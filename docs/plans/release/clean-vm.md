@@ -1068,27 +1068,36 @@ A phase whose driver cycles never reached Folio is printed `NOT EXERCISED`, and 
 
 Run it twice: `-Tag before` on the build at the instrumentation commit (the named fold and the `stale_us`/`source=` cells, no fix), `-Tag after` on the fix; the report carries both tables.
 
-**Recorded 2026-10-21** (folio-win11, 2 logical processors, so the hog runs 4 spinners):
+**Recorded 2026-10-21** (folio-win11, 2 logical processors, so the hog runs 4 Normal-priority spinners). before3 is the instrumentation build without the fixes (7d00c2ed); after10 is the fix (1b911da7, with main 453c0c7c), on the harness at 81779f7a:
 
-| cell | before3 (7d00c2ed) | after6 (1b911da7) |
+| cell | before3 (7d00c2ed) | after10 (1b911da7) |
 |---|---|---|
-| exercised | yes: the boxed tab printed, 18 / 17 / 19 cycles | **no**: the driver was refused the foreground (one present in three minutes) |
-| turns/s (baseline / hog / after) | ≥103 / ≥127 / ≥97 | — |
-| stale turns (baseline / hog / after) | 289 / 374 / 397, single turns: LiveStability, StripAnimation, RefusedFrame 1–5 ms (one 42 ms); TerminalThumbs ~0.4 s twice a phase | — |
-| ForegroundProgram spin | none (the boxed tab was not an armed candidate; see the report) | — |
-| keyboard echo p50 / p95 | 5.5 / 25 → 21.8 / 50 → 6.6 / 21 ms | — |
-| present cadence p50 | 8.3 → 18.9 → 9.9 ms | — |
-| shell output p50 | 3.1 → 3.3 → 4.2 ms | — |
-| close | ok | **FAILED**: Folio, OpenConsole, the shell and its conhost still running 85 minutes after WM_CLOSE (the run before the close cell; the hang reports were not kept) |
+| exercised | yes: the boxed tab printed, 18 / 17 / 19 cycles | yes: the driver chose `class=Window Class title=folio`; 19 / 18 / 20 cycles; keyboard presents 247 / 244 / 259 |
+| turns/s (baseline / hog / after) | ≥103 / ≥127 / ≥97 | ≥83 / ≥152 / ≥55 |
+| delay max | 0 / 0 / 26.5 ms | 0 / 0 / 0 |
+| stale turns (count, max) | 289, 399 ms / 374, 3.4 ms / 397, 437 ms | 229, 532 ms / 549, 462 ms / 262, 526 ms |
+| stale sources | LiveStability, StripAnimation, RefusedFrame (1–5 ms; one 42 ms), ShellCaret, ProgramsEar; TerminalThumbs ~0.4 s twice a phase | LiveStability, RefusedFrame, StripAnimation, TerminalThumbs (~0.5 s), ShellCaret (after) |
+| ForegroundProgram spin | none: the boxed tab was not an armed candidate | none (and the entry is no longer booked) |
+| keyboard echo p50 / p95 | 5.5 / 25 → 21.8 / 50 → 6.6 / 21 ms | 3.9 / 11.8 → 15.9 / 36.9 → 5.0 / 13.3 ms |
+| present cadence p50 | 8.3 → 18.9 → 9.9 ms | 5.9 → 17.8 → 16.0 ms |
+| shell output p50 | 3.1 → 3.3 → 4.2 ms | 2.3 → 3.1 → 3.6 ms |
+| close | ok | ok: `WM_CLOSE posted -> True`, Folio exited |
 
-The same day, on the harness with the foreground wait (715569e14), the ownership rows. Both drivers reported the foreground taken and sent 59 cycles, but Folio saw none of them (`file_reads … input_seen=false`, no keyboard present; Folio's own focus was lost 1.3 s after it was gained), so their phases are not measurements (`KEYS NOT SEEN BY FOLIO`, since 680fbbc11):
+**What the row measures, and what it does not.**
+- **CPU starvation.** Under the hog, keys echo about 4× slower at the median (3.9 → 15.9 ms; 5.5 → 21.8 ms on before3) and recover after. The present cadence settles at about one per vblank. Shell output barely moves. No wake is ever late (`delay max` 0 in every phase on the fix). That is the per-turn cost residual, measured and not fixed in T-WINDOW-THREAD-UNDER-LOAD.
+- **The stale turns** are the single-extra-turn class: clocks that came due inside the turn that booked them, at 100-odd turns a second. They are not a spin. One shape is recorded for follow-up: `TerminalThumbs` booking an instant about 0.5 s already past, once or twice a phase.
+- **The owner's spin is not reproduced here.** That needs a background tab whose pane keeps redrawing a boxed frame (an armed foreground-program candidate), and this row's boxed tab is printed once. That shape is §4.6b, a 0.4.9 row (row 26), with a trace line that the cadence armed.
 
-| cell | main453 (main 453c0c7c, without this branch) | after7 (1b911da7) |
+**The ten runs that measured nothing, and why** (each fixed in the harness this row lands with):
+
+| runs | cause | fix |
 |---|---|---|
-| phases | KEYS NOT SEEN BY FOLIO (20 / 19 / 20 sent, 0 keyboard presents) | KEYS NOT SEEN BY FOLIO (20 / 19 / 20 sent, 0 keyboard presents) |
-| close | **FAILED**: folio, OpenConsole, the pane's powershell still running; no hang report written | **FAILED**: the same; no hang report written |
-
-**The close failures were the harness's, not the product's** (corrected 2026-10-21, T-CLOSE-HANG-ON-MAIN's finding). The row closed Folio with `Process.CloseMainWindow()`, which picks the process's first visible unowned top-level window. That is winit's thread event-target window (`WS_VISIBLE | WS_POPUP`, class `Winit Thread Event Target`), which hands WM_CLOSE to DefWindowProc and closes nothing, and Folio's window never heard the close. The row now posts WM_CLOSE to the window it drives and logs both windows; the `close` cells above are not measurements of Folio.
+| before2, after, after3, after4 | the guest suspended itself (ACPI S1, 13–21 min after boot) while a slow logon held `Wait-GuestReady` | `no sleep` steps (`powercfg` standby / monitor / hibernate on AC to 0); the readiness wait prints what it waited for and how long |
+| after5 | the `no sleep` step handed powercfg its words as one argument | through `cmd /c`, not tolerant |
+| the 10-20 run, after6 | the driver was refused the foreground; the first-run card stayed up | the row waits up to 180 s for the keyboard, else `FAILED foreground`; the first run is answered before the launch |
+| main453, after7 | the foreground was taken but not the keyboard (`input_seen=false` all run) | the driver checks the foreground thread's focus window (`GetGUIThreadInfo`) and clicks a verified pixel otherwise; the reader marks `KEYS NOT SEEN BY FOLIO` |
+| after8 | the desktop held the foreground; the click point found no window | an Alt tap before the foreground is asked; a click at the window's verified centre; the close recorded on every road |
+| after6, main453, after7, after9 (the close) | `Process.CloseMainWindow()` and the probe's `AppWindow` both picked winit's `Winit Thread Event Target` popup, so the row typed into and closed a window that draws nothing | the row drives and posts WM_CLOSE to the visible window of winit's application class (`Window Class`); every top-level window is logged |
 
 ## 5. 截图清单
 

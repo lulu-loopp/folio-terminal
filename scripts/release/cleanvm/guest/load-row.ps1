@@ -218,8 +218,12 @@ function CloseFolio {
   $closed = [LoadRowWindows]::PostMessage($h, [LoadRowWindows]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
   Say "WM_CLOSE posted -> $closed"
   $asked = Get-Date
-  if ($folio.WaitForExit(30000)) {
-    Say ("close ok: Folio exited with {0} after {1:N1} s" -f $folio.ExitCode, ((Get-Date) - $asked).TotalSeconds)
+  # Exited is asked of the system, by pid, as well as of the Process object: after10's object said
+  # exited at 0.0 s with no exit code, which the pid's absence has to confirm.
+  $gone = $folio.WaitForExit(30000)
+  $still = Get-Process -Id $folio.Id -ErrorAction SilentlyContinue
+  if ($gone -and -not $still) {
+    Say ("close ok: Folio exited ({0}) after {1:N1} s; pid {2} is gone" -f $(if ($folio.HasExited) { "code $($folio.ExitCode)" } else { 'code unknown' }), ((Get-Date) - $asked).TotalSeconds, $folio.Id)
     return
   }
   Say 'FAILED close: Folio still running 30 s after WM_CLOSE'
