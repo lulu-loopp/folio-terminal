@@ -935,17 +935,19 @@ fn a_controlled_failure_writes_a_dirty_preview_back_to_its_file() {
     let tabs = [tab, other_tab];
     let recovery = disk_scratch("g7-recovered-unused").join(preview::RECOVERED_FOLDER);
 
-    let kept: Vec<preview::Kept> = tabs
+    let (kept, held): (Vec<preview::Kept>, Vec<preview::PreviewPool>) = tabs
         .iter()
-        .flat_map(|tab| {
-            crate::test_support::the_stops_keep(
+        .map(|tab| {
+            let (mut kept, pool) = crate::test_support::the_stops_keep_and_its_pool(
                 &tab.preview_pool,
                 &recovery,
                 SystemTime::now(),
                 &[None],
-            )
+            );
+            assert_eq!(kept.len(), 1, "one buffer per tab: {kept:?}");
+            (kept.remove(0), pool)
         })
-        .collect();
+        .unzip();
 
     for (at, file) in [&path, &second].into_iter().enumerate() {
         assert!(
@@ -965,6 +967,12 @@ fn a_controlled_failure_writes_a_dirty_preview_back_to_its_file() {
             kept[at].line().contains(&file.display().to_string()),
             "{}",
             kept[at].line()
+        );
+        assert!(
+            held[at]
+                .get(&preview::PreviewSource::file(file))
+                .is_some_and(|buffer| !buffer.dirty()),
+            "and it is clean"
         );
     }
     assert!(!recovery.exists(), "nothing needed a copy");

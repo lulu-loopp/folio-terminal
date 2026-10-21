@@ -2143,6 +2143,17 @@ pub(crate) fn the_stops_keep(
     at: std::time::SystemTime,
     crossings: &[Option<&[u8]>],
 ) -> Vec<preview::Kept> {
+    the_stops_keep_and_its_pool(pool, recovered, at, crossings).0
+}
+
+/// [`the_stops_keep`], with the pool the stop held as it stands after the answers: the
+/// buffers a test asks about once the stop has kept what it kept.
+pub(crate) fn the_stops_keep_and_its_pool(
+    pool: &preview::PreviewPool,
+    recovered: &std::path::Path,
+    at: std::time::SystemTime,
+    crossings: &[Option<&[u8]>],
+) -> (Vec<preview::Kept>, preview::PreviewPool) {
     let (lane, jobs) = persist::StorageLane::scripted();
     let mut saves = preview::PreviewSaves::on(lane);
     let mut held = pool.clone();
@@ -2167,7 +2178,12 @@ pub(crate) fn the_stops_keep(
     }
     let kept = keeps.keep(&mut saves, at);
     drop(jobs);
-    kept
+    let held = keeps
+        .held()
+        .first()
+        .cloned()
+        .expect("the stop held the pool");
+    (kept, held)
 }
 
 /// **Serve one document request on a thread the thread door started** — the

@@ -68634,7 +68634,11 @@ impl<B: Backend> FolioApp<B> {
     /// Spent at the loop's two doors, exactly as the pending window is and for
     /// the same reason: it needs the `ActiveEventLoop` and every window at once,
     /// and a `Runtime` has never held either.
-    fn settle_quit(&mut self, event_loop: &B::Loop) -> Result<()> {
+    ///
+    /// `now` is the turn's instant: the save step's bound is read against it
+    /// (S-6c), as a close's wait is read against the instant
+    /// [`Self::settle_close_waits`] is handed.
+    fn settle_quit(&mut self, event_loop: &B::Loop, now: Instant) -> Result<()> {
         self.begin_quit_if_asked()?;
         loop {
             self.deliver_the_quits_update_report();
@@ -68655,7 +68659,6 @@ impl<B: Backend> FolioApp<B> {
                 // (`AppEvent::DocumentsAnswered`) until all have answered or the bound
                 // (`Quit::deadline`) has passed — never a wait on this thread.
                 quit::QuitStep::Save => {
-                    let now = Instant::now();
                     let handed = self
                         .app
                         .as_ref()
@@ -69457,7 +69460,8 @@ impl<B: Backend> FolioApp<B> {
     /// ([`Runtime::keep_unsaved_edits`], S-6c): each dirty preview buffer's save is handed to
     /// the storage worker as a press hands it — the window thread writes nothing over a file
     /// — and the buffers are held past their windows; `App::finish`, which follows on both
-    /// roads, waits for the worker's end inside its one bound (§5.3 row 16b), and what did
+    /// roads, waits for the session's last write (§5.3 row 16, queued behind those saves) and
+    /// the worker's end (row 16b), each within the writer's budget, and what did
     /// not land is copied into `recovered` then, with one diagnostics line each saying where
     /// the edit is. Every window keeps its edits whatever another window's close answered,
     /// and after it has been photographed and let go: its open editor is committed by the
@@ -69494,8 +69498,13 @@ impl<B: Backend> FolioApp<B> {
             dispose_of_a_held_release_on_a_stop(app.quit.as_mut(), &mut app.session_store);
         }
         let closed = self.for_each_window(|runtime| runtime.close_window(true));
+        // Every window `for_each_window` walks, whatever another's close answered — and not a
+        // window already leaving: it left through its own gate, which asked about every edit
+        // it held (discarded, or saved before it went), and its close has run.
         for index in 0..self.windows.len() {
-            if let Some(mut runtime) = self.runtime_at(index) {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
                 runtime.keep_unsaved_edits(recovery);
             }
         }
@@ -69555,7 +69564,7 @@ impl<B: Backend> FolioApp<B> {
             };
             let gone = self.every_page_has_gone();
             self.report_to_quit(|quit| quit.pages(gone, now));
-            if let Err(error) = self.settle_quit(event_loop) {
+            if let Err(error) = self.settle_quit(event_loop, now) {
                 self.fail(event_loop, error);
                 return;
             }
@@ -69618,7 +69627,7 @@ impl<B: Backend> FolioApp<B> {
             // line, exactly as the drag handover above does, so that the press,
             // the window and the frame it appears in are all one turn.
             .and_then(|()| self.settle_quake(event_loop))
-            .and_then(|()| self.settle_quit(event_loop))
+            .and_then(|()| self.settle_quit(event_loop, Instant::now()))
         {
             self.fail(event_loop, error);
             return;
@@ -70173,7 +70182,7 @@ impl<B: Backend> FolioApp<B> {
             // queued by the same turn is in the registry before it is photographed.
             let result = result.and_then(|()| {
                 hang_watch::during(hang_watch::Station::EventQuit, || {
-                    self.settle_quit(event_loop)
+                    self.settle_quit(event_loop, Instant::now())
                 })
             });
             if let Err(error) = result {

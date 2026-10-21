@@ -7401,7 +7401,8 @@ impl PreviewPool {
     /// **What a stop that cannot ask keeps of this pool, once the storage worker has ended**
     /// (D-4, 0.4.8 G7; S-6c) — the second half of the stop: every dirty buffer's save was
     /// handed to the worker as a press hands it, the worker served what was queued within the
-    /// stop's one bound (`SessionStore::close`, §5.3 row 16b), and each buffer has heard what
+    /// stop's waits (`SessionStore::close`: the session's last write, §5.3 row 16, then the
+    /// worker's end, row 16b), and each buffer has heard what
     /// came back ([`PreviewSaves::deliver`]). Now, in the pool's order:
     ///
     /// - a body a save sent that did not land and is no longer the body (R1,
@@ -8821,11 +8822,12 @@ pub fn keep_in_recovered(
 /// windows** (S-6c; D-4, 0.4.8 G7).
 ///
 /// A stop's two halves are a turn apart that never comes: the first hands every dirty
-/// buffer's save to the worker, as a press hands it, while the windows still stand
-/// (`Runtime::keep_unsaved_edits`), and holds each tab's pool here once its window has been
-/// photographed and let go; the second runs once the worker has ended — the stop's one
-/// bounded wait, `SessionStore::close` (§5.3 row 16b), inside which the worker serves
-/// everything queued before its end — and hears the answers, then keeps in `recovered`
+/// buffer's save to the worker, as a press hands it, once its window has been photographed and
+/// let go (`Runtime::keep_unsaved_edits`), and holds each tab's pool here; the second runs once
+/// the worker has ended — the stop's waits are `SessionStore::close`'s two, the session's last
+/// write (§5.3 row 16), queued behind these saves, then the worker's end (row 16b), each
+/// within the writer's budget, so up to about twice 3 s; saves ahead can spend the session
+/// write's budget, which leaves `session.lock` standing — and hears the answers, then keeps in `recovered`
 /// whatever no file took ([`Self::keep`]). Empty on every other road.
 #[derive(Debug, Default)]
 pub(crate) struct StopKeeps {
@@ -8856,7 +8858,9 @@ impl StopKeeps {
     /// **The second half of the stop**, once the storage worker has ended (or was let go at its
     /// bound): every answer that came back heard by the buffer that asked
     /// ([`PreviewSaves::deliver`]; the rest to the sink), then each pool's
-    /// [`PreviewPool::kept_after_the_stop`]. Takes what is held; nothing is held afterwards.
+    /// [`PreviewPool::kept_after_the_stop`]. Once: a second keep has nowhere to keep into and
+    /// keeps nothing. The buffers stay held, as they stood after their answers, until the
+    /// process is gone.
     pub(crate) fn keep(&mut self, saves: &mut PreviewSaves, at: SystemTime) -> Vec<Kept> {
         let Some(recovery) = self.recovery.take() else {
             return Vec::new();
@@ -8878,10 +8882,19 @@ impl StopKeeps {
                 }),
         );
         let awaited = std::mem::take(&mut self.awaited);
-        pools
+        let kept = pools
             .iter_mut()
             .flat_map(|pool| pool.kept_after_the_stop(&awaited, &said, &recovery, at))
-            .collect()
+            .collect();
+        self.pools = pools;
+        kept
+    }
+
+    /// The pools the stop holds, as they stand — a test's look at the buffers after their
+    /// answers.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> &[PreviewPool] {
+        &self.pools
     }
 }
 

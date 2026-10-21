@@ -1141,6 +1141,10 @@ struct Quitting {
     seats: Vec<bt_layout::SeatId>,
     names: Vec<String>,
     dir: std::path::PathBuf,
+    /// The instant every turn of the test is taken at, unless one names its own: the save
+    /// step's bound is read against the turn's clock, so no test depends on how much real
+    /// time passes between its turns.
+    at: Instant,
 }
 
 impl Quitting {
@@ -1185,6 +1189,7 @@ impl Quitting {
             seats,
             names,
             dir,
+            at: Instant::now(),
         }
     }
 
@@ -1214,11 +1219,16 @@ impl Quitting {
         self.settle();
     }
 
-    /// The loop's look at the quit (`FolioApp::settle_quit`).
+    /// The loop's look at the quit (`FolioApp::settle_quit`), on the test's turn.
     fn settle(&mut self) {
+        self.settle_at(self.at);
+    }
+
+    /// The loop's look at the quit on a turn taken at `now`: the clock is the turn's.
+    fn settle_at(&mut self, now: Instant) {
         self.application
             .folio
-            .settle_quit(&self.application.event_loop)
+            .settle_quit(&self.application.event_loop, now)
             .expect("the quit is spent");
     }
 
@@ -1344,7 +1354,6 @@ impl Drop for Quitting {
 #[test]
 fn a_quits_save_hands_both_windows_saves_to_the_worker_and_goes_on_when_they_land() {
     let mut quitting = Quitting::open("lands", ["one.md", "two.md"]);
-    let before = Instant::now();
     quitting.quit_with_save();
     assert_eq!(
         (quitting.file(1), quitting.file(2)),
@@ -1361,9 +1370,10 @@ fn a_quits_save_hands_both_windows_saves_to_the_worker_and_goes_on_when_they_lan
         .quit
         .as_ref()
         .and_then(crate::quit::Quit::deadline);
-    assert!(
-        bound.is_some_and(|bound| bound >= before + crate::quit::QUIT_WAITS_FOR_ITS_SAVES),
-        "its bound is the loop's next wake-up: {bound:?}"
+    assert_eq!(
+        bound,
+        Some(quitting.at + crate::quit::QUIT_WAITS_FOR_ITS_SAVES),
+        "its bound, from the turn's clock, is the loop's next wake-up"
     );
 
     quitting.serve(None);
@@ -1458,17 +1468,12 @@ fn the_worker_gone_withdraws_the_quit_and_each_card_names_its_buffer() {
 fn at_the_bound_the_quit_says_its_saves_are_still_on_their_way() {
     let mut quitting = Quitting::open("bound", ["one.md", "two.md"]);
     quitting.quit_with_save();
-    let late = Instant::now() + crate::quit::QUIT_WAITS_FOR_ITS_SAVES;
-    assert!(
-        quitting
-            .application
-            .folio
-            .settle_the_quits_saves(late)
-            .expect("the quit's saves are looked at"),
-        "the bound decides"
+    quitting.settle_at(quitting.at + crate::quit::QUIT_WAITS_FOR_ITS_SAVES);
+    assert_eq!(
+        quitting.step(),
+        None,
+        "the bound decides: the quit is withdrawn"
     );
-    quitting.settle();
-    assert_eq!(quitting.step(), None, "the quit is withdrawn");
     for window in [1, 2] {
         let name = quitting.names[window as usize - 1].clone();
         assert_eq!(
@@ -1581,8 +1586,9 @@ fn a_quit_pending_beside_a_closes_question_leaves_the_question_alone() {
 /// file.
 ///
 /// MUTATION: in `Runtime::keep_unsaved_edits`, hand nothing over (drop the
-/// `save_every_dirty_preview` call, holding the pools only) — the first window's file still
-/// holds what was read, and two copies are made.
+/// `save_every_dirty_preview` call, holding the pools only) — the test's own worker finds no save
+/// on the lane to serve: `test_support::next_document` panics, "a document's write is on the
+/// lane".
 #[test]
 fn a_stop_hands_its_saves_to_the_worker_and_copies_only_what_did_not_land() {
     let mut quitting = Quitting::open("stop", ["one.md", "two.md"]);
@@ -1639,6 +1645,64 @@ fn a_stop_whose_saves_are_still_out_keeps_both_edits_in_copies() {
     assert_eq!(
         (quitting.file(1), quitting.file(2)),
         (READ.to_owned(), READ.to_owned())
+    );
+}
+
+/// RED (S-6c; review N5) — **on the shared lane, the stop's one bounded wait is what serves its
+/// saves: `SessionStore::close` waits for the worker's end, which comes after the preview saves
+/// queued before the session's last write.**
+///
+/// The application's session store and its preview saves are on one storage lane, as the
+/// product's are (`PreviewSaves::on(session_store.lane())`), its worker the suite's, held at its
+/// gate. The stop hands both saves over: neither file has changed. The gate is let go and the
+/// stop's second half runs (`App::finish`): the close waits for the worker to end, which serves
+/// the two saves first, so both files carry their edits and nothing is copied.
+///
+/// MUTATION: in `SessionWriter::close`, wait for nothing (`return` before the poll for the
+/// worker's end) — the second half reads no answer, and both edits are copied.
+#[test]
+fn the_stops_one_bounded_wait_serves_the_saves_queued_on_the_shared_lane() {
+    let mut quitting = Quitting::open("stop-shared", ["one.md", "two.md"]);
+    let gate = std::sync::Arc::new(crate::lane::Gate::default());
+    gate.hold();
+    let lane = crate::persist::StorageLane::with_a_worker_started_by(
+        crate::lane::Executor::scripted(std::sync::Arc::clone(&gate)),
+        || {},
+    );
+    let dir = quitting.dir.clone();
+    {
+        let app = quitting.app();
+        app.session_store = crate::persist::SessionStore::at_on(
+            dir.join("session.json"),
+            dir.join("session.lock"),
+            lane.clone(),
+        );
+        app.session_store.set_save_budget(crate::lane::PATIENCE);
+        app.preview_saves = crate::preview::PreviewSaves::on(lane);
+    }
+    let recovery = dir.join(crate::preview::RECOVERED_FOLDER);
+    quitting
+        .application
+        .folio
+        .stop_every_window_keeping_in(&recovery)
+        .expect("the windows stop");
+    assert_eq!(
+        (quitting.file(1), quitting.file(2)),
+        (READ.to_owned(), READ.to_owned()),
+        "the worker is held: nothing is written yet"
+    );
+
+    gate.release();
+    quitting.app().finish();
+    assert_eq!(
+        (quitting.file(1), quitting.file(2)),
+        (format!("{READ}{TYPED}"), format!("{READ}{TYPED}")),
+        "the close's wait served both saves"
+    );
+    assert_eq!(
+        quitting.copies(),
+        Vec::<String>::new(),
+        "and nothing is copied"
     );
 }
 
