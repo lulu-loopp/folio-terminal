@@ -539,11 +539,11 @@ mod tests {
             // (synthesis 3), and a fence read off a list item's content column.
             (
                 "an indented tilde fence that splits a tab",
-                "  ~~~ text\n   one\n \ttwo\tthree\n  ~~~\n".to_owned(),
+                "  ~~~ text\n  one\n two\n \tthree\tfour\n  ~~~\n".to_owned(),
             ),
             (
                 "a fence inside a list item",
-                "- item\n  ```rust\n    let x = 1;\n  \tlet y\n  ```\n- next\n".to_owned(),
+                "- item\n  ```rust\n  let x = 1;\n  \tlet y\n  ```\n- next\n".to_owned(),
             ),
             ("nothing at all", String::new()),
             ("one word", "word".to_owned()),

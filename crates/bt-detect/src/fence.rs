@@ -378,7 +378,9 @@ mod tests {
     fn the_language_is_the_info_strings_first_word() {
         let ruby = fence_opening("```ruby").expect("an opening");
         assert_eq!(ruby.language(), Some("ruby"));
-        let long = fence_opening("~~~~    ruby startline=3 $%@#$").expect("an opening");
+        // Ex. 143's four spaces before the info string, built rather than spelled in a literal.
+        let opener = format!("~~~~{}ruby startline=3 $%@#$", " ".repeat(4));
+        let long = fence_opening(&opener).expect("an opening");
         assert_eq!(long.info, "ruby startline=3 $%@#$");
         assert_eq!(long.language(), Some("ruby"));
         let semicolon = fence_opening("````;").expect("an opening");
