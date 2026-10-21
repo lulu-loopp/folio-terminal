@@ -2007,6 +2007,46 @@ fn the_systems_end_keeps_an_owed_document_beside_the_edits() {
     assert_eq!(names.len(), 3, "beside the two edits: {names:?}");
 }
 
+/// RED (T-ENDSESSION-SAVES, review N3) — **a quit in its documents phase keeps the documents
+/// its own**: the system's end neither hands them over again (`quit_begin` would reset the quit's
+/// own recovery) nor copies them; the quit's recovery phase does.
+///
+/// MUTATION: in `FolioApp::settle_session_end_keeping_in`, take `documents` as true whatever the
+/// quit holds — a `settings.json` copy is made beside the edits.
+#[test]
+fn the_systems_end_leaves_a_quits_documents_to_the_quit() {
+    let _news = crate::test_support::EndSessionHome::new("end-quit-documents");
+    let mut quitting = Quitting::open("end-quit-documents", ["one.md", "two.md"]);
+    quitting.on_one_scripted_lane(std::time::Duration::ZERO);
+    let dir = quitting.dir.clone();
+    let lane = quitting.app().session_store.lane();
+    let app = quitting.app();
+    app.settings_store =
+        crate::persist::SettingsStore::at_on(dir.join(crate::persist::SETTINGS_FILE_NAME), lane);
+    assert!(app.settings_store.store(bt_persist::SettingsV1 {
+        terminal_font_family: "退出 Quitting Mono".to_owned(),
+        ..bt_persist::SettingsV1::default()
+    }));
+    let quit = crate::quit::Quit::begin(Vec::new());
+    assert!(quit.holds_the_storage_worker(), "the quit is in its documents phase");
+    app.quit = Some(quit);
+    assert_eq!(crate::test_support::the_system_asks(), Some(1));
+    let _ = quitting.settle_the_systems_end();
+    assert_eq!(
+        quitting.handed(),
+        ["settings", "save", "save", "document"],
+        "the quit's write stays the one on the worker: nothing sends it again"
+    );
+    let names = quitting.copy_names();
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.ends_with(crate::persist::SETTINGS_FILE_NAME)),
+        "the quit's document is left to the quit: {names:?}"
+    );
+    assert_eq!(names.len(), 2, "the two edits are kept: {names:?}");
+}
+
 /// RED (T-ENDSESSION-SAVES) — **the question is settled once per span**: the system sends it to
 /// every top-level window, and the second window's question hands nothing over again, writes no
 /// second document and copies nothing twice.
