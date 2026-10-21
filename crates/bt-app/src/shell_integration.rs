@@ -9431,9 +9431,12 @@ mod tests {
             1,
             "the birth worker composes the pane's argv (and learns whether the loader went in)"
         );
+        // The retry's composer is handed to `pty_door::plan_birth`, which composes it with the
+        // integration the edition's answer leaves; that decision is driven by
+        // `pty_door::tests::a_birth_composes_with_the_integration_its_edition_leaves`.
         assert!(
-            birth.contains("shell_integration::last_resort_arguments(powershell_integration)"),
-            "and the retry's, with the same switch"
+            birth.contains("shell_integration::last_resort_arguments,"),
+            "and the retry's, with the one composer"
         );
 
         let found = index
