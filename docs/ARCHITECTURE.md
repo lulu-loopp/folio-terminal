@@ -1107,8 +1107,10 @@ all` road) and waits in its save step across turns, its bound `quit::QUIT_WAITS_
 (= `restore::CLOSE_WAITS_FOR_A_SAVE`) read on the turn and joined to the wake-up, going on only
 when every save has landed (`FolioApp::settle_the_quits_saves`); a stop that cannot ask hands
 them over once its windows are let go (`Runtime::keep_unsaved_edits`), holds the buffers past
-their windows (`preview::StopKeeps`), and after the worker's end inside `SessionStore::close`'s
-bound (§5.3 row 16b) copies only what did not land into `recovered` (row 20b). Neither sends a
+their windows (`preview::StopKeeps`), and after `SessionStore::close` — the session's last write
+(§5.3 row 16), queued behind those saves, then the worker's end (row 16b), each within the
+writer's 3 s budget, so up to about 6 s; saves ahead of it can spend the session write's budget,
+leaving `session.lock` standing — copies only what did not land into `recovered` (row 20b). Neither sends a
 buffer whose conflict the pane said until a press answers it. A volume
 that cannot exchange takes the preview's save the plain way through one switch
 (`preview::ON_A_VOLUME_THAT_CANNOT_EXCHANGE`, owner ruling 2026-10-15), and the first such
