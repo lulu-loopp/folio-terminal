@@ -6278,3 +6278,100 @@ runs.
 ## Amendment, 2026-10-17 — row 26 repaid (T-CLIPBOARD-LANE)
 
 Row 26 (the Windows clipboard's open, `retry_open_clipboard`'s 5, 10, 20 and 40 ms between five `OpenClipboard` attempts, on the window thread) is `done`. Every road that opened the clipboard — `windows_impl::{clipboard_text, set_clipboard_text}` and `WindowsClipboard::begin` — is now reached only from the clipboard lane's `bt-clipboard` worker (`clipboard_lane`, S-7), and the three doors (`bt_platform::{clipboard_text, set_clipboard_text, clipboard_payload}`) take that worker's `WorkerCtx` on every arm, so the window thread cannot call them (the `compile_fail` in `bt_platform`'s `clipboard` module). The contention wait stays, bounded and declared, on the worker (side-effects contract C5 rule 3): each pause goes through `bt_platform::wait::sleep_within`, the registered worker wait, and the bare-site row `bt-platform [windows] crate::windows_impl::open_clipboard_with_retry std::thread::sleep` leaves the inventory. The registry's completions rows for the clipboard name `bt-clipboard` and `ClipboardAnswered` and conform.
+
+## Revision (q), 2026-10-17 — A2 after the reconciliation: worker sites are their own doors, the shared-operation schema lands (A2s)
+
+The bare-site inventory's 200 rows (218 sites, on `de88f0f7`) were each given one disposition against the tree as it
+is (`trace/tickets-048/reports/T-A2-BARE-SITE-LINT.md`). None of the tickets (k)7, (l)8 and (m)3 cut had landed;
+the inventory shrank from 248 sites through other tickets, and the tree took a shape of its own for worker sites.
+The coordinator's rulings of 2026-10-17 on that report are recorded here; where they differ from (i)–(m), this
+revision rules.
+
+**(q)1 · Worker sites are their own doors.** A site that runs on a worker or a standalone main goes through the
+function that holds it: that function takes the worker's `&WorkerCtx` and is a `worker-door-body` row of
+`# effects`, as 35 rows already are (`exchange`, `deferred_removal`, `DirWatch::start_scoped`, the lanes' bodies).
+A family door is used only where one exists — `wait::sleep_within` — or where a round would otherwise create several
+doors of identical body. **Superseded by name:** (i)3's `bt_platform::file_writes` (`write`, `rename`, `copy`,
+`create_dir_all`, `File::create`, `sync_data`/`sync_all`, `write_line`) and `file_reads::observe` as doors for
+worker sites; (i)4's `wait::{join, recv, recv_timeout, condvar_wait, condvar_wait_timeout, block_on}` (the
+`_bounded` names were withdrawn by (j)6 already) and its `handles` door (`close_handle`, `set_event`, `close_fd`,
+`write_fd`); (i)4's `quiet_command::{output_within, status_within, wait_within}`, which T-PROBE-CHILD made needless
+(`ProbeChild::wait_within`, `probe_outputs_within`); and (l)1's rule R1 with (l)8's "new `worker-door-body` lines for
+the `file_reads::observe` and `file_writes` functions". (l)1's R2 (owner-only sites stay in their owner body, an
+`interim-owner` row) and (m)1's R3′ (shared bodies take a `Leg`) stand.
+
+**(q)2 · A2s lands** (this revision's commit):
+
+- `admission::Leg<'a, D>` and `admission::Arm`, as (m)1 specifies: two constructors, `Leg::owner(WaitToken<'a, D>)`
+  (the token consumed) and `Leg::worker(&'a WorkerCtx)`; `!Send`, `!Sync`, not `Clone`; `arm()` for the one
+  statement that differs. Plants 1–3 of (m)1.5 are `compile_fail` blocks on the type.
+- `# effects` gains the kinds `shared-body` (authority `Leg`, its door) and `emergency` (authority `emergency (panic
+  hook)`); every kind now has its closed rule in the guard (`effect_row_shape`): `interim-owner` serves a row that
+  is `open` or `pending`; `transport` is bt-pty's; `drop-exception` names a pinned body or a counted-only `Drop`
+  (`COUNTED_ONLY`: `Overlapped`, `OwnedHandle`, `DataDirectoryClaim`, each held to closing without a wait);
+  `emergency` names one of (l)5's two holders. A function registered by its listing (`transport`, `drop-exception`,
+  `emergency`) leaves the bare-site inventory exactly as a `worker-door-body` does. No product row is converted.
+- The registry's `# graphs` section, empty, and the guard of (m)1 items 1–4 (`leg_and_graph_failures`): roots only at
+  a listed mint site inside the door's admission or from a `&WorkerCtx` parameter; no leg in a field, a variant or a
+  return, and none handed back in a closure; every leg-taking function a verb or helper of its door's graph; every
+  reference to a graph function — a call, or the name as a value — inside the graph or, for a verb, in a listed
+  outside caller. Plants 4–8 run against a planted crate. Item 5 (a spawn closure's site attributed to its context)
+  is not built: a round that needs a worker leg in a spawn closure lifts the body into a function taking the context,
+  which the roots rule already demands.
+- The shrink-only list's merge rule, as the phase-1 report found it missing: `check-window-waits.ps1` holds every
+  merge commit since the merge base, and a merge still open, to `merged ≤ max(0, p1 + p2 − b)` per `(crate, entry)`
+  (renames pass) and per row (the resurrection check); `gates-can-fail` builds a resurrecting merge and requires
+  red.
+
+**(q)3 · The other rulings.** A2e does not wait for A2anim or the retained `file_reads` census: each is its own
+0.4.8 ticket (content reads are not vocabulary). bt-pty gains an edge to bt-effects, provided the crate graph stays
+acyclic and the dependency-direction guard agrees, so the rows that run under an owner admission or on a bt-app
+worker take that token or context, and `transport` is left to bt-pty's own threads; the endpoints' `retire` takes
+`&WorkerCtx`. The path predicates (`Path::{exists, is_file, is_dir, try_exists}`, `fs::symlink_metadata`) join the
+vocabulary after A2e, in their own ticket (T-PATH-PREDICATES-IN-THE-VOCABULARY). A wait proposed to stay on the
+window thread comes to the coordinator in its round's report with its bound, its reason and the worker alternative;
+a wait only at startup before the first frame or only at exit may stay with a stated bound, and a wait reachable
+mid-run goes to a worker unless the report shows it cannot.
+
+**(q)4 · This revision's own architecture impact.** (a) none. (b) one type in `admission` (`Leg`, with `Arm`); two
+`# effects` kinds; the `# graphs` section. (c) none. (c′) none. (d) yes: (q)1 supersedes (i)3–(i)4's family doors and
+(l)1's R1; the shrink-only list's merge rule becomes the three-way bound.
+
+**(q)5 · 2026-10-21 — after three reviews of A2s: what the rules became.** Dated, at the end; (q)1–(q)4 stand as
+written on 2026-10-17 and this entry rules where they differ.
+
+- **`transport` admits no row until R4** (the R1 review's B1, 2026-10-17). A crate is no thread: `join_within` is
+  bt-pty's and the window thread joins through it. R4 builds the reachability check — a transport function is reached
+  only from bt-pty's own threads, the ring, reader, writer and publisher bodies — and opens the kind with a plant on
+  such a function (`InputRing::take`, `OutputRing::push_read`). `drop-exception` admits the pinned bodies the window
+  thread also calls directly (`PtySession::shutdown`, `join_within`, `reap_within`): accepted for R1 as the design's
+  words; R4 and R9 revisit it when they convert those roads.
+- **The two closed exception lists are registry sections**, `# counted-only` and `# emergency`, each row with the
+  function, the day it joined, why, and the ruling that allowed it (a ticket and the ruling's day). A row the merge
+  base lacks is admitted only with its ruling filled (the coordinator's ruling of 2026-10-18 on N4); a re-ruled
+  existing row and a removal are always allowed; the ruling's day is a shape check, read against no clock.
+- **The shrink-only list's merge rule is the smaller of both sides**: `merged ≤ min(p1, p2)` per `(crate, entry)` and
+  per row the merge base has, `≤ max(p1, p2)` for a row it lacks (a rename on one side). Both sides removing one site
+  count it once.
+
+**(q)6 · 2026-10-21 — the leg's authority moves to 0.4.9; what of A2s lands in 0.4.8.** Dated, at the end; (q)1–(q)5
+stand as written and this entry rules where they differ. The independent audit of the leg guard
+(`trace/tickets-048/reports/T-A2-LEG-GUARD-AUDIT.md`, ruled by the coordinator the same day) found that four rounds of
+a grammar for where a leg may be *named* each left new silent passes, because that claim covers every spelling in
+every file and has no bound; and that the compiler already keeps a leg inside its door (the owner leg is built from a
+token handed to a `for<'scope>` closure, invariant and `!Send`/`!Sync`; the worker leg from a context lent only for a
+thread body whose result is `'static`). So the source guard's claim shrinks to recognising **one** admitted shape on
+bt-source's resolver, and that is built in 0.4.9: T-CALL-GRAPH-SIGNATURE-VIEW, then T-DOOR-BODY-SITES-STAND-IN-THEIR-CALL
+(a site in a door function stands in the function's own block, for every capability kind), then T-LEG-AUTHORITY
+(the recognition, `lend_worker` lending instead of returning, the `admission` census, and the `# graphs` check on the
+engine's edges). What lands in 0.4.8 (T-A2-R1-NONLEG):
+
+- `admission::Leg` and `Arm` with their `compile_fail` proofs, as (q)2 says, but **carrying no authority**: no guard
+  registers a function by the leg it takes, so a vocabulary site in one stays a bare-site row.
+- The `# effects` kinds of (q)2 and (q)5, with `shared-body` refused outright ("a leg carries no authority until the
+  leg guard (T-LEG-AUTHORITY, 0.4.9)"), as `transport` is until R4.
+- `# graphs` as an empty section whose every line is refused (`graphs_section_failures`), not (q)2's
+  `leg_and_graph_failures`; the roots rule, the closed-graph reading, the mint-site matching and the leg-position
+  allow-list of rounds 2–4 do not land.
+- `# counted-only` and `# emergency` with their `ruling` column, and the merge rule of (q)5, both as written; the
+  script reads every key and ruling byte for byte, case included.

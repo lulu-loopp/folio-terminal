@@ -655,7 +655,21 @@ Where and what to do: the raw-effect half of
 `window_waits_tests::every_door_is_where_the_registry_says` and
 `scripts/ci/check-window-waits.ps1` enforce it. When red, use
 `spawn_at_priority` with a named worker/effect; retain a bare site only when the
-door cannot own it and record that reason in the exception ledger.
+door cannot own it and record that reason in the exception ledger. A worker's
+site goes through its own function, which takes the worker's `&WorkerCtx` and is
+a `worker-door-body` row (a family door only where one exists:
+`wait::sleep_within`). A body both the window thread and a worker run will take
+`&Leg<'_, doors::D>`, but a leg carries no authority yet: no function is a door
+by the leg it takes, so its sites stay bare rows, and `shared-body` and
+`# graphs` admit nothing until T-LEG-AUTHORITY (0.4.9). A
+merge keeps both sides' removals: the script refuses a merge that brings back a
+row either side removed. The registry's two closed exception lists, `# counted-only`
+and `# emergency`, grow only by a ruling: a row the merge base lacks needs its
+`ruling` cell — the ticket and the day of the ruling that allowed it
+(`T-A2-BARE-SITE-LINT 2026-10-17`) — or `check-window-waits.ps1` refuses it; a
+removal, and an existing row re-ruled (its `ruling` cell changed), are always
+allowed. The ruling's day is a shape check (`YYYY-MM-DD`), read against no
+clock. The script compares keys and rulings byte for byte, case included.
 
 ## Window seam
 
