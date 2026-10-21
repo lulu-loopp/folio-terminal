@@ -1088,7 +1088,7 @@ The same day, on the harness with the foreground wait (715569e14), the ownership
 | phases | KEYS NOT SEEN BY FOLIO (20 / 19 / 20 sent, 0 keyboard presents) | KEYS NOT SEEN BY FOLIO (20 / 19 / 20 sent, 0 keyboard presents) |
 | close | **FAILED**: folio, OpenConsole, the pane's powershell still running; no hang report written | **FAILED**: the same; no hang report written |
 
-The close failure is main's, between a919fe77 and 453c0c7c: 7d00c2ed (a919fe77 plus this branch's instrumentation) closed in every run, exercised or not. No hang report was written, so the window thread was not holding control (the watchdog writes one for any hold past its threshold). The thread was turning (`taskbar_state` generations and the per-minute `file_reads` lines continue), and neither keys nor the OS's close reached what it acts on.
+**The close failures were the harness's, not the product's** (corrected 2026-10-21, T-CLOSE-HANG-ON-MAIN's finding). The row closed Folio with `Process.CloseMainWindow()`, which picks the process's first visible unowned top-level window. That is winit's thread event-target window (`WS_VISIBLE | WS_POPUP`, class `Winit Thread Event Target`), which hands WM_CLOSE to DefWindowProc and closes nothing, and Folio's window never heard the close. The row now posts WM_CLOSE to the window it drives and logs both windows; the `close` cells above are not measurements of Folio.
 
 ## 5. 截图清单
 
