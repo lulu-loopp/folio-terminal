@@ -10330,9 +10330,10 @@ pub(crate) mod contract_adapter {
             .expect("a lane just made has one owner")
             .door = Some(Arc::new(move |_ctx, job, _receipts| {
             if let StorageJob::Document(job) = job {
-                if let Some(question) = question_of(&job.which) {
-                    door.execute(question);
-                }
+                // The suite's file, held for the job's file work and let go before it answers,
+                // as `serve_document` lets go of what it read and wrote before its `send`.
+                let held = question_of(&job.which).map(|question| door.execute(question));
+                drop(held);
                 let _ = job.answer.send(DocumentAnswer {
                     generation: job.generation,
                     version: job.version,

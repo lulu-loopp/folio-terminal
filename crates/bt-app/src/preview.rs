@@ -13601,6 +13601,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a
+    /// preview read's answer arrives with its file already closed**: the real `bt-preview-worker`
+    /// reads a real file's body, and the moment its answer is in the channel nobody holds the file
+    /// and a writer saving over it finishes — the gesture of an editor saving the file the pane has
+    /// just shown.
+    ///
+    /// MUTATION: leak a handle on the file in `read_up_to`
+    /// (`std::mem::forget(std::fs::File::open(path))`) — the answer arrives while the file is held,
+    /// and the exclusive open is refused.
+    #[test]
+    fn a_preview_reads_answer_arrives_with_its_file_closed() {
+        let dir = bt_testpath::temp_path("folio-preview-answered");
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("笔记 notes.txt");
+        std::fs::write(&path, "第一行 the first line\n").expect("a file to read");
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(path.clone()), "notes".to_owned());
+        let want = buffer
+            .claim_head_read()
+            .expect("a fresh buffer asks for its body");
+        let events = crate::headless::LoopEvents::default();
+        let worker = PreviewWorker::spawn(events.proxy()).expect("the worker starts");
+        assert!(worker.request(PreviewRequest {
+            window: WindowId::from(1_u64),
+            tab: crate::TabId(1),
+            source: PreviewSource::file(path.clone()),
+            want,
+        }));
+        let answer = crate::lane::receive(&worker.responses, "the read's answer");
+        let free = bt_testpath::nobody_holds(&path);
+        let written = std::fs::write(&path, "saved over\n");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(answer.answer, PreviewAnswer::Head { .. }),
+            "the body is answered"
+        );
+        assert!(free, "and nobody holds the file when the answer is in");
+        assert!(written.is_ok(), "and the writer finishes: {written:?}");
+    }
+
     // T-MD-LOADING-STATE: exercise the actual request selection and arrival.
     fn loading_open(path: &Path) -> PreviewBuffer {
         let mut buffer = PreviewBuffer::new(

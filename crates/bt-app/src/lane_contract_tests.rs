@@ -1030,6 +1030,9 @@ enum Planted {
     WithdrawnInSilence,
     /// The worker ends question 1 `Cancelled`, on a lane whose askers withdraw nothing.
     CancelsUnasked,
+    /// The worker publishes a request's answer while its work still holds the file it took,
+    /// and lets the file go after.
+    PublishesBeforeLettingGo,
 }
 
 /// How many identities the FIFO scripted lane's ledger owes at most.
@@ -1182,9 +1185,16 @@ fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) 
                     wake.woke();
                     continue;
                 }
+                // What a planted lane keeps of the suite's file past its answer.
+                let past = Mutex::new(None);
                 let attempt = || {
                     task(ctx, |_ctx| {
-                        door.execute(question);
+                        let held = door.execute(question);
+                        if planted == Planted::PublishesBeforeLettingGo {
+                            *locked(&past) = Some(held);
+                        } else {
+                            drop(held);
+                        }
                         Ok::<u64, String>(question)
                     })
                 };
@@ -1213,6 +1223,12 @@ fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) 
                 }
                 publish.publish(id, terminal);
                 wake.woke();
+                // The plant lets the file go only after the answer is out — and after the
+                // suite has looked, so the order it breaks is seen, not raced.
+                if let Some(held) = locked(&past).take() {
+                    door.wait_looked();
+                    drop(held);
+                }
             }
         })
         .expect("the scripted worker starts");
@@ -1654,6 +1670,40 @@ fn an_orphaned_answer_reaches_its_sink_and_a_dropping_sink_is_red() {
     assert_eq!(
         dropped.map_err(|failure| failure.kind()),
         Err(FailureKind::OrphanNotSunk)
+    );
+}
+
+/// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **An answer is published after its resources are
+/// released**: on the seam, a worker's terminal is observable only once its work has let go of
+/// the file it took, so the moment the consumer finds the answer nobody holds that file; a worker
+/// that publishes while it still holds the file — as a decode thread walked away from, or a
+/// platform's late release, would — is red, naming the request.
+///
+/// MUTATION: plant `Planted::Nothing` in the second run — it passes, and the test is red. On a
+/// product lane: hand the decoration share adapter's held file to a thread that outlives its door
+/// (the walked-away decode's shape) — `every_lane_runs_every_claim_and_fails_only_where_the_ledger_says`
+/// is red with "Computation × AnAnswerIsPublishedAfterItsResourcesAreReleased failed with
+/// HeldPastTheAnswer { key: 1 }".
+#[test]
+fn an_answer_is_published_after_its_resources_are_released_and_one_published_first_is_red() {
+    assert_eq!(
+        on_scripted(
+            &SCRIPTED_FIFO,
+            Policy::Fifo,
+            Planted::Nothing,
+            Claim::AnAnswerIsPublishedAfterItsResourcesAreReleased
+        ),
+        Ok(())
+    );
+    let first = on_scripted(
+        &SCRIPTED_FIFO,
+        Policy::Fifo,
+        Planted::PublishesBeforeLettingGo,
+        Claim::AnAnswerIsPublishedAfterItsResourcesAreReleased,
+    );
+    assert_eq!(
+        first.map_err(|failure| failure.kind()),
+        Err(FailureKind::HeldPastTheAnswer)
     );
 }
 

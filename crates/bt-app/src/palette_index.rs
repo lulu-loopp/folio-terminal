@@ -790,6 +790,38 @@ mod tests {
     /// and two binaries can run at once too — and a
     /// fixture that two walks are writing into is the "shared fixture hides a
     /// bug" family from `docs/CONVENTIONS.md` §3 in its most literal form.
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **an
+    /// index walk's answer arrives with every directory it listed let go**: the real
+    /// `bt-index-worker` walks a real tree, and the moment its answer is in nobody holds the root
+    /// or the folder below it.
+    ///
+    /// MUTATION: leak a handle on each folder `walk` lists
+    /// (`std::mem::forget(std::fs::read_dir(..))`) — the answer arrives while the folders are held,
+    /// and the exclusive open is refused.
+    #[test]
+    fn an_index_walks_answer_arrives_with_its_folders_let_go() {
+        let root = scratch("answered");
+        touch(&root.join("子 sub").join("a.txt"));
+        let events = crate::headless::LoopEvents::default();
+        let worker = IndexWorker::spawn(events.proxy()).expect("the worker starts");
+        assert!(worker.request(IndexRequest {
+            root: root.clone(),
+            epoch: 1,
+        }));
+        let mut answers = Vec::new();
+        crate::lane::wait_until("the walk's answer", || {
+            answers.extend(worker.drain().0);
+            !answers.is_empty()
+        });
+        let free = [
+            bt_testpath::nobody_holds(&root),
+            bt_testpath::nobody_holds(&root.join("子 sub")),
+        ];
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(free, [true, true], "nobody holds a folder the walk listed");
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = bt_testpath::temp_path(&format!("folio-palette-index-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
