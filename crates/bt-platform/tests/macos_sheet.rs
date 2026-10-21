@@ -242,7 +242,7 @@ mod mac {
         let host = a_window_to_sheet_onto(mtm);
         let picker = ImagePicker::new(handle_of(&host)).expect("the picture chooser builds");
         assert_eq!(
-            picker.request(ShellPickKind::Image, None),
+            picker.request(ShellPickKind::Image, None, "Images"),
             Ok(true),
             "the sheet goes up"
         );
@@ -252,7 +252,7 @@ mod mac {
         );
         stand_for_a_photograph(&the_attached_sheet(&host), "picture-sheet");
         assert_eq!(
-            picker.request(ShellPickKind::Image, None),
+            picker.request(ShellPickKind::Image, None, "Images"),
             Ok(false),
             "② a second press while it is up is one sheet, not two"
         );

@@ -852,11 +852,11 @@ impl<B: Backend> Runtime<'_, B> {
         let start = (!stored.is_empty())
             .then(|| Path::new(&stored).parent().map(Path::to_path_buf))
             .flatten();
-        match self
-            .window
-            .image_picker
-            .request(bt_platform::FilePickKind::Image, start.as_deref())
-        {
+        match self.window.image_picker.request(
+            bt_platform::FilePickKind::Image,
+            start.as_deref(),
+            crate::i18n::Text::ImageFileType.text(),
+        ) {
             Ok(true) => self.window.image_pick_pending = Some(FilePick::BackgroundImage),
             Ok(false) => {}
             Err(error) => eprintln!("recoverable picture chooser failure: {error}"),

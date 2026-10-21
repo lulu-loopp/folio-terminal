@@ -523,19 +523,21 @@ pub fn syntax_for_file(name: &str, first_line: Option<&str>) -> Option<Grammar> 
     })
 }
 
-/// The grammar a markdown **fence** is read with: its info string.
+/// The grammar a markdown **fence** is read with: its language, the info
+/// string's first word (`bt_detect::fence::FenceOpening::language`), so
+/// ` ```ruby startline=3 ` asks for `ruby`.
 ///
 /// ` ```rust `, ` ```py `, ` ```Shell ` — `find_syntax_by_token` is the door
 /// syntect documents for exactly this, matching an extension first and then a
 /// grammar's own name case-insensitively, which is what makes `py` and
 /// `Python` the same request. A fence with no info string, or one naming
 /// something not in the box, is drawn in the fence's own ink as it always was.
-pub fn syntax_for_fence(info: Option<&str>) -> Option<Grammar> {
-    let info = info?.trim();
-    if info.is_empty() {
+pub fn syntax_for_fence(language: Option<&str>) -> Option<Grammar> {
+    let language = language?.trim();
+    if language.is_empty() {
         return None;
     }
-    first_box_to_answer(|syntaxes| syntaxes.find_syntax_by_token(info))
+    first_box_to_answer(|syntaxes| syntaxes.find_syntax_by_token(language))
 }
 
 #[cfg(test)]

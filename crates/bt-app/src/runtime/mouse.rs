@@ -5109,7 +5109,11 @@ impl<B: Backend> Runtime<'_, B> {
                     // copy lands (`ClipboardWriteEffect::MathCopied`).
                     self.repaint_hovered_pane()?;
                 }
-                (MouseButton::Right, _) => match self.window.math_context_menu.request() {
+                (MouseButton::Right, _) => match self
+                    .window
+                    .math_context_menu
+                    .request(crate::i18n::Text::FormulaMenuCopyLatex.text())
+                {
                     Ok(true) => {
                         self.window.pending_math_context_anchor =
                             Some((target, math_hit.anchor.clone()));
