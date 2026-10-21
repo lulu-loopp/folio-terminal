@@ -1044,7 +1044,7 @@ crates/bt-app/src/git.rs	bt-app crate::git::run_git_with_input	Ambiguous	take_st
 crates/bt-app/src/git.rs	bt-app crate::git::run_git_with_input	Ambiguous	take_stdin	1	
 crates/bt-app/src/git.rs	bt-app crate::git::run_git_with_input	Ambiguous	take_stdout	1	
 crates/bt-app/src/git.rs	bt-app crate::git::run_git_with_input	Ambiguous	try_wait	1	
-crates/bt-app/src/git.rs	bt-app crate::git::run_git_with_input	Ambiguous	wait	1	
+crates/bt-app/src/git.rs	bt-app crate::git::run_git_with_input	Ambiguous	wait	2	2026-10-20: T-ANSWER-AFTER-THE-FILE-IS-CLOSED; GitChild::wait on the child just killed (the try_wait error path now reaps it as the timeout path does), which reaches no door
 crates/bt-app/src/git.rs	bt-app crate::git::run_git_with_input	Ambiguous	write_all	1	
 crates/bt-app/src/git.rs	bt-app crate::git::run_git_worker	Dynamic	execute	1	
 crates/bt-app/src/git.rs	bt-app crate::git::same_step	Ambiguous	eq_ignore_ascii_case	1	
@@ -9952,6 +9952,9 @@ crates/bt-platform/src/video/mod.rs	bt-platform crate::video::Readers::quiet_wit
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::Readers::quiet_within	Ambiguous	is_zero	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::Readers::quiet_within	Ambiguous	saturating_duration_since	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::Readers::quiet_within	Ambiguous	unwrap_or_else	2	
+crates/bt-platform/src/video/mod.rs	bt-platform crate::video::TheFile::open	Ambiguous	SetString	1	2026-10-20: T-ANSWER-AFTER-THE-FILE-IS-CLOSED; a Media Foundation COM method (IMFAttributes::SetString) on the stream the open just made, which reaches no door
+crates/bt-platform/src/video/mod.rs	bt-platform crate::video::TheFile::open	Ambiguous	cast	1	2026-10-20: T-ANSWER-AFTER-THE-FILE-IS-CLOSED; the windows crate's Interface::cast (QueryInterface) on the stream the open just made, which reaches no door
+crates/bt-platform/src/video/mod.rs	bt-platform crate::video::TheFile::open	Ambiguous	ok	1	2026-10-20: T-ANSWER-AFTER-THE-FILE-IS-CLOSED; a standard-library Result::ok on the platform call's answer, which reaches no door
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::copy_locked_frame	Ambiguous	GetContiguousLength	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::copy_locked_frame	Ambiguous	Lock2D	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::copy_locked_frame	Ambiguous	Unlock2D	1	
@@ -9963,6 +9966,7 @@ crates/bt-platform/src/video/mod.rs	bt-platform crate::video::copy_locked_frame	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::copy_locked_frame	Ambiguous	map	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::copy_locked_frame	Ambiguous	ok	2	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::duration_of	Ambiguous	ok	2	
+crates/bt-platform/src/video/mod.rs	bt-platform crate::video::first_frame_through	Dynamic	decode	1	2026-10-20: T-ANSWER-AFTER-THE-FILE-IS-CLOSED; the decode closure first_frame_through is handed: first_frame's decode_lent in the product, a held fake under test; it runs on the budgeted thread, inside the process apartment, and reaches no door
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::frame_fits	Ambiguous	is_some_and	1	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::in_the_process_apartment	Ambiguous	elapsed	3	
 crates/bt-platform/src/video/mod.rs	bt-platform crate::video::in_the_process_apartment	Ambiguous	is_err	1	
