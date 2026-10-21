@@ -1466,8 +1466,8 @@ crates/bt-app/src/i18n.rs	bt-app crate::i18n::profile_entry_fault	Ambiguous	text
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::profile_integration_auto	Ambiguous	text	2	
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::quit_documents_not_saved_in	Ambiguous	in_lang	1	
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::quit_documents_not_saved_in	Ambiguous	replace	1	
-crates/bt-app/src/i18n.rs	bt-app crate::i18n::quit_save_on_its_way_in	Ambiguous	in_lang	1	
-crates/bt-app/src/i18n.rs	bt-app crate::i18n::quit_save_on_its_way_in	Ambiguous	replace	1	
+crates/bt-app/src/i18n.rs	bt-app crate::i18n::quit_save_on_its_way_in	Ambiguous	in_lang	1	2026-10-21: T-QUIT-AND-STOP-SAVES; `i18n::Text::in_lang`, a language-table read, which calls no door
+crates/bt-app/src/i18n.rs	bt-app crate::i18n::quit_save_on_its_way_in	Ambiguous	replace	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::recovered_edits_kept_in	Ambiguous	in_lang	1	
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::recovered_edits_kept_in	Ambiguous	replace	2	
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::resolve	Ambiguous	next	1	
@@ -1904,8 +1904,8 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::say_the_cancelled_quit	Dynamic
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_arrival	Ambiguous	len	2	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_drag_handover	Ambiguous	clone	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_launch_requests	Ambiguous	is_some_and	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_quit	Ambiguous	is_some	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_quit	Ambiguous	is_some_and	2	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_quit	Ambiguous	is_some	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_quit	Ambiguous	is_some_and	2	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_quit	Ambiguous	map	2	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_quit	Ambiguous	map_or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_quit	Ambiguous	message	1	
@@ -1914,13 +1914,13 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_restore_answer	Ambiguou
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_restore_answer	Ambiguous	iter	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_restore_answer	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_tear_out	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	collect	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	map	3	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	names	2	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	of	2	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	to_owned	2	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	to_vec	1	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	and_then	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	collect	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	map	3	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	names	2	2026-10-21: T-QUIT-AND-STOP-SAVES; `ByWindow::names`, a read of names already found, which calls no door
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	of	2	2026-10-21: T-QUIT-AND-STOP-SAVES; `ByWindow::of` and `restore::SavesFound::of`, reads of findings already made, which call no door
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	to_owned	2	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	to_vec	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Dynamic	named	3	2026-10-21: T-QUIT-AND-STOP-SAVES; a local closure over the findings already read, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_update_card	Ambiguous	flatten	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_update_card	Ambiguous	map	1	
@@ -2853,10 +2853,10 @@ crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewBuffer::request_save	
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewBuffer::update_line_index	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewBuffer::viewport_edits_since	Ambiguous	rev	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewFault::notice	Ambiguous	text	3	
-crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::kept_after_the_stop	Ambiguous	clone	2	
-crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::kept_after_the_stop	Ambiguous	text	3	
-crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::kept_after_the_stop	Ambiguous	to_owned	3	
-crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::kept_after_the_stop	Ambiguous	unwrap_or_else	1	
+crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::kept_after_the_stop	Ambiguous	clone	2	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::kept_after_the_stop	Ambiguous	text	3	2026-10-21: T-QUIT-AND-STOP-SAVES; `i18n::Text::text`, a language-table read, which calls no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::kept_after_the_stop	Ambiguous	to_owned	3	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::kept_after_the_stop	Ambiguous	unwrap_or_else	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewPool::save_for_a_shut	Dynamic	shown_on	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewRefusal::notice	Ambiguous	text	3	
 crates/bt-app/src/preview.rs	bt-app crate::preview::PreviewSaves::sink	Ambiguous	display	1	
@@ -2879,10 +2879,10 @@ crates/bt-app/src/preview.rs	bt-app crate::preview::Span::math_source	Ambiguous	
 crates/bt-app/src/preview.rs	bt-app crate::preview::Span::math_source	Ambiguous	strip_prefix	2	
 crates/bt-app/src/preview.rs	bt-app crate::preview::Span::math_source	Ambiguous	strip_suffix	2	
 crates/bt-app/src/preview.rs	bt-app crate::preview::Span::math_source	Ambiguous	unwrap_or	1	
-crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	collect	2	
-crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	extend	1	
-crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	filter_map	1	
-crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	flat_map	1	
+crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	collect	2	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	extend	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	filter_map	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	flat_map	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/preview.rs	bt-app crate::preview::claimed_runs	Ambiguous	find	2	
 crates/bt-app/src/preview.rs	bt-app crate::preview::claimed_runs	Ambiguous	map	2	
 crates/bt-app/src/preview.rs	bt-app crate::preview::close_bracket	Ambiguous	find	1	
