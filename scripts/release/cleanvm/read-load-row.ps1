@@ -76,12 +76,25 @@ for ($i = 0; $i -lt 3; $i++) {
     $out.Add(('{0,-9} {1,5:N0} s  turns/s>={2}  stale turns={3} max_us={4} sources={5}  delay max_us={6}' -f `
                 $from.Name, $seconds, $rate, $staleTurns, $staleMax, ((@($sources.Keys) | Sort-Object) -join ',' | ForEach-Object { if ($_) { $_ } else { '-' } }), $delayMax))
     $out.Add(('          presents {0}  cadence(since_previous_us) {1}' -f $presents.Count, (Quantiles $cadence)))
+    # **Whether the phase was exercised at all** (2026-10-21: two runs whose driver was refused
+    # the foreground measured one present in three minutes). The driver says how many of its
+    # cycles reached Folio; a phase with none is marked, so its cells are not read as a result.
+    $cycleLine = @(Get-Content -LiteralPath $log | Where-Object { $_ -match ' cycles \d+' })[$i]
+    if ($cycleLine -and $cycleLine -match 'cycles (\d+) sent (\d+)') {
+        $out.Add(('          cycles {0}, {1} reached Folio{2}' -f $Matches[1], $Matches[2], $(if ([int]$Matches[2] -eq 0) { '  NOT EXERCISED' } else { '' })))
+    } elseif ($presents.Count -lt 10) {
+        $out.Add('          NOT EXERCISED (fewer than 10 presents; this run did not count its cycles)')
+    }
     $bySource = @($presents | Group-Object { if ($_ -match ' source=(\S+)') { $Matches[1] } else { '?' } })
     foreach ($group in $bySource) {
         $latency = [double[]]@($group.Group | ForEach-Object { if ($_ -match 'event_to_present_us=(\d+)') { [double]$Matches[1] } })
         $out.Add(('          source={0,-12} event_to_present_us {1}' -f $group.Name, (Quantiles $latency)))
     }
 }
+# The close: Folio exiting on the OS's close is a cell of the row, and a Folio still running
+# 30 s later is its failure (load-row.ps1 says which, and what was still standing).
+$closeLines = @(Get-Content -LiteralPath $log | Where-Object { $_ -match 'WM_CLOSE|close ok|FAILED close|still running|hang report' })
+$out.Add('close     ' + $(if ($closeLines.Count) { ($closeLines | ForEach-Object { $_.Substring(25) }) -join ' | ' } else { 'not recorded (a run before the close cell)' }))
 $cells = Join-Path $Results "cells-$Tag.txt"
 $out | Set-Content -LiteralPath $cells -Encoding utf8
 $out | ForEach-Object { Write-Host $_ }

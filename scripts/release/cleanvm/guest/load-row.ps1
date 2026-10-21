@@ -86,8 +86,10 @@ function Front($h) {
 function Cycle($h, $seconds) {
   $end = (Get-Date).AddSeconds($seconds)
   $cycles = 0
+  $sent = 0
   while ((Get-Date) -lt $end) {
     if (Front $h) {
+      $sent++
       [void][Probe]::TypeText('1..400|%{$_}')
       [void][Probe]::TapVk([uint16]13)
       Start-Sleep -Milliseconds 600
@@ -101,7 +103,8 @@ function Cycle($h, $seconds) {
     $cycles++
     Start-Sleep -Milliseconds 900
   }
-  Say "cycles $cycles"
+  # How many cycles reached Folio: a phase whose keys were all refused measured nothing.
+  Say "cycles $cycles sent $sent"
 }
 
 Say "load start candidate=$Candidate seconds=$Seconds processors=$([Environment]::ProcessorCount)"
@@ -138,8 +141,31 @@ Cycle $h $Seconds
 Mark 'close'
 $closed = $folio.CloseMainWindow()
 Say "WM_CLOSE -> $closed"
-if (-not $folio.WaitForExit(30000)) { Say 'Folio still running 30 s after WM_CLOSE' }
+# **A Folio that does not close is the row's failure, recorded, not a hang** (2026-10-21: the
+# after row's Folio was still running 85 minutes after the OS's close). The row says so, lists
+# the processes still standing, and keeps the window thread's own account of where it is stuck
+# (`hang-reports`, which the watchdog writes while the thread holds control); then it ends, and
+# the done marker lets the host go on whatever Folio does.
+if ($folio.WaitForExit(30000)) {
+  Say ("close ok: Folio exited with {0}" -f $folio.ExitCode)
+} else {
+  Say 'FAILED close: Folio still running 30 s after WM_CLOSE'
+  foreach ($name in @('folio', 'OpenConsole', 'powershell', 'pwsh', 'conhost')) {
+    foreach ($process in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+      Say ("  still running: {0} pid={1} started={2:HH:mm:ss}" -f $process.ProcessName, $process.Id, $process.StartTime)
+    }
+  }
+  $reports = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Folio\hang-reports'
+  if (Test-Path -LiteralPath $reports) {
+    $kept = Join-Path $GuestHome "load-$Tag-hang-reports.zip"
+    Compress-Archive -Path (Join-Path $reports '*') -DestinationPath $kept -Force
+    Say "  hang reports kept: $kept"
+  } else {
+    Say '  no hang report was written'
+  }
+}
 Start-Sleep -Seconds 2
 Mark 'end'
 Copy-Item -LiteralPath $diag -Destination (Join-Path $GuestHome "load-$Tag-diagnostics.log") -Force
 Say 'load end'
+Set-Content -LiteralPath (Join-Path $GuestHome "load-$Tag-done.txt") -Value 'done' -Encoding UTF8

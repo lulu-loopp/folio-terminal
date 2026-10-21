@@ -125,9 +125,27 @@ try {
         Invoke-Vmrun -Door $door -Step 'copy in' -Verb 'copyFileFromHostToGuest' -InGuest `
             -Arguments @($binary, "$guestCandidate\$([IO.Path]::GetFileName($binary))") | Out-Null
     }
-    Invoke-GuestScript -Door $door -Step 'load row' -Script "$guestLoad\load-row.ps1" `
-        -Arguments @('-Candidate', $guestCandidate, '-Tag', $Tag, '-Seconds', "$Seconds", '-GuestHome', $GuestHome) -Tolerant | Out-Null
-    foreach ($name in @("load-$Tag.txt", "load-$Tag-perf.txt", "load-$Tag-diagnostics.log", "load-$Tag-hog.txt")) {
+    # **The row runs with `-NoWait`, and the host waits for its done marker** (2026-10-21):
+    # `runProgramInGuest` waits for the console the script runs in, and a Folio started from it
+    # holds that console for as long as it runs — a Folio that does not close held the host for
+    # 85 minutes. The marker is written last by the script; a row that never writes it within
+    # its bound is reported, and what it left is copied out all the same.
+    Invoke-GuestScript -Door $door -Step 'load row' -Script "$guestLoad\load-row.ps1" -NoWait `
+        -Arguments @('-Candidate', $guestCandidate, '-Tag', $Tag, '-Seconds', "$Seconds", '-GuestHome', $GuestHome) | Out-Null
+    if (-not $planning) {
+        $bound = (Get-Date).AddSeconds(3 * $Seconds + 300)
+        $done = $false
+        while ((Get-Date) -lt $bound) {
+            Invoke-Vmrun -Door $door -Step 'done?' -Verb 'fileExistsInGuest' -InGuest -Tolerant -Quiet `
+                -Arguments @("$GuestHome\load-$Tag-done.txt") | Out-Null
+            if ($door.LastExit -eq 0) { $done = $true; break }
+            Start-Sleep -Seconds 10
+        }
+        Write-Host ("  {0,-12} {1}" -f 'row', $(if ($done) { 'the guest wrote its done marker' } else { "FAILED: no done marker within $(3 * $Seconds + 300) s" }))
+    } else {
+        Write-Host ("  {0,-12} (wait for load-$Tag-done.txt, up to $(3 * $Seconds + 300) s)" -f 'done?')
+    }
+    foreach ($name in @("load-$Tag.txt", "load-$Tag-perf.txt", "load-$Tag-diagnostics.log", "load-$Tag-hog.txt", "load-$Tag-hang-reports.zip")) {
         Invoke-Vmrun -Door $door -Step 'copy out' -Verb 'copyFileFromGuestToHost' -InGuest -Tolerant `
             -Arguments @("$GuestHome\$name", (Join-Path $Results $name)) | Out-Null
     }
