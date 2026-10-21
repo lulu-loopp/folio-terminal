@@ -127,6 +127,11 @@ impl ExecutionPolicy {
     #[must_use]
     /// A policy's name in any case, as PowerShell reads it — a probe prints the canonical
     /// spelling, and a row's own `-ExecutionPolicy bypass` is the same policy.
+    ///
+    /// Windows only: its one reader is the Profiles page's observation of Windows PowerShell
+    /// (`shell_integration::parse_profile_observation`), and the probe that read it on every
+    /// platform is retired (T-INTEGRATION-INJECT-2-BUILD, ruling Q3).
+    #[cfg(windows)]
     pub fn parse(text: &str) -> Self {
         let text = text.trim();
         [
@@ -765,8 +770,10 @@ pub fn take_legacy_removals() -> Vec<(winit::window::WindowId, LegacyRemoval)> {
 pub(crate) mod tests {
     use super::*;
 
+    /// A scratch root with no link above it: the marks record and the profile writers refuse a
+    /// path with a link among its ancestors, and macOS's temporary directory has one (`/var`).
     fn temp_dir(tag: &str) -> PathBuf {
-        let dir = bt_testpath::temp_path(&format!("folio-psreadline-{tag}"));
+        let dir = bt_testpath::link_free_temp_path(&format!("folio-psreadline-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
