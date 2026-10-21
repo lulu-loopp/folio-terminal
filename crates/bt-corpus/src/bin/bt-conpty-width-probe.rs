@@ -187,6 +187,8 @@ fn capture_powershell(script: &str) -> Result<Vec<u8>, Box<dyn Error>> {
         NonZeroU16::new(ROWS).unwrap(),
     );
     let wake: OutputWake = Arc::new(|| {});
+    // No recording request: this probe's pane is never recorded (`BT_PTY_DUMP` is read by
+    // `folio.exe`'s entry and handed to its panes; this program hands none).
     let mut session = PtySession::spawn(command, size, wake)?;
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut bytes = Vec::new();

@@ -47,7 +47,7 @@ use crate::trace::Gate;
 pub use crate::trace::{Trace, emit};
 
 static GATE: Gate = Gate::new(
-    "BT_ATTENTION_TRACE",
+    |files| files.attention.as_deref(),
     "# BT_ATTENTION_TRACE_V1 elapsed_ms event field=value…",
 );
 

@@ -4431,7 +4431,7 @@ impl ViewportProjection {
                 if !artifact.pane_narrower_than_marks {
                     return true;
                 }
-                if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
+                if crate::trace::perf() {
                     crate::trace::line(format!(
                         "BT_PERF_TRACE live_math_event=source-fallback row={} left={:?} right={:?} reason=pane-narrower-than-marks",
                         artifact.start.row, artifact.left_limit_columns, artifact.right_limit_columns,
@@ -4487,7 +4487,7 @@ impl ViewportProjection {
                 // unproven block gets — and it is refused *here*, so that nothing downstream ever
                 // sees a bridge whose rows above the grid were guessed at.
                 let Some(box_height) = share.map(|share| share.max(1)) else {
-                    if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
+                    if crate::trace::perf() {
                         crate::trace::line(format!(
                             "BT_PERF_TRACE live_math_event=source-fallback row={} frozen_prefix={} staging_prefix={} reason=bridge-prefix-not-measurable",
                             artifact.start.row,
@@ -4504,7 +4504,7 @@ impl ViewportProjection {
                 let accepted = box_height <= per_block_limit;
                 // Set-but-empty is off, as everywhere else this family is read.
                 if !accepted
-                    && std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty())
+                    && crate::trace::perf()
                 {
                     crate::trace::line(format!(
                         "BT_PERF_TRACE live_math_event=source-fallback row={} box_subpixels={} per_block_limit_subpixels={} min_text_rows={} reason=block-exceeds-visible-text-floor",
