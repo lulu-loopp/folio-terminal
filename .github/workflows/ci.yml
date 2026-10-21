@@ -1073,8 +1073,8 @@ jobs:
       # member — minus the three crates whose tests are about hardware. `bt-pty`
       # starts real ConPTY sessions, and `bt-render` and `bt-render-probe` (the
       # headless probe and the glyph read-back, thread-door note revision (l)4)
-      # ask for a real adapter; each has a job of its own below, where the machine it needs is set up
-      # and where a failure means something specific.
+      # ask for a real adapter; each has a job of its own below, where the
+      # machine it needs is set up and where a failure means something specific.
       #
       # Its own budget, under the job's, so that a run past it fails here with
       # a line naming the budget instead of being cancelled, without a reason,
