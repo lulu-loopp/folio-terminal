@@ -1917,8 +1917,9 @@ fn the_systems_end_copies_what_had_not_landed_at_the_bound() {
 /// another writer's bytes; the first lands. Then `WM_ENDSESSION(FALSE)`.
 ///
 /// MUTATION: in `FolioApp::hand_over_for_the_systems_end`, hand over the stop's way
-/// (`Runtime::keep_unsaved_edits`, which takes the pools out of the tabs) — window 2's tab holds
-/// no buffer: "the tab's buffer" panics.
+/// (`Runtime::keep_unsaved_edits`, which takes the pools out of the tabs) — the tabs hold no
+/// pool to keep from: nothing is said saved or copied ("the first saved, the second copied"
+/// goes red), and the edits are no longer in their windows.
 #[test]
 fn a_session_taken_back_finds_every_window_and_every_edit_as_it_was() {
     let _news = crate::test_support::EndSessionHome::new("end-back");
@@ -2009,7 +2010,7 @@ fn the_systems_end_keeps_an_owed_document_beside_the_edits() {
 ///
 /// MUTATION: drop the once-per-span guard (in `session_end::owes_the_write`, the
 /// `!SETTLED.with(Cell::get)` term, and `settle`'s `AlreadySaved` arm) — the worker is handed a
-/// second document and four copies are made.
+/// second document (`save, save, document, document`), and each edit is copied twice.
 #[test]
 fn the_systems_question_to_every_window_is_settled_once() {
     let _news = crate::test_support::EndSessionHome::new("end-once");
