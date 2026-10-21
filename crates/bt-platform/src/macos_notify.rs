@@ -405,15 +405,17 @@ impl Notifier {
     ///
     /// As [`Self::new`].
     pub fn without_registration(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
-        Self::new(wake)
+        Self::new("", wake)
     }
 
     /// Nothing to write on macOS; see [`Self::without_registration`].
     ///
     /// # Errors
     ///
-    /// Never.
-    pub fn register_identity() -> Result<(), String> {
+    /// Never. The sender's name on this platform is the bundle's own, so
+    /// `display_name` is not written anywhere.
+    pub fn register_identity(display_name: &str) -> Result<(), String> {
+        let _ = display_name;
         Ok(())
     }
 
@@ -428,7 +430,11 @@ impl Notifier {
     ///
     /// If this process has no bundle identifier, or if it is asked from a
     /// thread that is not the main one.
-    pub fn new(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
+    ///
+    /// `display_name` is [`Self::register_identity`]'s and is not read here:
+    /// the notification centre names the sender by the bundle.
+    pub fn new(display_name: &str, wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
+        let _ = display_name;
         // **Before the thread gate and before anything from the framework.**
         // The centre's own accessor raises an Objective-C exception in a
         // process with no bundle, and an exception is not a value this function
@@ -773,7 +779,7 @@ mod tests {
     /// wrong sentence; delete it and the case ends the process.
     #[test]
     fn a_process_with_no_bundle_is_refused_by_name() {
-        let refusal = Notifier::new(Box::new(|| {}))
+        let refusal = Notifier::new("Folio", Box::new(|| {}))
             .err()
             .expect("a test binary is not inside a bundle");
         assert!(

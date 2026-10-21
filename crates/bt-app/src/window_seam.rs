@@ -1230,14 +1230,17 @@ impl FrameDoor for bt_platform::CustomWindowFrame {
 }
 
 /// **The formula's native context menu** — `bt_platform::MathContextMenu`'s methods.
+///
+/// The row's title crosses with the call (T-NATIVE-LABELS-FROM-THE-CALLER): the menu reads in
+/// the language in force when it was asked for, and `bt-platform` keeps no words of its own.
 pub(crate) trait MathMenuDoor {
-    fn request(&self) -> Result<bool, String>;
+    fn request(&self, copy_latex: &str) -> Result<bool, String>;
     fn take_result(&self) -> Option<Result<bool, String>>;
 }
 
 impl MathMenuDoor for bt_platform::MathContextMenu {
-    fn request(&self) -> Result<bool, String> {
-        bt_platform::MathContextMenu::request(self)
+    fn request(&self, copy_latex: &str) -> Result<bool, String> {
+        bt_platform::MathContextMenu::request(self, copy_latex)
     }
     fn take_result(&self) -> Option<Result<bool, String>> {
         bt_platform::MathContextMenu::take_result(self)
@@ -1260,11 +1263,15 @@ impl FolderPickerDoor for bt_platform::FolderPicker {
 }
 
 /// **The native file chooser** — `bt_platform::ImagePicker`'s methods.
+///
+/// `image_types` is the image filter's name in the caller's words, crossing with the call
+/// (T-NATIVE-LABELS-FROM-THE-CALLER); the platform reads it only for an image request.
 pub(crate) trait ImagePickerDoor {
     fn request(
         &self,
         kind: bt_platform::FilePickKind,
         start: Option<&Path>,
+        image_types: &str,
     ) -> Result<bool, String>;
     fn take_result(&self) -> Option<Result<Option<PathBuf>, String>>;
 }
@@ -1274,8 +1281,9 @@ impl ImagePickerDoor for bt_platform::ImagePicker {
         &self,
         kind: bt_platform::FilePickKind,
         start: Option<&Path>,
+        image_types: &str,
     ) -> Result<bool, String> {
-        bt_platform::ImagePicker::request(self, kind, start)
+        bt_platform::ImagePicker::request(self, kind, start, image_types)
     }
     fn take_result(&self) -> Option<Result<Option<PathBuf>, String>> {
         bt_platform::ImagePicker::take_result(self)
