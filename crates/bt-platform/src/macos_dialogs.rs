@@ -595,8 +595,9 @@ struct MenuDeferral {
     window: NativeWindow,
     state: Arc<Deferred<Result<bool, String>>>,
     /// The one row's title as the caller wrote it at [`MathContextMenu::request`],
-    /// read when the scheduled pop fires (T-NATIVE-LABELS-FROM-THE-CALLER).
-    copy_latex: std::sync::Mutex<String>,
+    /// taken when the scheduled pop fires (T-NATIVE-LABELS-FROM-THE-CALLER). A `RefCell`: the
+    /// request and the pop are both the main thread's.
+    copy_latex: std::cell::RefCell<String>,
 }
 
 define_class!(
@@ -626,11 +627,7 @@ define_class!(
                 return;
             };
             let ivars = self.ivars();
-            let copy_latex = ivars
-                .copy_latex
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone();
+            let copy_latex = ivars.copy_latex.take();
             let answer = track_formula_menu(ivars.window, &copy_latex, mtm);
             ivars.state.complete(answer);
             ask_for_a_frame(ivars.window, mtm);
@@ -645,7 +642,7 @@ impl DeferredFormulaMenu {
         let this = Self::alloc().set_ivars(MenuDeferral {
             window,
             state: Arc::new(Deferred::new()),
-            copy_latex: std::sync::Mutex::new(String::new()),
+            copy_latex: std::cell::RefCell::new(String::new()),
         });
         // SAFETY: `NSObject`'s designated initializer, called on a fresh
         // allocation whose ivars are set.
@@ -691,12 +688,7 @@ impl MathContextMenu {
         let (_mtm, _host) = ivars
             .state
             .give_back_on_refusal(window_for(ivars.window, what))?;
-        copy_latex.clone_into(
-            &mut ivars
-                .copy_latex
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()),
-        );
+        ivars.copy_latex.replace(copy_latex.to_owned());
         // SAFETY: the selector is one this class defines above and takes no
         // argument, which is what `withObject: nil` says; the run loop retains
         // the target until the perform fires, and `Drop` cancels any perform

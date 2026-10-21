@@ -910,7 +910,15 @@ an expansion the reading cannot see. Its fixture (`tests/fixtures/native_labels/
 plants each case (`a_capitalised_literal_in_a_guarded_item_is_named`). When red, add
 the words to `i18n.rs` (English in both columns, Chinese pending with its
 `CHINESE_PENDING` rows), pass them in at the call, and take the literal out; a new
-guarded surface adds its item to the guard's lists.
+guarded surface adds its item to the guard's lists. An entry of the guard's
+`FILES`, `TYPES` or `FUNCTIONS` that names nothing in the index is refused by name, so
+a renamed item cannot drop out silently, and a literal the index holds no record of is
+refused by its line. `ALLOWED` shrinks by review only: no check holds it to the merge
+base's. Not seen, as limits (widening the grammar is T-NATIVE-LABELS-GUARD-REACH, 0.4.9):
+a `const` or `static` label defined outside the scope and named from a guarded item (the
+shape `NOTIFICATION_DISPLAY_NAME` had), a crate-local `macro_rules!` defined outside the
+scope and invoked inside it, a helper function on none of the lists, and a label whose
+first character is not a capital (an `"&Copy"` mnemonic, a leading space).
 
 ## Machine-independent paths
 

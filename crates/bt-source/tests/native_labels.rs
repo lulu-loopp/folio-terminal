@@ -21,7 +21,16 @@
 //! * **Allowed by row**: [`ALLOWED`] — a literal that must stay, by file and text, with its
 //!   reason. The list only shrinks, and a row no guarded item uses is refused.
 //! * **Unreadable, refused by its line**: a literal inside a `macro_rules!` definition — it lands
-//!   in an expansion this reading cannot see.
+//!   in an expansion this reading cannot see; and a literal the index holds no record of.
+//! * **The lists are checked**: an entry of [`FILES`], [`TYPES`] or [`FUNCTIONS`] that names
+//!   nothing in the index is refused, so a renamed item cannot drop out of the guard silently.
+//!
+//! # What it does not see (limits; widening the grammar is T-NATIVE-LABELS-GUARD-REACH, 0.4.9)
+//!
+//! A `const` or `static` label defined outside the scope and named from a guarded item (the shape
+//! `NOTIFICATION_DISPLAY_NAME` had); a crate-local `macro_rules!` defined outside the scope and
+//! invoked inside it; a helper function on none of the lists that a guarded item calls; and a
+//! label whose first character is not a capital (an `"&Copy"` mnemonic, a leading space).
 //!
 //! The fixture under `tests/fixtures/native_labels/` plants each case; the last test holds
 //! `bt-platform` itself.
@@ -30,7 +39,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use bt_source::{
-    Certainty, DiskScope, FileRecord, ImplRecord, Index, ItemRecord, LiteralValue, Occurrence,
+    Certainty, DiskScope, FileRecord, ImplRecord, Index, ItemRecord, LiteralRecord, LiteralValue, Occurrence,
     Span, TargetId, TargetKind, TargetRoot, Universe, Vendor, report,
 };
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
@@ -166,31 +175,60 @@ fn group_place(trees: &[TokenTree], at: usize, delimiter: Delimiter) -> Place {
 }
 
 /// The spans the guard reads: the guarded files whole, the types' blocks, the free functions.
-fn guarded_spans(index: &Index, guarded: &Guarded<'_>) -> Vec<Span> {
-    let mut spans: Vec<Span> = index
-        .files()
-        .iter()
-        .filter(|file| {
-            let path = file.path().to_string_lossy().replace('\\', "/");
-            guarded.files.iter().any(|suffix| path.ends_with(suffix))
-        })
-        .map(FileRecord::span)
-        .collect();
-    spans.extend(
-        index
+fn guarded_spans(index: &Index, guarded: &Guarded<'_>) -> (Vec<Span>, Vec<String>) {
+    let mut spans = Vec::new();
+    let mut unresolved = Vec::new();
+    for suffix in guarded.files {
+        let found: Vec<Span> = index
+            .files()
+            .iter()
+            .filter(|file| {
+                file.path()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .ends_with(suffix)
+            })
+            .map(FileRecord::span)
+            .collect();
+        if found.is_empty() {
+            unresolved.push(format!("the guarded file `{suffix}`"));
+        }
+        spans.extend(found);
+    }
+    for name in guarded.types {
+        let found: Vec<Span> = index
             .impls()
             .iter()
-            .filter(|block| guarded.types.contains(&block.type_owner()))
-            .map(ImplRecord::whole),
-    );
-    spans.extend(
-        index
+            .filter(|block| block.type_owner() == *name)
+            .map(ImplRecord::whole)
+            .collect();
+        if found.is_empty() {
+            unresolved.push(format!("the guarded type `{name}`"));
+        }
+        spans.extend(found);
+    }
+    for name in guarded.functions {
+        let found: Vec<Span> = index
             .items()
             .iter()
-            .filter(|item| item.type_owner().is_none() && guarded.functions.contains(&item.name()))
-            .map(ItemRecord::whole),
-    );
-    spans
+            .filter(|item| item.type_owner().is_none() && item.name() == *name)
+            .map(ItemRecord::whole)
+            .collect();
+        if found.is_empty() {
+            unresolved.push(format!("the guarded function `{name}`"));
+        }
+        spans.extend(found);
+    }
+    let unresolved = unresolved
+        .into_iter()
+        .map(|entry| {
+            format!(
+                "{entry} names nothing in the index — a renamed or moved item would drop out of \
+                 the guard silently; name it as it is now"
+            )
+        })
+        .collect();
+    (spans, unresolved)
 }
 
 fn where_is(index: &Index, span: Span) -> String {
@@ -199,29 +237,23 @@ fn where_is(index: &Index, span: Span) -> String {
         .map_or_else(|| format!("{span:?}"), |location| location.to_string())
 }
 
-/// The index's record of the string literal starting at `start` — its span and decoded text —
-/// or `None` for a literal that is not a string (a number, a character).
-fn string_at(index: &Index, start: usize) -> Option<(Span, String)> {
-    let record = index
-        .literals()
-        .iter()
-        .find(|record| record.span().start() == start)?;
-    let text = match record.value() {
-        LiteralValue::Str(text) => text.clone(),
+/// The decoded text of a string literal, or `None` for a literal that is not a string (a number,
+/// a character).
+fn string_value(record: &LiteralRecord) -> Option<String> {
+    match record.value() {
+        LiteralValue::Str(text) => Some(text.clone()),
         LiteralValue::ByteStr(bytes) | LiteralValue::CStr(bytes) => {
-            String::from_utf8_lossy(bytes).into_owned()
+            Some(String::from_utf8_lossy(bytes).into_owned())
         }
-        _ => return None,
-    };
-    Some((record.span(), text))
+        _ => None,
+    }
 }
 
 /// **The refusals** over one index: each capitalised literal in an open place of the guarded
 /// product bytes that no row allows, each literal in a `macro_rules!` definition there, and each
 /// row no literal uses.
 fn judge(index: &Index, guarded: &Guarded<'_>) -> Vec<String> {
-    let spans = guarded_spans(index, guarded);
-    let mut refusals = Vec::new();
+    let (spans, mut refusals) = guarded_spans(index, guarded);
     let mut used = vec![false; guarded.allowed.len()];
     for file in index.files() {
         if !spans.iter().any(|span| span.within(file.span())) {
@@ -229,16 +261,40 @@ fn judge(index: &Index, guarded: &Guarded<'_>) -> Vec<String> {
         }
         let path = file.path().to_string_lossy().replace('\\', "/");
         for found in literals_of(index.text(file.span()), file.span().start()) {
-            let Some((span, text)) = string_at(index, found.start) else {
+            if matches!(found.place, Place::Attribute | Place::ErrorText | Place::Abi) {
+                continue;
+            }
+            let in_scope = spans
+                .iter()
+                .any(|guarded| guarded.start() <= found.start && found.start < guarded.end());
+            if !in_scope {
+                continue;
+            }
+            // Not recorded is not "not a string": a literal the index holds no record of is one
+            // this guard cannot classify, and it is refused by its line.
+            let Some(record) = index
+                .literals()
+                .iter()
+                .find(|record| record.span().start() == found.start)
+            else {
+                refusals.push(format!(
+                    "{}: a literal the index holds no record of — the guard cannot read its text",
+                    index
+                        .locate(found.start)
+                        .map_or_else(|| format!("offset {}", found.start), |at| at.to_string())
+                ));
                 continue;
             };
-            let in_scope = spans.iter().any(|guarded| span.within(*guarded));
+            let span = record.span();
+            let Some(text) = string_value(record) else {
+                continue;
+            };
             let product = Occurrence {
                 span,
                 certainty: Certainty::Resolved,
             }
             .in_the_product(index);
-            if !in_scope || !product {
+            if !product {
                 continue;
             }
             match found.place {
@@ -304,8 +360,8 @@ fn fixture() -> Index {
 }
 
 /// RED (planted) — **a capitalised literal in a guarded product item is refused, a literal in a
-/// `macro_rules!` definition is refused by its line, and a row nothing uses is refused; nothing
-/// else is.** The fixture's error texts (`Err(…)`, `.map_err`, `.ok_or_else`), its attributes,
+/// `macro_rules!` definition is refused by its line, a row nothing uses is refused, and a list
+/// entry that names no item is refused; nothing else is.** The fixture's error texts (`Err(…)`, `.map_err`, `.ok_or_else`), its attributes,
 /// its ABI name, its allowlisted literal and its test module pass, and an unguarded item is not
 /// read.
 #[test]
@@ -318,7 +374,7 @@ fn a_capitalised_literal_in_a_guarded_item_is_named() {
     let items = Guarded {
         files: &[],
         types: &["Menu"],
-        functions: &["labels"],
+        functions: &["labels", "renamed_away"],
         allowed: &allowed,
     };
     let refusals = judge(&index, &items);
@@ -335,8 +391,13 @@ fn a_capitalised_literal_in_a_guarded_item_is_named() {
     );
     assert_eq!(named("the row for \"Gone\""), 1, "{refusals:#?}");
     assert_eq!(
+        named("the guarded function `renamed_away` names nothing in the index"),
+        1,
+        "a list entry that resolves to no item is refused, not skipped: {refusals:#?}"
+    );
+    assert_eq!(
         refusals.len(),
-        2,
+        3,
         "nothing else is refused — the error texts, the attribute, the allowed row, the unguarded \
          function and the test module pass: {refusals:#?}"
     );
@@ -364,7 +425,7 @@ fn a_capitalised_literal_in_a_guarded_item_is_named() {
         1,
         "a whole guarded file reads every product item: {whole:#?}"
     );
-    assert_eq!(whole.len(), 4, "{whole:#?}");
+    assert_eq!(whole.len(), 5, "{whole:#?}");
 }
 
 /// GUARD — **`bt-platform`'s menus and dialogs carry no capitalised literal of their own**, but
