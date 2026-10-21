@@ -2853,10 +2853,16 @@ impl SessionStore {
     /// same storage worker first, and the worker serves its queue in order, so this document's
     /// landing is what says everything queued ahead of it has been served. One that was already
     /// clean, or already on its way, would end the wait before them.
-    pub(crate) fn save_for_the_systems_end(&mut self) -> Result<(), SaveRefusal> {
+    ///
+    /// **The budget counts from `asked_at`**, the instant the question's turn began: what was
+    /// handed over ahead of this document spends it, and adds nothing to it.
+    pub(crate) fn save_for_the_systems_end(
+        &mut self,
+        asked_at: Instant,
+    ) -> Result<(), SaveRefusal> {
         let landed = match self.hand_over_a_new_generation() {
             Ok(Some(generation)) => {
-                let until = self.writer.wait_ends(Instant::now());
+                let until = self.writer.wait_ends(asked_at);
                 self.wait_for_landing(generation, until)
             }
             Ok(None) => Ok(()),
@@ -5026,7 +5032,7 @@ pub(crate) mod tests {
         );
         let settled: Vec<_> = crate::session_end::take()
             .into_iter()
-            .map(|end| crate::session_end::settle(end, &mut store, false))
+            .map(|end| crate::session_end::settle(end, &mut store, false, Instant::now()))
             .collect();
         assert_eq!(
             settled,

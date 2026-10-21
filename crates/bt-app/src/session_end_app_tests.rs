@@ -36,7 +36,7 @@ fn a_query_end_session_freezes_writes_and_drops_the_sentinel() {
     record_as_the_app_does(&mut store, shells_document(&home.0, 1));
     let settled: Vec<_> = session_end::take()
         .into_iter()
-        .map(|end| session_end::settle(end, &mut store, false))
+        .map(|end| session_end::settle(end, &mut store, false, Instant::now()))
         .collect();
     assert_eq!(settled, vec![session_end::Settled::Saved(Ok(()))]);
     assert_eq!(
@@ -84,7 +84,7 @@ fn a_shutdown_taken_back_lets_the_document_go_and_puts_the_sentinel_back() {
     );
     let settled: Vec<_> = session_end::take()
         .into_iter()
-        .map(|end| session_end::settle(end, &mut store, false))
+        .map(|end| session_end::settle(end, &mut store, false, Instant::now()))
         .collect();
     assert_eq!(
         settled,
@@ -142,7 +142,7 @@ fn a_shutdown_taken_back_after_its_wait_ran_out_is_waited_for_again() {
     );
     let settled: Vec<_> = session_end::take()
         .into_iter()
-        .map(|end| session_end::settle(end, &mut store, false))
+        .map(|end| session_end::settle(end, &mut store, false, Instant::now()))
         .collect();
     assert!(
         matches!(

@@ -67563,7 +67563,8 @@ impl<B: Backend> FolioApp<B> {
     /// dirty preview buffer's save, as a press hands it ([`Self::hand_over_for_the_systems_end`]).
     /// The document follows them onto the same worker, which serves its queue in order, so its one
     /// bounded wait (§5.3 row 16, `SESSION_SAVE_BUDGET`) is the drain of everything ahead of it —
-    /// one budget, inside the five seconds Windows allows after `WM_ENDSESSION`. Then the answers
+    /// one budget, counted from this turn's start (`asked_at`), which fits the five seconds
+    /// Windows allows from when it sends `WM_ENDSESSION` — possibly while this turn runs. Then the answers
     /// are heard as the loop's own turn hears them, every buffer staying in its tab, and whatever
     /// did not land is copied into `recovery` (§5.3 row 20c) before the line comes down. A save
     /// stalled on the disk delays the document behind it: the sentinel stays, and the next start
@@ -67574,19 +67575,23 @@ impl<B: Backend> FolioApp<B> {
         if heard.is_empty() || self.app.is_none() {
             return kept;
         }
+        // The one budget counts from here: the hand-overs ahead of the document spend it.
+        let asked_at = Instant::now();
         let mut lines_down = false;
         for end in heard {
-            let a_quit_holds_it = self
-                .app
-                .as_ref()
-                .and_then(|app| app.quit.as_ref())
-                .is_some_and(quit::Quit::document_is_frozen);
+            let quit = self.app.as_ref().and_then(|app| app.quit.as_ref());
+            let a_quit_holds_it = quit.is_some_and(quit::Quit::document_is_frozen);
+            // **A quit in its documents or recovery phase owns the four documents** and their
+            // copies, as one past its photograph owns everything (`LeftToTheQuit`): this road
+            // neither retries them — `quit_begin` would reset the quit's own recovery — nor
+            // copies them.
+            let documents = !quit.is_some_and(quit::Quit::holds_the_storage_worker);
             let handed = session_end::owes_the_write(end, a_quit_holds_it)
-                .then(|| self.hand_over_for_the_systems_end());
+                .then(|| self.hand_over_for_the_systems_end(documents));
             let Some(app) = self.app.as_mut() else {
                 return kept;
             };
-            match session_end::settle(end, &mut app.session_store, a_quit_holds_it) {
+            match session_end::settle(end, &mut app.session_store, a_quit_holds_it, asked_at) {
                 session_end::Settled::Saved(Ok(()))
                 | session_end::Settled::LeftToTheQuit
                 | session_end::Settled::AlreadySaved => {
@@ -67606,6 +67611,7 @@ impl<B: Backend> FolioApp<B> {
             if let Some(handed) = handed {
                 kept.extend(self.keep_what_the_systems_end_did_not_save(
                     &handed,
+                    documents,
                     recovery,
                     SystemTime::now(),
                 ));
@@ -67627,8 +67633,14 @@ impl<B: Backend> FolioApp<B> {
     /// retried on, §4.1), then each standing window's dirty preview buffers
     /// ([`Runtime::hand_over_for_the_systems_end`]) — all of it ahead of the session document,
     /// which the caller writes next. Answers what each window handed over, by window.
-    fn hand_over_for_the_systems_end(&mut self) -> Vec<(WindowId, preview::HandedOver)> {
-        if let Some(app) = self.app.as_mut() {
+    ///
+    /// `documents` is false while a quit holds the storage worker for its documents and their
+    /// copies: those are the quit's, and are left to it.
+    fn hand_over_for_the_systems_end(
+        &mut self,
+        documents: bool,
+    ) -> Vec<(WindowId, preview::HandedOver)> {
+        if documents && let Some(app) = self.app.as_mut() {
             app.with_documents(|documents| {
                 for document in documents.iter_mut() {
                     document.quit_begin();
@@ -67649,19 +67661,28 @@ impl<B: Backend> FolioApp<B> {
 
     /// **After the document's wait: what landed heard, and what did not kept**
     /// (T-ENDSESSION-SAVES). The answers the worker gave are taken as the loop's turn takes them
-    /// ([`Self::take_document_answers`]: each buffer hears its own, each document store its own);
-    /// then each window's buffers that a save did not clean are copied into `recovery`
-    /// ([`Runtime::keep_what_the_systems_end_did_not_save`]) — the buffers stay in their tabs as
-    /// they now stand, dirty where the save did not land — and each document still owed is
+    /// — the session's receipts, each buffer its own, each document store its own — and **all of
+    /// them before anything that failed on the way is said**: a window whose repaint refused does
+    /// not keep the document stores from hearing theirs. Then each window's buffers that a save
+    /// did not clean are copied into `recovery` ([`Runtime::keep_what_the_systems_end_did_not_save`],
+    /// each line naming why its file did not take the edit — the disk's own reason where it
+    /// refused) — the buffers stay in their tabs as they now stand, dirty where the save did not
+    /// land — and, unless a quit holds them (`documents` false), each document still owed is
     /// copied beside them, a loss said in `diagnostics.log` alone ([`IntoTheLog`]). Every line
     /// is offered to `diagnostics.log`.
     fn keep_what_the_systems_end_did_not_save(
         &mut self,
         handed: &[(WindowId, preview::HandedOver)],
+        documents: bool,
         recovery: &Path,
         at: SystemTime,
     ) -> Vec<preview::Kept> {
-        if let Err(error) = self.take_document_answers() {
+        if let Some(app) = self.app.as_mut() {
+            app.session_store.take_receipts();
+        }
+        let (said, previews) = self.hear_preview_save_answers();
+        let heard = self.take_the_documents_answers();
+        for error in [previews.err(), heard.err()].into_iter().flatten() {
             diagnostics::note(&format!(
                 "{APP_NAME}: the session is ending and an answer from the disk was not heard: \
                  {error:#}"
@@ -67670,13 +67691,15 @@ impl<B: Backend> FolioApp<B> {
         let mut kept = Vec::new();
         for (id, handed) in handed {
             if let Some(mut runtime) = self.runtime(*id) {
-                kept.extend(runtime.keep_what_the_systems_end_did_not_save(handed, recovery, at));
+                kept.extend(
+                    runtime.keep_what_the_systems_end_did_not_save(handed, &said, recovery, at),
+                );
             }
         }
         for one in &kept {
             diagnostics::note(&one.line());
         }
-        if let Some(app) = self.app.as_mut() {
+        if documents && let Some(app) = self.app.as_mut() {
             app.with_documents(|documents| {
                 keep_owed_documents_over(documents, recovery, at, &mut TheDisk, &mut IntoTheLog)
             });
@@ -67818,6 +67841,13 @@ impl<B: Backend> FolioApp<B> {
             app.session_store.take_receipts();
         }
         self.take_preview_save_answers()?;
+        self.take_the_documents_answers()
+    }
+
+    /// **What the storage worker answered the four documents, heard by the first standing
+    /// window** — [`Self::take_document_answers`]'s second half, on its own for the system's end
+    /// of the session, which hears every answer before it says any failure.
+    fn take_the_documents_answers(&mut self) -> Result<()> {
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
         // recovery phases take the answers themselves, on the turn this wake brings, and merge
         // without the doors.
@@ -67848,11 +67878,19 @@ impl<B: Backend> FolioApp<B> {
     /// recorded and then ignored (C6). Not held back by a quit: these answers are
     /// the buffers', and the quit's documents phase takes only the stores'.
     fn take_preview_save_answers(&mut self) -> Result<()> {
+        self.hear_preview_save_answers().1
+    }
+
+    /// [`Self::take_preview_save_answers`], answering also every refusal the answers gave, by
+    /// the file each was for ([`Runtime::hear_preview_saves`]) — gathered whatever a window's
+    /// repaint answered.
+    fn hear_preview_save_answers(&mut self) -> (Vec<(preview::PreviewSource, String)>, Result<()>) {
+        let mut refused = Vec::new();
         let Some(mut answers) = self.app.as_mut().map(App::take_preview_save_answers) else {
-            return Ok(());
+            return (refused, Ok(()));
         };
         if answers.is_empty() {
-            return Ok(());
+            return (refused, Ok(()));
         }
         // Every standing window hears its buffers' answers whatever another
         // window's repaint answered, and every answer taken is ended — heard,
@@ -67861,7 +67899,7 @@ impl<B: Backend> FolioApp<B> {
         for index in 0..self.windows.len() {
             if let Some(mut runtime) = self.runtime_at(index)
                 && runtime.window.leaving.is_none()
-                && let Err(error) = runtime.hear_preview_saves(&mut answers)
+                && let Err(error) = runtime.hear_preview_saves(&mut answers, &mut refused)
             {
                 first_error.get_or_insert(error);
             }
@@ -67869,7 +67907,7 @@ impl<B: Backend> FolioApp<B> {
         if let Some(app) = self.app.as_mut() {
             app.sink_preview_save_answers(answers);
         }
-        first_error.map_or(Ok(()), Err)
+        (refused, first_error.map_or(Ok(()), Err))
     }
 
     /// **Every window's close that waits for its saves, looked at** (S-6b) — once

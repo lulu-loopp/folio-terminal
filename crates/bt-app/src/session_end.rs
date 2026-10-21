@@ -30,6 +30,7 @@
 //! test on a thread of its own starts with nothing held.
 
 use std::cell::{Cell, RefCell};
+use std::time::Instant;
 
 use bt_platform::session_end::SessionEnd;
 
@@ -96,10 +97,14 @@ pub(crate) enum Settled {
 /// For the question, the quit's write step: the way out's phase for the one admitted wait, the
 /// write, and back to the running phase — the session may yet be taken back, and until the
 /// system ends the process the windows are still Folio's.
+///
+/// `asked_at` is the instant the question's turn began: the write's one budget counts from it, so
+/// the hand-overs ahead of the document spend it rather than add to it (T-ENDSESSION-SAVES).
 pub(crate) fn settle(
     end: SessionEnd,
     store: &mut SessionStore,
     a_quit_holds_the_document: bool,
+    asked_at: Instant,
 ) -> Settled {
     match end {
         SessionEnd::Asked if a_quit_holds_the_document => Settled::LeftToTheQuit,
@@ -107,7 +112,7 @@ pub(crate) fn settle(
         SessionEnd::Asked => {
             SETTLED.with(|settled| settled.set(true));
             bt_platform::admission::exiting();
-            let landed = store.save_for_the_systems_end();
+            let landed = store.save_for_the_systems_end(asked_at);
             bt_platform::admission::quit_abandoned();
             Settled::Saved(landed)
         }

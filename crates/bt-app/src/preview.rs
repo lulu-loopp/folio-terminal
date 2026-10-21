@@ -8114,6 +8114,19 @@ pub enum SaveOutcome {
     Failed(String),
 }
 
+impl SaveOutcome {
+    /// **Why the file did not take the body, if it did not** — the sentence a copy's line
+    /// names (`Kept::Copied`'s `refused`): the conflict's notice, or the disk's own reason.
+    /// `None` for a save that landed.
+    pub(crate) fn refusal(self) -> Option<String> {
+        match self {
+            Self::Conflict => Some(preview_conflict_notice().to_owned()),
+            Self::Failed(why) => Some(why),
+            Self::Saved | Self::SavedOrdinarily => None,
+        }
+    }
+}
+
 /// **What a preview save does on a volume that cannot exchange two files in
 /// one step** — FAT and exFAT removable media on macOS, and Windows file systems
 /// that refuse the replacement: the one switch for the policy (S-6a round 2),
@@ -8875,11 +8888,7 @@ impl StopKeeps {
         said.extend(
             heard
                 .into_iter()
-                .filter_map(|(_, source, said)| match said? {
-                    SaveOutcome::Conflict => Some((source, preview_conflict_notice().to_owned())),
-                    SaveOutcome::Failed(why) => Some((source, why)),
-                    SaveOutcome::Saved | SaveOutcome::SavedOrdinarily => None,
-                }),
+                .filter_map(|(_, source, said)| Some((source, said?.refusal()?))),
         );
         let awaited = std::mem::take(&mut self.awaited);
         let kept = pools

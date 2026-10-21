@@ -7882,18 +7882,25 @@ impl<B: Backend> Runtime<'_, B> {
     /// save sent that did not land, is copied into `recovery`, never over the file (§5.3 row 20c).
     /// The pools stay in their tabs and the buffers as they stand: dirty where the save did not
     /// land, so a session taken back still holds the edit.
+    ///
+    /// `said` is every refusal the storage worker's answers gave (heard by
+    /// [`Self::hear_preview_saves`]): with the hand-over's own refusals, each copy's line names
+    /// why its file did not take the edit — the disk's own reason where the disk refused it.
     pub(crate) fn keep_what_the_systems_end_did_not_save(
         &mut self,
         handed: &preview::HandedOver,
+        said: &[(preview::PreviewSource, String)],
         recovery: &Path,
         at: SystemTime,
     ) -> Vec<preview::Kept> {
+        let mut refused = handed.refused.clone();
+        refused.extend_from_slice(said);
         self.window
             .tabs
             .iter_mut()
             .flat_map(|tab| {
                 tab.preview_pool
-                    .kept_after_the_stop(&handed.awaited, &handed.refused, recovery, at)
+                    .kept_after_the_stop(&handed.awaited, &refused, recovery, at)
             })
             .collect()
     }
@@ -7905,9 +7912,15 @@ impl<B: Backend> Runtime<'_, B> {
     /// file. An
     /// answer this window holds no buffer for is left in `answers`, for the next
     /// window or the sink.
+    ///
+    /// Every answer that says the file did not take its body — the conflict, or the disk's own
+    /// refusal ([`preview::SaveOutcome::refusal`]) — is put in `refused`, before the repaint, so
+    /// a caller that keeps copies of what did not land names the reason
+    /// (`FolioApp::keep_what_the_systems_end_did_not_save`, as `preview::StopKeeps::keep` does).
     pub(crate) fn hear_preview_saves(
         &mut self,
         answers: &mut Vec<preview::SaveAnswer>,
+        refused: &mut Vec<(preview::PreviewSource, String)>,
     ) -> Result<()> {
         let mut pools: Vec<&mut preview::PreviewPool> = self
             .window
@@ -7927,6 +7940,9 @@ impl<B: Backend> Runtime<'_, B> {
             let still_shows_it = self
                 .preview_buffer_on(surface)
                 .is_some_and(|buffer| buffer.source() == &source);
+            if let Some(why) = said.clone().refusal() {
+                refused.push((source, why));
+            }
             if still_shows_it {
                 self.preview_pane_mut(surface)
                     .say(Some((preview::save_notice(said), now)));
