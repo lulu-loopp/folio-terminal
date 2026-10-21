@@ -7373,10 +7373,11 @@ mod tests {
             assert_eq!(policy_cause(list, here, row), cause, "{name}");
         }
         // And `Changeable` means the command works: the CurrentUser scope it writes, then read.
-        let command_policy = crate::psreadline::ExecutionPolicy::parse(
-            POLICY_COMMAND.rsplit(' ').next().expect("a policy word"),
+        assert_eq!(
+            POLICY_COMMAND.rsplit(' ').next(),
+            Some(POLICY_COMMAND_POLICY.name()),
+            "the command writes the policy the cause promises, in Get-ExecutionPolicy's own word"
         );
-        assert_eq!(command_policy, POLICY_COMMAND_POLICY);
         assert!(POLICY_COMMAND.contains("-Scope CurrentUser"));
         for list in [
             scopes(none, none, none, Restricted, none),
@@ -7385,7 +7386,7 @@ mod tests {
         ] {
             assert_eq!(policy_cause(list, here, Absent), Changeable);
             let after = PolicyScopes {
-                current_user: command_policy,
+                current_user: POLICY_COMMAND_POLICY,
                 ..list
             };
             assert_eq!(policy_cause(after, here, Absent), Allows, "{list:?}");

@@ -814,8 +814,8 @@ if ($PSVersionTable.PSEdition -ne 'Core') { & {
             (Test-Path -LiteralPath (Join-Path $_ 'PSReadLine'))
     } | Select-Object -First 1
     # A loaded module's base is spelled the long way whatever spelling the module path gave its
-    # folder: a module path made from an 8.3 TEMP or LOCALAPPDATA (`C:\Users\LONGNA~1\...`) still
-    # loads a module whose base reads `C:\Users\longname\...`. Get-Item spells a folder that same
+    # folder: a module path made from an 8.3 TEMP or LOCALAPPDATA (`C:\Users\ALICE~1\...`) still
+    # loads a module whose base reads `C:\Users\alice\...`. Get-Item spells a folder that same
     # long way, so Folio's folder is compared in it.
     $folioBase = if ($folioModules) { (Get-Item -LiteralPath $folioModules).FullName }
     $foreignPSReadLine = if ($folioBase) {
