@@ -9182,9 +9182,7 @@ crates/bt-platform/src/macos_dialogs.rs	bt-platform crate::macos_dialogs::Deferr
 crates/bt-platform/src/macos_dialogs.rs	bt-platform crate::macos_dialogs::Deferred::take	Ambiguous	into_inner	1	
 crates/bt-platform/src/macos_dialogs.rs	bt-platform crate::macos_dialogs::Deferred::take	Ambiguous	unwrap_or_else	1	
 crates/bt-platform/src/macos_dialogs.rs	bt-platform crate::macos_dialogs::MathContextMenu::request	Ambiguous	begin	1	
-crates/bt-platform/src/macos_dialogs.rs	bt-platform crate::macos_dialogs::MathContextMenu::request	Ambiguous	into_inner	1	2026-10-21: T-NATIVE-LABELS-FROM-THE-CALLER; a standard-library method (Mutex, PoisonError, Result) on a receiver the grammar does not type, which reaches no door
-crates/bt-platform/src/macos_dialogs.rs	bt-platform crate::macos_dialogs::MathContextMenu::request	Ambiguous	lock	1	2026-10-21: T-NATIVE-LABELS-FROM-THE-CALLER; a standard-library method (Mutex, PoisonError, Result) on a receiver the grammar does not type, which reaches no door
-crates/bt-platform/src/macos_dialogs.rs	bt-platform crate::macos_dialogs::MathContextMenu::request	Ambiguous	unwrap_or_else	1	2026-10-21: T-NATIVE-LABELS-FROM-THE-CALLER; a standard-library method (Mutex, PoisonError, Result) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/macos_dialogs.rs	bt-platform crate::macos_dialogs::MathContextMenu::request	Ambiguous	replace	1	2026-10-21: T-NATIVE-LABELS-FROM-THE-CALLER; RefCell::replace on the formula menu title ivar, a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/macos_dialogs.rs	bt-platform crate::macos_dialogs::MathContextMenu::take_result	Ambiguous	take	1	
 crates/bt-platform/src/macos_dialogs.rs	bt-platform crate::macos_dialogs::SaveFilePicker::request	Ambiguous	setAllowedContentTypes	1	
 crates/bt-platform/src/macos_dialogs.rs	bt-platform crate::macos_dialogs::SaveFilePicker::request	Ambiguous	setCanCreateDirectories	1	
