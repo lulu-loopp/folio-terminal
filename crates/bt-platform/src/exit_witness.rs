@@ -49,15 +49,17 @@ mod tests {
     use std::time::Duration;
 
     /// RED (T-INTEGRATION-INJECT-2-BUILD round 4) — **the witness says a process ended only once
-    /// the kernel signals its exit**: a child standing in a wait is not ended at once, and the
+    /// the kernel signals its exit**: a child still running is not ended at once, and the
     /// same child, killed, is ended within the patience — the signal, not a guess from time.
     ///
     /// MUTATION: answer `ended_within` with `true` without waiting — the live child reads as ended.
     #[test]
     fn a_witness_waits_for_the_exit_signal() {
-        let mut child = crate::quiet_command("cmd.exe")
-            .args(["/d", "/c", "pause"])
-            .stdin(std::process::Stdio::piped())
+        // Not a shell (a test's shell goes through `bt_pty::test_shell`): a program that stands
+        // still for half a minute, ended by the test long before.
+        let mut child = crate::quiet_command("ping.exe")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -65,7 +67,7 @@ mod tests {
         let witness = ExitWitness::of(child.id()).expect("the live child opens");
         assert!(
             !witness.ended_within(Duration::ZERO),
-            "a child standing in a wait has not ended"
+            "a child still running has not ended"
         );
         child.kill().expect("the child is ended");
         assert!(
