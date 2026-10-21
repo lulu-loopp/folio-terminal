@@ -1650,7 +1650,8 @@ fn a_stop_whose_saves_are_still_out_keeps_both_edits_in_copies() {
 
 /// RED (S-6c; review N5) — **on the shared lane, the stop's one bounded wait is what serves its
 /// saves: `SessionStore::close` waits for the worker's end, which comes after the preview saves
-/// queued before the session's last write.**
+/// queued before the session's last write.** (Both of its waits serve them: the session's last
+/// write, row 16, is queued behind them, and the worker's end, row 16b, after it.)
 ///
 /// The application's session store and its preview saves are on one storage lane, as the
 /// product's are (`PreviewSaves::on(session_store.lane())`), its worker the suite's, held at its
@@ -1658,8 +1659,9 @@ fn a_stop_whose_saves_are_still_out_keeps_both_edits_in_copies() {
 /// stop's second half runs (`App::finish`): the close waits for the worker to end, which serves
 /// the two saves first, so both files carry their edits and nothing is copied.
 ///
-/// MUTATION: in `SessionWriter::close`, wait for nothing (`return` before the poll for the
-/// worker's end) — the second half reads no answer, and both edits are copied.
+/// MUTATION: in `SessionStore::close`, wait for nothing (`return` before its flush, row 16, and
+/// the writer's close, row 16b) — the second half reads before the answers come back, and the
+/// edits are copied ("and nothing is copied" goes red).
 #[test]
 fn the_stops_one_bounded_wait_serves_the_saves_queued_on_the_shared_lane() {
     let mut quitting = Quitting::open("stop-shared", ["one.md", "two.md"]);
