@@ -3681,7 +3681,8 @@ fn every_pointer_reader_below_the_in_pane_surfaces_reads_their_claim() {
 /// rule — is false for a pane that closed, a shell restarted in the same seat
 /// and a tab no longer on top. Read: the release and the drag's moves take the
 /// seat from the route, ask whether the owner is live, and drop the route
-/// without a byte when it is not.
+/// without a byte when it is not. (A tab switch no longer leaves a gesture to
+/// find its tab gone from the top: since cut 5 it releases the gesture first.)
 ///
 /// Red gates: take the release's seat from `focused_leaf` again (focus moved
 /// mid-drag) and the owner assertion fails; drop the liveness question from the
@@ -3727,6 +3728,12 @@ fn a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to() {
         !paste_target_is_live(TabId(7), Some(42), owner),
         "nor a shell restarted in the same seat"
     );
+    // A tab no longer on top is not a live address — but since T-POINTER-CAPTURE cut 5 (R-9,
+    // Q2's recommendation) no gesture is left on one: the tab switch ends the capture first,
+    // while the tab is still on top, and the program is told its button came up at the last cell
+    // it was told about (`runtime::pointer::ending::tests::
+    // a_forwarded_press_is_told_its_button_came_up_from_its_last_report`). What was "dropped,
+    // nothing sent" for a switched tab is now "released from the last report".
     assert!(
         !paste_target_is_live(TabId(8), Some(41), owner),
         "nor a pane whose tab is no longer on top"
@@ -3848,6 +3855,8 @@ fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
         }),
         button: MouseButton::Left,
         started: None,
+        os: None,
+        last: None,
     };
     assert_eq!(
         crate::runtime::pointer::release_against_the_slot(

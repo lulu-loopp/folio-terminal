@@ -1,6 +1,7 @@
 //! `floats` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::{Gone, OwnerGone};
 use crate::window_seam::prelude::*;
 use crate::{
     CardWords, DropLanding, FileMenuState, FileMenuTarget, FileMenuTreeRow, HoverFloat, Layered,
@@ -3464,6 +3465,10 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// Begin one float's exit (§7.1.2's remaining closers, and only those).
     pub(in crate::runtime) fn dismiss_float(&mut self, id: float::FloatId) -> Result<bool> {
+        // **The gesture held on the window goes before the window does** (T-POINTER-CAPTURE R-9,
+        // owner gone): its carry, a press on its head, a thumb, a selection or a picture pan
+        // inside it, a row of its tree.
+        self.end_capture(OwnerGone(Gone::Float(id)));
         if !self.window.float.dismiss(id, Instant::now()) {
             return Ok(false);
         }

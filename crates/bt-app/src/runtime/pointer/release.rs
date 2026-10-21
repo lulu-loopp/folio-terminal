@@ -17,6 +17,7 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::window::WindowId;
 
+use super::Ending;
 use super::capture::{
     CaptureOwner, PressVerdict, ReleaseVerdict, cancel_then_route, press_against_the_slot,
     release_against_the_slot,
@@ -156,40 +157,10 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
-    /// End this window's capture with its owner's cancel.
+    /// **End this window's capture with its owner's cancel** (R-5 rule 2: a press of the held
+    /// button proves the capture stale), the same cancel a blur gives it.
     pub(crate) fn cancel_own_capture(&mut self) -> Result<()> {
-        let Some(owner) = self.own_capture().map(|capture| capture.owner.clone()) else {
-            return Ok(());
-        };
-        match owner {
-            CaptureOwner::Divider(_) => {
-                self.cancel_divider_drag()?;
-            }
-            CaptureOwner::Drag(_) => {
-                self.cancel_drag()?;
-            }
-            CaptureOwner::RenderedSelection(..) => self.cancel_preview_text_drag()?,
-            CaptureOwner::TabPress(_)
-            | CaptureOwner::PanePress(..)
-            | CaptureOwner::RowPress(_)
-            | CaptureOwner::FloatHeadPress(_)
-            | CaptureOwner::FloatDrag(_)
-            | CaptureOwner::GlanceHeadPress(_)
-            | CaptureOwner::GlanceThumb(_)
-            | CaptureOwner::VideoBar(_)
-            | CaptureOwner::PreviewBodyThumb(..)
-            | CaptureOwner::BlockThumb(..)
-            | CaptureOwner::PicturePan(..)
-            | CaptureOwner::EditSelection(..)
-            | CaptureOwner::TerminalThumb(..)
-            | CaptureOwner::TerminalFootMark(..)
-            | CaptureOwner::Route(_)
-            | CaptureOwner::SettingsSlider(_)
-            | CaptureOwner::SettingsMenuBar(_) => {
-                self.drop_own_capture();
-            }
-        }
-        Ok(())
+        self.end_capture(Ending::Cancel)
     }
 
     /// Deliver a release selected by the application to this capture's owner,

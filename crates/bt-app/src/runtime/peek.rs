@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::CaptureOwner;
+use super::pointer::{Gone, OwnerGone};
 use crate::computation_lane::Asking;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -965,6 +966,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// Answers whether a card that was **showing** came down — a matured peek,
     /// not a timer — because that is the only case that owes a frame.
     pub(crate) fn hide_file_peek(&mut self) -> bool {
+        // **The hand that was on it goes first** (T-POINTER-CAPTURE R-9, owner gone): on its head,
+        // its thumb, or a gesture inside its page. A press whose card has gone has nothing left
+        // to promote, and a promotion that fired afterwards would open a window over a file
+        // nobody is pointing at any more.
+        self.end_capture(OwnerGone(Gone::GlanceCard));
         let showing = self
             .window
             .file_peek
@@ -992,11 +998,6 @@ impl<B: Backend> Runtime<'_, B> {
         // again too (below).
         self.window.peek_card_pending = None;
         self.window.file_peek = None;
-        // And the hand that was on its head. A press whose card has gone has
-        // nothing left to promote, and a promotion that fired afterwards would
-        // open a window over a file nobody is pointing at any more.
-        self.drop_file_peek_press();
-        self.drop_glance_thumb();
         self.window.peek_buffer.clear();
         // And the parsed document with it: a card that is down is holding a
         // markdown layout for a file nobody is looking at.

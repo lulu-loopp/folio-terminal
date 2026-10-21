@@ -13,6 +13,7 @@
 //! (`every_pointer_read_is_the_routers_or_a_captures`, §4.2).
 
 mod capture;
+mod ending;
 mod release;
 mod router;
 pub(crate) mod touch;
@@ -23,6 +24,7 @@ pub(crate) use capture::{
     PressVerdict, ReleaseVerdict, cancel_then_route, press_against_the_slot,
     release_against_the_slot,
 };
+pub(crate) use ending::{Ending, Leaving, Gone, OwnerGone};
 
 #[cfg(test)]
 pub(crate) use router::{BANDS_THAT_TAKE_NO_POINTER, POINTER_LAYERS_TOP_FIRST, Visits};

@@ -3101,8 +3101,15 @@ impl<B: Backend> Runtime<'_, B> {
         self.drop_tab_press();
         self.drop_pane_press();
         self.drop_row_press();
+        self.send_the_drag_home(&drag)
+    }
+
+    /// **A drag already let go of, sent home** — the cancel's own business, for a drag that is no
+    /// longer in the slot: [`Self::cancel_drag`]'s, and a capture's ending's
+    /// ([`Self::end_capture`]).
+    pub(crate) fn send_the_drag_home(&mut self, drag: &Drag) -> Result<bool> {
         self.window.tab_clicks.interrupt();
-        self.settle_home(&drag);
+        self.settle_home(drag);
         self.finish_drag()
     }
 
@@ -3564,7 +3571,6 @@ impl<B: Backend> Runtime<'_, B> {
                     split,
                     dir: slot.dir,
                     grip,
-                    capture: bt_platform::thread_mouse_capture(),
                 });
                 self.window.seat_pointer.dragging = Some(split);
                 self.apply_pointer_cursor();
@@ -4114,7 +4120,9 @@ impl<B: Backend> Runtime<'_, B> {
             self.window.modifiers,
         );
         self.answer_attention(seat, UserInputKind::MouseMotion);
-        self.send_mouse_input_to(seat, &bytes, "forward SGR mouse motion to PTY")
+        self.send_mouse_input_to(seat, &bytes, "forward SGR mouse motion to PTY")?;
+        self.note_the_last_report_sent(hit, self.window.modifiers);
+        Ok(())
     }
 
     pub(crate) fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {
@@ -5203,7 +5211,11 @@ impl<B: Backend> Runtime<'_, B> {
         );
         if answered.is_some() {
             match route {
-                Some(route) => self.latch_mouse_route(route, button),
+                Some(route) => {
+                    self.latch_mouse_route(route, button);
+                    // What the program was told, in case the gesture ends without its release.
+                    self.note_the_last_report_sent(forwarded_hit, self.window.modifiers);
+                }
                 None => self.drop_mouse_route(),
             }
         }

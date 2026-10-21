@@ -1,6 +1,7 @@
 //! `quake` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::Ending;
 use crate::window_seam::prelude::*;
 use crate::{Runtime, persisted_window_bounds, profiles, quake, shortcuts};
 use anyhow::Result;
@@ -104,13 +105,17 @@ impl<B: Backend> Runtime<'_, B> {
     /// window has been on the glass at least once — which is what the first
     /// visible present's dpi check reads — and a hidden window is not a window
     /// that was never shown.
-    pub(crate) fn hide_quake_window(&mut self) -> Option<bt_platform::hotkey::Foreground> {
+    pub(crate) fn hide_quake_window(&mut self) -> Result<Option<bt_platform::hotkey::Foreground>> {
+        // **A window sent away takes the gesture it was holding** (T-POINTER-CAPTURE R-9): a
+        // cancel, before the window leaves the glass, so a press handed to a program is told its
+        // button came up while the pane it went to is still on the screen.
+        self.end_capture(Ending::Cancel)?;
         // An owner-thread door (`doors::SetVisible`, whose station the meter enters). A refusal
         // is a hide that had no effect.
         let _ = bt_platform::admission::admitted::<bt_platform::admission::doors::SetVisible, _>(
             |token| crate::owner_door::set_visible(token, &self.window.window, false),
         );
-        self.app.quake.hidden()
+        Ok(self.app.quake.hidden())
     }
 
     /// **Whether this window is the one a key summons** (§7.54).
