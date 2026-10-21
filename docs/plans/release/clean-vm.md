@@ -1079,6 +1079,15 @@ Run it twice: `-Tag before` on the build at the instrumentation commit (the name
 | shell output p50 | 3.1 → 3.3 → 4.2 ms | — |
 | close | ok | **FAILED**: Folio, OpenConsole, the shell and its conhost still running 85 minutes after WM_CLOSE (the run before the close cell; the hang reports were not kept) |
 
+The same day, on the harness with the foreground wait (715569e14), the ownership rows. Both drivers reported the foreground taken and sent 59 cycles, but Folio saw none of them (`file_reads … input_seen=false`, no keyboard present; Folio's own focus was lost 1.3 s after it was gained), so their phases are not measurements (`KEYS NOT SEEN BY FOLIO`, since 680fbbc11):
+
+| cell | main453 (main 453c0c7c, without this branch) | after7 (1b911da7) |
+|---|---|---|
+| phases | KEYS NOT SEEN BY FOLIO (20 / 19 / 20 sent, 0 keyboard presents) | KEYS NOT SEEN BY FOLIO (20 / 19 / 20 sent, 0 keyboard presents) |
+| close | **FAILED**: folio, OpenConsole, the pane's powershell still running; no hang report written | **FAILED**: the same; no hang report written |
+
+The close failure is main's, between a919fe77 and 453c0c7c: 7d00c2ed (a919fe77 plus this branch's instrumentation) closed in every run, exercised or not. No hang report was written, so the window thread was not holding control (the watchdog writes one for any hold past its threshold). The thread was turning (`taskbar_state` generations and the per-minute `file_reads` lines continue), and neither keys nor the OS's close reached what it acts on.
+
 ## 5. 截图清单
 
 自动产出(每台机一套):
