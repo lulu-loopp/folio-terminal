@@ -372,8 +372,8 @@ try {
     try { $null = Get-PlantedJournal -Template ($tpl -replace '"destructive"', '"terminal"') -Word 'class' } catch { $threw = $true }
     Check $threw 'a template that does not carry the word is refused, never planted'
 
-    Check ((Get-CardKind -Lines @('window pid=1 path=C:\folio-vm\folio\folio.exe size=1x1', 'An update by a newer Folio is not finished.', 'It finishes when you next sign in, or when you start Folio 0.4.98. Changes made in', 'this session are not kept.')) -eq 'newer-held') 'the newer card with the held sentence reads newer-held'
-    Check ((Get-CardKind -Lines @('window pid=1 path=x size=1x1', 'An update by a newer  FOLIO is not finished.')) -eq 'newer') 'the newer card reads newer, case and spacing folded'
+    Check ((Get-CardKind -Lines @('window pid=1 path=C:\folio-vm\folio\folio.exe size=1x1', 'An update by a newer Folio is not finished.', 'It finishes when you next sign in, or when you start Folio 0.4.98. Changes made in', 'this session are not ke pt.')) -eq 'newer-held') 'the newer card with the held sentence reads newer-held'
+    Check ((Get-CardKind -Lines @('window pid=1 path=x size=1x1', 'An update by a newer FOIi0 is not finished.')) -eq 'newer') 'the newer card reads newer through the OCR misreads measured (FOIi0)'
     Check ((Get-CardKind -Lines @('window pid=1 path=x size=1x1', 'The new version did not start.', 'Previous version restored.')) -eq 'restored') 'the rollback card reads restored'
     Check ((Get-CardKind -Lines @('window none')) -eq 'no-window') 'no window reads no-window'
     Check ((Get-CardKind -Lines @('window pid=1 path=x size=1x1', 'PS C:\Users\folio>')) -eq 'none') 'a pane with no card reads none'

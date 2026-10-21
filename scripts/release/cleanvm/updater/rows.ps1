@@ -206,15 +206,17 @@ function Get-PlantedJournal {
 # **What a card's OCR text says** (guest\card.ps1): `none` when no Folio window stood, else the
 # first of `newer-held` (*An update by a newer Folio is not finished.* with *... not kept.*),
 # `newer`, `unreadable`, `incomplete`, `restored` (*Previous version restored.*), `interrupted`,
-# or `none`. The match is on words the OCR reads reliably, case and spacing folded.
+# or `none`. The OCR splits and misreads words (measured on Segoe UI: *newer FOIi0*, *ke pt*), so
+# the text is folded to lower-case letters and digits with no spaces, `0` read as `o`, and the
+# match is on runs of words without the product's name.
 function Get-CardKind {
     param([string[]] $Lines = @())
     if ($Lines.Count -eq 0 -or $Lines[0] -match '^window none') { return 'no-window' }
-    $t = (($Lines | Select-Object -Skip 1) -join ' ').ToLowerInvariant() -replace '\s+', ' '
-    if ($t -match 'newer folio') { if ($t -match 'not kept') { return 'newer-held' } else { return 'newer' } }
-    if ($t -match 'record cannot be read') { return 'unreadable' }
-    if ($t -match 'update incomplete') { return 'incomplete' }
-    if ($t -match 'version restored') { return 'restored' }
+    $t = ((($Lines | Select-Object -Skip 1) -join ' ').ToLowerInvariant() -replace '[^a-z0-9]', '') -replace '0', 'o'
+    if ($t -match 'anupdatebyanewer') { if ($t -match 'notkept') { return 'newer-held' } else { return 'newer' } }
+    if ($t -match 'recordcannotberead') { return 'unreadable' }
+    if ($t -match 'updateincomplete') { return 'incomplete' }
+    if ($t -match 'versionrestored') { return 'restored' }
     if ($t -match 'interrupted') { return 'interrupted' }
     return 'none'
 }
