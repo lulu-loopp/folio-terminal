@@ -13595,14 +13595,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not seen by
-    /// `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a preview read's answer arrives with its file
-    /// already closed**: the real `bt-preview-worker` reads a real file's body, and the moment its
-    /// answer is in the channel nobody holds the file and a writer saving over it finishes — the
-    /// gesture of an editor saving the file the pane has just shown.
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a
+    /// preview read's answer arrives with its file already closed**: the real `bt-preview-worker`
+    /// reads a real file's body, and the moment its answer is in the channel nobody holds the file
+    /// and a writer saving over it finishes — the gesture of an editor saving the file the pane has
+    /// just shown.
     ///
-    /// MUTATION: leak a handle on the file in `read_up_to` (`std::mem::forget(std::fs::File::open(path))`) — the answer arrives while the file
-    /// is held, and the exclusive open is refused.
+    /// MUTATION: leak a handle on the file in `read_up_to`
+    /// (`std::mem::forget(std::fs::File::open(path))`) — the answer arrives while the file is held,
+    /// and the exclusive open is refused.
     #[test]
     fn a_preview_reads_answer_arrives_with_its_file_closed() {
         let dir = bt_testpath::temp_path("folio-preview-answered");

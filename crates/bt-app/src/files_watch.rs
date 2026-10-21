@@ -633,11 +633,12 @@ mod tests {
         assert_eq!(rig.watch.counts(), (1, 0), "and the folder is not heard");
     }
 
-    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not seen by
-    /// `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a folder no longer wanted is let go before the
-    /// steward's next answer**: two folders are watched through the real kernel door; the reader
-    /// stops wanting one, and by the wake that brings the round's reports nobody holds it — its
-    /// watch was retired, its directory handle closed, on the worker before the publication.
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a
+    /// folder no longer wanted is let go before the steward's next answer**: two folders are
+    /// watched through the real kernel door; the reader stops wanting one, and by the wake that
+    /// brings the round's reports nobody holds it — its watch was retired, its directory handle
+    /// closed, on the worker before the publication.
     ///
     /// MUTATION: `std::mem::forget` a departed member in the steward's `serve_ear` instead of
     /// retiring it — the wake comes while the folder is still held.

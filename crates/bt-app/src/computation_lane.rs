@@ -1935,15 +1935,15 @@ mod tests {
         crate::test_support::ScratchFile(file)
     }
 
-    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not seen by
-    /// `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **every read the decoration worker answers has
-    /// let go of its file by the time the window can take the answer**: a picture's pixels (a PNG,
-    /// and a GIF's first frame), a recording's frame and facts (a real one, and one that is no
-    /// video, which Media Foundation refuses), a page's raster and a printed picture's decode.
-    /// Each is asked through the product's door on the real lane; the moment its terminal is
-    /// taken, nobody holds the file (`bt_testpath::nobody_holds`) and a writer saving over it
-    /// finishes — what an editor does the moment the card has shown the answer
-    /// (`runtime::preview::tests::a_set_aside_peek_answer_changes_nothing_on_the_window`).
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **every
+    /// read the decoration worker answers has let go of its file by the time the window can take
+    /// the answer**: a picture's pixels (a PNG, and a GIF's first frame), a recording's frame and
+    /// facts (a real one, and one that is no video, which Media Foundation refuses), a page's
+    /// raster and a printed picture's decode. Each is asked through the product's door on the real
+    /// lane; the moment its terminal is taken, nobody holds the file (`bt_testpath::nobody_holds`)
+    /// and a writer saving over it finishes — what an editor does the moment the card has shown the
+    /// answer (`runtime::preview::tests::a_set_aside_peek_answer_changes_nothing_on_the_window`).
     ///
     /// MUTATION: `std::mem::forget` the `File` in `bt_term`'s `read_and_decode_local_image`
     /// (the handle outlives the decode) — "a picture's pixels: the answer is taken, and nobody

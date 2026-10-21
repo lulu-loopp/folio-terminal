@@ -104,9 +104,10 @@ pub fn link_free_temp_path(tag: &str) -> PathBuf {
 
 /// **Whether [`nobody_holds`] sees any open handle on this platform**, or only a lock.
 ///
-/// On Windows every open handle is seen, whatever it shares: the exclusive open refuses it. On
-/// Unix an open descriptor refuses nothing, so [`nobody_holds`] sees only an advisory lock (`flock`)
-/// a holder took. A test that asserts a reader *holds* a file it opened without locking it — a
+/// On Windows a handle with data access (reading, writing, deleting) is seen whatever it shares:
+/// the exclusive open refuses it; a handle opened for attributes or synchronization alone is not
+/// checked. On Unix an open descriptor refuses nothing, so [`nobody_holds`] sees only an advisory
+/// lock (`flock`) a holder took. A test that asserts a reader *holds* a file it opened without locking it — a
 /// precondition, the opposite of the release it pins — asserts it only where this is `true`, and
 /// states the release on every platform.
 pub const OPEN_HANDLES_ARE_SEEN: bool = cfg!(windows);

@@ -1828,14 +1828,16 @@ mod tests {
         assert_eq!(take_files_worker_notice(&mut pending), None);
     }
 
-    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not seen by
-    /// `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a listing's answer arrives with its directory
-    /// already let go**: the real `bt-files-worker` lists a real folder, and the moment its answer
-    /// is in the channel nobody holds the folder (`bt_testpath::nobody_holds`) — a rename or a
-    /// removal the person makes next is not refused by a read the column has finished with.
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a
+    /// listing's answer arrives with its directory already let go**: the real `bt-files-worker`
+    /// lists a real folder, and the moment its answer is in the channel nobody holds the folder
+    /// (`bt_testpath::nobody_holds`) — a rename or a removal the person makes next is not refused
+    /// by a read the column has finished with.
     ///
-    /// MUTATION: leak a handle on the folder in `read_directory` (`std::mem::forget(std::fs::read_dir(path))`) — the answer arrives while
-    /// the directory is held, and the exclusive open is refused.
+    /// MUTATION: leak a handle on the folder in `read_directory`
+    /// (`std::mem::forget(std::fs::read_dir(path))`) — the answer arrives while the directory is
+    /// held, and the exclusive open is refused.
     #[test]
     fn a_listings_answer_arrives_with_its_directory_let_go() {
         let dir = bt_testpath::temp_path("bt-files-answered");

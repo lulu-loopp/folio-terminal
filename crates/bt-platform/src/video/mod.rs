@@ -85,9 +85,10 @@
 //! **The file is the caller's, not the thread's** (T-ANSWER-AFTER-THE-FILE-IS-CLOSED).
 //! The calling thread opens it ([`TheFile`]), lends the thread a reference to the
 //! stream, and closes the stream itself before it answers — answered or given up
-//! on — so the answer never leaves while a handle on the file is still open:
-//! neither Media Foundation's own late release of a stream nor a thread still
-//! inside `ReadSample` keeps the file from the next writer.
+//! on — so the answer never leaves while a handle on the file is still open.
+//! Media Foundation's own late release of a stream holds a closed stream, and so
+//! does a thread this call walked away from: whatever it is stuck in, it holds
+//! a closed stream, never the file.
 //!
 //! **The two halves are separately callable and separately tested**, which is the
 //! other thing this split bought. [`decode_first_frame`] is the whole

@@ -928,14 +928,14 @@ mod tests {
     }
 
     /// One real one-pixel PNG, as a clipboard would offer it.
-    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not seen by
-    /// `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a saved picture is closed when its path is
-    /// answered**: the save the `clipboard-picture` worker runs hands back the path it wrote, and
-    /// at that moment nobody holds the file — the picture is ready to be opened, dragged or
-    /// attached by whatever the person hands it to next.
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a saved
+    /// picture is closed when its path is answered**: the save the `clipboard-picture` worker runs
+    /// hands back the path it wrote, and at that moment nobody holds the file — the picture is
+    /// ready to be opened, dragged or attached by whatever the person hands it to next.
     ///
-    /// MUTATION: `std::mem::forget` the written `File` in `save` (for its `drop`) — the path is answered while the
-    /// file is held, and the exclusive open is refused.
+    /// MUTATION: `std::mem::forget` the written `File` in `save` (for its `drop`) — the path is
+    /// answered while the file is held, and the exclusive open is refused.
     #[test]
     fn a_saved_picture_is_closed_when_its_path_is_answered() {
         let folder = scratch("answered");

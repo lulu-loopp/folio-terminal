@@ -790,13 +790,15 @@ mod tests {
     /// and two binaries can run at once too — and a
     /// fixture that two walks are writing into is the "shared fixture hides a
     /// bug" family from `docs/CONVENTIONS.md` §3 in its most literal form.
-    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not seen by
-    /// `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **an index walk's answer arrives with every
-    /// directory it listed let go**: the real `bt-index-worker` walks a real tree, and the moment
-    /// its answer is in nobody holds the root or the folder below it.
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **an
+    /// index walk's answer arrives with every directory it listed let go**: the real
+    /// `bt-index-worker` walks a real tree, and the moment its answer is in nobody holds the root
+    /// or the folder below it.
     ///
-    /// MUTATION: leak a handle on each folder `walk` lists (`std::mem::forget(std::fs::read_dir(..))`) — the answer arrives while the folders
-    /// are held, and the exclusive open is refused.
+    /// MUTATION: leak a handle on each folder `walk` lists
+    /// (`std::mem::forget(std::fs::read_dir(..))`) — the answer arrives while the folders are held,
+    /// and the exclusive open is refused.
     #[test]
     fn an_index_walks_answer_arrives_with_its_folders_let_go() {
         let root = scratch("answered");
