@@ -1093,11 +1093,13 @@ pub(crate) fn web_document(uri: &str) -> WebDocument {
 /// showed it, the same Edge window at 200 % did not, and an HTML page in the
 /// same pane at 150 % did not. So a PDF seat is handed an integer scale and the
 /// viewer draws the page it draws at 200 %: it fits the page to the pane's
-/// physical width either way, so the page costs the same pixels; what is smaller
-/// is the viewer's own toolbar, laid out in CSS pixels that are now larger.
+/// physical width either way, so the page costs about the same pixels; what
+/// changes is the viewer's own toolbar, laid out in CSS pixels that are now
+/// larger by the ratio of the two scales — a third at 150 % — and drawn so.
 ///
 /// Every other document keeps the window's number: an HTML page laid out at
-/// 2.0 on a 1.5 display would be a page three quarters of its size.
+/// 2.0 on a 1.5 display would be a page drawn a third larger than its author
+/// and the person's own zoom asked for.
 pub(crate) fn raster_scale(window_scale: f64, document: WebDocument) -> f64 {
     match document {
         WebDocument::Pdf => window_scale.ceil(),
@@ -5816,7 +5818,7 @@ mod rasterization_tests {
     /// RED — **an HTML page in the same window keeps the window's scale.**
     ///
     /// An HTML page lays itself out in CSS pixels, and one told 2.0 on a 1.5
-    /// display would be a page at three quarters of its size; only the PDF
+    /// display would be a page drawn a third too large; only the PDF
     /// viewer is handed the whole number.
     ///
     /// MUTATION: hand every seat the whole number above the window's scale, and
