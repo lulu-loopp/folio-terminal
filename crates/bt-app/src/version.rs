@@ -39,7 +39,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `HEAD` moves, so it cannot go stale while the binary stays.
 pub const COMMIT: &str = env!("FOLIO_COMMIT");
 
-/// **The tag this build was released under** — `v0.4.7-preview`.
+/// **The tag this build was released under** — `v<version>-preview`, out of [`VERSION`].
 ///
 /// # Why this is not `v` and the version
 ///

@@ -34,7 +34,7 @@ use crate::index::{ImplRecord, Index, TraitRecord};
 /// `b` opens `a`; `use anyhow::anyhow;`) does not end here: a name already being looked up in the
 /// same module along one walk names nothing more there. A chain longer than this is a cutoff,
 /// which [`TraitResolver::resolve_checked`] reports and [`TraitResolver::resolve`] does not.
-const HOPS: usize = 16;
+pub(crate) const HOPS: usize = 16;
 
 /// **A trait's identity**: the package it is declared in, the module path of
 /// the declaration (inline ancestry included) and its name.

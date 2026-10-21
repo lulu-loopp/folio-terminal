@@ -61,7 +61,7 @@
 
 mod paths;
 mod resolve;
-mod types;
+pub(crate) mod types;
 mod walk;
 
 use std::collections::{BTreeMap, BTreeSet};

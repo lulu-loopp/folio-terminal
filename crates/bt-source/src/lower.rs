@@ -35,10 +35,10 @@ use syn::spanned::Spanned;
 
 use crate::declarations::{Compilation, cfg_predicates};
 use crate::index::{
-    CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord, ImplRecord, Index,
-    ItemKind, ItemRecord, LiteralRecord, LiteralValue, MacroKind, MacroRecord, MacroShape,
-    ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord, TraitRecord, UnsupportedMacroShape,
-    UseRecord,
+    AliasRecord, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord,
+    ImplRecord, Index, ItemKind, ItemRecord, LiteralRecord, LiteralValue, MacroKind, MacroRecord,
+    MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord, TraitRecord,
+    UnsupportedMacroShape, UseRecord, ValueKind, ValueRecord,
 };
 use crate::reject::Rejection;
 use crate::universe::Universe;
@@ -72,6 +72,8 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     let mut impls = Vec::new();
     let mut traits = Vec::new();
     let mut uses = Vec::new();
+    let mut aliases = Vec::new();
+    let mut values = Vec::new();
     let mut modules = Vec::new();
     let mut macros = Vec::new();
     let mut shapes = Vec::new();
@@ -188,6 +190,8 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
                     impls: &mut impls,
                     traits: &mut traits,
                     uses: &mut uses,
+                    aliases: &mut aliases,
+                    values: &mut values,
                     modules: &mut modules,
                 };
                 // The stack opens empty and unconditional: what stands *outside*
@@ -220,6 +224,10 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     traits.sort_by_key(|declaration| (declaration.whole().start(), declaration.whole().end()));
     uses.shrink_to_fit();
     uses.sort_by_key(|used| (used.whole().start(), used.whole().end()));
+    aliases.shrink_to_fit();
+    aliases.sort_by_key(|alias| (alias.whole().start(), alias.whole().end()));
+    values.shrink_to_fit();
+    values.sort_by_key(|value| (value.whole().start(), value.whole().end()));
     macros.shrink_to_fit();
     macros.sort_by_key(|record| (record.tokens.start(), record.tokens.end()));
     shapes.shrink_to_fit();
@@ -237,6 +245,8 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
         impls,
         traits,
         uses,
+        aliases,
+        values,
         modules,
         tokens,
         literals,
@@ -796,6 +806,8 @@ struct Parsed<'a> {
     impls: &'a mut Vec<ImplRecord>,
     traits: &'a mut Vec<TraitRecord>,
     uses: &'a mut Vec<UseRecord>,
+    aliases: &'a mut Vec<AliasRecord>,
+    values: &'a mut Vec<ValueRecord>,
     modules: &'a mut Vec<ModuleRecord>,
 }
 
@@ -1018,6 +1030,23 @@ impl Parsed<'_> {
                         body,
                     });
                     for member in &block.items {
+                        if let syn::ImplItem::Const(constant) = member {
+                            self.value(
+                                module,
+                                predicates,
+                                inside,
+                                &constant.attrs,
+                                Some(&constant.vis),
+                                constant.const_token.span.byte_range().start,
+                                constant.semi_token.span.byte_range().end,
+                                (
+                                    constant.ident.to_string(),
+                                    Some(owner.clone()),
+                                    trait_name.clone(),
+                                    ValueKind::Const,
+                                ),
+                            );
+                        }
                         let syn::ImplItem::Fn(function) = member else {
                             continue;
                         };
@@ -1067,6 +1096,23 @@ impl Parsed<'_> {
                         body: self.span(written),
                     });
                     for member in &definition.items {
+                        if let syn::TraitItem::Const(constant) = member {
+                            self.value(
+                                module,
+                                predicates,
+                                inside,
+                                &constant.attrs,
+                                None,
+                                constant.const_token.span.byte_range().start,
+                                constant.semi_token.span.byte_range().end,
+                                (
+                                    constant.ident.to_string(),
+                                    None,
+                                    Some(trait_name.clone()),
+                                    ValueKind::Const,
+                                ),
+                            );
+                        }
                         let syn::TraitItem::Fn(function) = member else {
                             continue;
                         };
@@ -1099,6 +1145,49 @@ impl Parsed<'_> {
                     }
                     predicates.truncate(depth);
                 }
+                syn::Item::Const(constant) => {
+                    self.value(
+                        module,
+                        predicates,
+                        gate,
+                        &constant.attrs,
+                        Some(&constant.vis),
+                        constant.const_token.span.byte_range().start,
+                        constant.semi_token.span.byte_range().end,
+                        (constant.ident.to_string(), None, None, ValueKind::Const),
+                    );
+                }
+                syn::Item::Static(value) => {
+                    self.value(
+                        module,
+                        predicates,
+                        gate,
+                        &value.attrs,
+                        Some(&value.vis),
+                        value.static_token.span.byte_range().start,
+                        value.semi_token.span.byte_range().end,
+                        (value.ident.to_string(), None, None, ValueKind::Static),
+                    );
+                }
+                syn::Item::Type(alias) => {
+                    let (own, compilation) = cfg_predicates(&alias.attrs, self.text);
+                    let opens = start_of(
+                        &alias.attrs,
+                        Some(&alias.vis),
+                        alias.type_token.span.byte_range().start,
+                    );
+                    let mut standing = predicates.clone();
+                    standing.extend(own);
+                    self.aliases.push(AliasRecord {
+                        declared: self.declarations_for(module),
+                        name: alias.ident.to_string(),
+                        variant: ConditionalVariant {
+                            predicates: standing,
+                            compilation: gate.and(compilation),
+                        },
+                        whole: self.span(opens..alias.semi_token.span.byte_range().end),
+                    });
+                }
                 syn::Item::Use(used) => {
                     let (own, compilation) = cfg_predicates(&used.attrs, self.text);
                     let mut names = Vec::new();
@@ -1125,6 +1214,39 @@ impl Parsed<'_> {
                 _ => {}
             }
         }
+    }
+
+    /// One `const` or `static` ([`ValueRecord`]): `named` is its name, the type an `impl` block is
+    /// for, the trait, and the keyword.
+    #[allow(clippy::too_many_arguments)]
+    fn value(
+        &mut self,
+        module: &[String],
+        predicates: &[String],
+        gate: Compilation,
+        attrs: &[syn::Attribute],
+        visibility: Option<&syn::Visibility>,
+        keyword: usize,
+        end: usize,
+        named: (String, Option<String>, Option<String>, ValueKind),
+    ) {
+        let (own, compilation) = cfg_predicates(attrs, self.text);
+        let opens = start_of(attrs, visibility, keyword);
+        let mut standing = predicates.to_vec();
+        standing.extend(own);
+        let (name, type_owner, trait_name, kind) = named;
+        self.values.push(ValueRecord {
+            declared: self.declarations_for(module),
+            name,
+            type_owner,
+            trait_name,
+            kind,
+            variant: ConditionalVariant {
+                predicates: standing,
+                compilation: gate.and(compilation),
+            },
+            whole: self.span(opens..end),
+        });
     }
 
     /// The module paths an inline module inside this file answers to — one per
@@ -1701,6 +1823,8 @@ mod tests {
         let mut impls = Vec::new();
         let mut traits = Vec::new();
         let mut uses = Vec::new();
+        let mut aliases = Vec::new();
+        let mut values = Vec::new();
         let mut modules = Vec::new();
         let parsed = Parsed {
             text,
@@ -1711,6 +1835,8 @@ mod tests {
             impls: &mut impls,
             traits: &mut traits,
             uses: &mut uses,
+            aliases: &mut aliases,
+            values: &mut values,
             modules: &mut modules,
         };
         let owner = parsed.type_owner(&block.self_ty);

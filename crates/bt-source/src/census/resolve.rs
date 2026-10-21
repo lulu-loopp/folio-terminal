@@ -473,6 +473,7 @@ impl<'d> Resolver<'d> {
                 Ty::Assoc { param, name } => {
                     return Err(format!("a field of the associated type `{param}::{name}`"));
                 }
+                Ty::Traits(_) => return Err("a field of a trait object".to_owned()),
                 Ty::Unknown(why) => return Err(why),
                 Ty::Slice(_) | Ty::Iter(_) | Ty::Entry(_) | Ty::Fn(_) => {
                     return Err(format!("`{field}` on a type with no fields"));
@@ -712,6 +713,7 @@ impl<'d> Resolver<'d> {
                             )
                         });
                 }
+                Ty::Traits(_) => return Err(fail("a trait object".to_owned(), shared)),
                 Ty::Unknown(why) => return Err(fail(why, shared)),
                 Ty::Named(named) => match self.kind(&named) {
                     Kind::Four(owner) => {
@@ -1123,6 +1125,6 @@ fn holds_unique_reference(ty: &Ty) -> bool {
         Ty::Tuple(items) => items.iter().any(holds_unique_reference),
         Ty::Iter(inner) | Ty::Slice(inner) => holds_unique_reference(inner),
         Ty::Entry(_) => true,
-        Ty::Fn(_) | Ty::Param(_) | Ty::Assoc { .. } | Ty::Unknown(_) => false,
+        Ty::Fn(_) | Ty::Param(_) | Ty::Assoc { .. } | Ty::Traits(_) | Ty::Unknown(_) => false,
     }
 }

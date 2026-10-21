@@ -1085,6 +1085,15 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-census-unknowns.ps1
 
+      # T-BT-SOURCE-CALL-GRAPH round 3: the calls the door reach cannot see through, by site:
+      # bt-source's `call_graph` test holds the code to docs/plans/UNFOLLOWED-EDGES.tsv, and this
+      # holds the list to the merge base's: no key added or grown without a dated reason.
+      - name: the unfollowed edges only shrink
+        shell: pwsh
+        run: |
+          ./scripts/ci/check-unfollowed-edges-tests.ps1
+          ./scripts/ci/check-unfollowed-edges.ps1
+
       # T-HEADLESS-RUNTIME-SEAM: the places bt-app names a backend holder for the
       # native backend are listed, and the list is held to the merge base's (or
       # its seed): no row added.
