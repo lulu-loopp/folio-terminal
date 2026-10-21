@@ -20,4 +20,3 @@ crate::runtime::tabs::Runtime::reap_exited_tabs	value	1	the last-resort shell's 
 crate::runtime::web::Runtime::make_spare_web_controller	call	4	the spare web page's retirement: no headless test makes a spare page
 crate::runtime::web::Runtime::warm_web_engine	call	1	the spare page's advance lines: no headless test warms the web engine
 crate::runtime::web::Runtime::warm_web_engine	value	1	the warm-up clock's line (`web_warmup`): no headless test warms the web engine
-crate::runtime::windows::Runtime::keep_unsaved_edits	call	1	a stop's kept preview edit: no headless test stops with an unsaved edit
