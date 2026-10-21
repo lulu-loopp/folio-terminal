@@ -67,6 +67,8 @@ public static class LoadRowWindows {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint message, IntPtr w, IntPtr l);
+  public const uint WM_CLOSE = 0x0010;
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder text, int max);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder text, int max);
   public static string Describe(IntPtr h) {
@@ -166,8 +168,17 @@ function Front($h) {
 # running is the row's failure, with the processes still standing and the hang reports kept.
 function CloseFolio {
   Mark 'close'
-  $closed = $folio.CloseMainWindow()
-  Say "WM_CLOSE -> $closed"
+  # **WM_CLOSE to Folio's window, posted** (2026-10-21, T-CLOSE-HANG-ON-MAIN's finding):
+  # `Process.CloseMainWindow()` picks the process's first visible unowned top-level window, which
+  # is winit's thread event-target window (`WS_VISIBLE | WS_POPUP`, class `Winit Thread Event
+  # Target`); its procedure hands WM_CLOSE to DefWindowProc, which destroys it and closes
+  # nothing, and Folio's window never heard the close. The row posts the close to the window it
+  # drives ($h, the largest visible window of Folio's process), and says which window .NET
+  # would have picked.
+  $folio.Refresh()
+  Say ("close target {0}; Process.MainWindowHandle {1}" -f [LoadRowWindows]::Describe($h), [LoadRowWindows]::Describe($folio.MainWindowHandle))
+  $closed = [LoadRowWindows]::PostMessage($h, [LoadRowWindows]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+  Say "WM_CLOSE posted -> $closed"
   $asked = Get-Date
   if ($folio.WaitForExit(30000)) {
     Say ("close ok: Folio exited with {0} after {1:N1} s" -f $folio.ExitCode, ((Get-Date) - $asked).TotalSeconds)
