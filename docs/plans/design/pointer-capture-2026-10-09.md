@@ -794,3 +794,10 @@ END {
 - **Not items yet, so not rows**: `drag_out_to_the_system` and `OsDragHandoff` land with the OS drag-out; the `WebSeat::place`/`park_for_handoff` rows are cut 7's.
 - **Q2 is built as recommended** (a switched tab's program is told its button came up from its last report); the owner's confirmation is asked in the build report.
 
+## Revision (k), 2026-10-21 — what building cut 6 changed (build 3)
+
+- **"Ask the slot" is `a_gesture_holds_the_pointer`, made the application's** (`App::pointer_capture.is_some()`, any window's), so a gesture held in one window freezes another's hover too; `a_capture_holds_the_pointer` (this window's only) is gone.
+- **Frozen means not armed and not changed**: the chevron clocks are cleared, the tip's anchor is `None`, the flyout's trigger is `None`, and the glance is neither observed nor relit (observing `None` would take down the card a glance-head press began on, which is an ending of its own, not a hover). `rearm_hover_intents` asks the same for the flyout and the glance. The layout peek and the chrome hover are R-7's too but not cut 6's list; they are unchanged.
+- **The page layer's own question is `Runtime::page_under_the_hand`** (in `runtime::pointer`), the page under the point less the tab list, the download sheets and the capsule; `web_page_at` is it with the held gesture subtracted. The wheel's page station asks the former and swallows under a held gesture, so a notch over a page no longer falls through to what is beneath it.
+- **No reader of the router's memo was added**, so `a_complete_event_walks_once` is unchanged.
+

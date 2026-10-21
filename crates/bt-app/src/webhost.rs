@@ -4225,6 +4225,18 @@ impl WebSeat {
         }
     }
 
+    /// **A seat standing shown at `bounds` with no engine behind it**, for a test that needs the
+    /// page layer under the pointer and nothing a page does.
+    #[cfg(test)]
+    pub(crate) fn shown_without_an_engine(bounds: WebBounds) -> Self {
+        let mut seat = rehost_address_tests::detached(SeatAddress {
+            page: rehost_address_tests::page(1, 99),
+            window: rehost_address_tests::window(0x77),
+        });
+        seat.presence = Some(WebPresence::Shown(bounds));
+        seat
+    }
+
     /// Forward one mouse event. `window_point` is in the window's client area,
     /// in physical pixels; the translation into the page's own space happens
     /// here and nowhere else.

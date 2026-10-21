@@ -57947,7 +57947,7 @@ mod mouse_trace_station_tests {
         // at=in-pane` line above it. 26 → 27 the same day: a notch on a band
         // painted above the panes that does not scroll is swallowed, with its
         // own `wheel_route taken=overlay at=over-pane` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 27);
+        assert_every_exit_is_traced("mouse_wheel", 28);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
@@ -62272,8 +62272,10 @@ mod page_under_a_laden_hand_tests {
         let asked = web_page_at
             .find("self.a_gesture_holds_the_pointer()")
             .expect("the page's door subtracts a hand that is already carrying");
+        // The scan is the page layer's own question since T-POINTER-CAPTURE cut 6, which the
+        // wheel asks without the hand's subtraction.
         let scan = web_page_at
-            .find("self.web_page_shown_at(position)")
+            .find("self.page_under_the_hand(position)")
             .expect("the page's door scans the pages it knows about");
         assert!(
             asked < scan,
@@ -62347,7 +62349,9 @@ mod page_under_the_tab_list_tests {
     /// already given away.
     #[test]
     fn the_tab_list_is_asked_before_any_page_is() {
-        let web_page_at = method_body("Runtime", "web_page_at");
+        // The page layer's own question since T-POINTER-CAPTURE cut 6 (`web_page_at` is it with
+        // a held gesture subtracted).
+        let web_page_at = method_body("Runtime", "page_under_the_hand");
         let asked = web_page_at
             .find("tab_list_target_at")
             .expect("the page's door subtracts the tab list");

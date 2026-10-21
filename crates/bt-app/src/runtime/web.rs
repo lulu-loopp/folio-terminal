@@ -1701,7 +1701,6 @@ impl<B: Backend> Runtime<'_, B> {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<LeafId> {
-        let (x, y) = (position.x as f32, position.y as f32);
         // **And a hand that is already carrying something is not a hand the page
         // can have** (user report, 0.2.2: a pane dragged over a page could not be
         // let go of).
@@ -1725,26 +1724,7 @@ impl<B: Backend> Runtime<'_, B> {
         if self.a_gesture_holds_the_pointer() {
             return None;
         }
-        if self.tab_list_target_at(position).is_some() {
-            return None;
-        }
-        if self
-            .window
-            .web_sheet_layouts
-            .iter()
-            .any(|(_, layout)| websheet::covers(layout, x, y))
-        {
-            return None;
-        }
-        let inside = |box_: [f32; 4]| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3];
-        if self
-            .window
-            .search_layout
-            .is_some_and(|capsule| self.window.search.is_open() && inside(capsule.frame))
-        {
-            return None;
-        }
-        self.web_page_shown_at(position)
+        self.page_under_the_hand(position)
     }
 
     /// **The page whose shown bounds hold this point**, asking nothing about

@@ -3614,7 +3614,7 @@ fn every_pointer_reader_below_the_in_pane_surfaces_reads_their_claim() {
         .find("letSome(surface)=self.in_pane_surface_at(position)")
         .expect("wheel: a notch asks the router whether a surface inside a pane owns it");
     for below in [
-        "self.point_is_on_the_web_page(position)",
+        "self.page_under_the_hand(position)",
         "self.preview_surface_at(position)",
         "seats::files_body_at(",
     ] {
@@ -3919,7 +3919,7 @@ fn a_band_painted_above_the_panes_owns_the_wheel_over_its_area() {
         );
     }
     for beneath in [
-        "self.point_is_on_the_web_page(position)",
+        "self.page_under_the_hand(position)",
         "seats::files_body_at(",
         "self.preview_surface_at(position)",
         "self.in_pane_surface_at(position)",

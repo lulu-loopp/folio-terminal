@@ -1230,8 +1230,8 @@ fn a_divider_released_anywhere_commits_through_the_whole_dispatch() {
     );
     assert_eq!(
         crate::test_support::squeezed_body("Runtime", "a_gesture_holds_the_pointer"),
-        "{self.a_capture_holds_the_pointer()}",
-        "every capture holds the pointer — the one slot, not a list of latches (supersedes \
+        "{self.app.pointer_capture.is_some()}",
+        "every capture holds the pointer — the one slot, the application's since cut 6, not a list of latches (supersedes \
          every_carry_this_window_can_hold_is_named_by_the_one_predicate)"
     );
 }

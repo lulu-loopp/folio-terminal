@@ -1968,13 +1968,16 @@ impl<B: Backend> Runtime<'_, B> {
         position: Option<PhysicalPosition<f64>>,
         now: Instant,
     ) {
-        // **A drag owns the pointer outright**, and a gesture in flight is not a
-        // hover — the same rule the tip, the layout peek and the float's own
+        // **A held gesture owns the pointer outright**, and a gesture in flight is
+        // not a hover — the same rule the tip, the layout peek and the float's own
         // intent already live by (`rebuild_tooltip_anchors` empties its whole
         // list for the length of a drag). A menu dropped under a pane being
         // carried across the window would be a menu nobody asked for, standing
-        // in the way of the drop.
-        if self.held_drag().is_some() || self.held_float_drag().copied().is_some() {
+        // in the way of the drop; and the same menu opened by a divider, a thumb
+        // or a selection resting on a `⌄` would eat the release the gesture is
+        // owed (T-POINTER-CAPTURE R-7, cut 6: every gesture in the slot, not the
+        // drag and the float carry alone).
+        if self.a_gesture_holds_the_pointer() {
             self.window.chevrons.clear();
             return;
         }

@@ -611,12 +611,6 @@ impl<B: Backend> Runtime<'_, B> {
             .filter(|capture| capture.window == window && predicate(capture))
     }
 
-    /// **Whether a gesture of this window holds the pointer** — any of them,
-    /// by the one slot ([`crate::Runtime::a_gesture_holds_the_pointer`]).
-    pub(crate) fn a_capture_holds_the_pointer(&self) -> bool {
-        self.own_capture().is_some()
-    }
-
     pub(crate) fn drop_own_capture(&mut self) {
         let window = self.window.window.id();
         let _ = self
