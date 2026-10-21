@@ -633,7 +633,8 @@ mod tests {
         assert_eq!(rig.watch.counts(), (1, 0), "and the folder is not heard");
     }
 
-    /// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a folder no longer wanted is let go before the
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not seen by
+    /// `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a folder no longer wanted is let go before the
     /// steward's next answer**: two folders are watched through the real kernel door; the reader
     /// stops wanting one, and by the wake that brings the round's reports nobody holds it — its
     /// watch was retired, its directory handle closed, on the worker before the publication.
@@ -658,8 +659,10 @@ mod tests {
         let free = bt_testpath::nobody_holds(&gone);
         drop(rig);
         let _ = std::fs::remove_dir_all(&root);
+        // A watch's handle is seen only where an open handle is (Windows' directory handle; a Mac's
+        // FSEvents stream holds no descriptor at all).
         assert!(
-            held_while_wanted,
+            held_while_wanted || !bt_testpath::OPEN_HANDLES_ARE_SEEN,
             "the fixture's own precondition: a watched folder is held by its watch"
         );
         assert!(

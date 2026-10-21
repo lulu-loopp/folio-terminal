@@ -1935,7 +1935,8 @@ mod tests {
         crate::test_support::ScratchFile(file)
     }
 
-    /// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **every read the decoration worker answers has
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not seen by
+    /// `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **every read the decoration worker answers has
     /// let go of its file by the time the window can take the answer**: a picture's pixels (a PNG,
     /// and a GIF's first frame), a recording's frame and facts (a real one, and one that is no
     /// video, which Media Foundation refuses), a page's raster and a printed picture's decode.
@@ -2041,9 +2042,9 @@ mod tests {
     /// the frames still to come from the open file (`animation::FileAnimationSource`), so the
     /// handle lives exactly as long as the window keeps the animation — and it is opened as every
     /// read in this process is, sharing reading, writing and deletion, so a writer saving over the
-    /// file is never refused by it. Let the answer go and nobody holds the file. (That the cursor
-    /// holds the file while it is kept is not asserted: on Windows an exclusive open would show it,
-    /// but a Unix descriptor takes no lock, so `bt_testpath::nobody_holds` cannot see it there.)
+    /// file is never refused by it. Let the answer go and nobody holds the file. That the cursor
+    /// holds the file while it is kept is asserted only where an open handle is seen
+    /// (`bt_testpath::OPEN_HANDLES_ARE_SEEN`: Windows); a Unix descriptor takes no lock.
     ///
     /// MUTATION: open the animation's file sharing nothing (or sharing reading only) — the writer
     /// is refused while the window plays it.
@@ -2066,6 +2067,11 @@ mod tests {
         else {
             panic!("the shipped GIF opens as an animation");
         };
+        // Seen only where an open handle is (Windows); a Unix descriptor takes no lock.
+        assert!(
+            !bt_testpath::nobody_holds(&gif.0) || !bt_testpath::OPEN_HANDLES_ARE_SEEN,
+            "the animation's cursor holds its file while the window keeps the animation"
+        );
         let original = std::fs::read(&gif.0).expect("the file reads");
         let written = std::fs::write(&gif.0, &original);
         assert!(

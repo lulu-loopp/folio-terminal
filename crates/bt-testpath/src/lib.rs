@@ -102,6 +102,15 @@ pub fn link_free_temp_path(tag: &str) -> PathBuf {
     link_free_temp_dir().join(unique_name(tag))
 }
 
+/// **Whether [`nobody_holds`] sees any open handle on this platform**, or only a lock.
+///
+/// On Windows every open handle is seen, whatever it shares: the exclusive open refuses it. On
+/// Unix an open descriptor refuses nothing, so [`nobody_holds`] sees only an advisory lock (`flock`)
+/// a holder took. A test that asserts a reader *holds* a file it opened without locking it — a
+/// precondition, the opposite of the release it pins — asserts it only where this is `true`, and
+/// states the release on every platform.
+pub const OPEN_HANDLES_ARE_SEEN: bool = cfg!(windows);
+
 /// **Whether nobody holds `path` now** (T-ANSWER-AFTER-THE-FILE-IS-CLOSED): the
 /// strongest claim on a file or a directory this platform lets one opener make
 /// succeeds at once.
