@@ -46,24 +46,38 @@ fn section(name: &str, columns: &[&str]) -> Vec<Vec<&'static str>> {
 
 /// [`section`], of a registry's text.
 fn section_in<'r>(registry: &'r str, name: &str, columns: &[&str]) -> Vec<Vec<&'r str>> {
+    numbered_section_in(registry, name, columns)
+        .into_iter()
+        .map(|(_, cells)| cells)
+        .collect()
+}
+
+/// [`section_in`], each line with its 1-based line number in `registry`.
+fn numbered_section_in<'r>(
+    registry: &'r str,
+    name: &str,
+    columns: &[&str],
+) -> Vec<(usize, Vec<&'r str>)> {
     let marker = format!("# {name}");
     let mut lines = registry
         .lines()
-        .skip_while(|line| *line != marker)
+        .enumerate()
+        .skip_while(|(_, line)| *line != marker)
         .skip(1)
-        .take_while(|line| !line.starts_with("# "))
-        .filter(|line| !line.is_empty() && !line.starts_with("##"));
+        .take_while(|(_, line)| !line.starts_with("# "))
+        .filter(|(_, line)| !line.is_empty() && !line.starts_with("##"));
     let header: Vec<&str> = lines
         .next()
         .unwrap_or_else(|| panic!("the registry has a `{marker}` section with a header"))
+        .1
         .split('\t')
         .collect();
     assert_eq!(header, columns, "`{marker}`'s columns");
     lines
-        .map(|line| {
+        .map(|(at, line)| {
             let cells: Vec<&str> = line.split('\t').collect();
             assert_eq!(cells.len(), columns.len(), "`{marker}`: {line}");
-            cells
+            (at + 1, cells)
         })
         .collect()
 }
@@ -8198,25 +8212,21 @@ fn a_counted_only_drop_closes_and_never_waits() {
 
 // ── the render probe: a tool's submissions (revision (l)4, A2p) ───────────────────────────────
 
-/// The functions of `bt-render`'s product that may hold a GPU submission or present, each under the
-/// one door it serves: `PresentFrame`'s body and the surface failure it absorbs.
-const RENDER_EFFECT_FUNCTIONS: [(&str, &str); 2] = [
-    ("crate::WindowRenderer::compose_frame", "PresentFrame"),
-    ("crate::WindowRenderer::handle_surface_failure", "PresentFrame"),
-];
+/// The one door `bt-render`'s product serves with a GPU submission or present: a window's present
+/// (`compose_frame` and the surface failure it absorbs). Which functions those are is the registry's
+/// to say — its `# effects` rows of `bt-render` — and this guard reads them there.
+const RENDER_EFFECT_DOOR: &str = "PresentFrame";
 
-/// RED (A2p, the thread-door note's revision (l)4) — **the product library holds no probe
-/// effect**: `bt-render` has no row of the bare-site inventory, and every function of its product
-/// that holds a vocabulary effect is one of [`RENDER_EFFECT_FUNCTIONS`], inside the door it names.
-/// The headless probe's submit and present and the read-back's submit are `bt-render-probe`'s, a
-/// tool crate; `bt_render::probe_surface` prepares, encodes and reads and hands the work over.
-///
-/// MUTATION: put `gpu.queue.submit(std::iter::empty());` back into
-/// `WindowRenderer::read_back_work` and this names it as a bare site of `bt-render`.
-#[test]
-fn the_product_library_holds_no_probe_effect() {
-    let world = World::new();
-    let (bare, in_doors) = vocabulary_sites(&world);
+/// Why `the_product_library_holds_no_probe_effect` fails, over the registry text `registry` and
+/// the product's sites split at the doors (`bare`, `in_doors`, as [`vocabulary_sites`] answers):
+/// a `bt-render` bare site, a `bt-render` door function holding an effect under a door other than
+/// [`RENDER_EFFECT_DOOR`], and a `bt-render` row of `# effects` whose door is another — the last
+/// named by its line of `crates/bt-app/src/window_waits.tsv`.
+fn probe_effect_failures(
+    registry: &str,
+    bare: &BTreeMap<BareKey, usize>,
+    in_doors: &DoorEffects,
+) -> Vec<String> {
     let mut failures: Vec<String> = bare
         .iter()
         .filter(|((package, _, _, _), _)| package == "bt-render")
@@ -8224,18 +8234,42 @@ fn the_product_library_holds_no_probe_effect() {
             format!("{item} {arm}: {entry} ×{count}, outside every door of bt-render")
         })
         .collect();
-    for ((package, arm, item), (door, effects)) in &in_doors {
-        if package != "bt-render" {
-            continue;
-        }
-        if !RENDER_EFFECT_FUNCTIONS.contains(&(item.as_str(), door.as_str())) {
+    for ((package, arm, item), (door, effects)) in in_doors {
+        if package == "bt-render" && door != RENDER_EFFECT_DOOR {
             failures.push(format!(
                 "{item} {arm}: {} under door `{door}`, where bt-render's product holds GPU effects \
-                 only in {RENDER_EFFECT_FUNCTIONS:?}",
+                 only under `{RENDER_EFFECT_DOOR}`",
                 effects_spelled(effects)
             ));
         }
     }
+    for (line, cells) in numbered_section_in(registry, "effects", &EFFECT_COLUMNS) {
+        if cells[0] == "bt-render" && cells[6] != RENDER_EFFECT_DOOR {
+            failures.push(format!(
+                "crates/bt-app/src/window_waits.tsv:{line}: `{}` {} is a bt-render row under door \
+                 `{}`; bt-render's product holds GPU effects only under `{RENDER_EFFECT_DOOR}`",
+                cells[2], cells[1], cells[6]
+            ));
+        }
+    }
+    failures
+}
+
+/// RED (A2p, the thread-door note's revision (l)4) — **the product library holds no probe
+/// effect**: `bt-render` has no bare site, and every function of its product that holds a
+/// vocabulary effect stands under [`RENDER_EFFECT_DOOR`], as every `bt-render` row of the
+/// registry's `# effects` says. The headless probe's submit and present and the read-back's submit
+/// are `bt-render-probe`'s, a tool crate; `bt_render::probe_surface` prepares, encodes and reads
+/// and hands the work over.
+///
+/// MUTATION: put `gpu.queue.submit(std::iter::empty());` back into
+/// `WindowRenderer::read_back_work` and this names it as a bare site of `bt-render`; give a
+/// `bt-render` row of `# effects` another door and this names the row's line.
+#[test]
+fn the_product_library_holds_no_probe_effect() {
+    let world = World::new();
+    let (bare, in_doors) = vocabulary_sites(&world);
+    let failures = probe_effect_failures(REGISTRY, &bare, &in_doors);
     assert!(
         failures.is_empty(),
         "bt-render's product holds a probe effect:\n  {}",
@@ -8245,13 +8279,11 @@ fn the_product_library_holds_no_probe_effect() {
 
 /// RED (A2p, the thread-door note's revision (l)4) — **the probe crate is outside the product
 /// closure**: no dependency table a build of `folio.exe` reads names `bt-render-probe`, optional or
-/// not (so it is not even a candidate of [`product`]); it is a declared tool
-/// ([`NOT_THE_PRODUCT`]); and its library root opens with revision (j)2's excluded form,
-/// `#![allow(clippy::disallowed_methods)]`, once, so the configuration fence needs no shield for
-/// it.
+/// not (so it is not even a candidate of [`product`]), and it is a declared tool
+/// ([`NOT_THE_PRODUCT`]). Its layer, 6, is `scripts/ci/crate-layers.tsv`'s, held by
+/// `scripts/ci/check-crate-edges.ps1`.
 ///
-/// MUTATION: name `bt-render-probe` in `bt-app`'s `[dependencies]` and the first assertion fails;
-/// take the form off the probe's `lib.rs` and the last does.
+/// MUTATION: name `bt-render-probe` in `bt-app`'s `[dependencies]` and the first assertion fails.
 #[test]
 fn the_probe_crate_is_outside_the_product_closure() {
     let candidates = product_candidate_manifests();
@@ -8261,23 +8293,6 @@ fn the_probe_crate_is_outside_the_product_closure() {
         candidates.keys().collect::<Vec<_>>()
     );
     assert!(NOT_THE_PRODUCT.contains(&"bt-render-probe"));
-    let root = repository_root()
-        .join("crates")
-        .join("bt-render-probe")
-        .join("src")
-        .join("lib.rs");
-    let text = std::fs::read_to_string(&root).expect("the probe crate's root");
-    let leading: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with("//"))
-        .take_while(|line| line.starts_with("#!["))
-        .collect();
-    assert_eq!(
-        leading,
-        ["#![allow(clippy::disallowed_methods)]"],
-        "the probe crate's root opens with the excluded form, once"
-    );
 }
 
 /// The committed inventory's rows, keyed, each count a positive integer and each key once.
