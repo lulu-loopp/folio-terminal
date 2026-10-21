@@ -280,14 +280,16 @@ fn win32_would_trim_the_name(path: &Path) -> bool {
         .is_some_and(|name| name.ends_with(['.', ' ']))
 }
 
-/// Whether a `BT_…` diagnostic variable is switched on.
-///
-/// **Set-but-empty is off**, which is the word every environment variable in
-/// this program is read with: a shell that writes `BT_PERF_TRACE=` has said "not
-/// this run", and a build that answered presence alone would turn a profiling
-/// session into a measurement of its own `eprintln!`s.
-fn switched_on(name: &str) -> bool {
-    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+/// Whether `BT_SEMANTIC_TRACE` is on, as the host's entry installed it
+/// ([`crate::install_diagnostics`]); off in a process that installed nothing.
+fn semantic_trace() -> bool {
+    crate::host::diagnostics().semantic_trace
+}
+
+/// Whether `BT_PERF_TRACE` is on, as the host's entry switched it
+/// (`bt_viewport::trace::perf`); off in a process that switched nothing.
+fn perf_trace() -> bool {
+    bt_viewport::trace::perf()
 }
 
 const INLINE_IMAGE_WORKER_QUEUE_CAP: usize = 4;
@@ -2170,7 +2172,7 @@ fn semantic_witness_rematch(
             })
             .collect::<Vec<_>>();
         let ordered = ordered_semantic_matches(&regions, &candidates);
-        if switched_on("BT_SEMANTIC_TRACE") {
+        if semantic_trace() {
             eprintln!(
                 "SEMANTIC_ORDERED witness={witness:?} regions={regions:?} candidates={candidates:?} matched={ordered:?}"
             );
@@ -2389,9 +2391,7 @@ impl DualPlaneSession {
             math_failure_validate_count: 0,
             math_failure_convert_count: 0,
             math_failure_compile_count: 0,
-            decor_trace: std::env::var_os("BT_DECOR_TRACE")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from),
+            decor_trace: crate::host::diagnostics().decor_trace.clone(),
             decor_trace_frame: 0,
         }
     }
@@ -5305,7 +5305,7 @@ impl DualPlaneSession {
             self.live_admission_row = row;
         }
         self.live_detection_count = self.live_detection_count.saturating_add(scheduled as u64);
-        if scheduled != 0 && switched_on("BT_PERF_TRACE") {
+        if scheduled != 0 && perf_trace() {
             bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
@@ -7107,7 +7107,7 @@ impl DualPlaneSession {
         }
         // Under the same switch `semantic_witness_rematch` traces through, because the two answer
         // the same question about the same event and a reader chasing one wants both.
-        if switched_on("BT_SEMANTIC_TRACE") {
+        if semantic_trace() {
             eprintln!(
                 "REFLOW_RESEAT placed={} of {} over {} lines",
                 placements.len(),
@@ -9056,7 +9056,7 @@ impl DualPlaneSession {
             }
         }
         self.live_invalidation_count = self.live_invalidation_count.saturating_add(invalidated);
-        if invalidated != 0 && switched_on("BT_PERF_TRACE") {
+        if invalidated != 0 && perf_trace() {
             bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_event=invalidate live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
@@ -9133,7 +9133,7 @@ impl DualPlaneSession {
         if !(self.live_screen == ScreenId::Alternate && self.alternate_repaint_in_progress) {
             self.offscreen_decorations.clear();
         }
-        if removed != 0 && switched_on("BT_PERF_TRACE") {
+        if removed != 0 && perf_trace() {
             bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_event=invalidate-all live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
@@ -9646,7 +9646,7 @@ impl DualPlaneSession {
         if !accepted {
             self.stale_results += 1;
             self.account_stranded_pending(task.candidate_id, task.versions);
-        } else if switched_on("BT_PERF_TRACE") {
+        } else if perf_trace() {
             if let Some(elapsed) = render_time {
                 bt_viewport::trace::line(format!(
                     "BT_PERF_TRACE math_render_us={} source={} resident_bytes={}",
@@ -9729,13 +9729,13 @@ impl DualPlaneSession {
             // formula that stayed at source because its raster was thrown away looked in the trace
             // exactly like a formula that was never scanned. It is the one outcome a recording of
             // this defect needs to show, so it says so.
-            if switched_on("BT_PERF_TRACE") {
+            if perf_trace() {
                 bt_viewport::trace::line(format!(
                     "BT_PERF_TRACE live_math_result_dropped row={} candidate_row={} reason={reason}",
                     task.start.row, task.candidate_row,
                 ));
             }
-        } else if switched_on("BT_PERF_TRACE")
+        } else if perf_trace()
             && let Some(elapsed) = render_time
         {
             bt_viewport::trace::line(format!(
@@ -9765,7 +9765,7 @@ impl DualPlaneSession {
             }
             None => return,
         }
-        if switched_on("BT_PERF_TRACE") {
+        if perf_trace() {
             bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE math_failures_validate={} math_failures_convert={} math_failures_compile={}",
                 self.math_failure_validate_count,

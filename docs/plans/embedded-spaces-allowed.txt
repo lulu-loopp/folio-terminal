@@ -46,29 +46,29 @@ crates/bt-app/src/hang_watch.rs:4999 the hang report's label column: every label
 crates/bt-app/src/hang_watch.rs:5002 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
 crates/bt-app/src/highlight.rs:721 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/highlight.rs:779 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/i18n.rs:8103 the command-line usage text: option descriptions aligned in one column
-crates/bt-app/src/i18n.rs:8120 the command-line usage text: option descriptions aligned in one column
+crates/bt-app/src/i18n.rs:8130 the command-line usage text: option descriptions aligned in one column
+crates/bt-app/src/i18n.rs:8147 the command-line usage text: option descriptions aligned in one column
 crates/bt-app/src/install_channel.rs:1442 a Scoop manifest sample: JSON indentation after an escaped line break
 crates/bt-app/src/install_channel.rs:1898 the Homebrew cask's own key alignment, as the cask writes it
-crates/bt-app/src/main.rs:34679 the chrome dump's tag column: `quad` padded to the width of the other tags
-crates/bt-app/src/main.rs:34793 the chrome dump's tag column: `quad` padded to the width of the other tags
-crates/bt-app/src/main.rs:60541 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:63140 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:63589 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:63589 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:63781 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:64707 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/main.rs:79342 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:34718 the chrome dump's tag column: `quad` padded to the width of the other tags
+crates/bt-app/src/main.rs:34832 the chrome dump's tag column: `quad` padded to the width of the other tags
+crates/bt-app/src/main.rs:60593 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:63192 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:63641 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:63641 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:63833 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:64759 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/main.rs:79548 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview_live.rs:1686 table fixture: each cell padded to its column
 crates/bt-app/src/preview_select.rs:777 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:11685 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11689 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11686 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11690 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:13007 tab expansion's expected columns
-crates/bt-app/src/preview.rs:13004 tab expansion's expected columns
-crates/bt-app/src/preview.rs:18578 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:18605 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:11691 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11695 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11692 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11696 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:13013 tab expansion's expected columns
+crates/bt-app/src/preview.rs:13010 tab expansion's expected columns
+crates/bt-app/src/preview.rs:18681 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:18708 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/profiles.rs:27206 the spacing between the arguments is the input under test
 crates/bt-detect/src/frame.rs:1564 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-detect/src/lib.rs:4545 table fixture: each cell padded to its column
@@ -117,7 +117,7 @@ crates/bt-platform/src/macos_update_mount_tests.rs:13 recorded `hdiutil` output:
 crates/bt-platform/src/macos_update_mount_tests.rs:26 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/src/macos_update_mount_tests.rs:141 recorded `hdiutil` output: its columns as the tool prints them
 crates/bt-platform/tests/macos_services.rs:230 the probe's listing: each path indented under the line that counts them
-crates/bt-pty/src/lib.rs:4072 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-pty/src/lib.rs:4144 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/src/declarations.rs:665 the spacing inside the predicate is the input under test
 crates/bt-source/src/declarations.rs:666 the spacing inside the predicate is the input under test
 crates/bt-source/src/manifest.rs:616 a manifest fixture: a trailing comment set off by spaces

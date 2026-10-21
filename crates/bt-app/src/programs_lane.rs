@@ -752,7 +752,7 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
         } = lane.requests.count_arrivals();
         let terminal = match walked {
             Ok((path_entries, file_questions)) => {
-                if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
+                if crate::entry_doors::installed().perf {
                     crate::trace_sink::stderr_line(format!(
                         "BT_PERF_TRACE program_walk_us={} generation={generation} trigger={:?} \
                          rows={} path_entries={path_entries} file_questions={file_questions} \
@@ -1964,7 +1964,9 @@ pub(crate) mod contract_adapter {
                 .and_then(|path| path.strip_prefix(QUESTION))
                 .and_then(|question| question.parse().ok())
             {
-                self.0.execute(question);
+                // The suite's file, held while the walk asks about this path.
+                let held = self.0.execute(question);
+                drop(held);
             }
             false
         }

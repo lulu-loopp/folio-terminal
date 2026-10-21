@@ -595,9 +595,9 @@ pub(crate) mod contract_adapter {
 
     impl ClipboardDoor for GateDoor {
         fn serve(&self, _worker: &WorkerCtx, ask: &Ask) -> Result<Reply, String> {
-            if let Some(question) = question_of(ask) {
-                self.0.execute(question);
-            }
+            // The suite's file, held while the door runs.
+            let held = question_of(ask).map(|question| self.0.execute(question));
+            drop(held);
             Ok(Reply::Written)
         }
     }

@@ -31,6 +31,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- On Windows, saving over a recording or another file right after Folio has shown it is no longer refused because Folio still has the file open. <!-- zh: pending T-ANSWER-AFTER-THE-FILE-IS-CLOSED -->
 - When Folio cannot save your window layout (a full disk, a folder that became read-only), it tells you once and stops trying again every couple of seconds; it tries again at your next change and when you quit. <!-- zh: pending T-SESSION-WRITER-NO-TIMER-RETRY -->
 - A picture that could not be loaded is no longer read again and again while the window holds many other pictures. <!-- zh: pending T-PEEK-CACHE-QUESTION-RECORDS -->
 - A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->
@@ -135,6 +136,7 @@ All notable changes to Folio are recorded here. The format follows
 - Closing a pane, a tab or a window right after saving no longer asks whether to discard your changes while the save is still on its way: it waits for the save, and closes once it is in the file and nothing on screen differs from it. It asks if the save did not land, or if what is on screen is not what was saved (after an undo, say); when no unsaved changes are left, the question says a save has not reached the disk. A tab whose shell has exited waits the same way before it closes on its own. Save all on a window's question saves every file the same way; the window stays open until the saves have landed, then closes. <!-- zh: pending T-CLOSE-GATE-WAITS -->
 - Closing a pane, a floating window or a glance card that is playing a video no longer freezes the window while the video's decoder stops, which could take up to two seconds per video when the decoder was stuck; quitting waits for such a decoder once, for at most two seconds. <!-- zh: pending T-DROP-DOORS -->
 - When another program holds the clipboard, copying and pasting no longer freeze Folio's window for a moment: the clipboard is asked in the background, and a paste arrives a moment later, with whatever you typed meanwhile after it (two pastes pressed quickly both arrive, in order). If the clipboard stays busy, the paste is dropped, what you typed goes through, and a notice says the clipboard was busy. <!-- zh: pending T-CLIPBOARD-LANE -->
+- Choosing Save on the quit card no longer freezes the windows while the files are written: the saves are handed to the background writer, and Folio quits once they are all in their files. If one could not be saved, the quit stops and the window says which file; if a save is still on its way after three seconds, the quit stops and says so. When Folio stops after an error, unsaved edits are saved the same way, and only an edit that could not be saved is kept in the recovered folder. <!-- zh: pending T-QUIT-AND-STOP-SAVES -->
 
 ### Changed
 

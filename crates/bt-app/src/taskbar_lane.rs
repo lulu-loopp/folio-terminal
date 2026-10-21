@@ -260,7 +260,7 @@ fn run_taskbar_lane(ctx: &WorkerCtx, lane: &TaskbarLane) {
             Ok(auto_hidden) => Terminal::Done(auto_hidden),
             Err(failure) => Terminal::Failed(failure),
         };
-        if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty())
+        if crate::entry_doors::installed().perf
             && let Terminal::Done(auto_hidden) = terminal
         {
             crate::trace_sink::stderr_line(format!(
@@ -661,10 +661,11 @@ pub(crate) mod contract_adapter {
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&generation)
                     .copied();
-                if let Some(question) = question {
-                    door.execute(question);
-                }
-                generation.is_multiple_of(2)
+                // The suite's file, held while the ask runs.
+                let held = question.map(|question| door.execute(question));
+                let hidden = generation.is_multiple_of(2);
+                drop(held);
+                hidden
             },
             move |_line: &str| {
                 counted.fetch_add(1, Ordering::SeqCst);

@@ -134,6 +134,9 @@ pub(crate) struct ShellSpec {
     /// directory it starts with instead when that folder is not a directory now (G-SWEEP-048,
     /// #29; `profiles::BirthPlace`).
     pub(crate) unless_gone: Option<GoneSpec>,
+    /// Which of the pane's streams are recorded: the answer the program's entry read for
+    /// `BT_PTY_DUMP` and `BT_PTY_INPUT_DUMP` (`entry_doors`), the same for every pane of the run.
+    pub(crate) recording: bt_pty::PtyRecording,
 }
 
 /// [`ShellSpec::unless_gone`].
@@ -223,6 +226,7 @@ fn bear(
         size,
         working_directory,
         unless_gone,
+        recording,
     } = spec;
     let gone = gone_place(unless_gone, &Path::is_dir);
     let folder_gone = gone.is_some();
@@ -308,6 +312,7 @@ fn bear(
                     size,
                     wake,
                     working_directory,
+                    &recording,
                 ),
                 // No account environment to read: the shell inherits this process's, and what a launch
                 // carried is laid over it in the same place it is laid over the account's.
@@ -323,6 +328,7 @@ fn bear(
                     size,
                     wake,
                     working_directory,
+                    &recording,
                 ),
             }
         });

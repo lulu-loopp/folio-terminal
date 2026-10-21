@@ -826,19 +826,15 @@ struct SummonTrace {
 const TRACE_HEADER: &str = "# BT_HOTKEY_TRACE_V1 elapsed_ms station field=value";
 
 impl SummonTrace {
+    /// The file [`trace_into`] named, opened at the first station; `None` when nothing named one.
     fn opened() -> Option<Self> {
         use std::io::Write as _;
 
-        // Set-but-empty is off, which is this product's rule for every one of
-        // these: `BT_HOTKEY_TRACE=` is a shell saying "not this run", and a run
-        // that answered it with a file named the empty string would fail in a
-        // way that looks like the feature is broken.
-        let path = std::env::var_os("BT_HOTKEY_TRACE").filter(|value| !value.is_empty())?;
-        let path = std::path::PathBuf::from(path);
+        let path = SUMMON_TRACE_PATH.get()?;
         match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(path)
         {
             Ok(mut file) => {
                 let _ = writeln!(file, "{TRACE_HEADER}");
@@ -880,6 +876,17 @@ impl SummonTrace {
 
 /// The process's trace, opened at the first station any road reaches.
 static SUMMON_TRACE: std::sync::OnceLock<Option<SummonTrace>> = std::sync::OnceLock::new();
+
+/// The file [`trace_into`] named, which [`SummonTrace::opened`] opens.
+static SUMMON_TRACE_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// **Trace the summon's road into `path`** — called by the program's entry when `BT_HOTKEY_TRACE`
+/// names a file (set-but-empty is off, and the entry has already said so), before any station can
+/// be reached (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY). This crate reads no environment variable: a
+/// process whose entry names no file — a test binary above all — traces nothing.
+pub fn trace_into(path: std::path::PathBuf) {
+    let _ = SUMMON_TRACE_PATH.set(path);
+}
 
 /// **Write one station**, formatting nothing at all when the variable is unset.
 ///

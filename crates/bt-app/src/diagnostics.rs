@@ -398,7 +398,7 @@ pub fn resident_channel() -> Option<Channel> {
 static RESIDENT_CHANNEL: std::sync::OnceLock<Channel> = std::sync::OnceLock::new();
 
 fn choose_resident_channel(storage: &Path, previous_run_last_wrote: Option<SystemTime>) -> Channel {
-    if console_was_asked_for(std::env::vars_os().map(|(name, _)| name)) {
+    if console_was_asked_for(crate::entry_doors::installed().named.iter().cloned()) {
         // The console was named by this run. Keep it, keep the group membership
         // that comes with it, and rely on the control handler installed at the
         // front door for the `Ctrl+C` that membership exposes.

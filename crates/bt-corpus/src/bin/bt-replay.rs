@@ -24,6 +24,12 @@ const HEADLESS_HEIGHT: u32 = 1_200;
 
 fn main() -> Result<()> {
     bt_corpus::install_host_answers();
+    // `BT_PERF_TRACE`, read here once and handed to the crates that time their own work
+    // (`bt_viewport::trace::perf`, T-DIAGNOSTIC-DOORS-AT-THE-ENTRY): they read no environment.
+    // Set-but-empty is off, the word every door of this workspace is read with.
+    bt_viewport::trace::install_perf(
+        env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()),
+    );
     let mut args = env::args().skip(1);
     let first = args.next().context(
         "usage: bt-replay CORPUS.btcr [CHUNK_SIZE] [--render] | \
@@ -275,7 +281,7 @@ impl RenderReplay {
             probe,
             totals: PerfTotals::default(),
             last_frame: None,
-            trace_perf: env::var_os("BT_PERF_TRACE").is_some(),
+            trace_perf: bt_viewport::trace::perf(),
         }
     }
 

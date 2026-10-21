@@ -1025,6 +1025,20 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-pointer-debt.ps1
 
+      # `docs/plans/ENV-DOORS.tsv` (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY): the product items that read
+      # the environment outside the program's entry. The bt-source test `env_doors` holds it to
+      # the tree; this refuses a row added, or grown, to let a new reader past that test.
+      - name: the environment-door list only shrinks
+        shell: pwsh
+        run: ./scripts/ci/check-env-doors.ps1
+
+      # The environment-door gate's scratch-repository suite plants its three refusals (an
+      # added row, a row reading a new name, a row holding more refusals) and requires each to
+      # fail for its own reason, while the no-base, unchanged and shrink cases pass.
+      - name: the environment-door gate can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-env-doors-tests.ps1
+
       # Gate G3: the crates a browser build reads name no clock of the standard
       # library (`scripts/ci/check-clock-guard.ps1` states the source set and what
       # is out of it by name). The workspace test above ran the same reading;

@@ -2165,7 +2165,7 @@ fn run_font_lane(ctx: &bt_platform::admission::WorkerCtx, lane: &FontLane) {
 /// the platform's words: the request ends `Failed`, the ledger says it once per
 /// streak, and the list on screen stays what it was.
 fn walk_the_machine(generation: u64) -> Result<FontAnswer, String> {
-    let traced = std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty());
+    let traced = crate::entry_doors::installed().perf;
     count_walk();
     let start = std::time::Instant::now();
     let monospace = bt_platform::monospace_font_families()
@@ -34941,13 +34941,14 @@ pub(crate) mod font_lane_adapter {
                 .unwrap_or_else(PoisonError::into_inner)
                 .get(&generation)
                 .copied();
-            if let Some(question) = question {
-                door.execute(question);
-            }
-            Ok((
+            // The suite's file, held while the walk runs.
+            let held = question.map(|question| door.execute(question));
+            let walked = Ok((
                 answer(format!("Lane Contract Mono {generation}")),
                 Vec::new(),
-            ))
+            ));
+            drop(held);
+            walked
         });
         let (heard, counted) = (Arc::clone(&probe), Arc::clone(&said));
         let lane: &'static FontLane = Box::leak(Box::new(FontLane::new(

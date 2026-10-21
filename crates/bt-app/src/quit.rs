@@ -110,6 +110,14 @@ pub const PAGE_TEARDOWN_DEADLINE: Duration =
 /// ordinary [`WriteVerdict::TimedOut`], which leaves.
 pub(crate) const UPDATE_RECEIPT_DEADLINE: Duration = crate::persist::SESSION_SAVE_BUDGET;
 
+/// **How long a quit answered `Save` waits for the saves it handed to the storage worker**
+/// (S-6c): a close's own bound, [`crate::restore::CLOSE_WAITS_FOR_A_SAVE`], derived and not
+/// written beside it — the quit waits for the same saves of the same writer a close does,
+/// and asks nothing more of them. Past it a save still unanswered is a write the worker is
+/// stuck inside, and the quit is withdrawn, saying so. A clock read on each turn
+/// ([`Quit::deadline`]), never a wait: every answer wakes the loop itself.
+pub(crate) const QUIT_WAITS_FOR_ITS_SAVES: Duration = crate::restore::CLOSE_WAITS_FOR_A_SAVE;
+
 /// **When a quit's documents phase ends, measured from its start** (design note
 /// `docs/plans/design/settings-reread-2026-10-11.md`, revision (c)2): half of
 /// [`crate::persist::SESSION_SAVE_BUDGET`], 1.5 s.
@@ -465,6 +473,7 @@ impl SaveReport {
     }
 
     /// The names of what did not go through, in the order they were tried.
+    #[cfg(test)]
     #[must_use]
     pub fn failed_names(&self) -> Vec<String> {
         self.failed.iter().map(|(name, _)| name.clone()).collect()
@@ -481,7 +490,10 @@ impl SaveReport {
 pub enum QuitStep {
     /// Keep the card up and wait for one answer.
     Ask,
-    /// Save everything the card named, then report with [`Quit::saved`].
+    /// **Save everything the card named**: hand every save to the storage worker once
+    /// ([`Quit::saves_handed_over`]), then look at them on each turn until they have
+    /// answered or [`QUIT_WAITS_FOR_ITS_SAVES`] has passed, and report with
+    /// [`Quit::saved`] (S-6c) — a bound read on the turn, never a wait.
     Save,
     /// Throw the in-memory modifications away — **and only those** — then report
     /// with [`Quit::discarded`].
@@ -570,6 +582,9 @@ pub struct Quit {
     held_release: Vec<crate::update_trial::Writer>,
     /// The update this quit is running for, if it is one (U-21).
     update: Option<Update>,
+    /// **The buffers the save step handed to the storage worker and waits for** (S-6c),
+    /// across every window, as each stood when its save was handed over.
+    awaited: Vec<crate::preview::Awaited>,
     /// What the card names, collected once when the question was put.
     ///
     /// **Once, and not re-derived per frame** like the dirty gate's list is. The
@@ -584,7 +599,11 @@ pub struct Quit {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
     Asking,
-    Saving,
+    /// The save step: `until` is `None` until every save has been handed over, then the
+    /// bound of the wait for their answers (S-6c).
+    Saving {
+        until: Option<Instant>,
+    },
     Discarding,
     Documents,
     Recovery,
@@ -648,6 +667,7 @@ impl Quit {
             merged_lines: Vec::new(),
             held_release: Vec::new(),
             update,
+            awaited: Vec::new(),
             names,
             hover: None,
         }
@@ -688,7 +708,7 @@ impl Quit {
     pub fn step(&self) -> QuitStep {
         match self.phase {
             Phase::Asking => QuitStep::Ask,
-            Phase::Saving => QuitStep::Save,
+            Phase::Saving { .. } => QuitStep::Save,
             Phase::Discarding => QuitStep::Discard,
             Phase::Documents => QuitStep::Documents,
             Phase::Recovery => QuitStep::Recovery,
@@ -800,7 +820,7 @@ impl Quit {
         }
         self.hover = None;
         self.phase = match answer {
-            QuitAnswer::Save => Phase::Saving,
+            QuitAnswer::Save => Phase::Saving { until: None },
             QuitAnswer::Discard => Phase::Discarding,
             QuitAnswer::Cancel => {
                 self.give_up_the_update(Abandon::Cancelled);
@@ -810,6 +830,34 @@ impl Quit {
         self.step()
     }
 
+    /// **Every save the card owes has been handed to the storage worker** (S-6c): the
+    /// buffers `awaited` are what the save step now waits for, each as it stood when it was
+    /// handed over, until [`QUIT_WAITS_FOR_ITS_SAVES`] after `now`. Once per quit: the
+    /// saves are handed over once, and every later turn only looks at them.
+    pub(crate) fn saves_handed_over(
+        &mut self,
+        awaited: Vec<crate::preview::Awaited>,
+        now: Instant,
+    ) -> QuitStep {
+        if self.phase == (Phase::Saving { until: None }) {
+            self.awaited = awaited;
+            self.phase = Phase::Saving {
+                until: Some(now + QUIT_WAITS_FOR_ITS_SAVES),
+            };
+        }
+        self.step()
+    }
+
+    /// **What the save step waits for, and until when** — `None` before the saves are
+    /// handed over and outside the save step (S-6c).
+    #[must_use]
+    pub(crate) fn saves_awaited(&self) -> Option<(&[crate::preview::Awaited], Instant)> {
+        match self.phase {
+            Phase::Saving { until: Some(until) } => Some((&self.awaited, until)),
+            _ => None,
+        }
+    }
+
     /// Report what the save branch managed.
     ///
     /// **All of it or none of the leaving** (v3): one refusal and the process
@@ -817,9 +865,10 @@ impl Quit {
     /// that did go through are not un-saved to make the sentence tidier — they
     /// are on the disk, and only `Cancel` ever promised otherwise.
     pub fn saved(&mut self, report: &SaveReport) -> QuitStep {
-        if self.phase != Phase::Saving {
+        if !matches!(self.phase, Phase::Saving { .. }) {
             return self.step();
         }
+        self.awaited.clear();
         self.phase = if report.is_complete() {
             Phase::Documents
         } else {
@@ -1095,7 +1144,7 @@ impl Quit {
                 HeldRelease::Consumed
             }
             Phase::Asking
-            | Phase::Saving
+            | Phase::Saving { .. }
             | Phase::Discarding
             | Phase::Documents
             | Phase::Recovery
@@ -1322,7 +1371,8 @@ impl Quit {
             // The two phases' bounds, both measured from the documents phase's start.
             Phase::Documents => self.documents_from.map(|start| start + QUIT_DOCUMENTS_BY),
             Phase::Recovery => self.documents_from.map(|start| start + QUIT_RECOVERY_BY),
-            Phase::Waiting { until }
+            Phase::Saving { until: Some(until) }
+            | Phase::Waiting { until }
             | Phase::Writing {
                 receipt: Some(Receipt { until, .. }),
             }
