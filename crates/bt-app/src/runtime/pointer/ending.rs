@@ -323,45 +323,59 @@ impl CaptureOwner {
     /// tab in front is `active`. A gesture on the tab in front that names no tab of its own — a
     /// divider, a files row, a formula block — goes with that tab.
     fn is_gone_with(&self, gone: Gone, active: TabId) -> bool {
-        let pane_of = |tab: TabId, seat: SeatId| matches!(gone, Gone::Pane(leaf) if leaf == LeafId { tab, seat });
-        let the_tab = |tab: TabId| matches!(gone, Gone::Tab(gone) if gone == tab);
-        let on_surface =
-            |tab: TabId, surface: PreviewSurface| the_tab(tab) || surface_goes(gone, surface);
         match self {
-            Self::Divider(_) | Self::Route(MouseRoute::MathBlock) => the_tab(active),
-            Self::TabPress(press) => the_tab(press.tab),
-            Self::PanePress(tab, press) => the_tab(*tab) || pane_of(*tab, press.seat),
+            Self::Divider(_) | Self::Route(MouseRoute::MathBlock) => the_tab(gone, active),
+            Self::TabPress(press) => the_tab(gone, press.tab),
+            Self::PanePress(tab, press) => the_tab(gone, *tab) || pane_of(gone, *tab, press.seat),
             Self::RowPress(press) => match press.host {
                 RowHost::Column(seat) | RowHost::Git(seat) | RowHost::Terminal(seat) => {
-                    the_tab(active) || pane_of(active, seat)
+                    the_tab(gone, active) || pane_of(gone, active, seat)
                 }
                 RowHost::Float(id) => matches!(gone, Gone::Float(gone) if gone == id),
             },
             // The drag of a tab that is closed: its payload stopped existing. A pane or a row in
             // the hand is the drag's own to settle when its source goes.
-            Self::Drag(drag) => drag.tab().is_some_and(the_tab),
+            Self::Drag(drag) => drag.tab().is_some_and(|tab| the_tab(gone, tab)),
             Self::FloatHeadPress(press) => matches!(gone, Gone::Float(id) if id == press.win),
             Self::FloatDrag(drag) => matches!(gone, Gone::Float(id) if id == drag.win),
             Self::GlanceHeadPress(_) | Self::GlanceThumb(_) => gone == Gone::GlanceCard,
             Self::VideoBar(surface) => {
                 surface_goes(gone, *surface)
-                    || matches!(surface, PreviewSurface::Seat(leaf) if the_tab(leaf.tab))
+                    || matches!(surface, PreviewSurface::Seat(leaf) if the_tab(gone, leaf.tab))
             }
-            Self::PreviewBodyThumb(tab, drag) => on_surface(*tab, drag.surface),
-            Self::PicturePan(tab, drag) => on_surface(*tab, drag.surface),
-            Self::EditSelection(tab, surface) => on_surface(*tab, *surface),
-            Self::RenderedSelection(tab, drag) => on_surface(*tab, drag.surface),
+            Self::PreviewBodyThumb(tab, drag) => on_surface(gone, *tab, drag.surface),
+            Self::PicturePan(tab, drag) => on_surface(gone, *tab, drag.surface),
+            Self::EditSelection(tab, surface) => on_surface(gone, *tab, *surface),
+            Self::RenderedSelection(tab, drag) => on_surface(gone, *tab, drag.surface),
             Self::BlockThumb(tab, drag) => {
-                on_surface(*tab, drag.surface)
+                on_surface(gone, *tab, drag.surface)
                     || matches!(gone, Gone::Blocks(surface) if surface == drag.surface)
             }
-            Self::TerminalThumb(tab, drag) => the_tab(*tab) || pane_of(*tab, drag.seat),
-            Self::TerminalFootMark(tab, drag) => the_tab(*tab) || pane_of(*tab, drag.seat),
+            Self::TerminalThumb(tab, drag) => the_tab(gone, *tab) || pane_of(gone, *tab, drag.seat),
+            Self::TerminalFootMark(tab, drag) => {
+                the_tab(gone, *tab) || pane_of(gone, *tab, drag.seat)
+            }
             Self::Route(MouseRoute::Local(selection)) => goes_with_its_shell(gone, selection.owner),
             Self::Route(MouseRoute::Forward { owner, .. }) => goes_with_its_shell(gone, *owner),
             Self::SettingsSlider(_) | Self::SettingsMenuBar(_) => gone == Gone::SettingsSheet,
         }
     }
+}
+
+/// Whether `gone` is the tab `tab`.
+fn the_tab(gone: Gone, tab: TabId) -> bool {
+    matches!(gone, Gone::Tab(went) if went == tab)
+}
+
+/// Whether `gone` is the pane `seat` of `tab`.
+fn pane_of(gone: Gone, tab: TabId, seat: SeatId) -> bool {
+    matches!(gone, Gone::Pane(leaf) if leaf == LeafId { tab, seat })
+}
+
+/// Whether a gesture kept with `tab` and held on `surface` went with `gone`: its tab, or what
+/// the surface is.
+fn on_surface(gone: Gone, tab: TabId, surface: PreviewSurface) -> bool {
+    the_tab(gone, tab) || surface_goes(gone, surface)
 }
 
 /// Whether a gesture on `surface` went with `gone`: its document, its floating window, its pane,
