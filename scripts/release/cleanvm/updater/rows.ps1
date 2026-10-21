@@ -149,8 +149,9 @@ function Get-UpdaterRows {
         Add-Planted "RW-$word-A" 'rolled-back' $word 'A' $standsAside $leftBody
         Add-Planted "BC-$word" 'rolled-back' $word 'B' $settled
     }
-    # A terminal header is retired on its frozen promise (A1), whatever its body says.
-    $retired = @{ Journal = 'settled'; Card = 'restored'; Window = 'installed'; NoLines = @($handedOff) }
+    # A terminal header is retired on its frozen promise (A1), whatever its body says; a plain
+    # start that retires a rollback says nothing (its card is the one a rollback's start was sent with).
+    $retired = @{ Journal = 'settled'; Card = 'none'; Window = 'installed'; NoLines = @($handedOff) }
     Add-Planted 'RW-retired-outcome-B' 'retired' 'retired-outcome' 'B' $retired $retired
     Add-Planted 'BC-retired-outcome' 'retired' 'retired-outcome' 'B' $retired
     return $rows
