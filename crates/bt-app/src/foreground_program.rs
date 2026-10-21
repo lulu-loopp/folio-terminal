@@ -118,7 +118,9 @@ pub(crate) fn dispatch(
     }
 }
 
-/// When `leaf`'s cadence next asks, for the window's wake-up deadline.
+/// When `leaf`'s cadence next asks — the instant its next publish is admitted at. Not a wake the
+/// loop books: no turn spends the cadence (T-WINDOW-THREAD-UNDER-LOAD round 3); a test reads it.
+#[cfg(test)]
 pub(crate) fn deadline(leaf: &LeafSession) -> Option<Instant> {
     leaf.foreground_program_cadence
         .deadline(leaf.session.foreground_program_probe_is_armed())
@@ -190,6 +192,7 @@ impl Cadence {
         ask_now
     }
 
+    #[cfg(test)]
     pub(crate) fn deadline(&self, candidate: bool) -> Option<Instant> {
         (candidate && !self.in_flight)
             .then_some(self.next_periodic)

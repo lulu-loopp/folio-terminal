@@ -1735,7 +1735,8 @@ fixed (304 706 829 ms and 304 706 826 ms from two pairs 82 s apart; one block of
 earlier in the same run, one of 3.1 h), while the turn counter ran at about 13 500 turns a
 second — a hundred times its rate outside the blocks. The number was not a late wake. It was
 the age of a deadline already in the past when the loop parked: `ControlFlow::WaitUntil(past)`
-makes winit return at once, so the park is no wait at all, and the loop turned on it.
+is a zero timeout to winit 0.30.13, whose `wait_for_messages_impl` then returns before any
+wait call (`event_loop.rs:701-703`), so the park is no wait at all, and the loop turned on it.
 
 **The split.** The owed wake is judged at `park` (`Accounts::parked`, with the park's instant):
 an instant still ahead is a wait, and how late the next turn began past it is `delay_us`, as
@@ -1746,9 +1747,10 @@ turn however short. Both carry `source=`: the clock in the wake fold that asked 
 the name beside the control flow it sets). One more cell each, in the one instrument.
 
 **What the cell found.** An audit of every entry for an instant that can stay due without being
-spent: the foreground-program cadence (booked for every pane of every tab, spent only by the
-active tab's publish — the owner's blocks), the three menus' matured rests, a bufferless glance
-card, the autosave and storage watch while a quit holds the storage worker, a standing
-credential behind the strip's gate. Each is now spent on the turn it comes due, under the
-predicate that books it (`docs/DESIGN.md`, 2026-10-20). An entry that goes stale later is
+spent: the foreground-program cadence (booked for every pane of every tab, spent by no turn —
+it is a gate on a pane's published output — the owner's blocks), the three menus' matured
+rests, a bufferless glance card, the autosave and storage watch while a quit holds the storage
+worker, a standing credential behind the strip's gate. The cadence is no longer booked (round
+3: the publish asks it as before, so nothing is probed that was not); each other is now spent on
+the turn it comes due, under the predicate that books it (`docs/DESIGN.md`, 2026-10-20). An entry that goes stale later is
 reported by the cell with its name; nothing is filtered.

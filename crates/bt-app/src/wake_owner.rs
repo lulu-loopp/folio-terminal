@@ -31,6 +31,9 @@ pub(crate) enum WakeOwner {
     ResizeFinish,
     SynchronizedUpdate,
     LiveStability,
+    /// **Booked by no fold since round 3** (T-WINDOW-THREAD-UNDER-LOAD): the foreground-program
+    /// cadence is a gate on a pane's published output, not a clock a turn spends. The name stays,
+    /// so the instrumentation commit's lines (`source=ForegroundProgram`) read the same.
     ForegroundProgram,
     PtyCoalesce,
     AttentionCredential,

@@ -12278,38 +12278,6 @@ fn dispatch_tab_decoration_tasks(
     disabled
 }
 
-/// **Every pane's foreground-program cadence, spent on the turn it comes due**
-/// (T-WINDOW-THREAD-UNDER-LOAD).
-///
-/// The window's wake fold books [`foreground_program_deadline`] over every leaf of every tab, and
-/// the only spender used to be [`dispatch_tab_decoration_tasks`] — the active tab's panes, on a
-/// published terminal frame. A frame candidate in a background tab, or in the tab on screen while
-/// nothing is printing, therefore kept its periodic instant after it had passed: every turn
-/// handed `ControlFlow::WaitUntil` the same instant in the past, winit returned at once, and the
-/// loop turned some thirteen thousand times a second until something published the pane's tab.
-/// The clock is spent here, on the turn, for every pane the fold reads it from. The request is
-/// the same one the publish makes, so a pane asked here is not asked twice: the cadence moves on.
-fn spend_foreground_program_cadences(
-    window: WindowId,
-    tabs: &mut [TabState],
-    requests: &mpsc::Sender<foreground_program::Request>,
-    now: Instant,
-) {
-    for tab in tabs {
-        let tab_id = tab.id;
-        for (seat, leaf) in tab.leaves_mut() {
-            let address = ShellAddress {
-                window,
-                leaf: LeafId {
-                    tab: tab_id,
-                    seat: *seat,
-                },
-            };
-            foreground_program::request(leaf, address, requests, now);
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 struct DpiSnapshot {
     winit_scale: f64,
@@ -30224,13 +30192,6 @@ fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
     tabs.iter()
         .flat_map(|tab| tab.leaves())
         .filter_map(|(_, leaf)| leaf.attention_clock.deadline())
-        .min()
-}
-
-fn foreground_program_deadline(tabs: &[TabState]) -> Option<Instant> {
-    tabs.iter()
-        .flat_map(TabState::leaves)
-        .filter_map(|(_, leaf)| foreground_program::deadline(leaf))
         .min()
 }
 

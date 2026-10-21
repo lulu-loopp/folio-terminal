@@ -37,19 +37,24 @@ fn turn(folio: &mut HeadlessFolio, now: Instant) -> Option<(WakeOwner, Instant)>
         .expect("the turn is answered")
 }
 
-/// RED — **a frame candidate's foreground-program cadence is spent on the turn it comes due, in a
-/// tab that is not on screen.**
+/// RED — **a frame candidate's foreground-program cadence books no wake, and a turn asks the
+/// worker nothing for a pane that publishes nothing.**
 ///
-/// The fold books the cadence for every pane of every tab; the only spender was the publish of
-/// the active tab's frame. A pane whose capture held a frame candidate (an agent's boxed TUI) in a
-/// background tab kept its five-second instant after it passed, and the loop spun on it until the
-/// tab came forward. This is the entry the owner's blocks fit: a constant instant, presents still
-/// happening in the tab on screen.
+/// The cadence is a gate on the publish of a pane's own output: `dispatch_tab_decoration_tasks`
+/// asks `Cadence::should_request` with the publish's instant. The fold booked its five-second
+/// instant for every pane of every tab, and no turn spends it, so a frame candidate (an agent's
+/// boxed TUI) in a background tab left that instant in the past and the loop spun on it until
+/// the tab published — the entry the owner's blocks fit. Two halves, both held: the turn at the
+/// due instant books nothing stale, and the pane's cadence is exactly where it was — no request
+/// minted for a pane in a tab that is not on screen, as shipped (a request mints by moving the
+/// cadence's next instant on; this fixture's pane has no shell, so nothing would leave the
+/// window either way, and the cadence is the counter).
 ///
-/// MUTATION: drop `spend_foreground_program_cadences` from `Runtime::turn` — the turn hands the
-/// loop `ForegroundProgram` at the instant it was due.
+/// MUTATIONS: book `foreground_program::deadline` over every leaf in `Runtime::turn`'s fold — the
+/// turn hands the loop `ForegroundProgram`; ask `foreground_program::request` for every pane on
+/// every turn — the background pane's cadence moves on.
 #[test]
-fn a_background_frame_candidates_cadence_is_spent_on_the_turn_it_comes_due() {
+fn a_background_frame_candidates_cadence_books_no_wake_and_asks_nothing() {
     let mut framed = tab_holding(leaf_saying("ab │ cd\r\nab │ cd\r\nab │ cd\r\n"));
     framed.id = TabId(2);
     let front = tab_holding(leaf_saying("plain\r\n"));
@@ -90,17 +95,20 @@ fn a_background_frame_candidates_cadence_is_spent_on_the_turn_it_comes_due() {
     // The window's own clocks, without the application's: the turn runs five seconds ahead of
     // the real clock the heartbeat's allowance is taken on, and the web engine's warm-up — a
     // deferrable unit, asked only while that allowance lasts — would be judged against an
-    // allowance from another instant. The cadence is spent on every window's turn.
+    // allowance from another instant.
     let wake = folio
         .runtime()
         .turn(due, false)
         .expect("the turn is answered");
     books_nothing_due(wake, due);
-    let next = folio.window.tabs[1]
+    let after = folio.window.tabs[1]
         .leaves()
-        .find_map(|(_, leaf)| foreground_program::deadline(leaf))
-        .expect("the candidate is still a candidate");
-    assert!(next > due, "the cadence moved on to its next observation");
+        .find_map(|(_, leaf)| foreground_program::deadline(leaf));
+    assert_eq!(
+        after,
+        Some(due),
+        "a turn mints no request for a pane in a tab that is not on screen: its cadence is          where it was"
+    );
 }
 
 /// RED — **a pane menu's matured rest is spent when the pointer has left the window.**
@@ -139,10 +147,14 @@ fn a_pane_menus_matured_rest_is_spent_with_the_pointer_gone() {
     books_nothing_due(turn(&mut folio, due), due);
 }
 
-/// RED — **a terminal menu's matured rest is spent when its child cannot open.**
+/// RED — **a terminal menu's matured rest is spent when its child cannot open** — a class guard
+/// over a synthetic state.
 ///
 /// `set_term_submenu(true)` declines a menu whose pane is not alone on the stage (`lone` false),
-/// and the hold that asked it was left standing.
+/// and the hold that asked it was left standing. The product cannot reach that pairing today —
+/// the `Split with` heading is drawn only when `lone` — so the state is set by hand: the guard
+/// is that `advance_term_menu` spends a matured hold whatever its roads do next, as the pane
+/// menu's and the tab menu's do on roads the product does reach.
 ///
 /// MUTATION: drop the `menu.submenu_hold_until = None` in `advance_term_menu`.
 #[test]

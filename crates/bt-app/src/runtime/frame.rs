@@ -8,11 +8,10 @@ use crate::{
     FrameTraces, GhostFace, HyperlinkActivation, PaneDraw, PointerTarget, PresentIntent, Runtime,
     STARTUP_PTY_POLL_INTERVAL, SearchRefresh, TabPress, a_bare_redraw_still_owes_a_present,
     advance_periodic_deadline, apply_hover_marks, attention_ledger_deadline, chrome_over,
-    chrome_tick_reuses_picture, dispatch_tab_decoration_tasks, earliest_named_deadline, files,
-    foreground_program_deadline, git, hang_watch, hyperlink_activation, ime_outbound,
-    mark_leaf_painted, math_copy_window, present_diagnostics, present_gate, preview,
-    pty_drain_says_nothing_new, pty_frame_is_unchanged, sample_window_place, seats, settings,
-    settling, spend_foreground_program_cadences, startup_poll_delay, take_math_worker_notice,
+    chrome_tick_reuses_picture, dispatch_tab_decoration_tasks, earliest_named_deadline, files, git,
+    hang_watch, hyperlink_activation, ime_outbound, mark_leaf_painted, math_copy_window,
+    present_diagnostics, present_gate, preview, pty_drain_says_nothing_new, pty_frame_is_unchanged,
+    sample_window_place, seats, settings, settling, startup_poll_delay, take_math_worker_notice,
     toast, trace_sink, trace_unchanged_present, update, webhost,
 };
 use anyhow::Context;
@@ -1807,12 +1806,6 @@ impl<B: Backend> Runtime<'_, B> {
         // `ProcessFailed` does not arrive at all and `BrowserProcessExited`
         // arrived late in one of eight measured shutdowns and never in another.
         self.advance_web_page(now)?;
-        // **The foreground-program cadence of every pane**, which the fold below books for every
-        // leaf of every tab and which nothing else spends on a turn the window publishes no frame
-        // for (T-WINDOW-THREAD-UNDER-LOAD; see [`spend_foreground_program_cadences`]).
-        let window = self.window_id();
-        let requests = self.app.decoration_senders().foreground;
-        spend_foreground_program_cadences(window, &mut self.window.tabs, &requests, now);
         // Ahead of the strip's own animation tick: paying the press's promise
         // activates a tab, and the strip that is redrawn afterwards should be
         // the one the switch produced.
@@ -2194,7 +2187,7 @@ impl<B: Backend> Runtime<'_, B> {
             && self.window.settings.category() == settings::SettingsCategory::About)
             .then(|| update::last_checked_deadline(now, update::unix_epoch_ms()))
             .flatten();
-        const DEADLINE_OWNERS: [WakeOwner; 57] = [
+        const DEADLINE_OWNERS: [WakeOwner; 56] = [
             WakeOwner::StartupPoll,
             WakeOwner::ImeCursor,
             WakeOwner::ShellCaret,
@@ -2206,7 +2199,6 @@ impl<B: Backend> Runtime<'_, B> {
             WakeOwner::ResizeFinish,
             WakeOwner::SynchronizedUpdate,
             WakeOwner::LiveStability,
-            WakeOwner::ForegroundProgram,
             WakeOwner::PtyCoalesce,
             WakeOwner::AttentionCredential,
             WakeOwner::Tooltip,
@@ -2283,7 +2275,12 @@ impl<B: Backend> Runtime<'_, B> {
             resize_finish_deadline,
             synchronized_update_deadline,
             live_stability_deadline,
-            foreground_program_deadline(&self.window.tabs),
+            // **No foreground-program cadence** (T-WINDOW-THREAD-UNDER-LOAD round 3). The cadence
+            // is a gate on the publish of a pane's own output (`dispatch_tab_decoration_tasks`
+            // asks `Cadence::should_request` with the publish's instant), and no turn spends it:
+            // booked here, a frame candidate's five-second instant — in a background tab, or in
+            // the tab on screen while nothing printed — came due on a turn that probed nothing,
+            // stayed in the past, and the loop spun on it until that tab published.
             // **The bounded wait for the rest of a burst**, and the wake that keeps
             // [`coalesce::Pending`]'s invariant true: a deferred publication is never `Some`
             // without this line booking the turn that pays it. A window whose panes are not
