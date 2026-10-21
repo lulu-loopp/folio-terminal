@@ -99,8 +99,12 @@ Invoke-Vmrun -Door $door -Step 'revert' -Verb 'revertToSnapshot' -Arguments @($S
 Invoke-Vmrun -Door $door -Step 'start' -Verb 'start' -Arguments @('nogui') | Out-Null
 Wait-GuestReady -Door $door
 try {
-    foreach ($folder in @($GuestHome, $guestLoad, $guestCandidate)) {
-        Invoke-Vmrun -Door $door -Step 'mkdir' -Verb 'createDirectoryInGuest' -Arguments @($folder) -InGuest -Tolerant | Out-Null
+    # Idempotent and in any guest language: `cmd`'s own `mkdir` makes the intermediate folders,
+    # and `if not exist` leaves a folder the snapshot already has alone (createDirectoryInGuest
+    # refuses an existing one with a localised error).
+    foreach ($folder in @($guestLoad, $guestCandidate)) {
+        Invoke-Vmrun -Door $door -Step 'mkdir' -Verb 'runProgramInGuest' -InGuest `
+            -Arguments @('C:\Windows\System32\cmd.exe', "/c if not exist $folder mkdir $folder") | Out-Null
     }
     foreach ($script in $guestScripts) {
         Invoke-Vmrun -Door $door -Step 'copy in' -Verb 'copyFileFromHostToGuest' -InGuest `

@@ -47,7 +47,7 @@ function Slice([string] $Path, [long] $From, [long] $To) {
 }
 function Quantiles([double[]] $Values) {
     if ($Values.Count -eq 0) { return '-' }
-    $sorted = $Values | Sort-Object
+    $sorted = @($Values | Sort-Object)
     $at = { param($q) $sorted[[Math]::Min($sorted.Count - 1, [int][Math]::Floor($q * $sorted.Count))] }
     return 'n={0} p50={1} p95={2} max={3}' -f $sorted.Count, (& $at 0.5), (& $at 0.95), $sorted[-1]
 }
@@ -76,7 +76,7 @@ for ($i = 0; $i -lt 3; $i++) {
     $out.Add(('{0,-9} {1,5:N0} s  turns/s>={2}  stale turns={3} max_us={4} sources={5}  delay max_us={6}' -f `
                 $from.Name, $seconds, $rate, $staleTurns, $staleMax, ((@($sources.Keys) | Sort-Object) -join ',' | ForEach-Object { if ($_) { $_ } else { '-' } }), $delayMax))
     $out.Add(('          presents {0}  cadence(since_previous_us) {1}' -f $presents.Count, (Quantiles $cadence)))
-    $bySource = $presents | Group-Object { if ($_ -match ' source=(\S+)') { $Matches[1] } else { '?' } }
+    $bySource = @($presents | Group-Object { if ($_ -match ' source=(\S+)') { $Matches[1] } else { '?' } })
     foreach ($group in $bySource) {
         $latency = [double[]]@($group.Group | ForEach-Object { if ($_ -match 'event_to_present_us=(\d+)') { [double]$Matches[1] } })
         $out.Add(('          source={0,-12} event_to_present_us {1}' -f $group.Name, (Quantiles $latency)))

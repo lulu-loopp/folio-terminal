@@ -64,8 +64,22 @@ function Window($procId) {
   }
   return [IntPtr]::Zero
 }
+# Foreground first, as ui-probe's own law asks before a key is sent. A window Windows opened
+# without the foreground (the driver runs from a hidden console the user never touched) refuses
+# the request; it is taken the way a person takes it — a real click at window+(60,-60), a point
+# inside the pane, made only when that pixel is Folio's (keys.ps1's H-8) — and asked again.
 function Front($h) {
-  if ([Probe]::BringToFront($h)) { return $true }
+  for ($try = 1; $try -le 4; $try++) {
+    if ([Probe]::BringToFront($h)) { return $true }
+    $r = New-Object PRECT
+    [void][Probe]::GetWindowRect($h, [ref]$r)
+    $x = $r.L + 60; $y = $r.B - 60
+    if ([Probe]::PointBelongsTo($x, $y, $folio.Id)) {
+      [Probe]::Click($x, $y)
+      Start-Sleep -Milliseconds 400
+    }
+  }
+  if ([Probe]::GetForegroundWindow() -eq $h) { return $true }
   Say 'no foreground: nothing sent'
   return $false
 }
