@@ -279,7 +279,7 @@ crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::reco
 crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::stable_executable	Ambiguous	text	2	
 crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::translocated	Ambiguous	any	1	
 crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::translocated	Ambiguous	as_os_str	1	
-crates/bt-app/src/attention_trace.rs	bt-app crate::attention_trace::GATE	Ambiguous	as_deref	1	
+crates/bt-app/src/attention_trace.rs	bt-app crate::attention_trace::GATE	Ambiguous	as_deref	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	as_str	3	
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	as_u64	1	
 crates/bt-app/src/attention_wire.rs	bt-app crate::attention_wire::Message::decode	Ambiguous	get	4	
@@ -354,7 +354,7 @@ crates/bt-app/src/attention_words.rs	bt-app crate::attention_words::shortened	Am
 crates/bt-app/src/attention_words.rs	bt-app crate::attention_words::shortened	Ambiguous	take	1	
 crates/bt-app/src/attention_words.rs	bt-app crate::attention_words::transcript_lede	Ambiguous	len	1	
 crates/bt-app/src/attention_words.rs	bt-app crate::attention_words::transcript_lede	Ambiguous	ok	2	
-crates/bt-app/src/card_trace.rs	bt-app crate::card_trace::GATE	Ambiguous	as_deref	1	
+crates/bt-app/src/card_trace.rs	bt-app crate::card_trace::GATE	Ambiguous	as_deref	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/card_trace.rs	bt-app crate::card_trace::row_word	Ambiguous	enumerate	1	
 crates/bt-app/src/card_trace.rs	bt-app crate::card_trace::row_word	Ambiguous	is_control	1	
 crates/bt-app/src/cardhint.rs	bt-app crate::cardhint::CardHintHost::nudge_rows	Ambiguous	as_secs_f32	1	
@@ -674,13 +674,13 @@ crates/bt-app/src/document_request.rs	bt-app crate::document_request::retire	Amb
 crates/bt-app/src/document_request.rs	bt-app crate::document_request::serve_read	Dynamic	(value)	1	
 crates/bt-app/src/document_request.rs	bt-app crate::document_request::settle_exchange	Dynamic	between	1	
 crates/bt-app/src/document_request.rs	bt-app crate::document_request::take_away	Ambiguous	rev	1	
-crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	collect	1	
-crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	starts_with	1	
-crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	to_ascii_uppercase	1	
-crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	to_string_lossy	1	
-crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Ambiguous	collect	1	
-crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Ambiguous	map	1	
-crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::installed	Ambiguous	unwrap_or	1	
+crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	collect	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	starts_with	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	to_ascii_uppercase	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	to_string_lossy	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Ambiguous	collect	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Ambiguous	map	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::installed	Ambiguous	unwrap_or	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::cap_controlled_failure	Ambiguous	by_ref	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::cap_controlled_failure	Ambiguous	collect	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::cap_controlled_failure	Ambiguous	is_some	1	
@@ -1293,7 +1293,7 @@ crates/bt-app/src/git_watch.rs	bt-app crate::git_watch::listener	Ambiguous	inser
 crates/bt-app/src/git_watch.rs	bt-app crate::git_watch::listener	Ambiguous	send_event	1	
 crates/bt-app/src/git_watch.rs	bt-app crate::git_watch::lock	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/git_watch.rs	bt-app crate::git_watch::paths_of	Ambiguous	push	1	
-crates/bt-app/src/glyph_trace.rs	bt-app crate::glyph_trace::GATE	Ambiguous	as_deref	1	
+crates/bt-app/src/glyph_trace.rs	bt-app crate::glyph_trace::GATE	Ambiguous	as_deref	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::<Abandoned as Owed<HandoffId>>::sink	Dynamic	(value)	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::Duty::reply	Ambiguous	text	3	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::Duty::reply	Ambiguous	to_owned	3	
@@ -1518,7 +1518,7 @@ crates/bt-app/src/ime_outbound.rs	bt-app crate::ime_outbound::input_line	Ambiguo
 crates/bt-app/src/ime_report.rs	bt-app crate::ime_report::Report::line	Dynamic	stamp	7	
 crates/bt-app/src/ime_report.rs	bt-app crate::ime_report::Report::pairing	Ambiguous	then_some	1	
 crates/bt-app/src/ime_report.rs	bt-app crate::ime_report::Report::pairing	Dynamic	facts	1	
-crates/bt-app/src/ime_report.rs	bt-app crate::ime_report::TRACE	Ambiguous	as_deref	1	
+crates/bt-app/src/ime_report.rs	bt-app crate::ime_report::TRACE	Ambiguous	as_deref	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/ime_report.rs	bt-app crate::ime_report::now_ms	Ambiguous	as_millis	1	
 crates/bt-app/src/ime_report.rs	bt-app crate::ime_report::now_ms	Ambiguous	elapsed	1	
 crates/bt-app/src/ime_report.rs	bt-app crate::ime_report::printable_latin	Ambiguous	all	1	
@@ -2306,7 +2306,7 @@ crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Ambiguous	append	1
 crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Ambiguous	open	1	
 crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Ambiguous	write_all	1	
 crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Dynamic	ink	3	
-crates/bt-app/src/main.rs	bt-app crate::dump_focus_thumb_frame	Ambiguous	as_deref	1	
+crates/bt-app/src/main.rs	bt-app crate::dump_focus_thumb_frame	Ambiguous	as_deref	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Ambiguous	append	1	
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Ambiguous	open	1	
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Ambiguous	write_all	1	
@@ -2630,7 +2630,7 @@ crates/bt-app/src/marks.rs	bt-app crate::marks::view_box_extent	Ambiguous	parse	
 crates/bt-app/src/marks.rs	bt-app crate::marks::view_box_extent	Ambiguous	skip	1	
 crates/bt-app/src/menubar.rs	bt-app crate::menubar::entry	Ambiguous	text	1	
 crates/bt-app/src/menubar.rs	bt-app crate::menubar::verb_entry	Ambiguous	and_then	1	
-crates/bt-app/src/mouse_trace.rs	bt-app crate::mouse_trace::GATE	Ambiguous	as_deref	1	
+crates/bt-app/src/mouse_trace.rs	bt-app crate::mouse_trace::GATE	Ambiguous	as_deref	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/mouse_trace.rs	bt-app crate::mouse_trace::WheelAim::line	Ambiguous	unwrap_or	1	
 crates/bt-app/src/mouse_trace.rs	bt-app crate::mouse_trace::WheelAim::line	Dynamic	carry	2	
 crates/bt-app/src/mouse_trace.rs	bt-app crate::mouse_trace::window_line	Dynamic	message	1	
@@ -3141,7 +3141,7 @@ crates/bt-app/src/preview_text.rs	bt-app crate::preview_text::LineIndex::replace
 crates/bt-app/src/preview_text.rs	bt-app crate::preview_text::LineIndex::replace	Ambiguous	count	1	
 crates/bt-app/src/preview_text.rs	bt-app crate::preview_text::LineIndex::replace	Ambiguous	enumerate	1	
 crates/bt-app/src/preview_text.rs	bt-app crate::preview_text::LineIndex::replace	Ambiguous	map	2	
-crates/bt-app/src/preview_trace.rs	bt-app crate::preview_trace::GATE	Ambiguous	as_deref	1	
+crates/bt-app/src/preview_trace.rs	bt-app crate::preview_trace::GATE	Ambiguous	as_deref	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/preview_trace.rs	bt-app crate::preview_trace::ReflowCause::names	Ambiguous	collect	1	
 crates/bt-app/src/preview_trace.rs	bt-app crate::preview_trace::ReflowCause::names	Ambiguous	filter_map	1	
 crates/bt-app/src/preview_trace.rs	bt-app crate::preview_trace::ReflowCause::names	Ambiguous	then_some	1	
@@ -5969,7 +5969,7 @@ crates/bt-app/src/trace.rs	bt-app crate::trace::TraceFile::append	Ambiguous	unwr
 crates/bt-app/src/trace.rs	bt-app crate::trace::TraceFile::open	Ambiguous	append	1	
 crates/bt-app/src/trace.rs	bt-app crate::trace::TraceFile::open	Ambiguous	open	1	
 crates/bt-app/src/trace.rs	bt-app crate::trace::emit	Dynamic	message	1	
-crates/bt-app/src/trace.rs	bt-app crate::trace::installed	Ambiguous	and_then	1	
+crates/bt-app/src/trace.rs	bt-app crate::trace::installed	Ambiguous	and_then	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::Queue::close	Ambiguous	into_inner	1	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::Queue::close	Ambiguous	take	2	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::Queue::offer	Ambiguous	into_inner	1	
@@ -6828,7 +6828,7 @@ crates/bt-app/src/web_thumb.rs	bt-app crate::web_thumb::shrink	Ambiguous	height	
 crates/bt-app/src/web_thumb.rs	bt-app crate::web_thumb::shrink	Ambiguous	ok	1	
 crates/bt-app/src/web_thumb.rs	bt-app crate::web_thumb::shrink	Ambiguous	to_rgba8	2	
 crates/bt-app/src/web_thumb.rs	bt-app crate::web_thumb::shrink	Ambiguous	width	1	
-crates/bt-app/src/web_trace.rs	bt-app crate::web_trace::GATE	Ambiguous	as_deref	1	
+crates/bt-app/src/web_trace.rs	bt-app crate::web_trace::GATE	Ambiguous	as_deref	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/web_warmup.rs	bt-app crate::web_warmup::WebWarmup::turn	Dynamic	say	2	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::AddressRefusal::text	Ambiguous	text	1	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::WebFault::detail	Ambiguous	then	2	
@@ -8156,7 +8156,7 @@ crates/bt-platform/src/hang.rs	bt-platform crate::hang::system_crash_reports_dir
 crates/bt-platform/src/hang.rs	bt-platform crate::hang::system_crash_reports_directory	Ambiguous	to_bytes	1	
 crates/bt-platform/src/hang.rs	bt-platform crate::hang::system_crash_reports_directory	Ambiguous	to_vec	1	
 crates/bt-platform/src/hotkey.rs	bt-platform crate::hotkey::SummonTrace::opened	Ambiguous	append	1	
-crates/bt-platform/src/hotkey.rs	bt-platform crate::hotkey::SummonTrace::opened	Ambiguous	display	1	
+crates/bt-platform/src/hotkey.rs	bt-platform crate::hotkey::SummonTrace::opened	Ambiguous	display	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/hotkey.rs	bt-platform crate::hotkey::SummonTrace::opened	Ambiguous	flush	1	
 crates/bt-platform/src/hotkey.rs	bt-platform crate::hotkey::SummonTrace::opened	Ambiguous	open	1	
 crates/bt-platform/src/hotkey.rs	bt-platform crate::hotkey::claims	Ambiguous	unwrap_or_else	1	
@@ -8232,7 +8232,7 @@ crates/bt-platform/src/https_download.rs	bt-platform crate::https_download::long
 crates/bt-platform/src/ime_observation.rs	bt-platform crate::ime_observation::snapshot	Ambiguous	as_bool	3	
 crates/bt-platform/src/ime_observation.rs	bt-platform crate::ime_observation::snapshot	Ambiguous	code	1	
 crates/bt-platform/src/ime_observation.rs	bt-platform crate::ime_observation::snapshot	Ambiguous	is_null	2	
-crates/bt-platform/src/ime_trace.rs	bt-platform crate::ime_trace::enabled	Ambiguous	is_some	1	
+crates/bt-platform/src/ime_trace.rs	bt-platform crate::ime_trace::enabled	Ambiguous	is_some	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/ime_trace.rs	bt-platform crate::ime_trace::line	Dynamic	message	1	
 crates/bt-platform/src/ime_trace.rs	bt-platform crate::ime_trace::line	Dynamic	sink	1	
 crates/bt-platform/src/install_evidence.rs	bt-platform crate::install_evidence::imp::account_of	Ambiguous	cast	2	
@@ -10307,7 +10307,7 @@ crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn_interactive_with	Ambigu
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn_interactive_with	Ambiguous	fold	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn_interactive_with	Ambiguous	iter	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn_interactive_with	Ambiguous	map_err	1	
-crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn_interactive_with	Ambiguous	recorded	1	
+crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn_interactive_with	Ambiguous	recorded	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; PtyCommand::recorded on a command the builder chain makes, a receiver the grammar does not type; it opens no door
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn_interactive_with	Ambiguous	to_string	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn_interactive_with	Ambiguous	working_directory	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn_interactive_with	Dynamic	fallback_args	2	
@@ -10906,7 +10906,7 @@ crates/bt-term/src/cell_capture.rs	bt-term crate::cell_capture::captured_row_fin
 crates/bt-term/src/cell_capture.rs	bt-term crate::cell_capture::captured_row_is_blank	Ambiguous	all	1	
 crates/bt-term/src/command_marks.rs	bt-term crate::command_marks::CommandMark::anchors	Ambiguous	collect	1	
 crates/bt-term/src/command_marks.rs	bt-term crate::command_marks::CommandMark::own_anchors	Ambiguous	collect	1	
-crates/bt-term/src/host.rs	bt-term crate::host::diagnostics	Ambiguous	unwrap_or	1	
+crates/bt-term/src/host.rs	bt-term crate::host::diagnostics	Ambiguous	unwrap_or	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-term/src/host.rs	bt-term crate::host::install_pool_thread_start	Ambiguous	is_ok	1	
 crates/bt-term/src/host.rs	bt-term crate::host::install_svg_rasterizer	Ambiguous	expect	1	
 crates/bt-term/src/host.rs	bt-term crate::host::local_host_names	Ambiguous	expect	1	
@@ -11949,7 +11949,7 @@ crates/bt-viewport/src/lib.rs	bt-viewport crate::search_spans	Dynamic	class	2
 crates/bt-viewport/src/lib.rs	bt-viewport crate::selection_spans	Ambiguous	enumerate	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::selection_spans	Dynamic	selected	2	
 crates/bt-viewport/src/trace.rs	bt-viewport crate::trace::line	Dynamic	writer	1	
-crates/bt-viewport/src/trace.rs	bt-viewport crate::trace::perf	Ambiguous	unwrap_or	1	
+crates/bt-viewport/src/trace.rs	bt-viewport crate::trace::perf	Ambiguous	unwrap_or	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-winres/src/digest.rs	bt-winres crate::digest::Sha256::finish	Ambiguous	copy_from_slice	1	
 crates/bt-winres/src/digest.rs	bt-winres crate::digest::Sha256::finish	Ambiguous	extend_from_slice	1	
 crates/bt-winres/src/digest.rs	bt-winres crate::digest::Sha256::finish	Ambiguous	resize	1	
