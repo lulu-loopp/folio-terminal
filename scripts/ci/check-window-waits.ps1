@@ -363,12 +363,12 @@ try {
 
 # The `# rows` section of a registry text: row -> (status, disposition).
 function Read-RegistryRows([string[]]$lines) {
-    $rows = [ordered]@{}
+    $rows = New-OrdinalMap
     $inside = $false
     $header = $false
     foreach ($line in $lines) {
         if ($line.StartsWith("##")) { continue }
-        if ($line.StartsWith("# ")) { $inside = ($line -eq "# rows"); continue }
+        if ($line.StartsWith("# ")) { $inside = ($line -ceq "# rows"); continue }
         if (-not $inside -or $line.Length -eq 0) { continue }
         if (-not $header) { $header = $true; continue }
         $cells = $line -split "`t"
@@ -382,15 +382,15 @@ $designText = [IO.File]::ReadAllText((Join-Path $repo "docs/DESIGN.md"))
 foreach ($row in $rowsNow.Keys) {
     $current = $rowsNow[$row]
     $previous = $rowsThen[$row]
-    if ($current.status -eq "pending" -and -not ($previous -and $previous.status -eq "pending")) {
+    if ($current.status -ceq "pending" -and -not ($previous -and $previous.status -ceq "pending")) {
         $failures += "[ruling] registry row $row is 'pending' and was not pending at the merge base: the rows pending a ruling only shrink; a new row carries its ruling"
     }
-    if (-not $previous -and $current.status -ne "pending") {
-        if ($current.disposition -notmatch 'DESIGN\.md`?, (20\d\d-\d\d-\d\d)') {
+    if (-not $previous -and $current.status -cne "pending") {
+        if ($current.disposition -cnotmatch 'DESIGN\.md`?, (20[0-9][0-9]-[0-9][0-9]-[0-9][0-9])') {
             $failures += "[ruling] registry row $row is new and its disposition cites no dated DESIGN.md ruling"
         } else {
             $date = $Matches[1]
-            if ($designText -notmatch "(?m)^### $([regex]::Escape($date)) —") {
+            if ($designText -cnotmatch "(?m)^### $([regex]::Escape($date)) —") {
                 $failures += "[ruling] registry row $row cites DESIGN.md $date, but no dated heading exists"
             }
         }
@@ -452,12 +452,12 @@ foreach ($name in @("counted-only", "emergency")) {
 # Its names are its own (`$repairsNow`, `$repairsBefore`, `$repairsAdded`): `$now`, `$before`
 # and `$grown` are the bare-site inventory's, read again after this block.
 function Read-Completions([string[]]$lines) {
-    $rows = [ordered]@{}
+    $rows = New-OrdinalMap
     $inside = $false
     $header = $false
     foreach ($line in $lines) {
         if ($line.StartsWith("##")) { continue }
-        if ($line.StartsWith("# ")) { $inside = ($line -eq "# completions"); continue }
+        if ($line.StartsWith("# ")) { $inside = ($line -ceq "# completions"); continue }
         if (-not $inside -or $line.Length -eq 0) { continue }
         if (-not $header) { $header = $true; continue }
         $cells = $line -split "`t"
@@ -466,7 +466,7 @@ function Read-Completions([string[]]$lines) {
     return $rows
 }
 function Get-Repairs([string]$status) {
-    if ($status -eq "conforms" -or $status -eq "owner-thread") { return @() }
+    if ($status -ceq "conforms" -or $status -ceq "owner-thread") { return @() }
     return @($status -split ", ")
 }
 $ledgerNow = Read-Completions ([IO.File]::ReadAllLines((Join-Path $repo $registry)))
@@ -483,7 +483,7 @@ if ($ledgerThen.Count -eq 0) {
             continue
         }
         $repairsBefore = Get-Repairs $ledgerThen[$class]
-        $repairsAdded = @($repairsNow | Where-Object { $repairsBefore -notcontains $_ })
+        $repairsAdded = @($repairsNow | Where-Object { $repairsBefore -cnotcontains $_ })
         if ($repairsAdded.Count -gt 0) {
             $failures += "[completions] '$class' was '$($ledgerThen[$class])' at the merge base and is '$($ledgerNow[$class])': a status's repairs only shrink, to conforms ($($repairsAdded -join ', ') added)"
         }
@@ -522,7 +522,7 @@ if (-not $startsAtBase) {
 } else {
     $startsBefore = Read-DoorStarts ($startsText -split "`r?`n")
     foreach ($pair in $startsNow) {
-        if ($startsBefore -notcontains $pair) {
+        if ($startsBefore -cnotcontains $pair) {
             $failures += "[door-starts] $startsRelative adds '$($pair -replace "`t", ' -> ')': a door reaches its thread by a call path, and this list only shrinks"
         }
     }
@@ -546,7 +546,7 @@ if (-not $uncalledAtBase) {
 } else {
     $uncalledBefore = @(Read-DoorStarts ($uncalledText -split "`r?`n") | ForEach-Object { ($_ -split "`t")[0] })
     foreach ($body in $uncalledNow) {
-        if ($uncalledBefore -notcontains $body) {
+        if ($uncalledBefore -cnotcontains $body) {
             $failures += "[uncalled] $uncalledRelative adds '$body': a worker's door body has a door, and this list only shrinks"
         }
     }
