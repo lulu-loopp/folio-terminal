@@ -1383,12 +1383,14 @@ crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting:
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::call	Ambiguous	iter	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::call	Ambiguous	position	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	and_then	1	
-crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	checked_sub	1	
+crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	checked_sub	2	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	get	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	ok	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::offer	Ambiguous	checked_sub	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::offer	Ambiguous	len	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::offer	Ambiguous	push	1	
+crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::parked	Ambiguous	checked_sub	1	
+crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::parked	Ambiguous	is_some_and	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::summary	Ambiguous	iter	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::summary	Ambiguous	label	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::summary	Ambiguous	name	1	
@@ -1402,6 +1404,7 @@ crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting:
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::TurnAllowance::from_frames	Ambiguous	map	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::TurnAllowance::from_frames	Ambiguous	map_or_else	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::TurnAllowance::from_frames	Ambiguous	saturating_sub	1	
+crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::owner_of	Ambiguous	and_then	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::said	Ambiguous	collect	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::said	Ambiguous	line	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::said	Ambiguous	map	1	
@@ -1871,6 +1874,7 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::about_to_wait_inner	Ambiguous	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::about_to_wait_inner	Ambiguous	is_empty	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::about_to_wait_inner	Ambiguous	is_none_or	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::about_to_wait_inner	Ambiguous	is_some_and	1	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::about_to_wait_inner	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::announce_recovered_edits	Ambiguous	find_map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::announce_recovered_edits	Ambiguous	then_some	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::announce_recovered_edits	Dynamic	oldest_standing	1	
@@ -4133,6 +4137,7 @@ crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::turn	A
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::turn	Ambiguous	flatten	11	
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::turn	Ambiguous	is_some	1	
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::turn	Ambiguous	map	2	
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::turn	Ambiguous	name	1	
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::turn	Ambiguous	then	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::apply_git_results	Ambiguous	accept	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::apply_git_results	Ambiguous	as_path	2	
@@ -6831,6 +6836,9 @@ crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Ambiguous	te
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Ambiguous	then_some	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Ambiguous	to_owned	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Dynamic	clock_label	3	
+crates/bt-app/src/wake_owner.rs	bt-app crate::wake_owner::WakeOwner::from_byte	Ambiguous	get	1	
+crates/bt-app/src/wake_owner.rs	bt-app crate::wake_owner::earliest_wake	Ambiguous	flatten	1	
+crates/bt-app/src/wake_owner.rs	bt-app crate::wake_owner::earliest_wake	Ambiguous	min_by_key	1	
 crates/bt-app/src/watch_steward.rs	bt-app crate::watch_steward::<EarHandle as std::fmt::Debug>::fmt	Ambiguous	field	1	
 crates/bt-app/src/watch_steward.rs	bt-app crate::watch_steward::<EarHandle as std::fmt::Debug>::fmt	Ambiguous	finish	1	
 crates/bt-app/src/watch_steward.rs	bt-app crate::watch_steward::EarHandle::take_reports	Ambiguous	clone	1	
