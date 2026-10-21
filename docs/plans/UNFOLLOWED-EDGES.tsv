@@ -4372,6 +4372,7 @@ crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::cap
 crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::capture::Runtime::capture_where_mut	Dynamic	predicate	1	
 crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::capture::cancel_then_route	Dynamic	cancel_owner	1	
 crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::capture::cancel_then_route	Dynamic	route_press	1	
+crates/bt-app/src/runtime/pointer/mod.rs	bt-app crate::runtime::pointer::Runtime::page_under_the_hand	Dynamic	inside	1	2026-10-21: T-POINTER-CAPTURE cut 6; moved unchanged out of `web_page_at`: `inside`, a local closure over a rectangle, which calls no door
 crates/bt-app/src/runtime/pointer/mod.rs	bt-app crate::runtime::pointer::Runtime::plane_at	Ambiguous	map	1	
 crates/bt-app/src/runtime/pointer/mod.rs	bt-app crate::runtime::pointer::Runtime::plane_at	Ambiguous	or_else	2	
 crates/bt-app/src/runtime/pointer/release.rs	bt-app crate::runtime::pointer::release::FolioApp::capture_before_pointer_event	Ambiguous	map_or	1	
@@ -4735,7 +4736,6 @@ crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::sync_web_p
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::warm_web_engine	Ambiguous	as_micros	3	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::warm_web_engine	Ambiguous	elapsed	2	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::warm_web_engine	Dynamic	advance	3	
-crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_page_at	Dynamic	inside	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Ambiguous	collect	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Ambiguous	filter_map	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Ambiguous	to_owned	1	
