@@ -899,7 +899,7 @@ mod real_shell {
 
     /// **Whether a module base the shell reported lies under `folder`**, both read as the
     /// filesystem names them. The shell spells a loaded module's base the long way, while a
-    /// folder made under an 8.3 temporary directory (a CI runner's `C:\Users\RUNNER~1\...`) is
+    /// folder made under an 8.3 temporary directory (`C:\Users\ALICE~1\...`, as on a CI runner) is
     /// spelled short by the test that made it; the two spellings name one folder.
     fn lies_under(base: &str, folder: &Path) -> bool {
         match (std::fs::canonicalize(base), std::fs::canonicalize(folder)) {
