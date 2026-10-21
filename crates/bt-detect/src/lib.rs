@@ -2,6 +2,7 @@
 
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
+pub mod fence;
 pub mod frame;
 mod ledger;
 pub mod table;
@@ -238,7 +239,7 @@ pub enum PrefixKnowledge {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DetectionContext {
-    fence: Option<(char, usize)>,
+    fence: Option<fence::Fence>,
     opening: Option<(TranscriptId, DisplayDelimiter)>,
     prefix: PrefixKnowledge,
 }
@@ -836,7 +837,7 @@ pub fn detect_inline_math_across_rows(
     // between them contains none.
     let open = lone_trailing_opener(previous)?;
     let close = first_inline_closer(text)?;
-    if commonmark_indented_code(previous) || commonmark_indented_code(text) {
+    if fence::is_indented_code(previous) || fence::is_indented_code(text) {
         return None;
     }
     if row_opens_a_block(text) {
@@ -1435,18 +1436,18 @@ enum AbandonedOpening {
 
 fn structural_line_step(
     text: &str,
-    fence: &mut Option<(char, usize)>,
+    fence: &mut Option<fence::Fence>,
     opening: Option<&DisplayDelimiter>,
 ) -> StructuralStep {
-    if opening.is_none() && commonmark_indented_code(text) {
+    if opening.is_none() && fence::is_indented_code(text) {
         return StructuralStep::IndentedCode;
     }
     if opening.is_none()
-        && let Some(marker) = commonmark_fence_marker(text)
+        && let Some(marker) = fence::fence_opening(text)
     {
         match *fence {
-            Some(active) if commonmark_fence_closes(text, active) => *fence = None,
-            None => *fence = Some(marker),
+            Some(active) if fence::fence_closes(text, &active) => *fence = None,
+            None => *fence = Some(marker.fence),
             _ => {}
         }
         return StructuralStep::FenceMarker;
@@ -2222,7 +2223,7 @@ fn scan_math_blocks_impl<'a>(
 fn append_table_blocks(
     lines: &[(TranscriptId, &str)],
     captured_columns: Option<&[u32]>,
-    initial_fence: Option<(char, usize)>,
+    initial_fence: Option<fence::Fence>,
     clipped: Option<ClippedTail>,
     result: &mut MathScanResult,
 ) {
@@ -2279,16 +2280,16 @@ fn append_table_blocks(
     let mut index = 0;
     while index < lines.len() {
         let text = texts[index];
-        if let Some(marker) = commonmark_fence_marker(text) {
+        if let Some(marker) = fence::fence_opening(text) {
             match fence {
-                Some(active) if commonmark_fence_closes(text, active) => fence = None,
-                None => fence = Some(marker),
+                Some(active) if fence::fence_closes(text, &active) => fence = None,
+                None => fence = Some(marker.fence),
                 _ => {}
             }
             index += 1;
             continue;
         }
-        if fence.is_some() || claimed[index] || commonmark_indented_code(text) {
+        if fence.is_some() || claimed[index] || fence::is_indented_code(text) {
             index += 1;
             continue;
         }
@@ -2892,7 +2893,7 @@ fn delimiter_start(text: &str) -> usize {
 }
 
 fn complete_display_on_line(text: &str) -> Option<(DelimiterKind, usize, usize, usize, usize)> {
-    if commonmark_indented_code(text) {
+    if fence::is_indented_code(text) {
         return None;
     }
     let start = delimiter_start(text);
@@ -2944,7 +2945,7 @@ fn complete_display_on_line(text: &str) -> Option<(DelimiterKind, usize, usize, 
 }
 
 fn opening_delimiter(text: &str) -> Option<(DelimiterKind, usize)> {
-    if commonmark_indented_code(text) {
+    if fence::is_indented_code(text) {
         return None;
     }
     let start = delimiter_start(text);
@@ -3009,43 +3010,6 @@ fn environment_token(text: &str, open: bool) -> Option<(String, usize)> {
     let environment = &rest[..name_end];
     is_math_environment(environment)
         .then_some((environment.to_owned(), prefix.len() + name_end + 1))
-}
-
-fn commonmark_indented_code(text: &str) -> bool {
-    let mut columns = 0usize;
-    for character in text.chars() {
-        match character {
-            ' ' => columns += 1,
-            '\t' => columns += 4 - columns % 4,
-            _ => break,
-        }
-        if columns >= 4 {
-            return true;
-        }
-    }
-    false
-}
-
-fn commonmark_fence_marker(text: &str) -> Option<(char, usize)> {
-    if commonmark_indented_code(text) {
-        return None;
-    }
-    let trimmed = text.trim_start_matches(' ');
-    let marker = fence_marker(trimmed)?;
-    let suffix = trimmed.get(marker.1..)?;
-    (marker.0 != '`' || !suffix.contains('`')).then_some(marker)
-}
-
-fn commonmark_fence_closes(text: &str, active: (char, usize)) -> bool {
-    let trimmed = text.trim_start_matches(' ');
-    let count = trimmed
-        .chars()
-        .take_while(|character| *character == active.0)
-        .count();
-    count >= active.1
-        && trimmed
-            .get(count..)
-            .is_some_and(|suffix| suffix.chars().all(char::is_whitespace))
 }
 
 pub fn detect_math_blocks_in_context<'a>(
@@ -3522,7 +3486,7 @@ fn clipped_tail(
     // and reads as math rather than prose. Both markers bound the tail, so the last one does.
     let fence_floor = (b..first_dollars)
         .rev()
-        .find(|&index| commonmark_fence_marker(logical[index].text.as_str()).is_some())
+        .find(|&index| fence::fence_opening(logical[index].text.as_str()).is_some())
         .map_or(b, |index| index + 1);
     let floor = occurrence_floor.max(fence_floor).max(b);
     // **The body proof, over the maximal suffix `[body_start, first_dollars)` of what is left.** Not
@@ -4134,18 +4098,6 @@ pub fn delimiter_is_escaped(text: &str, byte: usize) -> bool {
         .count()
         % 2
         == 1
-}
-
-fn fence_marker(text: &str) -> Option<(char, usize)> {
-    let marker = text.chars().next()?;
-    if !matches!(marker, '`' | '~') {
-        return None;
-    }
-    let count = text
-        .chars()
-        .take_while(|character| *character == marker)
-        .count();
-    (count >= 3).then_some((marker, count))
 }
 
 pub fn render_placeholder(task: &DetectionTask) -> PlaceholderArtifact {
@@ -6329,6 +6281,32 @@ abla f",
             ])
             .is_empty()
         );
+    }
+
+    /// RED (T-FENCE-GRAMMAR-SHARED, ruling 3 of 2026-10-21) — **a closing fence is followed by
+    /// spaces and tabs only**, CommonMark §4.5's rule: a fence line ending in an ideographic space
+    /// (U+3000) or a no-break space (U+00A0) is a body line, so the fence stays open and the
+    /// formula under it is code, in the terminal as in the preview. A closer with trailing spaces
+    /// and tabs still closes, and the formula under it is mathematics.
+    ///
+    /// MUTATION: `char::is_whitespace` back in `fence::fence_closes` and both odd lines close the
+    /// fence, so the formula below them is detected.
+    #[test]
+    fn a_closer_followed_by_a_non_ascii_space_keeps_the_fence_open() {
+        let scan = |closer: &str| {
+            detect_math_blocks([
+                (TranscriptId(1), "```text"),
+                (TranscriptId(2), "inside"),
+                (TranscriptId(3), closer),
+                (TranscriptId(4), "$$"),
+                (TranscriptId(5), "x^2 + y^2"),
+                (TranscriptId(6), "$$"),
+            ])
+        };
+        for closer in ["```\u{3000}", "```\u{a0}"] {
+            assert!(scan(closer).is_empty(), "{closer:?} closed the fence");
+        }
+        assert_eq!(scan("``` \t").len(), 1, "spaces and tabs after a closer");
     }
 
     fn live_task(lines: &[&str], candidate_row: u32) -> LiveDetectionTask {
