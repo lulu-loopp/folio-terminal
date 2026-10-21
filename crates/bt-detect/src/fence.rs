@@ -182,6 +182,10 @@ pub fn fence_closes(line: &str, fence: &Fence) -> bool {
 }
 
 /// A body line of `fence` as the block holds it: up to the opening's indentation removed.
+///
+/// The answer (here and from [`strip_container_indent`]) is always a suffix of `line`, with
+/// spaces in front of it exactly when a tab was split — which is what lets a caller map every
+/// byte of it back to the line it came from.
 #[must_use]
 pub fn strip_fence_indent<'a>(line: &'a str, fence: &Fence) -> Cow<'a, str> {
     strip_columns(line, fence.indent).0

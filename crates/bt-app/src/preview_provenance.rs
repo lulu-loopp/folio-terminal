@@ -46,7 +46,7 @@
 //! | `!`, `[`, `]`, `(`, `)` | a picture **inside** a heading, a cell, an item or a quote | undrawn | there the run is its own alt text and nothing else |
 //! | `![`, `](`, the destination, `)` | a picture **from the web, left in its line** as a chip (§7.1.3k ⑬) | undrawn | the chip draws its label and nothing else: the alt text, which is a copy like any other run's, or — where the document wrote no alt — the last segment of the address, which is drawn and spelled nowhere (7 below) |
 //! | `|`, and the whole separator row | a table | undrawn | a cell's piece is the cell trimmed |
-//! | ```` ``` ````, the info string | a fence | undrawn | a fence's pieces are its body lines |
+//! | ```` ``` ```` or `~~~`, the info string, the opener's indentation, a list item's content columns | a fence | undrawn | a fence's pieces are its body lines, each less the columns `bt_detect::fence` strips off it |
 //! | `$$`, `\[`, `\]`, `\begin{…}` on their own lines | display mathematics | undrawn | the block dropped them (`MarkdownBlock::Math`) and the piece re-spells its own — see the synthesised list below |
 //! | `$…$`, `\(…\)` | inline mathematics | **drawn** | `SpanStyle::Math` keeps its delimiters in `Span::text` deliberately, so they are copies like the formula between them |
 //! | the indent, the break | between two joined source lines | undrawn | the single space that stands in their place is synthesised |
@@ -57,7 +57,9 @@
 //! 1. the single space `join_source_lines` puts between two source lines of a
 //!    paragraph or of a quoted paragraph;
 //! 2. the single space a list item's lazy continuation is joined on;
-//! 3. the spaces a tab expands to in a fence line (`expand_tabs`);
+//! 3. the spaces a tab expands to in a fence line (`expand_tabs`), and the
+//!    spaces left of a tab that the fence's indentation (or its list item's)
+//!    split (`bt_detect::fence::strip_fence_indent`, CommonMark §2.2);
 //! 4. the `\n` between two lines of a display formula's body;
 //! 5. the `$$` `preview_select` re-spells around a display formula, the file's
 //!    own delimiters standing on lines of their own or being `\[`…`\]` or an
@@ -532,6 +534,17 @@ mod tests {
                     .to_owned(),
             ),
             ("a tab in a fence", "```\n\tone\tstep\n```\n".to_owned()),
+            // T-FENCE-GRAMMAR-SHARED: a body line that lost its opener's
+            // indentation, one whose tab straddled it and was split into spaces
+            // (synthesis 3), and a fence read off a list item's content column.
+            (
+                "an indented tilde fence that splits a tab",
+                "  ~~~ text\n   one\n \ttwo\tthree\n  ~~~\n".to_owned(),
+            ),
+            (
+                "a fence inside a list item",
+                "- item\n  ```rust\n    let x = 1;\n  \tlet y\n  ```\n- next\n".to_owned(),
+            ),
             ("nothing at all", String::new()),
             ("one word", "word".to_owned()),
             (
