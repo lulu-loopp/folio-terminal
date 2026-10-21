@@ -118,25 +118,82 @@ function Window($procId) {
 # long, Folio's own focus lost a second after it was gained). A key goes to the foreground
 # thread's focus window, so the check is that this window is Folio's (`GetGUIThreadInfo`); a
 # foreground without it is taken the way a person takes it, a click inside the pane.
+function Rect($h) {
+  $r = New-Object PRECT
+  [void][Probe]::GetWindowRect($h, [ref]$r)
+  return $r
+}
+# A point inside Folio's window to click, verified as Folio's pixel: the window's centre, else a
+# point 60 px in from its bottom-left corner (inside the pane on every layout). $null when neither
+# is Folio's (the window covered, or its rectangle not where the screen is).
+function ClickPoint($h) {
+  $r = Rect $h
+  foreach ($point in @(@([int](($r.L + $r.R) / 2), [int](($r.T + $r.B) / 2)), @(($r.L + 60), ($r.B - 60)))) {
+    if ([Probe]::PointBelongsTo($point[0], $point[1], $folio.Id)) { return $point }
+  }
+  return $null
+}
 function Front($h) {
   for ($try = 1; $try -le 4; $try++) {
+    # The road that worked on before3: the foreground asked for, with the probe's thread attached
+    # to the foreground thread's input.
     [void][Probe]::BringToFront($h)
     if ([LoadRowWindows]::KeyboardIn([uint32]$folio.Id)) { return $true }
-    $r = New-Object PRECT
-    [void][Probe]::GetWindowRect($h, [ref]$r)
-    $x = $r.L + 60; $y = $r.B - 60
-    if ([Probe]::PointBelongsTo($x, $y, $folio.Id)) {
-      [Probe]::Click($x, $y)
+    # Windows grants the foreground only to the process that had the last input: a tapped Alt
+    # makes it this one (the desktop, Progman, held it on 2026-10-21's late boots), then ask again.
+    [void][Probe]::TapVk([uint16]0x12)
+    [void][Probe]::BringToFront($h)
+    if ([LoadRowWindows]::KeyboardIn([uint32]$folio.Id)) { return $true }
+    # And the person's way: a click inside the window, on a pixel that is Folio's.
+    $point = ClickPoint $h
+    if ($point) {
+      [Probe]::Click($point[0], $point[1])
       Start-Sleep -Milliseconds 400
       if ([LoadRowWindows]::KeyboardIn([uint32]$folio.Id)) { return $true }
     }
   }
-  $r = New-Object PRECT
-  [void][Probe]::GetWindowRect($h, [ref]$r)
-  Say ("no keyboard: nothing sent (foreground {0}; focus {1}; under window+(60,-60) {2}; folio pid={3})" -f `
+  $r = Rect $h
+  $cx = [int](($r.L + $r.R) / 2); $cy = [int](($r.T + $r.B) / 2)
+  Say ("no keyboard: nothing sent (foreground {0}; focus {1}; window rect {2},{3},{4},{5}; under its centre {6}; folio pid={7})" -f `
       [LoadRowWindows]::Describe([LoadRowWindows]::GetForegroundWindow()), [LoadRowWindows]::Describe([LoadRowWindows]::Focus()),
-      [LoadRowWindows]::At($r.L + 60, $r.B - 60), $folio.Id)
+      $r.L, $r.T, $r.R, $r.B, [LoadRowWindows]::At($cx, $cy), $folio.Id)
   return $false
+}
+
+# **The close, on every road** (2026-10-21: the row that never got the keyboard closed Folio and
+# recorded nothing about it — and a close with the first run answered and no key sent is the
+# datum the close-hang ticket needs). WM_CLOSE, then 30 s for Folio to exit; a Folio still
+# running is the row's failure, with the processes still standing and the hang reports kept.
+function CloseFolio {
+  Mark 'close'
+  $closed = $folio.CloseMainWindow()
+  Say "WM_CLOSE -> $closed"
+  $asked = Get-Date
+  if ($folio.WaitForExit(30000)) {
+    Say ("close ok: Folio exited with {0} after {1:N1} s" -f $folio.ExitCode, ((Get-Date) - $asked).TotalSeconds)
+    return
+  }
+  Say 'FAILED close: Folio still running 30 s after WM_CLOSE'
+  foreach ($name in @('folio', 'OpenConsole', 'powershell', 'pwsh', 'conhost')) {
+    foreach ($process in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+      Say ("  still running: {0} pid={1} started={2:HH:mm:ss}" -f $process.ProcessName, $process.Id, $process.StartTime)
+    }
+  }
+  $reports = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Folio\hang-reports'
+  if (Test-Path -LiteralPath $reports) {
+    $kept = Join-Path $GuestHome "load-$Tag-hang-reports.zip"
+    Compress-Archive -Path (Join-Path $reports '*') -DestinationPath $kept -Force
+    Say "  hang reports kept: $kept"
+  } else {
+    Say '  no hang report was written'
+  }
+}
+function EndRow {
+  Start-Sleep -Seconds 2
+  Mark 'end'
+  Copy-Item -LiteralPath $diag -Destination (Join-Path $GuestHome "load-$Tag-diagnostics.log") -Force
+  Say 'load end'
+  Set-Content -LiteralPath (Join-Path $GuestHome "load-$Tag-done.txt") -Value 'done' -Encoding UTF8
 }
 
 # **The row starts only once Folio can be given the keys** (2026-10-21: on boots whose logon came
@@ -200,13 +257,8 @@ if ($h -eq [IntPtr]::Zero) { Say 'no Folio window within 120 s'; Say 'load end';
 Start-Sleep -Seconds 8
 if (-not (FrontWithin $h $ForegroundSeconds)) {
   Say "FAILED foreground: Folio never took the keyboard within $ForegroundSeconds s; the row measures nothing"
-  $closed = $folio.CloseMainWindow()
-  Say "WM_CLOSE -> $closed"
-  if (-not $folio.WaitForExit(30000)) { Say 'FAILED close: Folio still running 30 s after WM_CLOSE' }
-  Mark 'end'
-  Copy-Item -LiteralPath $diag -Destination (Join-Path $GuestHome "load-$Tag-diagnostics.log") -Force
-  Say 'load end'
-  Set-Content -LiteralPath (Join-Path $GuestHome "load-$Tag-done.txt") -Value 'done' -Encoding UTF8
+  CloseFolio
+  EndRow
   exit 1
 }
 Say ("keyboard taken (focus {0})" -f [LoadRowWindows]::Describe([LoadRowWindows]::Focus()))
@@ -234,34 +286,5 @@ Cycle $h $Seconds
 $hogProcess.WaitForExit()
 Mark 'after'
 Cycle $h $Seconds
-Mark 'close'
-$closed = $folio.CloseMainWindow()
-Say "WM_CLOSE -> $closed"
-# **A Folio that does not close is the row's failure, recorded, not a hang** (2026-10-21: the
-# after row's Folio was still running 85 minutes after the OS's close). The row says so, lists
-# the processes still standing, and keeps the window thread's own account of where it is stuck
-# (`hang-reports`, which the watchdog writes while the thread holds control); then it ends, and
-# the done marker lets the host go on whatever Folio does.
-if ($folio.WaitForExit(30000)) {
-  Say ("close ok: Folio exited with {0}" -f $folio.ExitCode)
-} else {
-  Say 'FAILED close: Folio still running 30 s after WM_CLOSE'
-  foreach ($name in @('folio', 'OpenConsole', 'powershell', 'pwsh', 'conhost')) {
-    foreach ($process in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
-      Say ("  still running: {0} pid={1} started={2:HH:mm:ss}" -f $process.ProcessName, $process.Id, $process.StartTime)
-    }
-  }
-  $reports = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Folio\hang-reports'
-  if (Test-Path -LiteralPath $reports) {
-    $kept = Join-Path $GuestHome "load-$Tag-hang-reports.zip"
-    Compress-Archive -Path (Join-Path $reports '*') -DestinationPath $kept -Force
-    Say "  hang reports kept: $kept"
-  } else {
-    Say '  no hang report was written'
-  }
-}
-Start-Sleep -Seconds 2
-Mark 'end'
-Copy-Item -LiteralPath $diag -Destination (Join-Path $GuestHome "load-$Tag-diagnostics.log") -Force
-Say 'load end'
-Set-Content -LiteralPath (Join-Path $GuestHome "load-$Tag-done.txt") -Value 'done' -Encoding UTF8
+CloseFolio
+EndRow

@@ -36,6 +36,16 @@ $marks = @(Get-Content -LiteralPath $log | ForEach-Object {
             }
         }
     })
+# A row whose driver never got the keyboard ran no phase: it says so, and its close is still a cell.
+$refused = @(Get-Content -LiteralPath $log | Where-Object { $_ -match 'FAILED foreground' })
+if ($refused.Count) {
+    $closing = @(Get-Content -LiteralPath $log | Where-Object { $_ -match 'WM_CLOSE|close ok|FAILED close|still running|hang report' })
+    $lines = @("load row '$Tag' — $Results", ('phases    NOT RUN: ' + $refused[0].Substring(25)),
+        ('close     ' + $(if ($closing.Count) { ($closing | ForEach-Object { $_.Substring(25) }) -join ' | ' } else { 'not recorded' })))
+    $lines | Set-Content -LiteralPath (Join-Path $Results "cells-$Tag.txt") -Encoding utf8
+    $lines | ForEach-Object { Write-Host $_ }
+    return
+}
 if ($marks.Count -lt 4) { throw "$log has $($marks.Count) phase marks; the row did not finish" }
 
 function Slice([string] $Path, [long] $From, [long] $To) {
