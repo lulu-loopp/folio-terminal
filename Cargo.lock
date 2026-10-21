@@ -272,6 +272,7 @@ dependencies = [
  "bt-platform",
  "bt-pty",
  "bt-render",
+ "bt-render-probe",
  "bt-source",
  "bt-term",
  "bt-testpath",
@@ -326,6 +327,7 @@ dependencies = [
  "bt-platform",
  "bt-pty",
  "bt-render",
+ "bt-render-probe",
  "bt-term",
  "bt-transcript",
  "bt-viewport",
@@ -489,6 +491,20 @@ dependencies = [
  "ttf-parser",
  "unicode-properties",
  "unicode-script",
+ "web-time",
+ "wgpu",
+]
+
+[[package]]
+name = "bt-render-probe"
+version = "0.4.8"
+dependencies = [
+ "bt-doc",
+ "bt-effects",
+ "bt-render",
+ "bt-transcript",
+ "bt-viewport",
+ "pollster",
  "web-time",
  "wgpu",
 ]

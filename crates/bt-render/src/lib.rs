@@ -6539,56 +6539,124 @@ pub struct RenderProbeSample {
     pub wide_glyphs: u64,
 }
 
-/// Headless render-path instrumentation used by `bt-replay`.
-///
-/// Two layers and nothing else: the process's [`GpuContext`], and one
-/// [`WindowRenderer`] whose target is a texture instead of a swapchain. The
-/// multiwindow spike called this shape the template for the split — "the device
-/// layer without a surface" — and folding it back onto the real types is what
-/// keeps the claim honest: the probe measures the production shaping, atlas and
-/// encoding paths because it *is* a window renderer, not because a second copy
-/// of one was kept in step by hand.
+/// **What a tool needs from the product library to probe a frame or read one back, and no
+/// more** (the thread-door note's revision (l)4, A2p). Every function here prepares, encodes or
+/// reads; **none submits and none presents** — the submit and the present are
+/// `bt_render_probe`'s, a tool crate outside `folio.exe`, so the product library holds no probe
+/// effect (`window_waits_tests::the_product_library_holds_no_probe_effect`).
 #[doc(hidden)]
-pub struct HeadlessRenderProbe {
-    gpu: GpuContext,
-    window: WindowRenderer,
-    adapter_name: String,
+pub mod probe_surface {
+    use super::{
+        GpuContext, Instant, RenderError, RenderProbeSample, TextPreparationStats, ViewportFrame,
+        WindowRenderer,
+    };
+
+    /// A read-back's buffer and its geometry, between the encoded copy and the mapped rows.
+    pub struct ReadBack {
+        pub(super) buffer: wgpu::Buffer,
+        pub(super) padded: u32,
+        pub(super) width: u32,
+        pub(super) height: u32,
+    }
+
+    /// What a probe frame encoded and did not submit: its commands, the swapchain frame it
+    /// must present after them (none for a texture), and the instants it has measured so far.
+    pub struct ProbeWork {
+        pub commands: wgpu::CommandBuffer,
+        pub swapchain: Option<wgpu::SurfaceTexture>,
+        pub timings: ProbeTimings,
+    }
+
+    /// The probe frame's measurements before its submit.
+    pub struct ProbeTimings {
+        pub(super) started: Instant,
+        pub(super) text_stats: TextPreparationStats,
+        pub(super) rows_prepared_at: Instant,
+        pub(super) atlas_prepared_at: Instant,
+        pub(super) math_prepared_at: Instant,
+        pub(super) math_evictions_before: u64,
+        pub(super) math_texture_uploads: u64,
+        pub(super) math_texture_upload_bytes: usize,
+    }
+
+    /// Encode `window`'s read-back ([`WindowRenderer::read_back_work`]): the copy, unsubmitted.
+    ///
+    /// # Errors
+    ///
+    /// [`RenderError::DeviceLost`] when the device is gone before or after the buffer is minted.
+    pub fn read_back_work(
+        window: &WindowRenderer,
+        gpu: &GpuContext,
+    ) -> Result<(wgpu::CommandBuffer, ReadBack), RenderError> {
+        window.read_back_work(gpu)
+    }
+
+    /// The rows of a read-back whose copy was submitted.
+    ///
+    /// # Errors
+    ///
+    /// The mapping's or the device's failure.
+    pub fn read_back_pixels(gpu: &GpuContext, back: ReadBack) -> Result<Vec<[u8; 4]>, RenderError> {
+        WindowRenderer::read_back_pixels(gpu, back)
+    }
+
+    /// Prepare and encode one probe frame ([`WindowRenderer::probe_frame_work`]), unsubmitted.
+    ///
+    /// # Errors
+    ///
+    /// The frame's shape, the glyph prepares, or the acquire.
+    pub fn probe_frame_work(
+        window: &mut WindowRenderer,
+        gpu: &mut GpuContext,
+        frame: &ViewportFrame,
+    ) -> Result<ProbeWork, RenderError> {
+        window.probe_frame_work(gpu, frame)
+    }
+
+    /// Close a probe frame whose work was submitted at `submitted_at`.
+    pub fn probe_frame_finish(
+        window: &mut WindowRenderer,
+        gpu: &mut GpuContext,
+        timings: ProbeTimings,
+        submitted_at: Instant,
+    ) -> RenderProbeSample {
+        window.probe_frame_finish(gpu, timings, submitted_at)
+    }
+
+    /// The device's queue, for the tool that submits what this module encoded.
+    #[must_use]
+    pub fn queue(gpu: &GpuContext) -> &wgpu::Queue {
+        &gpu.queue
+    }
 }
 
-impl HeadlessRenderProbe {
-    pub async fn new(width: u32, height: u32, scale_factor: f64) -> Result<Self, RenderError> {
-        // Named outright rather than asked of a swapchain, which is the whole of
-        // what "headless" means here. It is the format the window path picks on
-        // every machine this ships to, so the atlas and pipelines the probe
-        // measures are the ones a window would have built.
-        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
-        let mut gpu = GpuContext::headless(format).await?;
-        let adapter_name = gpu.adapter_name();
-        let window = WindowRenderer::offscreen(&mut gpu, width, height, scale_factor, format)?;
-        Ok(Self {
-            gpu,
-            window,
-            adapter_name,
-        })
+/// The two compositions this crate's own tests read frames through. Test code is outside the
+/// product (its root's `cfg_attr(test, …)` form); the shipped compositions are
+/// `bt_render_probe`'s, and these are the same statements in the same order.
+#[cfg(test)]
+impl WindowRenderer {
+    fn read_back(&self, gpu: &GpuContext) -> Result<Vec<[u8; 4]>, RenderError> {
+        let (commands, back) = self.read_back_work(gpu)?;
+        gpu.queue.submit([commands]);
+        Self::read_back_pixels(gpu, back)
     }
 
-    pub fn adapter_name(&self) -> &str {
-        &self.adapter_name
-    }
-
-    pub fn max_texture_dimension_2d(&self) -> u32 {
-        self.gpu.max_texture_dimension_2d()
-    }
-
-    pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
-        self.window.update_scale_factor(&mut self.gpu, scale_factor)
-    }
-
-    pub fn prepare_frame(
+    fn probe_frame(
         &mut self,
+        gpu: &mut GpuContext,
         frame: &ViewportFrame,
     ) -> Result<RenderProbeSample, RenderError> {
-        self.window.probe_frame(&mut self.gpu, frame)
+        let probe_surface::ProbeWork {
+            commands,
+            swapchain,
+            timings,
+        } = self.probe_frame_work(gpu, frame)?;
+        gpu.queue.submit([commands]);
+        let submitted_at = Instant::now();
+        if let Some(texture) = swapchain {
+            gpu.queue.present(texture);
+        }
+        Ok(self.probe_frame_finish(gpu, timings, submitted_at))
     }
 }
 
@@ -8447,7 +8515,7 @@ impl WindowRenderer {
         // (`bt_viewport::trace::perf`).
         let trace_perf = bt_viewport::trace::perf();
         // A window that draws into a texture is an instrument by construction —
-        // `HeadlessRenderProbe` is the only thing that builds one — so its
+        // `bt_render_probe::HeadlessRenderProbe` and the read-back tests build them — so its
         // shaping caches count hits, misses and evictions whether or not the
         // trace is on, which is what `bt-replay` reports. A window on a
         // swapchain pays for that counting only when someone asked for it.
@@ -9174,8 +9242,11 @@ impl WindowRenderer {
         self.seat
     }
 
-    /// **Read this window's last frame back**, as `[b, g, r, a]` rows of
-    /// `config.width` pixels — an offscreen target only.
+    /// **Encode the read-back of this window's last frame** — an offscreen target only — and
+    /// hand the work back unsubmitted: [`probe_surface::read_back_work`], whose submit is
+    /// `bt_render_probe::read_back`'s (the thread-door note (l)4: the probe's GPU submissions
+    /// are a tool's, not the product library's). The rows come back as `[b, g, r, a]`, of
+    /// `config.width` pixels, from [`probe_surface::read_back_pixels`].
     ///
     /// The one way a test can ask *where a glyph landed* rather than where it
     /// was told to land, which is the whole difference §7.36 turns on: the
@@ -9183,9 +9254,9 @@ impl WindowRenderer {
     /// wrong (`BT_CHROME_DUMP` said `[42, 6, 180, 40]` while the picture put the
     /// same title at 84).
     ///
-    /// # Why it is public
+    /// # Why it is reachable from outside
     ///
-    /// It was a test's door until 2026-08-28 and is now anybody's, because an
+    /// It was a test's door until 2026-08-28 and is now any tool's, because an
     /// offscreen window has no other purpose: it is created with `COPY_SRC` for
     /// exactly this, and a target nothing can read is a target that has drawn
     /// nothing anyone can check. The video probe (§7.42) takes its evidence
@@ -9205,7 +9276,10 @@ impl WindowRenderer {
     /// earlier and somewhere else entirely. That is the panic the 2026-08-31
     /// investigation started from. Asking after the buffer is minted is what
     /// makes the answer name the machine instead of the messenger.
-    pub fn read_back(&self, gpu: &GpuContext) -> Result<Vec<[u8; 4]>, RenderError> {
+    fn read_back_work(
+        &self,
+        gpu: &GpuContext,
+    ) -> Result<(wgpu::CommandBuffer, probe_surface::ReadBack), RenderError> {
         let FrameTarget::Offscreen(texture) = &self.target else {
             panic!("only an offscreen window can be read back");
         };
@@ -9248,7 +9322,29 @@ impl WindowRenderer {
                 depth_or_array_layers: 1,
             },
         );
-        gpu.queue.submit([encoder.finish()]);
+        Ok((
+            encoder.finish(),
+            probe_surface::ReadBack {
+                buffer,
+                padded,
+                width,
+                height,
+            },
+        ))
+    }
+
+    /// **The read-back's second half**, after its work was submitted: wait for the mapping,
+    /// ask after the device once more, and unpad the rows.
+    fn read_back_pixels(
+        gpu: &GpuContext,
+        back: probe_surface::ReadBack,
+    ) -> Result<Vec<[u8; 4]>, RenderError> {
+        let probe_surface::ReadBack {
+            buffer,
+            padded,
+            width,
+            height,
+        } = back;
         buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         gpu.device
             .poll(wgpu::PollType::Wait {
@@ -9276,6 +9372,7 @@ impl WindowRenderer {
         buffer.unmap();
         Ok(pixels)
     }
+
 
     /// Place the terminal seat. Returns whether the rectangle changed.
     ///
@@ -9707,9 +9804,8 @@ impl WindowRenderer {
         trigger: FrameTrigger,
         mut phase: impl FnMut(PresentPhase),
     ) -> Result<PresentOutcome, RenderError> {
-        let _ = token;
         phase(PresentPhase::ComposeEncode);
-        let outcome = self.compose_frame(gpu, seats, trigger, &mut phase);
+        let outcome = self.compose_frame(&token, gpu, seats, trigger, &mut phase);
         // **The one place the shared atlas is told the frame is over, and it is
         // outside every way the frame can end.**
         //
@@ -9753,8 +9849,12 @@ impl WindowRenderer {
     /// Split from [`Self::present_frame`] for one reason: this function may
     /// return early and that one may not, because the atlas trim it owes has to
     /// outlive every exit here. Nothing else moved.
+    ///
+    /// Under the `PresentFrame` door: it borrows the admission's token, so its
+    /// submit and present are the door's effects (thread-door note (l)1, R2).
     fn compose_frame(
         &mut self,
+        token: &WaitToken<'_, doors::PresentFrame>,
         gpu: &mut GpuContext,
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
@@ -10557,7 +10657,7 @@ impl WindowRenderer {
                 (AcquiredFrame::Swapchain(texture), view)
             }
             SurfaceAcquisition::Failed(failure) => {
-                return self.handle_surface_failure(gpu, failure, phase);
+                return self.handle_surface_failure(token, gpu, failure, phase);
             }
             SurfaceAcquisition::Offscreen(view) => (AcquiredFrame::Offscreen, view),
         };
@@ -11949,8 +12049,12 @@ impl WindowRenderer {
     /// [`WindowRenderer::compose_frame`] reaches here has passed
     /// `still_has_its_device` and has just staged a whole frame against that
     /// device.
+    ///
+    /// Under the `PresentFrame` door, beside [`Self::compose_frame`]: its empty
+    /// submit is the door's effect.
     fn handle_surface_failure(
         &mut self,
+        _token: &WaitToken<'_, doors::PresentFrame>,
         gpu: &GpuContext,
         failure: SurfaceFailure,
         phase: &mut dyn FnMut(PresentPhase),
@@ -12783,8 +12887,10 @@ impl WindowRenderer {
         }
     }
 
-    /// Draw one frame's grid text into this window's attachment and report what
-    /// the CPU spent doing it — the `bt-replay` instrumentation path.
+    /// Prepare and encode one frame's grid text into this window's attachment, and hand
+    /// the work back unsubmitted — the `bt-replay` instrumentation path, whose submit and
+    /// present are `bt_render_probe::HeadlessRenderProbe::prepare_frame`'s (the thread-door
+    /// note (l)4). [`Self::probe_frame_finish`] reports what the CPU spent.
     ///
     /// Every phase here is the production path: the same [`prepare_text_rows`]
     /// against the same composed-row and shaping caches, the same glyphon
@@ -12800,12 +12906,13 @@ impl WindowRenderer {
     ///
     /// The pair invariant of [`Self::present_frame`] holds here for the same
     /// reason and by the same construction: the prepares and the render are
-    /// inside one call.
-    fn probe_frame(
+    /// inside one call, and the probe submits what that call encoded before it
+    /// prepares anything else.
+    fn probe_frame_work(
         &mut self,
         gpu: &mut GpuContext,
         frame: &ViewportFrame,
-    ) -> Result<RenderProbeSample, RenderError> {
+    ) -> Result<probe_surface::ProbeWork, RenderError> {
         let started = Instant::now();
         frame.validate_shape()?;
         let (width, height) = (self.config.width, self.config.height);
@@ -12910,14 +13017,46 @@ impl WindowRenderer {
                     .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
             }
         }
-        gpu.queue.submit([encoder.finish()]);
-        let submitted_at = Instant::now();
-        match acquired {
-            AcquiredFrame::Swapchain(texture) => gpu.queue.present(texture),
-            AcquiredFrame::Offscreen => {}
-        }
+        Ok(probe_surface::ProbeWork {
+            commands: encoder.finish(),
+            swapchain: match acquired {
+                AcquiredFrame::Swapchain(texture) => Some(texture),
+                AcquiredFrame::Offscreen => None,
+            },
+            timings: probe_surface::ProbeTimings {
+                started,
+                text_stats,
+                rows_prepared_at,
+                atlas_prepared_at,
+                math_prepared_at,
+                math_evictions_before,
+                math_texture_uploads,
+                math_texture_upload_bytes,
+            },
+        })
+    }
+
+    /// **The probe frame's last half**, after its work was submitted (and a swapchain's
+    /// frame presented) at `submitted_at`: the atlas is told the frame is over, and the sample
+    /// is what the frame cost.
+    fn probe_frame_finish(
+        &mut self,
+        gpu: &mut GpuContext,
+        timings: probe_surface::ProbeTimings,
+        submitted_at: Instant,
+    ) -> RenderProbeSample {
+        let probe_surface::ProbeTimings {
+            started,
+            text_stats,
+            rows_prepared_at,
+            atlas_prepared_at,
+            math_prepared_at,
+            math_evictions_before,
+            math_texture_uploads,
+            math_texture_upload_bytes,
+        } = timings;
         gpu.atlas.trim();
-        Ok(RenderProbeSample {
+        RenderProbeSample {
             total: started.elapsed(),
             row_compose: text_stats.elapsed,
             shape_cache_miss: text_stats.narrow.miss_time + text_stats.wide.miss_time,
@@ -12958,7 +13097,7 @@ impl WindowRenderer {
                 .iter()
                 .map(|row| row.wide_glyphs.len() as u64)
                 .sum(),
-        })
+        }
     }
 
     /// Upload every math raster this frame would draw, and count what that cost.
@@ -32757,23 +32896,6 @@ mod tests {
                 DEFAULT_PRIMARY_FONT_FAMILY,
                 "an unnamed family is the settings file's way of saying `the default`"
             );
-        }
-
-        /// The replay probe is the two layers and nothing else.
-        #[test]
-        fn the_replay_probe_is_a_context_and_an_offscreen_window() {
-            let mut probe = pollster::block_on(HeadlessRenderProbe::new(400, 300, 1.0))
-                .expect("a headless probe");
-            assert!(!probe.adapter_name().is_empty());
-            assert!(probe.max_texture_dimension_2d() > 0);
-            let frame = single_cell_cursor_frame(probe.window.base_metrics());
-            let sample = probe.prepare_frame(&frame).expect("one replayed frame");
-            assert!(sample.narrow_glyphs > 0);
-            assert_eq!(sample.row_cache_misses, 1);
-            let metrics = probe
-                .update_scale_factor(2.0)
-                .expect("the probe re-measures like any window");
-            assert_eq!(metrics.scale_factor, 2.0);
         }
 
         /// PIN (§7.36) — **on the device a machine with no graphics driver

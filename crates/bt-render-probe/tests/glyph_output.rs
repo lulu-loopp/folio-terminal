@@ -2,7 +2,9 @@
 //! running** — M2-5's gate (`docs/DESIGN.md` §13.22).
 //!
 //! Every case here draws [`bt_render::glyph_probe::GlyphFixture`] into an
-//! offscreen window and reads the pixels back, which is the platform-neutral
+//! offscreen window and reads the pixels back (through this crate's
+//! [`bt_render_probe::read_back`], since the probe's submissions left the
+//! product library — the thread-door note's revision (l)4), which is the platform-neutral
 //! half of the ticket's pair; the other half is a real Metal swapchain and
 //! lives in `crates/bt-app/tests/macos_glyph_surface.rs`, because only a Mac
 //! has one. The two are handed the same frame by the same builder, which is
@@ -76,7 +78,7 @@ fn draw(fixture: GlyphFixture) -> Drawn {
         fixture.present(token, &mut gpu, &mut window)
     })
     .expect("the fixture draws");
-    let pixels = window.read_back(&gpu).expect("the frame reads back");
+    let pixels = bt_render_probe::read_back(&window, &gpu).expect("the frame reads back");
     Drawn {
         pixels,
         metrics: window.base_metrics(),

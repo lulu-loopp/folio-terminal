@@ -334,7 +334,13 @@ fn the_architecture_table_is_the_registry() {
 /// The first-party packages that are not in `folio.exe`: development tools, and `bt-testpath`,
 /// which only tests and the test-support features name. Every other workspace member outside
 /// `vendor/` must be one `bt-app` depends on.
-const NOT_THE_PRODUCT: [&str; 4] = ["bt-corpus", "bt-lint-probe", "bt-source", "bt-testpath"];
+const NOT_THE_PRODUCT: [&str; 5] = [
+    "bt-corpus",
+    "bt-lint-probe",
+    "bt-render-probe",
+    "bt-source",
+    "bt-testpath",
+];
 
 /// **The product as a build of `folio.exe` sees it**: the first-party packages in it, each with
 /// the first-party packages its product code can name (its *product* dependency edges), and the
@@ -8187,6 +8193,90 @@ fn a_counted_only_drop_closes_and_never_waits() {
             .contains("the emergency holder `planted crate::gone_holder` is not in the product")),
         "a stale emergency holder is not refused:\n  {}",
         failures.join("\n  ")
+    );
+}
+
+// ── the render probe: a tool's submissions (revision (l)4, A2p) ───────────────────────────────
+
+/// The functions of `bt-render`'s product that may hold a GPU submission or present, each under the
+/// one door it serves: `PresentFrame`'s body and the surface failure it absorbs.
+const RENDER_EFFECT_FUNCTIONS: [(&str, &str); 2] = [
+    ("crate::WindowRenderer::compose_frame", "PresentFrame"),
+    ("crate::WindowRenderer::handle_surface_failure", "PresentFrame"),
+];
+
+/// RED (A2p, the thread-door note's revision (l)4) — **the product library holds no probe
+/// effect**: `bt-render` has no row of the bare-site inventory, and every function of its product
+/// that holds a vocabulary effect is one of [`RENDER_EFFECT_FUNCTIONS`], inside the door it names.
+/// The headless probe's submit and present and the read-back's submit are `bt-render-probe`'s, a
+/// tool crate; `bt_render::probe_surface` prepares, encodes and reads and hands the work over.
+///
+/// MUTATION: put `gpu.queue.submit(std::iter::empty());` back into
+/// `WindowRenderer::read_back_work` and this names it as a bare site of `bt-render`.
+#[test]
+fn the_product_library_holds_no_probe_effect() {
+    let world = World::new();
+    let (bare, in_doors) = vocabulary_sites(&world);
+    let mut failures: Vec<String> = bare
+        .iter()
+        .filter(|((package, _, _, _), _)| package == "bt-render")
+        .map(|((_, arm, item, entry), count)| {
+            format!("{item} {arm}: {entry} ×{count}, outside every door of bt-render")
+        })
+        .collect();
+    for ((package, arm, item), (door, effects)) in &in_doors {
+        if package != "bt-render" {
+            continue;
+        }
+        if !RENDER_EFFECT_FUNCTIONS.contains(&(item.as_str(), door.as_str())) {
+            failures.push(format!(
+                "{item} {arm}: {} under door `{door}`, where bt-render's product holds GPU effects \
+                 only in {RENDER_EFFECT_FUNCTIONS:?}",
+                effects_spelled(effects)
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "bt-render's product holds a probe effect:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// RED (A2p, the thread-door note's revision (l)4) — **the probe crate is outside the product
+/// closure**: no dependency table a build of `folio.exe` reads names `bt-render-probe`, optional or
+/// not (so it is not even a candidate of [`product`]); it is a declared tool
+/// ([`NOT_THE_PRODUCT`]); and its library root opens with revision (j)2's excluded form,
+/// `#![allow(clippy::disallowed_methods)]`, once, so the configuration fence needs no shield for
+/// it.
+///
+/// MUTATION: name `bt-render-probe` in `bt-app`'s `[dependencies]` and the first assertion fails;
+/// take the form off the probe's `lib.rs` and the last does.
+#[test]
+fn the_probe_crate_is_outside_the_product_closure() {
+    let candidates = product_candidate_manifests();
+    assert!(
+        !candidates.contains_key("bt-render-probe"),
+        "a product manifest's dependency table names bt-render-probe: {:?}",
+        candidates.keys().collect::<Vec<_>>()
+    );
+    assert!(NOT_THE_PRODUCT.contains(&"bt-render-probe"));
+    let root = repository_root()
+        .join("crates")
+        .join("bt-render-probe")
+        .join("src")
+        .join("lib.rs");
+    let text = std::fs::read_to_string(&root).expect("the probe crate's root");
+    let leading: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
+        .take_while(|line| line.starts_with("#!["))
+        .collect();
+    assert_eq!(
+        leading,
+        ["#![allow(clippy::disallowed_methods)]"],
+        "the probe crate's root opens with the excluded form, once"
     );
 }
 
