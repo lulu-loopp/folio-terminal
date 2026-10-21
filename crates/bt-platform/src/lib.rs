@@ -16,12 +16,12 @@ pub mod elevated_protocol;
 pub mod environment;
 /// The process-wide file-read ledger, `bt-effects`' (re-exported whole).
 pub use bt_effects::file_reads;
-pub mod foreground_program;
-/// The folder a process is standing in, read from outside it (T-CWD-FROM-PROCESS).
-pub mod process_folder;
 /// That a process has ended, as the kernel signals it: a test's wait for a child it started.
 #[cfg(windows)]
 pub mod exit_witness;
+pub mod foreground_program;
+/// The folder a process is standing in, read from outside it (T-CWD-FROM-PROCESS).
+pub mod process_folder;
 
 /// **The thread door** — one definition, in [`admission`], for every platform: a named thread in
 /// its band whose body is lent a [`admission::WorkerCtx`]. Re-exported here, where every caller
