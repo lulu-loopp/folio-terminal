@@ -124,12 +124,14 @@ Compiled out of release builds.
 
 Folio's PowerShell integration script ships in every release and reads eight names, each the
 switch of a development probe in its resize-chord handlers: `BT_PSREADLINE_NOOP_PROBE`,
-`BT_PSREADLINE_REANCHOR_PROBE`, `$env:BT_PSREADLINE_REANCHOR_FORCE_FALLBACK_PROBE`,
-`$env:BT_PSREADLINE_REANCHOR_EXACT_EDGE_PROBE`, `$env:BT_PSREADLINE_REANCHOR_WHOLE_SCREEN_PROBE`,
-`$env:BT_PSREADLINE_REANCHOR_EMPTY_BASELINE_PROBE`, `$env:BT_PSREADLINE_HISTORY_PROBE` and
-`$env:BT_PSREADLINE_HISTORY_TRANSPARENCY_RED_PROBE` (the last six spelled as the script reads them:
-no Rust source of `bt-app` names them, so they are outside the source-and-document equality this
-file is checked by; `bt-pty`'s probes set them). Each is acted on only when it is exactly `1`, and
+`BT_PSREADLINE_REANCHOR_PROBE`, `BT_PSREADLINE_REANCHOR_FORCE_FALLBACK_PROBE`,
+`BT_PSREADLINE_REANCHOR_EXACT_EDGE_PROBE`, `BT_PSREADLINE_REANCHOR_WHOLE_SCREEN_PROBE`,
+`BT_PSREADLINE_REANCHOR_EMPTY_BASELINE_PROBE`, `BT_PSREADLINE_HISTORY_PROBE` and
+`BT_PSREADLINE_HISTORY_TRANSPARENCY_RED_PROBE`. This section is checked against the script
+itself: `bt-app`'s `diagnostics::bt_environment_doc_tests` reads `folio.ps1` and holds the names it
+reads (`$env:BT_…`) equal to the names here, both ways. The check's Rust half reads only whole
+string literals of the shipped program, and `bt-pty`'s probes name most of these inside format
+strings, which that half does not count. Each is acted on only when it is exactly `1`, and
 then makes the handler write an `OSC 777;BT_PSREADLINE_…` report (or, for the fallback and red
 probes, take the arm under test) so a test can tell which handler took the chord and what it did.
 Only tests set them — `bt-pty`'s real-shell probes and `bt-app`'s
