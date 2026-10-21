@@ -140,7 +140,7 @@ fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
     );
     refused
         .folio
-        .settle_quit(&refused.event_loop)
+        .settle_quit(&refused.event_loop, Instant::now())
         .expect("the turn is answered");
     assert!(
         says_not_written(&mut refused),
@@ -156,7 +156,7 @@ fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
     let mut landed = a_quit_at_its_write("headless-quit-landed", |root| root.to_path_buf(), now);
     landed
         .folio
-        .settle_quit(&landed.event_loop)
+        .settle_quit(&landed.event_loop, Instant::now())
         .expect("the turn is answered");
     assert!(
         !says_not_written(&mut landed),
@@ -181,7 +181,7 @@ fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
     let mut spent = a_quit_at_its_write("headless-quit-spent", |root| root.to_path_buf(), long_ago);
     spent
         .folio
-        .settle_quit(&spent.event_loop)
+        .settle_quit(&spent.event_loop, Instant::now())
         .expect("the turn is answered");
     assert!(
         !says_not_written(&mut spent),

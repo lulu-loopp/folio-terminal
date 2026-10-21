@@ -1377,6 +1377,50 @@ pub(crate) struct CloseWait {
     pub(crate) saving: bool,
 }
 
+/// **Where a wait for saves stands**, read off what each buffer it waits for has come
+/// to ([`crate::preview::AtTheClose`]) — one reading for every wait on saves: a close's
+/// ([`CloseWait`], `Runtime::settle_close_wait`) and a quit's `Save`
+/// (`FolioApp::settle_the_quits_saves`, S-6c).
+///
+/// The first that holds decides, in this order: a body moved since the wait began is the
+/// person's edit (or a Reload), and the wait is withdrawn; a save still on its way is
+/// waited for until the bound, and found still on its way at it; otherwise every save has
+/// answered, and what each answer was is the waiter's to judge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SavesFound {
+    /// A buffer's body moved since the wait began.
+    Edited,
+    /// A save is still on its way, before the bound: go on waiting.
+    OnTheirWay,
+    /// A save is still on its way at the bound.
+    PastTheBound,
+    /// Every save the wait is about has answered.
+    Answered,
+}
+
+impl SavesFound {
+    /// What `found` — each awaited buffer's name and what it came to — says at `now`, for
+    /// a wait whose bound is `until`.
+    pub(crate) fn of(
+        found: &[(String, crate::preview::AtTheClose)],
+        now: Instant,
+        until: Instant,
+    ) -> Self {
+        let finds = |what| found.iter().any(|(_, at)| *at == what);
+        if finds(crate::preview::AtTheClose::Edited) {
+            Self::Edited
+        } else if finds(crate::preview::AtTheClose::OnItsWay) {
+            if now < until {
+                Self::OnTheirWay
+            } else {
+                Self::PastTheBound
+            }
+        } else {
+            Self::Answered
+        }
+    }
+}
+
 /// **What putting a question to the gate came to** (ticket 58).
 ///
 /// Three answers, because the verb that asked needs three: go on, stop because
