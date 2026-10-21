@@ -105,3 +105,63 @@ fn a_shutdown_taken_back_lets_the_document_go_and_puts_the_sentinel_back() {
         "a change after the shutdown was taken back is saved"
     );
 }
+
+/// RED (T-ENDSESSION-SAVES) — **a shutdown taken back after its write's wait ran out leaves a
+/// writer that is waited on again**: the next save that waits — a quit's — waits for its
+/// document within its budget, instead of answering "did not finish" at once for the rest of the
+/// run.
+///
+/// The storage worker is held where the document's write begins, and the wait has a budget of
+/// zero: the question's write does not land, and the writer is marked stalled. The system takes
+/// the end back; the worker is let go; a later change is written and waited for.
+///
+/// MUTATION: in `session_end::settle`'s `TakenBack` arm, drop the
+/// `wait_again_after_the_systems_end` call — the later wait answers `TimedOut` at once.
+#[test]
+fn a_shutdown_taken_back_after_its_wait_ran_out_is_waited_for_again() {
+    on_the_window_thread();
+    let home = EndSessionHome::new("stall-cleared");
+    let gate = std::sync::Arc::new(crate::lane::Gate::default());
+    gate.hold();
+    let mut store = persist::SessionStore::at_waking_started_by(
+        home.session(),
+        home.sentinel(),
+        || {},
+        crate::lane::Executor::scripted(std::sync::Arc::clone(&gate)),
+    );
+    store.set_save_budget(Duration::ZERO);
+    record_as_the_app_does(&mut store, shells_document(&home.0, 2));
+    assert_eq!(the_system_asks(), Some(1));
+    assert_eq!(
+        bt_platform::session_end::answer(
+            bt_platform::session_end::WM_ENDSESSION,
+            0,
+            &session_end::hear
+        ),
+        Some(0)
+    );
+    let settled: Vec<_> = session_end::take()
+        .into_iter()
+        .map(|end| session_end::settle(end, &mut store, false))
+        .collect();
+    assert!(
+        matches!(
+            settled.as_slice(),
+            [
+                session_end::Settled::Saved(Err(persist::SaveRefusal::TimedOut(_))),
+                session_end::Settled::TakenBack
+            ]
+        ),
+        "the question's write ran out of its budget, then the end was taken back: {settled:?}"
+    );
+
+    gate.release();
+    store.set_save_budget(crate::lane::PATIENCE);
+    record_as_the_app_does(&mut store, shells_document(&home.0, 1));
+    assert!(bt_platform::admission::exiting());
+    assert_eq!(store.flush_judged(), Ok(()), "the later wait is a real one");
+    assert_eq!(
+        windows_on_disk(&home.session()),
+        shells_document(&home.0, 1).windows
+    );
+}
