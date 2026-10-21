@@ -1,6 +1,7 @@
 ## The window thread's waits: the one registry (design note 2026-09-26; budget note R7).
 ##
 ## Ten sections, each a header line then tab-separated lines. A line starting `##` is a comment.
+## The headers are a closed list, each once and in this order (`window_waits_tests::REGISTRY_SECTIONS`).
 ## Some seven-cell `worker-door-body` effect rows therefore end in a tab; `.gitattributes`
 ## exempts this registry from blank-at-EOL diagnostics because the parser counts that empty cell.
 ##

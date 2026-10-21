@@ -5266,7 +5266,7 @@ fn every_entrance_left_the_vocabulary_takes_its_capability(world: &World) -> Vec
 fn every_door_is_where_the_registry_says() {
     let world = World::new();
     let words = vocabulary();
-    let assertions: [(&str, Vec<String>); 16] = [
+    let assertions: [(&str, Vec<String>); 17] = [
         (
             "the_universe_is_the_product_and_its_tools_are_declared",
             the_universe_is_the_product_and_its_tools_are_declared(&world),
@@ -5330,6 +5330,10 @@ fn every_door_is_where_the_registry_says() {
         (
             "the_graphs_section_admits_no_line",
             graphs_section_failures(REGISTRY),
+        ),
+        (
+            "the_registry_sections_are_the_closed_list",
+            registry_section_failures(REGISTRY),
         ),
     ];
     let mut report = String::new();
@@ -7498,6 +7502,101 @@ fn the_effects_section_is_the_effect_functions_inside_the_doors() {
     );
 }
 
+/// The registry's sections, each headed `# <name>` once, in this order: a closed list, so a section
+/// misspelled, unknown or written twice — a second `# graphs` after the first, which
+/// [`section_in`] would never read — is refused by name rather than read past.
+const REGISTRY_SECTIONS: [&str; 10] = [
+    "rows",
+    "doors",
+    "vocabulary",
+    "entrances",
+    "effects",
+    "graphs",
+    "counted-only",
+    "emergency",
+    "owners",
+    "completions",
+];
+
+/// **The registry's section headers are the closed list** [`REGISTRY_SECTIONS`]: every line that
+/// starts `# ` is one of them, each stands once, all of them stand, and in the listed order.
+fn registry_section_failures(registry: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for (at, line) in registry.lines().enumerate() {
+        let Some(name) = line.strip_prefix("# ") else {
+            continue;
+        };
+        if !REGISTRY_SECTIONS.contains(&name) {
+            failures.push(format!(
+                "line {}: `# {name}` is no section of the registry, whose sections are {REGISTRY_SECTIONS:?}",
+                at + 1
+            ));
+        } else if seen.contains(&name) {
+            failures.push(format!(
+                "line {}: `# {name}` is written twice: a second header hides its lines from the first's reader",
+                at + 1
+            ));
+        } else {
+            seen.push(name);
+        }
+    }
+    for name in REGISTRY_SECTIONS {
+        if !seen.contains(&name) {
+            failures.push(format!("the registry has no `# {name}` section"));
+        }
+    }
+    let order: Vec<&str> = REGISTRY_SECTIONS
+        .iter()
+        .copied()
+        .filter(|name| seen.contains(name))
+        .collect();
+    if failures.is_empty() && seen != order {
+        failures.push(format!(
+            "the registry's sections stand as {seen:?}, where they are {REGISTRY_SECTIONS:?}"
+        ));
+    }
+    failures
+}
+
+/// RED (T-A2-R1-NONLEG review, nit c) — **the registry's section headers are a closed list**: the
+/// live registry passes; a misspelled header, an unknown one and a second `# graphs` after the
+/// first are each refused by name.
+///
+/// MUTATION: let [`registry_section_failures`] skip the duplicate check, and the second `# graphs`
+/// passes.
+#[test]
+fn the_registry_sections_are_the_closed_list() {
+    let failures = registry_section_failures(REGISTRY);
+    assert!(
+        failures.is_empty(),
+        "the live registry's sections are refused:\n  {}",
+        failures.join("\n  ")
+    );
+    let twice = format!(
+        "{REGISTRY}\n# graphs\n{}\nS1\tTraceFlush\tbt-app\t-\tcrate::x\tverb\n",
+        GRAPH_COLUMNS.join("\t")
+    );
+    for (planted, why) in [
+        (
+            REGISTRY.replace("\n# owners\n", "\n# owner\n"),
+            "`# owner` is no section of the registry",
+        ),
+        (
+            REGISTRY.replace("\n# owners\n", "\n# owners\n# notes\n"),
+            "`# notes` is no section of the registry",
+        ),
+        (twice, "`# graphs` is written twice"),
+    ] {
+        let failures = registry_section_failures(&planted);
+        assert!(
+            failures.iter().any(|f| f.contains(why)),
+            "the planted registry is not refused for `{why}`:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+}
+
 /// The registry's `# graphs` section (revision (m)1 item 2, revision (q)2): its header, one line per
 /// function of a shared operation's graph once a leg carries authority.
 const GRAPH_COLUMNS: [&str; 6] = ["graph", "door", "crate", "arm", "item", "role"];
@@ -8084,9 +8183,8 @@ fn a_counted_only_drop_closes_and_never_waits() {
     let stale = both(&[], &[&holder("crate::gone_holder")]);
     let failures = counted_only_failures(&world, &words, &stale);
     assert!(
-        failures
-            .iter()
-            .any(|f| f.contains("the emergency holder `planted crate::gone_holder` is not in the product")),
+        failures.iter().any(|f| f
+            .contains("the emergency holder `planted crate::gone_holder` is not in the product")),
         "a stale emergency holder is not refused:\n  {}",
         failures.join("\n  ")
     );
