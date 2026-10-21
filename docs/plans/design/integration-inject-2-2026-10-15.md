@@ -166,33 +166,10 @@ PSModulePath = <FolioModules> ; [<Documents>\WindowsPowerShell\Modules ;] <V>
 - **The fork in Documents keeps its no-op.** Where Folio's copy is not on a pane's path (its write
   failed, say), a pane loads the fork an earlier Folio left in Documents; the fork anchors itself,
   so `folio.ps1` excludes it from the reflection repair by its assembly's `-bt.` build stamp (what
-  `psreadline::installed_build` reads), not by a version number. Stated here rather than tested:
-  the fork's bytes are no longer in the tree to lay down a copy from.
-
-**Round 3 (CLM design audit, ruling B′, 2026-10-18) — supersedes round 2's give-back.** The
-5.1 pane's prefix is composed only from a known answer of the edition's language mode, asked at
-launch before the window by a question of its own (`-NoProfile -NonInteractive`,
-`$ExecutionContext.SessionState.LanguageMode`; 269–392 ms warm, measured): `FullLanguage` gives
-the prefix and the loader; any other mode gives the Shell-integration-off pane, byte for byte, and
-one diagnostics line per launch; a birth before the answer waits for it on its birth worker; a
-failed question gives that birth no prefix, one line, and the next birth asks again. The round-2
-`else` arm (`Remove-Module` and a by-name import) is deleted: with the prefix decided before birth
-it is unreachable, and its outcome could not be decided from the design — Folio's assembly stays
-loaded and the type literal of the module imported again may bind to it — nor measured without a
-lockdown.
-
-Why the others were rejected (the audit's evidence). **A**, shipping upstream's signed
-psd1/psm1/ps1xml, blocks every stock Restricted and AllSigned machine at the host's publisher
-prompt (spike Q7, measured), helps only an "Allow Microsoft" WDAC subset, and is refused outright
-by a `DefaultWindows` policy or AppLocker's path rules, where 5.1 then does not fall back to the
-in-box module. **C**, an earlier hook or an honest give-back, has nothing to stand on: the host
-imports PSReadLine before the profiles and `-Command`, a failed first-found module does not fall
-back, and a pane cannot re-exec its shell. **D**, accepting the legacy editor on a constrained
-machine, ships a timing-dependent regression to exactly the managed population. A cache across
-launches would make the first pane after a lockdown changes hang on order again; an in-process
-replica of PowerShell's lockdown test would copy an internal Windows servicing already changed
-(5.1.26100.9444 carries new `SystemPolicy` methods). The release rows V0 and V1
-(`docs/plans/release/clean-vm.md` §4.6) are where a real lockdown is entered.
+  `psreadline::installed_build` reads), not by a version number. (revised 2026-10-20) Tested: round
+  3a's `the_fork_an_earlier_folio_left_keeps_the_resize_chords_no_op` lays the fork's own bytes down
+  from the tree's history and finds its chord taken by the no-op — the round-2 spelling read an empty
+  `ImplementingAssembly` (the fork is a script-root module) and gave it the repair.
 
 **The prefix stays in the pane's environment** (spike conclusion B, disposition (i)). Removing it after the load was measured to make any later by-name import or command lookup pull 2.0.0 in as a second module, which breaks the pane. Keeping it costs a nested `powershell.exe` typed in the pane its line editor (§2.1, F). A nested pwsh 7 is unaffected: it puts its own three folders first (measured).
 
@@ -272,7 +249,7 @@ The executable's delta is the 2.4.5 binaries minus the fork's (330 KB + 17 KB + 
 | **The account has a newer upstream PSReadLine** (none exists today) | the probe says current | Folio's 2.4.5 in Folio's panes (Q2). The switch gives the account's back. |
 | **The account has stock 2.0.0 only** | the corruption, unless they accepted the invitation | Folio's 2.4.5 |
 | **The account has Folio's fork in Documents from an earlier Folio** | Folio's panes use it, and so does every other host | Folio's panes use 2.4.5 from local data. Other hosts keep the fork. The legacy row offers its removal, and the uninstall removes it (Q4). |
-| **A locked-down policy** | Restricted / AllSigned: dark `Install`, a reason sentence | **No policy refuses the binary-only module** (measured under Restricted, AllSigned and RemoteSigned). The pane says nothing. Constrained Language Mode: no prefix and no integration, silent, exactly as INJECT-1. An application-control refusal of the DLL is the unmeasured case in §2.3 and §5.4. |
+| **A locked-down policy** | Restricted / AllSigned: dark `Install`, a reason sentence | **No policy refuses the binary-only module** (measured under Restricted, AllSigned and RemoteSigned). The pane says nothing. Constrained Language Mode: no prefix and no integration, exactly as INJECT-1, and (revised 2026-10-20) one `diagnostics.log` line per launch saying Folio's PSReadLine is not offered (round 3). An application-control refusal of the DLL is the unmeasured case in §2.3 and §5.4. |
 | **Shell integration switched off, or an uncomposable row** | the account's PSReadLine | unchanged: the account's PSReadLine |
 | **A pwsh 7 pane** | in-box 2.4.5 with the repair | unchanged |
 | **A nested `powershell.exe` typed in a 5.1 pane** | the account's PSReadLine | **the legacy line editor** under M (no colouring, no PSReadLine keys); under F with the initializer, Folio's. This is the one regression in this table, and Q1 decides it. |
@@ -359,3 +336,37 @@ No step needs a window.
 - **Application-control refusal of the DLL** (WDAC, AppLocker, Smart App Control): §5.4's VM rows.
 - **The 2.4.5 package's exact entries, sizes and signatures**: step 1 records them. Two things suggest the layout: the fork, which mirrors upstream 2.4.x (five binaries, three script files, `Changes.txt`, `License.txt`), and the spike's `Save-PSResource` copy of 2.4.5 (Q7, "Microsoft-signed, no Mark-of-the-Web"). pwsh 7.6's in-box 2.4.5 DLL is netstandard2.0 with no public key ("What the DLLs are built for").
 - **pwsh 7 under AllSigned**: the host's own publisher prompt arrives before any Folio code runs. That is unchanged by this ticket and outside it.
+
+## 9. Round 3 (2026-10-18), moved here 2026-10-20
+
+**Round 3 (CLM design audit, ruling B′, 2026-10-18) — supersedes round 2's give-back.** The
+5.1 pane's prefix is composed only from a known answer of the edition's language mode, asked at
+launch before the window by a question of its own (`-NoProfile -NonInteractive`,
+`$ExecutionContext.SessionState.LanguageMode`; 269–392 ms warm, measured): `FullLanguage` gives
+the prefix and the loader; any other mode gives the Shell-integration-off pane, byte for byte, and
+one diagnostics line per launch; a birth before the answer waits for it on its birth worker and says so — the one line per launch is the constrained machine, and each birth that waited says it waited (a different fact, evidence of the wait, kept per birth: the ruling on review nit (b), 2026-10-20); a
+failed question gives that birth no prefix, one line, and the next birth asks again. The round-2
+`else` arm (`Remove-Module` and a by-name import) is deleted: with the prefix decided before birth
+it is unreachable, and its outcome could not be decided from the design — Folio's assembly stays
+loaded and the type literal of the module imported again may bind to it — nor measured without a
+lockdown.
+
+Why the others were rejected (the audit's evidence). **A**, shipping upstream's signed
+psd1/psm1/ps1xml, blocks every stock Restricted and AllSigned machine at the host's publisher
+prompt (spike Q7, measured), helps only an "Allow Microsoft" WDAC subset, and is refused outright
+by a `DefaultWindows` policy or AppLocker's path rules, where 5.1 then does not fall back to the
+in-box module. **C**, an earlier hook or an honest give-back, has nothing to stand on: the host
+imports PSReadLine before the profiles and `-Command`, a failed first-found module does not fall
+back, and a pane cannot re-exec its shell. **D**, accepting the legacy editor on a constrained
+machine, ships a timing-dependent regression to exactly the managed population. A cache across
+launches would make the first pane after a lockdown changes hang on order again; an in-process
+replica of PowerShell's lockdown test would copy an internal Windows servicing already changed
+(5.1.26100.9444 carries new `SystemPolicy` methods). The release rows V0 and V1
+(`docs/plans/release/clean-vm.md` §4.6) are where a real lockdown is entered.
+
+**Round 4 (review of round 3, 2026-10-20).** A birth waits for the answer to the question that was
+out when it began, or a newer one — questions are numbered — and never through a question put after
+its own was answered. Only a known language mode is an answer: the last line of the child's output
+that holds anything is `FullLanguage`, or one of `ConstrainedLanguage`, `RestrictedLanguage`,
+`NoLanguage`; anything else is no answer (`Failed`), never a constrained one. The launch question is
+put only with the Shell integration switch on; a birth with the switch on asks for itself.

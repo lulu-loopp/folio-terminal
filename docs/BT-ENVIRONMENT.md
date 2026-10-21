@@ -120,6 +120,21 @@ on macOS, land its new `CAMetalLayer` on a view the old one was cleared off
 (`docs/DESIGN.md` §13.14) — is invisible in every other run of the program.
 Compiled out of release builds.
 
+### Read by the shipped `folio.ps1`, set only by tests
+
+Folio's PowerShell integration script ships in every release and reads eight names, each the
+switch of a development probe in its resize-chord handlers: `BT_PSREADLINE_NOOP_PROBE`,
+`BT_PSREADLINE_REANCHOR_PROBE`, `BT_PSREADLINE_REANCHOR_FORCE_FALLBACK_PROBE`,
+`BT_PSREADLINE_REANCHOR_EXACT_EDGE_PROBE`, `BT_PSREADLINE_REANCHOR_WHOLE_SCREEN_PROBE`,
+`BT_PSREADLINE_REANCHOR_EMPTY_BASELINE_PROBE`, `BT_PSREADLINE_HISTORY_PROBE` and
+`BT_PSREADLINE_HISTORY_TRANSPARENCY_RED_PROBE`. Each is acted on only when it is exactly `1`, and
+then makes the handler write an `OSC 777;BT_PSREADLINE_…` report (or, for the fallback and red
+probes, take the arm under test) so a test can tell which handler took the chord and what it did.
+Only tests set them — `bt-pty`'s real-shell probes and `bt-app`'s
+`shell_integration::psreadline_tests::real_shell::the_fork_an_earlier_folio_left_keeps_the_resize_chords_no_op`
+— on the one pane they start. **Unset, which is every product session, they change nothing**: the
+handlers run their product road, and the terminal ignores an `OSC 777` it does not own.
+
 ## 2. Read only when the tests are compiled
 
 Never present in a release binary. `BT_PSREADLINE_MODULE_PATH`, `BT_BURST_EMIT`,
@@ -203,13 +218,6 @@ and the `folio.exe` the `launch` row starts, for `bt-platform`'s ignored
 | Variable | Value | What it does | What can end up in the file | Default |
 | --- | --- | --- | --- | --- |
 | `BT_PASTE_CRT_CONSUMER` | absolute path to the separately compiled `paste_paths_crt.exe` fixture | Set by the developer or acceptance coordinator when explicitly running the ignored Windows direct-CRT test. Names the consumer that receives the encoder's literal through the quiet process door; the test checks its captured argument count and UTF-16 units. | No file is written by this switch; consumer output is captured through pipes. | not set; the test is ignored by default and fails if explicitly run without this value |
-
-`BT_PSREADLINE_NOOP_PROBE` and `BT_PSREADLINE_REANCHOR_PROBE` — set to `1` on the Windows
-PowerShell pane `bt-app`'s `shell_integration::psreadline_tests::real_shell::the_fork_an_earlier_folio_left_keeps_the_resize_chords_no_op`
-starts, and read only by `folio.ps1`'s resize-chord handlers in that pane: the first makes the
-no-op handler write `OSC 777;BT_PSREADLINE_NOOP`, the second makes the reflection repair write
-`OSC 777;BT_PSREADLINE_REANCHOR=…`, so the test can tell which handler took the chord. A product
-session never has either; the terminal ignores both sequences.
 
 **Folio's local-data root for its PSReadLine has no variable.** The pane's module is
 written under `%LOCALAPPDATA%\Folio\psmodules\` (`shell_integration::local_data_root`),

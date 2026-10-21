@@ -1600,14 +1600,17 @@ patience. Timing changes how long a pane takes, never which editor it gets.
 Three rows: **`FullLanguage`** — prefix and loader, as above; **a constrained
 machine** (any other mode, an application-control lockdown) — no prefix and no
 loader, the pane is exactly the Shell-integration-off pane, and
-`diagnostics.log` says once per launch that Folio's PSReadLine is not offered;
+`diagnostics.log` says once per launch that Folio's PSReadLine is not offered
+(each birth that waited for the answer also says how long it waited — a
+different fact, kept per birth);
 **an account whose own profile switches the session to `ConstrainedLanguage`**
 — the edition answered `FullLanguage`, so the host imported Folio's copy, and
 the constrained profile leaves the pane on the host's legacy line editor: the
 account's own choice, recorded and not repaired, beside the version-demand row
-below. A question that fails or runs out of patience gives that birth no
-prefix, one line, and the next 5.1 birth asks again. No answer is kept across
-launches. A `pwsh` started inside it keeps its own. **Folio's copy always wins in
+below. A question that fails or runs out of patience — or answers with anything
+but a language mode — gives that birth no prefix, one line, and the next 5.1
+birth asks again. The launch asks only with the Shell integration switch on. No
+answer is kept across launches. A `pwsh` started inside it keeps its own. **Folio's copy always wins in
 Folio's 5.1 panes** (owner ruling Q2): the host imports it through the pane's
 `PSModulePath`, before any profile runs, and a profile that imports PSReadLine
 by name gets the one already loaded. A profile that demands another version by
