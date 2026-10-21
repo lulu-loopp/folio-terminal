@@ -1031,6 +1031,39 @@ the elevated install's output and the shots. Report the two client versions on t
 line: `PASS on <current> / PASS on <image's>`, or which cell went red and its exact
 `diagnostics.log` line.
 
+### 4.6 Load row: the window thread under a machine-wide CPU load (T-WINDOW-THREAD-UNDER-LOAD) <!-- zh: pending T-WINDOW-THREAD-UNDER-LOAD -->
+
+The owner's report of 2026-10-18 on a machine with nothing else running. `folio-win11`,
+`clean` snapshot, a candidate's `folio.exe`, `conpty.dll` and `OpenConsole.exe` (a release
+build's `target\release`), copied in; no install.
+
+```powershell
+$pass = Get-Content <the VM password file>   # into a variable, never printed
+pwsh -File scripts/release/cleanvm/run-load-row.ps1 -Vmx <folio-win11.vmx> -VmPassword $pass `
+    -Candidate <target\release of the candidate> -Tag before
+```
+
+`run-load-row.ps1` reverts, starts `nogui`, copies the candidate and `guest\load-row.ps1`,
+`guest\cpu-hog.ps1`, `ui-probe.ps1` in, runs the row in the logged-on session and copies out
+`load-<Tag>.txt`, `-perf.txt` (Folio's stderr under `BT_PERF_TRACE=1`), `-diagnostics.log`,
+`-hog.txt`; `read-load-row.ps1` prints the cells (`cells-<Tag>.txt`). In the guest: four rows
+with a box rule printed in the first tab (a frame candidate, as an agent's TUI is), a second
+tab opened over it, then three phases of `-Seconds` (60) each — **baseline**, **hog**
+(`cpu-hog.ps1`: 2 x logical processors spinners at the Normal priority class), **after** —
+with the person's cycle every two seconds: `1..400|%{$_}` typed and Enter, three wheel notches
+up and three down.
+
+| Cell | Read from | Expected (the fix) | Red |
+| --- | --- | --- | --- |
+| turns/s | the budget lines' `turn=` over the phase | the turn rate of the work: tens to a few hundred a second | thousands a second (the loop spins) |
+| stale turns, max, sources | `stale us=` lines and their `suppressed=` | none past a few `SearchWalk`/`ImeCursor` turns | a `stale` line a second naming a clock, `ForegroundProgram` in the unmodified build |
+| delay max | `delay_us=` on the `wall` lines | under one frame in baseline and after; the hog phase says what the guest's scheduler gives | — (reported, not judged) |
+| present cadence | `since_previous_us` of `BT_PERF_TRACE present` | about the display's frame while the pane prints | presents stop while input is sent |
+| echo / notch / output | `event_to_present_us` by `source=` | within a frame or two in every phase | seconds |
+
+Run it twice: `-Tag before` on the build at the instrumentation commit (the named fold and the
+`stale_us`/`source=` cells, no fix), `-Tag after` on the fix; the report carries both tables.
+
 ## 5. 截图清单
 
 自动产出(每台机一套):
