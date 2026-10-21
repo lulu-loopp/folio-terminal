@@ -77,6 +77,22 @@
 //! rollback's own card. The start that retires a commit whose journal notes
 //! the trial's version raises E4's card that its held changes were not kept.
 //!
+//! **The rescue copy's start** (T-RESCUE-COPY-CARD): a Windows lock holder
+//! whose install holds neither whole set starts `H\<txn>\rescue\folio.exe`
+//! with `--update-failed <journal>` (`update_apply::Opens::Rescue`), and the
+//! old build's hand-off exit starts the rescue copy the same way on both
+//! platforms when the installed build cannot be started
+//! (`update_handoff`'s fallback) — started because the install's home holds
+//! a journal whose card it must show. Its home is found from its own path
+//! (`update_txn::Home::of_rescue_copy`, [`home_of_start`]; on Windows as
+//! `--update-recover` finds it), never from the word's value, and that start
+//! only reads: it takes no admission (it does not run
+//! from the install, and the rollback the next logon makes needs the
+//! admission exclusive), no lock, and acts on nothing — no retirement, no
+//! discard (either would remove the folder it runs from), no hand-off and no
+//! trial. It continues with the card the word raises, its writes not held:
+//! it is the old build's own image, so what it writes is the old build's.
+//!
 //! # Where it runs, and its doors
 //!
 //! On the window thread in the phase `Starting` (`bt_platform::admission`):
@@ -354,7 +370,7 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
     let Ok(own_exe) = std::env::current_exe() else {
         return Admitted(());
     };
-    let Some(home) = Home::of(bt_platform::host_platform(), &own_exe) else {
+    let Some((home, starter)) = home_of_start(bt_platform::host_platform(), &own_exe) else {
         return Admitted(());
     };
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -366,7 +382,7 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
         failed: request.update_failed.as_deref(),
         journal_held: request.update_journal_held.as_deref(),
     };
-    match run(&start, &mut Machine) {
+    match run_by(&start, starter, &mut Machine) {
         Verdict::Exit(code) => bt_platform::leave_process(code),
         Verdict::Continue {
             admission,
@@ -403,9 +419,50 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
     }
 }
 
-/// **The pass over any home**: the steps of the module header, in order.
+/// **Whose start a pass is for**: the installed build's, or the rescue copy's
+/// (module header, T-RESCUE-COPY-CARD).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Starter {
+    /// Any start but the rescue copy's: the ordinary start's rule.
+    Install,
+    /// The rescue copy (`H\<txn>\rescue\folio.exe` on Windows, the rescue
+    /// clone's executable on macOS), which reads the install's journal for its
+    /// card and acts on nothing.
+    RescueCopy,
+}
+
+/// **The home a start at `exe` runs over, and whose start it is**: for the
+/// rescue copy, the install's home found from its own path
+/// (`Home::of_rescue_copy` — on Windows exactly as `--update-recover` finds it,
+/// `exe` in a folder named `rescue` two levels under a folder named
+/// `.folio-update`; on macOS the rescue clone of the installed bundle under
+/// that bundle's locator); for every other executable the home of its own
+/// place (`Home::of`). `None` where this build has no updater home.
+pub(crate) fn home_of_start(
+    platform: bt_platform::HostPlatform,
+    exe: &Path,
+) -> Option<(Home, Starter)> {
+    match Home::of_rescue_copy(platform, exe) {
+        Some(home) => Some((home, Starter::RescueCopy)),
+        None => Home::of(platform, exe).map(|home| (home, Starter::Install)),
+    }
+}
+
+/// **The pass over any home**, for the installed build's start
+/// ([`Starter::Install`]): the tests' door to [`run_by`].
+#[cfg(test)]
 pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
-    let admission = admit(start.home, world);
+    run_by(start, Starter::Install, world)
+}
+
+/// **The pass over any home**: the steps of the module header, in order. The
+/// rescue copy's start ([`Starter::RescueCopy`]) takes no admission and stops
+/// once its card is read.
+pub(crate) fn run_by(start: &Start<'_>, starter: Starter, world: &mut impl World) -> Verdict {
+    let admission = match starter {
+        Starter::Install => admit(start.home, world),
+        Starter::RescueCopy => None,
+    };
     let journal_path = start.home.journal();
     // A journal that could not be read is never taken for none (E1 round
     // 2): it is unreadable, with the card that says so.
@@ -504,6 +561,20 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             },
             None => failure,
         });
+    // The rescue copy reads only (T-RESCUE-COPY-CARD): no lock, and nothing
+    // `at_start` would do — a retirement or a discard removes the folder it
+    // runs from, a hand-off would start it again, and it is no trial.
+    if starter == Starter::RescueCopy {
+        return Verdict::Continue {
+            admission,
+            trial: None,
+            last_trial: false,
+            failed,
+            waiting: None,
+            held: None,
+            stands_in: false,
+        };
+    }
     // The transaction lock is asked for only where its answer decides
     // something: a retirement or a discard needs it; a destructive class is
     // never the start's to touch, and asking would contend with the applier.
@@ -3357,6 +3428,243 @@ mod tests {
                 );
                 assert_eq!(world.said.len(), 1, "{what}: {:?}", world.said);
             }
+        }
+
+        // ───────────────── the rescue copy's start (T-RESCUE-COPY-CARD) ─────────────────
+
+        /// The rescue copy's pass over this scene: its home found from its own
+        /// path as the product finds it ([`home_of_start`]), `argv` its words
+        /// (`--update-failed <journal>` first when `sent`, as
+        /// `update_apply::Opens::Rescue` starts it), and the hold's error.
+        fn run_rescue_copy(
+            scene: &Scene,
+            sent: bool,
+            journal_held: Option<&str>,
+            world: &mut Recorded,
+        ) -> Verdict {
+            let (home, starter) = home_of_start(bt_platform::HostPlatform::Windows, &scene.rescue)
+                .expect("the rescue copy has a home");
+            let journal = home.journal();
+            let argv: Vec<OsString> = if sent {
+                crate::update_apply::failed_words(&home).to_vec()
+            } else {
+                Vec::new()
+            };
+            world.admission = Some(scene.home.admission());
+            run_by(
+                &Start {
+                    own_exe: &scene.rescue,
+                    home: &home,
+                    argv: &argv,
+                    trial: None,
+                    failed: sent.then_some(journal.as_path()),
+                    journal_held,
+                },
+                starter,
+                world,
+            )
+        }
+
+        /// RED (T-RESCUE-COPY-CARD) — **the rescue copy a failed update opens
+        /// shows the card of the install's journal, and only reads**: started
+        /// as `Opens::Rescue` starts it, over a `destructive` journal its home
+        /// holds, it continues with *Update incomplete.* and the install's
+        /// home as the folder — or, over a journal it cannot read whole, the
+        /// card naming the later build, and with the hold's word the hold's
+        /// card over it — taking no admission (the next logon's rollback needs
+        /// it exclusive) and starting, writing and removing nothing: no
+        /// hand-off, no trial, writes not held, no E5 mark.
+        ///
+        /// MUTATIONS: in `home_of_start`, answer `Home::of` for every path —
+        /// the home is the exe's own folder's again and the copy opens with
+        /// no card; in `run_by`, take the admission for the rescue copy too.
+        #[test]
+        fn the_rescue_copy_shows_the_card_of_the_installs_journal_and_only_reads() {
+            use crate::update_txn::{HeaderOutcome, LATER_BUILD, beyond_inputs};
+            let Some(scene) = Scene::new("rescue-copy-card") else {
+                return;
+            };
+            let folder = Some(scene.home.root().to_path_buf());
+            let known = scene.journal_of(Class::Destructive, HeaderOutcome::RolledBack);
+            let before = scene.listing();
+            let mut world = Recorded::default();
+            let verdict = run_rescue_copy(&scene, true, None, &mut world);
+            let Verdict::Continue {
+                admission,
+                trial,
+                failed,
+                waiting,
+                held,
+                stands_in,
+                ..
+            } = verdict
+            else {
+                panic!("the rescue copy continues");
+            };
+            assert_eq!(
+                failed,
+                Some(Failure::Incomplete {
+                    folder: folder.clone(),
+                    held: false,
+                    untried: true,
+                }),
+                "the card of the install's journal: {:?}",
+                world.said
+            );
+            assert!(admission.is_none(), "the rescue copy takes no admission");
+            assert!(
+                install_txn::try_hold(&scene.home.admission(), Hold::Exclusive)
+                    .unwrap()
+                    .is_some(),
+                "the admission stays free for the rollback"
+            );
+            assert_eq!((trial, held, stands_in), (None, None, false));
+            assert!(waiting.is_none());
+            assert!(world.spawned.is_empty() && world.entrances.is_empty());
+            assert_eq!(std::fs::read(scene.home.journal()).unwrap(), known);
+            assert!(!scene.home.unkept(txn()).exists(), "no E5 mark");
+            assert_eq!(scene.listing(), before);
+
+            // A journal of a later Folio this build cannot read whole: the
+            // card that names it, and the hold's card over it.
+            let [(what, beyond), ..] = beyond_inputs(&known);
+            std::fs::write(scene.home.journal(), &beyond).unwrap();
+            let mut world = Recorded::default();
+            let (failed, held, trial) =
+                continued_with(run_rescue_copy(&scene, true, Some("held"), &mut world));
+            assert_eq!(
+                failed,
+                Some(Failure::JournalHeld {
+                    error: "held".to_owned(),
+                    then: Box::new(Failure::Newer {
+                        folder: folder.clone(),
+                        version: Some(LATER_BUILD.to_owned()),
+                        held: false,
+                    }),
+                }),
+                "{what}"
+            );
+            assert_eq!((held, trial), (None, None), "{what}");
+            assert!(world.spawned.is_empty(), "{what}");
+            assert_eq!(std::fs::read(scene.home.journal()).unwrap(), beyond);
+
+            // Started without the word over a destructive journal, it hands
+            // nothing to a rescue build — it is the rescue build.
+            scene.journal(Class::Destructive);
+            let mut world = Recorded::default();
+            let (failed, held, trial) =
+                continued_with(run_rescue_copy(&scene, false, None, &mut world));
+            assert_eq!((failed, held, trial), (None, None, None));
+            assert!(world.spawned.is_empty(), "{:?}", world.spawned);
+            let _ = std::fs::remove_dir_all(&scene.root);
+        }
+
+        /// RED (T-RESCUE-COPY-CARD) — **the rescue copy never retires**: over a
+        /// journal that turned `terminal` before it started, it shows the
+        /// rollback's card and leaves the journal and `H\<txn>` — the folder
+        /// it runs from — as they are, the entrance too.
+        ///
+        /// MUTATION: drop `run_by`'s early return for the rescue copy — the
+        /// ordinary start's rule retires the transaction.
+        #[test]
+        fn the_rescue_copy_never_retires_the_transaction_it_runs_from() {
+            let Some(scene) = Scene::new("rescue-copy-terminal") else {
+                return;
+            };
+            let journal = scene.journal_of(
+                Class::Terminal,
+                crate::update_txn::HeaderOutcome::RolledBack,
+            );
+            let before = scene.listing();
+            let mut world = Recorded::default();
+            let (failed, held, trial) =
+                continued_with(run_rescue_copy(&scene, true, None, &mut world));
+            assert_eq!(failed, Some(Failure::RolledBack));
+            assert_eq!((held, trial), (None, None));
+            assert_eq!(std::fs::read(scene.home.journal()).unwrap(), journal);
+            assert!(scene.rescue.is_file(), "the folder it runs from stays");
+            assert_eq!(scene.listing(), before);
+            assert!(world.entrances.is_empty() && world.spawned.is_empty());
+            let _ = std::fs::remove_dir_all(&scene.root);
+        }
+    }
+
+    /// **Only the rescue copy's own layout is taken for it**
+    /// (T-RESCUE-COPY-CARD): on Windows an executable in a folder named
+    /// `rescue` whose grandparent is a folder named `.folio-update`, on macOS
+    /// the clone of the installed bundle in `<locator>/<txn>/rescue/`; every
+    /// other executable — the install's own, a copy in a folder merely named
+    /// `rescue`, a clone under another bundle's locator — gets its own place's
+    /// home (`Home::of`).
+    #[test]
+    fn only_the_rescue_layout_is_the_rescue_copys_start() {
+        use super::{Starter, home_of_start};
+        use crate::update_txn::{Home, WINDOWS_HOME};
+        use bt_platform::HostPlatform;
+        use std::path::PathBuf;
+        let base = PathBuf::from("Programs");
+        let install = base.join("Folio");
+        let home = install.join(WINDOWS_HOME);
+        let rescue = home.join("7a7a").join("rescue").join("folio.exe");
+        assert_eq!(
+            home_of_start(HostPlatform::Windows, &rescue),
+            Some((Home::at(home.clone()), Starter::RescueCopy))
+        );
+        for exe in [
+            install.join("folio.exe"),
+            base.join("rescue").join("folio.exe"),
+            base.join("Tools")
+                .join("x")
+                .join("rescue")
+                .join("folio.exe"),
+            install
+                .join("not-the-home")
+                .join("7a7a")
+                .join("rescue")
+                .join("folio.exe"),
+        ] {
+            assert_eq!(
+                home_of_start(HostPlatform::Windows, &exe),
+                Home::of(HostPlatform::Windows, &exe).map(|home| (home, Starter::Install)),
+                "{}",
+                exe.display()
+            );
+        }
+        // macOS: the rescue clone of the installed bundle, under that bundle's
+        // locator, has the installed bundle's home; any other bundle its own.
+        let apps = PathBuf::from("Applications");
+        let inside = PathBuf::from("Contents").join("MacOS").join("folio");
+        let clone_in = |locator: &str, folder: &str, name: &str| {
+            apps.join(locator)
+                .join("7a7a")
+                .join(folder)
+                .join(name)
+                .join(&inside)
+        };
+        let installed = apps.join("Folio.app").join(&inside);
+        assert_eq!(
+            home_of_start(
+                HostPlatform::MacOs,
+                &clone_in(".Folio.app.folio-update", "rescue", "Folio.app")
+            ),
+            Home::of(HostPlatform::MacOs, &installed).map(|home| (home, Starter::RescueCopy))
+        );
+        for exe in [
+            installed.clone(),
+            clone_in(".Other.app.folio-update", "rescue", "Folio.app"),
+            clone_in(".Folio.app.folio-update", "stage", "Folio.app"),
+            clone_in("not-a-locator", "rescue", "Folio.app"),
+            apps.join("Tools")
+                .join("rescue")
+                .join("Folio.app")
+                .join(&inside),
+        ] {
+            assert_eq!(
+                home_of_start(HostPlatform::MacOs, &exe),
+                Home::of(HostPlatform::MacOs, &exe).map(|home| (home, Starter::Install)),
+                "{}",
+                exe.display()
+            );
         }
     }
 }
