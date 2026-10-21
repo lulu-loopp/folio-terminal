@@ -4495,7 +4495,8 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
-    /// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a background picture is
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not seen by
+    /// `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a background picture is
     /// decoded from a file already closed when the picture comes back**: the
     /// `background-picture` worker hands the window what this returns, and at
     /// that moment nothing holds the file (`bt_testpath::nobody_holds`).

@@ -1797,7 +1797,8 @@ pub(crate) enum Claim {
     AWithdrawnRequestLeavesTheLine,
     /// A request's answer is observable only once its work has let go of every handle it took for
     /// it (T-ANSWER-AFTER-THE-FILE-IS-CLOSED): the moment the consumer finds the terminal, nobody
-    /// holds the file the work held — the order is the lane's, never a race its consumer wins.
+    /// holds the file the work held — the order is the lane's, never a race its consumer wins —
+    /// except a handle that is the answer itself, which the lane's `# completions` row names.
     AnAnswerIsPublishedAfterItsResourcesAreReleased,
 }
 

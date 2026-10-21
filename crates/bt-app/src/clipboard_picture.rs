@@ -928,7 +928,8 @@ mod tests {
     }
 
     /// One real one-pixel PNG, as a clipboard would offer it.
-    /// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a saved picture is closed when its path is
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not seen by
+    /// `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a saved picture is closed when its path is
     /// answered**: the save the `clipboard-picture` worker runs hands back the path it wrote, and
     /// at that moment nobody holds the file — the picture is ready to be opened, dragged or
     /// attached by whatever the person hands it to next.

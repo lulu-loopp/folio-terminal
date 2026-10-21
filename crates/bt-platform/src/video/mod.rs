@@ -275,7 +275,9 @@ impl FirstFrameCost {
 /// closes it itself before it hands back what it found. A closed stream is a
 /// closed file whoever still holds a reference to the stream — the reader Media
 /// Foundation lets go of on its own schedule, or a decode this call walked away
-/// from, whose next read of the closed stream fails and ends it. So an editor
+/// from, whose next read of the closed stream fails and ends it. A walked-away
+/// thread stuck somewhere other than a read of the stream stays where it is — it
+/// is leaked holding a closed stream, never the file. So an editor
 /// that saves over the file the moment the window has its answer is never
 /// refused by a read this window had already finished with.
 #[must_use]
@@ -321,9 +323,9 @@ fn first_frame_through(
 /// closes the file whatever still holds the stream, so the order — the file let
 /// go, then the answer — is this code's and not the platform's.
 ///
-/// Opened for reading, sharing reading only ([`MF_FILEFLAGS_NONE`]), as the
-/// platform opened it before: what changed is when the file is closed, never what
-/// a writer meets while a frame is being read.
+/// Opened for reading with [`MF_FILEFLAGS_NONE`], which does not allow write
+/// sharing: a writer meets the open file while a frame is being read, as it did
+/// before; what changed is when the file is closed.
 struct TheFile {
     stream: IMFByteStream,
 }
@@ -378,9 +380,12 @@ struct Lent(IMFByteStream);
 
 // SAFETY: a Media Foundation byte stream is a free-threaded object of the
 // process's multithreaded apartment — the platform itself calls it from its
-// work-queue threads ("Media Foundation and COM") — and both threads that touch
-// this one, the one that opened it and the one it is lent to, stand in that
-// apartment while they do (`in_the_process_apartment`).
+// work-queue threads ("Media Foundation and COM"). Both threads that use this
+// one, the one that opened it and the one it is lent to, do so inside
+// `in_the_process_apartment`; the lent reference's last `Release` can run after
+// the decode thread has left that bracket, which is harmless while the MTA
+// stands, and `media_session`'s `CoIncrementMTAUsage` keeps it standing for the
+// process's life.
 unsafe impl Send for Lent {}
 
 /// One lent stream decoded on the calling thread, which joins the process
