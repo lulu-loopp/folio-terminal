@@ -236,7 +236,8 @@ function Get-CardKind {
 #   Card     the start1 card's kind (Get-CardKind)
 #   Window   which folio.exe owns the window start1's card was read from: `installed`,
 #            `rescue` (`H\<txn>\rescue\folio.exe`) or `any`
-#   Lines / NoLines   patterns that must / must not appear in start2's diagnostics.log
+#   Lines / NoLines   patterns that must / must not appear in start2's diagnostics.log or in the
+#            plain starts' standard error (`updater-stderr-<tag>.txt`)
 #   JournalGuard      between consecutive collections a journal that changed or went away
 #            was settled by a rescue (a `BT_UPDATE_RECOVER ... recovery ended` line among the
 #            lines that interval added) or had a header A acts on by its frozen promise before (A1)
@@ -277,7 +278,10 @@ function Get-PlantedVerdict {
         }
         Cell 'Window' $want $got
     }
-    $diag = Lines (Join-Path $start2 'diagnostics.log')
+    # The lines a row reads: diagnostics.log, and the plain starts' own standard error
+    # (`keys.ps1 launchplain`: the start pass writes there only).
+    $diag = @(Lines (Join-Path $start2 'diagnostics.log')) + @(Get-ChildItem -LiteralPath $start2 -File -Filter 'updater-stderr-*.txt' -ErrorAction SilentlyContinue |
+            Sort-Object Name | ForEach-Object { [IO.File]::ReadAllLines($_.FullName) })
     foreach ($pattern in @(if ($Expect.ContainsKey('Lines')) { $Expect.Lines })) {
         $hit = @($diag | Where-Object { $_ -match $pattern }).Count -gt 0
         Cell "Line /$pattern/" 'present' $(if ($hit) { 'present' } else { 'absent' })

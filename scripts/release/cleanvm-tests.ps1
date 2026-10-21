@@ -396,6 +396,10 @@ try {
     $newerHeld = @($installed, 'An update by a newer Folio is not finished.', 'Changes made in this session are not kept.')
     $v = Get-PlantedVerdict -Expect $heldCell -Evidence (New-Evidence 'held-ok' $tpl @($heldLine) $newerHeld)
     Check (-not $v.Failed) "a held cell with the journal kept, its card and its line passes ($($v.Line))"
+    $fromStderr = New-Evidence 'held-stderr' $tpl @('10:00:00 run started') $newerHeld
+    [IO.File]::WriteAllLines((Join-Path $fromStderr 'after-start2\updater-stderr-start1.txt'), @($heldLine))
+    $v = Get-PlantedVerdict -Expect $heldCell -Evidence $fromStderr
+    Check (-not $v.Failed) "a start's line read from its standard error counts ($($v.Line))"
     $v = Get-PlantedVerdict -Expect $heldCell -Evidence (New-Evidence 'held-rewritten' ($tpl -replace '0.4.98', '0.4.97') @($heldLine) $newerHeld)
     Check ($v.Failed -and $v.Cells['Journal'].Got -eq 'rewritten') "a journal rewritten in one byte, same length, is not kept ($($v.Line))"
     $v = Get-PlantedVerdict -Expect $heldCell -Evidence (New-Evidence 'held-plain' $tpl @('10:00:01 BT_UPDATE_START x is left as it is: y') @($installed, 'PS C:\>'))

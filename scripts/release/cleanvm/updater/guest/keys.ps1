@@ -179,7 +179,14 @@ foreach ($step in ($Plan -split ',')) {
   Say "step $step"
   switch -Regex ($step) {
     '^launchfeed$' { $p = Start-Process -FilePath $exe -ArgumentList @('--update-feed', $FeedUrl) -PassThru; Say "started pid=$($p.Id) with --update-feed $FeedUrl" }
-    '^launchplain$' { $p = Start-Process -FilePath $exe -PassThru; Say "started pid=$($p.Id) plain" }
+    # The start's own words go to its standard error only (`update_startup`'s `Machine::say`: the
+    # start pass runs before diagnostics.log is open, and a start that hands itself to a rescue
+    # leaves before it ever is), so a plain start's are kept in updater-stderr-<Tag>.txt.
+    '^launchplain$' {
+      $err = Join-Path $GuestHome "updater-stderr-$Tag.txt"
+      $p = Start-Process -FilePath $exe -RedirectStandardError $err -PassThru
+      Say "started pid=$($p.Id) plain (standard error to $err)"
+    }
     '^offer$' {
       $w = WaitWindow; Say "window pid=$w"
       $deadline = (Get-Date).AddSeconds($WaitSeconds)
