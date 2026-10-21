@@ -3066,8 +3066,11 @@ pub(crate) enum Opens {
     /// `destructive` and the install folder holds neither whole set — a
     /// rollback that could not finish, or a layout that cannot be read — so
     /// the rescue copy, O's own image, is started with `--update-failed
-    /// <journal>`: the one executable known to run, whose own home holds no
-    /// journal. A macOS holder never answers it.
+    /// <journal>`: the one executable known to run, started because the
+    /// install's home holds a journal whose card it must show. It finds that
+    /// home from its own path (`update_startup::home_of_start`; the word's
+    /// value is not read, U-32) and only reads it. A macOS holder never
+    /// answers it.
     Rescue,
 }
 
