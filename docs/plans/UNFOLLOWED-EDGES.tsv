@@ -6708,12 +6708,12 @@ crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::perform	Ambiguous	to_string	2	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::retire	Ambiguous	to_string	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::retire	Dynamic	kept	2	
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run	Ambiguous	flatten	2	
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run	Ambiguous	is_some	3	
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run	Ambiguous	is_some_and	1	
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run	Ambiguous	map	2	
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run	Ambiguous	or_else	1	
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run	Ambiguous	then	1	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	flatten	2	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	is_some	3	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	is_some_and	1	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	map	2	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	or_else	1	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	then	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::stand_down	Ambiguous	is_ok	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::stands_in	Ambiguous	is_some	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::stood_down	Ambiguous	is_some	1	
@@ -6763,6 +6763,7 @@ crates/bt-app/src/update_txn.rs	bt-app crate::update_txn::Home::of	Ambiguous	joi
 crates/bt-app/src/update_txn.rs	bt-app crate::update_txn::Home::of_rescue	Ambiguous	file_name	2	
 crates/bt-app/src/update_txn.rs	bt-app crate::update_txn::Home::of_rescue	Ambiguous	join	1	
 crates/bt-app/src/update_txn.rs	bt-app crate::update_txn::Home::of_rescue	Ambiguous	to_path_buf	1	
+crates/bt-app/src/update_txn.rs	bt-app crate::update_txn::Home::of_rescue_copy	Ambiguous	file_name	1	
 crates/bt-app/src/update_txn.rs	bt-app crate::update_txn::Home::of_rescue_named	Ambiguous	join	2	
 crates/bt-app/src/update_txn.rs	bt-app crate::update_txn::Home::of_rescue_named	Ambiguous	strip_prefix	1	
 crates/bt-app/src/update_txn.rs	bt-app crate::update_txn::Home::of_rescue_named	Ambiguous	strip_suffix	1	
