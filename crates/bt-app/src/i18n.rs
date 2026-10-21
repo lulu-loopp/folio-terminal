@@ -2477,10 +2477,11 @@ text_entries! {
     MergeNotApplied,
     /// Between a file's two clauses.
     MergeClauseSeparator,
-    /// **The line the system's shutdown screen shows for a Folio window while the layout is
-    /// being written** (B-ENDSESSION): `ShutdownBlockReasonCreate`'s reason, up for at most the
-    /// session write's budget. A state, so a few words.
-    ShutdownSavingLayout,
+    /// **The line the system's shutdown screen shows for a Folio window while its work is being
+    /// written** (B-ENDSESSION; T-ENDSESSION-SAVES: the preview edits and the owed documents go
+    /// ahead of the layout): `ShutdownBlockReasonCreate`'s reason, up for at most the session
+    /// write's budget and the copies of what did not land. A state, so a few words.
+    ShutdownSavingWork,
 
     // ── the preview pane's lock (§7.7 ⑧, Claude 定 2026-08-23) ─────────────
     //
@@ -4966,7 +4967,11 @@ impl Text {
                 "session.json could not be written. Nothing was closed.",
                 "session.json 写入失败。没有关闭任何窗口。",
             ),
-            Self::ShutdownSavingLayout => pick(lang, "Saving your layout", "正在保存窗口布局"),
+            Self::ShutdownSavingWork => pick(
+                lang,
+                "Saving your work",
+                "Saving your work", // zh: pending T-ENDSESSION-SAVES
+            ),
             Self::QuitDocumentsNotSaved => pick(
                 lang,
                 "{files} could not be saved.",
@@ -6646,6 +6651,10 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-ENDSESSION-SAVES — the line the shutdown screen shows while the edits,
+        // the owed documents and the layout are written.
+        (Self::ShutdownSavingWork, HostPlatform::Windows),
+        (Self::ShutdownSavingWork, HostPlatform::MacOs),
         // zh: pending T-CWD-FROM-PROCESS — the foot of a files card or column opened on the home
         // folder because the pane's folder could not be read.
         (Self::FilesFolderUnknown, HostPlatform::Windows),

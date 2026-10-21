@@ -21,6 +21,11 @@
 //! another program, or the person at the shutdown screen, stopped it) lets the document go again
 //! and puts the sentinel back: the run goes on.
 //!
+//! **The question is settled once per span** (T-ENDSESSION-SAVES): the system sends it to every
+//! top-level window, so the inbox holds one `Asked` per window, and only the first of a span — the
+//! one [`owes_the_write`] answers for — hands the edits over and writes the document; the rest are
+//! [`Settled::AlreadySaved`]. A shutdown taken back opens the next span.
+//!
 //! Window-thread state, so a thread-local: the procedure and the loop are the same thread, and a
 //! test on a thread of its own starts with nothing held.
 
@@ -33,6 +38,9 @@ use crate::persist::{SaveRefusal, SessionStore};
 thread_local! {
     /// Whether the system has asked the session to end and not taken it back.
     static HELD: Cell<bool> = const { Cell::new(false) };
+    /// Whether this span's question has been settled — its edits handed over and its document
+    /// written — so that the same question, sent to the next window, does nothing again.
+    static SETTLED: Cell<bool> = const { Cell::new(false) };
     /// What the system has said and the loop has not read yet, in arrival order.
     static INBOX: RefCell<Vec<SessionEnd>> = const { RefCell::new(Vec::new()) };
 }
@@ -57,12 +65,22 @@ pub(crate) fn take() -> Vec<SessionEnd> {
     INBOX.with_borrow_mut(std::mem::take)
 }
 
+/// **Whether `end` is the question this span still owes its write** (T-ENDSESSION-SAVES): the
+/// first `Asked` of a span that no quit holds. The caller hands every edit over to the storage
+/// worker before [`settle`] writes the document behind them, and keeps what did not land after it.
+#[must_use]
+pub(crate) fn owes_the_write(end: SessionEnd, a_quit_holds_the_document: bool) -> bool {
+    end == SessionEnd::Asked && !a_quit_holds_the_document && !SETTLED.with(Cell::get)
+}
+
 /// What the loop's turn did about one piece of news.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Settled {
     /// The held document went to the writer; what became of it. `Ok` is also `session.lock`
     /// gone.
     Saved(Result<(), SaveRefusal>),
+    /// This span's question was settled already, when the system asked another window.
+    AlreadySaved,
     /// A quit had already fixed the document and is writing it: its write is the last word.
     LeftToTheQuit,
     /// The session goes on: the document is let go and the sentinel is back.
@@ -85,7 +103,9 @@ pub(crate) fn settle(
 ) -> Settled {
     match end {
         SessionEnd::Asked if a_quit_holds_the_document => Settled::LeftToTheQuit,
+        SessionEnd::Asked if SETTLED.with(Cell::get) => Settled::AlreadySaved,
         SessionEnd::Asked => {
+            SETTLED.with(|settled| settled.set(true));
             bt_platform::admission::exiting();
             let landed = store.save_for_the_systems_end();
             bt_platform::admission::quit_abandoned();
@@ -93,7 +113,9 @@ pub(crate) fn settle(
         }
         SessionEnd::TakenBack => {
             HELD.with(|held| held.set(false));
+            SETTLED.with(|settled| settled.set(false));
             store.rearm_after_the_systems_end();
+            store.wait_again_after_the_systems_end();
             Settled::TakenBack
         }
     }
@@ -104,5 +126,6 @@ pub(crate) fn settle(
 #[cfg(test)]
 pub(crate) fn forget() {
     HELD.with(|held| held.set(false));
+    SETTLED.with(|settled| settled.set(false));
     INBOX.with_borrow_mut(Vec::clear);
 }

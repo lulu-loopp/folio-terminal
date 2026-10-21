@@ -19955,6 +19955,17 @@ impl NativeSay for SystemBox {
     }
 }
 
+/// **The system's end of the session says a lost change in `diagnostics.log` only**
+/// (T-ENDSESSION-SAVES): the shutdown screen is up, and a box of the system's own would be one
+/// more window standing in the way of the shutdown, ended with the process before anybody read it.
+struct IntoTheLog;
+
+impl NativeSay for IntoTheLog {
+    fn say(&mut self, text: &str) {
+        diagnostics::note(text);
+    }
+}
+
 /// **Keep every owed hand-editable document on a stop that cannot ask**
 /// (T-QUIT-DOCUMENTS; revisions (c)2 and (d)3): each store's owed `desired`
 /// document is written into `folder` — the data directory's `recovered` folder,
@@ -45786,7 +45797,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
                 session_end::hear(end);
                 let _ = proxy.send_event(AppEvent::SessionEnding);
             }),
-            Box::new(|| i18n::Text::ShutdownSavingLayout.text().to_owned()),
+            Box::new(|| i18n::Text::ShutdownSavingWork.text().to_owned()),
         )
     };
     // **A window is born knowing its display's rate**, before it has drawn
@@ -67521,7 +67532,7 @@ impl<B: Backend> FolioApp<B> {
     }
 
     /// **The system is ending the session, or took the end back: settle what it said**
-    /// (B-ENDSESSION; `docs/M2-persistence-schema-v1.md` §5.5).
+    /// (B-ENDSESSION, T-ENDSESSION-SAVES; `docs/M2-persistence-schema-v1.md` §5.5).
     ///
     /// Windows' side of what [`Self::begin_the_systems_quit`] is on macOS, and a different shape
     /// for a reason the platform gives: AppKit waits for an answer the application gives when it
@@ -67535,22 +67546,51 @@ impl<B: Backend> FolioApp<B> {
     /// A save that did not land leaves the sentinel standing and the disk holding the last
     /// completed save, which is still whole because the hold kept every later change off it; the
     /// system is not kept waiting for it.
+    ///
+    /// [`Self::settle_session_end_keeping_in`], what no file takes kept in the data directory's
+    /// `recovered` folder.
     fn settle_session_end(&mut self) {
+        let _ = self.settle_session_end_keeping_in(
+            &persist::storage_dir().join(preview::RECOVERED_FOLDER),
+        );
+    }
+
+    /// [`Self::settle_session_end`], what no file takes kept in `recovery` — a test's own folder
+    /// in a test. Answers what became of every dirty preview buffer.
+    ///
+    /// **The edits go ahead of the document** (T-ENDSESSION-SAVES, ruled 2026-10-21). On the
+    /// first question of a span ([`session_end::owes_the_write`]), before the document is written:
+    /// every owed hand-editable document is handed to the storage worker once more, then every
+    /// dirty preview buffer's save, as a press hands it ([`Self::hand_over_for_the_systems_end`]).
+    /// The document follows them onto the same worker, which serves its queue in order, so its one
+    /// bounded wait (§5.3 row 16, `SESSION_SAVE_BUDGET`) is the drain of everything ahead of it —
+    /// one budget, inside the five seconds Windows allows after `WM_ENDSESSION`. Then the answers
+    /// are heard as the loop's own turn hears them, every buffer staying in its tab, and whatever
+    /// did not land is copied into `recovery` (§5.3 row 20c) before the line comes down. A save
+    /// stalled on the disk delays the document behind it: the sentinel stays, and the next start
+    /// offers the layout back — the edits are worth more than the last moments of layout.
+    fn settle_session_end_keeping_in(&mut self, recovery: &Path) -> Vec<preview::Kept> {
         let heard = session_end::take();
-        if heard.is_empty() {
-            return;
+        let mut kept = Vec::new();
+        if heard.is_empty() || self.app.is_none() {
+            return kept;
         }
-        let Some(app) = self.app.as_mut() else {
-            return;
-        };
         let mut lines_down = false;
         for end in heard {
-            let a_quit_holds_it = app
-                .quit
+            let a_quit_holds_it = self
+                .app
                 .as_ref()
+                .and_then(|app| app.quit.as_ref())
                 .is_some_and(quit::Quit::document_is_frozen);
+            let handed = session_end::owes_the_write(end, a_quit_holds_it)
+                .then(|| self.hand_over_for_the_systems_end());
+            let Some(app) = self.app.as_mut() else {
+                return kept;
+            };
             match session_end::settle(end, &mut app.session_store, a_quit_holds_it) {
-                session_end::Settled::Saved(Ok(())) | session_end::Settled::LeftToTheQuit => {
+                session_end::Settled::Saved(Ok(()))
+                | session_end::Settled::LeftToTheQuit
+                | session_end::Settled::AlreadySaved => {
                     lines_down = true;
                 }
                 session_end::Settled::Saved(Err(refusal)) => {
@@ -67564,6 +67604,13 @@ impl<B: Backend> FolioApp<B> {
                 // they stand are the layout again.
                 session_end::Settled::TakenBack => app.record_session(Instant::now()),
             }
+            if let Some(handed) = handed {
+                kept.extend(self.keep_what_the_systems_end_did_not_save(
+                    &handed,
+                    recovery,
+                    SystemTime::now(),
+                ));
+            }
         }
         if lines_down {
             for window in self.windows.values() {
@@ -67572,6 +67619,70 @@ impl<B: Backend> FolioApp<B> {
                 }
             }
         }
+        kept
+    }
+
+    /// **Everything the system's end of the session would lose, handed to the storage worker,
+    /// and nothing taken from any window** (T-ENDSESSION-SAVES): first every owed hand-editable
+    /// document, once more (`QuitDocument::quit_begin`: the end is a trigger an owed edit is
+    /// retried on, §4.1), then each standing window's dirty preview buffers
+    /// ([`Runtime::hand_over_for_the_systems_end`]) — all of it ahead of the session document,
+    /// which the caller writes next. Answers what each window handed over, by window.
+    fn hand_over_for_the_systems_end(&mut self) -> Vec<(WindowId, preview::HandedOver)> {
+        if let Some(app) = self.app.as_mut() {
+            app.with_documents(|documents| {
+                for document in documents.iter_mut() {
+                    document.quit_begin();
+                }
+            });
+        }
+        let mut handed = Vec::new();
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
+                let id = runtime.window.window.id();
+                handed.push((id, runtime.hand_over_for_the_systems_end()));
+            }
+        }
+        handed
+    }
+
+    /// **After the document's wait: what landed heard, and what did not kept**
+    /// (T-ENDSESSION-SAVES). The answers the worker gave are taken as the loop's turn takes them
+    /// ([`Self::take_document_answers`]: each buffer hears its own, each document store its own);
+    /// then each window's buffers that a save did not clean are copied into `recovery`
+    /// ([`Runtime::keep_what_the_systems_end_did_not_save`]) — the buffers stay in their tabs as
+    /// they now stand, dirty where the save did not land — and each document still owed is
+    /// copied beside them, a loss said in `diagnostics.log` alone ([`IntoTheLog`]). Every line
+    /// is offered to `diagnostics.log`.
+    fn keep_what_the_systems_end_did_not_save(
+        &mut self,
+        handed: &[(WindowId, preview::HandedOver)],
+        recovery: &Path,
+        at: SystemTime,
+    ) -> Vec<preview::Kept> {
+        if let Err(error) = self.take_document_answers() {
+            diagnostics::note(&format!(
+                "{APP_NAME}: the session is ending and an answer from the disk was not heard: \
+                 {error:#}"
+            ));
+        }
+        let mut kept = Vec::new();
+        for (id, handed) in handed {
+            if let Some(mut runtime) = self.runtime(*id) {
+                kept.extend(runtime.keep_what_the_systems_end_did_not_save(handed, recovery, at));
+            }
+        }
+        for one in &kept {
+            diagnostics::note(&one.line());
+        }
+        if let Some(app) = self.app.as_mut() {
+            app.with_documents(|documents| {
+                keep_owed_documents_over(documents, recovery, at, &mut TheDisk, &mut IntoTheLog)
+            });
+        }
+        kept
     }
 
     /// One launch's tab, in a window that is already standing.

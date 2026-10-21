@@ -7864,6 +7864,40 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
+    /// **Hand this window's saves over for the system's end of the session, and take nothing
+    /// from it** (T-ENDSESSION-SAVES): every dirty buffer's save handed to the storage worker as
+    /// a press hands it ([`Self::save_every_dirty_preview`]) — the window thread writes nothing —
+    /// with every pool left in its tab and the window left standing, because a session taken back
+    /// finds every window as it was. What the hand-over came to is the caller's, for
+    /// [`Self::keep_what_the_systems_end_did_not_save`] once the document behind these saves has
+    /// had its wait.
+    pub(crate) fn hand_over_for_the_systems_end(&mut self) -> preview::HandedOver {
+        self.save_every_dirty_preview()
+    }
+
+    /// **What the system's end of the session keeps of this window's edits, once the document's
+    /// wait is over and the answers have been heard** (T-ENDSESSION-SAVES): each tab's
+    /// [`preview::PreviewPool::kept_after_the_stop`] over what [`Self::hand_over_for_the_systems_end`]
+    /// handed — a buffer its save cleaned is `Saved`, and one its save did not clean, or a body a
+    /// save sent that did not land, is copied into `recovery`, never over the file (§5.3 row 20c).
+    /// The pools stay in their tabs and the buffers as they stand: dirty where the save did not
+    /// land, so a session taken back still holds the edit.
+    pub(crate) fn keep_what_the_systems_end_did_not_save(
+        &mut self,
+        handed: &preview::HandedOver,
+        recovery: &Path,
+        at: SystemTime,
+    ) -> Vec<preview::Kept> {
+        self.window
+            .tabs
+            .iter_mut()
+            .flat_map(|tab| {
+                tab.preview_pool
+                    .kept_after_the_stop(&handed.awaited, &handed.refused, recovery, at)
+            })
+            .collect()
+    }
+
     /// **The storage worker's answers about preview saves, heard by this
     /// window's buffers** (S-6a): each answer goes to the buffer that asked, if
     /// one of this window's tabs holds it ([`preview::PreviewSaves::deliver`]),
