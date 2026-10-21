@@ -566,3 +566,50 @@ fn the_carry_hands_neither_formula_lane_a_frame() {
         "the carry has no frame of this compose to hand to either formula lane:\n{carry}"
     );
 }
+
+/// RED (T-NATIVE-LABELS-FROM-THE-CALLER) — **a right press on a typeset formula asks the
+/// system's menu for the row the interface table names**, and the words cross with the call:
+/// `bt-platform` builds the one row from what it was handed and spells nothing of its own.
+///
+/// The pointer is walked down the pane until the window's own hit test lands on the block, so
+/// the press is the product's whole path — the hit, the latch, the request — and not a call made
+/// beside it.
+///
+/// MUTATION: hand `math_context_menu.request` any other string in `Runtime::mouse_input` and the
+/// title the menu was asked for is not the table's.
+#[test]
+fn a_right_press_on_a_formula_asks_the_menu_in_the_tables_words() {
+    let (mut folio, _target, _anchor) = a_typeset_formula("native-labels-formula-menu");
+    let on_the_block = (0..800)
+        .step_by(2)
+        .flat_map(|y| (0..1200).step_by(16).map(move |x| (x, y)))
+        .map(|(x, y)| winit::dpi::PhysicalPosition::new(f64::from(x), f64::from(y)))
+        .find(|&position| {
+            folio.move_to(position);
+            folio.runtime().math_hit().is_some()
+        })
+        .expect("the typeset block is under some point of the window");
+    folio.move_to(on_the_block);
+    folio.ledger.take();
+    folio
+        .runtime()
+        .mouse_input(
+            winit::event::ElementState::Pressed,
+            winit::event::MouseButton::Right,
+        )
+        .expect("a headless right press is answered");
+    let asked: Vec<String> = folio
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            crate::headless::WindowEffect::MathMenuAsked(title) => Some(title),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        asked,
+        vec![crate::i18n::Text::FormulaMenuCopyLatex.text().to_owned()],
+        "the menu is asked for once, with the table's row"
+    );
+}

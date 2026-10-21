@@ -493,7 +493,16 @@ impl ImagePicker {
     }
 
     /// Put the chooser up once, opening in `start` if that names a folder.
-    pub fn request(&self, kind: ShellPickKind, start: Option<&Path>) -> Result<bool, String> {
+    ///
+    /// `image_types` is the Windows arm's filter name and is not read here: a
+    /// panel filtered by content types names no filter.
+    pub fn request(
+        &self,
+        kind: ShellPickKind,
+        start: Option<&Path>,
+        image_types: &str,
+    ) -> Result<bool, String> {
+        let _ = image_types;
         let what = "the file chooser";
         if !self.state.begin() {
             return Ok(false);
@@ -585,6 +594,9 @@ impl SaveFilePicker {
 struct MenuDeferral {
     window: NativeWindow,
     state: Arc<Deferred<Result<bool, String>>>,
+    /// The one row's title as the caller wrote it at [`MathContextMenu::request`],
+    /// read when the scheduled pop fires (T-NATIVE-LABELS-FROM-THE-CALLER).
+    copy_latex: std::sync::Mutex<String>,
 }
 
 define_class!(
@@ -614,7 +626,12 @@ define_class!(
                 return;
             };
             let ivars = self.ivars();
-            let answer = track_formula_menu(ivars.window, mtm);
+            let copy_latex = ivars
+                .copy_latex
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            let answer = track_formula_menu(ivars.window, &copy_latex, mtm);
             ivars.state.complete(answer);
             ask_for_a_frame(ivars.window, mtm);
         }
@@ -628,6 +645,7 @@ impl DeferredFormulaMenu {
         let this = Self::alloc().set_ivars(MenuDeferral {
             window,
             state: Arc::new(Deferred::new()),
+            copy_latex: std::sync::Mutex::new(String::new()),
         });
         // SAFETY: `NSObject`'s designated initializer, called on a fresh
         // allocation whose ivars are set.
@@ -638,10 +656,10 @@ impl DeferredFormulaMenu {
 /// **The formula context menu, over `NSMenu`** (M2-3; what is on it is §7.20's).
 ///
 /// Step 7 of the startup path, harmless to construct for [`FolderPicker`]'s
-/// reason. The Windows arm builds its one item in `bt-platform`
-/// (`AppendMenuW(… "Copy LaTeX")`) and hands `bt-app` back only whether it was
-/// chosen, so that split is kept: the menu's content is here and the caller's
-/// answer is the same `Option<Result<bool, String>>`.
+/// reason. The Windows arm builds its one item in `bt-platform` from the title
+/// the caller passed and hands `bt-app` back only whether it was chosen, so that
+/// split is kept: the menu's shape is here, its words are the caller's, and the
+/// caller's answer is the same `Option<Result<bool, String>>`.
 ///
 /// **Deferred, because this one really is modal.**
 /// `popUpMenuPositioningItem:atLocation:inView:` blocks until the menu closes,
@@ -662,8 +680,9 @@ impl MathContextMenu {
         })
     }
 
-    /// Schedule the menu once.
-    pub fn request(&self) -> Result<bool, String> {
+    /// Schedule the menu once. `copy_latex` is its one row, in the caller's
+    /// words (T-NATIVE-LABELS-FROM-THE-CALLER).
+    pub fn request(&self, copy_latex: &str) -> Result<bool, String> {
         let what = "the formula menu";
         let ivars = self.deferral.ivars();
         if !ivars.state.begin() {
@@ -672,6 +691,12 @@ impl MathContextMenu {
         let (_mtm, _host) = ivars
             .state
             .give_back_on_refusal(window_for(ivars.window, what))?;
+        copy_latex.clone_into(
+            &mut ivars
+                .copy_latex
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
         // SAFETY: the selector is one this class defines above and takes no
         // argument, which is what `withObject: nil` says; the run loop retains
         // the target until the perform fires, and `Drop` cancels any perform
@@ -734,7 +759,11 @@ impl Drop for MathContextMenu {
 /// disables an item whose target and action are both `nil` unless the menu is
 /// told it does its own enabling, and a greyed-out item can never be chosen —
 /// which would make this function answer `false` forever.
-fn track_formula_menu(window: NativeWindow, mtm: MainThreadMarker) -> Result<bool, String> {
+fn track_formula_menu(
+    window: NativeWindow,
+    copy_latex: &str,
+    mtm: MainThreadMarker,
+) -> Result<bool, String> {
     let what = "the formula menu";
     let host = window_of(window, mtm).ok_or_else(|| nothing_to_ask(what))?;
     // SAFETY: as `ask_for_a_frame` — winit's live view, on winit's own thread.
@@ -742,7 +771,7 @@ fn track_formula_menu(window: NativeWindow, mtm: MainThreadMarker) -> Result<boo
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
     let item = NSMenuItem::new(mtm);
-    item.setTitle(ns_string!("Copy LaTeX"));
+    item.setTitle(&NSString::from_str(copy_latex));
     item.setEnabled(true);
     menu.addItem(&item);
     let on_the_screen = NSEvent::mouseLocation();
@@ -1053,22 +1082,28 @@ mod tests {
         let menu = MathContextMenu::new(window).expect("the formula menu builds");
         assert!(folder.request(None).is_err(), "the folder chooser");
         assert!(
-            picture.request(ShellPickKind::Image, None).is_err(),
+            picture
+                .request(ShellPickKind::Image, None, "Images")
+                .is_err(),
             "the picture chooser"
         );
         assert!(
-            picture.request(ShellPickKind::Program, None).is_err(),
+            picture
+                .request(ShellPickKind::Program, None, "Images")
+                .is_err(),
             "the program chooser"
         );
         assert!(
-            picture.request(ShellPickKind::SettingsFile, None).is_err(),
+            picture
+                .request(ShellPickKind::SettingsFile, None, "Images")
+                .is_err(),
             "the settings file chooser"
         );
         assert!(
             save.request(None, "folio-settings.json").is_err(),
             "the save dialog"
         );
-        assert!(menu.request().is_err(), "the formula menu");
+        assert!(menu.request("Copy LaTeX").is_err(), "the formula menu");
         assert!(
             folder.take_result().is_none(),
             "a request that refused leaves no answer to collect"

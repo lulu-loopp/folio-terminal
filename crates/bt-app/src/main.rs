@@ -338,7 +338,12 @@ const INITIAL_HEIGHT: f64 = 600.0;
 ///
 /// It is not `CARGO_PKG_NAME`: the crate is `bt-app` and stays `bt-app`, because
 /// a crate name is a thing other Rust code says and this is a thing people say.
-pub(crate) const APP_NAME: &str = "Folio";
+///
+/// **And it is typed once** (T-NATIVE-LABELS-FROM-THE-CALLER): the name this
+/// terminal announces to its children is the same word, so the constant is
+/// `bt_pty`'s rather than a second literal; `bt-platform`, which cannot depend
+/// on either crate, is handed it where it names the product (the toast sender).
+pub(crate) const APP_NAME: &str = bt_pty::TERM_PROGRAM;
 
 /// **How long a quit waits for the panes it has told to go**
 /// (T-PANE-CLOSE-OFF-THREAD).
@@ -19720,7 +19725,7 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         }
         Writer::ExplorerRepair => explorer_menu::begin_probe(),
         Writer::ToastIdentity => {
-            if let Err(error) = bt_platform::Notifier::register_identity() {
+            if let Err(error) = bt_platform::Notifier::register_identity(APP_NAME) {
                 eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
             }
         }
@@ -31440,7 +31445,7 @@ impl NotificationDesk {
             let opened = if update_trial::defer(update_trial::Writer::ToastIdentity) {
                 bt_platform::Notifier::without_registration(wake)
             } else {
-                bt_platform::Notifier::new(wake)
+                bt_platform::Notifier::new(APP_NAME, wake)
             };
             match opened {
                 Ok(voice) => self.voice = Some(voice),
@@ -50100,11 +50105,11 @@ impl<B: Backend> Runtime<'_, B> {
             .map(|editor| PathBuf::from(editor.program.text()))
             .and_then(|path| path.parent().map(Path::to_path_buf))
             .filter(|parent| parent.as_os_str().len() > 1);
-        match self
-            .window
-            .image_picker
-            .request(bt_platform::FilePickKind::Program, start.as_deref())
-        {
+        match self.window.image_picker.request(
+            bt_platform::FilePickKind::Program,
+            start.as_deref(),
+            crate::i18n::Text::ImageFileType.text(),
+        ) {
             Ok(true) => self.window.image_pick_pending = Some(FilePick::ProfileProgram),
             // Already queued or already open: a second press while one is up is
             // one dialog, not two, and whoever asked first keeps the answer.
