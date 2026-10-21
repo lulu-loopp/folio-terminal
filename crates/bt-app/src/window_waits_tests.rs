@@ -7625,7 +7625,8 @@ fn listed_exception_row_failures(registry: &str) -> Vec<String> {
 /// **The counted-only `Drop`s close and never wait** ((k)2 item 5): each `# counted-only` row of
 /// `registry` is a product `Drop::drop`, outside [`EXCEPTIONS`], whose body holds at least one
 /// vocabulary effect, none of which waits — so listing it as a `drop-exception` admits a handle
-/// closed in its owner's destructor and nothing else.
+/// closed in its owner's destructor and nothing else. And each `# emergency` row names a product
+/// function, so a holder that was renamed or removed is refused by name, not kept as a stale row.
 fn counted_only_failures(world: &World, words: &[Word], registry: &str) -> Vec<String> {
     let mut failures = listed_exception_row_failures(registry);
     let mut bodies: BTreeMap<String, (usize, &'static ItemRecord)> = BTreeMap::new();
@@ -7668,6 +7669,14 @@ fn counted_only_failures(world: &World, words: &[Word], registry: &str) -> Vec<S
         if counted == 0 {
             failures.push(format!(
                 "the counted-only `{key}` holds no counted effect: it is no exception at all"
+            ));
+        }
+    }
+    for (package, arm, item) in listed_exceptions(registry, "emergency") {
+        let key = spelled_key(&package, &arm, &item);
+        if !bodies.contains_key(&key) {
+            failures.push(format!(
+                "the emergency holder `{key}` is not in the product"
             ));
         }
     }
@@ -7978,8 +7987,9 @@ pub fn not_a_drop() { CloseHandle(0); }
 /// Against the planted crate ([`PLANTED_DROPS`]): the `Drop` that only closes is accepted (the
 /// control); the one that also sleeps, the one that holds nothing, the function that is no `Drop`,
 /// a row naming nothing in the product, an undated row, a row with no reason and a row listed twice
-/// are each refused for their named reason. The live registry's own rows are the real-world
-/// control (`every_door_is_where_the_registry_says`).
+/// are each refused for their named reason; an `# emergency` holder that is a product function
+/// is accepted and one that is not is refused by name. The live registry's own rows are the
+/// real-world control (`every_door_is_where_the_registry_says`).
 ///
 /// MUTATION: count a waiting effect as counted in [`counted_only_failures`] and the sleeping `Drop`
 /// is accepted; drop the `since` check in [`listed_exception_row_failures`] and the undated row is.
@@ -7987,15 +7997,20 @@ pub fn not_a_drop() { CloseHandle(0); }
 fn a_counted_only_drop_closes_and_never_waits() {
     let world = planted_world("ww-counted-only", PLANTED_DROPS);
     let words = vocabulary();
-    let registry = |rows: &[&str]| {
+    let both = |rows: &[&str], holders: &[&str]| {
         let mut text = "# counted-only\ncrate\tarm\titem\tsince\treason\truling\n".to_owned();
         for row in rows {
             text.push_str(row);
             text.push('\n');
         }
         text.push_str("\n# emergency\ncrate\tarm\titem\tsince\treason\truling\n");
+        for row in holders {
+            text.push_str(row);
+            text.push('\n');
+        }
         text
     };
+    let registry = |rows: &[&str]| both(rows, &[]);
     let control = registry(&[
         "planted\t-\tcrate::<Closes as Drop>::drop\t2026-10-17\tcloses its handle and nothing else\tT-A2-BARE-SITE-LINT 2026-10-17",
     ]);
@@ -8051,6 +8066,29 @@ fn a_counted_only_drop_closes_and_never_waits() {
             .iter()
             .any(|f| f.contains("listed twice")),
         "a row listed twice is not refused"
+    );
+    // An `# emergency` row names a product function: one that is (the control), and a holder
+    // nobody wrote, refused by name.
+    let holder = |item: &str| {
+        format!(
+            "planted\t-\t{item}\t2026-10-17\tthe panic hook's planted holder\tT-A2-BARE-SITE-LINT 2026-10-17"
+        )
+    };
+    let present = both(&[], &[&holder("crate::not_a_drop")]);
+    let failures = counted_only_failures(&world, &words, &present);
+    assert!(
+        failures.is_empty(),
+        "an emergency holder in the product is refused:\n  {}",
+        failures.join("\n  ")
+    );
+    let stale = both(&[], &[&holder("crate::gone_holder")]);
+    let failures = counted_only_failures(&world, &words, &stale);
+    assert!(
+        failures
+            .iter()
+            .any(|f| f.contains("the emergency holder `planted crate::gone_holder` is not in the product")),
+        "a stale emergency holder is not refused:\n  {}",
+        failures.join("\n  ")
     );
 }
 
