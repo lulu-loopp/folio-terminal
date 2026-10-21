@@ -19924,7 +19924,8 @@ mod tests {
     /// reads them with, so `~~~` fences, openers and closers indented up to three
     /// spaces, closers that are too short or carry an info string, and a fence
     /// inside a list item all draw as CommonMark draws them. `tab-split` is §2.2's
-    /// tab straddling the opener's indentation.
+    /// tab straddling the opener's indentation; `list-tab` is a tab in a list
+    /// item's line, counted from its real column (2 to 4), not from the item's.
     ///
     /// Where a page still differs from CommonMark it is the preview's block
     /// grammar, not the fence's, and the page says so: a quote holds no code
@@ -20119,6 +20120,11 @@ mod tests {
                 "tab-split",
                 include_str!("../tests/fixtures/preview-fences/tab-split.md"),
                 include_str!("../tests/fixtures/preview-fences/tab-split.page"),
+            ),
+            (
+                "list-tab",
+                include_str!("../tests/fixtures/preview-fences/list-tab.md"),
+                include_str!("../tests/fixtures/preview-fences/list-tab.page"),
             ),
         ];
         let wrong: Vec<String> = fixtures

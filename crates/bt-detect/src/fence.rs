@@ -43,7 +43,9 @@
 //! them **first** — the opening, the closing and the body are then read off what is left, as if
 //! the container were not there (§5.2: "a list item … with the same content indented"). A line
 //! indented by fewer columns than the container is not the container's (`None`), unless it is
-//! blank.
+//! blank. A tab in what is left's indentation is counted from its real column, not from the
+//! remainder's start: where the container's column is not a tab stop it is spelled as the spaces
+//! it spans, so the readers below see the indentation the line really has.
 //!
 //! **Not here, and the caller's:** which container a line belongs to (a list marker's width, a
 //! `>`), whether a fence may interrupt the block above it (it may interrupt a paragraph, §4.5 ex.
@@ -184,8 +186,8 @@ pub fn fence_closes(line: &str, fence: &Fence) -> bool {
 /// A body line of `fence` as the block holds it: up to the opening's indentation removed.
 ///
 /// The answer (here and from [`strip_container_indent`]) is always a suffix of `line`, with
-/// spaces in front of it exactly when a tab was split — which is what lets a caller map every
-/// byte of it back to the line it came from.
+/// spaces in front of it only when the indentation it stands in held a tab that was split or
+/// spelled out — which is what lets a caller map every byte of it back to the line it came from.
 #[must_use]
 pub fn strip_fence_indent<'a>(line: &'a str, fence: &Fence) -> Cow<'a, str> {
     strip_columns(line, fence.indent).0
@@ -194,10 +196,40 @@ pub fn strip_fence_indent<'a>(line: &'a str, fence: &Fence) -> Cow<'a, str> {
 /// `line` with a container's `columns` of content indentation removed, or `None` when the line is
 /// indented by fewer and so is not that container's. A blank line is every container's, and is
 /// blank in it.
+///
+/// What is left starts at column `columns` of the real line, and every reader here counts tab
+/// stops from the start of the text it is handed. So a tab in what is left's indentation is
+/// spelled as the spaces it spans **from its real column** whenever `columns` is not itself a
+/// stop: `- a` over `  <TAB>```` is a fence indented two columns in the item (the tab runs from
+/// column 2 to 4), not indented code. The spec keeps such a tab a tab; spelling it is what lets
+/// the readers below count it where it stands.
 #[must_use]
 pub fn strip_container_indent(line: &str, columns: usize) -> Option<Cow<'_, str>> {
     let (rest, reached) = strip_columns(line, columns);
-    (reached || rest.is_empty()).then_some(rest)
+    (reached || rest.is_empty()).then(|| spell_leading_tabs_from(rest, columns))
+}
+
+/// `text`'s leading tabs as the spaces they span when `text` starts at column `start`; `text`
+/// itself when `start` is a tab stop (the stops then fall where the readers count them) or its
+/// indentation holds no tab.
+fn spell_leading_tabs_from(text: Cow<'_, str>, start: usize) -> Cow<'_, str> {
+    let indentation = text.len() - text.trim_start_matches([' ', '\t']).len();
+    if start.is_multiple_of(TAB_STOP) || !text[..indentation].contains('\t') {
+        return text;
+    }
+    let mut column = start;
+    let mut spelled = String::with_capacity(text.len() + TAB_STOP);
+    for character in text[..indentation].chars() {
+        let stop = if character == '\t' {
+            column + TAB_STOP - column % TAB_STOP
+        } else {
+            column + 1
+        };
+        spelled.extend(std::iter::repeat_n(' ', stop - column));
+        column = stop;
+    }
+    spelled.push_str(&text[indentation..]);
+    Cow::Owned(spelled)
 }
 
 fn run_length(text: &str, marker: FenceMarker) -> usize {
@@ -438,5 +470,31 @@ mod tests {
         assert_eq!(strip_container_indent(" ", 2).as_deref(), Some(""));
         assert_eq!(strip_container_indent("\tb", 2).as_deref(), Some("  b"));
         assert_eq!(strip_container_indent("abc", 0).as_deref(), Some("abc"));
+    }
+
+    /// §2.2 inside §5.2: a tab in an item's line is counted from its real column. `- a` over
+    /// `  <TAB>```` is a fence indented two columns in the item (the tab runs from column 2 to
+    /// 4), so it opens and it closes; counted from the remainder's start it would be indented code.
+    /// MUTATION: return the remainder unspelled and the opener is `None` and the closer stays open.
+    #[test]
+    fn a_tab_in_an_items_line_is_counted_from_its_real_column() {
+        let opener = strip_container_indent("  \t```", 2).expect("the item's line");
+        assert_eq!(opener, "  ```");
+        let open = fence_opening(&opener).expect("an opening");
+        assert_eq!(open.fence.indent, 2);
+        let body = strip_container_indent("  \tb", 2).expect("the item's line");
+        assert_eq!(strip_fence_indent(&body, &open.fence), "b");
+        let closer = strip_container_indent("  \t```", 2).expect("the item's line");
+        assert!(fence_closes(&closer, &open.fence));
+        // At a tab stop the remainder's own stops are the real ones, and it is lent as it is.
+        assert!(matches!(
+            strip_container_indent("    \t```", 4),
+            Some(Cow::Borrowed("\t```"))
+        ));
+        // A space before the tab moves the stop it reaches: column 3 to 4 is one column.
+        assert_eq!(
+            strip_container_indent("   \t```", 2).as_deref(),
+            Some("  ```")
+        );
     }
 }
