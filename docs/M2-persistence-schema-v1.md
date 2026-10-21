@@ -447,6 +447,17 @@ the loop's next turn writes it through the quit's writer and bounded wait and re
 lets the document go and re-creates the sentinel. macOS: the system's end is
 `applicationShouldTerminate:`, already the quit transaction (M3-1).
 
+**Addendum 2026-10-21 (0.4.8, T-ENDSESSION-SAVES): the edits go ahead of the document.** On the
+first `WM_QUERYENDSESSION` of a span, before the held document is written, every owed hand-editable
+document and every dirty preview buffer's save are handed to the one storage worker; the document
+follows them, always as a new generation, so its one bounded wait (`SESSION_SAVE_BUDGET`, 3 s,
+inside the five seconds Windows allows after `WM_ENDSESSION`) is the drain of everything ahead of
+it. What did not land is copied into `recovered`, never over a file, before the shutdown screen's
+line comes down. The contract above stands: the one writer, the one bounded wait, `session.lock`
+dropped once the document has landed, nothing torn down, and a session taken back finds every
+window as it was — a buffer dirty where its save did not land. A shutdown taken back after the
+wait ran out leaves the writer waited on again (`wait_again_after_the_systems_end`).
+
 ## 6. 与既有裁决的一致性检查
 
 - 本文没有引入任何与 `DESIGN.md` §7.1.4 冲突的字段或行为——每个字段名尽量复用该节原文用词
