@@ -1950,7 +1950,10 @@ fn a_session_taken_back_finds_every_window_and_every_edit_as_it_was() {
     );
     assert_eq!(quitting.settle_the_systems_end(), Vec::new());
     assert_eq!(quitting.application.folio.windows.len(), 2, "both windows");
-    assert!(!quitting.dirty(1), "the save that landed left its buffer clean");
+    assert!(
+        !quitting.dirty(1),
+        "the save that landed left its buffer clean"
+    );
     assert!(
         quitting.dirty(2),
         "the one that did not left its buffer holding the edit"

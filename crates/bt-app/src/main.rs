@@ -67550,9 +67550,8 @@ impl<B: Backend> FolioApp<B> {
     /// [`Self::settle_session_end_keeping_in`], what no file takes kept in the data directory's
     /// `recovered` folder.
     fn settle_session_end(&mut self) {
-        let _ = self.settle_session_end_keeping_in(
-            &persist::storage_dir().join(preview::RECOVERED_FOLDER),
-        );
+        let _ = self
+            .settle_session_end_keeping_in(&persist::storage_dir().join(preview::RECOVERED_FOLDER));
     }
 
     /// [`Self::settle_session_end`], what no file takes kept in `recovery` — a test's own folder
