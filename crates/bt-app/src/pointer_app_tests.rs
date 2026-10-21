@@ -1326,9 +1326,10 @@ fn resolved_callers_of(type_owner: &str, name: &str) -> BTreeSet<String> {
             let Some(id) = resolver.id_of("bt-app", record) else {
                 continue;
             };
-            let reaches = resolver.resolve_callees(id).iter().any(|edge| {
-                edge.site.name == name && edge.to == Target::Item(callee)
-            });
+            let reaches = resolver
+                .resolve_callees(id)
+                .iter()
+                .any(|edge| edge.site.name == name && edge.to == Target::Item(callee));
             if reaches {
                 callers.insert(format!(
                     "{}::{}::{}",
@@ -1396,7 +1397,10 @@ fn every_lifecycle_door_ends_the_capture() {
         .collect();
     for (door, why) in [
         ("toggle_settings_panel", "the gear"),
-        ("open_scheme_for_editing", "the verb that hands the reader a scheme file"),
+        (
+            "open_scheme_for_editing",
+            "the verb that hands the reader a scheme file",
+        ),
     ] {
         assert!(
             closers.contains(&format!("crate::Runtime::{door}")),

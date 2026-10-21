@@ -14,8 +14,8 @@ use crate::{
     PreviewBodyDrag, PreviewTextDrag, RowPress, SelectionDrag, SelectionDragMode, SpringGate,
     TabCarry, TabPress, TerminalColumnDrag, TerminalThumbDrag, preview, settings,
 };
-use bt_layout::{Axis, Ratio, SplitId};
 use bt_doc::Bias;
+use bt_layout::{Axis, Ratio, SplitId};
 use bt_viewport::ViewSelection;
 use std::num::NonZeroU32;
 use winit::dpi::PhysicalPosition;

@@ -1,7 +1,7 @@
 //! `tabs` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
-use super::pointer::{Ending, Leaving, Gone, OwnerGone};
+use super::pointer::{Ending, Gone, Leaving, OwnerGone};
 use crate::input::Keystroke;
 use crate::window_seam::prelude::*;
 use crate::{
