@@ -99,12 +99,17 @@ function Get-UpdaterRows {
     # `BT_UPDATE_RECOVER ... recovery ended` line in that interval, or a header before it whose
     # class A acts on by its frozen promise: terminal, preparing, deferred - A1),
     # and a Folio window stands at the end.
+    # The first run is answered before B's first start (`run-row.ps1` puts `answerfirstrun` before
+    # `launchfeed` for an overlay row), so the offer is the first card and no `later` is pressed: on
+    # a 0.4.8-era build the two Escapes dismissed the offer itself and Update pressed nothing.
     $guard = @{ JournalGuard = $true; Window = 'any' }
-    Add-Cut 'RV-W1' $toUpdate -Overlay -Expect $guard
-    Add-Cut 'RV-W2' "$toUpdate,waitverified" -Overlay -Expect $guard
-    foreach ($w in 'W3', 'W4', 'W5', 'W6', 'W7', 'W8', 'W12') { Add-Cut "RV-$w" $toRestart -Overlay -Expect $guard }
-    foreach ($w in 'W9', 'W11') { Add-Cut "RV-$w" $toRestart @('-KillNewInstallProcess') -Overlay -Expect $guard }
-    Add-Cut 'RV-W10' $toRestart @('-KillNewInstallProcess', '-HoldPath', '.folio-update\*\backup\folio.msix', '-HoldAt', '*') -Overlay -Expect $guard
+    $rvUpdate = 'offer,sleep:4,shot:offer-card,update'
+    $rvRestart = "$rvUpdate,waitverified,restart,sleep:150"
+    Add-Cut 'RV-W1' $rvUpdate -Overlay -Expect $guard
+    Add-Cut 'RV-W2' "$rvUpdate,waitverified" -Overlay -Expect $guard
+    foreach ($w in 'W3', 'W4', 'W5', 'W6', 'W7', 'W8', 'W12') { Add-Cut "RV-$w" $rvRestart -Overlay -Expect $guard }
+    foreach ($w in 'W9', 'W11') { Add-Cut "RV-$w" $rvRestart @('-KillNewInstallProcess') -Overlay -Expect $guard }
+    Add-Cut 'RV-W10' $rvRestart @('-KillNewInstallProcess', '-HoldPath', '.folio-update\*\backup\folio.msix', '-HoldAt', '*') -Overlay -Expect $guard
 
     # RW: A installed. The cells (the design note's RW table, re-read against E1-a1's, E1-a2's and
     # E3's DESIGN entries on main):

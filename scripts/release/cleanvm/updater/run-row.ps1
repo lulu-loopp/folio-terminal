@@ -350,7 +350,8 @@ function Invoke-Row([hashtable] $spec) {
         Say "row $name done"
         return
     }
-    Start-Keys $name "nosleep,launchfeed,$($spec.Plan)"
+    $answer = if ($spec.Overlay) { 'answerfirstrun,' } else { '' }
+    Start-Keys $name "nosleep,$($answer)launchfeed,$($spec.Plan)"
 
     if ($spec.Cut) {
         $marker = "$GuestHome\updater-marker-$name.txt"
