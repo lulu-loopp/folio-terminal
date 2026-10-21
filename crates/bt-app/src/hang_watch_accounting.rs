@@ -452,7 +452,7 @@ fn owner_byte(owner: Option<WakeOwner>) -> u8 {
 
 /// The owner [`owner_byte`] packed.
 fn owner_of(byte: u8) -> Option<WakeOwner> {
-    byte.checked_sub(1).and_then(WakeOwner::from_byte)
+    Option::and_then(byte.checked_sub(1), WakeOwner::from_byte)
 }
 
 /// **A window's next frame boundary after `began_ns`**, on its own phase: its last present plus
@@ -588,7 +588,7 @@ impl Accounts {
         let due = if until { due } else { 0 };
         self.owed_ns.store(due, Ordering::Relaxed);
         self.owed_past.store(
-            due.checked_sub(1).is_some_and(|due| due <= now_ns),
+            Option::is_some_and(u64::checked_sub(due, 1), |due| due <= now_ns),
             Ordering::Relaxed,
         );
         self.owed_owner
@@ -738,7 +738,7 @@ impl Accounts {
         let over = self.over_count.swap(0, Ordering::Relaxed);
         let unexplained_ns = wall_ns - waits_ns;
         let delay_ns = self.delay_ns.load(Ordering::Relaxed).checked_sub(1);
-        let stale_ns = self.stale_ns.load(Ordering::Relaxed).checked_sub(1);
+        let stale_ns = u64::checked_sub(self.stale_ns.load(Ordering::Relaxed), 1);
         let source = owner_of(self.source.load(Ordering::Relaxed));
         let frame_ns = match self.frame_ns.load(Ordering::Relaxed) {
             NO_FRAME => nanos(TURN_BUDGET),

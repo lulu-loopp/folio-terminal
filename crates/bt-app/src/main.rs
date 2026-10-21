@@ -69528,7 +69528,7 @@ impl<B: Backend> FolioApp<B> {
             // and both of those wake the loop themselves — **and the spare web
             // controller, while it lets go** (ticket 60, SW-2): no window is left to
             // wake the loop for its browser-exit wait, so its instant is the one kept.
-            let run_end = match self.run_end(wake.map(|(_, at)| at)) {
+            let run_end = match self.run_end(Option::map(wake, |(_, at)| at)) {
                 web_spare::RunControl::WaitUntil(at) => Some((WakeOwner::RunEnd, at)),
                 web_spare::RunControl::Exit | web_spare::RunControl::Wait => None,
             };

@@ -2560,7 +2560,7 @@ impl<B: Backend> Runtime<'_, B> {
         {
             trace_sink::stderr_line(format!(
                 "BT_PERF_TRACE idle_wake owner={:?} in_us={}",
-                owner.name(),
+                WakeOwner::name(owner),
                 at.saturating_duration_since(now).as_micros(),
             ));
         }

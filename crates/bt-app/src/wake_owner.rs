@@ -234,7 +234,7 @@ impl WakeOwner {
 
     /// The owner whose discriminant is `byte`, if there is one.
     pub(crate) fn from_byte(byte: u8) -> Option<Self> {
-        Self::ALL.get(usize::from(byte)).copied()
+        <[WakeOwner]>::get(Self::ALL, usize::from(byte)).copied()
     }
 }
 
@@ -243,7 +243,7 @@ impl WakeOwner {
 pub(crate) fn earliest_wake(
     entries: impl IntoIterator<Item = Option<(WakeOwner, Instant)>>,
 ) -> Option<(WakeOwner, Instant)> {
-    entries.into_iter().flatten().min_by_key(|(_, at)| *at)
+    Iterator::min_by_key(Iterator::flatten(entries.into_iter()), |(_, at)| *at)
 }
 
 /// `deadline`, owned by `owner`.
