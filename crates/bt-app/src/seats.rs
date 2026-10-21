@@ -623,6 +623,14 @@ impl Seats {
         self.zoom == Some(seat)
     }
 
+    /// **Whether [`Self::toggle_zoom`] on `seat` would zoom into it** — and so take every other
+    /// pane off the glass — rather than let a zoom go or do nothing (T-POINTER-CAPTURE R-9: the
+    /// door that ends a gesture held on a pane leaving the glass asks this before the toggle).
+    #[must_use]
+    pub fn toggle_would_zoom_in(&self, seat: SeatId) -> bool {
+        self.pane_count() >= 2 && self.tree.find_seat(seat).is_some() && self.zoom != Some(seat)
+    }
+
     /// **Zoom this pane, or let it go if it is already the one on the stage**
     /// (§7.1.6l). Answers whether anything changed.
     ///

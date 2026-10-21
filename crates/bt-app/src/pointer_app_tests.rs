@@ -1263,6 +1263,29 @@ const LIFECYCLE_DOORS: [(&str, &str); 15] = [
     ("settings_closed", "end_capture"),
 ];
 
+/// **The matrix's rows that are not items yet**, each with when it lands — never silent
+/// (2026-10-21, round 2): the OS drag-out door lands with its feature (§7: no drag-out exists),
+/// and the page seat's two doors end a page's own capture, which is cut 7's. The drag-out door is
+/// asserted absent, so the day it is written this list fails until it moves into
+/// [`LIFECYCLE_DOORS`].
+const DOORS_NOT_YET_ITEMS: [(&str, &str, &str); 3] = [
+    (
+        "Runtime",
+        "drag_out_to_the_system",
+        "2026-10-21: lands with the OS drag-out feature (design §7), with `OsDragHandoff`",
+    ),
+    (
+        "WebSeat",
+        "place",
+        "2026-10-21: cut 7 — the seat's own button-up before a page leaves the glass",
+    ),
+    (
+        "WebSeat",
+        "park_for_handoff",
+        "2026-10-21: cut 7 — the seat's own button-up before a page is handed over",
+    ),
+];
+
 /// The callers of `end_capture` that are not doors of the matrix, each with the road it is: the
 /// resize door's sample, a press of the held button proving the capture stale (R-5 rule 2), and
 /// a preview surface turned to another document — the buffer-left door's twin.
@@ -1356,6 +1379,19 @@ fn resolved_callers_of(type_owner: &str, name: &str) -> BTreeSet<String> {
 /// MUTATION: remove the `end_capture` call from `hide_quake_window` — its row names the door.
 #[test]
 fn every_lifecycle_door_ends_the_capture() {
+    for (owner, door, lands) in DOORS_NOT_YET_ITEMS {
+        // The drag-out door is not written yet; the page seat's two are, and end no capture yet.
+        let written = usize::from(owner == "WebSeat");
+        source()
+            .find(&bt_source::ItemQuery::method(owner, door).expecting(written))
+            .unwrap_or_else(|failure| {
+                panic!("`{owner}::{door}` is no longer what this list says ({lands}): {failure}")
+            });
+        assert!(
+            !product_callers("Runtime", "end_capture").contains_key(&format!("{owner}::{door}")),
+            "`{owner}::{door}` ends a capture: give it its row in the matrix ({lands})"
+        );
+    }
     for (door, call) in LIFECYCLE_DOORS {
         let callers = product_callers("Runtime", call);
         assert!(
@@ -1424,7 +1460,12 @@ fn every_lifecycle_door_ends_the_capture() {
         }
     }
 
-    // The blur arm.
+    // The blur arm. **A deny-list, by what the index can say**: a match arm is not an item, so the
+    // index can name `window_blurred`'s callers and the calls an item makes, but not the
+    // statements of one arm; reading the arm's text would be a new source-text pin, which this
+    // ticket does not add. So the dispatcher is held to being the blur's only caller and to making
+    // none of the blur's own calls itself — a statement of the blur's work written beside
+    // `window_blurred` in the dispatcher names its call here.
     let dispatcher = "FolioApp::on_window_event".to_owned();
     assert_eq!(
         product_callers("Runtime", "window_blurred"),

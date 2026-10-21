@@ -1015,17 +1015,9 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some(slot) = self.window.peek_page.as_mut() {
             slot.asked.clear();
         }
-        // And any hand that was on a block inside it. The card's surface is the
-        // one the sweep deliberately never retires ([`Self::sweep_preview_panes`]),
-        // because its life is this field's — so this is where that life ends for
-        // the gestures too.
-        if self
-            .held_preview_block_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == PreviewSurface::Peek)
-        {
-            self.drop_preview_block_drag();
-        }
+        // (A hand that was on a block inside it was let go of by the ending at the top: the
+        // card's surface is the one the sweep deliberately never retires
+        // ([`Self::sweep_preview_panes`]), because its life is this field's.)
         if self
             .preview_block_hover
             .is_some_and(|(surface, _)| surface == PreviewSurface::Peek)

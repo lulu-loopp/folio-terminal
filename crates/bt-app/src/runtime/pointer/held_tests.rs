@@ -101,6 +101,15 @@ fn a_notch(runtime: &mut Runtime<'_, Headless>) {
     runtime.flush_wheel().expect("and spent");
 }
 
+/// Whether a page of this window was handed a wheel notch.
+fn page_heard_a_wheel(runtime: &Runtime<'_, Headless>) -> bool {
+    runtime.window.web.values().any(|page| {
+        page.heard
+            .iter()
+            .any(|event| matches!(event, bt_platform::WebMouseEvent::Wheel(_)))
+    })
+}
+
 /// Whether the second shell's view has left its live end.
 fn scrolled(runtime: &Runtime<'_, Headless>, seat: SeatId) -> bool {
     runtime.leaf(seat).projection.is_scrolled()
@@ -125,14 +134,7 @@ fn no_page_but_the_owner_hears_the_wheel_under_a_capture() {
             .keys()
             .nth(1)
             .expect("the tab holds two shells");
-        let text: String = (0..40)
-            .map(|line| {
-                format!(
-                    "line {line}
-"
-                )
-            })
-            .collect();
+        let text: String = (0..40).map(|line| format!("line {line}\r\n")).collect();
         runtime
             .sessions
             .get_mut(&seat)
@@ -173,6 +175,11 @@ fn no_page_but_the_owner_hears_the_wheel_under_a_capture() {
         assert!(
             !scrolled(&runtime, seat),
             "a notch over a page scrolls nothing under it (held: {holding})"
+        );
+        assert_eq!(
+            page_heard_a_wheel(&runtime),
+            !holding,
+            "the page hears the notch with the hand free, and not under a held press"
         );
         // And with the page gone the same notch scrolls the shell, so it was the page that
         // held it.
@@ -217,4 +224,264 @@ fn a_pan_under_a_held_gesture_moves_nothing() {
         Some(hand),
         "and the held press does not move to the finger"
     );
+}
+
+// ── round 2: the flyout's gate, the glance's gate, and the slot across windows ──
+
+/// One window of one tab with one shell, which wears the corner ghost (its `🗀` is the flyout's
+/// trigger), drawn once.
+fn a_lone_pane(tag: &str) -> HeadlessFolio {
+    let mut folio = HeadlessFolio::with_tabs(tag, vec![cross_tab(1, &["A"])], 0);
+    folio.draw();
+    folio.ledger.take();
+    folio
+}
+
+/// The road the intent is asked on: the pointer's own move, or the re-ask once the glass is free.
+#[derive(Clone, Copy, Debug)]
+enum Road {
+    Move,
+    Rearm,
+}
+
+/// The pointer at `at`, asked on `road`.
+fn ask_at(runtime: &mut Runtime<'_, Headless>, at: PhysicalPosition<f64>, road: Road) {
+    match road {
+        Road::Move => runtime.pointer_moved(at).expect("the move is answered"),
+        Road::Rearm => {
+            runtime.window.pointer_position = Some(at);
+            runtime
+                .rearm_hover_intents(Instant::now())
+                .expect("the intents are asked again");
+        }
+    }
+}
+
+/// Whether resting on the corner ghost's `🗀` armed the files flyout, with the hand free or
+/// holding a press, asked on `road`.
+fn the_flyout_arms(holding: bool, road: Road) -> bool {
+    let mut folio = a_lone_pane("held-flyout");
+    let mut runtime = folio.runtime();
+    let trigger = first_point(&mut runtime, |runtime, point| {
+        matches!(
+            runtime.chrome_target_at(point),
+            Some(seats::ChromeTarget::PaneFiles(_))
+        )
+    });
+    if holding {
+        a_tab_press(&mut runtime, trigger);
+    }
+    ask_at(&mut runtime, trigger, road);
+    runtime
+        .window
+        .float
+        .take_due(Instant::now() + Duration::from_secs(10))
+        .is_some()
+}
+
+/// RED (T-POINTER-CAPTURE cut 6, R-7; round 2) — **a held gesture arms no flyout**: a hand
+/// resting on a pane's `🗀` arms the files flyout when it is free, on the move and on the re-ask
+/// once the glass came free, and arms nothing while it holds a press (cells A·h).
+///
+/// MUTATION: drop the slot's gate from the flyout's trigger in `pointer_moved` — the move arms
+/// it under the held press; drop it in `rearm_hover_intents` — the re-ask does.
+#[test]
+fn a_held_gesture_arms_no_flyout() {
+    for road in [Road::Move, Road::Rearm] {
+        assert!(
+            the_flyout_arms(false, road),
+            "a free hand on the 🗀 arms the flyout ({road:?})"
+        );
+        assert!(
+            !the_flyout_arms(true, road),
+            "a hand holding a press arms no flyout ({road:?})"
+        );
+    }
+}
+
+/// What a settling glance card on a files row is after the pointer is asked at a point no row
+/// is under, with the hand free or holding a press, on `road`: still standing as it was.
+fn the_glance_card_stands(holding: bool, road: Road) -> bool {
+    let mut folio = a_lone_pane("held-glance");
+    let mut runtime = folio.runtime();
+    let away = PhysicalPosition::new(600.0, 500.0);
+    runtime.pointer_moved(away).expect("the move is answered");
+    let seat = *runtime.sessions.keys().next().expect("the tab's shell");
+    runtime.window.file_peek = Some(crate::test_support::card_over(
+        crate::RowHost::Terminal(seat),
+        std::path::Path::new("notes.md"),
+        crate::PeekClock::Settling(Instant::now() + Duration::from_secs(3600)),
+    ));
+    if holding {
+        a_tab_press(&mut runtime, away);
+    }
+    ask_at(&mut runtime, away, road);
+    runtime
+        .window
+        .file_peek
+        .as_ref()
+        .is_some_and(|card| card.closing_at.is_none())
+}
+
+/// RED (T-POINTER-CAPTURE cut 6, R-7; round 2) — **a held gesture neither arms nor takes down a
+/// glance**: a card settling over a row, with the hand gone to where no row is, is let go of when
+/// the hand is free — on the move and on the re-ask — and stands as it was while the hand holds a
+/// press: frozen, not armed, not lit, not taken down (cells A·h).
+///
+/// MUTATION: drop the slot's gate from the glance's intent in `pointer_moved` — the held move
+/// takes the card down; drop it in `rearm_hover_intents` — the re-ask does.
+#[test]
+fn a_held_gesture_neither_arms_nor_takes_down_a_glance() {
+    for road in [Road::Move, Road::Rearm] {
+        assert!(
+            !the_glance_card_stands(false, road),
+            "a free hand gone from the row lets the settling card go ({road:?})"
+        );
+        assert!(
+            the_glance_card_stands(true, road),
+            "a hand holding a press leaves the card as it was ({road:?})"
+        );
+    }
+}
+
+/// One application with two windows, `1` and `2`, each one tab of two shells, drawn once.
+fn two_windows(tag: &str) -> crate::headless::HeadlessApplication {
+    use crate::headless::{HeadlessApplication, HeadlessParts, Ledger, headless_window};
+    let folio = HeadlessFolio::with_tabs(tag, vec![cross_tab(1, &["A", "B"])], 0);
+    let second = headless_window(
+        &folio.app,
+        HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &Ledger::default()),
+        vec![cross_tab(2, &["C", "D"])],
+        0,
+    );
+    let mut application = HeadlessApplication::of(folio);
+    application
+        .folio
+        .windows
+        .insert(winit::window::WindowId::from(2), second);
+    for id in [1, 2] {
+        let mut runtime = application
+            .folio
+            .runtime(winit::window::WindowId::from(id))
+            .expect("both windows are open");
+        runtime
+            .settle_seat_set_change()
+            .expect("the window's tabs take their layout");
+        runtime
+            .publish_frame(bt_render::FrameTrigger {
+                occurred_at: Instant::now(),
+                source: bt_render::FrameSource::Expose,
+            })
+            .expect("a headless frame composes");
+        runtime.redraw().expect("and reaches the glass");
+    }
+    application
+}
+
+/// Window `id` of `application`.
+fn window(
+    application: &mut crate::headless::HeadlessApplication,
+    id: u64,
+) -> Runtime<'_, Headless> {
+    application
+        .folio
+        .runtime(winit::window::WindowId::from(id))
+        .expect("the window is open")
+}
+
+/// A page shown over window 2's second shell, and a point well inside it.
+fn a_page_in_window_two(
+    application: &mut crate::headless::HeadlessApplication,
+) -> PhysicalPosition<f64> {
+    let mut runtime = window(application, 2);
+    let seat = *runtime.sessions.keys().nth(1).expect("two shells");
+    let corner = first_point(&mut runtime, |runtime, point| {
+        seats::pane_at(&runtime.seat_layout, point.x, point.y) == Some(seat)
+    });
+    let inside = PhysicalPosition::new(corner.x + 100.0, corner.y + 300.0);
+    runtime.window.web.insert(
+        LeafId {
+            tab: runtime.id,
+            seat: SeatId(99),
+        },
+        WebSeat::shown_without_an_engine(WebBounds {
+            x: inside.x as i32 - 50,
+            y: inside.y as i32 - 50,
+            width: 200,
+            height: 200,
+        }),
+    );
+    inside
+}
+
+/// RED (T-POINTER-CAPTURE cut 6, R-7, revision (k); round 2) — **a gesture held in one window
+/// freezes another window's hover**: with a press held in window 1, a rest on window 2's new-tab
+/// `⌄` opens no menu and arms no tip, and a page in window 2 under the pointer hears no hover.
+/// With nothing held the same rest opens the menu and the page hears the hand, so window 2 is a
+/// window whose hover answers.
+///
+/// MUTATION: make `a_gesture_holds_the_pointer` ask the window's own capture only — window 2's
+/// rest opens its menu under window 1's held press, and its page lights.
+#[test]
+fn a_gesture_held_in_one_window_freezes_the_hover_of_another() {
+    for holding in [false, true] {
+        let mut application = two_windows("held-across-hover");
+        let inside = a_page_in_window_two(&mut application);
+        if holding {
+            let mut first = window(&mut application, 1);
+            let at = PhysicalPosition::new(300.0, 300.0);
+            first.pointer_moved(at).expect("the move is answered");
+            a_tab_press(&mut first, at);
+        }
+        let mut second = window(&mut application, 2);
+        let chevron = first_point(&mut second, |runtime, point| {
+            matches!(
+                runtime.chrome_target_at(point),
+                Some(seats::ChromeTarget::NewTabMenu)
+            )
+        });
+        second.pointer_moved(chevron).expect("the move is answered");
+        let rested = Instant::now() + Duration::from_secs(2);
+        second.window.tooltip.activate_if_due(rested);
+        let tip = second.window.tooltip.active().is_some();
+        second.advance_chevrons(rested).expect("the rest is spent");
+        let menu = second.window.profile_menu.is_open();
+        second.pointer_moved(inside).expect("the move is answered");
+        let page_hover = second.window.web_pointer_inside;
+        assert_eq!(
+            (menu, tip, page_hover),
+            (!holding, !holding, !holding),
+            "window 2's menu, tip and page hover with a press held in window 1: {holding}"
+        );
+    }
+}
+
+/// RED (T-POINTER-CAPTURE cut 6, R-10, revision (k); round 2) — **a gesture held in one window
+/// leaves another window's page deaf to the wheel**: with a press held in window 1, a notch over
+/// a page in window 2 is swallowed — the page hears no wheel and nothing under it scrolls; with
+/// nothing held the page hears it.
+///
+/// MUTATION: make `a_gesture_holds_the_pointer` ask the window's own capture only — window 2's
+/// page hears the notch under window 1's held press.
+#[test]
+fn a_gesture_held_in_one_window_leaves_another_windows_page_deaf_to_the_wheel() {
+    for holding in [false, true] {
+        let mut application = two_windows("held-across-wheel");
+        let inside = a_page_in_window_two(&mut application);
+        if holding {
+            let mut first = window(&mut application, 1);
+            let at = PhysicalPosition::new(300.0, 300.0);
+            first.pointer_moved(at).expect("the move is answered");
+            a_tab_press(&mut first, at);
+        }
+        let mut second = window(&mut application, 2);
+        second.pointer_moved(inside).expect("the move is answered");
+        a_notch(&mut second);
+        assert_eq!(
+            page_heard_a_wheel(&second),
+            !holding,
+            "window 2's page hears the notch only when no window holds a press (held in 1: \
+             {holding})"
+        );
+    }
 }

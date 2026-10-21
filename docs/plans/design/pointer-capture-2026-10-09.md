@@ -801,3 +801,16 @@ END {
 - **The page layer's own question is `Runtime::page_under_the_hand`** (in `runtime::pointer`), the page under the point less the tab list, the download sheets and the capsule; `web_page_at` is it with the held gesture subtracted. The wheel's page station asks the former and swallows under a held gesture, so a notch over a page no longer falls through to what is beneath it.
 - **No reader of the router's memo was added**, so `a_complete_event_walks_once` is unchanged.
 
+## Revision (l), 2026-10-21 — build 3 round 2 (the independent review's HOLD)
+
+- **Owner-gone doors may end after the state change** (N3): `sweep_preview_panes`, `land_preview_source_on` and `rebuild_preview_document` run once the surface, its document or its blocks have already gone, and `hide_file_peek` and `settings_closed` as the card or the sheet goes. That keeps §4.1 cut 5's "before it changes the state the owner names" in force for every ending that reads that state (cancel and off the glass). `OwnerGone` reads none of the state: its ending is a let-go that owes nobody anything (`let_go_of_a_gone_owner`).
+- **Table A's `=` w-cells change under the application-wide swallow** (N8). Cut 6 swallows a notch over a page under *any* held gesture, so the w-column's `=` cells for C1, C5, C7, C9–C13, C15–C18 and C20 ("page subtracted today", or no page road) now read **swallowed**: before cut 6 the notch fell through the subtracted page to whatever was under it, and now it scrolls nothing. The owning page keeps its own notch from cut 7 (below).
+- **Later cuts, named so they are not lost:**
+  - (N10) **the layout peek is still armed under a held press.** R-7 lists it, cut 6's list does not, and `pointer_moved` still asks `layout_peek_target_at` under a held press. It joins the hover freeze in cut 8d, with the chrome hover.
+  - (N11) **cut 7 splits the wheel's swallow**, so that a page that owns the capture (`CaptureOwner::Page`) keeps its own notch (R-10's second rule) while every other page swallows.
+- **Pinned in round 2:**
+  - the flyout's and the glance's gates, on the move and on the re-ask: `held_tests::{a_held_gesture_arms_no_flyout, a_held_gesture_neither_arms_nor_takes_down_a_glance}`;
+  - the slot across windows: `a_gesture_held_in_one_window_freezes_the_hover_of_another` and `a_gesture_held_in_one_window_leaves_another_windows_page_deaf_to_the_wheel`. They use an engine-less `WebSeat` that records what it is handed (`WebSeat::heard`, cfg(test));
+  - cell C1·g, the divider's ratio put back on a tab switch: `ending::tests::a_tab_switch_puts_a_held_dividers_ratio_back`;
+  - the matrix's not-yet rows, as a dated list in `every_lifecycle_door_ends_the_capture` (`DOORS_NOT_YET_ITEMS`).
+

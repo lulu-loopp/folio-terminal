@@ -840,3 +840,46 @@ fn a_forwarded_press_is_told_its_button_came_up_from_its_last_report() {
         );
     }
 }
+
+/// RED (cut 5, R-9, cell C1·g; round 2) — **a divider held when the tab switches puts its ratio
+/// back first**: off the glass is a cancel for a divider, read off the tab whose seats it moved
+/// before the tab in front changes, so the split comes back to the ratio it had when the press
+/// began.
+///
+/// MUTATION: drop the divider from `leaves_the_glass` — the switch leaves the ratio the hand
+/// dragged it to.
+#[test]
+fn a_tab_switch_puts_a_held_dividers_ratio_back() {
+    let mut application = two_tabs("ending-divider-ratio");
+    let mut runtime = application.runtime();
+    let (split, dragged) = runtime.seats.tree().ratios()[0];
+    let at_the_press = Ratio::from_ppm(if dragged == Ratio::HALF {
+        300_000
+    } else {
+        500_000
+    })
+    .expect("a legal ratio");
+    hold(
+        &mut runtime,
+        CaptureOwner::Divider(DividerDrag {
+            split,
+            dir: Axis::Row,
+            grip: DividerGrip::Ratio(at_the_press),
+        }),
+    );
+    runtime
+        .activate_tab(1, false)
+        .expect("tab 2 comes in front");
+    runtime.activate_tab(0, false).expect("and tab 1 again");
+    let ratio = runtime
+        .seats
+        .tree()
+        .ratios()
+        .into_iter()
+        .find_map(|(id, ratio)| (id == split).then_some(ratio));
+    assert_eq!(
+        ratio,
+        Some(at_the_press),
+        "the split is back at the ratio it had when the press began"
+    );
+}

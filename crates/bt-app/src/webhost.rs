@@ -2231,6 +2231,10 @@ pub(crate) struct WebSeat {
     /// account of the same presses, and the two would part company the first
     /// time a button came up over another window.
     buttons: u32,
+    /// Every mouse event this seat was handed to forward, for a test to read which page heard
+    /// what (T-POINTER-CAPTURE cut 6: which page hears the wheel under a held gesture).
+    #[cfg(test)]
+    pub(crate) heard: Vec<bt_platform::WebMouseEvent>,
     /// The last left press, for the double click the engine cannot infer.
     ///
     /// `SendMouseInput` has a `LEFT_BUTTON_DOUBLE_CLICK` kind and no way to
@@ -2459,6 +2463,8 @@ impl WebSeat {
             rastered: None,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
+            #[cfg(test)]
+            heard: Vec::new(),
             last_left_press: None,
             minted,
             page: PageFacts::default(),
@@ -4258,6 +4264,8 @@ impl WebSeat {
         };
         let point = (window_point.0 - bounds.x, window_point.1 - bounds.y);
         let event = self.upgrade_to_double_click(event, window_point, now);
+        #[cfg(test)]
+        self.heard.push(event);
         // The mask the engine is handed describes the state **including** this
         // event, which is what a Win32 mouse message carries: a press arrives
         // with its own bit set and a release arrives with it already clear.
@@ -5161,6 +5169,8 @@ mod rehost_address_tests {
             rastered: None,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
+            #[cfg(test)]
+            heard: Vec::new(),
             last_left_press: None,
             minted: Mint::Nothing,
             page: PageFacts::default(),

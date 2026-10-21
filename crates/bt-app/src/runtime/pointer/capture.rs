@@ -514,10 +514,6 @@ impl<B: Backend> Runtime<'_, B> {
         gesture_door!(@tab latch self BlockThumb value)
     }
 
-    pub(crate) fn drop_preview_block_drag(&mut self) {
-        gesture_door!(@tab drop self BlockThumb)
-    }
-
     pub(crate) fn held_preview_image_drag(&self) -> Option<&ImageDrag> {
         gesture_door!(@tab held self PicturePan)
     }

@@ -1706,7 +1706,8 @@ impl<B: Backend> Runtime<'_, B> {
         // let go of).
         //
         // First of the subtractions, because it does not depend on where the
-        // pointer is at all. A gesture of this window's is a press that has not
+        // pointer is at all. A held gesture — in any window, the slot being the
+        // application's (T-POINTER-CAPTURE cut 6) — is a press that has not
         // finished: the release that ends it is owed to whatever the press began
         // on, and every one of those endings — the drop, the divider, the
         // scrubber, the thumb, the selection — is answered *below* the ladder's

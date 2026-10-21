@@ -2992,10 +2992,7 @@ impl<B: Backend> Runtime<'_, B> {
         // **A zoom takes every other pane off the glass, and the gesture held on one with it**
         // (T-POINTER-CAPTURE R-9, off the glass) — before the posture changes, while that pane
         // is still drawn. Letting a zoom go takes nothing away.
-        if self.seats.pane_count() >= 2
-            && self.seats.tree().find_seat(seat).is_some()
-            && self.seats.zoom() != Some(seat)
-        {
+        if self.seats.toggle_would_zoom_in(seat) {
             self.end_capture(Ending::OffTheGlass(Leaving {
                 tab: self.id,
                 kept: Some(seat),
