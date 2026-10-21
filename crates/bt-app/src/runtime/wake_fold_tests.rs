@@ -314,3 +314,38 @@ fn a_shown_glance_card_with_no_buffer_is_taken_down_on_its_turn() {
     books_nothing_due(turn(&mut folio, second), second);
     assert!(folio.window.file_peek.is_none(), "the card is down");
 }
+
+/// RED — **the storage watch's re-read is not booked while a quit holds the storage worker.**
+///
+/// The autosave's twin: the watch's spender (`advance_storage_watch`) does not run while the
+/// quit's documents and their copies are on the worker, and its quiet instant, booked anyway,
+/// was one the loop spun on for the whole of that phase. The settings file changes, a turn hears
+/// it and books the quiet window; then a quit takes the worker and the window comes due.
+///
+/// MUTATION: book `storage_watch.deadline()` under `application_clocks` alone in the fold — the
+/// turn hands the loop `StorageWatch`.
+#[test]
+fn the_storage_watch_is_not_booked_while_a_quit_holds_the_storage_worker() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "wake-fold-storage-watch",
+        vec![tab_holding(leaf_saying("plain\r\n"))],
+        0,
+    );
+    folio.draw();
+    let listener = folio.app.storage_watch.listener_on(Instant::now);
+    listener(
+        std::path::Path::new("storage"),
+        bt_platform::DirChange::Named(&[std::ffi::OsString::from(
+            crate::persist::SETTINGS_FILE_NAME,
+        )]),
+    );
+    let heard = Instant::now();
+    books_nothing_due(turn(&mut folio, heard), heard);
+    let due = folio
+        .app
+        .storage_watch
+        .deadline()
+        .expect("the turn heard the change and booked its quiet window");
+    folio.app.quit = Some(crate::quit::Quit::begin(Vec::new()));
+    books_nothing_due(turn(&mut folio, due), due);
+}
