@@ -451,9 +451,13 @@ lets the document go and re-creates the sentinel. macOS: the system's end is
 first `WM_QUERYENDSESSION` of a span, before the held document is written, every owed hand-editable
 document and every dirty preview buffer's save are handed to the one storage worker; the document
 follows them, always as a new generation, so its one bounded wait (`SESSION_SAVE_BUDGET`, 3 s,
-inside the five seconds Windows allows after `WM_ENDSESSION`) is the drain of everything ahead of
-it. What did not land is copied into `recovered`, never over a file, before the shutdown screen's
-line comes down. The contract above stands: the one writer, the one bounded wait, `session.lock`
+counted from the question's turn) is the drain of everything ahead of it. The window thread spends
+at most those 3 s plus the hand-overs' CPU, one preview repaint per window and one durable
+create-new per item that did not land (the disk's own time); Windows' five seconds start when it
+sends `WM_ENDSESSION`, which can be while this turn runs, and the budget fits either way. What did
+not land is copied into `recovered`, never over a file, before the shutdown screen's line comes
+down; after a shutdown taken back the copies stay there, beside the live edits, and the next start
+offers them. A quit in its documents or recovery phase keeps the four documents to itself. The contract above stands: the one writer, the one bounded wait, `session.lock`
 dropped once the document has landed, nothing torn down, and a session taken back finds every
 window as it was — a buffer dirty where its save did not land. A shutdown taken back after the
 wait ran out leaves the writer waited on again (`wait_again_after_the_systems_end`).
