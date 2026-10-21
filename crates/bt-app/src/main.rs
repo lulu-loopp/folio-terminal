@@ -157,6 +157,11 @@ mod profiles_merge;
 mod programs_ear;
 mod programs_lane;
 mod psreadline;
+// The build script's PSReadLine package reader and its pins (T-INTEGRATION-INJECT-2-BUILD),
+// compiled here only so its tests run: `build.rs` reaches the same file by `#[path]`, and what
+// ships is the container it writes (`psreadline::module_files`).
+#[cfg(test)]
+mod psreadline_artefact;
 mod pty_door;
 mod quake;
 mod quit;
@@ -576,24 +581,14 @@ enum AppEvent {
     /// must wake only the seat that asked rather than every tree, every preview
     /// and every formula in the tab.
     GitReady,
-    /// **The PSReadLine probe answered** (§7.1.6c-5).
-    ///
-    /// The fifth of the same family and separate for the same reason, read from
-    /// the other end: it is the only one whose answer can land while a *modal*
-    /// is up. A dialog standing on the Terminal page draws a row that says
-    /// "Checking this machine's PSReadLine", and while it is up there is no
-    /// shell output, no hover and no keystroke to produce the frame that would
-    /// replace that line — so the probe has to ask for one itself.
-    PsReadLineProbed,
     /// **A PowerShell has said where its own `$PROFILE` is** (§7.1.6j).
     ///
-    /// The sixth of the same family, and separate from `PsReadLineProbed` for
-    /// the reason that one is separate from `GitReady`: the answers arrive from
-    /// two different processes at two different moments, and one variant would
-    /// mean a probe that finished first waking the window a second time when the
-    /// other did. Its own wake is owed for the reason that one's is: a pane that
-    /// has printed its prompt and gone quiet produces no further frame, so an
-    /// answer landing after that frame would sit unread until somebody typed.
+    /// The fifth of the same family. Its own wake is owed: a pane that has printed its prompt
+    /// and gone quiet produces no further frame, so an answer landing after that frame would sit
+    /// unread until somebody typed. It also carries the earlier Folio's PSReadLine copy's
+    /// observation and removal (`psreadline::begin_legacy_observation`,
+    /// `psreadline::begin_legacy_removal`; T-INTEGRATION-INJECT-2-BUILD), which are answers
+    /// about the same family of legacy PowerShell artefacts for the same Terminal page.
     PowerShellProfileProbed,
     /// **The copilot version probe answered** (`attention_copilot`).
     ///
@@ -952,8 +947,7 @@ impl AppEvent {
             Self::ClipboardAnswered => Station::ClipboardRead,
             Self::FileIndexReady => Station::FileIndex,
             Self::WebPageSpoke => Station::WebSpoke,
-            Self::PsReadLineProbed
-            | Self::PowerShellProfileProbed
+            Self::PowerShellProfileProbed
             | Self::CopilotProbed
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
@@ -13559,25 +13553,6 @@ struct App<B: Backend = Native> {
     // whatever this machine has registered for it, which is very often that same
     // editor. A start-up probe kept for a row nobody draws is a filesystem walk
     // answering a question the product no longer asks.
-    /// This user's Documents folder, asked of Windows once.
-    ///
-    /// Once because it cannot move under a running process, and stored rather
-    /// than re-asked because both the row and the dialog need it and a known
-    /// folder lookup is a COM call.
-    psreadline_documents: Option<PathBuf>,
-    /// Last observed Folio module: `None` is unread; `Some(InstalledCopy::None)`
-    /// is a completed reading that found no Folio copy.
-    ///
-    /// Cached because it is nine file reads and a version-resource walk, and the
-    /// settings dialog asks on every frame it draws. Read once when the probe
-    /// lands, after an install/removal, and on opening the Terminal page. The
-    /// App owns the slot, so additional windows do not repeat the first read.
-    ///
-    /// **Three answers since 2026-08-18**, and the middle one is why: a module an
-    /// older Folio wrote is neither "ours" nor "somebody else's", and a `bool`
-    /// made it the second, which is how it became a module this product had
-    /// installed and would not remove.
-    psreadline_installed: Option<psreadline::InstalledCopy>,
     /// Whether the ready first-run attempt has been consumed, even if no card
     /// could open. This is an edge latch, not another agent-availability cache.
     first_run_attempted: bool,
@@ -13590,9 +13565,8 @@ struct App<B: Backend = Native> {
     first_run_waited_for_agent_folders: bool,
     /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
     ///
-    /// Cached for [`Self::psreadline_installed`]'s reason and no other: the
-    /// settings dialog asks on every frame it draws, and the answer is four
-    /// registry opens. It is refreshed at the three moments it can change — the
+    /// Cached for one reason and no other: the settings dialog asks on every
+    /// frame it draws, and the answer is four registry opens. It is refreshed at the three moments it can change — the
     /// launch, an install and a removal — and at no other, because nothing else
     /// in this process can move it.
     ///
@@ -14015,7 +13989,6 @@ struct AppParts<B: Backend> {
     motion: Motion,
     profile_programs: profiles::ProfilePrograms,
     startup_shells: Option<StartupShells>,
-    psreadline_documents: Option<PathBuf>,
     context_menu_installed: bool,
     claude_hooks_installed: bool,
     codex_notify_installed: bool,
@@ -14070,7 +14043,6 @@ impl<B: Backend> App<B> {
             motion,
             profile_programs,
             startup_shells,
-            psreadline_documents,
             context_menu_installed,
             claude_hooks_installed,
             codex_notify_installed,
@@ -14123,7 +14095,6 @@ impl<B: Backend> App<B> {
             motion,
             profile_programs,
             startup_shells,
-            psreadline_documents,
             context_menu_installed,
             claude_hooks_installed,
             codex_notify_installed,
@@ -14170,7 +14141,6 @@ impl<B: Backend> App<B> {
             scheme_fault: None,
             scheme_source: [None, None],
             program_news: window_news::WindowSeats::default(),
-            psreadline_installed: None,
             first_run_attempted: false,
             first_run_waited_for_channel: false,
             first_run_waited_for_agent_folders: false,
@@ -16134,9 +16104,6 @@ struct WindowRuntime<B: Backend = Native> {
     /// **The ended tabs whose close waits for saves on their way** (S-6b), kept
     /// by the loop's cleanup (`Runtime::reap_exited_tabs`).
     exited_tab_waits: ExitedTabWaits,
-    /// The PSReadLine invitation, when the probe has found a shell that would
-    /// benefit (§7.1.6c-3b).
-    psreadline_invite: psreadline::Invite,
     /// **What the pointer is over on the multi-line paste card** (0.4.4 ticket 02) — the card's
     /// only state of its own. Whether it is up at all is not stored here: it is
     /// [`LeafSession::pending_paste`], read through `Runtime::paste_card_seat`.
@@ -16155,12 +16122,6 @@ struct WindowRuntime<B: Backend = Native> {
     /// its own. The state that says "once, ever" is in `settings.json`; this is
     /// only the surface.
     first_run: first_run::Card,
-    /// Whether the size row has been answered since the invitation was refused.
-    ///
-    /// The one exception in the trigger table, and it is deliberately *not*
-    /// persisted: it is a fact about this sitting, and a file that remembered it
-    /// would let a refusal from last month be re-opened by a font change today.
-    psreadline_size_changed: bool,
     /// **Which window the gate's confirmed answer has asked to go**, if it has —
     /// this window after its own shut, or the run's last ordinary window after
     /// the run's end was answered here, in the summoned terminal
@@ -19754,16 +19715,10 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::PowerShellScript => {
             shell_integration::begin_powershell_script_preparation();
         }
-        Writer::PsReadLineUpgrade => {
-            if let Some(documents) = psreadline::documents_directory()
-                && let Some(replacement) = psreadline::upgrade_recorded(
-                    &documents,
-                    &persist::storage_dir(),
-                    stores.settings.loaded().psreadline_invite,
-                )
-            {
-                eprintln!("{}", replacement.log_line());
-            }
+        // The same worker: the durable module is a birth's to write, and the artefacts the old
+        // build left are removed now that nothing of the old build is running.
+        Writer::PsReadLineModule => {
+            shell_integration::begin_powershell_script_preparation();
         }
         Writer::ExplorerRepair => explorer_menu::begin_probe(),
         Writer::ToastIdentity => {
@@ -19954,6 +19909,17 @@ struct SystemBox;
 impl NativeSay for SystemBox {
     fn say(&mut self, text: &str) {
         bt_platform::message_box(APP_NAME, text);
+    }
+}
+
+/// **The system's end of the session says a lost change in `diagnostics.log` only**
+/// (T-ENDSESSION-SAVES): the shutdown screen is up, and a box of the system's own would be one
+/// more window standing in the way of the shutdown, ended with the process before anybody read it.
+struct IntoTheLog;
+
+impl NativeSay for IntoTheLog {
+    fn say(&mut self, text: &str) {
+        diagnostics::note(text);
     }
 }
 
@@ -22411,8 +22377,10 @@ fn coalesce_pty_resize_on_grid_change(
 ///
 /// The user's 2026-08-06 ruling turned it off on sight — freezing the reflow and cropping the old
 /// width read worse than the artefact it prevented — kept the machine as a policy bit at `false`,
-/// and ordered the root cause fixed instead. That fix shipped: the patched PSReadLine re-anchors
-/// itself, and `scripts/shell-integration/folio.ps1` needs no reflection repair at ≥ 2.4.6. The
+/// and ordered the root cause fixed instead. That fix shipped, as the patched PSReadLine that
+/// re-anchored itself; since T-INTEGRATION-INJECT-2-BUILD the root cause is repaired on Microsoft's
+/// own 2.4.5 — every pane's, Windows PowerShell's included — by `folio.ps1`'s reflection repair on
+/// the resize chord. The
 /// same ruling ends 「修好后扣留政策位永久退役」, and this is that retirement. A bit nailed to
 /// `false` in front of a state machine nothing can reach is not an option the product has; it is a
 /// second reading of the resize path that no test of the shipping one covers.
@@ -42689,13 +42657,6 @@ fn create_leaf_session(
             .is_some_and(|row| shell_integration::listens_for_a_locale(environment, &row.env))
         && locale_declaration::at_birth() == locale_declaration::AtBirth::Waiting;
     let in_birth = rows_wait || locale_waits;
-    // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
-    // this process, because the module that is broken is the one `Windows
-    // PowerShell 5.1` ships and nothing else on this machine is affected by it.
-    // Idempotent — see `psreadline::begin_probe`.
-    if !in_birth && spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
-        psreadline::begin_probe(psreadline::ProbeTrigger::Birth);
-    }
     // There used to be a second trigger here (§7.40 ③): a `wsl.exe` started
     // beside this spawn to ask the default distribution which shell it logs
     // into. It is gone as of 2026-09-07, because nothing waited for it and so
@@ -45300,6 +45261,11 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         for line in leaf.session.take_keyboard_protocol_notes() {
             diagnostics::note(&line);
         }
+        // **A pane whose PSReadLine is not Folio's after its profile ran** says so once, in the
+        // log and nowhere else (T-INTEGRATION-INJECT-2-BUILD round 2), on the same road.
+        for line in leaf.session.take_line_editor_notes() {
+            diagnostics::note(&line);
+        }
         Ok(DrainOutcome {
             // Taken here because this is the one place every leaf of every tab
             // passes through on every turn, which is the same sentence
@@ -45781,7 +45747,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
                 session_end::hear(end);
                 let _ = proxy.send_event(AppEvent::SessionEnding);
             }),
-            Box::new(|| i18n::Text::ShutdownSavingLayout.text().to_owned()),
+            Box::new(|| i18n::Text::ShutdownSavingWork.text().to_owned()),
         )
     };
     // **A window is born knowing its display's rate**, before it has drawn
@@ -46045,11 +46011,9 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         root_menu_shell_folders: Vec::new(),
         dirty_gate: restore::DirtyGate::default(),
         exited_tab_waits: ExitedTabWaits::default(),
-        psreadline_invite: psreadline::Invite::default(),
         paste_card_hover: None,
         update_card: update_card::Card::default(),
         first_run: first_run::Card::default(),
-        psreadline_size_changed: false,
         window_close_requested: None,
         shell_exit_close_requested: false,
         preview_menu: profiles::PreviewMenu::default(),
@@ -46605,22 +46569,8 @@ impl Runtime<'_, Native> {
             eprintln!("BT_PERSIST another Folio holds this data directory; nothing here is saved");
             settings_fault.get_or_insert_with(crate::i18n::second_instance_notice);
         }
-        // Before the first pane can start a probe of its own. A no-op unless
-        // `BT_PSREADLINE_PROBE` is set — see `psreadline::probe_override_from_env`
-        // for why the door exists and what it deliberately does not override.
-        psreadline::install_probe_override();
-        // And how the answer gets back to a window that may be sitting on a
-        // modal when it lands (§7.1.6c-5). Installed here, once, because the
-        // wake belongs to this process's event loop rather than to whichever of
-        // the probe's two triggers fires first — the pane starts it, the dialog
-        // needs the repaint, and they are not the same call.
-        {
-            let proxy = proxy.clone();
-            psreadline::install_wake(move || {
-                let _ = proxy.send_event(AppEvent::PsReadLineProbed);
-            });
-        }
-        // And the second probe's, beside it and for its argument (§7.1.6j).
+        // The `$PROFILE` probe's wake (§7.1.6j), installed here, once, because the wake belongs to
+        // this process's event loop; the earlier Folio's PSReadLine copy's answers ride it too.
         {
             let proxy = proxy.clone();
             shell_integration::install_wake(move || {
@@ -46907,32 +46857,26 @@ impl Runtime<'_, Native> {
         let focus_mode = settings_store.loaded().focus_mode;
         // Every row unknown until the walk asked for above has answered it.
         let mut profile_programs = profiles::ProfilePrograms::unknown();
-        // **Folio's own older PSReadLine is replaced here, without asking**
-        // (ruling 2026-09-21, option A; ticket 56). At the launch and before the
-        // first window, because a pane of this Folio starting a PowerShell is
-        // what would hold the old DLL open and make the write fail; and before
-        // the profile migration's worker, which takes the same marks lock. Only
-        // a build Folio recorded installing and older than the bundled one is
-        // touched (`psreadline::upgrade_decision`); a failure is one line here
-        // and the next launch tries again. On this thread, as the Settings
-        // row's own install is (RULES §38's debt).
-        let psreadline_documents = psreadline::documents_directory();
-        if let Some(documents) = psreadline_documents.as_deref()
-            && let Some(replacement) = psreadline::upgrade_recorded(
-                documents,
-                &persist::storage_dir(),
-                settings_store.loaded().psreadline_invite,
-            )
-        {
-            eprintln!("{}", replacement.log_line());
-        }
-        // **The first window, in `startup::resume`'s order**: the startup migration and
-        // the script's preparation, the window, the PowerShell questions, the first tab. What the
+        // **An earlier Folio's PSReadLine in Documents is looked for, never written**
+        // (T-INTEGRATION-INJECT-2-BUILD, owner ruling Q4): Folio's own panes run Folio's own
+        // module from its local data folder, so the launch replaces nothing; it only finds out,
+        // on a worker, whether the Terminal page owes the copy's removal row.
+        psreadline::begin_legacy_observation();
+        // **The first window, in `startup::resume`'s order**: Windows PowerShell's language
+        // question, the startup migration and the script's preparation, the window, the
+        // PowerShell questions, the first tab. What the
         // steps share is the program walk's answers, adopted by the window's title and by the
         // questions, and read by the first tab.
         let (opened, first) = startup::resume(
             &mut profile_programs,
             startup::FirstWindow {
+                // Only with the Shell integration switch on: a launch with it off starts no
+                // Windows PowerShell; a birth after it is turned on asks for itself.
+                language: || {
+                    shell_integration::begin_language_question(
+                        settings_store.loaded().shell_integration,
+                    )
+                },
                 migration: shell_integration::begin_startup_migration,
                 script: || {
                     // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
@@ -47566,7 +47510,6 @@ impl Runtime<'_, Native> {
             motion: read_motion_preference(),
             profile_programs,
             startup_shells,
-            psreadline_documents,
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
@@ -48120,26 +48063,6 @@ impl<B: Backend> Runtime<'_, B> {
         let content =
             self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
         let content_us = trace_start.map_or(0, |start| start.elapsed().as_micros());
-        // **The probe's second trigger** (§7.1.6c-5), and it is here because this
-        // is the one place that knows which page is being shown *and* is reached
-        // by every road to showing it — the gear, a press on the rail, an arrow
-        // walking it, and a page the dialog fell back to because the one it was
-        // on lost its rows. A trigger hung off those four separately is a
-        // trigger with a fifth door somebody will add later.
-        let psreadline_opened = self
-            .window
-            .settings
-            .take_psreadline_open_edge(content.probes_psreadline(self.window.settings.category()));
-        if psreadline_opened {
-            // Asked at every visit (T-PROBE-NO-CACHED-FAILURE): a module installed or updated
-            // while Folio runs is seen here, and a failed check is asked again. One probe per
-            // visit, never per frame while this page is open.
-            psreadline::begin_probe(psreadline::ProbeTrigger::TerminalPage);
-            // An out-of-band module change becomes visible when the reader
-            // opens its page. A redraw or hover on the open page is not an edge.
-            self.psreadline_documents();
-            self.refresh_psreadline_installed();
-        }
         // **The agent rows' own edge**, and it is not a convenience: their switches are inert
         // while the file they name is one this build will not edit, so a press cannot be what
         // notices that the reader has unpicked the link or cleared the read-only bit. Opening the
@@ -48169,21 +48092,12 @@ impl<B: Backend> Runtime<'_, B> {
             self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
         // Use the refreshed fact on this very layout, including its geometry.
-        let refreshed_values = (psreadline_opened || agents_opened).then(|| {
-            let state = self.psreadline_row_state();
-            settings::SettingsValues {
-                psreadline: state,
-                psreadline_install_available: psreadline::install_available(
-                    psreadline::probe(),
-                    state,
-                ) && self.app.psreadline_documents.is_some(),
-                psreadline_remove_available: psreadline::remove_available(state),
-                claude_hooks: self.app.claude_hooks_installed,
-                codex_notify: self.app.codex_notify_installed,
-                copilot_hooks: self.app.copilot_hooks_installed,
-                agent_config_refusals: self.app.agent_config_refusals,
-                ..values.clone()
-            }
+        let refreshed_values = agents_opened.then(|| settings::SettingsValues {
+            claude_hooks: self.app.claude_hooks_installed,
+            codex_notify: self.app.codex_notify_installed,
+            copilot_hooks: self.app.copilot_hooks_installed,
+            agent_config_refusals: self.app.agent_config_refusals,
+            ..values.clone()
         });
         let content = settings::SettingsContent {
             values: refreshed_values.as_ref().unwrap_or(&values),
@@ -48295,6 +48209,10 @@ impl<B: Backend> Runtime<'_, B> {
                 settings::retain_powershell_profile_remover(
                     &mut rows,
                     shell_integration::powershell_profile_line_present(),
+                );
+                settings::retain_legacy_psreadline_remover(
+                    &mut rows,
+                    psreadline::legacy_copy_present(),
                 );
                 rows
             },
@@ -48627,12 +48545,6 @@ impl<B: Backend> Runtime<'_, B> {
             // so the row has to report what it can see: the window it is standing
             // in. See `settings::SettingsValues::focus_mode`.
             focus_mode: self.window.focus_mode,
-            psreadline: self.psreadline_row_state(),
-            psreadline_install_available: psreadline::install_available(
-                psreadline::probe(),
-                self.psreadline_row_state(),
-            ) && self.app.psreadline_documents.is_some(),
-            psreadline_remove_available: psreadline::remove_available(self.psreadline_row_state()),
             profile_available: (0..profiles::count())
                 .map(|index| self.app.profile_programs.row_is_available(index))
                 .collect(),
@@ -49312,21 +49224,13 @@ impl<B: Backend> Runtime<'_, B> {
                 .loaded()
                 .terminal_cjk_font_family
                 .clone();
-            if self.apply_terminal_font(family, cjk_family, size)? {
-                // S110's one exception to "asked once": the row whose visible
-                // consequence on an unpatched 5.1 *is* the bug the module fixes.
-                // See `psreadline::invite_decision`.
-                self.window.psreadline_size_changed = true;
-            }
+            self.apply_terminal_font(family, cjk_family, size)?;
         }
         if let Some(name) = settings::light_scheme_requested(target) {
             self.apply_scheme(Some(name.to_owned()), None)?;
         }
         if let Some(name) = settings::dark_scheme_requested(target) {
             self.apply_scheme(None, Some(name.to_owned()))?;
-        }
-        if let Some(install) = settings::psreadline_requested(target) {
-            self.apply_psreadline(install)?;
         }
         // Both rail combos go through the one constructor: the layout choice
         // keeps the sidebar mode standing and the sidebar choice keeps the
@@ -49434,6 +49338,9 @@ impl<B: Backend> Runtime<'_, B> {
                 }
                 None if row == settings::SettingsRow::PowerShellProfileLine => {
                     shell_integration::begin_removal();
+                }
+                None if row == settings::SettingsRow::LegacyPsReadLine => {
+                    psreadline::begin_legacy_removal(self.window_id());
                 }
                 None => {}
             },
@@ -49647,7 +49554,6 @@ impl<B: Backend> Runtime<'_, B> {
             // somebody moves it, and this is the one row in the dialog whose
             // reset would switch a network request back on.
             | Row::AutoCheck
-            | Row::PsReadLine
             | Row::Scrollback
             | Row::LineWrapping
             | Row::CopyOnSelect
@@ -49690,6 +49596,7 @@ impl<B: Backend> Runtime<'_, B> {
             | Row::ImportSettings
             | Row::SettingsFolder
             | Row::PowerShellProfileLine
+            | Row::LegacyPsReadLine
             // And the uninstaller's rows (T-UNINSTALL-UX): a door, a switch that
             // lives for one visit, and a fact about who installed this copy.
             | Row::Uninstall
@@ -49739,7 +49646,6 @@ impl<B: Backend> Runtime<'_, B> {
         let card_above = self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
-            || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
             || self.uninstall_card_is_up();
@@ -67521,7 +67427,7 @@ impl<B: Backend> FolioApp<B> {
     }
 
     /// **The system is ending the session, or took the end back: settle what it said**
-    /// (B-ENDSESSION; `docs/M2-persistence-schema-v1.md` §5.5).
+    /// (B-ENDSESSION, T-ENDSESSION-SAVES; `docs/M2-persistence-schema-v1.md` §5.5).
     ///
     /// Windows' side of what [`Self::begin_the_systems_quit`] is on macOS, and a different shape
     /// for a reason the platform gives: AppKit waits for an answer the application gives when it
@@ -67535,22 +67441,55 @@ impl<B: Backend> FolioApp<B> {
     /// A save that did not land leaves the sentinel standing and the disk holding the last
     /// completed save, which is still whole because the hold kept every later change off it; the
     /// system is not kept waiting for it.
+    ///
+    /// [`Self::settle_session_end_keeping_in`], what no file takes kept in the data directory's
+    /// `recovered` folder.
     fn settle_session_end(&mut self) {
+        let _ = self
+            .settle_session_end_keeping_in(&persist::storage_dir().join(preview::RECOVERED_FOLDER));
+    }
+
+    /// [`Self::settle_session_end`], what no file takes kept in `recovery` — a test's own folder
+    /// in a test. Answers what became of every dirty preview buffer.
+    ///
+    /// **The edits go ahead of the document** (T-ENDSESSION-SAVES, ruled 2026-10-21). On the
+    /// first question of a span ([`session_end::owes_the_write`]), before the document is written:
+    /// every owed hand-editable document is handed to the storage worker once more, then every
+    /// dirty preview buffer's save, as a press hands it ([`Self::hand_over_for_the_systems_end`]).
+    /// The document follows them onto the same worker, which serves its queue in order, so its one
+    /// bounded wait (§5.3 row 16, `SESSION_SAVE_BUDGET`) is the drain of everything ahead of it —
+    /// one budget, counted from this turn's start (`asked_at`), which fits the five seconds
+    /// Windows allows from when it sends `WM_ENDSESSION` — possibly while this turn runs. Then the answers
+    /// are heard as the loop's own turn hears them, every buffer staying in its tab, and whatever
+    /// did not land is copied into `recovery` (§5.3 row 20c) before the line comes down. A save
+    /// stalled on the disk delays the document behind it: the sentinel stays, and the next start
+    /// offers the layout back — the edits are worth more than the last moments of layout.
+    fn settle_session_end_keeping_in(&mut self, recovery: &Path) -> Vec<preview::Kept> {
         let heard = session_end::take();
-        if heard.is_empty() {
-            return;
+        let mut kept = Vec::new();
+        if heard.is_empty() || self.app.is_none() {
+            return kept;
         }
-        let Some(app) = self.app.as_mut() else {
-            return;
-        };
+        // The one budget counts from here: the hand-overs ahead of the document spend it.
+        let asked_at = Instant::now();
         let mut lines_down = false;
         for end in heard {
-            let a_quit_holds_it = app
-                .quit
-                .as_ref()
-                .is_some_and(quit::Quit::document_is_frozen);
-            match session_end::settle(end, &mut app.session_store, a_quit_holds_it) {
-                session_end::Settled::Saved(Ok(())) | session_end::Settled::LeftToTheQuit => {
+            let quit = self.app.as_ref().and_then(|app| app.quit.as_ref());
+            let a_quit_holds_it = quit.is_some_and(quit::Quit::document_is_frozen);
+            // **A quit in its documents or recovery phase owns the four documents** and their
+            // copies, as one past its photograph owns everything (`LeftToTheQuit`): this road
+            // neither retries them — `quit_begin` would reset the quit's own recovery — nor
+            // copies them.
+            let documents = !quit.is_some_and(quit::Quit::holds_the_storage_worker);
+            let handed = session_end::owes_the_write(end, a_quit_holds_it)
+                .then(|| self.hand_over_for_the_systems_end(documents));
+            let Some(app) = self.app.as_mut() else {
+                return kept;
+            };
+            match session_end::settle(end, &mut app.session_store, a_quit_holds_it, asked_at) {
+                session_end::Settled::Saved(Ok(()))
+                | session_end::Settled::LeftToTheQuit
+                | session_end::Settled::AlreadySaved => {
                     lines_down = true;
                 }
                 session_end::Settled::Saved(Err(refusal)) => {
@@ -67564,6 +67503,14 @@ impl<B: Backend> FolioApp<B> {
                 // they stand are the layout again.
                 session_end::Settled::TakenBack => app.record_session(Instant::now()),
             }
+            if let Some(handed) = handed {
+                kept.extend(self.keep_what_the_systems_end_did_not_save(
+                    &handed,
+                    documents,
+                    recovery,
+                    SystemTime::now(),
+                ));
+            }
         }
         if lines_down {
             for window in self.windows.values() {
@@ -67572,6 +67519,87 @@ impl<B: Backend> FolioApp<B> {
                 }
             }
         }
+        kept
+    }
+
+    /// **Everything the system's end of the session would lose, handed to the storage worker,
+    /// and nothing taken from any window** (T-ENDSESSION-SAVES): first every owed hand-editable
+    /// document, once more (`QuitDocument::quit_begin`: the end is a trigger an owed edit is
+    /// retried on, §4.1), then each standing window's dirty preview buffers
+    /// ([`Runtime::hand_over_for_the_systems_end`]) — all of it ahead of the session document,
+    /// which the caller writes next. Answers what each window handed over, by window.
+    ///
+    /// `documents` is false while a quit holds the storage worker for its documents and their
+    /// copies: those are the quit's, and are left to it.
+    fn hand_over_for_the_systems_end(
+        &mut self,
+        documents: bool,
+    ) -> Vec<(WindowId, preview::HandedOver)> {
+        if documents && let Some(app) = self.app.as_mut() {
+            app.with_documents(|documents| {
+                for document in documents.iter_mut() {
+                    document.quit_begin();
+                }
+            });
+        }
+        let mut handed = Vec::new();
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
+                let id = runtime.window.window.id();
+                handed.push((id, runtime.hand_over_for_the_systems_end()));
+            }
+        }
+        handed
+    }
+
+    /// **After the document's wait: what landed heard, and what did not kept**
+    /// (T-ENDSESSION-SAVES). The answers the worker gave are taken as the loop's turn takes them
+    /// — the session's receipts, each buffer its own, each document store its own — and **all of
+    /// them before anything that failed on the way is said**: a window whose repaint refused does
+    /// not keep the document stores from hearing theirs. Then each window's buffers that a save
+    /// did not clean are copied into `recovery` ([`Runtime::keep_what_the_systems_end_did_not_save`],
+    /// each line naming why its file did not take the edit — the disk's own reason where it
+    /// refused) — the buffers stay in their tabs as they now stand, dirty where the save did not
+    /// land — and, unless a quit holds them (`documents` false), each document still owed is
+    /// copied beside them, a loss said in `diagnostics.log` alone ([`IntoTheLog`]). Every line
+    /// is offered to `diagnostics.log`.
+    fn keep_what_the_systems_end_did_not_save(
+        &mut self,
+        handed: &[(WindowId, preview::HandedOver)],
+        documents: bool,
+        recovery: &Path,
+        at: SystemTime,
+    ) -> Vec<preview::Kept> {
+        if let Some(app) = self.app.as_mut() {
+            app.session_store.take_receipts();
+        }
+        let (said, previews) = self.hear_preview_save_answers();
+        let heard = self.take_the_documents_answers();
+        for error in [previews.err(), heard.err()].into_iter().flatten() {
+            diagnostics::note(&format!(
+                "{APP_NAME}: the session is ending and an answer from the disk was not heard: \
+                 {error:#}"
+            ));
+        }
+        let mut kept = Vec::new();
+        for (id, handed) in handed {
+            if let Some(mut runtime) = self.runtime(*id) {
+                kept.extend(
+                    runtime.keep_what_the_systems_end_did_not_save(handed, &said, recovery, at),
+                );
+            }
+        }
+        for one in &kept {
+            diagnostics::note(&one.line());
+        }
+        if documents && let Some(app) = self.app.as_mut() {
+            app.with_documents(|documents| {
+                keep_owed_documents_over(documents, recovery, at, &mut TheDisk, &mut IntoTheLog)
+            });
+        }
+        kept
     }
 
     /// One launch's tab, in a window that is already standing.
@@ -67708,6 +67736,13 @@ impl<B: Backend> FolioApp<B> {
             app.session_store.take_receipts();
         }
         self.take_preview_save_answers()?;
+        self.take_the_documents_answers()
+    }
+
+    /// **What the storage worker answered the four documents, heard by the first standing
+    /// window** — [`Self::take_document_answers`]'s second half, on its own for the system's end
+    /// of the session, which hears every answer before it says any failure.
+    fn take_the_documents_answers(&mut self) -> Result<()> {
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
         // recovery phases take the answers themselves, on the turn this wake brings, and merge
         // without the doors.
@@ -67738,11 +67773,19 @@ impl<B: Backend> FolioApp<B> {
     /// recorded and then ignored (C6). Not held back by a quit: these answers are
     /// the buffers', and the quit's documents phase takes only the stores'.
     fn take_preview_save_answers(&mut self) -> Result<()> {
+        self.hear_preview_save_answers().1
+    }
+
+    /// [`Self::take_preview_save_answers`], answering also every refusal the answers gave, by
+    /// the file each was for ([`Runtime::hear_preview_saves`]) — gathered whatever a window's
+    /// repaint answered.
+    fn hear_preview_save_answers(&mut self) -> (Vec<(preview::PreviewSource, String)>, Result<()>) {
+        let mut refused = Vec::new();
         let Some(mut answers) = self.app.as_mut().map(App::take_preview_save_answers) else {
-            return Ok(());
+            return (refused, Ok(()));
         };
         if answers.is_empty() {
-            return Ok(());
+            return (refused, Ok(()));
         }
         // Every standing window hears its buffers' answers whatever another
         // window's repaint answered, and every answer taken is ended — heard,
@@ -67751,7 +67794,7 @@ impl<B: Backend> FolioApp<B> {
         for index in 0..self.windows.len() {
             if let Some(mut runtime) = self.runtime_at(index)
                 && runtime.window.leaving.is_none()
-                && let Err(error) = runtime.hear_preview_saves(&mut answers)
+                && let Err(error) = runtime.hear_preview_saves(&mut answers, &mut refused)
             {
                 first_error.get_or_insert(error);
             }
@@ -67759,7 +67802,7 @@ impl<B: Backend> FolioApp<B> {
         if let Some(app) = self.app.as_mut() {
             app.sink_preview_save_answers(answers);
         }
-        first_error.map_or(Ok(()), Err)
+        (refused, first_error.map_or(Ok(()), Err))
     }
 
     /// **Every window's close that waits for its saves, looked at** (S-6b) — once
@@ -70805,19 +70848,6 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // order the worker served them, in the window that turns the application's clocks —
             // the window the storage pass's cards belong to.
             AppEvent::DocumentsAnswered => self.take_document_answers(),
-            // The answer is already in `psreadline::probe()`; what is owed is a
-            // frame that reads it. `refresh_chrome` rebuilds the row's sentence
-            // from scratch — `SettingsRow::description` asks `row_state` afresh
-            // every time — so there is nothing to apply, only something to draw.
-            // On every window, because the row is a fact about this machine and
-            // any of them may be showing it.
-            AppEvent::PsReadLineProbed => self.for_each_window(|runtime| {
-                if runtime.refresh_chrome() {
-                    runtime.present_chrome_change()
-                } else {
-                    Ok(())
-                }
-            }),
             // The answer is already in the legacy-profile observation or
             // removal report. What is owed is a frame that reveals or hides the
             // conditional Settings cleanup verb, plus any removal result.
@@ -70827,15 +70857,28 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // here. A removal that found nothing to remove changed nothing,
                 // so it says nothing.
                 let mut removal = shell_integration::take_removal();
-                // Each answer is addressed to the window whose click asked for it; an answer
-                // for a window that has since closed is delivered nowhere.
+                // Each answer below is addressed to the window whose click asked for it; an answer
+                // for a window that has since closed is delivered nowhere. The earlier Folio's
+                // PSReadLine copy's removal is said as the report is
+                // (`psreadline::LegacyRemoval::window_text`): a copy gone since the row was drawn
+                // says nothing.
+                let legacy = psreadline::take_legacy_removals();
                 let installs = shell_integration::take_profile_installs();
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()?;
                     }
-                    if let Some((refused, text)) =
-                        removal.take().and_then(|report| report.window_text())
+                    let window = runtime.window_id();
+                    for (refused, text) in removal
+                        .take()
+                        .and_then(|report| report.window_text())
+                        .into_iter()
+                        .chain(
+                            legacy
+                                .iter()
+                                .filter(|(asked_by, _)| *asked_by == window)
+                                .filter_map(|(_, answer)| answer.window_text()),
+                        )
                     {
                         runtime.toast(
                             if refused {
@@ -78706,7 +78749,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 29] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 30] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -78755,6 +78798,9 @@ mod platform_gate_tests {
         "psreadline.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
+        // Windows-only test fixtures: real Windows PowerShell 5.1 panes running Folio's
+        // PSReadLine through a real ConPTY, beside the composition's every-platform tests.
+        "shell_integration_psreadline_tests.rs",
         // Native invalid-name, Windows spelling and direct CRT test fixtures only;
         // the pure encoders stay here as paste-paths design section 5 specifies.
         "shell_literal.rs",
@@ -81132,7 +81178,6 @@ mod edit_menu_clipboard_tests {
             "self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)",
             "self.window.dirty_gate.is_open()",
             "self.window.first_run.is_open()",
-            "self.window.psreadline_invite.is_open()",
             "self.paste_card_seat().is_some()",
             "self.update_card_is_up()",
             "self.settings_layout().is_some()",

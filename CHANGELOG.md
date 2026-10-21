@@ -22,6 +22,12 @@ All notable changes to Folio are recorded here. The format follows
 - A keybindings.json that says it was written on Windows or Linux no longer reads `Cmd+` there, and one written on macOS no longer reads `Win+`; such a line now reads as the other system's key on that system, and a file with no recorded system still reads both. <!-- zh: pending T-STORE-MERGE-KEYBINDINGS -->
 - Quitting first saves any change to settings, shortcuts, profiles or pins that is not on disk yet. If one cannot be saved or kept in the recovered folder, Folio stays open and a card names the file, with a button to leave without that change; quitting again tries again. <!-- zh: pending T-QUIT-DOCUMENTS -->
 - If Folio stops after a failure with such a change unsaved, the change is kept in the recovered folder; if it cannot be kept anywhere, the system's own message says so. <!-- zh: pending T-QUIT-DOCUMENTS -->
+- In a Windows PowerShell pane, Folio now uses its own copy of Microsoft's PSReadLine 2.4.5, so a long command you are still typing stays in one piece when the pane is resized. It is kept in Folio's own folder and used by Folio's panes only: nothing is installed for the rest of your account, nothing is asked, and Windows Terminal and other windows keep the PSReadLine they have. <!-- zh: pending T-INTEGRATION-INJECT-2-BUILD -->
+- If an earlier Folio installed its PSReadLine into Documents, Folio no longer uses or updates it; Settings ▸ Terminal offers to remove it from Documents while it is there, and uninstalling Folio removes it. <!-- zh: pending T-INTEGRATION-INJECT-2-BUILD -->
+
+### Removed
+
+- The PSReadLine row on Settings ▸ Terminal, and the card that offered to install PSReadLine when a Windows PowerShell tab opened: there is nothing to install any more. <!-- zh: pending T-INTEGRATION-INJECT-2-BUILD -->
 
 ### Fixed
 
@@ -132,6 +138,7 @@ All notable changes to Folio are recorded here. The format follows
 - Closing a pane, a floating window or a glance card that is playing a video no longer freezes the window while the video's decoder stops, which could take up to two seconds per video when the decoder was stuck; quitting waits for such a decoder once, for at most two seconds. <!-- zh: pending T-DROP-DOORS -->
 - When another program holds the clipboard, copying and pasting no longer freeze Folio's window for a moment: the clipboard is asked in the background, and a paste arrives a moment later, with whatever you typed meanwhile after it (two pastes pressed quickly both arrive, in order). If the clipboard stays busy, the paste is dropped, what you typed goes through, and a notice says the clipboard was busy. <!-- zh: pending T-CLIPBOARD-LANE -->
 - Choosing Save on the quit card no longer freezes the windows while the files are written: the saves are handed to the background writer, and Folio quits once they are all in their files. If one could not be saved, the quit stops and the window says which file; if a save is still on its way after three seconds, the quit stops and says so. When Folio stops after an error, unsaved edits are saved the same way, and only an edit that could not be saved is kept in the recovered folder. <!-- zh: pending T-QUIT-AND-STOP-SAVES -->
+- Shutting down, restarting or signing out of Windows no longer loses unsaved edits in a preview: Folio saves them before it saves your layout, and anything that could not be written in time is kept in the recovered folder, which Folio offers at the next start. <!-- zh: pending T-ENDSESSION-SAVES -->
 
 ### Changed
 

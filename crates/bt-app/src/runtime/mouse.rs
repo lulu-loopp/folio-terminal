@@ -1724,15 +1724,6 @@ impl<B: Backend> Runtime<'_, B> {
             self.update_chrome_hover_target(None)?;
             return Ok(());
         }
-        if let Some(layout) = self.psreadline_invite_layout() {
-            let over = restore::invite_hit(&layout, position.x, position.y);
-            if self.window.psreadline_invite.set_hover(Some(over)) && self.refresh_overlay() {
-                self.present_chrome_change()?;
-            }
-            self.note_tooltip(None)?;
-            self.update_chrome_hover_target(None)?;
-            return Ok(());
-        }
         // The multi-line paste card, in the order it is drawn: it takes the pointer outright,
         // scrim included (0.4.4 ticket 02).
         if let Some(layout) = self.paste_card_layout() {
@@ -4277,19 +4268,6 @@ impl<B: Backend> Runtime<'_, B> {
             if state == ElementState::Pressed && button == MouseButton::Left {
                 let target = first_run::hit(&layout, position.x, position.y);
                 self.answer_first_run(target)?;
-            }
-            return Ok(());
-        }
-        // The invitation, in the order it is drawn. Every press is swallowed,
-        // its own scrim included, and a press on a disabled Install lands on
-        // `Panel` and answers nothing.
-        if let (Some(layout), Some(position)) = (
-            self.psreadline_invite_layout(),
-            self.window.pointer_position,
-        ) {
-            if state == ElementState::Pressed && button == MouseButton::Left {
-                let target = restore::invite_hit(&layout, position.x, position.y);
-                self.answer_psreadline_invite(target)?;
             }
             return Ok(());
         }

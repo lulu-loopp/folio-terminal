@@ -75,7 +75,7 @@ fn a_shell_the_system_ends_after_the_freeze_keeps_its_pane_in_the_document() {
     assert_eq!(the_system_asks(), Some(1));
     record_as_the_app_does(&mut store, shells_document(&home.0, 1));
     for end in session_end::take() {
-        session_end::settle(end, &mut store, false);
+        session_end::settle(end, &mut store, false, Instant::now());
     }
 
     let (plan, shapes) = launch_plan_on_disk(&home.session());

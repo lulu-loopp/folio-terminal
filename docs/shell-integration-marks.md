@@ -30,6 +30,10 @@ Each root/path array contains strings. `profile_refusals` contains objects with
 and replaced by the next operation. The other fields are historical locations,
 including locations already cleaned. They are discovery candidates, not proof
 that a mark still exists. Only exact file contents establish that fact.
+`psreadline_module_roots` is read and never written since 2026-10-17: Folio no
+longer installs PSReadLine into Documents, and the roots an earlier Folio
+recorded there are where the Terminal page's removal row and the uninstall look
+for its copy.
 Discovery alone never adds a profile to `powershell_profiles`: migration/removal
 records an exact owned mark before editing it; inaccessible candidates are kept
 in `profile_refusals` for retry. A hand-written installation is left untouched

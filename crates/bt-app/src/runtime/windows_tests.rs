@@ -1708,6 +1708,367 @@ fn the_stops_one_bounded_wait_serves_the_saves_queued_on_the_shared_lane() {
     );
 }
 
+// ── The system's end of the session keeps the edits (T-ENDSESSION-SAVES) ──────────────────────
+//
+// The `Quitting` harness's two windows, one dirty preview each, and the system's question asked
+// through the window procedure's own seam (`test_support::the_system_asks`); the turn it wakes is
+// `FolioApp::settle_session_end`, here with this test's own `recovered` folder. No clock: a wait
+// that must run out has a budget of zero, and one that must not has the suite's patience.
+
+impl Quitting {
+    /// **The session store and the preview saves on one lane this test serves**, as the
+    /// product's are on one storage worker: every job is taken by the test, in the order the
+    /// worker would serve it, and none is answered — the document's wait has `budget` to run out
+    /// in. The store's sentinel stands.
+    fn on_one_scripted_lane(&mut self, budget: std::time::Duration) {
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        let dir = self.dir.clone();
+        let app = self.app();
+        app.session_store = crate::persist::SessionStore::at_on(
+            dir.join("session.json"),
+            dir.join("session.lock"),
+            lane.clone(),
+        )
+        .armed();
+        app.session_store.set_save_budget(budget);
+        app.preview_saves = crate::preview::PreviewSaves::on(lane);
+        self.jobs = jobs;
+    }
+
+    /// **The session store and the preview saves on one working storage worker**, as the
+    /// product's are: it writes the files and answers, and the document's wait has the suite's
+    /// patience. The store's sentinel stands.
+    fn on_one_working_lane(&mut self) {
+        let dir = self.dir.clone();
+        let app = self.app();
+        let mut store = crate::persist::SessionStore::at_waking(
+            dir.join("session.json"),
+            dir.join("session.lock"),
+            || {},
+        )
+        .armed();
+        store.set_save_budget(crate::lane::PATIENCE);
+        app.preview_saves = crate::preview::PreviewSaves::on(store.lane());
+        app.session_store = store;
+    }
+
+    /// The test's own `recovered` folder.
+    fn recovery(&self) -> std::path::PathBuf {
+        self.dir.join(crate::preview::RECOVERED_FOLDER)
+    }
+
+    /// **The turn the system's news wakes**, keeping in the test's folder.
+    fn settle_the_systems_end(&mut self) -> Vec<crate::preview::Kept> {
+        let recovery = self.recovery();
+        self.application
+            .folio
+            .settle_session_end_keeping_in(&recovery)
+    }
+
+    /// What the test's worker was handed, in the order it would serve it.
+    fn handed(&self) -> Vec<&'static str> {
+        std::iter::from_fn(|| self.jobs.next())
+            .map(|job| match job {
+                crate::persist::ScriptedJob::Document(job) => {
+                    if job.which.ends_with(crate::persist::SETTINGS_FILE_NAME) {
+                        "settings"
+                    } else {
+                        "save"
+                    }
+                }
+                crate::persist::ScriptedJob::Session => "document",
+                _ => "other",
+            })
+            .collect()
+    }
+
+    /// Whether the run's sentinel stands.
+    fn sentinel_stands(&self) -> bool {
+        self.dir.join("session.lock").exists()
+    }
+
+    /// The names of the copies in the test's `recovered` folder.
+    fn copy_names(&self) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(self.recovery()) else {
+            return Vec::new();
+        };
+        entries
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+}
+
+/// RED (T-ENDSESSION-SAVES) — **the system's end hands every window's save to the storage worker
+/// ahead of the session document**, and tears nothing down.
+///
+/// On one lane, as the product's: the worker serves its queue in order, so the document's
+/// landing is what says the saves ahead of it were served — its one wait is the drain.
+///
+/// MUTATION: in `FolioApp::settle_session_end_keeping_in`, hand the saves over after
+/// `session_end::settle` (move the `hand_over_for_the_systems_end` call below it) — the worker is
+/// handed `document, save, save`.
+#[test]
+fn the_systems_end_hands_every_save_to_the_worker_ahead_of_the_document() {
+    let _news = crate::test_support::EndSessionHome::new("end-order");
+    let mut quitting = Quitting::open("end-order", ["one.md", "two.md"]);
+    quitting.on_one_scripted_lane(std::time::Duration::ZERO);
+    assert_eq!(crate::test_support::the_system_asks(), Some(1));
+    let _ = quitting.settle_the_systems_end();
+    assert_eq!(
+        quitting.handed(),
+        ["save", "save", "document"],
+        "both saves, then the document behind them"
+    );
+    assert_eq!(
+        quitting.application.folio.windows.len(),
+        2,
+        "nothing is torn down"
+    );
+    assert_eq!(
+        (quitting.file(1), quitting.file(2)),
+        (READ.to_owned(), READ.to_owned()),
+        "and the window thread wrote nothing over a file"
+    );
+}
+
+/// RED (T-ENDSESSION-SAVES) — **the document's one wait serves the saves queued ahead of it:
+/// both files carry their edits, the document lands, the sentinel goes, and nothing is copied.**
+///
+/// The shipped defect: in 0.4.6 and 0.4.7 this road wrote only the document, and the system
+/// ended the process over both edits.
+///
+/// MUTATION: in `Runtime::hand_over_for_the_systems_end`, hand nothing over (answer
+/// `preview::HandedOver::default()`) — both files are as they were read, and both edits copied.
+#[test]
+fn the_systems_end_saves_every_edit_before_the_document_lands() {
+    let _news = crate::test_support::EndSessionHome::new("end-saved");
+    let mut quitting = Quitting::open("end-saved", ["one.md", "two.md"]);
+    quitting.on_one_working_lane();
+    assert_eq!(crate::test_support::the_system_asks(), Some(1));
+    let kept = quitting.settle_the_systems_end();
+    assert_eq!(
+        (quitting.file(1), quitting.file(2)),
+        (format!("{READ}{TYPED}"), format!("{READ}{TYPED}")),
+        "both edits are in their files"
+    );
+    assert!(
+        kept.iter()
+            .all(|one| matches!(one, crate::preview::Kept::Saved { .. }))
+            && kept.len() == 2,
+        "both said saved: {kept:?}"
+    );
+    assert_eq!(quitting.copies(), Vec::<String>::new(), "nothing is copied");
+    assert!(
+        !quitting.sentinel_stands(),
+        "the document landed: the run claims its clean exit"
+    );
+    assert!(!quitting.dirty(1) && !quitting.dirty(2));
+    assert_eq!(quitting.application.folio.windows.len(), 2);
+}
+
+/// RED (T-ENDSESSION-SAVES) — **a save that had not landed when the document's wait ran out is
+/// copied into `recovered`, never over its file, and the sentinel stands.**
+///
+/// The worker is handed both saves and the document and serves none before the bound (here a
+/// budget of zero): the files may yet take them; the copies keep both edits whatever they do.
+///
+/// MUTATION: in `FolioApp::keep_what_the_systems_end_did_not_save`, drop the
+/// `Runtime::keep_what_the_systems_end_did_not_save` call — no copy is made.
+#[test]
+fn the_systems_end_copies_what_had_not_landed_at_the_bound() {
+    let _news = crate::test_support::EndSessionHome::new("end-bound");
+    let mut quitting = Quitting::open("end-bound", ["one.md", "two.md"]);
+    quitting.on_one_scripted_lane(std::time::Duration::ZERO);
+    assert_eq!(crate::test_support::the_system_asks(), Some(1));
+    let kept = quitting.settle_the_systems_end();
+    assert_eq!(
+        quitting.copies(),
+        [format!("{READ}{TYPED}"), format!("{READ}{TYPED}")],
+        "both edits are kept"
+    );
+    assert!(
+        kept.iter()
+            .all(|one| matches!(one, crate::preview::Kept::Copied { .. }))
+            && kept.len() == 2,
+        "both said copied: {kept:?}"
+    );
+    assert_eq!(
+        (quitting.file(1), quitting.file(2)),
+        (READ.to_owned(), READ.to_owned()),
+        "never over the files"
+    );
+    assert!(
+        quitting.sentinel_stands(),
+        "the document did not land: the sentinel stands"
+    );
+}
+
+/// RED (T-ENDSESSION-SAVES) — **a session taken back finds every window as it was: the buffer
+/// whose save landed clean, the one whose save met another writer's bytes still dirty, its edit
+/// also copied.**
+///
+/// The second file is changed under its buffer before the system asks, so its save meets
+/// another writer's bytes; the first lands. Then `WM_ENDSESSION(FALSE)`.
+///
+/// MUTATION: in `FolioApp::hand_over_for_the_systems_end`, hand over the stop's way
+/// (`Runtime::keep_unsaved_edits`, which takes the pools out of the tabs) — the tabs hold no
+/// pool to keep from: nothing is said saved or copied ("the first saved, the second copied"
+/// goes red), and the edits are no longer in their windows.
+#[test]
+fn a_session_taken_back_finds_every_window_and_every_edit_as_it_was() {
+    let _news = crate::test_support::EndSessionHome::new("end-back");
+    let mut quitting = Quitting::open("end-back", ["one.md", "two.md"]);
+    quitting.on_one_working_lane();
+    let theirs = "another writer\n";
+    std::fs::write(&quitting.paths[1], theirs).expect("another writer writes the second file");
+    assert_eq!(crate::test_support::the_system_asks(), Some(1));
+    let kept = quitting.settle_the_systems_end();
+    assert!(
+        matches!(
+            kept.as_slice(),
+            [
+                crate::preview::Kept::Saved { .. },
+                crate::preview::Kept::Copied { .. }
+            ]
+        ),
+        "the first saved, the second copied: {kept:?}"
+    );
+    assert_eq!(
+        bt_platform::session_end::answer(
+            bt_platform::session_end::WM_ENDSESSION,
+            0,
+            &crate::session_end::hear
+        ),
+        Some(0),
+        "the shutdown is taken back"
+    );
+    assert_eq!(quitting.settle_the_systems_end(), Vec::new());
+    assert_eq!(quitting.application.folio.windows.len(), 2, "both windows");
+    assert!(
+        !quitting.dirty(1),
+        "the save that landed left its buffer clean"
+    );
+    assert!(
+        quitting.dirty(2),
+        "the one that did not left its buffer holding the edit"
+    );
+    assert_eq!(quitting.file(1), format!("{READ}{TYPED}"));
+    assert_eq!(quitting.file(2), theirs, "their bytes stay in the second");
+    assert_eq!(quitting.copies(), [format!("{READ}{TYPED}")]);
+    assert!(quitting.sentinel_stands(), "the run is running again");
+    assert!(!crate::session_end::holds_the_document());
+}
+
+/// RED (T-ENDSESSION-SAVES) — **an owed hand-editable document goes to the worker ahead of
+/// everything, and is copied into `recovered` when it had not landed at the bound.**
+///
+/// A change of the terminal face is on its way to `settings.json` when the system asks; nothing
+/// answers it before the document's wait runs out. The copy is said in `diagnostics.log` only:
+/// the road has no box to raise (`IntoTheLog`).
+///
+/// MUTATION: in `FolioApp::keep_what_the_systems_end_did_not_save`, drop the
+/// `keep_owed_documents_over` call — no `settings.json` copy is made.
+#[test]
+fn the_systems_end_keeps_an_owed_document_beside_the_edits() {
+    let _news = crate::test_support::EndSessionHome::new("end-documents");
+    let mut quitting = Quitting::open("end-documents", ["one.md", "two.md"]);
+    quitting.on_one_scripted_lane(std::time::Duration::ZERO);
+    let dir = quitting.dir.clone();
+    let lane = quitting.app().session_store.lane();
+    let app = quitting.app();
+    app.settings_store =
+        crate::persist::SettingsStore::at_on(dir.join(crate::persist::SETTINGS_FILE_NAME), lane);
+    assert!(app.settings_store.store(bt_persist::SettingsV1 {
+        terminal_font_family: "关机 Shutdown Mono".to_owned(),
+        ..bt_persist::SettingsV1::default()
+    }));
+    assert_eq!(crate::test_support::the_system_asks(), Some(1));
+    let _ = quitting.settle_the_systems_end();
+    assert_eq!(
+        quitting.handed(),
+        ["settings", "save", "save", "document"],
+        "the owed document first, then the saves, then the session"
+    );
+    let names = quitting.copy_names();
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.ends_with(crate::persist::SETTINGS_FILE_NAME))
+            .count(),
+        1,
+        "the owed change is kept: {names:?}"
+    );
+    assert_eq!(names.len(), 3, "beside the two edits: {names:?}");
+}
+
+/// RED (T-ENDSESSION-SAVES, review N3) — **a quit in its documents phase keeps the documents
+/// its own**: the system's end neither hands them over again (`quit_begin` would reset the quit's
+/// own recovery) nor copies them; the quit's recovery phase does.
+///
+/// MUTATION: in `FolioApp::settle_session_end_keeping_in`, take `documents` as true whatever the
+/// quit holds — a `settings.json` copy is made beside the edits.
+#[test]
+fn the_systems_end_leaves_a_quits_documents_to_the_quit() {
+    let _news = crate::test_support::EndSessionHome::new("end-quit-documents");
+    let mut quitting = Quitting::open("end-quit-documents", ["one.md", "two.md"]);
+    quitting.on_one_scripted_lane(std::time::Duration::ZERO);
+    let dir = quitting.dir.clone();
+    let lane = quitting.app().session_store.lane();
+    let app = quitting.app();
+    app.settings_store =
+        crate::persist::SettingsStore::at_on(dir.join(crate::persist::SETTINGS_FILE_NAME), lane);
+    assert!(app.settings_store.store(bt_persist::SettingsV1 {
+        terminal_font_family: "退出 Quitting Mono".to_owned(),
+        ..bt_persist::SettingsV1::default()
+    }));
+    let quit = crate::quit::Quit::begin(Vec::new());
+    assert!(
+        quit.holds_the_storage_worker(),
+        "the quit is in its documents phase"
+    );
+    app.quit = Some(quit);
+    assert_eq!(crate::test_support::the_system_asks(), Some(1));
+    let _ = quitting.settle_the_systems_end();
+    assert_eq!(
+        quitting.handed(),
+        ["settings", "save", "save", "document"],
+        "the quit's write stays the one on the worker: nothing sends it again"
+    );
+    let names = quitting.copy_names();
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.ends_with(crate::persist::SETTINGS_FILE_NAME)),
+        "the quit's document is left to the quit: {names:?}"
+    );
+    assert_eq!(names.len(), 2, "the two edits are kept: {names:?}");
+}
+
+/// RED (T-ENDSESSION-SAVES) — **the question is settled once per span**: the system sends it to
+/// every top-level window, and the second window's question hands nothing over again, writes no
+/// second document and copies nothing twice.
+///
+/// MUTATION: drop the once-per-span guard (in `session_end::owes_the_write`, the
+/// `!SETTLED.with(Cell::get)` term, and `settle`'s `AlreadySaved` arm) — the worker is handed a
+/// second document (`save, save, document, document`), and each edit is copied twice.
+#[test]
+fn the_systems_question_to_every_window_is_settled_once() {
+    let _news = crate::test_support::EndSessionHome::new("end-once");
+    let mut quitting = Quitting::open("end-once", ["one.md", "two.md"]);
+    quitting.on_one_scripted_lane(std::time::Duration::ZERO);
+    assert_eq!(crate::test_support::the_system_asks(), Some(1));
+    assert_eq!(crate::test_support::the_system_asks(), Some(1));
+    let _ = quitting.settle_the_systems_end();
+    assert_eq!(quitting.handed(), ["save", "save", "document"]);
+    assert_eq!(quitting.copies().len(), 2, "each edit copied once");
+}
+
 // ── The window's doors to the system, driven (T-NATIVE-HANDLE-BEHIND-THE-SEAM) ──────────────────
 //
 // One test per group of the doors that replaced the window's platform handle: the window's place

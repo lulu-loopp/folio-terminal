@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Guest side of the load row (clean-vm.md 4.6): load every processor of the guest at Normal
+    Guest side of the load row (clean-vm.md 4.7): load every processor of the guest at Normal
     priority for a while, the way three cargo builds load the owner's machine.
 
 .DESCRIPTION

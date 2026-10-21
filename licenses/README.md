@@ -60,7 +60,7 @@ exist upstream, so `bundled-assets.md` quotes what does.
 | `../vendor/conpty/LICENSE-MICROSOFT-TERMINAL` | The two ConPTY `.nupkg` files and the `conpty.dll` / `OpenConsole.exe` extracted from them |
 | `../vendor/conpty/portable-pty/LICENSE.md` | The patched `portable-pty` 0.9.0 |
 | `../assets/fonts/NotoColorEmoji-LICENSE` | The embedded colour emoji font (OFL-1.1) |
-| `../assets/psreadline/2.4.6/License.txt` | PSReadLine 2.4.6, which is installed with this file beside it |
+| `../vendor/psreadline/LICENSE-PSREADLINE.txt` | PSReadLine 2.4.5 — the package's own `License.txt`, byte for byte (`scripts/ci/check-psreadline-artefact.ps1` holds the two equal); the module is written with it beside it |
 
 Every one of them is also reproduced in `THIRD-PARTY-NOTICES.md`, so a release
 archive carrying only that one file is still complete.

@@ -16,12 +16,14 @@
 #     each group carries its reason beside the rows.
 # A file-keyed key's first segment ends in .rs, which is how the two are told
 # apart. Order is not part of the comparison; the rows are a set.
-# The installed-module seam: both are the seam's own verb; its production arm reads
-# through file_reads::read(Lane::Settings), so the bytes are counted.
-is_folios_copy_at: installed_disk::read
-# The install door's own occupancy check (audit 3, E-1): the assembly is read at
-# the moment of the write to establish who wrote the module standing there.
+# The earlier Folio's PSReadLine copy in Documents (T-INTEGRATION-INJECT-2-BUILD): the
+# installed-module seam's own verb, whose production arm reads through
+# file_reads::read(Lane::Settings), so the bytes are counted.
+file_matches: installed_disk::read
+# Who wrote the copy standing there (audit 3, E-1): the assembly is read to decide.
 unclaimed_or_foreign: installed_disk::read
+# The roots the marks record names for that copy, read and never written.
+legacy_roots: crate::shell_integration::profile_marks::Marks::read
 # `read` has six free-function declarations (four test-only); the installed
 # PSReadLine reader therefore also needs its file key to identify one item.
 psreadline.rs: read: .read
@@ -68,7 +70,6 @@ Runtime::pop_out_preview: .open
 Runtime::promote_file_peek: .open
 DirtyGate::raise: .open
 Runtime::raise_first_run_if_due: .open
-Runtime::raise_psreadline_invite_if_due: .open
 # A silent birth death's in-place fallback (T-SHELL-BIRTH-DEATH): LeafWake::output, the pane's
 # output-wake closure handed to the last-resort shell's birth worker; no bytes are read.
 Runtime::reap_exited_tabs: .output
@@ -102,12 +103,9 @@ ProfileFiles::retire: Decoded::read
 # `record` has a second test-only free-function declaration in install_channel;
 # this production owner remains file-keyed so the identity is unique.
 attention_ownership.rs: record: Marks::read
-# `install_recorded` is a duplicate free-function name (the PSReadLine and
-# profile-runtime modules each declare one), so these rows cannot name one item
-# without the file key; `bt_source::Index::one` refuses the ambiguous query.
 operate_with: Marks::read
-shell_integration/profile_runtime.rs: install_recorded: Marks::read
-shell_integration/profile_runtime.rs: install_recorded: ProfileFiles::read
+install_recorded: Marks::read
+install_recorded: ProfileFiles::read
 operate_with: ProfileFiles::read
 profile_answers: ProfileFiles::read
 profile_carries_an_owned_line: Decoded::read
@@ -125,8 +123,6 @@ TraceFile::open: .open
 Claim::take: .open
 VideoSeat::open: Engine::open
 VideoSeats::open: VideoSeat::open
-psreadline.rs: install_recorded: Marks::read
-recorded_install: Marks::read
 execute_with_claim: Marks::read
 # The install channel (U-1): the marker and scoop's receipt on Lane::Install, each
 # capped; the derivation's one call of the folder read.

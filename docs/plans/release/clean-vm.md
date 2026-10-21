@@ -1031,7 +1031,20 @@ the elevated install's output and the shots. Report the two client versions on t
 line: `PASS on <current> / PASS on <image's>`, or which cell went red and its exact
 `diagnostics.log` line.
 
-### 4.6 Load row: the window thread under a machine-wide CPU load (T-WINDOW-THREAD-UNDER-LOAD) <!-- zh: pending T-WINDOW-THREAD-UNDER-LOAD -->
+### 4.6 Windows PowerShell under a lockdown (every release) <!-- zh: pending T-INTEGRATION-INJECT-2-BUILD -->
+
+The rule is RULES §38: a Windows PowerShell 5.1 pane is given Folio's PSReadLine only when the
+edition answered `FullLanguage`; on a machine whose 5.1 runs constrained the pane is exactly the
+Shell-integration-off pane. A lockdown cannot be entered from a test on the development machine
+(`__PSLockdownPolicy` is read from the machine's block only, and writing it needs an
+administrator), so these two rows are where it is proved. **`folio-win11`, an elevated shell in
+the guest, the `clean` snapshot first; run by the coordinator at release time.**
+
+| Row | Make the lockdown | Check |
+| --- | --- | --- |
+| **V0** — the debug lockdown (cheap) | `[Environment]::SetEnvironmentVariable('__PSLockdownPolicy','4','Machine')`, sign out and in; `powershell -NoProfile -Command $ExecutionContext.SessionState.LanguageMode` says `ConstrainedLanguage` | Folio started, the first Windows PowerShell pane of the launch and a second one: `$env:PSModulePath` holds no `psmodules` entry; `(Get-Module PSReadLine).ModuleBase` is the in-box 2.0.0; colouring and `Ctrl+R` history search work (the in-box editor); `diagnostics.log` has the one "runs constrained" line and, for the first pane, the "waited N ms" line. Revert: delete the variable, or the snapshot. |
+| **V1** — a real WDAC lockdown | `$x="$env:TEMP\clm.xml"; Copy-Item "$env:windir\schemas\CodeIntegrity\ExamplePolicies\DefaultWindows_Enforced.xml" $x`; admit Folio (unsigned): `New-CIPolicy -Level Hash -UserPEs -ScanPath '<Folio install folder>' -FilePath "$env:TEMP\folio.xml"`, `Merge-CIPolicy -PolicyPaths $x,"$env:TEMP\folio.xml" -OutputFilePath $x`; `ConvertFrom-CIPolicy -XmlFilePath $x -BinaryFilePath "$env:TEMP\clm.cip"`; `CiTool.exe --update-policy "$env:TEMP\clm.cip"`; `CiTool.exe --list-policies` shows it enforced; a new 5.1 says `ConstrainedLanguage`. Check `Get-Command New-CIPolicy` first (the ConfigCI module). | The rows of V0. A second pass with `AllowMicrosoft.xml` (audit mode deleted: `Set-RuleOption -FilePath $x -Option 3 -Delete`) records the same. Remove: `CiTool.exe --remove-policy <PolicyID>`, or the snapshot. |
+### 4.7 Load row: the window thread under a machine-wide CPU load (T-WINDOW-THREAD-UNDER-LOAD) <!-- zh: pending T-WINDOW-THREAD-UNDER-LOAD -->
 
 The owner's report of 2026-10-18 on a machine with nothing else running. `folio-win11`,
 `clean` snapshot, a candidate's `folio.exe`, `conpty.dll` and `OpenConsole.exe` (a release
@@ -1086,7 +1099,7 @@ Run it twice: `-Tag before` on the build at the instrumentation commit (the name
 **What the row measures, and what it does not.**
 - **CPU starvation.** Under the hog, keys echo about 4× slower at the median (3.9 → 15.9 ms; 5.5 → 21.8 ms on before3) and recover after. The present cadence settles at about one per vblank. Shell output barely moves. No wake is ever late (`delay max` 0 in every phase on the fix). That is the per-turn cost residual, measured and not fixed in T-WINDOW-THREAD-UNDER-LOAD.
 - **The stale turns** are the single-extra-turn class: clocks that came due inside the turn that booked them, at 100-odd turns a second. They are not a spin. One shape is recorded for follow-up: `TerminalThumbs` booking an instant about 0.5 s already past, once or twice a phase.
-- **The owner's spin is not reproduced here.** That needs a background tab whose pane keeps redrawing a boxed frame (an armed foreground-program candidate), and this row's boxed tab is printed once. That shape is §4.6b, a 0.4.9 row (row 26), with a trace line that the cadence armed.
+- **The owner's spin is not reproduced here.** That needs a background tab whose pane keeps redrawing a boxed frame (an armed foreground-program candidate), and this row's boxed tab is printed once. That shape is §4.7b, a 0.4.9 row (row 26), with a trace line that the cadence armed.
 
 **The ten runs that measured nothing, and why** (each fixed in the harness this row lands with):
 

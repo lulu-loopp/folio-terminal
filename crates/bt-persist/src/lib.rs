@@ -100,9 +100,8 @@ pub use settings::{
     DEFAULT_QUAKE_TOP_GAP, DEFAULT_QUAKE_WIDTH, DEFAULT_SCROLLBACK_LINES,
     DEFAULT_TERMINAL_FONT_FAMILY, DEFAULT_TERMINAL_FONT_SIZE, FirstRunCardV1, LanguageV1,
     LaunchOpensV1, MAXIMUM_QUAKE_TOP_GAP, MINIMUM_BACKGROUND_OPACITY, MINIMUM_QUAKE_HEIGHT,
-    MINIMUM_QUAKE_WIDTH, MinimumContrastV1, PsReadLineInviteV1, QuakeRestoreV1,
-    SETTINGS_SCHEMA_VERSION, SearchEngineV1, SettingsV1, SplitDirectionV1, ThemeModeV1,
-    WebColorSchemeV1, WebPagesUsedV1,
+    MINIMUM_QUAKE_WIDTH, MinimumContrastV1, QuakeRestoreV1, SETTINGS_SCHEMA_VERSION,
+    SearchEngineV1, SettingsV1, SplitDirectionV1, ThemeModeV1, WebColorSchemeV1, WebPagesUsedV1,
 };
 pub use update::{UPDATE_CHECK_SCHEMA_VERSION, UpdateCheckV1};
 pub use write_tracker::{WriteAlertAction, WriteFailureTracker};

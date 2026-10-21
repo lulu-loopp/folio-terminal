@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    The load row of clean-vm.md 4.6 on the clean Windows guest: a candidate Folio, a person
+    The load row of clean-vm.md 4.7 on the clean Windows guest: a candidate Folio, a person
     typing and scrolling in a pane that prints, and a machine-wide CPU load at Normal priority
     in the middle — the field report of 2026-10-18 (T-WINDOW-THREAD-UNDER-LOAD), on a machine
     where nothing else is running.

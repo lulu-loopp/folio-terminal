@@ -48,14 +48,14 @@
 //!
 //! 1. **[`current`] itself** — an atomic now, not a `OnceLock`, so [`install`]
 //!    can be called again. It is read from the layout code on the UI thread and
-//!    from the PSReadLine probe's thread, hence `Relaxed` loads of a plain word
-//!    rather than a lock.
+//!    from workers' threads, hence `Relaxed` loads of a plain word rather than a
+//!    lock.
 //! 2. **[`lang_revision`]** — the number that did not exist. It feeds
 //!    `bt_doc::LayoutKey::lang_rev`, which is what makes the language a member
 //!    of the layout's identity rather than an ambient fact about it.
-//! 3. **`crate::psreadline::row_description`'s three `OnceLock<String>`** — the
-//!    only process-lifetime string cache in this app that is built out of this
-//!    table. It is keyed by [`Lang`] now, which is why it has room for six.
+//! 3. A process-lifetime string cache built out of this table must be keyed by
+//!    [`Lang`] (the retired PSReadLine row's was the first; [`intern`] is the one
+//!    left).
 //!
 //! Everything else was audited and is language-neutral by construction:
 //! `profiles::title`'s cache holds names this file deliberately does not carry,
@@ -98,9 +98,8 @@ use bt_platform::HostPlatform;
 /// a typo in it.
 ///
 /// `repr(u8)` because the live answer is an atomic word — see [`Current`]. The
-/// discriminants are also the indices of the per-language cache slots
-/// `crate::psreadline::row_description` keeps, which is what [`Self::COUNT`] and
-/// [`Self::from_index`] are for: a third variant then fails to compile in the
+/// discriminants are also the indices of any per-language cache slots, which is
+/// what [`Self::COUNT`] and [`Self::from_index`] are for: a third variant then fails to compile in the
 /// one place that would otherwise have silently kept two.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
@@ -590,9 +589,6 @@ text_entries! {
     CjkKorean,
     CjkUndeclared,
     RowFontSize,
-    /// The Terminal page's first row, and therefore the row that puts that page
-    /// in the rail at all.
-    RowPsReadLine,
 
     DescTheme,
     DescCursor,
@@ -692,30 +688,6 @@ text_entries! {
     // `no_string_in_this_table_asks_for_a_relaunch` is the pin, and it reads this
     // file, so the words it forbids are not spelled out here.
 
-    // ── the PSReadLine row and its invitation ──────────────────────
-    /// The row's line while the out-of-band probe has not answered yet. It is a
-    /// real state and not a placeholder: the probe starts a process, and on a
-    /// cold machine that takes long enough to see.
-    PsReadLineProbing,
-    /// The row's line when the newest probe failed: unknown, never "no module", and asked again
-    /// when the page opens (T-PROBE-NO-CACHED-FAILURE).
-    PsReadLineCheckFailed,
-    /// `settings.json` says Folio installed the module and the directory is not
-    /// there. Something outside Folio removed it, which is a fact the row owes
-    /// the reader rather than a state to silently correct.
-    PsReadLineRowGone,
-    /// A module somebody else wrote is standing in the directory Folio installs
-    /// into, so neither verb on the row is offered (audit 3, E-1).
-    PsReadLineRowNotOurs,
-    /// The invitation's own question. It names the symptom the reader has
-    /// already seen — the input line that does not follow the window — rather
-    /// than the module, because the module is not what they noticed.
-    PsReadLineInviteTitle,
-    PsReadLineInstall,
-    /// The refusal, worded so it is plainly not the last chance: the Terminal
-    /// page keeps the row.
-    PsReadLineNotNow,
-    PsReadLineRemovedToast,
 
     // ── Explorer's context menu (§7.4) ─────────────────────────────────────
     /// **The words in Explorer's own menu**, and the one string in this table
@@ -1147,7 +1119,8 @@ text_entries! {
     DescAlwaysOnTop,
     /// The sentence a greyed Acrylic row carries **instead of** its ordinary
     /// description. The reason lives in the description line rather than in a
-    /// slot of its own, which is `psreadline::row_description`'s ruling: there
+    /// slot of its own, which is the ruling the retired PSReadLine row was the first
+    /// to follow (§7.47): there
     /// is one muted line under a title, and a row that is off has exactly one
     /// thing worth saying there.
     DescAcrylicUnavailable,
@@ -1512,12 +1485,6 @@ text_entries! {
     // family is a conflict in every lane that is adding one.
     RowBlockMaxHeight,
     DescBlockMaxHeight,
-    /// **The PSReadLine row's fourth value** (2026-08-18): an older Folio build's
-    /// module is installed and this one carries a newer patch. It stands where a
-    /// picker draws its ticked item, because that is the one place on the row a
-    /// reader is already looking for its state — and the two items behind it are
-    /// still `On` and `Off`, which is what the ruling asked for.
-    PsReadLineUpdate,
     /// The uncapped end of the `Maximum height` picker: the one option that is a
     /// word rather than a quantity, which is why it is in this table and the
     /// three numbers beside it are not.
@@ -2223,6 +2190,13 @@ text_entries! {
     RowPowerShellProfileLine,
     DescPowerShellProfileLine,
     RemovePowerShellProfileLine,
+    /// The removal row for the PSReadLine copy an earlier Folio wrote into Documents
+    /// (T-INTEGRATION-INJECT-2-BUILD, owner ruling Q4), shown only while there is one.
+    RowLegacyPsReadLine,
+    DescLegacyPsReadLine,
+    RemoveLegacyPsReadLine,
+    /// What its press says when the copy went.
+    LegacyPsReadLineRemovedToast,
     ShellProfileAddedToast,
 
     // ── Claude Code's hooks (attention plan §3.3, Terminal page) ────────────
@@ -2477,10 +2451,11 @@ text_entries! {
     MergeNotApplied,
     /// Between a file's two clauses.
     MergeClauseSeparator,
-    /// **The line the system's shutdown screen shows for a Folio window while the layout is
-    /// being written** (B-ENDSESSION): `ShutdownBlockReasonCreate`'s reason, up for at most the
-    /// session write's budget. A state, so a few words.
-    ShutdownSavingLayout,
+    /// **The line the system's shutdown screen shows for a Folio window while its work is being
+    /// written** (B-ENDSESSION; T-ENDSESSION-SAVES: the preview edits and the owed documents go
+    /// ahead of the layout): `ShutdownBlockReasonCreate`'s reason, up for at most the session
+    /// write's budget and the copies of what did not land. A state, so a few words.
+    ShutdownSavingWork,
 
     // ── the preview pane's lock (§7.7 ⑧, Claude 定 2026-08-23) ─────────────
     //
@@ -3480,7 +3455,6 @@ impl Text {
             Self::CjkUndeclared => pick(lang, "CJK (language undeclared)", "语言未注明"),
             Self::RowTerminalCjkFont => pick(lang, "CJK font", "中文字体"),
             Self::RowFontSize => pick(lang, "Font size", "字号"),
-            Self::RowPsReadLine => pick(lang, "PSReadLine patch", "PSReadLine 补丁"),
 
             Self::DescTheme => pick(
                 lang,
@@ -3733,49 +3707,6 @@ impl Text {
             Self::OptionSplitAuto => pick(lang, "Auto (longer edge)", "自动（沿长边）"),
             Self::OptionSplitRight => pick(lang, "Right", "右侧"),
             Self::OptionSplitDown => pick(lang, "Down", "下方"),
-
-            Self::PsReadLineProbing => pick(
-                lang,
-                "Checking which PSReadLine this machine has",
-                "正在检查本机的 PSReadLine 版本",
-            ),
-            Self::PsReadLineCheckFailed => pick(
-                lang,
-                "Could not check which PSReadLine this machine has. Folio checks again when this page opens.",
-                "无法检查本机的 PSReadLine 版本。再次打开此页时重新检测。",
-            ),
-            Self::PsReadLineRowGone => pick(
-                lang,
-                "The copy Folio installed is no longer on disk",
-                "Folio 安装的副本已不在磁盘上",
-            ),
-            Self::PsReadLineRowNotOurs => pick(
-                lang,
-                "Another PSReadLine is installed here. Folio leaves it alone",
-                "本机的 PSReadLine 并非由 Folio 安装，Folio 不作改动",
-            ),
-            // **Length-sensitive.** The dialog's title is one unwrapped line in
-            // a 400px float, exactly as the dirty gate's is; the first draft
-            // ("…when the window resizes?") ran off the right edge on a real
-            // window. It still names the symptom the reader has already seen
-            // rather than the module, which is the half that matters.
-            Self::PsReadLineInviteTitle => pick(
-                lang,
-                "Fix the input line after a resize?",
-                "修复缩放后输入行错位？",
-            ),
-            Self::PsReadLineInstall => pick(lang, "Install", "安装"),
-            // **One word for deferring, everywhere** (user ruling 2026-09-06).
-            // The Chinese used to be its own phrase; the first-run card asks a
-            // reader to defer too, and two surfaces spending two words on one
-            // idea is the drift this table exists to stop. The English never
-            // moved.
-            Self::PsReadLineNotNow => pick(lang, "Not now", "暂不"),
-            Self::PsReadLineRemovedToast => pick(
-                lang,
-                "Removed. New PowerShell sessions use the module Windows ships",
-                "已移除。新开的 PowerShell 会话将使用 Windows 自带的模块",
-            ),
 
             // ── Explorer's context menu (§7.4) ─────────────────────────────
             //
@@ -4387,9 +4318,6 @@ impl Text {
                 "高度超过此值的渲染块在块内滚动，不再增高。",
             ),
             Self::OptionBlockHeightNone => pick(lang, "No limit", "不限"),
-            // A verb, because that is what pressing `On` here does. 「更新」is
-            // the word every Chinese software updater uses for exactly this.
-            Self::PsReadLineUpdate => pick(lang, "Update", "更新"),
 
             // ── the profile editor (§7.1.6c-6b) ────────────────
             Self::ProfilesEdit => pick(lang, "Edit", "编辑"),
@@ -4966,7 +4894,11 @@ impl Text {
                 "session.json could not be written. Nothing was closed.",
                 "session.json 写入失败。没有关闭任何窗口。",
             ),
-            Self::ShutdownSavingLayout => pick(lang, "Saving your layout", "正在保存窗口布局"),
+            Self::ShutdownSavingWork => pick(
+                lang,
+                "Saving your work",
+                "Saving your work", // zh: pending T-ENDSESSION-SAVES
+            ),
             Self::QuitDocumentsNotSaved => pick(
                 lang,
                 "{files} could not be saved.",
@@ -5387,6 +5319,26 @@ impl Text {
                 lang,
                 "Remove the line from $PROFILE",
                 "从 $PROFILE 移除此行",
+            ),
+            Self::RowLegacyPsReadLine => pick(
+                lang,
+                "Earlier PSReadLine copy",
+                "Earlier PSReadLine copy", // zh: pending T-INTEGRATION-INJECT-2-BUILD
+            ),
+            Self::DescLegacyPsReadLine => pick(
+                lang,
+                "An earlier Folio put it in Documents. Folio no longer uses it.",
+                "An earlier Folio put it in Documents. Folio no longer uses it.", // zh: pending T-INTEGRATION-INJECT-2-BUILD
+            ),
+            Self::RemoveLegacyPsReadLine => pick(
+                lang,
+                "Remove it from Documents",
+                "Remove it from Documents", // zh: pending T-INTEGRATION-INJECT-2-BUILD
+            ),
+            Self::LegacyPsReadLineRemovedToast => pick(
+                lang,
+                "Removed. PowerShell windows opened from now on use their own PSReadLine.",
+                "Removed. PowerShell windows opened from now on use their own PSReadLine.", // zh: pending T-INTEGRATION-INJECT-2-BUILD
             ),
             Self::ShellProfileAddedToast => pick(
                 lang,
@@ -6610,13 +6562,12 @@ impl Text {
         Self::ExplorerFirstPageAddedRestartToast,
         Self::ExplorerFirstPageUnreadable,
         Self::ExplorerFirstPageNoPackage,
-        // — the PSReadLine repair: one edition of one shell, and a module
-        //   written under that account's `Documents`
-        Self::RowPsReadLine,
-        Self::PsReadLineProbing,
-        Self::PsReadLineCheckFailed,
-        Self::PsReadLineRowNotOurs,
-        Self::PsReadLineRemovedToast,
+        // — the copy an earlier Folio wrote into one edition of one shell's `Documents`
+        //   (T-INTEGRATION-INJECT-2-BUILD): its removal row and what its press says
+        Self::RowLegacyPsReadLine,
+        Self::DescLegacyPsReadLine,
+        Self::RemoveLegacyPsReadLine,
+        Self::LegacyPsReadLineRemovedToast,
         // Only the Windows PowerShell discovery worker can emit this refusal.
         Self::ShellProfileProbeFailed,
         // — the Acrylic row's reason, which only a Windows with no backdrop
@@ -6646,10 +6597,24 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-ENDSESSION-SAVES — the line the shutdown screen shows while the edits,
+        // the owed documents and the layout are written.
+        (Self::ShutdownSavingWork, HostPlatform::Windows),
+        (Self::ShutdownSavingWork, HostPlatform::MacOs),
         // zh: pending T-CWD-FROM-PROCESS — the foot of a files card or column opened on the home
         // folder because the pane's folder could not be read.
         (Self::FilesFolderUnknown, HostPlatform::Windows),
         (Self::FilesFolderUnknown, HostPlatform::MacOs),
+        // zh: pending T-INTEGRATION-INJECT-2-BUILD — the removal row for the PSReadLine copy an
+        // earlier Folio wrote into Documents, and what its press says.
+        (Self::RowLegacyPsReadLine, HostPlatform::Windows),
+        (Self::RowLegacyPsReadLine, HostPlatform::MacOs),
+        (Self::DescLegacyPsReadLine, HostPlatform::Windows),
+        (Self::DescLegacyPsReadLine, HostPlatform::MacOs),
+        (Self::RemoveLegacyPsReadLine, HostPlatform::Windows),
+        (Self::RemoveLegacyPsReadLine, HostPlatform::MacOs),
+        (Self::LegacyPsReadLineRemovedToast, HostPlatform::Windows),
+        (Self::LegacyPsReadLineRemovedToast, HostPlatform::MacOs),
         // zh: pending T-PROFILE-INSTALL-REFUSED-START — a change whose worker would not start, or
         // stopped before it finished.
         (Self::ChangeNotStarted, HostPlatform::Windows),
@@ -6870,30 +6835,6 @@ pub fn new_tab_tip(profile_title: &str) -> String {
     }
 }
 
-/// The invitation's body: what the machine has, what it costs today, what
-/// installing writes and where, and how it comes back out.
-///
-/// Four facts and no persuasion. Both versions are parameters because the
-/// module version this build ships is a Rust constant that `folio.ps1`'s own
-/// gate reads too — a literal here would be the third place it is written, and
-/// the one nothing would catch when it moved.
-#[must_use]
-pub fn psreadline_invite_body(found: &str, patched: &str, path: &str) -> String {
-    match current() {
-        Lang::English => format!(
-            "Windows PowerShell ships with PSReadLine {found}. On that version the input line \
-             lands in the wrong place when the window is resized, and the repair Folio sends \
-             does nothing. Installing writes PSReadLine {patched} to {path}. It takes effect in \
-             PowerShell sessions started after that, and Settings ▸ Terminal removes it."
-        ),
-        Lang::Chinese => format!(
-            "Windows PowerShell 自带的 PSReadLine 是 {found}。在这个版本上，缩放窗口后输入行会\
-             错位，Folio 发出的修复指令不起作用。安装会把 PSReadLine {patched} 写入 \
-             {path}，对此后新开的 PowerShell 会话生效，并可在设置 ▸ 终端中移除。"
-        ),
-    }
-}
-
 /// The card a scheme file that would not parse raises: which file, and why.
 ///
 /// Both halves are parameters because both come from outside the product — the
@@ -6948,64 +6889,6 @@ pub fn scheme_in_use_gone(name: &str, fallback: &str) -> String {
             format!("{name} is no longer in the schemes folder. {fallback} is in force.")
         }
         Lang::Chinese => format!("配色 {name} 已不在 schemes 文件夹中，当前使用 {fallback}。"),
-    }
-}
-
-/// Why the Install button is dark.
-///
-/// Windows' script execution policy governs `.psm1` files, and PSReadLine is a
-/// script module: under `AllSigned` or `Restricted` a module Folio writes would
-/// be refused at import. The button is disabled rather than allowed to write
-/// files that cannot load, and the reason is on screen rather than in a card
-/// after the fact.
-#[must_use]
-pub fn psreadline_policy_reason(policy: &str) -> String {
-    match current() {
-        Lang::English => format!(
-            "Windows' execution policy is {policy}, which refuses to load an unsigned module."
-        ),
-        Lang::Chinese => format!("Windows 的执行策略是 {policy}，不会加载未签名的模块。"),
-    }
-}
-
-/// The row's line when the machine's PSReadLine is older than the patched one.
-///
-/// **The three PSReadLine row lines take their language as an argument**, where
-/// every other value-carrying string in this file reads [`current`]. They are
-/// the only three the app caches for the life of the process — see
-/// `crate::psreadline::row_description`, which keeps one slot per [`Lang`] — and
-/// a cache filling itself from an ambient answer is a cache that cannot be asked
-/// for the other column.
-#[must_use]
-pub fn psreadline_row_outdated_in(lang: Lang, found: &str) -> String {
-    match lang {
-        Lang::English => {
-            format!("{found} on this machine · resizing still misplaces the input line")
-        }
-        Lang::Chinese => format!("本机为 {found} · 调整窗口大小时输入行仍会错位"),
-    }
-}
-
-/// The row's line after Folio has written the module.
-#[must_use]
-pub fn psreadline_row_installed_in(lang: Lang, patched: &str) -> String {
-    match lang {
-        Lang::English => format!("{patched} · installed by Folio"),
-        Lang::Chinese => format!("{patched} · 由 Folio 安装"),
-    }
-}
-
-/// The row's line when an older Folio build's module is the one on disk
-/// (2026-08-18).
-///
-/// It names **both** builds because the reader's question in this state is not
-/// "what have I got" but "what would pressing On change", and a sentence naming
-/// only one of the two answers neither half of it.
-#[must_use]
-pub fn psreadline_row_update_in(lang: Lang, installed: &str, available: &str) -> String {
-    match lang {
-        Lang::English => format!("{installed} · installed by Folio · {available} available"),
-        Lang::Chinese => format!("{installed} · 由 Folio 安装 · 可更新至 {available}"),
     }
 }
 
@@ -7236,10 +7119,9 @@ pub fn focus_mode_row_in(lang: Lang, chord: Option<&str>) -> String {
 ///
 /// `SettingsRow::description` answers `&'static str` — every row in the dialog
 /// hands its answer straight to a `ChromeLabel`, and the whole table costs zero
-/// allocations because of it. `psreadline::row_description` meets the same
-/// signature with a `OnceLock` per language, which is sound there because its
-/// probe is a one-shot; it is **not** sound for a sentence whose value can change
-/// while the process runs — the version `update::row_description` names, or the
+/// allocations because of it. A `OnceLock` per language meets the same signature,
+/// which is sound only for a sentence fixed for the process; it is **not** sound
+/// for a sentence whose value can change while the process runs — the version `update::row_description` names, or the
 /// chord `focus_mode_row_in` names after a rebind — because a `OnceLock` would
 /// go on drawing the first one.
 ///
@@ -7262,77 +7144,12 @@ pub(crate) fn intern(text: String) -> &'static str {
     held
 }
 
-/// The row's line when the machine already had a new enough module of its own.
-#[must_use]
-pub fn psreadline_row_current_in(lang: Lang, found: &str) -> String {
-    match lang {
-        Lang::English => format!("{found} on this machine · already keeps the input line in place"),
-        Lang::Chinese => format!("本机为 {found} · 调整窗口大小时输入行保持原位"),
-    }
-}
-
-/// The row's line when the machine's module is old **and Windows' execution
-/// policy would refuse the replacement** (§7.47).
-///
-/// **The row says why the switch will not move.** Before this line existed the
-/// obstacle was written down in exactly one place — the invitation's reason
-/// line — and a reader who had already answered that invitation could never see
-/// it again: the row said `2.0.0 on this machine · resizing still misplaces the
-/// input line`, the `On` item was dark, and a press on it did nothing and said
-/// nothing. That is the whole of the 2026-08-29 defect.
-///
-/// Two clauses and not three. `resizing still misplaces the input line` is the
-/// case *for* the module, and it is made by the row's own title and by the
-/// invitation; what this reader is owed instead is the reason the answer is not
-/// available to them, and a row that said all three would wrap past the height
-/// every row on this page shares.
-#[must_use]
-pub fn psreadline_row_blocked_in(lang: Lang, found: &str, policy: &str) -> String {
-    match lang {
-        Lang::English => format!(
-            "{found} on this machine · Windows' execution policy is {policy}, which refuses to \
-             load an unsigned module"
-        ),
-        Lang::Chinese => {
-            format!("本机为 {found} · Windows 执行策略为 {policy}，不加载未签名的模块")
-        }
-    }
-}
-
-/// The card raised when the module lands.
-#[must_use]
-pub fn psreadline_installed_toast(patched: &str) -> String {
-    match current() {
-        Lang::English => {
-            format!("PSReadLine {patched} installed. PowerShell sessions started after this use it")
-        }
-        Lang::Chinese => {
-            format!("已安装 PSReadLine {patched}。此后新开的 PowerShell 会话将使用它")
-        }
-    }
-}
-
-// ── the six sentences a refused press speaks (§7.47) ────────────────────────
+// ── the sentence a refused removal of the earlier PSReadLine copy speaks (§7.47) ──
 //
-// **Every one of them names the path.** A reader who is told an install did not
-// happen and not told where it would have gone has been handed a sentence they
-// can do nothing with; a reader who has the path can look, can copy it, and can
-// finish the job by hand. That is the whole of the copy-guide rule here, and it
-// is why `psreadline_install_failed`'s old one-argument shape is gone: it
-// carried Windows' own words and dropped the only other fact in the room.
-
-/// The card raised when writing the module failed, carrying what Windows said.
-///
-/// The operating system's own sentence is passed through rather than
-/// summarised: it is the only text that distinguishes a full disk from a
-/// redirected Documents folder from a file another process is holding open.
-#[must_use]
-pub fn psreadline_install_failed(path: &str, message: &str) -> String {
-    match current() {
-        Lang::English => format!("Could not write PSReadLine to {path}: {message}"),
-        Lang::Chinese => format!("无法把 PSReadLine 写入 {path}：{message}"),
-    }
-}
+// **It names the path.** A reader who is told a removal did not happen and not
+// told where has been handed a sentence they can do nothing with; a reader who
+// has the path can look, can copy it, and can finish the job by hand. Windows'
+// own words are carried whole beside it.
 
 #[must_use]
 pub fn psreadline_remove_failed(path: &str, message: &str) -> String {
@@ -7342,155 +7159,13 @@ pub fn psreadline_remove_failed(path: &str, message: &str) -> String {
     }
 }
 
-/// The command that lifts the refusal, in the one scope that needs no
-/// administrator.
-///
-/// **`CurrentUser` and not `LocalMachine`, and that is measured rather than
-/// preferred**: on the clean Windows 10 of 2026-08-29,
-/// `Set-ExecutionPolicy -Scope LocalMachine` from an unelevated shell failed
-/// silently — the policy did not move — while the same command at
-/// `-Scope CurrentUser` took. A card that told a reader to run something their
-/// shell will refuse is a card that has sent them somewhere worse than nowhere.
-///
-/// `RemoteSigned` and not `Bypass` or `Unrestricted`: it is the weakest policy
-/// that loads the module, it is what Windows Server ships with, and it still
-/// asks for a signature on anything that came off the network.
-pub const POLICY_REMEDY_COMMAND: &str = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned";
-
-/// The card raised when the execution policy is what stopped the install.
-///
-/// Measured on a clean Windows 10 Pro 22H2 on 2026-08-29: under `Restricted`
-/// the module writes perfectly well and then `Import-Module PSReadLine` loads
-/// **nothing** — `PSReadLine.format.ps1xml` is refused as a script, and the
-/// import fails with it. So the refusal is right and the silence was the bug.
-///
-/// **Three sentences, and the middle one is a way out** (§7.47). A card that
-/// names the obstacle and stops leaves its reader exactly where they were
-/// standing; the copy rule is that a sentence on screen says what can be done
-/// *now*, and what can be done now is one command in the shell already in front
-/// of them. It is on the card and deliberately not on the row: the row has one
-/// line to say what the machine is, and a command is not a state.
-///
-/// **The way out comes before the path, and that order is the whole of what a
-/// six-line cap costs.** `TOAST_MAX_LINES` drops what does not fit and marks
-/// the cut with an ellipsis, and this card carries the longest text this
-/// product raises — a module path under a redirected `Documents` can be a
-/// hundred characters on its own. Whatever falls off the end must therefore be
-/// the least actionable half, and between "here is the command that fixes it"
-/// and "here is where the file would have gone", the path is the half a reader
-/// can lose and still act. `the_way_out_survives_the_cards_six_line_cap` in
-/// `toast.rs` holds that.
-///
-/// The clause about *why* an unsigned module is refused is not repeated here:
-/// the row this card was raised from says it, one line above the picker that
-/// was just pressed.
-#[must_use]
-pub fn psreadline_policy_refused(patched: &str, policy: &str, path: &str) -> String {
-    let remedy = POLICY_REMEDY_COMMAND;
-    match current() {
-        Lang::English => format!(
-            "PSReadLine {patched} was not installed. Windows' execution policy is {policy}. Run \
-             {remedy} in PowerShell, then try again. The module goes to {path}."
-        ),
-        Lang::Chinese => format!(
-            "未安装 PSReadLine {patched}。Windows 的执行策略是 {policy}。在 PowerShell 中运行 \
-             {remedy} 后再试。模块本应写入 {path}。"
-        ),
-    }
-}
-
-/// The card raised when Windows would not say where Documents is.
-///
-/// No path in this one because there is no path to name — which is exactly what
-/// it says.
-#[must_use]
-pub fn psreadline_no_documents(patched: &str) -> String {
-    match current() {
-        Lang::English => format!(
-            "PSReadLine {patched} was not installed. Windows did not say where this user's \
-             Documents folder is, and PowerShell looks for the module under it."
-        ),
-        Lang::Chinese => format!(
-            "未安装 PSReadLine {patched}。Windows 没有给出本用户的 Documents 文件夹位置，而 \
-             PowerShell 在它下面找这个模块。"
-        ),
-    }
-}
-
-/// The card raised when the probe has not answered yet.
-#[must_use]
-pub fn psreadline_still_reading() -> String {
-    match current() {
-        Lang::English => {
-            "Still reading this machine's PSReadLine. Try again in a moment.".to_owned()
-        }
-        Lang::Chinese => "正在读取本机的 PSReadLine，请稍候再试。".to_owned(),
-    }
-}
-
-/// The card raised when `On` is pressed on a machine whose own module is already
-/// new enough.
-#[must_use]
-pub fn psreadline_already_current(found: &str, path: &str) -> String {
-    match current() {
-        Lang::English => format!(
-            "This machine's own PSReadLine {found} already keeps the input line in place, so \
-             nothing was written to {path}."
-        ),
-        Lang::Chinese => {
-            format!("本机自带的 PSReadLine {found} 已能守住输入行，未向 {path} 写入任何东西。")
-        }
-    }
-}
-
-/// The card raised when `On` is pressed over a module Folio did not write
-/// (audit 3, E-1).
-///
-/// It names the path for the reason every refusal on this row does — that is
-/// the half a reader can act on — and it says who the module belongs to rather
-/// than how new it is, because ownership is what stopped the write.
-#[must_use]
-pub fn psreadline_occupied(path: &str) -> String {
-    match current() {
-        Lang::English => {
-            format!("A PSReadLine Folio did not install is at {path}, so nothing was written.")
-        }
-        Lang::Chinese => format!("{path} 有非 Folio 安装的 PSReadLine，未写入任何东西。"),
-    }
-}
-
-/// The card raised when `On` is pressed over a directory that already holds it.
-#[must_use]
-pub fn psreadline_already_there(patched: &str, path: &str) -> String {
-    match current() {
-        Lang::English => format!("PSReadLine {patched} is already installed at {path}."),
-        Lang::Chinese => format!("PSReadLine {patched} 已经装在 {path}。"),
-    }
-}
-
-/// The card raised when `Off` is pressed and the guard kept its hands off.
-///
-/// **One sentence for two situations** — a directory holding somebody else's
-/// module, and a directory holding nothing at all — because it is true of both
-/// and because the distinction is not one a reader can act on differently. What
-/// they can act on is the path, which is in it.
-#[must_use]
-pub fn psreadline_not_ours(path: &str) -> String {
-    match current() {
-        Lang::English => {
-            format!("No module written by Folio is at {path}, so nothing was removed.")
-        }
-        Lang::Chinese => format!("{path} 没有 Folio 写的模块，未移除任何东西。"),
-    }
-}
-
 /// The card raised when the registry would not take the Explorer verb, carrying
 /// what Windows said.
 ///
 /// One sentence for both directions, because what a reader can act on is the
 /// operating system's own code and not which way the switch was moving — and
 /// the row beside the card already says which state the machine ended up in.
-/// [`psreadline_install_failed`]'s ruling for passing the message through whole.
+/// The message is passed through whole, as [`psreadline_remove_failed`] passes it.
 #[must_use]
 pub fn context_menu_failed(message: &str) -> String {
     match current() {
@@ -8592,8 +8267,7 @@ impl CliText<'_> {
 // Every one of these is a sentence with a number, a name or a path in it, which
 // is why it is here and not in the table: the table is `&'static str` and these
 // allocate. They are written as a private `…_in(lang, …)` with a public wrapper
-// that reads the language in force, which is
-// [`psreadline_row_outdated_in`]'s shape and is here for its reason — a test
+// that reads the language in force, for one reason — a test
 // that had to `install` a language in order to read a sentence would be a test
 // racing every other test in this file for the process's own answer.
 
@@ -9575,7 +9249,7 @@ fn switcher_pin_refused_in(lang: Lang, target: &str) -> String {
 /// `PageKept`).
 ///
 /// The platform's own sentence is passed through rather than summarised, on
-/// [`psreadline_install_failed`]'s reason: it is the only text that tells a
+/// [`psreadline_remove_failed`]'s reason: it is the only text that tells a
 /// controller that had already gone from a parent window Windows would not set,
 /// and neither of those is a thing this window can word better than the report
 /// it was given.

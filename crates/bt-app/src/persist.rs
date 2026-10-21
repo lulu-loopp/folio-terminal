@@ -2265,6 +2265,15 @@ impl SessionStore {
         store
     }
 
+    /// This store, with its sentinel created and armed as [`Self::open`] arms it — for a test
+    /// whose store is built on a lane of its own ([`Self::at_on`], [`Self::at_waking`]) and that
+    /// watches the system's end drop the sentinel, or leave it standing (T-ENDSESSION-SAVES).
+    #[cfg(test)]
+    pub(crate) fn armed(mut self) -> Self {
+        self.armed = create_sentinel(&self.sentinel_path).is_ok();
+        self
+    }
+
     /// The session document as it was read. The caller owns what the fields
     /// mean; this type owns only when they reach the disk.
     pub fn loaded(&self) -> &SessionV1 {
@@ -2701,33 +2710,37 @@ impl SessionStore {
     /// The document could not be serialised, or there is no writer thread: a refusal, as
     /// [`Self::flush_judged`] reports it.
     pub(crate) fn hand_over_final(&mut self) -> Result<Option<u64>, SaveRefusal> {
+        let handed = self.hand_over_a_new_generation();
+        if let Err(refusal) = &handed {
+            self.said_by_the_quit(&Err(refusal.clone()));
+        }
+        handed
+    }
+
+    /// **The document as it stands, handed to the writer as a new generation, clean or not** —
+    /// never waited for here: [`Self::hand_over_final`]'s hand-over and
+    /// [`Self::save_for_the_systems_end`]'s. `Ok(None)` when this process owes the disk nothing
+    /// (the second Folio over this directory).
+    fn hand_over_a_new_generation(&mut self) -> Result<Option<u64>, SaveRefusal> {
         if !self.writes_to_disk() {
             self.debouncer.mark_flushed();
             return Ok(None);
         }
         self.queue_launch_backup();
         self.take_receipts();
-        let bytes = match bt_persist::serialize_session(&self.session) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                let error = error.to_string();
-                self.report_write(Err(error.clone()));
-                let verdict = Err(SaveRefusal::Refused(error));
-                self.said_by_the_quit(&verdict);
-                return verdict.map(|()| None);
-            }
-        };
-        let generation = match self.send_to_the_writer(bytes) {
-            Ok(generation) => generation,
+        let bytes = bt_persist::serialize_session(&self.session).map_err(|error| {
+            let error = error.to_string();
+            self.report_write(Err(error.clone()));
+            SaveRefusal::Refused(error)
+        })?;
+        match self.send_to_the_writer(bytes) {
+            Ok(generation) => Ok(Some(generation)),
             Err(refused) => {
                 let said = refused.said(NO_WRITER_THREAD);
                 self.report_write(Err(said.clone()));
-                let verdict = Err(SaveRefusal::Refused(said));
-                self.said_by_the_quit(&verdict);
-                return verdict.map(|()| None);
+                Err(SaveRefusal::Refused(said))
             }
-        };
-        Ok(Some(generation))
+        }
     }
 
     /// **What became of generation `generation`, if the writer has said** — never waits (U-21);
@@ -2834,8 +2847,27 @@ impl SessionStore {
     /// **What differs from the close is that the writer stays.** The session may yet go on —
     /// somebody can stop a shutdown at the last screen — and a store whose writer had been retired
     /// would never save the layout again for the rest of the run.
-    pub(crate) fn save_for_the_systems_end(&mut self) -> Result<(), SaveRefusal> {
-        let landed = self.flush_judged();
+    ///
+    /// **Always a new generation, clean or not** (T-ENDSESSION-SAVES), as an update's quit hands
+    /// its document over: the system's end hands every preview save and every owed document to the
+    /// same storage worker first, and the worker serves its queue in order, so this document's
+    /// landing is what says everything queued ahead of it has been served. One that was already
+    /// clean, or already on its way, would end the wait before them.
+    ///
+    /// **The budget counts from `asked_at`**, the instant the question's turn began: what was
+    /// handed over ahead of this document spends it, and adds nothing to it.
+    pub(crate) fn save_for_the_systems_end(
+        &mut self,
+        asked_at: Instant,
+    ) -> Result<(), SaveRefusal> {
+        let landed = match self.hand_over_a_new_generation() {
+            Ok(Some(generation)) => {
+                let until = self.writer.wait_ends(asked_at);
+                self.wait_for_landing(generation, until)
+            }
+            Ok(None) => Ok(()),
+            Err(refusal) => Err(refusal),
+        };
         if landed.is_ok() && self.armed {
             let _ = remove_sentinel(&self.sentinel_path);
             self.armed = false;
@@ -2852,6 +2884,19 @@ impl SessionStore {
             return;
         }
         self.armed = create_sentinel(&self.sentinel_path).is_ok();
+    }
+
+    /// **The system took the end back, and its write's wait had run out** (T-ENDSESSION-SAVES):
+    /// the writer was marked stalled, which makes every later wait answer "did not finish" at once
+    /// and the close leave without waiting — right for a process that is leaving, wrong for a run
+    /// that goes on. A writer whose thread is still there is waited on again, within its budget, by
+    /// the next save that waits (a quit's); one whose thread has gone stays as it is, and its next
+    /// wait is the refusal it always was.
+    pub(crate) fn wait_again_after_the_systems_end(&mut self) {
+        self.take_receipts();
+        if !self.writer.ended {
+            self.writer.stalled = false;
+        }
     }
 
     /// Flush anything pending, let the writer finish, and drop this run's sentinel. Idempotent.
@@ -4987,7 +5032,7 @@ pub(crate) mod tests {
         );
         let settled: Vec<_> = crate::session_end::take()
             .into_iter()
-            .map(|end| crate::session_end::settle(end, &mut store, false))
+            .map(|end| crate::session_end::settle(end, &mut store, false, Instant::now()))
             .collect();
         assert_eq!(
             settled,

@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Guest side of the load row (clean-vm.md 4.6): Folio open, a person typing and scrolling in
+    Guest side of the load row (clean-vm.md 4.7): Folio open, a person typing and scrolling in
     a pane that prints, before, during and after a machine-wide CPU load at Normal priority.
 
 .DESCRIPTION

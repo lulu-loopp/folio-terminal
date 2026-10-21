@@ -66,9 +66,8 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 | `BT_PROBE_INPUT` | file path, used verbatim | **Reads** the named file and feeds its bytes to the terminal instead of starting a shell. Writes nothing. | — | off; a shell is started |
 | `BT_WEB_DEV` | URL | Opens a preview seat at startup and navigates it to this URL. | The page is loaded, so its cache and cookies land in the WebView2 profile under `%LOCALAPPDATA%\Folio\WebView2` like any other previewed page. | off; no page is opened |
 | `BT_POWERSHELL_PROFILE` | file path, used verbatim | Redirects the shell-integration installer: the `$PROFILE` it reads and writes becomes this file instead of the real one. | The file you name is created and edited by the installer. | the real `$PROFILE`, asked of a running PowerShell |
-| `BT_PSREADLINE_DOCUMENTS` | directory path, used as a base | Redirects the bundled PSReadLine installer's Documents root. The module goes to `<dir>\WindowsPowerShell\Modules\PSReadLine\<version>\`. | Nine files are written under, and deleted from, the directory you name. | the real Documents folder |
+| `BT_PSREADLINE_DOCUMENTS` | directory path, used as a base | Redirects the Documents root in which the PSReadLine copy an earlier Folio wrote is looked for, offered for removal on the Terminal page, and removed by that row and by the uninstall. The copy is looked for at `<dir>\WindowsPowerShell\Modules\PSReadLine\`. Folio's own PSReadLine is never written there (it goes to Folio's local data folder). It also changes the Documents entry a Windows PowerShell pane's composed `PSModulePath` carries, because that entry is the same Documents root. | A copy under the directory you name that is the earlier Folio's, by its bytes or its build stamp, is deleted when its removal is pressed or the uninstall runs. | the real Documents folder |
 | `BT_UNINSTALL_ROOT` | absolute sandbox directory; empty/relative refuses | **Read only by a debug or test build; a shipped `folio.exe` ignores it entirely** (`uninstall.rs: SANDBOX_DOOR`). Isolates `--uninstall-cleanup` and `--purge`: data, profiles, modules, agents, temp files and instance claims resolve below this directory. Registry/MSIX/toast operations are replaced with absent sandbox readings. | Deletes only resolved sandbox data paths when `--purge` is present; never the application folder. Recorded directories outside the sandbox refuse; a recorded `$PROFILE` is held to its kind (absolute, no `..`, a `.ps1`) and is not contained by the sandbox, so a fixture must never record a real one. | real account roots and system registrations |
-| `BT_PSREADLINE_PROBE` | `<version>[,<policy>]` | Makes the machine read as if it had that PSReadLine version and execution policy, so the upgrade invitation can be photographed. Redirects no write. | — | the real probe, which runs `powershell -NoProfile`. **Set-but-empty is not off here**: `=` engages the override at version `0.0.0`. |
 | `BT_FIRST_RUN_CARD` | switch | Raises the first-run card on a machine that has already answered it, so it can be photographed in a second language or looked at again. Overrides the appearance gate and nothing else: which rows are offered, what `Done` does and what is written down are exactly what they would be on a real first run. | — | off; the card appears only on a machine with no `settings.json` that has never shown it |
 | `BT_SHELL` | program path or bare name, used verbatim | Overrides the default shell program, and is what the `PowerShell` profile row resolves to. Never checked for existence; a bare name is resolved by `CreateProcess` against `PATH`, and a spawn failure falls back to `powershell.exe`. | — | `pwsh.exe` if found, else `powershell.exe` |
 | `BT_BG` | `#RRGGBB` | Overrides the terminal background colour and locks the theme for the run. An unreadable value is reported on the diagnostics channel and ignored. | — | `#1B1B1B`, unlocked. **Set-but-empty is not silently off**: it is reported as invalid and ignored. |
@@ -131,6 +130,25 @@ latch is set by a driver reset, and what a rebuild has to be watched doing —
 on macOS, land its new `CAMetalLayer` on a view the old one was cleared off
 (`docs/DESIGN.md` §13.14) — is invisible in every other run of the program.
 Compiled out of release builds.
+
+### Read by the shipped `folio.ps1`, set only by tests
+
+Folio's PowerShell integration script ships in every release and reads eight names, each the
+switch of a development probe in its resize-chord handlers: `BT_PSREADLINE_NOOP_PROBE`,
+`BT_PSREADLINE_REANCHOR_PROBE`, `BT_PSREADLINE_REANCHOR_FORCE_FALLBACK_PROBE`,
+`BT_PSREADLINE_REANCHOR_EXACT_EDGE_PROBE`, `BT_PSREADLINE_REANCHOR_WHOLE_SCREEN_PROBE`,
+`BT_PSREADLINE_REANCHOR_EMPTY_BASELINE_PROBE`, `BT_PSREADLINE_HISTORY_PROBE` and
+`BT_PSREADLINE_HISTORY_TRANSPARENCY_RED_PROBE`. This section is checked against the script
+itself: `bt-app`'s `diagnostics::bt_environment_doc_tests` reads `folio.ps1` and holds the names it
+reads (`$env:BT_…`) equal to the names here, both ways. The check's Rust half reads only whole
+string literals of the shipped program, and `bt-pty`'s probes name most of these inside format
+strings, which that half does not count. Each is acted on only when it is exactly `1`, and
+then makes the handler write an `OSC 777;BT_PSREADLINE_…` report (or, for the fallback and red
+probes, take the arm under test) so a test can tell which handler took the chord and what it did.
+Only tests set them — `bt-pty`'s real-shell probes and `bt-app`'s
+`shell_integration::psreadline_tests::real_shell::the_fork_an_earlier_folio_left_keeps_the_resize_chords_no_op`
+— on the one pane they start. **Unset, which is every product session, they change nothing**: the
+handlers run their product road, and the terminal ignores an `OSC 777` it does not own.
 
 ## 2. Read only when the tests are compiled
 
@@ -222,6 +240,16 @@ and the `folio.exe` the `launch` row starts, for `bt-platform`'s ignored
 | Variable | Value | What it does | What can end up in the file | Default |
 | --- | --- | --- | --- | --- |
 | `BT_PASTE_CRT_CONSUMER` | absolute path to the separately compiled `paste_paths_crt.exe` fixture | Set by the developer or acceptance coordinator when explicitly running the ignored Windows direct-CRT test. Names the consumer that receives the encoder's literal through the quiet process door; the test checks its captured argument count and UTF-16 units. | No file is written by this switch; consumer output is captured through pipes. | not set; the test is ignored by default and fails if explicitly run without this value |
+
+**Folio's local-data root for its PSReadLine has no variable.** The pane's module is
+written under `%LOCALAPPDATA%\Folio\psmodules\` (`shell_integration::local_data_root`),
+and no `BT_` name moves that root, in a test build or any other (it follows
+`LOCALAPPDATA`, which the `update_trial` child tests above point inside their own folder): the
+writer, the prune and the module-path composer take the root as an argument
+(`shell_integration::install_psreadline_module_at`, `prune_psreadline_artefacts`,
+`compose_module_path`), and their tests hand in a folder of their own. The real-shell
+tests in `shell_integration_psreadline_tests.rs` write into their test shell's own scratch root the same way.
+The earlier Folio's copy in Documents is moved by `BT_PSREADLINE_DOCUMENTS` (§1).
 
 ## 3. `BT_` names in the source that are not environment variables
 

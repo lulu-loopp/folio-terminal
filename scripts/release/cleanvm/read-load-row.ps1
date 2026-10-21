@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    The cells of the load row (clean-vm.md 4.6), read from what `run-load-row.ps1` copied out
+    The cells of the load row (clean-vm.md 4.7), read from what `run-load-row.ps1` copied out
     of the guest.
 
 .DESCRIPTION

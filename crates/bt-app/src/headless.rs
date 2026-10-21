@@ -1637,7 +1637,6 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         motion: Motion::Full,
         profile_programs: profiles::ProfilePrograms::unknown(),
         startup_shells: None,
-        psreadline_documents: None,
         context_menu_installed: false,
         claude_hooks_installed: false,
         agent_config_refusals: [None, None, None],
@@ -1749,6 +1748,8 @@ pub(crate) enum StartupStep {
     CommandLine,
     /// The parsed request handed over, or kept.
     HandOver,
+    /// Windows PowerShell's language-mode question started.
+    LanguageQuestion,
     /// The startup's `$PROFILE` observation started.
     StartupMigration,
     /// Folio's own script's preparation started.
@@ -1802,6 +1803,10 @@ pub(crate) fn start(argv: &str, walk: Vec<Vec<String>>) -> HeadlessStart {
     let opened = crate::startup::resume(
         &mut answers,
         crate::startup::FirstWindow {
+            language: || {
+                step(StartupStep::LanguageQuestion);
+                crate::shell_integration::LanguageAsked::stand_in()
+            },
             migration: || {
                 step(StartupStep::StartupMigration);
                 crate::shell_integration::Migrated::stand_in()
