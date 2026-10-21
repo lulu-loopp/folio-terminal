@@ -117,6 +117,8 @@ try {
         Invoke-Vmrun -Door $door -Step 'mkdir' -Verb 'runProgramInGuest' -InGuest `
             -Arguments @('C:\Windows\System32\cmd.exe', "/c if not exist $folder mkdir $folder") | Out-Null
     }
+    Invoke-Vmrun -Door $door -Step 'copy in' -Verb 'copyFileFromHostToGuest' -InGuest `
+        -Arguments @((Join-Path $guestSide 'load-row-settings.json'), "$guestLoad\load-row-settings.json") | Out-Null
     foreach ($script in $guestScripts) {
         Invoke-Vmrun -Door $door -Step 'copy in' -Verb 'copyFileFromHostToGuest' -InGuest `
             -Arguments @($script, "$guestLoad\$([IO.Path]::GetFileName($script))") | Out-Null

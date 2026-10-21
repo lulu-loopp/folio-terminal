@@ -41,6 +41,7 @@ $ErrorActionPreference = 'Continue'
 $exe = Join-Path $Candidate 'folio.exe'
 $probe = Join-Path $PSScriptRoot 'ui-probe.ps1'
 $hog = Join-Path $PSScriptRoot 'cpu-hog.ps1'
+$answered = Join-Path $PSScriptRoot 'load-row-settings.json'
 $log = Join-Path $GuestHome "load-$Tag.txt"
 $perf = Join-Path $GuestHome "load-$Tag-perf.txt"
 $hogLog = Join-Path $GuestHome "load-$Tag-hog.txt"
@@ -175,6 +176,22 @@ function Cycle($h, $seconds) {
 }
 
 Say "load start candidate=$Candidate seconds=$Seconds processors=$([Environment]::ProcessorCount)"
+# **The row runs with the first-run card already answered** (2026-10-21: the card stood over the
+# pane through two rows whose keys never reached it, and through their WM_CLOSE). The guest is a
+# fresh `clean` account with no Folio data; the row gives it a settings document from before the
+# card existed (schema 25, every value the shipped default but the PowerShell invitation, which is
+# answered too), and the candidate's own migrations carry it to its version — the v31 -> v32 step
+# writes `first_run_card: Shown`, the product's rule that a returning reader never meets the card.
+# A guest that already holds a settings.json is left as it is. The card itself is its own row.
+$data = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Folio'
+$settings = Join-Path $data 'settings.json'
+if (Test-Path -LiteralPath $settings) {
+  Say "settings.json already present: left as it is"
+} else {
+  [IO.Directory]::CreateDirectory($data) | Out-Null
+  Copy-Item -LiteralPath $answered -Destination $settings
+  Say "first run answered: a schema-25 settings.json placed for the candidate to migrate"
+}
 $env:BT_PERF_TRACE = '1'
 $folio = Start-Process -FilePath $exe -RedirectStandardError $perf -PassThru
 Say "started pid=$($folio.Id)"
