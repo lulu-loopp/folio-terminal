@@ -680,8 +680,6 @@ crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_e
 crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::at_the_entry	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Ambiguous	collect	1	
 crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Ambiguous	map	1	
-crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Dynamic	file	13	
-crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::EntryDoors::from_values	Dynamic	on	6	
 crates/bt-app/src/entry_doors.rs	bt-app crate::entry_doors::installed	Ambiguous	unwrap_or	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::cap_controlled_failure	Ambiguous	by_ref	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::cap_controlled_failure	Ambiguous	collect	1	
