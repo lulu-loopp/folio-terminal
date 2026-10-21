@@ -91,31 +91,36 @@ public static class KeysWindows {
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder text, int max);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint message, IntPtr w, IntPtr l);
   public const uint WM_CLOSE = 0x0010;
-  public static IntPtr AppWindowOf(uint target) {
-    IntPtr best = IntPtr.Zero; long bestArea = 0;
+  public static IntPtr[] AppWindowsOf(uint target) {
+    var all = new System.Collections.Generic.List<IntPtr>();
     EnumWindows((h, l) => {
       uint pid; GetWindowThreadProcessId(h, out pid);
       if (pid != target || !IsWindowVisible(h)) { return true; }
       var name = new StringBuilder(128); GetClassName(h, name, 128);
-      RECT c; GetClientRect(h, out c);
-      long area = (long)(c.R - c.L) * (c.B - c.T);
-      if (name.ToString() == "Window Class" && area > bestArea) { bestArea = area; best = h; }
+      if (name.ToString() == "Window Class") { all.Add(h); }
       return true;
     }, IntPtr.Zero);
-    return best;
+    return all.ToArray();
   }
 }
 '@
+# **Every Folio window is closed, then every folio.exe must be gone**: a plain start while Folio
+# runs is handed to it and opens a second window in the same process (seen in E1-b's RV-W11), so
+# closing one window leaves the process running and the next plain start hands over again.
 function CloseFolio {
-  $w = WindowPid
-  if (-not $w) { Say 'close: no Folio window'; return }
-  $h = [KeysWindows]::AppWindowOf([uint32]$w)
-  if ($h -eq [IntPtr]::Zero) { Say "close: pid=$w has no window of winit's application class"; return }
-  $ok = [KeysWindows]::PostMessage($h, [KeysWindows]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
-  $p = Get-Process -Id $w -ErrorAction SilentlyContinue
+  $procs = @(Get-Process folio -ErrorAction SilentlyContinue)
+  if ($procs.Count -eq 0) { Say 'close: no Folio running'; return }
+  foreach ($p in $procs) {
+    $hs = @([KeysWindows]::AppWindowsOf([uint32]$p.Id))
+    foreach ($h in $hs) {
+      $ok = [KeysWindows]::PostMessage($h, [KeysWindows]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+      Say "WM_CLOSE posted to hwnd=$h of pid=$($p.Id) -> $ok"
+    }
+  }
   # bounded: Folio's own close budget is seconds; 30 s is load-row's bound for the same close
-  $gone = (-not $p) -or $p.WaitForExit(30000)
-  Say "WM_CLOSE posted to hwnd=$h of pid=$w -> $ok; exited within 30 s: $gone"
+  $gone = $true
+  foreach ($p in $procs) { if (-not $p.WaitForExit(30000)) { $gone = $false; Say "close: pid=$($p.Id) still running 30 s after its windows were closed" } }
+  Say "every folio.exe exited within 30 s: $gone"
 }
 function WaitWindow {
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
