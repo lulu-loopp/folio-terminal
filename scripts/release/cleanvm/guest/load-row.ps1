@@ -76,6 +76,26 @@ public static class LoadRowWindows {
     return String.Format("hwnd={0} pid={1} class={2} title={3}", h, pid, name, title);
   }
   public static string At(int x, int y) { var p = new POINT(); p.X = x; p.Y = y; return Describe(WindowFromPoint(p)); }
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L; public int T; public int R; public int B; }
+  [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO {
+    public int cbSize; public int flags; public IntPtr hwndActive; public IntPtr hwndFocus; public IntPtr hwndCapture;
+    public IntPtr hwndMenuOwner; public IntPtr hwndMoveSize; public IntPtr hwndCaret; public RECT rcCaret;
+  }
+  [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
+  // The keyboard's own window: the foreground thread's focus. A key SendInput sends goes there.
+  public static IntPtr Focus() {
+    uint pid;
+    uint thread = GetWindowThreadProcessId(GetForegroundWindow(), out pid);
+    var info = new GUITHREADINFO();
+    info.cbSize = Marshal.SizeOf(info);
+    return GetGUIThreadInfo(thread, ref info) ? info.hwndFocus : IntPtr.Zero;
+  }
+  public static bool KeyboardIn(uint target) {
+    IntPtr focus = Focus();
+    if (focus == IntPtr.Zero) { return false; }
+    uint pid; GetWindowThreadProcessId(focus, out pid);
+    return pid == target;
+  }
 }
 '@
 
@@ -92,22 +112,29 @@ function Window($procId) {
 # without the foreground (the driver runs from a hidden console the user never touched) refuses
 # the request; it is taken the way a person takes it — a real click at window+(60,-60), a point
 # inside the pane, made only when that pixel is Folio's (keys.ps1's H-8) — and asked again.
+# **And the keyboard, not only the foreground** (2026-10-21: two rows whose driver reported the
+# foreground taken sent 60 cycles that Folio never saw — `file_reads … input_seen=false` all run
+# long, Folio's own focus lost a second after it was gained). A key goes to the foreground
+# thread's focus window, so the check is that this window is Folio's (`GetGUIThreadInfo`); a
+# foreground without it is taken the way a person takes it, a click inside the pane.
 function Front($h) {
   for ($try = 1; $try -le 4; $try++) {
-    if ([Probe]::BringToFront($h)) { return $true }
+    [void][Probe]::BringToFront($h)
+    if ([LoadRowWindows]::KeyboardIn([uint32]$folio.Id)) { return $true }
     $r = New-Object PRECT
     [void][Probe]::GetWindowRect($h, [ref]$r)
     $x = $r.L + 60; $y = $r.B - 60
     if ([Probe]::PointBelongsTo($x, $y, $folio.Id)) {
       [Probe]::Click($x, $y)
       Start-Sleep -Milliseconds 400
+      if ([LoadRowWindows]::KeyboardIn([uint32]$folio.Id)) { return $true }
     }
   }
-  if ([Probe]::GetForegroundWindow() -eq $h) { return $true }
   $r = New-Object PRECT
   [void][Probe]::GetWindowRect($h, [ref]$r)
-  Say ("no foreground: nothing sent (foreground {0}; under window+(60,-60) {1}; folio pid={2})" -f `
-      [LoadRowWindows]::Describe([LoadRowWindows]::GetForegroundWindow()), [LoadRowWindows]::At($r.L + 60, $r.B - 60), $folio.Id)
+  Say ("no keyboard: nothing sent (foreground {0}; focus {1}; under window+(60,-60) {2}; folio pid={3})" -f `
+      [LoadRowWindows]::Describe([LoadRowWindows]::GetForegroundWindow()), [LoadRowWindows]::Describe([LoadRowWindows]::Focus()),
+      [LoadRowWindows]::At($r.L + 60, $r.B - 60), $folio.Id)
   return $false
 }
 
@@ -155,7 +182,7 @@ $h = Window $folio.Id
 if ($h -eq [IntPtr]::Zero) { Say 'no Folio window within 120 s'; Say 'load end'; exit 1 }
 Start-Sleep -Seconds 8
 if (-not (FrontWithin $h $ForegroundSeconds)) {
-  Say "FAILED foreground: Folio never took the foreground within $ForegroundSeconds s; the row measures nothing"
+  Say "FAILED foreground: Folio never took the keyboard within $ForegroundSeconds s; the row measures nothing"
   $closed = $folio.CloseMainWindow()
   Say "WM_CLOSE -> $closed"
   if (-not $folio.WaitForExit(30000)) { Say 'FAILED close: Folio still running 30 s after WM_CLOSE' }
@@ -165,7 +192,7 @@ if (-not (FrontWithin $h $ForegroundSeconds)) {
   Set-Content -LiteralPath (Join-Path $GuestHome "load-$Tag-done.txt") -Value 'done' -Encoding UTF8
   exit 1
 }
-Say 'foreground taken'
+Say ("keyboard taken (focus {0})" -f [LoadRowWindows]::Describe([LoadRowWindows]::Focus()))
 foreach ($i in 1..2) { if (Front $h) { [void][Probe]::TapVk([uint16]27) }; Start-Sleep -Milliseconds 800 }
 Start-Sleep -Seconds 4
 # The owner's shape: a pane whose screen holds a boxed frame (an agent's TUI is one) in a tab

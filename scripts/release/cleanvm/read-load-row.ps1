@@ -79,7 +79,12 @@ for ($i = 0; $i -lt 3; $i++) {
     # **Whether the phase was exercised at all** (2026-10-21: two runs whose driver was refused
     # the foreground measured one present in three minutes). The driver says how many of its
     # cycles reached Folio; a phase with none is marked, so its cells are not read as a result.
+    $keyboard = @($presents | Where-Object { $_ -match ' source=Keyboard ' }).Count
+    $seen = @(Slice $perf $from.Perf $to.Perf | Where-Object { $_ -match 'BT_PERF_TRACE file_reads .*input_seen=true' }).Count
     $cycleLine = @(Get-Content -LiteralPath $log | Where-Object { $_ -match ' cycles \d+' })[$i]
+    if ($cycleLine -and $cycleLine -match 'sent ([1-9]\d*)' -and $keyboard -eq 0) {
+        $out.Add(("          KEYS NOT SEEN BY FOLIO: {0} cycles sent, 0 keyboard presents, {1} minute(s) with input_seen=true" -f $Matches[1], $seen))
+    }
     if ($cycleLine -and $cycleLine -match 'cycles (\d+) sent (\d+)') {
         $out.Add(('          cycles {0}, {1} reached Folio{2}' -f $Matches[1], $Matches[2], $(if ([int]$Matches[2] -eq 0) { '  NOT EXERCISED' } else { '' })))
     } elseif ($presents.Count -lt 10) {
