@@ -1060,9 +1060,24 @@ up and three down.
 | delay max | `delay_us=` on the `wall` lines | under one frame in baseline and after; the hog phase says what the guest's scheduler gives | — (reported, not judged) |
 | present cadence | `since_previous_us` of `BT_PERF_TRACE present` | about the display's frame while the pane prints | presents stop while input is sent |
 | echo / notch / output | `event_to_present_us` by `source=` | within a frame or two in every phase | seconds |
+| close | `close ok` / `FAILED close` in `load-<Tag>.txt` (with the processes still standing and `load-<Tag>-hang-reports.zip`) | Folio exits within 30 s of WM_CLOSE | still running: the row's failure |
 
-Run it twice: `-Tag before` on the build at the instrumentation commit (the named fold and the
-`stale_us`/`source=` cells, no fix), `-Tag after` on the fix; the report carries both tables.
+A phase whose driver cycles never reached Folio is printed `NOT EXERCISED`, and its cells are not a result. The guest is told not to sleep before the row (`powercfg` standby, monitor and hibernate timeouts on AC to 0). The row runs `-NoWait`, and the host waits for `load-<Tag>-done.txt` (bounded at 3 × `-Seconds` + 300 s).
+
+Run it twice: `-Tag before` on the build at the instrumentation commit (the named fold and the `stale_us`/`source=` cells, no fix), `-Tag after` on the fix; the report carries both tables.
+
+**Recorded 2026-10-21** (folio-win11, 2 logical processors, so the hog runs 4 spinners):
+
+| cell | before3 (7d00c2ed) | after6 (1b911da7) |
+|---|---|---|
+| exercised | yes: the boxed tab printed, 18 / 17 / 19 cycles | **no**: the driver was refused the foreground (one present in three minutes) |
+| turns/s (baseline / hog / after) | ≥103 / ≥127 / ≥97 | — |
+| stale turns (baseline / hog / after) | 289 / 374 / 397, single turns: LiveStability, StripAnimation, RefusedFrame 1–5 ms (one 42 ms); TerminalThumbs ~0.4 s twice a phase | — |
+| ForegroundProgram spin | none (the boxed tab was not an armed candidate; see the report) | — |
+| keyboard echo p50 / p95 | 5.5 / 25 → 21.8 / 50 → 6.6 / 21 ms | — |
+| present cadence p50 | 8.3 → 18.9 → 9.9 ms | — |
+| shell output p50 | 3.1 → 3.3 → 4.2 ms | — |
+| close | ok | **FAILED**: Folio, OpenConsole, the shell and its conhost still running 85 minutes after WM_CLOSE (the run before the close cell; the hang reports were not kept) |
 
 ## 5. 截图清单
 
