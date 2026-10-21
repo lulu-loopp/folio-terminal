@@ -98,6 +98,15 @@ $guestCandidate = "$GuestHome\candidate"
 Invoke-Vmrun -Door $door -Step 'revert' -Verb 'revertToSnapshot' -Arguments @($Snapshot) | Out-Null
 Invoke-Vmrun -Door $door -Step 'start' -Verb 'start' -Arguments @('nogui') | Out-Null
 Wait-GuestReady -Door $door
+# **A guest reverted to `clean` must not sleep during the row.** Its power plan's idle timers run
+# from boot: on 2026-10-21 three rows lost their guest to an ACPI S1 suspend some 13-21 minutes
+# after boot (vmware.log `PMAccessPM got ACPI S1 request`), mid-row when the session was slow to
+# come. Standby, monitor and hibernate timeouts on AC to 0, every row, before anything else —
+# idempotent, and a guest operation that needs no interactive session.
+foreach ($setting in @('standby-timeout-ac', 'monitor-timeout-ac', 'hibernate-timeout-ac')) {
+    Invoke-Vmrun -Door $door -Step 'no sleep' -Verb 'runProgramInGuest' -InGuest `
+        -Arguments @('C:\Windows\System32\powercfg.exe', "/change $setting 0") | Out-Null
+}
 try {
     # Idempotent and in any guest language: `cmd`'s own `mkdir` makes the intermediate folders,
     # and `if not exist` leaves a folder the snapshot already has alone (createDirectoryInGuest
