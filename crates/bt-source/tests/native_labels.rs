@@ -39,8 +39,8 @@ use std::path::Path;
 use std::str::FromStr;
 
 use bt_source::{
-    Certainty, DiskScope, FileRecord, ImplRecord, Index, ItemRecord, LiteralRecord, LiteralValue, Occurrence,
-    Span, TargetId, TargetKind, TargetRoot, Universe, Vendor, report,
+    Certainty, DiskScope, FileRecord, ImplRecord, Index, ItemRecord, LiteralRecord, LiteralValue,
+    Occurrence, Span, TargetId, TargetKind, TargetRoot, Universe, Vendor, report,
 };
 use proc_macro2::{Delimiter, TokenStream, TokenTree};
 
@@ -261,7 +261,10 @@ fn judge(index: &Index, guarded: &Guarded<'_>) -> Vec<String> {
         }
         let path = file.path().to_string_lossy().replace('\\', "/");
         for found in literals_of(index.text(file.span()), file.span().start()) {
-            if matches!(found.place, Place::Attribute | Place::ErrorText | Place::Abi) {
+            if matches!(
+                found.place,
+                Place::Attribute | Place::ErrorText | Place::Abi
+            ) {
                 continue;
             }
             let in_scope = spans
