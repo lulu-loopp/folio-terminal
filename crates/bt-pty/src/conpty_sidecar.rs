@@ -11,18 +11,18 @@
 //! (`docs/DESIGN.md`, 2026-09-26). The pins, the two entries and the files they land as are the
 //! script's, unchanged; `vendor/conpty/README.md` is where they are published.
 //!
-//! The archive reader is the stored-and-deflated subset of the zip format that the package uses:
-//! the end-of-central-directory record, the central directory, and each local header, with the
-//! inflating done by `miniz_oxide`, which is already in `Cargo.lock` through `flate2` and `png`, so
-//! reading the package costs no new package. SHA-256 is `bt_winres::digest`, the workspace's one
+//! The pin check and the archive reader — the stored-and-deflated subset of the zip format the
+//! package uses, inflated by `miniz_oxide` — are `bt_winres::pinned`, which `bt-app`'s build
+//! script takes the PSReadLine package apart with too (T-INTEGRATION-INJECT-2-BUILD moved them
+//! there from this file unchanged). SHA-256 is `bt_winres::digest`, the workspace's one
 //! written-out copy of FIPS 180-4, which `bt-app`'s build script hashes the release archive's
 //! members with too; the standard's own examples hold it there.
 
 use std::path::{Path, PathBuf};
 
 pub use bt_winres::digest::{hex, sha256};
+pub use bt_winres::pinned::{entry as zip_entry, verify_pinned};
 use bt_winres::release_manifest::sidecar_key;
-use bt_winres::zip;
 
 /// The vendored package, by file name. `build.rs` joins it to `WORKSPACE/vendor/conpty`.
 pub const PACKAGE: &str = "Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg";
@@ -74,20 +74,6 @@ pub fn exported(profile_dir: &Path) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// **Refuses `bytes` unless their SHA-256 is `pinned`, and the refusal names `name`.**
-///
-/// `pinned` is lower-case hex, the way every pin in this repository is written.
-pub fn verify_pinned(name: &str, bytes: &[u8], pinned: &str) -> Result<(), String> {
-    let actual = hex(&sha256(bytes));
-    if actual == pinned {
-        Ok(())
-    } else {
-        Err(format!(
-            "{name}: SHA-256 is {actual}, but the pinned official asset's is {pinned}"
-        ))
-    }
-}
-
 /// **The verified sidecar, out of the verified package**: each of [`SIDECAR`] with its bytes.
 ///
 /// The package is checked against [`PACKAGE_SHA256`] before a byte of it is parsed, and each entry
@@ -102,73 +88,6 @@ pub fn unpack(package: &[u8]) -> Result<Vec<(&'static SidecarFile, Vec<u8>)>, St
             Ok((file, bytes))
         })
         .collect()
-}
-
-/// **The contents of the entry called `name` in the zip archive `archive`.**
-///
-/// Stored and deflated entries are read. An encrypted entry, another compression method, or a
-/// ZIP64 archive (whose sizes do not fit the fields read here) is an error that says which. The
-/// records are read through `bt_winres::zip`, the workspace's one copy of the format's layout,
-/// which the updater's archive reader reads a release archive with too (0.4.6 ticket U-14).
-pub fn zip_entry(archive: &[u8], name: &str) -> Result<Vec<u8>, String> {
-    let tail_start = archive
-        .len()
-        .saturating_sub(zip::END_RECORD_BYTES + zip::MAX_COMMENT_BYTES);
-    let (_, end) = zip::find_end(&archive[tail_start..])?;
-    if end.entries == u16::MAX || end.directory_size == u32::MAX || end.directory_offset == u32::MAX
-    {
-        return Err("a ZIP64 archive, which this reader does not read".to_owned());
-    }
-
-    let mut at = end.directory_offset as usize;
-    for _ in 0..end.entries {
-        let (entry, next) = zip::central_entry(archive, at)?;
-        at = next;
-        if entry.name != name.as_bytes() {
-            continue;
-        }
-
-        if entry.flags & zip::FLAG_ENCRYPTED != 0 {
-            return Err(format!("{name} is encrypted"));
-        }
-        if entry.compressed_size == u32::MAX
-            || entry.size == u32::MAX
-            || entry.local_offset == u32::MAX
-        {
-            return Err(format!(
-                "{name} is a ZIP64 entry, which this reader does not read"
-            ));
-        }
-        let local = entry.local_offset as usize;
-        let header = archive
-            .get(local..)
-            .ok_or_else(|| format!("{name}: its local header at {local} is past the end"))
-            .and_then(|rest| {
-                zip::local_header(rest).map_err(|error| format!("{name}: {error} (offset {local})"))
-            })?;
-        let data = zip::slice(
-            archive,
-            local + header.length,
-            entry.compressed_size as usize,
-        )?;
-        let contents = match entry.method {
-            zip::STORED => data.to_vec(),
-            zip::DEFLATED => {
-                miniz_oxide::inflate::decompress_to_vec_with_limit(data, entry.size as usize)
-                    .map_err(|e| format!("{name} does not inflate: {:?}", e.status))?
-            }
-            other => return Err(format!("{name} uses compression method {other}")),
-        };
-        if contents.len() != entry.size as usize {
-            return Err(format!(
-                "{name} inflated to {} bytes, but its directory entry says {}",
-                contents.len(),
-                entry.size
-            ));
-        }
-        return Ok(contents);
-    }
-    Err(format!("no entry named {name}"))
 }
 
 #[cfg(test)]

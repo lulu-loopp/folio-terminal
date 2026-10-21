@@ -167,7 +167,6 @@ impl<B: Backend> Runtime<'_, B> {
             }
             ImeOwner::Modal if self.window.dirty_gate.is_open() => "dirty_gate",
             ImeOwner::Modal if self.window.first_run.is_open() => "first_run",
-            ImeOwner::Modal if self.window.psreadline_invite.is_open() => "psreadline_invite",
             ImeOwner::Modal if self.paste_card_seat().is_some() => "paste_card",
             ImeOwner::Modal if self.update_card_is_up() => "update_card",
             ImeOwner::Modal if self.window.settings.is_open() => "settings",

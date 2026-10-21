@@ -87,8 +87,8 @@ facts from that one read; the sentence under the row is the filesystem
 predicate's own answer, said about an agent's configuration file rather than
 about a `$PROFILE` (`AgentConfigLink`, `AgentConfigHardLink`,
 `AgentConfigReadOnly`), and the switch itself takes no press in either direction
-while it stands there — `SettingsRow::option_enabled`, the rule `PsReadLine`
-already keeps.
+while it stands there — `SettingsRow::option_enabled`, the rule every greyed
+picker in the dialog keeps.
 
 **Editing reformats.** Claude Code's and Copilot's files are re-serialised
 whole, so an entry Folio leaves alone comes back value-identical rather than

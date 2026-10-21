@@ -35,7 +35,6 @@ crates/bt-app/src/persist.rs	crate::persist::storage_dir	unjudged	-	1	T-ENV-UNJU
 crates/bt-app/src/persist.rs	crate::persist::storage_dir_as_it_stands	unjudged	-	1	T-ENV-UNJUDGED-ROWS	APPDATA, HOME and XDG_DATA_HOME, the data directory's place
 crates/bt-app/src/persist.rs	crate::persist::storage_dir_unmoved	unjudged	-	1	T-ENV-UNJUDGED-ROWS	APPDATA, HOME and XDG_DATA_HOME, the data directory's place
 crates/bt-app/src/psreadline.rs	crate::psreadline::documents_directory	door	BT_PSREADLINE_DOCUMENTS	0	T-TEST-DOORS-AT-THE-ENTRY	BT_PSREADLINE_DOCUMENTS, the PSReadLine installer's Documents redirect, read at use
-crates/bt-app/src/psreadline.rs	crate::psreadline::probe_override_from_env	door	BT_PSREADLINE_PROBE	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_PSREADLINE_PROBE, the upgrade invitation's photograph override, read at use
 crates/bt-app/src/pty_door.rs	crate::pty_door::bear	unjudged	-	1	T-ENV-UNJUDGED-ROWS	the block a shell inherits when no account environment can be read; its readers (ComposedEnvironment in derive_environment_for_birth, package_of_birth) ask for PROMPT, FORCE_HYPERLINK, ZDOTDIR, WSLENV, the locale variables and PATH, no BT_ name
 crates/bt-app/src/runtime/first_run.rs	crate::runtime::first_run::Runtime::raise_first_run_if_due	door	BT_FIRST_RUN_CARD	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_FIRST_RUN_CARD, read when the first-run card is considered
 crates/bt-app/src/shell_integration.rs	crate::shell_integration::ProbeEnvironment::apply	unjudged	-	1	T-ENV-UNJUDGED-ROWS	the inherited block a probe's child starts from

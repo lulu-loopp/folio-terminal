@@ -307,10 +307,11 @@ One box answers five questions at once, and `Enter` goes straight there.
   again** says. Starting Folio any other way opens a window, unless that row says
   otherwise.
 - Windows PowerShell 5.1 ships PSReadLine 2.0.0, which misplaces the input line
-  after the window is resized. Folio carries a patched 2.4.6 and installs it into
-  your module path on request. On a machine whose execution policy is still the
-  stock `Restricted`, the switch says so and hands you the `Set-ExecutionPolicy`
-  command that lets the module load.
+  after the window is resized. A Windows PowerShell pane in Folio runs Folio's own
+  copy of Microsoft's PSReadLine 2.4.5 instead, for Folio's panes only: nothing is
+  installed for your account and nothing is asked, under any execution policy,
+  and other windows keep the PSReadLine they have. If an earlier Folio installed
+  its patched copy into Documents, **Settings > Terminal** offers to remove it.
 
 ## macOS integration
 
@@ -328,12 +329,11 @@ One box answers five questions at once, and `Enter` goes straight there.
 - **Paths are written from your home directory.** A file under it reads
   `~ › …` in the files column, and the `~` is a step you can click like any
   other.
-- **Three Settings rows are not on a Mac at all** — the Explorer context menu,
-  the PowerShell integration and the PSReadLine repair. None of the three has a
-  macOS counterpart, and a greyed row explaining a mechanism the machine does
-  not have only teaches a Windows word. One row is a Mac's alone: **Option key
-  sends Alt**, off by default, so that Option keeps typing the character it is
-  printed with.
+- **Two Settings rows are not on a Mac at all** — the Explorer context menu and
+  Acrylic. Neither has a macOS counterpart, and a greyed row explaining a
+  mechanism the machine does not have only teaches a Windows word. One row is a
+  Mac's alone: **Option key sends Alt**, off by default, so that Option keeps
+  typing the character it is printed with.
 - **Not on macOS:** the sparse-package route to the first page of a right-click
   menu, and the Store video extensions. macOS is **arm64 only** in this preview.
 

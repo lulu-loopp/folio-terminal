@@ -27,19 +27,15 @@ bt-platform = { path = "../bt-platform", optional = true }
 # owner of a test's scratch name.
 bt-testpath = { path = "../bt-testpath", optional = true }
 
-# The build script unpacks the ConPTY sidecar out of its vendored NuGet package, which is a zip,
-# and inflates its entries with this (`src/conpty_sidecar.rs`). It is already in the lock file
-# through `flate2` and `png`, so it costs no new package; it is pinned to that locked version.
-# The library compiles the same file for its tests, which hold it to the real package, so the
-# tests name it too.
-#
-# `bt-winres` is this workspace's SHA-256 (`bt_winres::digest`), shared with
-# `bt-app`'s build script so the workspace has one copy of the standard, and
-# the rule that names the `links` keys (`bt_winres::release_manifest::
-# sidecar_key`). It has no dependencies.
+# The build script unpacks the ConPTY sidecar out of its vendored NuGet package, which is a zip
+# (`src/conpty_sidecar.rs`). `bt-winres` reads it: its `inflate` feature is the pin check and the
+# entry reader (`bt_winres::pinned`, inflating with `miniz_oxide`, already in the lock file through
+# `flate2` and `png`), shared with `bt-app`'s build script, which takes the PSReadLine package
+# apart the same way. It is also this workspace's SHA-256 (`bt_winres::digest`) and the rule that
+# names the `links` keys (`bt_winres::release_manifest::sidecar_key`). The library compiles the
+# same file for its tests, which hold it to the real package, so the tests name it too.
 [build-dependencies]
-bt-winres = { path = "../bt-winres" }
-miniz_oxide = "=0.8.9"
+bt-winres = { path = "../bt-winres", features = ["inflate"] }
 
 # A transport does not depend on terminal policy: no code this crate ships names
 # `bt_term`. A terminal is only ever the thing a *test* puts in front of a real
@@ -60,8 +56,7 @@ bt-testpath = { path = "../bt-testpath" }
 bt-term = { path = "../bt-term" }
 # The frame a session projects, which `tests/image_placeholders_from_a_program.rs` reads.
 bt-viewport = { path = "../bt-viewport" }
-bt-winres = { path = "../bt-winres" }
-miniz_oxide = "=0.8.9"
+bt-winres = { path = "../bt-winres", features = ["inflate"] }
 
 # The Unix child tests ask the kernel whether a pid is still in its table with `kill(pid, 0)`;
 # `nix` is already in the tree through `portable-pty`, so this adds no package, and its

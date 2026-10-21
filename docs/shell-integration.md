@@ -712,10 +712,11 @@ be copied; the status line was drawn on one frame of the focused pane and discar
 fell back while you were looking at another tab announced it to nobody.
 
 If you are on Windows PowerShell 5.1 by choice (`BT_SHELL=powershell.exe`, or no PowerShell 7
-install at all) and see stray/duplicated characters on a wrapped, unsubmitted input line right
-after narrowing the window, that is the PSReadLine 2.0.0 defect above — `Install-Module
-PSReadLine` (from the PowerShell Gallery) resolves it without changing anything else about your
-profile.
+install at all), a Folio pane does not show the PSReadLine 2.0.0 defect above: since 2026-10-17 a
+Windows PowerShell pane runs Folio's own copy of Microsoft's PSReadLine 2.4.5, for that pane only
+(see *Folio's PSReadLine in a Windows PowerShell pane* below). Another terminal still runs the 2.0.0
+that Windows ships; what you install for your own account there is yours to decide, and Folio
+neither installs anything for it nor asks.
 
 ## zsh
 
@@ -757,6 +758,32 @@ requires PSReadLine. PowerShell 7 may revive only its already-loaded in-box PSRe
 execution policy prevented module registration; Windows PowerShell does not take that path. A
 missing PSReadLine installation, non-FullLanguage session, refused argv, failed preparation or
 unreadable owned script emits no marks and uses fallback behavior. No execution policy is changed.
+
+### Folio's PSReadLine in a Windows PowerShell pane
+
+Windows PowerShell 5.1 ships PSReadLine 2.0.0, which keeps the edit line anchored to the width the
+pane had before a resize; Folio's resize repair needs 2.4. So a Windows PowerShell pane that Folio
+integrates runs **Microsoft's signed PSReadLine 2.4.5**, the PowerShell Gallery's own package,
+carried inside `folio.exe` unmodified (its hash is pinned) and written, the first time a pane needs
+it, to `%LOCALAPPDATA%\Folio\psmodules\<build>\PSReadLine\2.4.5\`. The module is binary-only, so it
+loads under every execution policy, `Restricted` included.
+
+- **Only Folio's panes.** The pane's own `PSModulePath` starts with that folder, followed by what
+  Windows PowerShell would have had. Nothing is written to `Documents`, to your `$PROFILE` or to
+  your account's environment, so Windows Terminal and every other window keep the PSReadLine they
+  have. A `pwsh` you start inside the pane finds its own PSReadLine first.
+- **Folio's copy wins in Folio's panes.** Your profile's `Set-PSReadLineOption` and key handlers
+  configure it; `Import-Module PSReadLine` by name changes nothing, because that module is already
+  loaded. A profile that asks for another version by number (`Import-Module PSReadLine
+  -RequiredVersion 2.0.0`, say) gets that version, and the pane then loses the marks that end a
+  command (`C` and `D`) — the prompt and the commands still work.
+- **The switch.** Settings ▸ Terminal ▸ *Shell integration* off starts Windows PowerShell panes with
+  nothing of Folio's, PSReadLine included. A session in Constrained Language Mode is left as it is.
+- **An earlier Folio's copy.** Folio 0.1.0–0.4.7 could install a patched PSReadLine (`2.4.6-bt.*`)
+  into `Documents\WindowsPowerShell\Modules\PSReadLine`, where every Windows PowerShell of your
+  account loads it. Folio no longer uses or updates it. While it is there, Settings ▸ Terminal
+  shows *Earlier PSReadLine copy* with *Remove it from Documents*; uninstalling Folio removes it
+  too. A PSReadLine that Folio did not write is never touched.
 
 ### The old names still work
 

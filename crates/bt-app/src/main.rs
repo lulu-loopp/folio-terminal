@@ -157,6 +157,11 @@ mod profiles_merge;
 mod programs_ear;
 mod programs_lane;
 mod psreadline;
+// The build script's PSReadLine package reader and its pins (T-INTEGRATION-INJECT-2-BUILD),
+// compiled here only so its tests run: `build.rs` reaches the same file by `#[path]`, and what
+// ships is the container it writes (`psreadline::module_files`).
+#[cfg(test)]
+mod psreadline_artefact;
 mod pty_door;
 mod quake;
 mod quit;
@@ -574,24 +579,14 @@ enum AppEvent {
     /// must wake only the seat that asked rather than every tree, every preview
     /// and every formula in the tab.
     GitReady,
-    /// **The PSReadLine probe answered** (§7.1.6c-5).
-    ///
-    /// The fifth of the same family and separate for the same reason, read from
-    /// the other end: it is the only one whose answer can land while a *modal*
-    /// is up. A dialog standing on the Terminal page draws a row that says
-    /// "Checking this machine's PSReadLine", and while it is up there is no
-    /// shell output, no hover and no keystroke to produce the frame that would
-    /// replace that line — so the probe has to ask for one itself.
-    PsReadLineProbed,
     /// **A PowerShell has said where its own `$PROFILE` is** (§7.1.6j).
     ///
-    /// The sixth of the same family, and separate from `PsReadLineProbed` for
-    /// the reason that one is separate from `GitReady`: the answers arrive from
-    /// two different processes at two different moments, and one variant would
-    /// mean a probe that finished first waking the window a second time when the
-    /// other did. Its own wake is owed for the reason that one's is: a pane that
-    /// has printed its prompt and gone quiet produces no further frame, so an
-    /// answer landing after that frame would sit unread until somebody typed.
+    /// The fifth of the same family. Its own wake is owed: a pane that has printed its prompt
+    /// and gone quiet produces no further frame, so an answer landing after that frame would sit
+    /// unread until somebody typed. It also carries the earlier Folio's PSReadLine copy's
+    /// observation and removal (`psreadline::begin_legacy_observation`,
+    /// `psreadline::begin_legacy_removal`; T-INTEGRATION-INJECT-2-BUILD), which are answers
+    /// about the same family of legacy PowerShell artefacts for the same Terminal page.
     PowerShellProfileProbed,
     /// **The copilot version probe answered** (`attention_copilot`).
     ///
@@ -950,8 +945,7 @@ impl AppEvent {
             Self::ClipboardAnswered => Station::ClipboardRead,
             Self::FileIndexReady => Station::FileIndex,
             Self::WebPageSpoke => Station::WebSpoke,
-            Self::PsReadLineProbed
-            | Self::PowerShellProfileProbed
+            Self::PowerShellProfileProbed
             | Self::CopilotProbed
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
@@ -13557,25 +13551,6 @@ struct App<B: Backend = Native> {
     // whatever this machine has registered for it, which is very often that same
     // editor. A start-up probe kept for a row nobody draws is a filesystem walk
     // answering a question the product no longer asks.
-    /// This user's Documents folder, asked of Windows once.
-    ///
-    /// Once because it cannot move under a running process, and stored rather
-    /// than re-asked because both the row and the dialog need it and a known
-    /// folder lookup is a COM call.
-    psreadline_documents: Option<PathBuf>,
-    /// Last observed Folio module: `None` is unread; `Some(InstalledCopy::None)`
-    /// is a completed reading that found no Folio copy.
-    ///
-    /// Cached because it is nine file reads and a version-resource walk, and the
-    /// settings dialog asks on every frame it draws. Read once when the probe
-    /// lands, after an install/removal, and on opening the Terminal page. The
-    /// App owns the slot, so additional windows do not repeat the first read.
-    ///
-    /// **Three answers since 2026-08-18**, and the middle one is why: a module an
-    /// older Folio wrote is neither "ours" nor "somebody else's", and a `bool`
-    /// made it the second, which is how it became a module this product had
-    /// installed and would not remove.
-    psreadline_installed: Option<psreadline::InstalledCopy>,
     /// Whether the ready first-run attempt has been consumed, even if no card
     /// could open. This is an edge latch, not another agent-availability cache.
     first_run_attempted: bool,
@@ -13588,9 +13563,8 @@ struct App<B: Backend = Native> {
     first_run_waited_for_agent_folders: bool,
     /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
     ///
-    /// Cached for [`Self::psreadline_installed`]'s reason and no other: the
-    /// settings dialog asks on every frame it draws, and the answer is four
-    /// registry opens. It is refreshed at the three moments it can change — the
+    /// Cached for one reason and no other: the settings dialog asks on every
+    /// frame it draws, and the answer is four registry opens. It is refreshed at the three moments it can change — the
     /// launch, an install and a removal — and at no other, because nothing else
     /// in this process can move it.
     ///
@@ -14013,7 +13987,6 @@ struct AppParts<B: Backend> {
     motion: Motion,
     profile_programs: profiles::ProfilePrograms,
     startup_shells: Option<StartupShells>,
-    psreadline_documents: Option<PathBuf>,
     context_menu_installed: bool,
     claude_hooks_installed: bool,
     codex_notify_installed: bool,
@@ -14068,7 +14041,6 @@ impl<B: Backend> App<B> {
             motion,
             profile_programs,
             startup_shells,
-            psreadline_documents,
             context_menu_installed,
             claude_hooks_installed,
             codex_notify_installed,
@@ -14121,7 +14093,6 @@ impl<B: Backend> App<B> {
             motion,
             profile_programs,
             startup_shells,
-            psreadline_documents,
             context_menu_installed,
             claude_hooks_installed,
             codex_notify_installed,
@@ -14168,7 +14139,6 @@ impl<B: Backend> App<B> {
             scheme_fault: None,
             scheme_source: [None, None],
             program_news: window_news::WindowSeats::default(),
-            psreadline_installed: None,
             first_run_attempted: false,
             first_run_waited_for_channel: false,
             first_run_waited_for_agent_folders: false,
@@ -16132,9 +16102,6 @@ struct WindowRuntime<B: Backend = Native> {
     /// **The ended tabs whose close waits for saves on their way** (S-6b), kept
     /// by the loop's cleanup (`Runtime::reap_exited_tabs`).
     exited_tab_waits: ExitedTabWaits,
-    /// The PSReadLine invitation, when the probe has found a shell that would
-    /// benefit (§7.1.6c-3b).
-    psreadline_invite: psreadline::Invite,
     /// **What the pointer is over on the multi-line paste card** (0.4.4 ticket 02) — the card's
     /// only state of its own. Whether it is up at all is not stored here: it is
     /// [`LeafSession::pending_paste`], read through `Runtime::paste_card_seat`.
@@ -16153,12 +16120,6 @@ struct WindowRuntime<B: Backend = Native> {
     /// its own. The state that says "once, ever" is in `settings.json`; this is
     /// only the surface.
     first_run: first_run::Card,
-    /// Whether the size row has been answered since the invitation was refused.
-    ///
-    /// The one exception in the trigger table, and it is deliberately *not*
-    /// persisted: it is a fact about this sitting, and a file that remembered it
-    /// would let a refusal from last month be re-opened by a font change today.
-    psreadline_size_changed: bool,
     /// **Which window the gate's confirmed answer has asked to go**, if it has —
     /// this window after its own shut, or the run's last ordinary window after
     /// the run's end was answered here, in the summoned terminal
@@ -19752,16 +19713,10 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::PowerShellScript => {
             shell_integration::begin_powershell_script_preparation();
         }
-        Writer::PsReadLineUpgrade => {
-            if let Some(documents) = psreadline::documents_directory()
-                && let Some(replacement) = psreadline::upgrade_recorded(
-                    &documents,
-                    &persist::storage_dir(),
-                    stores.settings.loaded().psreadline_invite,
-                )
-            {
-                eprintln!("{}", replacement.log_line());
-            }
+        // The same worker: the durable module is a birth's to write, and the artefacts the old
+        // build left are removed now that nothing of the old build is running.
+        Writer::PsReadLineModule => {
+            shell_integration::begin_powershell_script_preparation();
         }
         Writer::ExplorerRepair => explorer_menu::begin_probe(),
         Writer::ToastIdentity => {
@@ -22420,8 +22375,10 @@ fn coalesce_pty_resize_on_grid_change(
 ///
 /// The user's 2026-08-06 ruling turned it off on sight — freezing the reflow and cropping the old
 /// width read worse than the artefact it prevented — kept the machine as a policy bit at `false`,
-/// and ordered the root cause fixed instead. That fix shipped: the patched PSReadLine re-anchors
-/// itself, and `scripts/shell-integration/folio.ps1` needs no reflection repair at ≥ 2.4.6. The
+/// and ordered the root cause fixed instead. That fix shipped, as the patched PSReadLine that
+/// re-anchored itself; since T-INTEGRATION-INJECT-2-BUILD the root cause is repaired on Microsoft's
+/// own 2.4.5 — every pane's, Windows PowerShell's included — by `folio.ps1`'s reflection repair on
+/// the resize chord. The
 /// same ruling ends 「修好后扣留政策位永久退役」, and this is that retirement. A bit nailed to
 /// `false` in front of a state machine nothing can reach is not an option the product has; it is a
 /// second reading of the resize path that no test of the shipping one covers.
@@ -42705,13 +42662,6 @@ fn create_leaf_session(
             .is_some_and(|row| shell_integration::listens_for_a_locale(environment, &row.env))
         && locale_declaration::at_birth() == locale_declaration::AtBirth::Waiting;
     let in_birth = rows_wait || locale_waits;
-    // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
-    // this process, because the module that is broken is the one `Windows
-    // PowerShell 5.1` ships and nothing else on this machine is affected by it.
-    // Idempotent — see `psreadline::begin_probe`.
-    if !in_birth && spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
-        psreadline::begin_probe(psreadline::ProbeTrigger::Birth);
-    }
     // There used to be a second trigger here (§7.40 ③): a `wsl.exe` started
     // beside this spawn to ask the default distribution which shell it logs
     // into. It is gone as of 2026-09-07, because nothing waited for it and so
@@ -45316,6 +45266,11 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         for line in leaf.session.take_keyboard_protocol_notes() {
             diagnostics::note(&line);
         }
+        // **A pane whose PSReadLine is not Folio's after its profile ran** says so once, in the
+        // log and nowhere else (T-INTEGRATION-INJECT-2-BUILD round 2), on the same road.
+        for line in leaf.session.take_line_editor_notes() {
+            diagnostics::note(&line);
+        }
         Ok(DrainOutcome {
             // Taken here because this is the one place every leaf of every tab
             // passes through on every turn, which is the same sentence
@@ -46061,11 +46016,9 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         root_menu_shell_folders: Vec::new(),
         dirty_gate: restore::DirtyGate::default(),
         exited_tab_waits: ExitedTabWaits::default(),
-        psreadline_invite: psreadline::Invite::default(),
         paste_card_hover: None,
         update_card: update_card::Card::default(),
         first_run: first_run::Card::default(),
-        psreadline_size_changed: false,
         window_close_requested: None,
         shell_exit_close_requested: false,
         preview_menu: profiles::PreviewMenu::default(),
@@ -46621,22 +46574,8 @@ impl Runtime<'_, Native> {
             eprintln!("BT_PERSIST another Folio holds this data directory; nothing here is saved");
             settings_fault.get_or_insert_with(crate::i18n::second_instance_notice);
         }
-        // Before the first pane can start a probe of its own. A no-op unless
-        // `BT_PSREADLINE_PROBE` is set — see `psreadline::probe_override_from_env`
-        // for why the door exists and what it deliberately does not override.
-        psreadline::install_probe_override();
-        // And how the answer gets back to a window that may be sitting on a
-        // modal when it lands (§7.1.6c-5). Installed here, once, because the
-        // wake belongs to this process's event loop rather than to whichever of
-        // the probe's two triggers fires first — the pane starts it, the dialog
-        // needs the repaint, and they are not the same call.
-        {
-            let proxy = proxy.clone();
-            psreadline::install_wake(move || {
-                let _ = proxy.send_event(AppEvent::PsReadLineProbed);
-            });
-        }
-        // And the second probe's, beside it and for its argument (§7.1.6j).
+        // The `$PROFILE` probe's wake (§7.1.6j), installed here, once, because the wake belongs to
+        // this process's event loop; the earlier Folio's PSReadLine copy's answers ride it too.
         {
             let proxy = proxy.clone();
             shell_integration::install_wake(move || {
@@ -46923,32 +46862,26 @@ impl Runtime<'_, Native> {
         let focus_mode = settings_store.loaded().focus_mode;
         // Every row unknown until the walk asked for above has answered it.
         let mut profile_programs = profiles::ProfilePrograms::unknown();
-        // **Folio's own older PSReadLine is replaced here, without asking**
-        // (ruling 2026-09-21, option A; ticket 56). At the launch and before the
-        // first window, because a pane of this Folio starting a PowerShell is
-        // what would hold the old DLL open and make the write fail; and before
-        // the profile migration's worker, which takes the same marks lock. Only
-        // a build Folio recorded installing and older than the bundled one is
-        // touched (`psreadline::upgrade_decision`); a failure is one line here
-        // and the next launch tries again. On this thread, as the Settings
-        // row's own install is (RULES §38's debt).
-        let psreadline_documents = psreadline::documents_directory();
-        if let Some(documents) = psreadline_documents.as_deref()
-            && let Some(replacement) = psreadline::upgrade_recorded(
-                documents,
-                &persist::storage_dir(),
-                settings_store.loaded().psreadline_invite,
-            )
-        {
-            eprintln!("{}", replacement.log_line());
-        }
-        // **The first window, in `startup::resume`'s order**: the startup migration and
-        // the script's preparation, the window, the PowerShell questions, the first tab. What the
+        // **An earlier Folio's PSReadLine in Documents is looked for, never written**
+        // (T-INTEGRATION-INJECT-2-BUILD, owner ruling Q4): Folio's own panes run Folio's own
+        // module from its local data folder, so the launch replaces nothing; it only finds out,
+        // on a worker, whether the Terminal page owes the copy's removal row.
+        psreadline::begin_legacy_observation();
+        // **The first window, in `startup::resume`'s order**: Windows PowerShell's language
+        // question, the startup migration and the script's preparation, the window, the
+        // PowerShell questions, the first tab. What the
         // steps share is the program walk's answers, adopted by the window's title and by the
         // questions, and read by the first tab.
         let (opened, first) = startup::resume(
             &mut profile_programs,
             startup::FirstWindow {
+                // Only with the Shell integration switch on: a launch with it off starts no
+                // Windows PowerShell; a birth after it is turned on asks for itself.
+                language: || {
+                    shell_integration::begin_language_question(
+                        settings_store.loaded().shell_integration,
+                    )
+                },
                 migration: shell_integration::begin_startup_migration,
                 script: || {
                     // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
@@ -47582,7 +47515,6 @@ impl Runtime<'_, Native> {
             motion: read_motion_preference(),
             profile_programs,
             startup_shells,
-            psreadline_documents,
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
@@ -48136,26 +48068,6 @@ impl<B: Backend> Runtime<'_, B> {
         let content =
             self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
         let content_us = trace_start.map_or(0, |start| start.elapsed().as_micros());
-        // **The probe's second trigger** (§7.1.6c-5), and it is here because this
-        // is the one place that knows which page is being shown *and* is reached
-        // by every road to showing it — the gear, a press on the rail, an arrow
-        // walking it, and a page the dialog fell back to because the one it was
-        // on lost its rows. A trigger hung off those four separately is a
-        // trigger with a fifth door somebody will add later.
-        let psreadline_opened = self
-            .window
-            .settings
-            .take_psreadline_open_edge(content.probes_psreadline(self.window.settings.category()));
-        if psreadline_opened {
-            // Asked at every visit (T-PROBE-NO-CACHED-FAILURE): a module installed or updated
-            // while Folio runs is seen here, and a failed check is asked again. One probe per
-            // visit, never per frame while this page is open.
-            psreadline::begin_probe(psreadline::ProbeTrigger::TerminalPage);
-            // An out-of-band module change becomes visible when the reader
-            // opens its page. A redraw or hover on the open page is not an edge.
-            self.psreadline_documents();
-            self.refresh_psreadline_installed();
-        }
         // **The agent rows' own edge**, and it is not a convenience: their switches are inert
         // while the file they name is one this build will not edit, so a press cannot be what
         // notices that the reader has unpicked the link or cleared the read-only bit. Opening the
@@ -48185,21 +48097,12 @@ impl<B: Backend> Runtime<'_, B> {
             self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
         // Use the refreshed fact on this very layout, including its geometry.
-        let refreshed_values = (psreadline_opened || agents_opened).then(|| {
-            let state = self.psreadline_row_state();
-            settings::SettingsValues {
-                psreadline: state,
-                psreadline_install_available: psreadline::install_available(
-                    psreadline::probe(),
-                    state,
-                ) && self.app.psreadline_documents.is_some(),
-                psreadline_remove_available: psreadline::remove_available(state),
-                claude_hooks: self.app.claude_hooks_installed,
-                codex_notify: self.app.codex_notify_installed,
-                copilot_hooks: self.app.copilot_hooks_installed,
-                agent_config_refusals: self.app.agent_config_refusals,
-                ..values.clone()
-            }
+        let refreshed_values = agents_opened.then(|| settings::SettingsValues {
+            claude_hooks: self.app.claude_hooks_installed,
+            codex_notify: self.app.codex_notify_installed,
+            copilot_hooks: self.app.copilot_hooks_installed,
+            agent_config_refusals: self.app.agent_config_refusals,
+            ..values.clone()
         });
         let content = settings::SettingsContent {
             values: refreshed_values.as_ref().unwrap_or(&values),
@@ -48311,6 +48214,10 @@ impl<B: Backend> Runtime<'_, B> {
                 settings::retain_powershell_profile_remover(
                     &mut rows,
                     shell_integration::powershell_profile_line_present(),
+                );
+                settings::retain_legacy_psreadline_remover(
+                    &mut rows,
+                    psreadline::legacy_copy_present(),
                 );
                 rows
             },
@@ -48643,12 +48550,6 @@ impl<B: Backend> Runtime<'_, B> {
             // so the row has to report what it can see: the window it is standing
             // in. See `settings::SettingsValues::focus_mode`.
             focus_mode: self.window.focus_mode,
-            psreadline: self.psreadline_row_state(),
-            psreadline_install_available: psreadline::install_available(
-                psreadline::probe(),
-                self.psreadline_row_state(),
-            ) && self.app.psreadline_documents.is_some(),
-            psreadline_remove_available: psreadline::remove_available(self.psreadline_row_state()),
             profile_available: (0..profiles::count())
                 .map(|index| self.app.profile_programs.row_is_available(index))
                 .collect(),
@@ -49328,21 +49229,13 @@ impl<B: Backend> Runtime<'_, B> {
                 .loaded()
                 .terminal_cjk_font_family
                 .clone();
-            if self.apply_terminal_font(family, cjk_family, size)? {
-                // S110's one exception to "asked once": the row whose visible
-                // consequence on an unpatched 5.1 *is* the bug the module fixes.
-                // See `psreadline::invite_decision`.
-                self.window.psreadline_size_changed = true;
-            }
+            self.apply_terminal_font(family, cjk_family, size)?;
         }
         if let Some(name) = settings::light_scheme_requested(target) {
             self.apply_scheme(Some(name.to_owned()), None)?;
         }
         if let Some(name) = settings::dark_scheme_requested(target) {
             self.apply_scheme(None, Some(name.to_owned()))?;
-        }
-        if let Some(install) = settings::psreadline_requested(target) {
-            self.apply_psreadline(install)?;
         }
         // Both rail combos go through the one constructor: the layout choice
         // keeps the sidebar mode standing and the sidebar choice keeps the
@@ -49450,6 +49343,9 @@ impl<B: Backend> Runtime<'_, B> {
                 }
                 None if row == settings::SettingsRow::PowerShellProfileLine => {
                     shell_integration::begin_removal();
+                }
+                None if row == settings::SettingsRow::LegacyPsReadLine => {
+                    psreadline::begin_legacy_removal(self.window_id());
                 }
                 None => {}
             },
@@ -49663,7 +49559,6 @@ impl<B: Backend> Runtime<'_, B> {
             // somebody moves it, and this is the one row in the dialog whose
             // reset would switch a network request back on.
             | Row::AutoCheck
-            | Row::PsReadLine
             | Row::Scrollback
             | Row::LineWrapping
             | Row::CopyOnSelect
@@ -49706,6 +49601,7 @@ impl<B: Backend> Runtime<'_, B> {
             | Row::ImportSettings
             | Row::SettingsFolder
             | Row::PowerShellProfileLine
+            | Row::LegacyPsReadLine
             // And the uninstaller's rows (T-UNINSTALL-UX): a door, a switch that
             // lives for one visit, and a fact about who installed this copy.
             | Row::Uninstall
@@ -49755,7 +49651,6 @@ impl<B: Backend> Runtime<'_, B> {
         let card_above = self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
-            || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
             || self.uninstall_card_is_up();
@@ -70914,19 +70809,6 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // order the worker served them, in the window that turns the application's clocks —
             // the window the storage pass's cards belong to.
             AppEvent::DocumentsAnswered => self.take_document_answers(),
-            // The answer is already in `psreadline::probe()`; what is owed is a
-            // frame that reads it. `refresh_chrome` rebuilds the row's sentence
-            // from scratch — `SettingsRow::description` asks `row_state` afresh
-            // every time — so there is nothing to apply, only something to draw.
-            // On every window, because the row is a fact about this machine and
-            // any of them may be showing it.
-            AppEvent::PsReadLineProbed => self.for_each_window(|runtime| {
-                if runtime.refresh_chrome() {
-                    runtime.present_chrome_change()
-                } else {
-                    Ok(())
-                }
-            }),
             // The answer is already in the legacy-profile observation or
             // removal report. What is owed is a frame that reveals or hides the
             // conditional Settings cleanup verb, plus any removal result.
@@ -70936,15 +70818,28 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // here. A removal that found nothing to remove changed nothing,
                 // so it says nothing.
                 let mut removal = shell_integration::take_removal();
-                // Each answer is addressed to the window whose click asked for it; an answer
-                // for a window that has since closed is delivered nowhere.
+                // Each answer below is addressed to the window whose click asked for it; an answer
+                // for a window that has since closed is delivered nowhere. The earlier Folio's
+                // PSReadLine copy's removal is said as the report is
+                // (`psreadline::LegacyRemoval::window_text`): a copy gone since the row was drawn
+                // says nothing.
+                let legacy = psreadline::take_legacy_removals();
                 let installs = shell_integration::take_profile_installs();
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()?;
                     }
-                    if let Some((refused, text)) =
-                        removal.take().and_then(|report| report.window_text())
+                    let window = runtime.window_id();
+                    for (refused, text) in removal
+                        .take()
+                        .and_then(|report| report.window_text())
+                        .into_iter()
+                        .chain(
+                            legacy
+                                .iter()
+                                .filter(|(asked_by, _)| *asked_by == window)
+                                .filter_map(|(_, answer)| answer.window_text()),
+                        )
                     {
                         runtime.toast(
                             if refused {
@@ -78814,7 +78709,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 29] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 30] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -78863,6 +78758,9 @@ mod platform_gate_tests {
         "psreadline.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
+        // Windows-only test fixtures: real Windows PowerShell 5.1 panes running Folio's
+        // PSReadLine through a real ConPTY, beside the composition's every-platform tests.
+        "shell_integration_psreadline_tests.rs",
         // Native invalid-name, Windows spelling and direct CRT test fixtures only;
         // the pure encoders stay here as paste-paths design section 5 specifies.
         "shell_literal.rs",
@@ -81240,7 +81138,6 @@ mod edit_menu_clipboard_tests {
             "self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)",
             "self.window.dirty_gate.is_open()",
             "self.window.first_run.is_open()",
-            "self.window.psreadline_invite.is_open()",
             "self.paste_card_seat().is_some()",
             "self.update_card_is_up()",
             "self.settings_layout().is_some()",

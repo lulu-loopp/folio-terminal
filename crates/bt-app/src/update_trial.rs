@@ -165,9 +165,14 @@ pub(crate) enum Writer {
     /// build's bytes and otherwise writes its own copy under the system
     /// temporary directory; the release repairs the durable copy on a worker.
     PowerShellScript,
-    /// The launch's replacement of Folio's own older PSReadLine and its stamp
-    /// (`psreadline::upgrade_recorded`, ticket 56).
-    PsReadLineUpgrade,
+    /// Folio's PSReadLine module a Windows PowerShell pane loads, in the local
+    /// data folder, and the launch's removal of the artefacts other builds left
+    /// (`shell_integration::psreadline_module_for_birth`,
+    /// T-INTEGRATION-INJECT-2-BUILD). Held back, a trial names the durable copy
+    /// only when it already holds this build's bytes and otherwise writes its own
+    /// under the system temporary directory, and removes nothing; the release
+    /// prepares the durable copy on a worker.
+    PsReadLineModule,
     /// The launch probe's repair and renewal of the Explorer package
     /// registration (`explorer_menu::begin_probe`; the gate is asked in
     /// `explorer_menu::probe_at_start`, U-25).
@@ -198,7 +203,7 @@ impl Writer {
             | Writer::BashScript
             | Writer::ZshScripts
             | Writer::PowerShellScript
-            | Writer::PsReadLineUpgrade
+            | Writer::PsReadLineModule
             | Writer::ExplorerRepair
             | Writer::ToastIdentity
             | Writer::RecoveredAnnouncement => false,
@@ -221,7 +226,7 @@ impl Writer {
         Writer::BashScript,
         Writer::ZshScripts,
         Writer::PowerShellScript,
-        Writer::PsReadLineUpgrade,
+        Writer::PsReadLineModule,
         Writer::ExplorerRepair,
         Writer::ToastIdentity,
         Writer::RecoveredAnnouncement,
@@ -4300,15 +4305,13 @@ mod tests {
     /// **The folder O left**: a data folder under its old name (where the
     /// platform had one), with a `settings.json` O wrote, a `keybindings.json`
     /// this build cannot read, the integration marks record and the reader's
-    /// own profile — and, where there is PSReadLine, Folio's own older build in
-    /// `Documents`. Answers whether that last one stands.
+    /// own profile — and, where this build carries Folio's PSReadLine, the
+    /// module artefact another build wrote into the local data folder. Answers
+    /// whether that last one stands.
     fn seed_what_the_old_build_left(root: &Path) -> bool {
         let data = seeded_data_folder(root);
         std::fs::create_dir_all(&data).unwrap();
-        let settings = bt_persist::SettingsV1 {
-            psreadline_invite: bt_persist::PsReadLineInviteV1::Installed,
-            ..bt_persist::SettingsV1::default()
-        };
+        let settings = bt_persist::SettingsV1::default();
         bt_persist::write_settings_atomic(&data.join(persist::SETTINGS_FILE_NAME), &settings)
             .unwrap();
         std::fs::write(
@@ -4328,7 +4331,21 @@ mod tests {
             "typed by hand — 手写\n",
         )
         .unwrap();
-        crate::psreadline::tests::an_older_build_stands_in(&root.join("documents"))
+        // Another build's artefact (T-INTEGRATION-INJECT-2-BUILD): what a launch
+        // removes once nothing holds it, and what a trial leaves for the commit.
+        if crate::psreadline::module_files().is_empty() {
+            return false;
+        }
+        let other = root
+            .join("local")
+            .join("Folio")
+            .join("psmodules")
+            .join("0123456789ab")
+            .join("PSReadLine")
+            .join("2.4.4");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join(crate::psreadline::ASSEMBLY), "another build's").unwrap();
+        true
     }
 
     /// Every file under `root`, with its bytes.
@@ -4371,8 +4388,8 @@ mod tests {
             "RecoveredAnnouncement"
         } else if name.starts_with("update-check") {
             "UpdateCheck"
-        } else if text.starts_with("documents") {
-            "PsReadLineUpgrade"
+        } else if text.contains("psmodules") {
+            "PsReadLineModule"
         } else if name == "profile.ps1" || text.contains("marks") {
             "ProfileMigration"
         } else if text.contains(persist::STORAGE_NAME) {
@@ -4385,8 +4402,10 @@ mod tests {
     /// **A start's durable writers, in `Runtime::create`'s order**, each driven
     /// through its own product entry and each asked to write something: the
     /// data folder, the stores and a change to each, the update check's state,
-    /// the integration marks' migration, the shell scripts and the PSReadLine
-    /// upgrade, and the recovered folder's record. The registry writers (the
+    /// the integration marks' migration, the shell scripts and Folio's
+    /// PSReadLine module (written as a Windows PowerShell birth writes it, with
+    /// the launch's removal of other builds' artefacts), and the recovered
+    /// folder's record. The registry writers (the
     /// Explorer repair, the toast identity) are not run here: a test that
     /// reached them would change the machine it runs on.
     ///
@@ -4448,14 +4467,7 @@ mod tests {
         let _ = crate::shell_integration::script_path();
         let _ = crate::shell_integration::zdotdir_path();
 
-        let documents = root.join("documents");
-        if documents.exists() {
-            let _ = crate::psreadline::upgrade_recorded(
-                &documents,
-                &storage,
-                bt_persist::PsReadLineInviteV1::Installed,
-            );
-        }
+        let _ = crate::shell_integration::psreadline_module_for_birth();
 
         // And the recovered folder's question, which a start asks at its first frame
         // (T-RECOVERED-FOLDER): its record is written on its worker before it wakes.
@@ -4688,8 +4700,8 @@ mod tests {
     /// same writers over the same folder move the data folder to its new name
     /// (where there was an old one), keep the refused `keybindings.json`, write
     /// the documents and the update check's state, start
-    /// the marks' migration, write the scripts and replace the older
-    /// PSReadLine.
+    /// the marks' migration, write the scripts and Folio's PSReadLine module,
+    /// and remove the artefact another build left.
     ///
     /// MUTATION: make `Gate::defer` answer `true` whether or not the process
     /// is a trial.
@@ -4740,8 +4752,12 @@ mod tests {
         }
         if psreadline {
             assert!(
-                changed.contains("PsReadLineUpgrade"),
-                "the older PSReadLine is replaced:\n{changed}"
+                changed.contains("cb9390e97332") && changed.contains("PsReadLineModule"),
+                "Folio's PSReadLine module is written:\n{changed}"
+            );
+            assert!(
+                changed.contains("0123456789ab") && changed.contains("removed"),
+                "the artefact another build left is removed:\n{changed}"
             );
         }
         let _ = std::fs::remove_dir_all(&root);

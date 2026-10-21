@@ -49,8 +49,8 @@ use std::collections::BTreeMap;
 
 use bt_persist::{
     BackgroundFitV1, KeybindingsPlatformV1, KeybindingsV1, LanguageV1, LaunchOpensV1,
-    MinimumContrastV1, PsReadLineInviteV1, QuakeRestoreV1, SearchEngineV1, SettingsV1,
-    SplitDirectionV1, ThemeModeV1, WebColorSchemeV1,
+    MinimumContrastV1, QuakeRestoreV1, SearchEngineV1, SettingsV1, SplitDirectionV1, ThemeModeV1,
+    WebColorSchemeV1,
 };
 use serde_json::Value;
 
@@ -89,7 +89,6 @@ pub(crate) enum SettingChange {
         cjk_family: String,
         size: u8,
     },
-    PsReadLineInvite(PsReadLineInviteV1),
     LightScheme(String),
     DarkScheme(String),
     BackgroundImage(String),
@@ -171,9 +170,9 @@ impl SettingChange {
             Self::OptionSendsAlt(_) => SettingsRow::OptionSendsAlt,
             Self::MultilinePaste(_) => SettingsRow::MultilinePaste,
             Self::WebPages(_) => SettingsRow::WebPages,
-            // The two with no row: an answer the PSReadLine card was given, and
-            // which pages' Advanced groups are open. Each is read where it is used.
-            Self::PsReadLineInvite(_) | Self::AdvancedOpen(_) => {
+            // The one with no row: which pages' Advanced groups are open. It is read where it is
+            // used.
+            Self::AdvancedOpen(_) => {
                 return None;
             }
         })
@@ -204,7 +203,6 @@ impl SettingChange {
                 settings.terminal_cjk_font_family = cjk_family;
                 settings.terminal_font_size = size;
             }
-            Self::PsReadLineInvite(value) => settings.psreadline_invite = value,
             Self::LightScheme(value) => settings.light_scheme = value,
             Self::DarkScheme(value) => settings.dark_scheme = value,
             Self::BackgroundImage(value) => settings.background_image = value,
@@ -280,7 +278,6 @@ pub(crate) fn plan_settings(
         terminal_font_family,
         terminal_cjk_font_family,
         terminal_font_size,
-        psreadline_invite,
         light_scheme,
         dark_scheme,
         background_image,
@@ -374,10 +371,6 @@ pub(crate) fn plan_settings(
             cjk_family: terminal_cjk_font_family,
             size: terminal_font_size,
         },
-    );
-    offer(
-        current.psreadline_invite != psreadline_invite,
-        SettingChange::PsReadLineInvite(psreadline_invite),
     );
     offer(
         current.light_scheme != light_scheme,
@@ -752,7 +745,6 @@ mod tests {
             terminal_font_family: "Test Mono".to_owned(),
             terminal_cjk_font_family: "Test Han".to_owned(),
             terminal_font_size: base.terminal_font_size + 3,
-            psreadline_invite: PsReadLineInviteV1::Declined,
             light_scheme: "Pale (custom)".to_owned(),
             dark_scheme: "Deep (custom)".to_owned(),
             background_image: "ground.png".to_owned(),

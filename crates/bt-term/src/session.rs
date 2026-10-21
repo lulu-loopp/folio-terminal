@@ -1630,6 +1630,10 @@ pub struct DualPlaneSession {
     /// The `diagnostics.log` lines those refusals earned and nobody has collected yet — one per
     /// request that asked for a bit this session had not been asked for before.
     keyboard_protocol_notes: Vec<String>,
+    /// The `diagnostics.log` line a foreign PSReadLine report earned, until the application takes
+    /// it ([`Self::take_line_editor_notes`]); `line_editor_noted` says one was queued already.
+    line_editor_notes: Vec<String>,
+    line_editor_noted: bool,
     /// See [`SessionStatus::attention_request`] — the live value of the weak tier.
     attention_request: Option<u64>,
     /// **The weak tier's cursor: the next generation `=yes` will mint, and it never runs
@@ -2303,6 +2307,8 @@ impl DualPlaneSession {
             notifications: Vec::new(),
             keyboard_flags_refused: 0,
             keyboard_protocol_notes: Vec::new(),
+            line_editor_notes: Vec::new(),
+            line_editor_noted: false,
             attention_request: None,
             next_attention_generation: 1,
             failure_exit_code: None,
@@ -2464,6 +2470,29 @@ impl DualPlaneSession {
     /// is the one reader and writes each line to the log.
     pub fn take_keyboard_protocol_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.keyboard_protocol_notes)
+    }
+
+    /// **The `diagnostics.log` line this session's PSReadLine report earned**, taken
+    /// (T-INTEGRATION-INJECT-2-BUILD round 2).
+    ///
+    /// Folio's PowerShell integration says, once, when a Windows PowerShell pane's PSReadLine after
+    /// the profile ran is not the copy Folio put on its module path — a profile that demanded
+    /// another version by number (`Import-Module PSReadLine -RequiredVersion 2.0.0`). The first such
+    /// report in a session queues one line naming the version; any later one queues nothing, so a
+    /// pane says it once. No card: the line is where somebody asking why that pane lost its command
+    /// marks finds the answer. The application's drain is the one reader.
+    pub fn take_line_editor_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.line_editor_notes)
+    }
+
+    fn note_foreign_line_editor(&mut self, version: &str) {
+        if std::mem::replace(&mut self.line_editor_noted, true) {
+            return;
+        }
+        self.line_editor_notes.push(format!(
+            "shell integration: this pane's PSReadLine after its profile ran is {version}, not \
+             Folio's"
+        ));
     }
 
     /// Every kitty keyboard flag a program in this session has asked for and been refused.
@@ -12282,6 +12311,9 @@ impl DualPlaneSession {
                     requested,
                     in_force,
                 } => self.note_refused_keyboard_flags(requested, in_force),
+                LifecycleDirective::ForeignLineEditor { version } => {
+                    self.note_foreign_line_editor(&version);
+                }
                 LifecycleDirective::GridWrites { screen, rows } => {
                     let screen = match screen {
                         RemovalScreen::Primary => ScreenId::Primary,
@@ -39573,6 +39605,48 @@ mod tests {
         );
         session.feed(b"\x1b[>1u\x1b[=1u").unwrap();
         assert!(session.take_keyboard_protocol_notes().is_empty());
+    }
+
+    /// RED (T-INTEGRATION-INJECT-2-BUILD round 2) — **a Windows PowerShell pane whose PSReadLine
+    /// after the profile is not Folio's says so once, in one `diagnostics.log` line naming the
+    /// version** (`OSC 777;folio-psreadline;<version>`, sent by `folio.ps1`), and only a version is
+    /// read: a payload that is not one queues nothing, and none of it reaches the screen or the
+    /// notifications.
+    ///
+    /// MUTATION: drop the `line_editor_noted` latch — the second report queues a second line;
+    /// drop the verb's arm in `finish_osc_777` — no line at all.
+    #[test]
+    fn a_foreign_psreadline_is_named_once_in_the_diagnostics_log() {
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        session
+            .feed(b"\x1b]777;folio-psreadline;not a version\x07\x1b]777;folio-psreadline;\x07")
+            .unwrap();
+        assert!(
+            session.take_line_editor_notes().is_empty(),
+            "a payload that is not a version is not a report"
+        );
+        session
+            .feed(b"\x1b]777;folio-psreadline;2.0.0\x07\x1b]777;folio-psreadline;2.0.0\x07")
+            .unwrap();
+        assert_eq!(
+            session.take_line_editor_notes(),
+            [
+                "shell integration: this pane's PSReadLine after its profile ran is 2.0.0, not \
+              Folio's"
+            ]
+        );
+        session
+            .feed(b"\x1b]777;folio-psreadline;2.3.6\x07")
+            .unwrap();
+        assert!(
+            session.take_line_editor_notes().is_empty(),
+            "a pane says it once"
+        );
+        assert!(session.take_notifications().is_empty(), "never a card");
+        assert!(
+            session.take_keyboard_protocol_notes().is_empty(),
+            "a line of its own"
+        );
     }
 
     /// RED (T-KEYBOARD-PROTOCOL) — **OSC 133 does not touch the keyboard state: after `C`, a push

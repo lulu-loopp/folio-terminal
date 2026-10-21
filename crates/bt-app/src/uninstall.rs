@@ -108,7 +108,10 @@ const INVENTORY: &[Mark] = &[
         says: Text::CleanupMarkPsReadLine,
         kind: Kind::PerAccount,
         remover: Remover::PsReadLine,
-        writer: "psreadline.rs:install_recorded",
+        // The copy Folio 0.1.0–0.4.7 wrote into Documents (`psreadline::install_recorded`,
+        // retired by T-INTEGRATION-INJECT-2-BUILD): nothing writes it any more, and the uninstall
+        // still removes what an earlier Folio left (owner ruling Q4).
+        writer: "none (Folio 0.1.0-0.4.7's psreadline.rs:install_recorded, retired)",
     },
     Mark {
         name: "Claude Code hooks",
@@ -192,7 +195,9 @@ const INVENTORY: &[Mark] = &[
         says: Text::CleanupMarkLocal,
         kind: Kind::Data,
         remover: Remover::Data(HostPlatform::Windows, Base::Local, "Folio"),
-        writer: "webhost.rs:user_data_folder_in",
+        // WebView2's profile, and Folio's PSReadLine module for Windows PowerShell panes
+        // (`psmodules\<artefact>`, T-INTEGRATION-INJECT-2-BUILD), which the run takes whole.
+        writer: "webhost.rs:user_data_folder_in;shell_integration.rs:install_psreadline_module_at",
     },
     Mark {
         name: "Application Support",

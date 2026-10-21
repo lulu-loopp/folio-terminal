@@ -22,6 +22,12 @@ All notable changes to Folio are recorded here. The format follows
 - A keybindings.json that says it was written on Windows or Linux no longer reads `Cmd+` there, and one written on macOS no longer reads `Win+`; such a line now reads as the other system's key on that system, and a file with no recorded system still reads both. <!-- zh: pending T-STORE-MERGE-KEYBINDINGS -->
 - Quitting first saves any change to settings, shortcuts, profiles or pins that is not on disk yet. If one cannot be saved or kept in the recovered folder, Folio stays open and a card names the file, with a button to leave without that change; quitting again tries again. <!-- zh: pending T-QUIT-DOCUMENTS -->
 - If Folio stops after a failure with such a change unsaved, the change is kept in the recovered folder; if it cannot be kept anywhere, the system's own message says so. <!-- zh: pending T-QUIT-DOCUMENTS -->
+- In a Windows PowerShell pane, Folio now uses its own copy of Microsoft's PSReadLine 2.4.5, so a long command you are still typing stays in one piece when the pane is resized. It is kept in Folio's own folder and used by Folio's panes only: nothing is installed for the rest of your account, nothing is asked, and Windows Terminal and other windows keep the PSReadLine they have. <!-- zh: pending T-INTEGRATION-INJECT-2-BUILD -->
+- If an earlier Folio installed its PSReadLine into Documents, Folio no longer uses or updates it; Settings ▸ Terminal offers to remove it from Documents while it is there, and uninstalling Folio removes it. <!-- zh: pending T-INTEGRATION-INJECT-2-BUILD -->
+
+### Removed
+
+- The PSReadLine row on Settings ▸ Terminal, and the card that offered to install PSReadLine when a Windows PowerShell tab opened: there is nothing to install any more. <!-- zh: pending T-INTEGRATION-INJECT-2-BUILD -->
 
 ### Fixed
 

@@ -19,11 +19,10 @@ use std::path::PathBuf;
 use bt_persist::{
     BackgroundFitV1, DegradationReport, FilesViewV1, LanguageV1, LayoutNodeV1, LeafNodeV1,
     MinimumContrastV1, PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1, PreviewSourceV1,
-    PsReadLineInviteV1, ReadReport, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION,
-    SETTINGS_SCHEMA_VERSION, SearchEngineV1, SessionCursorStyleV1, SessionSidebarModeV1,
-    SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, SettingsV1, SplitDirectionV1,
-    TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1, read_session, read_settings,
-    write_session_atomic, write_settings_atomic,
+    ReadReport, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
+    SearchEngineV1, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1,
+    SessionV1, SessionWindowV1, SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1, TermLeafV1,
+    ThemeModeV1, read_session, read_settings, write_session_atomic, write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -1258,11 +1257,6 @@ fn settings_v7_fixture_migrates_to_v8_with_an_unnamed_face_and_disturbs_nothing(
         "16 is the size every v7 build drew at — the step writes that answer \
          down rather than changing it"
     );
-    assert_eq!(
-        v8.psreadline_invite,
-        PsReadLineInviteV1::NotAsked,
-        "a v7 build had no invitation, so this user is owed the offer once"
-    );
     assert_eq!(v8.theme_mode, ThemeModeV1::Dark);
     assert!(!v8.display_formulas);
     assert!(!v8.inline_formulas);
@@ -1318,11 +1312,6 @@ fn settings_v8_fixture_migrates_to_v9_with_no_scheme_named_and_disturbs_nothing(
     assert_eq!(v9.language, LanguageV1::Chinese);
     assert_eq!(v9.terminal_font_family, "Cascadia Mono");
     assert_eq!(v9.terminal_font_size, 20);
-    assert_eq!(
-        v9.psreadline_invite,
-        PsReadLineInviteV1::Installed,
-        "v8→v9 is structural: every sibling crosses untouched"
-    );
 }
 
 /// PIN — a v9 file that *names* both schemes is loaded without migration and
@@ -1354,7 +1343,6 @@ fn a_v9_settings_file_that_names_both_schemes_keeps_both_names() {
     assert_eq!(v9.language, LanguageV1::English);
     assert_eq!(v9.terminal_font_family, "MS Gothic");
     assert_eq!(v9.terminal_font_size, 14);
-    assert_eq!(v9.psreadline_invite, PsReadLineInviteV1::Declined);
 
     // And back out again, byte-for-byte in meaning: the pair a user chose is the
     // pair the next launch reads.
@@ -1420,7 +1408,6 @@ fn settings_v9_fixture_migrates_to_v10_with_the_ground_v9_drew_and_disturbs_noth
     assert_eq!(v10.language, LanguageV1::English);
     assert_eq!(v10.terminal_font_family, "Lucida Console");
     assert_eq!(v10.terminal_font_size, 12);
-    assert_eq!(v10.psreadline_invite, PsReadLineInviteV1::Dismissed);
     assert_eq!(v10.light_scheme, "One Half Light");
     assert_eq!(
         v10.dark_scheme, "Gruvbox Dark",

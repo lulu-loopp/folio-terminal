@@ -33,6 +33,17 @@
 //! and the bytes are the tree's and `bt-pty`'s ConPTY sidecar, whose paths
 //! arrive through that crate's `links` metadata. The format is
 //! `bt_winres::release_manifest`.
+//!
+//! And a fifth, which is about one of the things the executable carries: **Folio's Windows
+//! PowerShell line editor** (T-INTEGRATION-INJECT-2-BUILD). For a Windows target the four
+//! assemblies and the licence of Microsoft's PSReadLine 2.4.5 are taken out of the vendored
+//! package (`vendor/psreadline/`), each held to its pin (`src/psreadline_artefact.rs`, reached
+//! below by `#[path]` so its tests run with the crate's), and written with Folio's own manifest
+//! into one byte container in `OUT_DIR` (`psreadline_module.bin`), which `crate::psreadline`
+//! embeds and reads its rows from; the artefact's name arrives as `FOLIO_PSREADLINE_ARTEFACT`.
+//! No Rust source is generated, so every item the crate holds is one its source index can read.
+//! Every other target gets an empty container: Windows PowerShell is a Windows fact, so the
+//! bytes are the Windows executable's only.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -47,6 +58,9 @@ use bt_winres::release_manifest::{
 
 #[path = "src/update_eligibility.rs"]
 mod update_eligibility;
+
+#[path = "src/psreadline_artefact.rs"]
+mod psreadline_artefact;
 
 /// What the commit is called when there is no git to ask.
 ///
@@ -92,6 +106,52 @@ fn main() {
     }
 
     updater_flag();
+    psreadline_module(&workspace);
+}
+
+/// **The PSReadLine module this executable carries**, as `OUT_DIR/psreadline_module.bin` and
+/// `FOLIO_PSREADLINE_ARTEFACT`: the artefact's name (the package hash's first twelve hex), and one
+/// row per file — its path under the artefact's directory, `PSReadLine/2.4.5/<file>`, the
+/// directory PowerShell finds a module version in, then its bytes — the manifest last. A row is
+/// the path's length as a little-endian `u32`, the path, the bytes' length as a little-endian
+/// `u32`, the bytes (`crate::psreadline::module_rows` reads it back). For a Windows target the
+/// package is read and held to its pins; a refusal stops the build with the file named. For any
+/// other target the container is empty and the package is not read.
+fn psreadline_module(workspace: &Path) {
+    use psreadline_artefact::{MANIFEST, MODULE, PACKAGE, VERSION, artefact, unpack};
+
+    let package = workspace.join("vendor").join("psreadline").join(PACKAGE);
+    let manifest = workspace.join("assets").join("psreadline").join(MANIFEST);
+    println!("cargo:rerun-if-changed={}", package.display());
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rustc-env=FOLIO_PSREADLINE_ARTEFACT={}", artefact());
+
+    let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
+    if env("CARGO_CFG_TARGET_OS") == "windows" {
+        let bytes = std::fs::read(&package)
+            .unwrap_or_else(|error| panic!("read {}: {error}", package.display()));
+        let files =
+            unpack(&bytes).unwrap_or_else(|error| panic!("PSReadLine extraction failed: {error}"));
+        for (file, contents) in files {
+            rows.push((format!("{MODULE}/{VERSION}/{}", file.entry), contents));
+        }
+        let ours = std::fs::read(&manifest)
+            .unwrap_or_else(|error| panic!("read {}: {error}", manifest.display()));
+        rows.push((format!("{MODULE}/{VERSION}/{MANIFEST}"), ours));
+    }
+
+    let mut container = Vec::new();
+    for (name, contents) in &rows {
+        for part in [name.as_bytes(), contents.as_slice()] {
+            let length = u32::try_from(part.len())
+                .unwrap_or_else(|_| panic!("{name}: a row's part is longer than a u32 counts"));
+            container.extend_from_slice(&length.to_le_bytes());
+            container.extend_from_slice(part);
+        }
+    }
+    let out = PathBuf::from(env("OUT_DIR")).join("psreadline_module.bin");
+    std::fs::write(&out, container)
+        .unwrap_or_else(|error| panic!("write {}: {error}", out.display()));
 }
 
 /// **Whether this build may update itself**, from `FOLIO_UPDATER` and nothing

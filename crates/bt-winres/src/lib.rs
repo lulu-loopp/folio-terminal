@@ -64,6 +64,10 @@ pub mod release_manifest;
 /// (0.4.6 ticket U-14). See the module.
 pub mod zip;
 
+/// **A file out of a vendored package whose bytes are pinned**: the pin check, and the one entry
+/// taken out of the zip archive the package is (`inflate` feature). See the module.
+pub mod pinned;
+
 use std::fmt;
 
 /// `RT_ICON` — one image out of an `.ico`.

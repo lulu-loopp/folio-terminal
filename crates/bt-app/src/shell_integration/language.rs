@@ -1,0 +1,423 @@
+//! **Windows PowerShell's language mode, asked once and early** (T-INTEGRATION-INJECT-2-BUILD
+//! round 3b; the CLM design audit's ruling B′, 2026-10-18).
+//!
+//! A Windows PowerShell 5.1 pane is given Folio's PSReadLine only on a known answer: the edition
+//! said its `-Command` text runs in `FullLanguage`. On a machine whose 5.1 runs constrained (an
+//! application-control lockdown) the pane is exactly the pane Folio starts with Shell integration
+//! off — no loader, no module path prefix — so the account's in-box editor works as the
+//! administrator's policy vetted it. The question is the edition's own
+//! (`$ExecutionContext.SessionState.LanguageMode`, under `-NoProfile -NonInteractive`): PowerShell's
+//! lockdown test is an internal that Windows servicing changes, and asking the edition is faithful
+//! by construction.
+//!
+//! **Timing changes only how long a pane takes, never which editor it gets.** The question starts
+//! at launch, before the window (`startup::resume`); a 5.1 birth that arrives before the answer
+//! waits for it on its own birth worker — never the window thread — bounded by the question's own
+//! patience ([`super::POWERSHELL_PROBE_PATIENCE`]). A question that failed or ran out of patience
+//! gives that birth no prefix (the loader still integrates the account's editor, as before this
+//! ticket), says so once, and the next 5.1 birth asks again. A known answer is kept for the
+//! process: no cache across launches, so the launch after a lockdown changes asks afresh.
+
+use super::{
+    POWERSHELL_PROBE_PATIENCE, ProbeEnvironment, check_powershell, is_powershell, is_pwsh,
+};
+use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use bt_platform::admission::WorkerCtx;
+
+/// **What Windows PowerShell's `-Command` text runs in**, as its own answer said, or that no
+/// answer came.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Language {
+    /// `FullLanguage`: the pane gets Folio's PSReadLine and its loader.
+    Full,
+    /// Any other mode (`ConstrainedLanguage` under a lockdown): the pane is the switch-off pane.
+    Constrained,
+    /// The question was not answered — a refused start, a panic, a child that said nothing or ran
+    /// out of patience. The pane gets no prefix; the next birth asks again.
+    Failed,
+}
+
+/// The question the edition is asked: the language mode its `-Command` text runs in.
+pub(crate) const LANGUAGE_COMMAND: &str = "$ExecutionContext.SessionState.LanguageMode";
+
+/// **The answer in a child's standard output**, read from its last line that holds anything (a
+/// banner or a stray line before it is not the answer): `FullLanguage` is [`Language::Full`];
+/// one of PowerShell's three other modes is [`Language::Constrained`]; anything else — nothing, or
+/// a word that is not a language mode — is **no answer** ([`Language::Failed`]), never a
+/// constrained one (ruling B′, review of round 3: the prefix comes only from a known answer, and an
+/// unrecognised line on a `FullLanguage` machine must not switch its panes' integration off).
+#[must_use]
+pub(crate) fn language_from(stdout: &str) -> Language {
+    match stdout.lines().map(str::trim).rfind(|line| !line.is_empty()) {
+        Some("FullLanguage") => Language::Full,
+        Some("ConstrainedLanguage" | "RestrictedLanguage" | "NoLanguage") => Language::Constrained,
+        _ => Language::Failed,
+    }
+}
+
+/// **What a cell holds**: the number of the latest question put (`0` before any), whether it is
+/// out, and the newest answer filed with the number of the question it answers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct State {
+    asked: u64,
+    out: bool,
+    answered: Option<(u64, Language)>,
+}
+
+impl State {
+    /// A known answer: one a birth composes from without asking.
+    fn known(&self) -> Option<Language> {
+        match self.answered {
+            Some((_, answer @ (Language::Full | Language::Constrained))) => Some(answer),
+            _ => None,
+        }
+    }
+}
+
+/// **One edition's answer, and the births waiting for it.** Every question is numbered when it is
+/// put, and every question ends by filing an answer under its number, [`Language::Failed`]
+/// included, so a waiting birth always wakes — and wakes on the answer to the question that was
+/// out when it began waiting, or a newer one, never sleeping on through a question put after its
+/// own was answered (review of round 3, nit (a)).
+pub(crate) struct LanguageCell {
+    state: Mutex<State>,
+    landed: Condvar,
+    /// How many births are waiting now — what a test reads to file an answer only once a birth
+    /// is waiting for it.
+    waiting: std::sync::atomic::AtomicUsize,
+    /// How many times any birth has begun a wait — what a test reads to see a birth wait twice.
+    #[cfg(test)]
+    began_waits: std::sync::atomic::AtomicUsize,
+}
+
+impl LanguageCell {
+    pub(crate) const fn new() -> Self {
+        Self {
+            state: Mutex::new(State {
+                asked: 0,
+                out: false,
+                answered: None,
+            }),
+            landed: Condvar::new(),
+            waiting: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            began_waits: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// **The question a birth or a launch waits on, read and — when none is out — put, under one
+    /// lock**: `Ok` with a known answer, or `Err` with the number of the question out (`true` when
+    /// this call put it, and so must start its worker).
+    fn take_turn(&self) -> Result<Language, (u64, bool)> {
+        let mut state = self.state();
+        if let Some(answer) = state.known() {
+            return Ok(answer);
+        }
+        if state.out {
+            return Err((state.asked, false));
+        }
+        state.asked += 1;
+        state.out = true;
+        Err((state.asked, true))
+    }
+
+    /// **Put the question, unless one is out or a known answer is held**: a cell that never
+    /// asked, or whose last question failed, asks. `start` is handed the question's number,
+    /// starts the worker that files the answer under it, and says whether it started; one that
+    /// did not is a failed question, filed under that number. Answers the number put, if any.
+    pub(crate) fn ask(&self, start: impl FnOnce(u64) -> bool) -> Option<u64> {
+        match self.take_turn() {
+            Err((question, true)) => {
+                if !start(question) {
+                    self.file(question, Language::Failed);
+                }
+                Some(question)
+            }
+            Ok(_) | Err((_, false)) => None,
+        }
+    }
+
+    /// **File the answer to question `question`** and wake every birth waiting. A stale filing —
+    /// for a question already answered, or older than the one out — changes nothing: a refused
+    /// start is filed twice (the door's refusal and the asker's), and the second filing must not
+    /// answer a newer question some other birth has put meanwhile (review of round 4, nit (a′)).
+    pub(crate) fn file(&self, question: u64, answer: Language) {
+        let mut state = self.state();
+        let answered = state.answered.is_some_and(|(filed, _)| filed >= question);
+        if question != state.asked || answered {
+            return;
+        }
+        state.answered = Some((question, answer));
+        state.out = false;
+        drop(state);
+        self.landed.notify_all();
+    }
+
+    /// [`Self::file`] for the question out, then a new question put before any waiting birth can
+    /// look — the order a failed answer and another birth's asking again can land in. Answers the
+    /// new question's number.
+    #[cfg(test)]
+    pub(crate) fn file_and_ask_again(&self, answer: Language) -> u64 {
+        let mut state = self.state();
+        state.answered = Some((state.asked, answer));
+        state.asked += 1;
+        state.out = true;
+        let asked = state.asked;
+        drop(state);
+        self.landed.notify_all();
+        asked
+    }
+
+    /// **The answer a birth composes from**: a known answer at once; otherwise the question is put
+    /// (again, after a failure) and the birth waits — on `worker`, the birth's own, never the
+    /// window thread — for the answer to the question out when it began, or a newer one. Also how
+    /// long it waited, when it did.
+    pub(crate) fn for_birth(
+        &self,
+        worker: &WorkerCtx,
+        start: impl FnOnce(u64) -> bool,
+    ) -> (Language, Option<Duration>) {
+        let _ = worker;
+        let mine = match self.take_turn() {
+            Ok(answer) => return (answer, None),
+            Err((question, put)) => {
+                if put && !start(question) {
+                    self.file(question, Language::Failed);
+                }
+                question
+            }
+        };
+        let began = Instant::now();
+        let mut waited = false;
+        let mut state = self.state();
+        loop {
+            if let Some((question, answer)) = state.answered
+                && question >= mine
+            {
+                return (answer, waited.then(|| began.elapsed()));
+            }
+            waited = true;
+            self.waiting
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            #[cfg(test)]
+            self.began_waits
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            state = self
+                .landed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.waiting
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+
+    /// How many births are waiting for the answer now.
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> usize {
+        self.waiting.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// How many waits births have begun, all told.
+    #[cfg(test)]
+    pub(crate) fn began_waits(&self) -> usize {
+        self.began_waits.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Windows PowerShell's cell, for the process.
+static WINDOWS_POWERSHELL: LanguageCell = LanguageCell::new();
+
+/// Whether the constrained machine has been said this launch.
+static CONSTRAINED_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// **That a start put the language question** (T-INTEGRATION-INJECT-2-BUILD round 3b): the value
+/// `startup::FirstWindow::language` must answer, and only [`begin_language_question`] makes one.
+pub struct LanguageAsked(());
+
+#[cfg(test)]
+impl LanguageAsked {
+    /// The headless start's stand-in for the step.
+    pub(crate) fn stand_in() -> Self {
+        Self(())
+    }
+}
+
+/// **Ask Windows PowerShell its language mode, now, on a worker nobody waits for** — at launch,
+/// before the window, so the first 5.1 pane finds it answered or waits only for what is left of
+/// it. Only with the Shell integration switch on (`integration`; review of round 3, nit (h)): a
+/// launch with it off starts no Windows PowerShell; a birth with the switch on — turned on later
+/// included — asks for itself. Nothing is asked off Windows.
+pub fn begin_language_question(integration: bool) -> LanguageAsked {
+    begin_language_question_in(
+        &WINDOWS_POWERSHELL,
+        integration,
+        bt_platform::host_platform(),
+        |question| start_question(question, None),
+    )
+}
+
+/// [`begin_language_question`] over a cell, the switch, the platform and a question handed in.
+pub(crate) fn begin_language_question_in(
+    cell: &LanguageCell,
+    integration: bool,
+    platform: bt_platform::HostPlatform,
+    start: impl FnOnce(u64) -> bool,
+) -> LanguageAsked {
+    if integration && platform == bt_platform::HostPlatform::Windows {
+        cell.ask(start);
+    }
+    LanguageAsked(())
+}
+
+/// **The language a Windows PowerShell birth of `program` composes from**, waiting on the birth
+/// worker for an answer not yet in, and saying in `diagnostics.log` how long it waited.
+pub(crate) fn language_for_birth(worker: &WorkerCtx, program: &Path) -> Language {
+    let program = program.to_path_buf();
+    language_for_birth_in(
+        &WINDOWS_POWERSHELL,
+        worker,
+        |question| start_question(question, Some(program)),
+        &crate::diagnostics::note,
+    )
+}
+
+/// [`language_for_birth`] over a cell, a question and a voice handed in.
+pub(crate) fn language_for_birth_in(
+    cell: &LanguageCell,
+    worker: &WorkerCtx,
+    start: impl FnOnce(u64) -> bool,
+    note: &dyn Fn(&str),
+) -> Language {
+    let (answer, waited) = cell.for_birth(worker, start);
+    if let Some(waited) = waited {
+        note(&format!(
+            "Windows PowerShell: a pane waited {} ms for the edition's language mode ({answer:?})",
+            waited.as_millis()
+        ));
+    }
+    answer
+}
+
+/// Start the worker of question `question`, which files its answer under that number; `program`
+/// is the birth's own, or — at launch — the `powershell.exe` the account's environment names.
+fn start_question(question: u64, program: Option<PathBuf>) -> bool {
+    crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal)
+        .start_worker(
+            "powershell-language",
+            crate::lane::Answered::new(
+                "Windows PowerShell's language question",
+                crate::diagnostics::note,
+                move |_| WINDOWS_POWERSHELL.file(question, Language::Failed),
+            ),
+            move |worker| {
+                let environment =
+                    ProbeEnvironment::current(worker, "Windows PowerShell's language question");
+                let asked = program
+                    .or_else(|| environment.program(Path::new("powershell.exe")))
+                    .ok_or_else(|| "no powershell.exe on this account's path".to_owned())
+                    .and_then(|program| {
+                        check_powershell(
+                            worker,
+                            &program,
+                            LANGUAGE_COMMAND,
+                            None,
+                            POWERSHELL_PROBE_PATIENCE,
+                            &environment,
+                        )
+                        .map_err(|failure| failure.to_string())
+                    })
+                    .and_then(|output| {
+                        String::from_utf8(output.stdout).map_err(|error| error.to_string())
+                    });
+                let answer = match &asked {
+                    Ok(stdout) => language_from(stdout),
+                    Err(_) => Language::Failed,
+                };
+                say(answer, asked.err().as_deref(), &crate::diagnostics::note);
+                WINDOWS_POWERSHELL.file(question, answer);
+            },
+        )
+        .is_ok()
+}
+
+/// The `diagnostics.log` line an answer earns: a constrained machine once per launch, a failed
+/// question every time (with its cause), a `FullLanguage` answer nothing.
+fn say(answer: Language, cause: Option<&str>, note: &dyn Fn(&str)) {
+    say_with(answer, cause, &CONSTRAINED_SAID, note);
+}
+
+/// [`say`] with the launch's latch handed in.
+pub(crate) fn say_with(
+    answer: Language,
+    cause: Option<&str>,
+    said: &std::sync::atomic::AtomicBool,
+    note: &dyn Fn(&str),
+) {
+    match answer {
+        Language::Full => {}
+        Language::Constrained => {
+            if !said.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                note(
+                    "Windows PowerShell runs constrained on this machine (its language mode is not \
+                     FullLanguage); Folio's PSReadLine is not offered to its panes, which start as \
+                     with Shell integration off",
+                );
+            }
+        }
+        Language::Failed => note(&format!(
+            "Windows PowerShell's language mode could not be asked ({}); this pane gets no Folio \
+             PSReadLine, and the next pane asks again",
+            cause.unwrap_or("no answer")
+        )),
+    }
+}
+
+/// **A Windows PowerShell birth, decided from the edition's answer** — what the birth worker
+/// composes (`pty_door::bear`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WindowsPowerShellBirth {
+    /// Whether the integration's loader may be composed: the Shell integration switch, except on
+    /// a constrained edition, whose pane is the switch-off pane.
+    pub(crate) integration: bool,
+    /// Whether Folio's PSReadLine may be put on the pane's module path: only on `FullLanguage`.
+    pub(crate) prefix: bool,
+}
+
+/// **Decide a birth of `program`**: a program that is not Windows PowerShell 5.1, or a birth with
+/// the switch off, asks nothing; a 5.1 birth asks `language` — which waits — and composes from
+/// what it answers.
+pub(crate) fn windows_powershell_birth(
+    program: &Path,
+    integration: bool,
+    language: impl FnOnce() -> Language,
+) -> WindowsPowerShellBirth {
+    if !integration || !is_powershell(program) || is_pwsh(program) {
+        return WindowsPowerShellBirth {
+            integration,
+            prefix: false,
+        };
+    }
+    match language() {
+        Language::Full => WindowsPowerShellBirth {
+            integration: true,
+            prefix: true,
+        },
+        Language::Constrained => WindowsPowerShellBirth {
+            integration: false,
+            prefix: false,
+        },
+        Language::Failed => WindowsPowerShellBirth {
+            integration: true,
+            prefix: false,
+        },
+    }
+}

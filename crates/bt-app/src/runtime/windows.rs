@@ -2118,7 +2118,6 @@ impl<B: Backend> Runtime<'_, B> {
         self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
-            || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
             || self.window.settings.is_open()

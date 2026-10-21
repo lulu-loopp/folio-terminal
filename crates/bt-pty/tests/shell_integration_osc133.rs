@@ -169,10 +169,12 @@ impl ShellProbe {
         let mut command = PtyCommand::interactive_shell(shell).arg("-NoLogo");
         if let Some(policy) = execution_policy {
             command = command.arg("-ExecutionPolicy").arg(policy);
-            // Ticket 2 owns Folio's per-pane PSModulePath prefix. Keep this ticket's Restricted
-            // loader probe on the stock 5.1 module roots so a Documents copy installed by an
-            // earlier development build cannot replace the subject of the test. This declaration
-            // belongs to the child only and writes nothing.
+            // Folio's per-pane PSModulePath prefix is composed in bt-app
+            // (T-INTEGRATION-INJECT-2-BUILD), and its real Windows PowerShell panes are bt-app's
+            // `shell_integration::psreadline_tests`. Keep this Restricted loader probe on the stock
+            // 5.1 module roots so a Documents copy installed by an earlier development build cannot
+            // replace the subject of the test. This declaration belongs to the child only and
+            // writes nothing.
             if policy.eq_ignore_ascii_case("Restricted") {
                 let program_files = std::env::var_os("ProgramFiles").expect("ProgramFiles");
                 let system_root = std::env::var_os("SystemRoot").expect("SystemRoot");
