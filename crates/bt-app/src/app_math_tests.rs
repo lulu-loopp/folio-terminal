@@ -164,12 +164,9 @@ fn copy_on_select_writes_nonempty_text_and_keeps_the_selection() {
         end: frame.anchor_at(0, 6, Bias::After).unwrap().unwrap(),
     };
     session.set_view_selection(Some(selection));
-    let mut clipboard = String::new();
 
-    assert!(write_selection_text(&session, true, |text| {
-        clipboard.push_str(text);
-        Ok(())
-    }));
+    // What the release puts on the clipboard lane; its effect takes nothing down.
+    let clipboard = selection_to_copy(&session, true).expect("a selection to copy");
     assert_eq!(clipboard, "drag me");
     assert_eq!(session.selection_text().as_deref(), Some("drag me"));
 }
@@ -186,13 +183,11 @@ fn copy_on_select_does_not_touch_the_clipboard_for_an_empty_selection() {
         start: anchor.clone(),
         end: anchor,
     }));
-    let mut writes = 0;
-
-    assert!(!write_selection_text(&session, true, |_| {
-        writes += 1;
-        Ok(())
-    }));
-    assert_eq!(writes, 0);
+    assert_eq!(
+        selection_to_copy(&session, true),
+        None,
+        "an empty selection asks the clipboard nothing"
+    );
 }
 
 #[test]
@@ -207,9 +202,12 @@ fn unavailable_clipboard_during_copy_on_select_keeps_the_selection() {
         end: frame.anchor_at(0, 7, Bias::After).unwrap().unwrap(),
     }));
 
-    assert!(!write_selection_text(&session, true, |_| {
-        Err(anyhow!("injected clipboard owner contention"))
-    }));
+    // The write the release asks for may be refused on the clipboard lane; copy-on-select's
+    // effect is none, so the selection stands whatever the clipboard answers.
+    assert_eq!(
+        selection_to_copy(&session, true).as_deref(),
+        Some("retry me")
+    );
     assert_eq!(session.selection_text().as_deref(), Some("retry me"));
 }
 
@@ -239,12 +237,8 @@ fn the_menus_copy_is_copy_on_selects_door_and_leaves_the_selection_standing() {
     session.set_view_selection(Some(selection.clone()));
     projection.set_selection(Some(selection));
 
-    // The menu row's door, which is the one copy-on-select spends.
-    let mut menu_clipboard = String::new();
-    assert!(write_selection_text(&session, true, |text| {
-        menu_clipboard.push_str(text);
-        Ok(())
-    }));
+    // The menu row's door, which is the one copy-on-select spends: its write's effect is none.
+    let menu_clipboard = selection_to_copy(&session, true).expect("a selection to copy");
     assert_eq!(menu_clipboard, "copy me");
     assert!(
         session.view_selection().is_some(),
@@ -252,12 +246,14 @@ fn the_menus_copy_is_copy_on_selects_door_and_leaves_the_selection_standing() {
     );
     assert!(projection.selection().is_some());
 
-    // The keyboard's door, on the same selection, for the difference.
-    let mut keyboard_clipboard = String::new();
-    assert!(copy_selection(&mut session, &mut projection, |text| {
-        keyboard_clipboard.push_str(text);
-        Ok(())
-    }));
+    // The keyboard's door, on the same selection, for the difference: its landed write takes
+    // the selection down (`ClipboardWriteEffect::ClearSelection`).
+    let keyboard_clipboard = selection_to_copy(&session, false).expect("a selection to copy");
+    assert!(clear_copied_selection(
+        &mut session,
+        &mut projection,
+        &keyboard_clipboard
+    ));
     assert_eq!(
         keyboard_clipboard, menu_clipboard,
         "the two doors put the same bytes on the clipboard"

@@ -379,33 +379,25 @@ impl<B: Backend> Runtime<'_, B> {
         // gesture is "type a few letters and press Enter" would be a second
         // way to do the one thing Enter already does.
         //
-        // **The clipboard is read before the field is borrowed**, and only for
-        // the chord that wants it: reading it costs a window handle and a trip
-        // to the platform, and doing that on every keystroke would be a box
-        // that opens the clipboard to find out whether you pressed `k`.
+        // **The clipboard's chord lands in the box, not in the shell behind it**
+        // (user ruling 2026-09-05). `Ctrl+V` and `Ctrl+Shift+V` are one verb here:
+        // the terminal tells them apart because `Ctrl+V` is a control code a
+        // program may want, and a text field has no such reading to protect. It is
+        // asked of the clipboard lane, and only for the chord that wants it —
+        // reading it is a trip to the platform, and doing that on every keystroke
+        // would be a box that opens the clipboard to find out whether you pressed
+        // `k`; the line lands through the box's own insert door
+        // ([`Self::palette_ime`]) on the turn the clipboard answers. Above the
+        // `Ctrl+A` arm and the ordinary character arm, both of which would
+        // otherwise answer for `v`.
+        if input::is_paste_shortcut(&event.logical_key, self.window.modifiers) {
+            return self.paste_into_field(crate::TextFieldSeat::Palette);
+        }
         let mut typed = false;
         let mut moved = false;
-        let pasted = input::is_paste_shortcut(&event.logical_key, self.window.modifiers)
-            .then(|| self.clipboard_line());
         if let Some(state) = self.window.palette.as_mut() {
             let field = state.field_mut();
             match &event.logical_key {
-                // **The clipboard's chord lands in the box, not in the shell
-                // behind it** (user ruling 2026-09-05). `Ctrl+V` and
-                // `Ctrl+Shift+V` are one verb here: the terminal tells them
-                // apart because `Ctrl+V` is a control code a program may want,
-                // and a text field has no such reading to protect.
-                //
-                // Above the `Ctrl+A` arm and above the ordinary character arm,
-                // both of which would otherwise answer for `v`.
-                _ if pasted.is_some() => {
-                    if let Some(line) = pasted.as_deref()
-                        && !line.is_empty()
-                    {
-                        field.insert(line);
-                        typed = true;
-                    }
-                }
                 // **An `Alt`-modified character is not typed here**: the palette
                 // reads it as a chord somebody meant for something else, and
                 // typing its letter would be the box answering a question it was

@@ -1692,10 +1692,17 @@ impl<B: Backend> Runtime<'_, B> {
         // The four answers a platform modal can have left behind, under their
         // own name (T-STATION-SPLIT) — see [`hang_watch::Station::Pickers`].
         hang_watch::at(hang_watch::Station::Pickers);
-        self.apply_math_context_menu_result();
+        self.apply_math_context_menu_result()?;
         self.apply_folder_pick_result()?;
         self.apply_image_pick_result()?;
         self.apply_save_pick_result()?;
+        // **What the clipboard lane answered this window, and the pastes it no longer wants**
+        // (`clipboard_lane`): before the drain, so a paste that has landed goes to its shell ahead
+        // of the turn's output; and on every turn, so a lost wake loses no answer and a paste's
+        // deadline is kept on the turn it falls in.
+        hang_watch::during(hang_watch::Station::ClipboardRead, || {
+            self.settle_clipboard(now)
+        })?;
         self.drain_pty()?;
         if !self.window.first_text_presented && now >= self.window.startup_poll_at {
             advance_periodic_deadline(
@@ -2187,7 +2194,7 @@ impl<B: Backend> Runtime<'_, B> {
             && self.window.settings.category() == settings::SettingsCategory::About)
             .then(|| update::last_checked_deadline(now, update::unix_epoch_ms()))
             .flatten();
-        const DEADLINE_OWNERS: [WakeOwner; 56] = [
+        const DEADLINE_OWNERS: [WakeOwner; 57] = [
             WakeOwner::StartupPoll,
             WakeOwner::ImeCursor,
             WakeOwner::ShellCaret,
@@ -2206,6 +2213,7 @@ impl<B: Backend> Runtime<'_, B> {
             WakeOwner::KeyHint,
             WakeOwner::CardsHint,
             WakeOwner::Toast,
+            WakeOwner::ClipboardPasteDeadline,
             WakeOwner::CommandFlash,
             WakeOwner::CommandRails,
             WakeOwner::TerminalThumbs,
@@ -2312,6 +2320,9 @@ impl<B: Backend> Runtime<'_, B> {
             // finishing — and nothing at all while one is held under the pointer,
             // because a stopped clock owes no wake-ups (2026-08-16).
             self.toast_deadline(now),
+            // A paste the clipboard lane still owes this window, withdrawn at its deadline if it is
+            // still owed then (`clipboard_lane::PASTE_DEADLINE`); nothing while none is.
+            self.window.clipboard.deadline(),
             // The jump flash's own 950ms, at the animation's rate and only while
             // one is running. A window that has not jumped asks for nothing.
             self.command_flash_deadline(now),
