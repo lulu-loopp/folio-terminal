@@ -43,12 +43,12 @@ try {
   if (-not $txn.Success) { throw 'the planted journal names no txn' }
   $txn = $txn.Groups[1].Value
   Put $planted (Join-Path $H 'journal.json')
-  $rescue = Join-Path (Join-Path (Join-Path $H $txn) 'rescue') 'folio.exe'
+  $rescuePath = Join-Path (Join-Path (Join-Path $H $txn) 'rescue') 'folio.exe'
   switch ($Rescue) {
-    'B' { Put (Join-Path $PSScriptRoot 'rescue-b.exe') $rescue }
-    'held' { Put (Join-Path $PSScriptRoot 'rescue-b.exe') $rescue }
-    'A' { Put (Join-Path $install 'folio.exe') $rescue }
-    'none' { [IO.Directory]::CreateDirectory((Join-Path $H $txn)) | Out-Null; Say "no rescue copy at $rescue" }
+    'B' { Put (Join-Path $PSScriptRoot 'rescue-b.exe') $rescuePath }
+    'held' { Put (Join-Path $PSScriptRoot 'rescue-b.exe') $rescuePath }
+    'A' { Put (Join-Path $install 'folio.exe') $rescuePath }
+    'none' { [IO.Directory]::CreateDirectory((Join-Path $H $txn)) | Out-Null; Say "no rescue copy at $rescuePath" }
   }
   Say "PLANT DONE txn=$txn rescue=$Rescue"
 } catch { Say "PLANT FAILED: $($_.Exception.Message)"; exit 1 }

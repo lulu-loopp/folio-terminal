@@ -403,6 +403,10 @@ try {
     $settled = @{ Journal = 'settled'; Card = 'restored'; Window = 'installed'; Lines = @('BT_UPDATE_RECOVER .*recovery ended RolledBack') }
     $v = Get-PlantedVerdict -Expect $settled -Evidence (New-Evidence 'settled' $null @('10:00:02 BT_UPDATE_RECOVER transaction 5d5d; recovery ended RolledBack; x') @($installed, 'Previous version restored.'))
     Check (-not $v.Failed) "a journal settled by the rescue with its card passes ($($v.Line))"
+    $failedPlant = New-Evidence 'plant-failed' $tpl @($heldLine) $newerHeld
+    [IO.File]::WriteAllLines((Join-Path $failedPlant 'after-start1\updater-plant-x.txt'), @('00:00:01 placed a', '00:00:02 PLANT FAILED: no rescue'))
+    $v = Get-PlantedVerdict -Expect $heldCell -Evidence $failedPlant
+    Check ($v.Failed -and $v.Cells['Planted'].Got -match 'PLANT FAILED: no rescue') "a row whose plant failed fails, whatever its other cells say ($($v.Line))"
     $aside = @{ Journal = 'kept'; Card = 'newer'; Window = 'rescue' }
     $v = Get-PlantedVerdict -Expect $aside -Evidence (New-Evidence 'aside' $tpl @() @($rescueWin, 'PS C:\>'))
     Check ($v.Failed -and $v.Cells['Window'].Ok -and $v.Cells['Card'].Got -eq 'none') "the rescue copy's window with no card fails the card cell only ($($v.Line))"

@@ -249,6 +249,13 @@ function Get-PlantedVerdict {
     function Cell([string] $name, $want, $got) { $cells[$name] = @{ Want = $want; Got = $got; Ok = ($want -eq $got) } }
     $start1 = Join-Path $Evidence 'after-start1'
     $start2 = Join-Path $Evidence 'after-start2'
+    # A planted row stands on its plant: `guest\plant.ps1` ends its log with `PLANT DONE` or
+    # `PLANT FAILED: <why>`, and a row whose plant failed is no reading of any cell.
+    $plantLog = @(Get-ChildItem -LiteralPath $start1 -File -Filter 'updater-plant-*.txt' -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($plantLog.Count -gt 0) {
+        $last = @([IO.File]::ReadAllLines($plantLog[0].FullName) | Where-Object { $_ -match 'PLANT (DONE|FAILED)' } | Select-Object -Last 1)
+        Cell 'Planted' 'done' $(if ($last.Count -and $last[0] -match 'PLANT DONE') { 'done' } elseif ($last.Count) { $last[0].Trim() } else { 'no end line' })
+    }
     if ($Expect.ContainsKey('Journal')) {
         $planted = Text (Join-Path $Evidence 'planted-journal.json')
         $after = Text (Join-Path $start2 'journal.json')
