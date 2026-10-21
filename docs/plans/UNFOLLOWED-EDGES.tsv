@@ -7070,6 +7070,9 @@ crates/bt-detect/src/fence.rs	bt-detect crate::fence::fence_opening	Ambiguous	ne
 crates/bt-detect/src/fence.rs	bt-detect crate::fence::fence_opening	Ambiguous	trim_matches	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
 crates/bt-detect/src/fence.rs	bt-detect crate::fence::run_length	Ambiguous	count	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
 crates/bt-detect/src/fence.rs	bt-detect crate::fence::run_length	Ambiguous	take_while	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::spell_leading_tabs_from	Ambiguous	chars	1	
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::spell_leading_tabs_from	Ambiguous	contains	1	
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::spell_leading_tabs_from	Ambiguous	len	1	
 crates/bt-detect/src/frame.rs	bt-detect crate::frame::CaptureFrame::measure	Ambiguous	all	2	
 crates/bt-detect/src/frame.rs	bt-detect crate::frame::CaptureFrame::measure	Ambiguous	any	3	
 crates/bt-detect/src/frame.rs	bt-detect crate::frame::CaptureFrame::measure	Ambiguous	chars	1	
@@ -11376,7 +11379,6 @@ crates/bt-term/src/session.rs	bt-term crate::session::live_candidate_rows_in_pan
 crates/bt-term/src/session.rs	bt-term crate::session::live_candidate_rows_in_pane	Ambiguous	unwrap_or	1	
 crates/bt-term/src/session.rs	bt-term crate::session::live_candidate_rows_in_pane	Dynamic	stable	1	
 crates/bt-term/src/session.rs	bt-term crate::session::live_detection_context_signature	Ambiguous	hash	2	
-crates/bt-term/src/session.rs	bt-term crate::session::live_detection_context_signature	Ambiguous	starts_with	2	
 crates/bt-term/src/session.rs	bt-term crate::session::live_fragment_cells	Ambiguous	map	1	
 crates/bt-term/src/session.rs	bt-term crate::session::live_fragment_cells	Ambiguous	ok	2	
 crates/bt-term/src/session.rs	bt-term crate::session::live_inline_run_cells	Ambiguous	ok	2	
