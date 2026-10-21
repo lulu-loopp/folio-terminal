@@ -183,7 +183,7 @@ pub(super) struct CjkCatalog {
 }
 impl CjkCatalog {
     fn read(db: &glyphon::fontdb::Database) -> Self {
-        if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty()) {
+        if bt_viewport::trace::perf() {
             for face in db.faces() {
                 let file = match &face.source {
                     glyphon::fontdb::Source::File(p)

@@ -30,8 +30,8 @@ pub use diagnostics::{
 };
 pub use host::{
     HOST_NAMES_READ_BEFORE_INSTALL, SVG_RASTERIZER_READ_BEFORE_INSTALL, SvgRasterizer,
-    TEST_HOST_NAMES, TEST_SVG_DOCUMENT, TEST_SVG_PIXEL, install_host_names,
-    install_pool_thread_start, install_svg_rasterizer, install_test_host_names,
+    TEST_HOST_NAMES, TEST_SVG_DOCUMENT, TEST_SVG_PIXEL, TermDiagnostics, install_diagnostics,
+    install_host_names, install_pool_thread_start, install_svg_rasterizer, install_test_host_names,
     install_test_svg_rasterizer, local_host_names, test_svg_rasterizer,
 };
 pub use inline_image::{

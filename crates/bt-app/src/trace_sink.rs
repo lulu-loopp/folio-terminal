@@ -317,10 +317,12 @@ fn sink() -> Option<&'static Sink> {
 }
 
 fn open() -> Option<Sink> {
+    // The names the entry read with a value (`entry_doors`): empty values are already out.
     if !a_trace_was_asked_for(
-        std::env::vars_os()
-            .filter(|(_, value)| !value.is_empty())
-            .map(|(name, _)| name),
+        crate::entry_doors::installed()
+            .named_with_a_value
+            .iter()
+            .cloned(),
     ) {
         return None;
     }
@@ -462,7 +464,7 @@ fn put(batch: &mut String, stderr: &mut impl std::io::Write) {
 /// Trace switches plus the focus-thumbnail file dump use this sink. Other
 /// dumps, such as the PTY byte capture, have their own writers and need no idle
 /// sink thread. Names are supplied separately so tests never mutate the process
-/// environment; `open` removes empty values before calling this function.
+/// environment; `open` hands it the names the entry read with a value.
 fn a_trace_was_asked_for<I: IntoIterator<Item = std::ffi::OsString>>(names: I) -> bool {
     names.into_iter().any(|name| {
         let name = name.to_string_lossy().to_ascii_uppercase();

@@ -260,7 +260,7 @@ fn run_taskbar_lane(ctx: &WorkerCtx, lane: &TaskbarLane) {
             Ok(auto_hidden) => Terminal::Done(auto_hidden),
             Err(failure) => Terminal::Failed(failure),
         };
-        if std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty())
+        if crate::entry_doors::installed().perf
             && let Terminal::Done(auto_hidden) = terminal
         {
             crate::trace_sink::stderr_line(format!(

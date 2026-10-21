@@ -5,7 +5,7 @@ pub use bt_platform::ime_observation::NativeFacts;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-pub static TRACE: crate::trace::Dump = crate::trace::Dump::new("BT_IME_TRACE");
+pub static TRACE: crate::trace::Dump = crate::trace::Dump::new(|files| files.ime.as_deref());
 
 pub fn now_ms() -> u64 {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();

@@ -3,7 +3,12 @@ use super::*;
 pub(crate) use bt_platform::ime_trace::{enabled, line};
 use std::cell::Cell;
 
+/// Turn the platform's IME trace on when the entry was asked for `BT_IME_TRACE`
+/// (`entry_doors`); with no file named, nothing is installed and the trace is off.
 pub fn install() {
+    if crate::entry_doors::installed().traces.ime.is_none() {
+        return;
+    }
     bt_platform::ime_trace::install(|message| {
         // One file, one writer: the focus census (`ime_report`) owns the sink.
         ime_report::TRACE.line(|| format!("{:?} {message}", Instant::now()));

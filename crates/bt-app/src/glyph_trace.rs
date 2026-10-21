@@ -29,7 +29,7 @@ use crate::trace::Gate;
 pub use crate::trace::{Trace, emit};
 
 static GATE: Gate = Gate::new(
-    "BT_GLYPH_CENSUS",
+    |files| files.glyph_census.as_deref(),
     "# BT_GLYPH_CENSUS_V1 elapsed_ms event field=value…",
 );
 
