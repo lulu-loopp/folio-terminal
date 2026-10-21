@@ -155,7 +155,7 @@ fn facts_with(
 fn declared(profile: &[(OsString, OsString)]) -> Vec<String> {
     profile
         .iter()
-        .filter(|(name, _)| environment_name_eq(name, OsStr::new(MODULE_PATH)))
+        .filter(|(name, _)| bt_pty::same_environment_name(name, OsStr::new(MODULE_PATH)))
         .map(|(_, value)| value.to_string_lossy().into_owned())
         .collect()
 }
@@ -200,14 +200,23 @@ fn a_prefix_is_declared_only_where_the_loader_is_and_once() {
         facts_with(Some(module.clone()), &asked),
     );
     assert!(asked.get());
+    // The row's `psmodulepath` is the pane's module path where the spawn folds names by case
+    // (Windows); elsewhere it is another variable, and the module path the declaration builds on
+    // is the one before Folio's.
+    let builds_on =
+        if bt_pty::same_environment_name(OsStr::new("psmodulepath"), OsStr::new(MODULE_PATH)) {
+            row_path.clone()
+        } else {
+            before[0].1.clone()
+        };
     assert_eq!(
         declared(&profile),
         [format!(
             "{};{}",
             module.display(),
-            row_path.to_string_lossy()
+            builds_on.to_string_lossy()
         )],
-        "one declaration: Folio's directory, then the row's own value"
+        "one declaration: Folio's directory, then the module path the pane would have read"
     );
     assert!(
         profile.iter().any(|(name, _)| name == "OTHER"),
@@ -888,6 +897,17 @@ mod real_shell {
     use bt_term::DualPlaneSession;
     use std::time::{Duration, Instant};
 
+    /// **Whether a module base the shell reported lies under `folder`**, both read as the
+    /// filesystem names them. The shell spells a loaded module's base the long way, while a
+    /// folder made under an 8.3 temporary directory (a CI runner's `C:\Users\RUNNER~1\...`) is
+    /// spelled short by the test that made it; the two spellings name one folder.
+    fn lies_under(base: &str, folder: &Path) -> bool {
+        match (std::fs::canonicalize(base), std::fs::canonicalize(folder)) {
+            (Ok(base), Ok(folder)) => base.starts_with(folder),
+            _ => false,
+        }
+    }
+
     /// How long a child may say nothing before a wait for it is called stalled; the ceiling stops a
     /// child that talks for ever without reaching what is awaited. A count of silence, never a total
     /// (`docs/CONVENTIONS.md` §三): a loaded machine delivers the same bytes further apart.
@@ -1305,7 +1325,7 @@ mod real_shell {
             );
             let base = fields.get(1).copied().unwrap_or_default();
             assert!(
-                Path::new(base).starts_with(&pane.module),
+                lies_under(base, &pane.module),
                 "{policy}: from Folio's directory {}: {line}",
                 pane.module.display()
             );
@@ -1521,10 +1541,7 @@ mod real_shell {
         assert_eq!(modules.len(), 1, "one PSReadLine: {facts}");
         let (version, base) = modules[0].split_once('@').expect("version@base");
         assert_eq!(version, crate::psreadline::SHIPPED_VERSION, "{facts}");
-        assert!(
-            Path::new(base).starts_with(&pane.module),
-            "Folio's: {facts}"
-        );
+        assert!(lies_under(base, &pane.module), "Folio's: {facts}");
         assert_eq!(
             fields.get(1).copied(),
             Some("BTCONT> "),
@@ -1705,7 +1722,7 @@ mod real_shell {
         eprintln!("BT_PSRL_FORK facts={facts}");
         let (base, stamp) = facts.split_once('|').expect("base|stamp");
         assert!(
-            Path::new(base).starts_with(&modules),
+            lies_under(base, &modules),
             "the pane runs the fork: {facts}"
         );
         assert!(
