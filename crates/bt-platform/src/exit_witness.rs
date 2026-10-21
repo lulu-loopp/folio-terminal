@@ -63,7 +63,7 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("cmd starts");
+            .expect("ping starts");
         let witness = ExitWitness::of(child.id()).expect("the live child opens");
         assert!(
             !witness.ended_within(Duration::ZERO),
@@ -71,7 +71,7 @@ mod tests {
         );
         child.kill().expect("the child is ended");
         assert!(
-            witness.ended_within(Duration::from_secs(10)),
+            witness.ended_within(crate::door_skipped::PATIENCE),
             "its exit is signalled"
         );
         let _ = child.wait();
