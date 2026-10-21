@@ -5197,10 +5197,13 @@ pub(crate) fn declare_psreadline_module(
     let Some(module) = facts.module else {
         return;
     };
+    // Names are compared by the spawn's own rule (`bt_pty::same_environment_name`), the one the
+    // pane's environment is layered by: the value found is the one the pane would read, and the
+    // rows replaced are the ones that would have set it.
     let pane = bt_pty::spawn_environment(before_folio, &[], folio, profile);
     let value = pane
         .iter()
-        .find(|(name, _)| environment_name_eq(name, OsStr::new(MODULE_PATH)))
+        .find(|(name, _)| bt_pty::same_environment_name(name, OsStr::new(MODULE_PATH)))
         .map(|(_, value)| value.as_os_str())
         .filter(|value| !value.is_empty());
     let Some(composed) = compose_module_path(
@@ -5212,7 +5215,7 @@ pub(crate) fn declare_psreadline_module(
     ) else {
         return;
     };
-    profile.retain(|(name, _)| !environment_name_eq(name, OsStr::new(MODULE_PATH)));
+    profile.retain(|(name, _)| !bt_pty::same_environment_name(name, OsStr::new(MODULE_PATH)));
     profile.push((OsString::from(MODULE_PATH), composed));
 }
 
