@@ -239,6 +239,7 @@ mod update_trial;
 mod update_txn;
 mod version;
 mod video_seat;
+mod wake_owner;
 mod watch_clock;
 mod watch_steward;
 mod web_spare;
@@ -266,6 +267,7 @@ use bt_persist::{
 };
 use input::Keystroke;
 use text_scale::{TextScale, TextStep};
+use wake_owner::WakeOwner;
 use window_seam::prelude::*;
 use window_seam::{LoopProxy, Native};
 // `main`'s event-loop builder methods, at module level: `main` is on the window-seam native list,
@@ -18881,10 +18883,10 @@ fn earliest_deadline<const N: usize>(deadlines: [Option<Instant>; N]) -> Option<
 /// Keeping the names beside the fold, rather than reconstructing them after the
 /// fact, makes the idle probe report evidence: ties retain the first entry, just
 /// as [`Iterator::min`] did before the entries were named.
-fn earliest_named_deadline<const N: usize>(
-    names: [&'static str; N],
+fn earliest_named_deadline<T: Copy, const N: usize>(
+    names: [T; N],
     deadlines: [Option<Instant>; N],
-) -> Option<(&'static str, Instant)> {
+) -> Option<(T, Instant)> {
     names
         .into_iter()
         .zip(deadlines)
@@ -30202,13 +30204,6 @@ fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
     tabs.iter()
         .flat_map(|tab| tab.leaves())
         .filter_map(|(_, leaf)| leaf.attention_clock.deadline())
-        .min()
-}
-
-fn foreground_program_deadline(tabs: &[TabState]) -> Option<Instant> {
-    tabs.iter()
-        .flat_map(TabState::leaves)
-        .filter_map(|(_, leaf)| foreground_program::deadline(leaf))
         .min()
 }
 
@@ -65120,7 +65115,7 @@ mod application_change_tests {
             .find("settle_application_change")
             .expect("the loop settles what the application changed");
         let waited = door
-            .find("wake_deadline")
+            .find("let mut wake = ")
             .expect("the loop asks every window for its next wake-up");
         assert!(
             settled < waited,
@@ -65177,6 +65172,10 @@ struct FolioApp<B: Backend = Native> {
     /// Inputs from which the installed macOS menu was derived. Compared before
     /// allocating a fresh plan or crossing into AppKit.
     main_menu_inputs: Option<MainMenuInputs>,
+    /// **The clock the standing `ControlFlow::WaitUntil` is owed to**
+    /// (T-WINDOW-THREAD-UNDER-LOAD), set beside it by [`Self::park_until`] on every road that
+    /// sets one; `None` with `Wait`.
+    wake_owner: Option<WakeOwner>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65271,6 +65270,7 @@ impl<B: Backend> FolioApp<B> {
             delegate,
             termination: None,
             main_menu_inputs: None,
+            wake_owner: None,
         }
     }
 
@@ -69623,9 +69623,12 @@ impl<B: Backend> FolioApp<B> {
                 .as_ref()
                 .and_then(|app| app.quit.as_ref())
                 .and_then(quit::Quit::deadline);
-            event_loop.set_control_flow(
-                earliest_deadline([waking, bound])
-                    .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+            self.park_until(
+                event_loop,
+                wake_owner::earliest_wake([
+                    wake_owner::owned(WakeOwner::Retirement, waking),
+                    wake_owner::owned(WakeOwner::QuitBound, bound),
+                ]),
             );
             return;
         }
@@ -69694,8 +69697,8 @@ impl<B: Backend> FolioApp<B> {
         // deadline joins the same fold every window's clocks reach through, which
         // is what lets a spring come due over a window that will hear nothing
         // else at all.
-        let mut wake_deadline = match self.drive_drag_broker(now) {
-            Ok(deadline) => deadline,
+        let mut wake = match self.drive_drag_broker(now) {
+            Ok(deadline) => wake_owner::owned(WakeOwner::DragBroker, deadline),
             Err(error) => {
                 self.fail(event_loop, error);
                 return;
@@ -69706,16 +69709,24 @@ impl<B: Backend> FolioApp<B> {
         // leaving — and a sweep that turned thirty clocks over a hidden window
         // first would be drawing frames for a reader who has already closed it.
         match self.reap_leaving_windows(event_loop, now) {
-            Ok(deadline) => wake_deadline = earliest_deadline([wake_deadline, deadline]),
+            Ok(deadline) => {
+                wake = wake_owner::earliest_wake([
+                    wake,
+                    wake_owner::owned(WakeOwner::WindowReap, deadline),
+                ]);
+            }
             Err(error) => {
                 self.fail(event_loop, error);
                 return;
             }
         }
         let programs_deadline = self.advance_programs_ear(now);
-        wake_deadline = earliest_deadline([wake_deadline, programs_deadline]);
         let index_deadline = self.advance_index_ear(now);
-        wake_deadline = earliest_deadline([wake_deadline, index_deadline]);
+        wake = wake_owner::earliest_wake([
+            wake,
+            wake_owner::owned(WakeOwner::ProgramsEar, programs_deadline),
+            wake_owner::owned(WakeOwner::IndexEar, index_deadline),
+        ]);
         if self.windows.is_empty() {
             // **An application with no windows waits, and waits properly**
             // (M3-1). Until this ticket an empty registry was a loop that had
@@ -69728,10 +69739,11 @@ impl<B: Backend> FolioApp<B> {
             // and both of those wake the loop themselves — **and the spare web
             // controller, while it lets go** (ticket 60, SW-2): no window is left to
             // wake the loop for its browser-exit wait, so its instant is the one kept.
-            event_loop.set_control_flow(match self.run_end(wake_deadline) {
-                web_spare::RunControl::WaitUntil(at) => ControlFlow::WaitUntil(at),
-                web_spare::RunControl::Exit | web_spare::RunControl::Wait => ControlFlow::Wait,
-            });
+            let run_end = match self.run_end(Option::map(wake, |(_, at)| at)) {
+                web_spare::RunControl::WaitUntil(at) => Some((WakeOwner::RunEnd, at)),
+                web_spare::RunControl::Exit | web_spare::RunControl::Wait => None,
+            };
+            self.park_until(event_loop, run_end);
             return;
         }
         // **The kernel's news about repositories, filed under every window that
@@ -69759,11 +69771,14 @@ impl<B: Backend> FolioApp<B> {
             // `Runtime::turn` — it is the opening order, and a closed window at
             // the head of it must not take the job away from the rest.
             let ime_deadline = runtime.service_ime_report(now);
-            wake_deadline = earliest_deadline([wake_deadline, ime_deadline]);
+            wake = wake_owner::earliest_wake([
+                wake,
+                wake_owner::owned(WakeOwner::ImeReport, ime_deadline),
+            ]);
             let turn = runtime.turn(now, application_clocks);
             application_clocks = false;
             match turn {
-                Ok(deadline) => wake_deadline = earliest_deadline([wake_deadline, deadline]),
+                Ok(window_wake) => wake = wake_owner::earliest_wake([wake, window_wake]),
                 Err(error) => {
                     self.fail(event_loop, error);
                     return;
@@ -69781,9 +69796,23 @@ impl<B: Backend> FolioApp<B> {
         // **And every close's bound, while it waits for its saves** (S-6b): the answers
         // wake the loop themselves; the clock is only the bound.
         let close_wake = self.close_waits_wake(now);
-        let wake_deadline = earliest_deadline([wake_deadline, quit_wake, close_wake]);
+        let wake = wake_owner::earliest_wake([
+            wake,
+            wake_owner::owned(WakeOwner::QuitBound, quit_wake),
+            wake_owner::owned(WakeOwner::CloseWait, close_wake),
+        ]);
+        self.park_until(event_loop, wake);
+    }
+
+    /// **The loop's control flow for this turn, and the clock that set it**
+    /// (T-WINDOW-THREAD-UNDER-LOAD): `WaitUntil` the wake's instant, or `Wait` when no clock
+    /// asked for one. The owner is kept beside the control flow it chose, so the parking
+    /// [`Self::about_to_wait`] records names the clock it is owed — and a turn that leaves early,
+    /// setting nothing, leaves both standing together.
+    fn park_until(&mut self, event_loop: &B::Loop, wake: Option<(WakeOwner, Instant)>) {
+        self.wake_owner = wake.map(|(owner, _)| owner);
         event_loop
-            .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+            .set_control_flow(wake.map_or(ControlFlow::Wait, |(_, at)| ControlFlow::WaitUntil(at)));
     }
 
     /// **One window event, dispatched** — `ApplicationHandler::window_event`'s whole answer,
@@ -70261,11 +70290,15 @@ impl<B: Backend> FolioApp<B> {
 ///   Silence well past it is a promise that was not kept.
 /// * `Poll` — nothing is handed over at all; the loop comes straight back
 ///   round, so it is judged as a thread holding control.
-fn parking(control_flow: ControlFlow, heart: &hang_watch::Heartbeat) -> hang_watch::Park {
+fn parking(
+    control_flow: ControlFlow,
+    owner: Option<WakeOwner>,
+    heart: &hang_watch::Heartbeat,
+) -> hang_watch::Park {
     match control_flow {
         ControlFlow::Poll => hang_watch::Park::Running,
         ControlFlow::Wait => hang_watch::Park::Indefinite,
-        ControlFlow::WaitUntil(deadline) => heart.until(deadline),
+        ControlFlow::WaitUntil(deadline) => heart.until(deadline, owner),
     }
 }
 
@@ -70339,18 +70372,19 @@ mod resident_run_tests {
     fn every_control_flow_says_what_it_owes_the_window_thread() {
         let heart = hang_watch::Heartbeat::new();
         assert_eq!(
-            parking(ControlFlow::Wait, &heart),
+            parking(ControlFlow::Wait, None, &heart),
             hang_watch::Park::Indefinite,
             "an idle window is owed nothing at all, and that is what stops the \
              watchdog reading its silence as a fault"
         );
         assert_eq!(
-            parking(ControlFlow::Poll, &heart),
+            parking(ControlFlow::Poll, None, &heart),
             hang_watch::Park::Running,
             "a loop that hands nothing over is judged as one holding control"
         );
         let hang_watch::Park::Until(deadline) = parking(
             ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5)),
+            None,
             &heart,
         ) else {
             panic!("a deadline is a deadline");
@@ -70363,7 +70397,8 @@ mod resident_run_tests {
         let past = Instant::now()
             .checked_sub(Duration::from_secs(1))
             .unwrap_or_else(Instant::now);
-        let hang_watch::Park::Until(already) = parking(ControlFlow::WaitUntil(past), &heart) else {
+        let hang_watch::Park::Until(already) = parking(ControlFlow::WaitUntil(past), None, &heart)
+        else {
             panic!("a deadline is a deadline");
         };
         assert!(
@@ -70635,9 +70670,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 if let Some(door) = self.delegate.as_ref() {
                     door.ready();
                 }
-                event_loop.set_control_flow(ControlFlow::WaitUntil(
-                    Instant::now() + STARTUP_PTY_POLL_INTERVAL,
-                ));
+                self.park_until(
+                    event_loop,
+                    Some((
+                        WakeOwner::StartupPoll,
+                        Instant::now() + STARTUP_PTY_POLL_INTERVAL,
+                    )),
+                );
             }
             Err(error) => self.fail(event_loop, error),
         }
@@ -71205,7 +71244,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         panic_selftest_if_due();
         self.surface_selftest_if_due();
         self.about_to_wait_inner(event_loop);
-        hang_watch::park(parking(event_loop.control_flow(), hang_watch::heartbeat()));
+        let (owner, heart) = (self.wake_owner, hang_watch::heartbeat());
+        hang_watch::park(parking(event_loop.control_flow(), owner, heart));
     }
 
     /// **The platform woke this thread.** See [`hang_watch::Heartbeat::woke`].
@@ -79545,7 +79585,7 @@ mod cross_window_drag_tests {
         // all is never.
         let wait = method_body("FolioApp", "about_to_wait_inner");
         let (before, after) = wait
-            .split_once("let mut wake_deadline = match self.drive_drag_broker(now)")
+            .split_once("let mut wake = match self.drive_drag_broker(now)")
             .expect(
                 "the broker is turned once a loop, and its answer is what the \
                  windows' own deadlines are then folded into",
@@ -79556,7 +79596,7 @@ mod cross_window_drag_tests {
              so promote, transfer, open and place all land in one turn:\n{wait}"
         );
         assert!(
-            after.contains("earliest_deadline([wake_deadline, deadline])"),
+            after.contains("wake_owner::earliest_wake([wake, window_wake])"),
             "every window's clocks fold onto the broker's rather than replacing \
              it:\n{after}"
         );

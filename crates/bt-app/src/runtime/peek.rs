@@ -1487,7 +1487,19 @@ impl<B: Backend> Runtime<'_, B> {
             })
             | hang_watch::during(hang_watch::Station::ClockFileClose, || {
                 self.expire_file_peek(now)
-            });
+            })
+            // **A shown card whose buffer has gone is taken down** (T-WINDOW-THREAD-UNDER-LOAD).
+            // It is a view of a buffer ([`Self::file_peek_subject`]); with none behind it the
+            // paint draws no card, and a card that is still reported shown owes a frame no frame
+            // can pay — the debt books the last present's frame, an instant in the past once
+            // nothing presents, on every turn.
+            | (self
+                .window
+                .file_peek
+                .as_ref()
+                .is_some_and(|peek| peek.clock.is_shown())
+                && self.file_peek_subject().is_none()
+                && self.hide_file_peek());
         if !moved && !self.animation_frame_is_due() {
             return Ok(());
         }
