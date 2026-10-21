@@ -3249,7 +3249,7 @@ struct OpenFence {
 /// 321). Anything else is asked at the top level, where a fence may stand
 /// indented up to three spaces (§4.5 ex. 131–133).
 fn fence_at(line: &str, item: Option<usize>) -> Option<OpenFence> {
-    let open = |content: &str, container: usize| {
+    let fence_in = |content: &str, container: usize| {
         fence::fence_opening(content).map(|opening| OpenFence {
             fence: opening.fence,
             language: opening.language().map(str::to_owned),
@@ -3258,15 +3258,15 @@ fn fence_at(line: &str, item: Option<usize>) -> Option<OpenFence> {
     };
     if let Some((_, text)) = parse_list_row(line) {
         let column = list_content_column(line, text);
-        return open(&line[column..], column);
+        return fence_in(&line[column..], column);
     }
     if let Some(column) = item
         && let Some(content) = fence::strip_container_indent(line, column)
-        && let Some(found) = open(&content, column)
+        && let Some(found) = fence_in(&content, column)
     {
         return Some(found);
     }
-    open(line, 0)
+    fence_in(line, 0)
 }
 
 /// The column a list item's content stands at, CommonMark §5.2: the marker and
