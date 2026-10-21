@@ -29,7 +29,8 @@
     -Plan is a comma list of steps:
       launchfeed | launchplain | offer | update | waitverified | restart |
       waitalloc | cancel | later | close | nosleep | preload | fastupdate |
-      fastcancel | shot:<name> | sleep:<s> | waitphase:<Phase>
+      fastcancel | shot:<name> | sleep:<s> | waitphase:<Phase> |
+      answerfirstrun | card:<name> | waithold
     `preload`, `fastupdate` and `fastcancel` press through the probe's own class
     loaded once into this process: a ui-probe run costs seconds on the guest,
     mostly compiling that class, and a Cancel has to land inside a download of a
@@ -66,9 +67,55 @@ function Phase {
     if ($m.Success) { return $m.Groups[1].Value } else { return '?' }
   } catch { return $null }
 }
+# Any folio.exe with a window: the installed one, or (E1-b) the rescue copy
+# in the transaction's rescue folder that an exit guard opened. The installed one first.
 function WindowPid {
-  $p = @(Get-Process folio -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe -and $_.MainWindowHandle -ne [IntPtr]::Zero })
+  $p = @(Get-Process folio -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } |
+      Sort-Object @{ Expression = { $_.Path -ne $exe } })
   if ($p.Count -gt 0) { return $p[0].Id } else { return $null }
+}
+# **Folio's own window, for the close** (cleanvm-harness pitfall 3): `Process.CloseMainWindow()`
+# picks winit's thread event-target popup, whose procedure destroys it and closes nothing. The
+# close is posted to the process's visible window of winit's application class.
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class KeysWindows {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc proc, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L; public int T; public int R; public int B; }
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder text, int max);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint message, IntPtr w, IntPtr l);
+  public const uint WM_CLOSE = 0x0010;
+  public static IntPtr AppWindowOf(uint target) {
+    IntPtr best = IntPtr.Zero; long bestArea = 0;
+    EnumWindows((h, l) => {
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      if (pid != target || !IsWindowVisible(h)) { return true; }
+      var name = new StringBuilder(128); GetClassName(h, name, 128);
+      RECT c; GetClientRect(h, out c);
+      long area = (long)(c.R - c.L) * (c.B - c.T);
+      if (name.ToString() == "Window Class" && area > bestArea) { bestArea = area; best = h; }
+      return true;
+    }, IntPtr.Zero);
+    return best;
+  }
+}
+'@
+function CloseFolio {
+  $w = WindowPid
+  if (-not $w) { Say 'close: no Folio window'; return }
+  $h = [KeysWindows]::AppWindowOf([uint32]$w)
+  if ($h -eq [IntPtr]::Zero) { Say "close: pid=$w has no window of winit's application class"; return }
+  $ok = [KeysWindows]::PostMessage($h, [KeysWindows]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+  $p = Get-Process -Id $w -ErrorAction SilentlyContinue
+  # bounded: Folio's own close budget is seconds; 30 s is load-row's bound for the same close
+  $gone = (-not $p) -or $p.WaitForExit(30000)
+  Say "WM_CLOSE posted to hwnd=$h of pid=$w -> $ok; exited within 30 s: $gone"
 }
 function WaitWindow {
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
@@ -149,8 +196,38 @@ foreach ($step in ($Plan -split ',')) {
     '^preload$' { Load-Probe; Say 'probe class loaded' }
     '^cancel$' { $w = WindowPid; Probe @('key', '-ProcId', "$w", '-Name', 'Tab'); Probe @('key', '-ProcId', "$w", '-Name', 'Enter') }
     '^later$' { $w = WindowPid; Probe @('key', '-ProcId', "$w", '-Name', 'Escape') }
-    '^nosleep$' { & powercfg.exe /change monitor-timeout-ac 0; & powercfg.exe /change standby-timeout-ac 0; Say 'display and standby timeouts off (guest power plan)' }
-    '^close$' { $w = WindowPid; if ($w) { $ok = (Get-Process -Id $w).CloseMainWindow(); Say "WM_CLOSE to pid=$w -> $ok" } }
+    '^nosleep$' { & powercfg.exe /change monitor-timeout-ac 0; & powercfg.exe /change standby-timeout-ac 0; & powercfg.exe /change hibernate-timeout-ac 0; Say 'display, standby and hibernate timeouts off (guest power plan)' }
+    '^close$' { CloseFolio }
+    # E1-b's held rescue: the watcher's hold taken before Folio starts (bounded: the watcher polls
+    # every 25 ms once its 1-2 s of startup are done; 60 s means it never will).
+    '^waithold$' {
+      $deadline = (Get-Date).AddSeconds(60); $held = $false
+      while (-not $held -and (Get-Date) -lt $deadline) {
+        $held = @(Get-ChildItem -LiteralPath $GuestHome -Filter 'updater-watch-*.txt' -File | Where-Object { Select-String -LiteralPath $_.FullName -Pattern 'RESCUE HOLD taken' -SimpleMatch -Quiet }).Count -gt 0
+        if (-not $held) { Start-Sleep -Milliseconds 250 }
+      }
+      Say "rescue hold taken: $held"
+    }
+    # The first-run card answered before Folio's first start (cleanvm-harness pitfall 4): an
+    # old-schema settings document the candidate's own migrations carry to `first_run_card: Shown`
+    # (the same document load-row.ps1 places). A guest that holds one already is left as it is.
+    '^answerfirstrun$' {
+      $data = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Folio'
+      $settings = Join-Path $data 'settings.json'
+      if (Test-Path -LiteralPath $settings) { Say 'settings.json already present: left as it is' }
+      else {
+        [IO.Directory]::CreateDirectory($data) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'first-run-settings.json') -Destination $settings
+        Say 'first run answered: a schema-25 settings.json placed for the candidate to migrate'
+      }
+    }
+    # The card Folio's window shows, read by the OCR (card.ps1), the capture beside the text.
+    '^card:(.+)$' {
+      $o = Join-Path $shots "$Tag-card-$($Matches[1])"
+      $r = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'card.ps1') -Out $o 2>&1 | Out-String
+      $t = if (Test-Path -LiteralPath "$o.txt") { (Get-Content -LiteralPath "$o.txt") -join ' | ' } else { "no text: $($r.Trim())" }
+      Say "card $($Matches[1]): $t"
+    }
     '^shot:(.+)$' { Shot $Matches[1] }
     '^sleep:(\d+)$' { Start-Sleep -Seconds ([int]$Matches[1]) }
     '^waitphase:(\w+)$' { [void](WaitPhase $Matches[1]) }

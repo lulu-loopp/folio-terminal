@@ -66,6 +66,19 @@
     cut row with no marker, and a `ROW <row> FAILED:` line in a live row's
     watcher log each fail the row on the host; a reached marker and a log with
     no failure line are ok. MUTATION: drop `'FAILED'` from the failing phases.
+
+    **the_planted_rows_are_read_against_their_cells** (E1-b) — `rows.ps1`
+    `Get-PlantedJournal` replaces exactly one word of a successor's journal per
+    vocabulary (and adds the adapter key) and refuses a template that does not
+    carry the word once; `Get-CardKind` names the card from its OCR lines;
+    `Get-PlantedVerdict` reads an evidence folder: a journal left byte for byte
+    is `kept`, one gone is `settled`, one rewritten is neither; the card, the
+    window's owner and the diagnostics lines are each compared with the cell,
+    and a differing cell fails the row naming it; the overlay rows' guard
+    passes a journal a rescue settled or a header A acts on by its frozen
+    promise, and fails one that changed with neither. MUTATION: in
+    `Get-PlantedVerdict`, compare the journal with `-eq` on its length only;
+    in the guard, drop `$byRescue`.
 #>
 [CmdletBinding()]
 param()
@@ -340,6 +353,78 @@ try {
     Check ($v.Failed -and $v.Line -eq 'watcher: 10:02:00.000 ROW rollback FAILED: the trial pid=4242 was killed and is still running 2000 ms later') "a live row's FAILED log line fails it on the host ($($v.Line))"
     $v = Get-RowVerdict -WatchLog @('10:00:00.000 watch start', '10:00:05.000 watch end')
     Check (-not $v.Failed) "a live row with no failure line is ok ($($v.Line))"
+
+    # -- the_planted_rows_are_read_against_their_cells -----------------------------
+    $tpl = '{"v":1,"txn":"5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d","rescue":"C:\\folio-vm\\folio\\.folio-update\\5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\\rescue\\folio.exe","class":"destructive","outcome":"rolled_back","written_by":"0.4.98","body":{"layout":{"layout":"Members","old_shipped":[],"old_present":[],"new":[]},"phase":{"phase":"RolledBack"}}}'
+    $want = @{
+        'class' = '"class":"rehearsal_destructive"'; 'outcome' = '"outcome":"rehearsal_rolled_back"'; 'v' = '{"v":2,'
+        'phase' = '"phase":"RehearsalRolledBack"'; 'layout' = '"layout":"RehearsalMembers"'; 'adapter' = '"body":{"adapter":"RehearsalOurs",'
+    }
+    foreach ($word in $want.Keys) {
+        $j = Get-PlantedJournal -Template $tpl -Word $word
+        $changed = ($j.Length - $tpl.Length)
+        Check ($j.Contains($want[$word]) -and $j.Contains('"written_by":"0.4.98"') -and ($j -ne $tpl)) "the planted $word word is B's test-only word, written_by kept ($changed chars)"
+        $null = $j | ConvertFrom-Json
+    }
+    $retiredTpl = $tpl -replace '"class":"destructive"', '"class":"terminal"' -replace '\{"phase":"RolledBack"\}', '{"phase":"Retired","outcome":"RolledBack"}'
+    Check ((Get-PlantedJournal -Template $retiredTpl -Word 'retired-outcome').Contains('"outcome":"RehearsalRolledBack"')) "the planted Retired.outcome word is B's"
+    $threw = $false
+    try { $null = Get-PlantedJournal -Template ($tpl -replace '"destructive"', '"terminal"') -Word 'class' } catch { $threw = $true }
+    Check $threw 'a template that does not carry the word is refused, never planted'
+
+    Check ((Get-CardKind -Lines @('window pid=1 path=C:\folio-vm\folio\folio.exe size=1x1', 'An update by a newer Folio is not finished.', 'It finishes when you next sign in, or when you start Folio 0.4.98. Changes made in', 'this session are not kept.')) -eq 'newer-held') 'the newer card with the held sentence reads newer-held'
+    Check ((Get-CardKind -Lines @('window pid=1 path=x size=1x1', 'An update by a newer  FOLIO is not finished.')) -eq 'newer') 'the newer card reads newer, case and spacing folded'
+    Check ((Get-CardKind -Lines @('window pid=1 path=x size=1x1', 'The new version did not start.', 'Previous version restored.')) -eq 'restored') 'the rollback card reads restored'
+    Check ((Get-CardKind -Lines @('window none')) -eq 'no-window') 'no window reads no-window'
+    Check ((Get-CardKind -Lines @('window pid=1 path=x size=1x1', 'PS C:\Users\folio>')) -eq 'none') 'a pane with no card reads none'
+
+    function New-Evidence([string] $name, $after, [string[]] $diag, [string[]] $card) {
+        $e = Join-Path $scratch $name
+        [IO.Directory]::CreateDirectory((Join-Path $e 'after-start1\shots')) | Out-Null
+        [IO.Directory]::CreateDirectory((Join-Path $e 'after-start2')) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $e 'planted-journal.json'), $tpl)
+        if ($null -ne $after) { [IO.File]::WriteAllText((Join-Path $e 'after-start2\journal.json'), $after) }
+        [IO.File]::WriteAllLines((Join-Path $e 'after-start2\diagnostics.log'), $diag)
+        [IO.File]::WriteAllLines((Join-Path $e 'after-start1\shots\start1-card-start1.txt'), $card)
+        [IO.File]::WriteAllText((Join-Path $e 'after-start2\processes.txt'), '42 parent=1 C:\folio-vm\folio\folio.exe :: folio.exe')
+        return $e
+    }
+    $installed = 'window pid=42 path=C:\folio-vm\folio\folio.exe size=800x600'
+    $rescueWin = 'window pid=43 path=C:\folio-vm\folio\.folio-update\5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\rescue\folio.exe size=800x600'
+    $heldLine = '10:00:01 BT_UPDATE_START transaction 5d5d is unfinished and its rescue build C:\x (os error 2) could not be started; Folio starts with its writes held, and nothing this session changes is kept'
+    $heldCell = @{ Journal = 'kept'; Card = 'newer-held'; Window = 'installed'; Lines = @('could not be started; Folio starts with its writes held') }
+    $newerHeld = @($installed, 'An update by a newer Folio is not finished.', 'Changes made in this session are not kept.')
+    $v = Get-PlantedVerdict -Expect $heldCell -Evidence (New-Evidence 'held-ok' $tpl @($heldLine) $newerHeld)
+    Check (-not $v.Failed) "a held cell with the journal kept, its card and its line passes ($($v.Line))"
+    $v = Get-PlantedVerdict -Expect $heldCell -Evidence (New-Evidence 'held-rewritten' ($tpl -replace '0.4.98', '0.4.97') @($heldLine) $newerHeld)
+    Check ($v.Failed -and $v.Cells['Journal'].Got -eq 'rewritten') "a journal rewritten in one byte, same length, is not kept ($($v.Line))"
+    $v = Get-PlantedVerdict -Expect $heldCell -Evidence (New-Evidence 'held-plain' $tpl @('10:00:01 BT_UPDATE_START x is left as it is: y') @($installed, 'PS C:\>'))
+    Check ($v.Failed -and -not $v.Cells['Card'].Ok -and -not $v.Cells['Line /could not be started; Folio starts with its writes held/'].Ok) "a plain start with no card fails the held cell on its card and its line ($($v.Line))"
+    $settled = @{ Journal = 'settled'; Card = 'restored'; Window = 'installed'; Lines = @('BT_UPDATE_RECOVER .*recovery ended RolledBack') }
+    $v = Get-PlantedVerdict -Expect $settled -Evidence (New-Evidence 'settled' $null @('10:00:02 BT_UPDATE_RECOVER transaction 5d5d; recovery ended RolledBack; x') @($installed, 'Previous version restored.'))
+    Check (-not $v.Failed) "a journal settled by the rescue with its card passes ($($v.Line))"
+    $aside = @{ Journal = 'kept'; Card = 'newer'; Window = 'rescue' }
+    $v = Get-PlantedVerdict -Expect $aside -Evidence (New-Evidence 'aside' $tpl @() @($rescueWin, 'PS C:\>'))
+    Check ($v.Failed -and $v.Cells['Window'].Ok -and $v.Cells['Card'].Got -eq 'none') "the rescue copy's window with no card fails the card cell only ($($v.Line))"
+
+    $guardE = Join-Path $scratch 'guard'
+    foreach ($c in 'after-logon', 'after-start1', 'after-start2') { [IO.Directory]::CreateDirectory((Join-Path $guardE $c)) | Out-Null }
+    [IO.File]::WriteAllText((Join-Path $guardE 'after-logon\journal.json'), $tpl)
+    [IO.File]::WriteAllLines((Join-Path $guardE 'after-logon\diagnostics.log'), @('a'))
+    [IO.File]::WriteAllText((Join-Path $guardE 'after-start1\journal.json'), $tpl)
+    [IO.File]::WriteAllLines((Join-Path $guardE 'after-start1\diagnostics.log'), @('a', 'b'))
+    [IO.File]::WriteAllLines((Join-Path $guardE 'after-start2\diagnostics.log'), @('a', 'b', 'c BT_UPDATE_START retired'))
+    [IO.File]::WriteAllText((Join-Path $guardE 'after-start2\processes.txt'), '42 parent=1 C:\folio-vm\folio\folio.exe :: folio.exe')
+    $v = Get-PlantedVerdict -Expect @{ JournalGuard = $true; Window = 'any' } -Evidence $guardE
+    Check ($v.Failed -and $v.Cells['JournalGuard'].Got -match 'after-start2: the journal went away') "a destructive journal gone with no rescue's line breaks the guard ($($v.Line))"
+    [IO.File]::WriteAllLines((Join-Path $guardE 'after-start2\diagnostics.log'), @('a', 'b', 'c BT_UPDATE_RECOVER transaction 5d5d; recovery ended RolledBack; x'))
+    $v = Get-PlantedVerdict -Expect @{ JournalGuard = $true; Window = 'any' } -Evidence $guardE
+    Check (-not $v.Failed) "a journal a rescue settled in that interval keeps the guard ($($v.Line))"
+    [IO.File]::WriteAllText((Join-Path $guardE 'after-logon\journal.json'), ($tpl -replace '"destructive"', '"deferred"'))
+    [IO.File]::WriteAllText((Join-Path $guardE 'after-start1\journal.json'), ($tpl -replace '"destructive"', '"preparing"'))
+    [IO.File]::WriteAllLines((Join-Path $guardE 'after-start2\diagnostics.log'), @('a', 'b', 'c'))
+    $v = Get-PlantedVerdict -Expect @{ JournalGuard = $true; Window = 'any' } -Evidence $guardE
+    Check (-not $v.Failed) "a preparing or deferred journal A discards keeps the guard (A1) ($($v.Line))"
 }
 finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

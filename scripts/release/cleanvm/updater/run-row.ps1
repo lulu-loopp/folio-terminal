@@ -87,6 +87,22 @@
 .PARAMETER MarkerTimeoutSeconds
     How long a cut row waits for its marker before it cuts anyway.
 
+.PARAMETER OverlayZip
+    E1-b's RV rows: the release archive of the build under test (A), copied into the
+    guest and laid over the install at the row's state (`guest\watch.ps1 -OverlayZip`).
+
+.PARAMETER TemplateDir
+    E1-b's planted rows: the folder holding the successor's own journals the rows plant
+    from, `rolled-back.json` and `retired.json` (`rows.ps1` `Get-PlantedJournal`).
+
+.PARAMETER RescueB
+    E1-b's planted rows: the successor B's `folio.exe`, placed as the rescue copy.
+
+.PARAMETER Mutant
+    E1-b: the snapshot holds the build with the hatch removed; a planted row's verdict is
+    taken against the mutation column (`ExpectMut`) and, beside it, against the hatch's
+    cell (`Expect`), which such a build must fail.
+
 .EXAMPLE
     ./run-row.ps1 -Vmx <win11.vmx> -VmPassword <password> -Snapshot a-installed -Feed <feed folder> -Row W1 -WhatIf
 
@@ -106,7 +122,11 @@ param(
     [string] $GuestHome = 'C:\folio-vm',
     [string] $Results,
     [string] $VmrunPath,
-    [int] $MarkerTimeoutSeconds = 600
+    [int] $MarkerTimeoutSeconds = 600,
+    [string] $OverlayZip,
+    [string] $TemplateDir,
+    [string] $RescueB,
+    [switch] $Mutant
 )
 
 $ErrorActionPreference = 'Stop'
@@ -137,11 +157,25 @@ $guestScripts = @(
     (Join-Path $guestSide 'waits.ps1'),
     (Join-Path $guestSide 'keys.ps1'),
     (Join-Path $guestSide 'collect.ps1'),
+    (Join-Path $guestSide 'plant.ps1'),
+    (Join-Path $guestSide 'card.ps1'),
     $uiProbe
 )
 Assert-GuestReadable -Paths $guestScripts
 $guestUpdater = "$GuestHome\updater"
 $guestFeed = 'C:\feed'
+# The first-run card answered before Folio's first plain start (cleanvm-harness pitfall 4): the
+# old-schema settings document load-row.ps1 places, which keys.ps1's `answerfirstrun` copies in.
+$firstRun = Join-Path $PSScriptRoot '..\guest\load-row-settings.json'
+$guestOverlay = "$guestUpdater\overlay-a.zip"
+$planted = @($names | Where-Object { $table[$_].Planted })
+if ($planted.Count -gt 0 -and -not $planning) {
+    if (-not $TemplateDir -or -not (Test-Path -LiteralPath $TemplateDir -PathType Container)) { throw 'planted rows need -TemplateDir' }
+    if (@($planted | Where-Object { $table[$_].Rescue -in 'B', 'held' }).Count -gt 0 -and
+        -not ($RescueB -and (Test-Path -LiteralPath $RescueB -PathType Leaf))) { throw 'planted rows with a B rescue need -RescueB' }
+}
+if (@($names | Where-Object { $table[$_].Overlay }).Count -gt 0 -and -not $planning -and
+    -not ($OverlayZip -and (Test-Path -LiteralPath $OverlayZip -PathType Leaf))) { throw 'overlay rows need -OverlayZip' }
 
 if (-not $planning) {
     if (-not (Test-Path -LiteralPath (Join-Path $Feed 'releases.json') -PathType Leaf)) { throw "no releases.json in $Feed" }
@@ -177,6 +211,13 @@ function Start-Guest([switch] $Revert) {
     if ($Revert) { Invoke-Vmrun -Door $door -Step 'revert' -Verb 'revertToSnapshot' -Arguments @($Snapshot) | Out-Null }
     Invoke-Vmrun -Door $door -Step 'start' -Verb 'start' -Arguments @('nogui') | Out-Null
     Wait-GuestReady -Door $door
+    # **The guest must not sleep during the row** (cleanvm-harness pitfall 1; run-load-row.ps1
+    # says why): standby, monitor and hibernate timeouts to 0 the moment it answers, through
+    # `cmd /c` (vmrun hands powercfg its words as one argument otherwise).
+    foreach ($setting in @('standby-timeout-ac', 'monitor-timeout-ac', 'hibernate-timeout-ac')) {
+        Invoke-Vmrun -Door $door -Step 'no sleep' -Verb 'runProgramInGuest' -InGuest `
+            -Arguments @('C:\Windows\System32\cmd.exe', "/c powercfg /change $setting 0") | Out-Null
+    }
 }
 
 function Push-GuestFiles {
@@ -187,6 +228,8 @@ function Push-GuestFiles {
         Invoke-Vmrun -Door $door -Step 'copy in' -Verb 'copyFileFromHostToGuest' -InGuest `
             -Arguments @($script, "$guestUpdater\$([IO.Path]::GetFileName($script))") | Out-Null
     }
+    Invoke-Vmrun -Door $door -Step 'copy in' -Verb 'copyFileFromHostToGuest' -InGuest `
+        -Arguments @((Resolve-Path -LiteralPath $firstRun).Path, "$guestUpdater\first-run-settings.json") | Out-Null
     foreach ($file in $feedFiles) {
         Invoke-Vmrun -Door $door -Step 'copy feed' -Verb 'copyFileFromHostToGuest' -InGuest `
             -Arguments @($file.FullName, "$guestFeed\$($file.Name)") | Out-Null
@@ -237,6 +280,26 @@ function Save-Evidence([string] $Tag, [string] $Evidence) {
     else { Say "collect ${Tag}: no zip came back" }
 }
 
+# **A planted row's journal and rescue** (E1-b RW): the planted bytes written on the host from the
+# template (kept in the evidence as `planted-journal.json`, the bytes the verdict compares), copied
+# in with B's executable when the row's rescue is B's, then `guest\plant.ps1`.
+function Push-Planted([hashtable] $spec, [string] $evidence) {
+    $file = Join-Path $evidence 'planted-journal.json'
+    if (-not $planning) {
+        $template = Join-Path $TemplateDir "$($spec.Template).json"
+        $bytes = Get-PlantedJournal -Template ([IO.File]::ReadAllText($template)) -Word $spec.Word
+        [IO.File]::WriteAllText($file, $bytes, [Text.UTF8Encoding]::new($false))
+    }
+    Invoke-Vmrun -Door $door -Step 'copy plant' -Verb 'copyFileFromHostToGuest' -InGuest `
+        -Arguments @($file, "$guestUpdater\planted-journal.json") | Out-Null
+    if ($spec.Rescue -in 'B', 'held') {
+        Invoke-Vmrun -Door $door -Step 'copy rescue' -Verb 'copyFileFromHostToGuest' -InGuest `
+            -Arguments @("$RescueB", "$guestUpdater\rescue-b.exe") | Out-Null
+    }
+    Invoke-GuestScript -Door $door -Step 'plant' -Script "$guestUpdater\plant.ps1" `
+        -Arguments @('-Rescue', $spec.Rescue, '-Tag', $spec.Name, '-GuestHome', $GuestHome) | Out-Null
+}
+
 function Invoke-Row([hashtable] $spec) {
     $name = $spec.Name
     $evidence = Join-Path $Results $name
@@ -249,13 +312,45 @@ function Invoke-Row([hashtable] $spec) {
 
     Start-Guest -Revert
     Push-GuestFiles
+    if ($spec.Overlay) {
+        Invoke-Vmrun -Door $door -Step 'copy A' -Verb 'copyFileFromHostToGuest' -InGuest `
+            -Arguments @($OverlayZip, $guestOverlay) | Out-Null
+    }
+    if ($spec.Planted) { Push-Planted $spec $evidence }
     $watch = @('-Tag', $name, '-GuestHome', $GuestHome, '-PollMs', '25')
     if ($spec.Cut) { $watch += @('-Row', $name, '-Freeze', '-TimeoutSeconds', "$MarkerTimeoutSeconds") }
     else { $watch += @('-TimeoutSeconds', '1500') }
+    if ($spec.Overlay) { $watch += @('-OverlayZip', $guestOverlay) }
     $watch += $spec.Watch
     Invoke-GuestScript -Door $door -Step 'watch' -Script "$guestUpdater\watch.ps1" -NoWait -Arguments $watch | Out-Null
-    Start-Keys $name "nosleep,launchfeed,$($spec.Plan)"
     $started = Get-Date
+
+    if ($spec.Planted) {
+        # Two plain starts over the planted journal, each read on the card it shows. A held rescue
+        # is waited for (the watcher's `RESCUE HOLD taken`) before the first start.
+        Save-Evidence 'planted' $evidence
+        $hold = if ($spec.Rescue -eq 'held') { 'waithold,' } else { '' }
+        Start-Keys 'start1' "nosleep,answerfirstrun,$($hold)launchplain,sleep:40,card:start1"
+        Wait-KeysEnd 'start1' $evidence
+        Save-Evidence 'after-start1' $evidence
+        Start-Keys 'start2' 'close,sleep:8,launchplain,sleep:40,card:start2'
+        Wait-KeysEnd 'start2' $evidence
+        Save-Evidence 'after-start2' $evidence
+        Invoke-Vmrun -Door $door -Step 'stop' -Verb 'stop' -Arguments @('soft') -Tolerant | Out-Null
+        if (-not $planning) {
+            $expect = if ($Mutant) { $spec.ExpectMut } else { $spec.Expect }
+            $verdict = Get-PlantedVerdict -Expect $expect -Evidence $evidence
+            if ($Mutant) {
+                $hatch = Get-PlantedVerdict -Expect $spec.Expect -Evidence $evidence
+                $verdict.Line = "mutation column: $($verdict.Line) || the hatch's cell: $(if ($hatch.Failed) { 'RED' } else { 'GREEN' }): $($hatch.Line)"
+                $verdict.HatchRed = $hatch.Failed
+            }
+            Save-Verdict $name $verdict $evidence
+        }
+        Say "row $name done"
+        return
+    }
+    Start-Keys $name "nosleep,launchfeed,$($spec.Plan)"
 
     if ($spec.Cut) {
         $marker = "$GuestHome\updater-marker-$name.txt"
@@ -280,10 +375,10 @@ function Invoke-Row([hashtable] $spec) {
         Start-Guest
         if (-not $planning) { Start-Sleep -Seconds 45 }
         Save-Evidence 'after-logon' $evidence
-        Start-Keys 'start1' "nosleep,launchplain,sleep:25,shot:start1$($spec.Start1Extra)"
+        Start-Keys 'start1' "nosleep,launchplain,sleep:25,shot:start1,card:start1$($spec.Start1Extra)"
         Wait-KeysEnd 'start1' $evidence
         Save-Evidence 'after-start1' $evidence
-        Start-Keys 'start2' 'close,sleep:8,launchplain,sleep:25,shot:start2'
+        Start-Keys 'start2' 'close,sleep:8,launchplain,sleep:25,shot:start2,card:start2'
         Wait-KeysEnd 'start2' $evidence
         Save-Evidence 'after-start2' $evidence
     }
@@ -308,10 +403,26 @@ function Invoke-Row([hashtable] $spec) {
         $watchLog = @(Get-ChildItem -LiteralPath $evidence -Recurse -File -Filter "updater-watch-$name.txt" |
                 ForEach-Object { [IO.File]::ReadAllLines($_.FullName) })
         $verdict = if ($spec.Cut) { Get-RowVerdict -Cut -Marker $markerText -WatchLog $watchLog } else { Get-RowVerdict -WatchLog $watchLog }
-        $script:verdicts[$name] = $verdict
-        Say "row $name $(if ($verdict.Failed) { 'FAILED' } else { 'ok' }): $($verdict.Line)"
+        if (-not $verdict.Failed -and $spec.Expect) {
+            # E1-b's overlay rows: reaching the state is not the result; the expected cells are.
+            $verdict = Get-PlantedVerdict -Expect $spec.Expect -Evidence $evidence
+        }
+        Save-Verdict $name $verdict $evidence
     }
     Say "row $name done"
+}
+
+# A row's verdict: kept for the table at the end, written beside the evidence (`verdict.txt`,
+# each expected cell with what it got), and said.
+function Save-Verdict([string] $name, [hashtable] $verdict, [string] $evidence) {
+    $script:verdicts[$name] = $verdict
+    if ($verdict.ContainsKey('Cells')) {
+        $text = @("row $name $(if ($verdict.Failed) { 'FAILED' } else { 'ok' })") +
+            @($verdict.Cells.Keys | ForEach-Object { "  {0,-4} {1}: want {2}, got {3}" -f $(if ($verdict.Cells[$_].Ok) { 'ok' } else { 'DIFF' }), $_, $verdict.Cells[$_].Want, $verdict.Cells[$_].Got })
+        if ($verdict.ContainsKey('HatchRed')) { $text += "  the hatch's cell on this build: $(if ($verdict.HatchRed) { 'RED' } else { 'GREEN' })" }
+        Set-Content -LiteralPath (Join-Path $evidence 'verdict.txt') -Value $text -Encoding UTF8
+    }
+    Say "row $name $(if ($verdict.Failed) { 'FAILED' } else { 'ok' }): $($verdict.Line)"
 }
 
 $script:verdicts = [ordered]@{}
