@@ -2028,7 +2028,10 @@ fn the_systems_end_leaves_a_quits_documents_to_the_quit() {
         ..bt_persist::SettingsV1::default()
     }));
     let quit = crate::quit::Quit::begin(Vec::new());
-    assert!(quit.holds_the_storage_worker(), "the quit is in its documents phase");
+    assert!(
+        quit.holds_the_storage_worker(),
+        "the quit is in its documents phase"
+    );
     app.quit = Some(quit);
     assert_eq!(crate::test_support::the_system_asks(), Some(1));
     let _ = quitting.settle_the_systems_end();
