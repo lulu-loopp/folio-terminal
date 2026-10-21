@@ -4301,9 +4301,9 @@ crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::presen
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::present_seats_and_commit	Ambiguous	to_string	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::press_command_rail	Ambiguous	map	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::press_command_rail	Dynamic	number	2	
-crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::put_the_ratio_back	Ambiguous	extent	1	
-crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::put_the_ratio_back	Ambiguous	find	1	
-crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::put_the_ratio_back	Ambiguous	map	1	
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::put_the_ratio_back	Ambiguous	extent	1	2026-10-21: T-POINTER-CAPTURE cut 5; moved unchanged out of `cancel_divider_drag`: `Slot::extent`, the split's own length, which calls no door
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::put_the_ratio_back	Ambiguous	find	1	2026-10-21: T-POINTER-CAPTURE cut 5; moved unchanged out of `cancel_divider_drag`: a standard-library iterator's `find`, which calls no door
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::put_the_ratio_back	Ambiguous	map	1	2026-10-21: T-POINTER-CAPTURE cut 5; moved unchanged out of `cancel_divider_drag`: a standard-library `Option::map`, which calls no door
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::rail_contains	Ambiguous	contains	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::rail_contains	Ambiguous	is_some_and	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::rail_contains	Ambiguous	or_else	1	
@@ -4372,9 +4372,6 @@ crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::cap
 crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::capture::Runtime::capture_where_mut	Dynamic	predicate	1	
 crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::capture::cancel_then_route	Dynamic	cancel_owner	1	
 crates/bt-app/src/runtime/pointer/capture.rs	bt-app crate::runtime::pointer::capture::cancel_then_route	Dynamic	route_press	1	
-crates/bt-app/src/runtime/pointer/ending.rs	bt-app crate::runtime::pointer::ending::CaptureOwner::is_gone_with	Dynamic	on_surface	5	
-crates/bt-app/src/runtime/pointer/ending.rs	bt-app crate::runtime::pointer::ending::CaptureOwner::is_gone_with	Dynamic	pane_of	4	
-crates/bt-app/src/runtime/pointer/ending.rs	bt-app crate::runtime::pointer::ending::CaptureOwner::is_gone_with	Dynamic	the_tab	8	
 crates/bt-app/src/runtime/pointer/mod.rs	bt-app crate::runtime::pointer::Runtime::plane_at	Ambiguous	map	1	
 crates/bt-app/src/runtime/pointer/mod.rs	bt-app crate::runtime::pointer::Runtime::plane_at	Ambiguous	or_else	2	
 crates/bt-app/src/runtime/pointer/release.rs	bt-app crate::runtime::pointer::release::FolioApp::capture_before_pointer_event	Ambiguous	map_or	1	
@@ -4785,7 +4782,7 @@ crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::se
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::vault_this_window	Ambiguous	contains	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::vault_this_window	Ambiguous	iter	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::vault_this_window	Ambiguous	map	1	
-crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_blurred	Ambiguous	and_then	1	
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_blurred	Ambiguous	and_then	1	2026-10-21: T-POINTER-CAPTURE cut 5; moved out of the dispatcher's `Focused(false)` arm (whose count fell by the same): `Result::and_then`, which calls no door
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	flatten	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	map	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	unwrap_or_default	1	
