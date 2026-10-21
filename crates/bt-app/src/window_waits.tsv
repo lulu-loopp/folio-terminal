@@ -1,6 +1,7 @@
 ## The window thread's waits: the one registry (design note 2026-09-26; budget note R7).
 ##
-## Seven sections, each a header line then tab-separated lines. A line starting `##` is a comment.
+## Ten sections, each a header line then tab-separated lines. A line starting `##` is a comment.
+## The headers are a closed list, each once and in this order (`window_waits_tests::REGISTRY_SECTIONS`).
 ## Some seven-cell `worker-door-body` effect rows therefore end in a tab; `.gitattributes`
 ## exempts this registry from blank-at-EOL diagnostics because the parser counts that empty cell.
 ##
@@ -27,11 +28,21 @@
 ## refuses one that is also in `# vocabulary`.
 ##
 ## `# effects` — one line per **effect function**: the function whose own body holds a listed effect,
-## keyed by crate, `cfg` arm and item, with its entries and their counts, its kind (`owner-door-body`,
-## `worker-door-body`, `transport`, `drop-exception`, `interim-owner`), its authority (`WaitToken`,
-## `WorkerCtx`, `none (transport)`, `drop`) and the door it serves (revision (j)7). A2e puts one
-## `expect` on each. Today it holds exactly the effect functions already inside a registered door;
-## revision (k) allocates the rest. Held equal to the bodies by
+## keyed by crate, `cfg` arm and item, with its entries and their counts, its kind, its authority and
+## the door it serves (revision (j)7). A2e puts one `expect` on each. The kinds, each with its
+## authority and the rule that holds it (A2s; revisions (l)1, (l)5, (m)1):
+##   `owner-door-body` / `WaitToken` / its door — the body of an owner door, which takes its token;
+##   `interim-owner` / `WaitToken` / its door — the same, for a door whose row is `open` or `pending`;
+##   `worker-door-body` / `WorkerCtx` / none — a worker's door, which takes the worker's context;
+##   `shared-body` / `Leg` / its door — a function of a shared operation's graph, which takes
+##     `&Leg<'_, doors::<door>>`; admits no row until T-LEG-AUTHORITY (0.4.9) recognises that shape,
+##     because a leg carries no authority yet (the audit T-A2-LEG-GUARD-AUDIT, 2026-10-21);
+##   `transport` / `none (transport)` / none — bt-pty's own threads (revision (c)6); admits no row until
+##     R4 builds its thread check (the R1 review's B1, 2026-10-17);
+##   `drop-exception` / `drop` / none — a pinned body of the closed `Drop` inventory or a row of
+##     `# counted-only`;
+##   `emergency` / `emergency (panic hook)` / none — a row of `# emergency` ((l)5).
+## Held equal to the bodies by
 ## `hang_watch::window_waits_tests::the_effects_section_is_the_effect_functions_inside_the_doors`.
 ## A `worker-door-body` row (revision (j)13, brought forward by U-28) is a worker's door: its function takes
 ## a `WorkerCtx`, and its door column is empty, because the admission identities are the window thread's.
@@ -41,6 +52,20 @@
 ## A `worker-door-body` row's last field (door) is empty, and the row still ends in its tab: every
 ## line of a section has exactly its header's seven cells. `.gitattributes` exempts this file from
 ## `git diff --check`'s blank-at-eol rule for that reason alone.
+##
+## `# graphs` — the shared operations (revision (m)1, R3′): one line per function of an operation's
+## graph — the graph (`S1`…), the door its legs are of, the function by crate, `cfg` arm and item, and
+## its role (`verb`, `helper` or `outside`). It admits no line until T-LEG-AUTHORITY (0.4.9) gives a
+## leg its authority and rebuilds the graph check on bt-source's edges (revision (q)6); held by
+## `window_waits_tests::graphs_section_failures`.
+##
+## `# counted-only` and `# emergency` — the two closed exception lists an `# effects` row of kind
+## `drop-exception` or `emergency` may name besides the pinned `Drop` bodies: the `Drop`s that close a
+## handle and never wait ((k)2 item 5), and the panic report's two holders ((l)5). Each row names the
+## function by crate, `cfg` arm and item, the day it joined, why, and the ruling that allowed it (a ticket
+## and the ruling's day). A row the merge base lacks is admitted only with its ruling filled; a removal is
+## always allowed (`scripts/ci/check-window-waits.ps1`, section 7); held by
+## `window_waits_tests::counted_only_failures` and the `# effects` rule.
 ##
 ## `# owners` — where the constructs a lint cannot see through may be written (budget note §C-3):
 ## `msg_send!`/`msg_send_id!`, a raw `vtable(` call, `GetProcAddress`, an `extern` block, `#[link]`
@@ -229,6 +254,20 @@ bt-platform	[target_os = "macos"]	crate::macos_impl::program_path_directory_in	s
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::fs::canonicalize 1, std::fs::metadata 1, std::sync::mpsc::Receiver::recv 1, std::thread::JoinHandle::join 2	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::retire_within	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
+
+# graphs
+graph	door	crate	arm	item	role
+
+# counted-only
+crate	arm	item	since	reason	ruling
+bt-platform	[windows]	crate::attention_pipe::<Overlapped as Drop>::drop	2026-10-17	an overlapped operation's event handle, closed in its owner's destructor; it closes and never waits ((k)2 item 5)	T-A2-BARE-SITE-LINT 2026-10-17
+bt-platform	[windows]	crate::attention_pipe::<OwnedHandle as Drop>::drop	2026-10-17	the shared handle guard of the pipe endpoints, closed in its owner's destructor; it closes and never waits ((k)2 item 5)	T-A2-BARE-SITE-LINT 2026-10-17
+bt-platform	[windows]	crate::instance::<DataDirectoryClaim as Drop>::drop	2026-10-17	the data directory's claim mutex, released in its owner's destructor; it closes and never waits ((k)2 item 5)	T-A2-BARE-SITE-LINT 2026-10-17
+
+# emergency
+crate	arm	item	since	reason	ruling
+bt-app	-	crate::append_panic_report	2026-10-17	the panic hook's report, written synchronously because the process may end next and the report is the case the hook exists for (revision (l)5)	T-A2-BARE-SITE-LINT 2026-10-17
+bt-platform	[windows]	crate::windows_impl::write_to_console	2026-10-17	the panic hook's fatal road announces on the console before the process leaves (revision (l)5)	T-A2-BARE-SITE-LINT 2026-10-17
 
 # owners
 construct	owner	count

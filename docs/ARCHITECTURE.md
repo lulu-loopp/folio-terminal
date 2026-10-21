@@ -1983,20 +1983,37 @@ derivation of it.
 **What stays pending until A2e** (the note's revisions (c)1, (c)6, (i) and (j)).
 The source guard of §5.1 fences the escapes around the doors; nothing yet
 refuses a raw effect written outside one — **the invariant of budget note C-1 is
-pending**. What A2a established (2026-09-26) is the debt, frozen: **242 bare
+pending**. What A2a established (2026-09-26) is the debt, frozen: **the bare
 sites** — every vocabulary effect in the product outside a registered door's
-body, by crate, `cfg` arm, item and entry — in
+body, by crate, `cfg` arm, item and entry, one row each with its count (the
+check's footer prints the total) — in
 `docs/plans/window-thread-bare-sites.tsv`, held equal to the code by
 `window_waits_tests::every_bare_site_is_a_row_and_every_row_a_site` and held to
 shrinking against the merge base by `scripts/ci/check-window-waits.ps1`, which
 compares totals per `(crate, effect entry)` — so a move or a rename passes and a
 new family or a grown total is refused — and prints the total in its footer.
+**A merge keeps both sides' removals** (A2s, 2026-10-17): every merge commit
+since the merge base, and a merge still open, is held to
+the smaller of its two parents — `merged ≤ min(parent₁, parent₂)` per
+`(crate, entry)` and per row the base has, `≤ max` for a row it lacks (a rename
+on one side) — so a merge that brings back a site one side removed is refused
+even when the other side's own removals hide it in the totals.
 Since T-GATES-047 there is no seed: a merge base without the inventory is an
 error, not a baseline.
 **The count is a reading of the source, not the compiler's** (note (j)12): a
 method call counts when its receiver's type is written somewhere on its road,
 so a receiver typed nowhere is not seen, and A2e's lint may find sites the file
-never listed. Beside it: the registry's `# effects` section (§5.3); the two mints
+never listed. Beside it: the registry's `# effects` section (§5.3), whose seven
+kinds each have a closed rule (an owner door's or an interim door's body takes
+its token; a worker's takes its context; a **shared operation**'s functions will
+take `admission::Leg<'_, doors::D>`, but `shared-body` admits no row and
+`# graphs` no line until T-LEG-AUTHORITY (0.4.9) gives a leg its authority;
+`transport` admits no row until R4 proves a function runs only on
+bt-pty's own threads; `drop-exception` names the closed `Drop` inventory or a
+`# counted-only` row; `emergency` a `# emergency` row, the panic report's two
+holders — both lists dated, and a row joins only with the ticket and the day of
+the ruling that allowed it);
+the two mints
 fenced by reference (the source guard's assertion 2); the **configuration
 fence** — five `clippy.toml` files, three of them shields, no `.clippy.toml`,
 no `.cargo/config`, no `CLIPPY_CONF_DIR`, no flag lowering the lint, only the

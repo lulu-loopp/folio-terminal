@@ -3411,7 +3411,7 @@ fn the_universe_is_the_product_and_its_tools_are_declared(world: &World) -> Vec<
 // ── assertion 1: the unsafe fences (§C-5, M14) ──────────────────────────────────────────────
 
 /// The names no `unsafe` stretch and no fabrication expression may spell.
-const CAPABILITY_NAMES: [&str; 3] = ["WaitToken", "WorkerCtx", "doors"];
+const CAPABILITY_NAMES: [&str; 4] = ["WaitToken", "WorkerCtx", "Leg", "doors"];
 /// The expressions that make a value out of bytes: each spelling of the note's four.
 const FABRICATION: [&str; 7] = [
     "transmute",
@@ -3475,9 +3475,9 @@ fn fabrication_region(src: &Src, at: usize) -> (usize, usize) {
     (at, toks.last().map_or(at, |t| t.end))
 }
 
-/// **No capability is named where the compiler checks nothing**: `WaitToken`, `WorkerCtx` and
-/// `admission::doors` never inside an `unsafe` block, `unsafe fn`, `unsafe impl` or `unsafe
-/// extern`, nor inside a `transmute`, `zeroed`, `MaybeUninit` or `read` expression, anywhere in
+/// **No capability is named where the compiler checks nothing**: `WaitToken`, `WorkerCtx`, `Leg`
+/// (which holds a token and lends it through `Leg::arm`) and `admission::doors` never inside an
+/// `unsafe` block, `unsafe fn`, `unsafe impl` or `unsafe extern`, nor inside a `transmute`, `zeroed`, `MaybeUninit` or `read` expression, anywhere in
 /// the product; and `admission` keeps `#![forbid(unsafe_code)]` and writes no `unsafe` — both of
 /// its halves: `bt-effects`' module, which builds the capabilities, and `bt-platform`'s, the thread
 /// door that lends the worker's.
@@ -5266,7 +5266,7 @@ fn every_entrance_left_the_vocabulary_takes_its_capability(world: &World) -> Vec
 fn every_door_is_where_the_registry_says() {
     let world = World::new();
     let words = vocabulary();
-    let assertions: [(&str, Vec<String>); 14] = [
+    let assertions: [(&str, Vec<String>); 17] = [
         (
             "the_universe_is_the_product_and_its_tools_are_declared",
             the_universe_is_the_product_and_its_tools_are_declared(&world),
@@ -5322,6 +5322,18 @@ fn every_door_is_where_the_registry_says() {
         (
             "every_excluded_root_carries_the_unconditional_form",
             every_excluded_root_carries_the_unconditional_form(&world),
+        ),
+        (
+            "the_counted_only_drops_close_and_never_wait",
+            counted_only_failures(&world, &words, REGISTRY),
+        ),
+        (
+            "the_graphs_section_admits_no_line",
+            graphs_section_failures(REGISTRY),
+        ),
+        (
+            "the_registry_sections_are_the_closed_list",
+            registry_section_failures(REGISTRY),
         ),
     ];
     let mut report = String::new();
@@ -7062,47 +7074,88 @@ fn bare_sites_observed(world: &World) -> BTreeMap<BareKey, usize> {
     vocabulary_sites(world).0
 }
 
+/// A function by `(crate, arm, item)`, as `# effects` keys one.
+type FnKey = (String, String, String);
+
+/// [`vocabulary_sites_in`]'s answer: the bare sites, the door functions' effects, and how each door
+/// function is registered.
+type SitesSplit = (
+    BTreeMap<BareKey, usize>,
+    DoorEffects,
+    BTreeMap<FnKey, Registered>,
+);
+
 /// A door function's effects: the door it serves, and its vocabulary entries counted.
 type DoorEffects = BTreeMap<(String, String, String), (String, BTreeMap<String, usize>)>;
 
-/// **A worker's door functions** (revision (j)13, brought forward by U-28): the product functions
-/// the registry's `# effects` section lists as `worker-door-body` whose parameters take a
-/// `WorkerCtx` — the capability only the thread door and `enter_standalone_main` lend. Their
-/// bodies are doors with no admission identity (the `# doors` identities are the window thread's),
-/// so their sites are door effects, never inventory. A listed function that takes no `WorkerCtx`
-/// is no door, and its sites stay bare.
-fn worker_door_functions(world: &World) -> BTreeSet<(usize, usize)> {
-    let listed: BTreeSet<(String, String, String)> = section("effects", &EFFECT_COLUMNS)
-        .into_iter()
-        .filter(|cells| cells[4] == "worker-door-body")
-        .map(|cells| {
-            (
-                cells[0].to_owned(),
-                cells[1].to_owned(),
-                cells[2].to_owned(),
-            )
+/// **How a function whose sites are not inventory is registered**: what the source shows it takes,
+/// or the `# effects` kind that lists it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Registered {
+    /// It takes the `WaitToken` of a `# doors` line: an owner door's body.
+    Token,
+    /// The registry lists it as a `worker-door-body` and it takes a `WorkerCtx` ((j)13).
+    Worker,
+    /// The registry lists it under a kind no parameter shows — `transport`, `drop-exception`,
+    /// `emergency` — and the `# effects` test holds the listing to that kind's own closed rule.
+    Listed,
+}
+
+/// The kinds a function is registered by its listing alone, each with the rule
+/// [`effect_row_shape`] holds it to.
+const LISTED_KINDS: [&str; 3] = ["transport", "drop-exception", "emergency"];
+
+/// **The functions the registry's `# effects` section registers by listing**: a `worker-door-body`
+/// row whose function takes a `WorkerCtx` (revision (j)13, brought forward by U-28: the capability
+/// only the thread door and `enter_standalone_main` lend — a listed function that takes none is no
+/// door, and its sites stay bare), and every row of a [`LISTED_KINDS`] kind. Their bodies are doors
+/// with no admission identity (the `# doors` identities are the window thread's), so their sites
+/// are door effects, never inventory.
+fn listed_effect_functions(
+    world: &World,
+    effects: &[Vec<&str>],
+) -> BTreeMap<(usize, usize), Registered> {
+    let listed: BTreeMap<(String, String, String), Registered> = effects
+        .iter()
+        .filter_map(|cells| {
+            let how = match cells[4] {
+                "worker-door-body" => Registered::Worker,
+                kind if LISTED_KINDS.contains(&kind) => Registered::Listed,
+                _ => return None,
+            };
+            Some((
+                (
+                    cells[0].to_owned(),
+                    cells[1].to_owned(),
+                    cells[2].to_owned(),
+                ),
+                how,
+            ))
         })
         .collect();
-    let mut out = BTreeSet::new();
+    let mut out = BTreeMap::new();
     for (at, src) in world.srcs.iter().enumerate() {
         for record in src.index.items() {
             if !record.kind().is_callable() || !src.product_item(record) {
                 continue;
             }
             let (item, arm) = item_and_arm(record);
-            if !listed.contains(&(src.package.to_owned(), arm, item)) {
-                continue;
-            }
-            let toks = src.lex(record.declaration().start(), record.declaration().end());
-            let Some((_, open, close)) = signature(src, &toks) else {
+            let Some(how) = listed.get(&(src.package.to_owned(), arm, item)) else {
                 continue;
             };
-            if toks[open..=close]
-                .iter()
-                .any(|t| src.text(*t) == "WorkerCtx")
-            {
-                out.insert((at, record.whole().start()));
+            if *how == Registered::Worker {
+                let toks = src.lex(record.declaration().start(), record.declaration().end());
+                let Some((_, open, close)) = signature(src, &toks) else {
+                    continue;
+                };
+                if !toks[open..=close]
+                    .iter()
+                    .any(|t| src.text(*t) == "WorkerCtx")
+                {
+                    continue;
+                }
             }
+            out.insert((at, record.whole().start()), *how);
         }
     }
     out
@@ -7110,24 +7163,32 @@ fn worker_door_functions(world: &World) -> BTreeSet<(usize, usize)> {
 
 /// Every vocabulary site in the product, split at the doors: those outside a registered door
 /// function's body, by `(crate, arm, item, entry)`; and, for each door function whose body holds
-/// any, the door it serves (empty for a worker's door) and its entries counted, by
-/// `(crate, arm, item)`.
+/// any, the door it serves (empty for a function registered by listing) and its entries counted,
+/// by `(crate, arm, item)`.
 fn vocabulary_sites(world: &World) -> (BTreeMap<BareKey, usize>, DoorEffects) {
+    let (bare, in_doors, _) = vocabulary_sites_in(world, &section("effects", &EFFECT_COLUMNS));
+    (bare, in_doors)
+}
+
+/// [`vocabulary_sites`] against the `# effects` rows `effects`, and how each door function holding
+/// a site is registered.
+fn vocabulary_sites_in(world: &World, effects: &[Vec<&str>]) -> SitesSplit {
     let reader = Reader::new(world);
-    let mut doors: BTreeMap<(usize, usize), String> = door_functions(world)
+    let mut doors: BTreeMap<(usize, usize), (String, Registered)> = door_functions(world)
         .iter()
         .map(|door| {
             (
                 (door.src, door.record.whole().start()),
-                door.doors.join(", "),
+                (door.doors.join(", "), Registered::Token),
             )
         })
         .collect();
-    for key in worker_door_functions(world) {
-        doors.entry(key).or_default();
+    for (key, how) in listed_effect_functions(world, effects) {
+        doors.entry(key).or_insert((String::new(), how));
     }
     let mut bare = BTreeMap::new();
     let mut in_doors: DoorEffects = BTreeMap::new();
+    let mut registered = BTreeMap::new();
     for (src, s) in world.srcs.iter().enumerate() {
         for (site, owner) in reader.sites(src) {
             if !s.in_product(site.at) {
@@ -7140,9 +7201,11 @@ fn vocabulary_sites(world: &World) -> (BTreeMap<BareKey, usize>, DoorEffects) {
             let entry = reader.entries[site.entry].path.clone();
             let door = owner.and_then(|record| doors.get(&(src, record.whole().start())));
             match door {
-                Some(door) => {
+                Some((door, how)) => {
+                    let key = (s.package.to_owned(), arm, item);
+                    registered.insert(key.clone(), *how);
                     *in_doors
-                        .entry((s.package.to_owned(), arm, item))
+                        .entry(key)
                         .or_insert_with(|| (door.clone(), BTreeMap::new()))
                         .1
                         .entry(entry)
@@ -7156,7 +7219,7 @@ fn vocabulary_sites(world: &World) -> (BTreeMap<BareKey, usize>, DoorEffects) {
             }
         }
     }
-    (bare, in_doors)
+    (bare, in_doors, registered)
 }
 
 const EFFECT_COLUMNS: [&str; 7] = [
@@ -7168,14 +7231,126 @@ const EFFECT_COLUMNS: [&str; 7] = [
     "authority",
     "door",
 ];
-const EFFECT_KINDS: [&str; 5] = [
+const EFFECT_KINDS: [&str; 7] = [
     "owner-door-body",
     "worker-door-body",
     "transport",
     "drop-exception",
     "interim-owner",
+    "shared-body",
+    "emergency",
 ];
-const AUTHORITIES: [&str; 4] = ["WaitToken", "WorkerCtx", "none (transport)", "drop"];
+const AUTHORITIES: [&str; 6] = [
+    "WaitToken",
+    "WorkerCtx",
+    "none (transport)",
+    "drop",
+    "Leg",
+    "emergency (panic hook)",
+];
+
+/// Why a `shared-body` row, and any `# graphs` line, is refused: a leg carries no authority yet
+/// (the audit `T-A2-LEG-GUARD-AUDIT`, 2026-10-21).
+const SHARED_BODY_CLOSED: &str =
+    "a leg carries no authority until the leg guard (T-LEG-AUTHORITY, 0.4.9)";
+
+/// The statuses an `interim-owner` door's §5.3 row may have: it is admitted as it is today, owed to
+/// the ticket its row names ((i)3's ruling), never `done` or `ruled to stay`.
+const INTERIM_STATUSES: [&str; 2] = ["open", "pending"];
+
+/// **What one `# effects` row may say, by kind** (revisions (j)7, (j)13, (l)1, (l)5, (m)1):
+///
+/// | kind | authority | door | registered by | further rule |
+/// |---|---|---|---|---|
+/// | `owner-door-body` | `WaitToken` | its door | the token it takes | — |
+/// | `interim-owner` | `WaitToken` | its door | the token it takes | the door's §5.3 row is `open` or `pending` |
+/// | `worker-door-body` | `WorkerCtx` | none | its listing, and the `WorkerCtx` it takes | — |
+/// | `shared-body` | `Leg` | its door | nothing yet | **refused until T-LEG-AUTHORITY** (0.4.9): a leg carries no authority until the guard recognises its one admitted shape (the audit `T-A2-LEG-GUARD-AUDIT`, 2026-10-21) |
+/// | `transport` | `none (transport)` | none | its listing | **refused until R4** builds its thread check: a transport function is reachable only from bt-pty's own threads (the R1 review's B1) |
+/// | `drop-exception` | `drop` | none | its listing | a [`PINNED`] body or a `# counted-only` `Drop` |
+/// | `emergency` | `emergency (panic hook)` | none | its listing | a `# emergency` holder ((l)5) |
+///
+/// Returns why the row breaks its kind's rule, if it does.
+fn effect_row_shape(cells: &[&str], registry: &str) -> Option<String> {
+    let (package, arm, item, kind, authority, door) =
+        (cells[0], cells[1], cells[2], cells[4], cells[5], cells[6]);
+    let wanted = match kind {
+        "owner-door-body" | "interim-owner" => ("WaitToken", true),
+        "worker-door-body" => ("WorkerCtx", false),
+        "shared-body" => ("Leg", true),
+        "transport" => ("none (transport)", false),
+        "drop-exception" => ("drop", false),
+        "emergency" => ("emergency (panic hook)", false),
+        _ => return None, // the kind's own failure says it.
+    };
+    if authority != wanted.0 || door.is_empty() == wanted.1 {
+        return Some(format!(
+            "`{kind}` is `{}` with {}, and the row says `{authority}` / door `{door}`",
+            wanted.0,
+            if wanted.1 { "its door" } else { "no door" }
+        ));
+    }
+    let key = (package.to_owned(), arm.to_owned(), item.to_owned());
+    match kind {
+        "interim-owner" => {
+            let row = section_in(registry, "doors", &DOOR_COLUMNS)
+                .into_iter()
+                .find(|cells| cells[0] == door)
+                .map(|cells| cells[1]);
+            let status = row.and_then(|row| {
+                section_in(registry, "rows", &ROW_COLUMNS)
+                    .into_iter()
+                    .find(|cells| cells[0] == row)
+                    .map(|cells| cells[1])
+            });
+            match status {
+                Some(status) if INTERIM_STATUSES.contains(&status) => None,
+                Some(status) => Some(format!(
+                    "an `interim-owner` body's door `{door}` serves a row that is `{status}`, \
+                     where an interim door's row is {INTERIM_STATUSES:?}"
+                )),
+                None => Some(format!(
+                    "an `interim-owner` body's door `{door}` serves no `# rows` row"
+                )),
+            }
+        }
+        // The audit T-A2-LEG-GUARD-AUDIT (2026-10-21): no guard recognises a function by the leg
+        // it takes, so no row may carry the kind until T-LEG-AUTHORITY builds that recognition on
+        // bt-source's resolver and reopens it.
+        "shared-body" => Some(format!(
+            "`shared-body` admits no row: {SHARED_BODY_CLOSED} ({package} {item})"
+        )),
+        // The R1 review's B1: a crate is no thread. Until R4 can prove a function is reached only
+        // from bt-pty's own threads (the ring, reader, writer and publisher bodies), no row may
+        // carry the kind — `join_within` is bt-pty's and the window thread joins through it.
+        "transport" => Some(format!(
+            "`transport` admits no row: no thread check until R4, which proves a transport \
+             function is reached only from bt-pty's own threads ({package} {item})"
+        )),
+        "drop-exception" => {
+            let spelled = if arm == "-" {
+                format!("{package} {item}")
+            } else {
+                format!("{package} {item} {arm}")
+            };
+            let counted = listed_exceptions(registry, "counted-only")
+                .iter()
+                .any(|(p, a, i)| spelled_key(p, a, i) == spelled);
+            (!PINNED.iter().any(|pin| pin.body == spelled) && !counted).then(|| {
+                format!(
+                    "a `drop-exception` names a pinned body of the closed `Drop` inventory or a \
+                         counted-only `Drop`, and `{spelled}` is neither"
+                )
+            })
+        }
+        "emergency" => (!listed_exceptions(registry, "emergency").contains(&key)).then(|| {
+            "an `emergency` row names a `# emergency` holder, one of the panic report's two \
+             ((l)5)"
+                .to_owned()
+        }),
+        _ => None,
+    }
+}
 
 /// `std::thread::JoinHandle::join 1, std::thread::sleep 1`: a row's effects, each entry with its
 /// count.
@@ -7187,31 +7362,26 @@ fn effects_spelled(effects: &BTreeMap<String, usize>) -> String {
         .join(", ")
 }
 
-/// RED (A2a, revision (j)7) — **the registry's `# effects` section lists exactly the functions
-/// whose own body holds a listed effect inside a registered door, each with its entries, counts,
-/// kind, authority and the door it serves.**
-///
-/// A2e puts one `expect(clippy::disallowed_methods)` on each effect function — the function whose
-/// body contains the raw effect, never a caller or a wrapper — and an `expect` on a function with no
-/// effect is itself an error, so the holders have to be known by name, arm and count before the
-/// lint exists. Until revision (k) allocates the rest, the only rows are the effect functions that
-/// already sit inside a door: kind `owner-door-body`, authority `WaitToken`, the door their token
-/// names — and, from U-28 ((j)13), a worker's door body: kind `worker-door-body`, authority
-/// `WorkerCtx`, **with no admission identity** (the door column empty), since the `# doors`
-/// identities are the window thread's and a worker's door is authorised by the `WorkerCtx` it
-/// takes. A door that forwards to a separately defined helper (`trace_sink::flush` →
-/// `flush_sink`) does not make the helper in-door; the helper's sites are inventory. The door
-/// `expect` count stays 0 (assertion 4) until A2e.
-///
-/// MUTATION: add a row for a function that holds no listed effect, or delete a row, or change a
-/// count, and it goes red naming the row.
-#[test]
-fn the_effects_section_is_the_effect_functions_inside_the_doors() {
-    let world = World::new();
-    let (_, observed) = vocabulary_sites(&world);
+/// Which kinds a function registered as `how` may be listed under.
+fn kinds_registered_as(how: Registered) -> &'static [&'static str] {
+    match how {
+        Registered::Token => &["owner-door-body", "interim-owner"],
+        Registered::Worker => &["worker-door-body"],
+        Registered::Listed => &LISTED_KINDS,
+    }
+}
+
+/// **The `# effects` section against the bodies**, for `registry` and the world: every row
+/// well formed and true to its kind ([`effect_row_shape`]), every function holding a site inside
+/// a door listed once with its entries, counts and door, and no row for a function that holds
+/// none.
+fn effects_section_failures(world: &World, registry: &str) -> Vec<String> {
+    let effects = section_in(registry, "effects", &EFFECT_COLUMNS);
+    let (_, observed, registered) = vocabulary_sites_in(world, &effects);
     let mut failures = Vec::new();
     let mut listed: DoorEffects = BTreeMap::new();
-    for cells in section("effects", &EFFECT_COLUMNS) {
+    let mut kinds: BTreeMap<(String, String, String), &str> = BTreeMap::new();
+    for cells in &effects {
         let key = (
             cells[0].to_owned(),
             cells[1].to_owned(),
@@ -7229,14 +7399,14 @@ fn the_effects_section_is_the_effect_functions_inside_the_doors() {
                 cells[0], cells[2], cells[5]
             ));
         }
-        let mut effects = BTreeMap::new();
+        let mut entries = BTreeMap::new();
         for part in cells[3].split(", ") {
             match part
                 .rsplit_once(' ')
                 .map(|(entry, count)| (entry, count.parse::<usize>()))
             {
                 Some((entry, Ok(count))) if count > 0 => {
-                    effects.insert(entry.to_owned(), count);
+                    entries.insert(entry.to_owned(), count);
                 }
                 _ => failures.push(format!(
                     "{} {}: `{part}` is not `<entry> <count>`",
@@ -7244,41 +7414,40 @@ fn the_effects_section_is_the_effect_functions_inside_the_doors() {
                 )),
             }
         }
-        // What A2a can say from the code: an effect inside a door is that door's owner-thread body,
-        // admitted by its token — or, since U-28 brought (j)13 forward, a worker's door body,
-        // authorised by the `WorkerCtx` it takes, with no admission identity (the `# doors`
-        // identities are the window thread's). Other kinds wait for revision (k).
-        let shape_ok = match (cells[4], cells[5]) {
-            ("owner-door-body", "WaitToken") => !cells[6].is_empty(),
-            ("worker-door-body", "WorkerCtx") => cells[6].is_empty(),
-            _ => false,
-        };
-        if !shape_ok {
-            failures.push(format!(
-                "{} {}: `{}` / `{}` / door `{}` — until revision (k) allocates the rest, a row \
-                 is an effect function inside a registered door: `owner-door-body` / `WaitToken` \
-                 with its door, or `worker-door-body` / `WorkerCtx` with none ((j)13)",
-                cells[0], cells[2], cells[4], cells[5], cells[6]
-            ));
+        if let Some(why) = effect_row_shape(cells, registry) {
+            failures.push(format!("{} {} {}: {why}", cells[0], cells[1], cells[2]));
         }
-        if listed.insert(key, (cells[6].to_owned(), effects)).is_some() {
+        kinds.insert(key.clone(), cells[4]);
+        if listed.insert(key, (cells[6].to_owned(), entries)).is_some() {
             failures.push(format!(
                 "{} {} {}: listed twice",
                 cells[0], cells[1], cells[2]
             ));
         }
     }
-    for (key, (door, effects)) in &observed {
+    for (key, (door, entries)) in &observed {
+        if let (Some(how), Some(kind)) = (registered.get(key), kinds.get(key))
+            && !kinds_registered_as(*how).contains(kind)
+        {
+            failures.push(format!(
+                "{} {} {}: its parameters make it {how:?}, which is listed as {:?}, and the row \
+                 says `{kind}`",
+                key.0,
+                key.1,
+                key.2,
+                kinds_registered_as(*how)
+            ));
+        }
         match listed.get(key) {
-            Some(row) if row == &(door.clone(), effects.clone()) => {}
-            Some((listed_door, listed_effects)) => failures.push(format!(
+            Some(row) if row == &(door.clone(), entries.clone()) => {}
+            Some((listed_door, listed_entries)) => failures.push(format!(
                 "{} {} {}: the body holds {} for door {door}, and the row says {} for door \
                  {listed_door}",
                 key.0,
                 key.1,
                 key.2,
-                effects_spelled(effects),
-                effects_spelled(listed_effects)
+                effects_spelled(entries),
+                effects_spelled(listed_entries)
             )),
             None => failures.push(format!(
                 "{} {} {}: a door function (door {door}) whose body holds {}, with no `# effects` \
@@ -7286,7 +7455,7 @@ fn the_effects_section_is_the_effect_functions_inside_the_doors() {
                 key.0,
                 key.1,
                 key.2,
-                effects_spelled(effects)
+                effects_spelled(entries)
             )),
         }
     }
@@ -7296,9 +7465,727 @@ fn the_effects_section_is_the_effect_functions_inside_the_doors() {
             key.0, key.1, key.2
         ));
     }
+    failures
+}
+
+/// RED (A2a, revision (j)7; kinds completed by A2s, revisions (l)1, (l)5 and (m)1) — **the
+/// registry's `# effects` section lists exactly the functions whose own body holds a listed effect
+/// inside a registered door, each with its entries, counts, kind, authority and the door it
+/// serves.**
+///
+/// A2e puts one `expect(clippy::disallowed_methods)` on each effect function — the function whose
+/// body contains the raw effect, never a caller or a wrapper — and an `expect` on a function with no
+/// effect is itself an error, so the holders have to be known by name, arm and count before the
+/// lint exists. A function is a door's body when the source shows it: it takes a `WaitToken` of a
+/// `# doors` line (an owner door's body, or an interim one whose row is still `open` or `pending`),
+/// or the `WorkerCtx` its `worker-door-body` row names; or when its kind is one no parameter can
+/// show and the kind's own closed rule holds it — a `drop-exception` of the closed `Drop`
+/// inventory or the counted-only `Drop`s, the panic report's two `emergency` holders. `transport`
+/// (until R4) and `shared-body` (until T-LEG-AUTHORITY, 0.4.9: a function taking a `Leg` is no door
+/// yet, and its sites stay bare) admit no row. A
+/// door that forwards to a separately defined helper (`trace_sink::flush` → `flush_sink`) does not
+/// make the helper in-door; the helper's sites are inventory. The door `expect` count stays 0
+/// (assertion 4) until A2e.
+///
+/// MUTATION: add a row for a function that holds no listed effect, or delete a row, or change a
+/// count, and it goes red naming the row; list a function under a kind its parameters do not
+/// show, and it goes red naming both (the planted registries of
+/// [`every_effect_kind_holds_to_its_own_rule`]).
+#[test]
+fn the_effects_section_is_the_effect_functions_inside_the_doors() {
+    let world = World::new();
+    let failures = effects_section_failures(&world, REGISTRY);
     assert!(
         failures.is_empty(),
         "the registry's `# effects` section and the doors' bodies differ:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// The registry's sections, each headed `# <name>` once, in this order: a closed list, so a section
+/// misspelled, unknown or written twice — a second `# graphs` after the first, which
+/// [`section_in`] would never read — is refused by name rather than read past.
+const REGISTRY_SECTIONS: [&str; 10] = [
+    "rows",
+    "doors",
+    "vocabulary",
+    "entrances",
+    "effects",
+    "graphs",
+    "counted-only",
+    "emergency",
+    "owners",
+    "completions",
+];
+
+/// **The registry's section headers are the closed list** [`REGISTRY_SECTIONS`]: every line that
+/// starts `# ` is one of them, each stands once, all of them stand, and in the listed order.
+fn registry_section_failures(registry: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for (at, line) in registry.lines().enumerate() {
+        let Some(name) = line.strip_prefix("# ") else {
+            continue;
+        };
+        if !REGISTRY_SECTIONS.contains(&name) {
+            failures.push(format!(
+                "line {}: `# {name}` is no section of the registry, whose sections are {REGISTRY_SECTIONS:?}",
+                at + 1
+            ));
+        } else if seen.contains(&name) {
+            failures.push(format!(
+                "line {}: `# {name}` is written twice: a second header hides its lines from the first's reader",
+                at + 1
+            ));
+        } else {
+            seen.push(name);
+        }
+    }
+    for name in REGISTRY_SECTIONS {
+        if !seen.contains(&name) {
+            failures.push(format!("the registry has no `# {name}` section"));
+        }
+    }
+    let order: Vec<&str> = REGISTRY_SECTIONS
+        .iter()
+        .copied()
+        .filter(|name| seen.contains(name))
+        .collect();
+    if failures.is_empty() && seen != order {
+        failures.push(format!(
+            "the registry's sections stand as {seen:?}, where they are {REGISTRY_SECTIONS:?}"
+        ));
+    }
+    failures
+}
+
+/// RED (T-A2-R1-NONLEG review, nit c) — **the registry's section headers are a closed list**: the
+/// live registry passes; a misspelled header, an unknown one and a second `# graphs` after the
+/// first are each refused by name.
+///
+/// MUTATION: let [`registry_section_failures`] skip the duplicate check, and the second `# graphs`
+/// passes.
+#[test]
+fn the_registry_sections_are_the_closed_list() {
+    let failures = registry_section_failures(REGISTRY);
+    assert!(
+        failures.is_empty(),
+        "the live registry's sections are refused:\n  {}",
+        failures.join("\n  ")
+    );
+    let twice = format!(
+        "{REGISTRY}\n# graphs\n{}\nS1\tTraceFlush\tbt-app\t-\tcrate::x\tverb\n",
+        GRAPH_COLUMNS.join("\t")
+    );
+    for (planted, why) in [
+        (
+            REGISTRY.replace("\n# owners\n", "\n# owner\n"),
+            "`# owner` is no section of the registry",
+        ),
+        (
+            REGISTRY.replace("\n# owners\n", "\n# owners\n# notes\n"),
+            "`# notes` is no section of the registry",
+        ),
+        (twice, "`# graphs` is written twice"),
+    ] {
+        let failures = registry_section_failures(&planted);
+        assert!(
+            failures.iter().any(|f| f.contains(why)),
+            "the planted registry is not refused for `{why}`:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+}
+
+/// The registry's `# graphs` section (revision (m)1 item 2, revision (q)2): its header, one line per
+/// function of a shared operation's graph once a leg carries authority.
+const GRAPH_COLUMNS: [&str; 6] = ["graph", "door", "crate", "arm", "item", "role"];
+
+/// **`# graphs` admits no line** (revision (q)6; the audit `T-A2-LEG-GUARD-AUDIT`, 2026-10-21): the
+/// section stands with its header, and every other line under it — well formed or not — is refused
+/// by its text, because a graph is a leg's and a leg carries no authority until T-LEG-AUTHORITY
+/// (0.4.9) recognises its one admitted shape and rebuilds the graph check on bt-source's edges. The
+/// lines are read raw, not through [`section_in`], so a line of the wrong width is refused, not a
+/// panic.
+fn graphs_section_failures(registry: &str) -> Vec<String> {
+    let mut lines = registry
+        .lines()
+        .skip_while(|line| *line != "# graphs")
+        .skip(1)
+        .take_while(|line| !line.starts_with("# "))
+        .filter(|line| !line.is_empty() && !line.starts_with("##"));
+    let mut failures = Vec::new();
+    if lines.next() != Some(GRAPH_COLUMNS.join("\t").as_str()) {
+        failures.push(format!(
+            "the registry has no `# graphs` section headed {GRAPH_COLUMNS:?}"
+        ));
+    }
+    for line in lines {
+        failures.push(format!(
+            "`# graphs` admits no line: {SHARED_BODY_CLOSED}; found `{line}`"
+        ));
+    }
+    failures
+}
+
+/// The columns of the registry's two closed exception lists, `# counted-only` and `# emergency`:
+/// the function by `crate`, `arm` and `item`, the day it joined (`since`, `YYYY-MM-DD`), why, and
+/// the ruling that allowed it (`ruling`: a ticket and the ruling's day, `T-A2-BARE-SITE-LINT
+/// 2026-10-17`). `scripts/ci/check-window-waits.ps1` (section 7) admits a row the merge base lacks
+/// only with its ruling filled; a removal is always allowed.
+const LISTED_EXCEPTION_COLUMNS: [&str; 6] = ["crate", "arm", "item", "since", "reason", "ruling"];
+
+/// Whether `cell` is a day, `YYYY-MM-DD`.
+fn is_a_day(cell: &str) -> bool {
+    let bytes = cell.as_bytes();
+    bytes.len() == 10
+        && bytes.iter().enumerate().all(|(at, byte)| {
+            if at == 4 || at == 7 {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_digit()
+            }
+        })
+}
+
+/// Whether `cell` is a ruling: a ticket's name (`T-` and capitals, digits or hyphens) and the
+/// ruling's day — `T-A2-BARE-SITE-LINT 2026-10-17`.
+fn is_a_ruling(cell: &str) -> bool {
+    cell.split_once(' ').is_some_and(|(ticket, day)| {
+        ticket.len() > 2
+            && ticket.starts_with("T-")
+            && ticket[2..]
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-')
+            && is_a_day(day)
+    })
+}
+
+/// A listed exception's rows, each as its `(crate, arm, item)`.
+fn listed_exceptions(registry: &str, section_name: &str) -> Vec<(String, String, String)> {
+    section_in(registry, section_name, &LISTED_EXCEPTION_COLUMNS)
+        .into_iter()
+        .map(|cells| {
+            (
+                cells[0].to_owned(),
+                cells[1].to_owned(),
+                cells[2].to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// `bt-platform crate::x::<T as Drop>::drop [windows]`: a listed row in [`key_of`]'s spelling.
+fn spelled_key(package: &str, arm: &str, item: &str) -> String {
+    if arm == "-" {
+        format!("{package} {item}")
+    } else {
+        format!("{package} {item} {arm}")
+    }
+}
+
+/// **Every row of the two closed exception lists is dated and says why** — a `since` that is a
+/// day and a reason that is a sentence — and no function is listed twice in one list.
+fn listed_exception_row_failures(registry: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    for name in ["counted-only", "emergency"] {
+        let mut seen = BTreeSet::new();
+        for cells in section_in(registry, name, &LISTED_EXCEPTION_COLUMNS) {
+            if !is_a_day(cells[3]) {
+                failures.push(format!(
+                    "# {name}: `{} {}` has `since` `{}`, not a day `YYYY-MM-DD`",
+                    cells[0], cells[2], cells[3]
+                ));
+            }
+            if cells[4].split_whitespace().count() < 3 {
+                failures.push(format!(
+                    "# {name}: `{} {}` gives no reason",
+                    cells[0], cells[2]
+                ));
+            }
+            if !is_a_ruling(cells[5]) {
+                failures.push(format!(
+                    "# {name}: `{} {}` has ruling `{}`, not a ticket and its day \
+                     (`T-A2-BARE-SITE-LINT 2026-10-17`)",
+                    cells[0], cells[2], cells[5]
+                ));
+            }
+            if !seen.insert((cells[0], cells[1], cells[2])) {
+                failures.push(format!(
+                    "# {name}: `{} {} {}` is listed twice",
+                    cells[0], cells[1], cells[2]
+                ));
+            }
+        }
+    }
+    failures
+}
+
+/// **The counted-only `Drop`s close and never wait** ((k)2 item 5): each `# counted-only` row of
+/// `registry` is a product `Drop::drop`, outside [`EXCEPTIONS`], whose body holds at least one
+/// vocabulary effect, none of which waits — so listing it as a `drop-exception` admits a handle
+/// closed in its owner's destructor and nothing else. And each `# emergency` row names a product
+/// function, so a holder that was renamed or removed is refused by name, not kept as a stale row.
+fn counted_only_failures(world: &World, words: &[Word], registry: &str) -> Vec<String> {
+    let mut failures = listed_exception_row_failures(registry);
+    let mut bodies: BTreeMap<String, (usize, &'static ItemRecord)> = BTreeMap::new();
+    for (at, src) in world.srcs.iter().enumerate() {
+        for record in src.index.items() {
+            if record.kind().is_callable() && src.product_item(record) {
+                bodies.insert(key_of(src, record), (at, record));
+            }
+        }
+    }
+    for (package, arm, item) in listed_exceptions(registry, "counted-only") {
+        let key = spelled_key(&package, &arm, &item);
+        if EXCEPTIONS.iter().any(|row| row.drop == key) {
+            failures.push(format!(
+                "`{key}` is a row of the exception table, not counted-only"
+            ));
+        }
+        let Some((src, record)) = bodies.get(&key) else {
+            failures.push(format!(
+                "the counted-only `Drop` `{key}` is not in the product"
+            ));
+            continue;
+        };
+        if record.name() != "drop" || record.trait_name() != Some("Drop") {
+            failures.push(format!("the counted-only `{key}` is not a `Drop::drop`"));
+            continue;
+        }
+        let body = Body::new(world, *src, record);
+        let mut counted = 0;
+        for site in body.sites() {
+            match effect_of(words, &site) {
+                Some((effect, true)) => failures.push(format!(
+                    "the counted-only `{key}` waits: `{effect}` at {}",
+                    body.s().location(site.at)
+                )),
+                Some((_, false)) => counted += 1,
+                None => {}
+            }
+        }
+        if counted == 0 {
+            failures.push(format!(
+                "the counted-only `{key}` holds no counted effect: it is no exception at all"
+            ));
+        }
+    }
+    for (package, arm, item) in listed_exceptions(registry, "emergency") {
+        let key = spelled_key(&package, &arm, &item);
+        if !bodies.contains_key(&key) {
+            failures.push(format!(
+                "the emergency holder `{key}` is not in the product"
+            ));
+        }
+    }
+    failures
+}
+
+/// The registry's `# effects` row for `item` of `package` on `arm`, cut at its tabs.
+fn live_effect_row(package: &str, arm: &str, item: &str) -> Vec<String> {
+    section("effects", &EFFECT_COLUMNS)
+        .into_iter()
+        .find(|cells| cells[0] == package && cells[1] == arm && cells[2] == item)
+        .unwrap_or_else(|| panic!("the registry lists `{package} {arm} {item}` in `# effects`"))
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// **A planted copy of the registry**, read the way the registry is read whatever it holds today:
+/// each of `effects` (seven cells) replaces the `# effects` row of its `(crate, arm, item)` — or is
+/// added when there is none — and each line of `appended` goes under the header of the section it
+/// names (`("graphs", line)`).
+fn planted_registry(effects: &[Vec<String>], appended: &[(&str, &str)]) -> String {
+    let keys: BTreeSet<(String, String, String)> = effects
+        .iter()
+        .map(|cells| (cells[0].clone(), cells[1].clone(), cells[2].clone()))
+        .collect();
+    let mut out = String::new();
+    let mut section_name = String::new();
+    for line in REGISTRY.lines() {
+        if let Some(name) = line.strip_prefix("# ") {
+            section_name = name.to_owned();
+        }
+        if section_name == "effects" && !line.starts_with('#') {
+            let cells: Vec<&str> = line.split('\t').collect();
+            if cells.len() == EFFECT_COLUMNS.len()
+                && keys.contains(&(
+                    cells[0].to_owned(),
+                    cells[1].to_owned(),
+                    cells[2].to_owned(),
+                ))
+            {
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+        if line == EFFECT_COLUMNS.join("\t") {
+            for cells in effects {
+                out.push_str(&cells.join("\t"));
+                out.push('\n');
+            }
+        }
+        if line.starts_with(|c: char| c.is_ascii_lowercase()) && !line.contains(' ') {
+            // A header line: the section's appended lines follow it.
+            for (wanted, appended_line) in appended {
+                if *wanted == section_name {
+                    out.push_str(appended_line);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out
+}
+
+/// An `# effects` row of seven cells.
+fn effect_row(cells: [&str; 7]) -> Vec<String> {
+    cells.iter().map(|cell| (*cell).to_owned()).collect()
+}
+
+/// `row` with its kind, authority and door replaced.
+fn with_kind(mut row: Vec<String>, kind: &str, authority: &str, door: &str) -> Vec<String> {
+    row[4] = kind.to_owned();
+    row[5] = authority.to_owned();
+    row[6] = door.to_owned();
+    row
+}
+
+/// Whether some failure names `what` and says `why`.
+fn says(failures: &[String], what: &str, why: &str) -> bool {
+    failures.iter().any(|f| f.contains(what) && f.contains(why))
+}
+
+/// RED (A2s, revisions (l)1, (l)5, (m)1, (m)3, and the R1 review's B1) — **every `# effects` kind
+/// holds to its own rule.**
+///
+/// Planted copies of the registry (the product unchanged) list real functions under each kind,
+/// each planted row replacing the registry's own row for that function if it has one:
+///
+/// - `transport` admits no row until R4 builds its thread check: `bt_pty::InputRing::take`, which
+///   runs on bt-pty's writer thread, is refused for that reason, and so is
+///   `hang_watch::watch_forever`;
+/// - `drop-exception` names a pinned body or a `# counted-only` `Drop`: `<Overlapped as
+///   Drop>::drop`'s `CloseHandle` is accepted, `watch_forever` is refused;
+/// - `emergency` names a `# emergency` holder: `append_panic_report` is accepted,
+///   `watch_forever` is refused;
+/// - `interim-owner` is a door whose §5.3 row is `open` or `pending`: `GpuOpen`'s body (row 23,
+///   pending) is accepted, `SessionWriteWait`'s (row 16, ruled to stay) is refused;
+/// - a function's parameters decide its kinds: `gpu_door::open_first_window`, which takes a
+///   `WaitToken`, listed as a `shared-body` is refused for that; and `shared-body` admits no row
+///   at all until T-LEG-AUTHORITY (0.4.9), so the same row is refused for that too.
+///
+/// Each accepted row also leaves the bare-site inventory: its sites are door effects, so the
+/// listing is what moves a row out, and the rule is what keeps a listing honest.
+///
+/// MUTATION: make [`effect_row_shape`] answer `None` for every kind past the authority check, and
+/// each refusal below goes unsaid (the `shared-body` one included); drop [`Registered::Listed`]'s registration in
+/// [`listed_effect_functions`], and the accepted rows are "an `# effects` row for a function that
+/// holds no listed effect inside a door".
+#[test]
+fn every_effect_kind_holds_to_its_own_rule() {
+    let world = World::new();
+    let gpu = live_effect_row("bt-app", "-", "crate::gpu_door::open_first_window");
+    let accepted = planted_registry(
+        &[
+            with_kind(gpu.clone(), "interim-owner", "WaitToken", "GpuOpen"),
+            effect_row([
+                "bt-platform",
+                "[windows]",
+                "crate::attention_pipe::<Overlapped as Drop>::drop",
+                "windows::Win32::Foundation::CloseHandle 1",
+                "drop-exception",
+                "drop",
+                "",
+            ]),
+            effect_row([
+                "bt-app",
+                "-",
+                "crate::append_panic_report",
+                "std::io::Write::write_fmt 1",
+                "emergency",
+                "emergency (panic hook)",
+                "",
+            ]),
+        ],
+        &[],
+    );
+    let failures = effects_section_failures(&world, &accepted);
+    assert!(
+        failures.is_empty(),
+        "the accepted plants are refused:\n  {}",
+        failures.join("\n  ")
+    );
+    let (bare, _, _) =
+        vocabulary_sites_in(&world, &section_in(&accepted, "effects", &EFFECT_COLUMNS));
+    for item in [
+        "crate::attention_pipe::<Overlapped as Drop>::drop",
+        "crate::append_panic_report",
+    ] {
+        assert!(
+            !bare.keys().any(|(_, _, listed, _)| listed == item),
+            "`{item}` is listed and is still bare"
+        );
+    }
+    let wait_for = live_effect_row("bt-app", "-", "crate::persist::SessionWriter::wait_for");
+    let refused = planted_registry(
+        &[
+            with_kind(wait_for, "interim-owner", "WaitToken", "SessionWriteWait"),
+            with_kind(gpu, "shared-body", "Leg", "GpuOpen"),
+            effect_row([
+                "bt-pty",
+                "-",
+                "crate::InputRing::take",
+                "std::sync::Condvar::wait 1",
+                "transport",
+                "none (transport)",
+                "",
+            ]),
+        ],
+        &[],
+    );
+    let failures = effects_section_failures(&world, &refused);
+    for (what, why) in [
+        ("crate::InputRing::take", "no thread check until R4"),
+        (
+            "crate::persist::SessionWriter::wait_for",
+            "serves a row that is `ruled to stay`",
+        ),
+        (
+            "crate::gpu_door::open_first_window",
+            "`shared-body` admits no row",
+        ),
+        (
+            "crate::gpu_door::open_first_window",
+            "its parameters make it Token",
+        ),
+    ] {
+        assert!(
+            says(&failures, what, why),
+            "`{what}`: no failure says `{why}`:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+    for (kind, authority, why) in [
+        ("transport", "none (transport)", "no thread check until R4"),
+        ("drop-exception", "drop", "is neither"),
+        (
+            "emergency",
+            "emergency (panic hook)",
+            "a `# emergency` holder",
+        ),
+    ] {
+        let row = effect_row([
+            "bt-app",
+            "-",
+            "crate::hang_watch::watch_forever",
+            "std::thread::sleep 1",
+            kind,
+            authority,
+            "",
+        ]);
+        let failures = effects_section_failures(&world, &planted_registry(&[row], &[]));
+        assert!(
+            says(&failures, "crate::hang_watch::watch_forever", why),
+            "`{kind}` for `watch_forever`: no failure says `{why}`:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+}
+
+/// The planted crate of the leg plants ([`planted_world`]): a `Leg<'a, D>` and a `WaitToken<'a, D>`
+/// over a door type, a function taking `&Leg<'_, doors::TraceFlush>` whose body sleeps, and a
+/// function taking the token whose body sleeps — the control that the planted world registers a
+/// door at all. Neither type is in a `crate::admission` module, which [`door_functions`] skips.
+const PLANTED_LEG_SITE: &str = "
+pub mod doors { pub struct TraceFlush; }
+pub struct Leg<'a, D> { door: &'a D }
+pub struct WaitToken<'a, D> { door: &'a D }
+pub fn shared(_leg: &Leg<'_, doors::TraceFlush>) { std::thread::sleep(std::time::Duration::ZERO); }
+pub fn owned(_token: WaitToken<'_, doors::TraceFlush>) { std::thread::sleep(std::time::Duration::ZERO); }
+";
+
+/// RED (T-A2-R1-NONLEG; the audit `T-A2-LEG-GUARD-AUDIT`, 2026-10-21) — **a leg carries no
+/// authority yet: a vocabulary site in a function that takes `&Leg<'_, doors::…>` is a bare site.**
+///
+/// Against the planted crate ([`PLANTED_LEG_SITE`]): `owned`, which takes a `WaitToken`, is a
+/// door function whose sleep is a door effect (the control), and `shared`, which takes a `Leg` of
+/// the same door, holds a bare site — no guard recognises a function by the leg it takes until
+/// T-LEG-AUTHORITY (0.4.9) builds that recognition on bt-source's resolver.
+///
+/// MUTATION: let [`door_functions`] register a parameter list that names `Leg` as it does one that
+/// names `WaitToken`, and `shared`'s site leaves the inventory.
+#[test]
+fn a_site_in_a_function_taking_a_leg_is_a_bare_site() {
+    let world = planted_world("ww-leg-site", PLANTED_LEG_SITE);
+    let (bare, in_doors, _) = vocabulary_sites_in(&world, &[]);
+    assert!(
+        in_doors.contains_key(&(
+            "planted".to_owned(),
+            "-".to_owned(),
+            "crate::owned".to_owned()
+        )),
+        "the control: `owned` takes a `WaitToken` and is not a door function; door effects {:?}",
+        in_doors.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        bare.keys()
+            .any(|(package, _, item, _)| package == "planted" && item == "crate::shared"),
+        "`shared` takes a `Leg` and its site is not bare: a leg carries authority; bare sites {:?}",
+        bare.keys().collect::<Vec<_>>()
+    );
+}
+
+/// RED (T-A2-R1-NONLEG; revision (q)6) — **`# graphs` admits no line**: the live registry's
+/// section is its header alone, and a planted line under it — a well-formed graph line, or one of
+/// the wrong width — is refused for what it is.
+///
+/// MUTATION: let [`graphs_section_failures`] read past the header without refusing a line, and the
+/// planted lines pass.
+#[test]
+fn the_graphs_section_admits_no_line() {
+    let failures = graphs_section_failures(REGISTRY);
+    assert!(
+        failures.is_empty(),
+        "the live `# graphs` section is refused:\n  {}",
+        failures.join("\n  ")
+    );
+    for line in [
+        "S1\tTraceFlush\tbt-app\t-\tcrate::trace_sink::flush\tverb",
+        "not a graph line",
+    ] {
+        let failures = graphs_section_failures(&planted_registry(&[], &[("graphs", line)]));
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("`# graphs` admits no line") && f.contains(line)),
+            "the planted `# graphs` line `{line}` is not refused:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+}
+
+/// The planted crate of the counted-only plants ([`planted_world`]): one `Drop` that closes, one
+/// that waits, one that holds nothing, and a function that is not a `Drop`.
+const PLANTED_DROPS: &str = "
+pub struct Closes;
+impl Drop for Closes { fn drop(&mut self) { CloseHandle(0); } }
+pub struct Waits;
+impl Drop for Waits { fn drop(&mut self) { CloseHandle(0); std::thread::sleep(std::time::Duration::ZERO); } }
+pub struct Holds;
+impl Drop for Holds { fn drop(&mut self) {} }
+pub fn not_a_drop() { CloseHandle(0); }
+";
+
+/// RED (A2s; the R1 review's B3 and N4) — **a `# counted-only` row is a dated product `Drop`
+/// that closes and never waits.**
+///
+/// Against the planted crate ([`PLANTED_DROPS`]): the `Drop` that only closes is accepted (the
+/// control); the one that also sleeps, the one that holds nothing, the function that is no `Drop`,
+/// a row naming nothing in the product, an undated row, a row with no reason and a row listed twice
+/// are each refused for their named reason; an `# emergency` holder that is a product function
+/// is accepted and one that is not is refused by name. The live registry's own rows are the
+/// real-world control (`every_door_is_where_the_registry_says`).
+///
+/// MUTATION: count a waiting effect as counted in [`counted_only_failures`] and the sleeping `Drop`
+/// is accepted; drop the `since` check in [`listed_exception_row_failures`] and the undated row is.
+#[test]
+fn a_counted_only_drop_closes_and_never_waits() {
+    let world = planted_world("ww-counted-only", PLANTED_DROPS);
+    let words = vocabulary();
+    let both = |rows: &[&str], holders: &[&str]| {
+        let mut text = "# counted-only\ncrate\tarm\titem\tsince\treason\truling\n".to_owned();
+        for row in rows {
+            text.push_str(row);
+            text.push('\n');
+        }
+        text.push_str("\n# emergency\ncrate\tarm\titem\tsince\treason\truling\n");
+        for row in holders {
+            text.push_str(row);
+            text.push('\n');
+        }
+        text
+    };
+    let registry = |rows: &[&str]| both(rows, &[]);
+    let control = registry(&[
+        "planted\t-\tcrate::<Closes as Drop>::drop\t2026-10-17\tcloses its handle and nothing else\tT-A2-BARE-SITE-LINT 2026-10-17",
+    ]);
+    let failures = counted_only_failures(&world, &words, &control);
+    assert!(
+        failures.is_empty(),
+        "the closing `Drop` is refused:\n  {}",
+        failures.join("\n  ")
+    );
+    for (row, why) in [
+        (
+            "planted\t-\tcrate::<Waits as Drop>::drop\t2026-10-17\tcloses and then sleeps\tT-A2-BARE-SITE-LINT 2026-10-17",
+            "waits: `thread::sleep`",
+        ),
+        (
+            "planted\t-\tcrate::<Holds as Drop>::drop\t2026-10-17\tholds no effect at all\tT-A2-BARE-SITE-LINT 2026-10-17",
+            "holds no counted effect",
+        ),
+        (
+            "planted\t-\tcrate::not_a_drop\t2026-10-17\ta function, not a destructor\tT-A2-BARE-SITE-LINT 2026-10-17",
+            "is not a `Drop::drop`",
+        ),
+        (
+            "planted\t-\tcrate::<Gone as Drop>::drop\t2026-10-17\ta destructor nobody wrote\tT-A2-BARE-SITE-LINT 2026-10-17",
+            "is not in the product",
+        ),
+        (
+            "planted\t-\tcrate::<Closes as Drop>::drop\tlast week\tcloses its handle and nothing else\tT-A2-BARE-SITE-LINT 2026-10-17",
+            "not a day `YYYY-MM-DD`",
+        ),
+        (
+            "planted\t-\tcrate::<Closes as Drop>::drop\t2026-10-17\tcloses\tT-A2-BARE-SITE-LINT 2026-10-17",
+            "gives no reason",
+        ),
+        (
+            "planted\t-\tcrate::<Closes as Drop>::drop\t2026-10-17\tcloses its handle and nothing else\tthe owner said so",
+            "not a ticket and its day",
+        ),
+    ] {
+        let failures = counted_only_failures(&world, &words, &registry(&[row]));
+        assert!(
+            failures.iter().any(|f| f.contains(why)),
+            "`{row}` is not refused for `{why}`:\n  {}",
+            failures.join("\n  ")
+        );
+    }
+    let twice = registry(&[
+        "planted\t-\tcrate::<Closes as Drop>::drop\t2026-10-17\tcloses its handle and nothing else\tT-A2-BARE-SITE-LINT 2026-10-17",
+        "planted\t-\tcrate::<Closes as Drop>::drop\t2026-10-17\tcloses its handle and nothing else\tT-A2-BARE-SITE-LINT 2026-10-17",
+    ]);
+    assert!(
+        counted_only_failures(&world, &words, &twice)
+            .iter()
+            .any(|f| f.contains("listed twice")),
+        "a row listed twice is not refused"
+    );
+    // An `# emergency` row names a product function: one that is (the control), and a holder
+    // nobody wrote, refused by name.
+    let holder = |item: &str| {
+        format!(
+            "planted\t-\t{item}\t2026-10-17\tthe panic hook's planted holder\tT-A2-BARE-SITE-LINT 2026-10-17"
+        )
+    };
+    let present = both(&[], &[&holder("crate::not_a_drop")]);
+    let failures = counted_only_failures(&world, &words, &present);
+    assert!(
+        failures.is_empty(),
+        "an emergency holder in the product is refused:\n  {}",
+        failures.join("\n  ")
+    );
+    let stale = both(&[], &[&holder("crate::gone_holder")]);
+    let failures = counted_only_failures(&world, &words, &stale);
+    assert!(
+        failures.iter().any(|f| f
+            .contains("the emergency holder `planted crate::gone_holder` is not in the product")),
+        "a stale emergency holder is not refused:\n  {}",
         failures.join("\n  ")
     );
 }
