@@ -72,8 +72,8 @@ public static class LoadRowWindows {
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc proc, IntPtr l);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
-  // The class winit registers for an application's window (winit 0.30.13,
-  // platform_impl/windows/mod.rs: `class_name: "Window Class"`); its other top-level window, the
+  // The class winit registers for an application's window (winit 0.30.13's Windows platform
+  // module: `class_name: "Window Class"`); its other top-level window, the
   // thread's event target, is `Winit Thread Event Target` and draws nothing.
   public const string AppClass = "Window Class";
   public static string ClassOf(IntPtr h) { var name = new StringBuilder(128); GetClassName(h, name, 128); return name.ToString(); }
