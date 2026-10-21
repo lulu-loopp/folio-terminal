@@ -884,6 +884,42 @@ whose road moved to the door is taken off in the same change. Across commits
 seed): a row the base does not carry, or a count that grew, is refused by identity
 (`gates-can-fail` plants a row). A row is never added for a new line.
 
+## Native labels
+
+The rule: every word a person reads on a native menu or dialog that `bt-platform`
+builds is passed in by the caller, from `bt-app`'s `i18n` table, with the call that
+shows it (T-NATIVE-LABELS-FROM-THE-CALLER, 2026-10-21). `bt-platform` keeps no words
+of its own: the menu bar and Dock rows (`menu::MenuPlan`), the formula's right-click
+row (`MathContextMenu::request(copy_latex)`), the Windows image filter's name
+(`ImagePicker::request(kind, start, image_types)`), an alert's title and text, the
+Explorer verb and the toast sender's name (`Notifier::new(display_name, wake)`). The
+system's own words — a dialog's title and buttons, AppKit's rows — stay the system's.
+
+Where and what to do: `crates/bt-source/tests/native_labels.rs`
+(`bt_platform_native_labels_come_from_the_caller`) reads every string literal in the
+product bytes of `menu.rs`, `macos_menu.rs`, `macos_dialogs.rs` and
+`explorer_command.rs` whole, of the `impl` blocks of `MathContextMenu`,
+`FolderPicker`, `ImagePicker` and `SaveFilePicker` on every arm, and of the dialog
+functions it names. A literal whose text begins with an ASCII capital letter is
+refused, except inside an attribute (a doc comment, a class or link name), right after
+`extern` (an ABI), and inside `Err(…)`, a `.map_err(…)` or an `.ok_or_else(…)` — an
+error text, not a label. A literal that must stay is a row of the guard's `ALLOWED`
+(file, text, reason), which only shrinks; a row no guarded item uses is refused. A
+literal inside a `macro_rules!` definition is refused by its line, because it lands in
+an expansion the reading cannot see. Its fixture (`tests/fixtures/native_labels/`)
+plants each case (`a_capitalised_literal_in_a_guarded_item_is_named`). When red, add
+the words to `i18n.rs` (English in both columns, Chinese pending with its
+`CHINESE_PENDING` rows), pass them in at the call, and take the literal out; a new
+guarded surface adds its item to the guard's lists. An entry of the guard's
+`FILES`, `TYPES` or `FUNCTIONS` that names nothing in the index is refused by name, so
+a renamed item cannot drop out silently, and a literal the index holds no record of is
+refused by its line. `ALLOWED` shrinks by review only: no check holds it to the merge
+base's. Not seen, as limits (widening the grammar is T-NATIVE-LABELS-GUARD-REACH, 0.4.9):
+a `const` or `static` label defined outside the scope and named from a guarded item (the
+shape `NOTIFICATION_DISPLAY_NAME` had), a crate-local `macro_rules!` defined outside the
+scope and invoked inside it, a helper function on none of the lists, and a label whose
+first character is not a capital (an `"&Copy"` mnemonic, a leading space).
+
 ## Machine-independent paths
 
 The rule: committed code, tests, and documentation do not carry one developer's

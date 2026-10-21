@@ -24,6 +24,7 @@ All notable changes to Folio are recorded here. The format follows
 - If Folio stops after a failure with such a change unsaved, the change is kept in the recovered folder; if it cannot be kept anywhere, the system's own message says so. <!-- zh: pending T-QUIT-DOCUMENTS -->
 - In a Windows PowerShell pane, Folio now uses its own copy of Microsoft's PSReadLine 2.4.5, so a long command you are still typing stays in one piece when the pane is resized. It is kept in Folio's own folder and used by Folio's panes only: nothing is installed for the rest of your account, nothing is asked, and Windows Terminal and other windows keep the PSReadLine they have. <!-- zh: pending T-INTEGRATION-INJECT-2-BUILD -->
 - If an earlier Folio installed its PSReadLine into Documents, Folio no longer uses or updates it; Settings ▸ Terminal offers to remove it from Documents while it is there, and uninstalling Folio removes it. <!-- zh: pending T-INTEGRATION-INJECT-2-BUILD -->
+- The formula's right-click menu and the picture filter in the Windows file chooser take their words from Folio's interface language, as the rest of Folio does. <!-- zh: pending T-NATIVE-LABELS-FROM-THE-CALLER -->
 
 ### Removed
 

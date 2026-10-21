@@ -76,11 +76,11 @@ impl<B: Backend> Runtime<'_, B> {
                     eprintln!("recoverable save dialog failure: {error}");
                 }
             }
-            settings::ConfigurationDoor::Import => match self
-                .window
-                .image_picker
-                .request(bt_platform::FilePickKind::SettingsFile, None)
-            {
+            settings::ConfigurationDoor::Import => match self.window.image_picker.request(
+                bt_platform::FilePickKind::SettingsFile,
+                None,
+                crate::i18n::Text::ImageFileType.text(),
+            ) {
                 Ok(true) => self.window.image_pick_pending = Some(FilePick::SettingsImport),
                 // Already queued or already open: whoever asked first keeps it.
                 Ok(false) => {}
