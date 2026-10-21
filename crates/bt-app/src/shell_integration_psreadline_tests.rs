@@ -553,7 +553,7 @@ fn births_around_a_late_answer(
             let asked = std::sync::Arc::clone(&asked);
             on_a_worker(move |worker| {
                 windows_powershell_birth(Path::new("powershell.exe"), true, || {
-                    cell.for_birth(worker, || {
+                    cell.for_birth(worker, |_| {
                         asked.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                         true
                     })
@@ -565,7 +565,7 @@ fn births_around_a_late_answer(
     while cell.waiting() < early && !births.iter().all(std::thread::JoinHandle::is_finished) {
         std::thread::yield_now();
     }
-    cell.file(answer);
+    cell.file(1, answer);
     let early: Vec<_> = births
         .into_iter()
         .map(|birth| birth.join().unwrap())
@@ -578,7 +578,7 @@ fn births_around_a_late_answer(
     let cell = std::sync::Arc::clone(cell);
     let late = on_a_worker(move |worker| {
         windows_powershell_birth(Path::new("powershell.exe"), true, || {
-            cell.for_birth(worker, || panic!("a known answer asks nothing"))
+            cell.for_birth(worker, |_| panic!("a known answer asks nothing"))
                 .0
         })
     })
@@ -629,7 +629,7 @@ fn a_birth_that_waited_says_so() {
         let cell = std::sync::Arc::clone(&cell);
         let said = std::sync::Arc::clone(&said);
         on_a_worker(move |worker| {
-            language_for_birth_in(&cell, worker, || true, &|line| {
+            language_for_birth_in(&cell, worker, |_| true, &|line| {
                 said.lock().unwrap().push(line.to_owned());
             })
         })
@@ -637,7 +637,7 @@ fn a_birth_that_waited_says_so() {
     while cell.waiting() == 0 && !waiting.is_finished() {
         std::thread::yield_now();
     }
-    cell.file(Language::Full);
+    cell.file(1, Language::Full);
     assert_eq!(waiting.join().unwrap(), Language::Full);
     let lines = said.lock().unwrap().clone();
     assert_eq!(lines.len(), 1, "{lines:?}");
@@ -647,7 +647,7 @@ fn a_birth_that_waited_says_so() {
         "{lines:?}"
     );
     let answered = on_a_worker(move |worker| {
-        language_for_birth_in(&cell, worker, || panic!("answered"), &|line| {
+        language_for_birth_in(&cell, worker, |_| panic!("answered"), &|line| {
             panic!("a birth that did not wait says nothing: {line}")
         })
     })
@@ -674,13 +674,13 @@ fn a_failed_question_gives_no_prefix_and_one_line() {
     );
 
     let cell = std::sync::Arc::new(LanguageCell::new());
-    cell.ask(|| false);
+    cell.ask(|_| false);
     // The question asked again fails too: its worker files the failure, as every end does.
     let (answer, asked_again) = on_a_worker(move |worker| {
         let mut asked_again = false;
-        let (answer, _) = cell.for_birth(worker, || {
+        let (answer, _) = cell.for_birth(worker, |question| {
             asked_again = true;
-            cell.file(Language::Failed);
+            cell.file(question, Language::Failed);
             true
         });
         (answer, asked_again)
@@ -766,18 +766,18 @@ fn a_birth_waits_for_its_own_question_and_not_the_next() {
     let cell = std::sync::Arc::new(LanguageCell::new());
     let birth = {
         let cell = std::sync::Arc::clone(&cell);
-        on_a_worker(move |worker| cell.for_birth(worker, || true).0)
+        on_a_worker(move |worker| cell.for_birth(worker, |_| true).0)
     };
     while cell.waiting() == 0 && !birth.is_finished() {
         std::thread::yield_now();
     }
-    cell.file_and_ask_again(Language::Failed);
+    let next = cell.file_and_ask_again(Language::Failed);
     while !birth.is_finished() && cell.began_waits() < 2 {
         std::thread::yield_now();
     }
     // A birth that began a second wait is released by the second question's answer, so the test
     // ends either way and the answer says which question woke it.
-    cell.file(Language::Full);
+    cell.file(next, Language::Full);
     assert_eq!(
         birth.join().unwrap(),
         Language::Failed,
@@ -790,14 +790,15 @@ fn a_birth_waits_for_its_own_question_and_not_the_next() {
 /// question only with the Shell integration switch on**: with it off no Windows PowerShell is
 /// started at launch, and a birth with the switch on — turned on later — asks for itself.
 ///
-/// MUTATIONS: ask whatever the switch says (`asks` ignored) — the switched-off launch starts a
-/// question; drop the ask — the switched-on launch starts none.
+/// MUTATIONS: drop `integration &&` from `begin_language_question_in`'s gate — the switched-off
+/// launch starts a question (review of round 4, nit (h′)); drop the platform half — a Mac launch
+/// asks; drop the ask — the switched-on launch starts none.
 #[test]
 fn the_launch_asks_only_with_the_switch_on() {
     use language::{Language, LanguageCell, begin_language_question_in, windows_powershell_birth};
     let off = LanguageCell::new();
     let asked = Cell::new(0);
-    let _ = begin_language_question_in(&off, false, || {
+    let _ = begin_language_question_in(&off, false, bt_platform::HostPlatform::Windows, |_| {
         asked.set(asked.get() + 1);
         true
     });
@@ -808,7 +809,7 @@ fn the_launch_asks_only_with_the_switch_on() {
     assert!(!birth.integration && !birth.prefix);
 
     let on = std::sync::Arc::new(LanguageCell::new());
-    let _ = begin_language_question_in(&on, true, || {
+    let _ = begin_language_question_in(&on, true, bt_platform::HostPlatform::Windows, |_| {
         asked.set(asked.get() + 1);
         true
     });
@@ -816,16 +817,22 @@ fn the_launch_asks_only_with_the_switch_on() {
 
     // Turned on later: the launch asked nothing, and the first birth asks for itself.
     let later = std::sync::Arc::new(LanguageCell::new());
-    let _ = begin_language_question_in(&later, false, || panic!("off at launch"));
+    let _ = begin_language_question_in(&later, false, bt_platform::HostPlatform::Windows, |_| {
+        panic!("off at launch")
+    });
+    let mac = LanguageCell::new();
+    let _ = begin_language_question_in(&mac, true, bt_platform::HostPlatform::MacOs, |_| {
+        panic!("no Windows PowerShell to ask off Windows")
+    });
     let birth = {
         let later = std::sync::Arc::clone(&later);
         on_a_worker(move |worker| {
             let mut asked = false;
             let birth = windows_powershell_birth(Path::new("powershell.exe"), true, || {
                 later
-                    .for_birth(worker, || {
+                    .for_birth(worker, |question| {
                         asked = true;
-                        later.file(Language::Full);
+                        later.file(question, Language::Full);
                         true
                     })
                     .0
@@ -836,6 +843,40 @@ fn the_launch_asks_only_with_the_switch_on() {
     let (birth, asked) = birth.join().unwrap();
     assert!(asked, "the birth put the question");
     assert!(birth.prefix, "and composed from its answer");
+}
+
+/// RED (T-INTEGRATION-INJECT-2-BUILD round 4 nits, (a′)) — **a stale filing answers nothing**: a
+/// refused start is filed twice (the door's refusal and the asker's), and when the second filing
+/// lands after another birth has put a newer question, it must not answer that question with a
+/// false failure while its worker runs. The newer question stays out; a birth waits for its own
+/// answer.
+///
+/// MUTATION: file under whatever question is out (`file` ignoring its number) — the stale second
+/// filing answers the newer question `Failed`, and the birth composes from it.
+#[test]
+fn a_stale_filing_answers_no_newer_question() {
+    use language::{Language, LanguageCell};
+    let cell = std::sync::Arc::new(LanguageCell::new());
+    let first = cell.ask(|_| true).expect("the first question");
+    cell.file(first, Language::Failed);
+    let second = cell
+        .ask(|_| true)
+        .expect("the next question, after a failure");
+    assert_ne!(first, second);
+    cell.file(first, Language::Failed);
+    let birth = {
+        let cell = std::sync::Arc::clone(&cell);
+        on_a_worker(move |worker| cell.for_birth(worker, |_| panic!("one is out")).0)
+    };
+    while cell.waiting() == 0 && !birth.is_finished() {
+        std::thread::yield_now();
+    }
+    cell.file(second, Language::Full);
+    assert_eq!(
+        birth.join().unwrap(),
+        Language::Full,
+        "the newer question's own answer, not the stale failure"
+    );
 }
 
 #[cfg(windows)]

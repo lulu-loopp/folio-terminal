@@ -114,42 +114,67 @@ impl LanguageCell {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// **Put the question, unless one is out or a known answer is held**: a cell that never
-    /// asked, or whose last question failed, asks. `start` starts the worker that files the
-    /// answer and says whether it started; one that did not is a failed question.
-    pub(crate) fn ask(&self, start: impl FnOnce() -> bool) {
-        {
-            let mut state = self.state();
-            if state.out || state.known().is_some() {
-                return;
-            }
-            state.asked += 1;
-            state.out = true;
+    /// **The question a birth or a launch waits on, read and — when none is out — put, under one
+    /// lock**: `Ok` with a known answer, or `Err` with the number of the question out (`true` when
+    /// this call put it, and so must start its worker).
+    fn take_turn(&self) -> Result<Language, (u64, bool)> {
+        let mut state = self.state();
+        if let Some(answer) = state.known() {
+            return Ok(answer);
         }
-        if !start() {
-            self.file(Language::Failed);
+        if state.out {
+            return Err((state.asked, false));
+        }
+        state.asked += 1;
+        state.out = true;
+        Err((state.asked, true))
+    }
+
+    /// **Put the question, unless one is out or a known answer is held**: a cell that never
+    /// asked, or whose last question failed, asks. `start` is handed the question's number,
+    /// starts the worker that files the answer under it, and says whether it started; one that
+    /// did not is a failed question, filed under that number. Answers the number put, if any.
+    pub(crate) fn ask(&self, start: impl FnOnce(u64) -> bool) -> Option<u64> {
+        match self.take_turn() {
+            Err((question, true)) => {
+                if !start(question) {
+                    self.file(question, Language::Failed);
+                }
+                Some(question)
+            }
+            Ok(_) | Err((_, false)) => None,
         }
     }
 
-    /// File the answer of the question out, under its number, and wake every birth waiting.
-    pub(crate) fn file(&self, answer: Language) {
+    /// **File the answer to question `question`** and wake every birth waiting. A stale filing —
+    /// for a question already answered, or older than the one out — changes nothing: a refused
+    /// start is filed twice (the door's refusal and the asker's), and the second filing must not
+    /// answer a newer question some other birth has put meanwhile (review of round 4, nit (a′)).
+    pub(crate) fn file(&self, question: u64, answer: Language) {
         let mut state = self.state();
-        state.answered = Some((state.asked, answer));
+        let answered = state.answered.is_some_and(|(filed, _)| filed >= question);
+        if question != state.asked || answered {
+            return;
+        }
+        state.answered = Some((question, answer));
         state.out = false;
         drop(state);
         self.landed.notify_all();
     }
 
-    /// [`Self::file`], then a new question put before any waiting birth can look — the order a
-    /// failed answer and another birth's asking again can land in.
+    /// [`Self::file`] for the question out, then a new question put before any waiting birth can
+    /// look — the order a failed answer and another birth's asking again can land in. Answers the
+    /// new question's number.
     #[cfg(test)]
-    pub(crate) fn file_and_ask_again(&self, answer: Language) {
+    pub(crate) fn file_and_ask_again(&self, answer: Language) -> u64 {
         let mut state = self.state();
         state.answered = Some((state.asked, answer));
         state.asked += 1;
         state.out = true;
+        let asked = state.asked;
         drop(state);
         self.landed.notify_all();
+        asked
     }
 
     /// **The answer a birth composes from**: a known answer at once; otherwise the question is put
@@ -159,17 +184,21 @@ impl LanguageCell {
     pub(crate) fn for_birth(
         &self,
         worker: &WorkerCtx,
-        start: impl FnOnce() -> bool,
+        start: impl FnOnce(u64) -> bool,
     ) -> (Language, Option<Duration>) {
         let _ = worker;
-        if let Some(answer) = self.state().known() {
-            return (answer, None);
-        }
-        self.ask(start);
+        let mine = match self.take_turn() {
+            Ok(answer) => return (answer, None),
+            Err((question, put)) => {
+                if put && !start(question) {
+                    self.file(question, Language::Failed);
+                }
+                question
+            }
+        };
         let began = Instant::now();
         let mut waited = false;
         let mut state = self.state();
-        let mine = state.asked;
         loop {
             if let Some((question, answer)) = state.answered
                 && question >= mine
@@ -230,19 +259,20 @@ impl LanguageAsked {
 pub fn begin_language_question(integration: bool) -> LanguageAsked {
     begin_language_question_in(
         &WINDOWS_POWERSHELL,
-        integration && bt_platform::host_platform() == bt_platform::HostPlatform::Windows,
-        || start_question(None),
+        integration,
+        bt_platform::host_platform(),
+        |question| start_question(question, None),
     )
 }
 
-/// [`begin_language_question`] over a cell and a question handed in; `asks` is the switch's (and
-/// the platform's) answer.
+/// [`begin_language_question`] over a cell, the switch, the platform and a question handed in.
 pub(crate) fn begin_language_question_in(
     cell: &LanguageCell,
-    asks: bool,
-    start: impl FnOnce() -> bool,
+    integration: bool,
+    platform: bt_platform::HostPlatform,
+    start: impl FnOnce(u64) -> bool,
 ) -> LanguageAsked {
-    if asks {
+    if integration && platform == bt_platform::HostPlatform::Windows {
         cell.ask(start);
     }
     LanguageAsked(())
@@ -255,7 +285,7 @@ pub(crate) fn language_for_birth(worker: &WorkerCtx, program: &Path) -> Language
     language_for_birth_in(
         &WINDOWS_POWERSHELL,
         worker,
-        || start_question(Some(program)),
+        |question| start_question(question, Some(program)),
         &crate::diagnostics::note,
     )
 }
@@ -264,7 +294,7 @@ pub(crate) fn language_for_birth(worker: &WorkerCtx, program: &Path) -> Language
 pub(crate) fn language_for_birth_in(
     cell: &LanguageCell,
     worker: &WorkerCtx,
-    start: impl FnOnce() -> bool,
+    start: impl FnOnce(u64) -> bool,
     note: &dyn Fn(&str),
 ) -> Language {
     let (answer, waited) = cell.for_birth(worker, start);
@@ -277,16 +307,16 @@ pub(crate) fn language_for_birth_in(
     answer
 }
 
-/// Start the question's worker; `program` is the birth's own, or — at launch — the
-/// `powershell.exe` the account's environment names.
-fn start_question(program: Option<PathBuf>) -> bool {
+/// Start the worker of question `question`, which files its answer under that number; `program`
+/// is the birth's own, or — at launch — the `powershell.exe` the account's environment names.
+fn start_question(question: u64, program: Option<PathBuf>) -> bool {
     crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal)
         .start_worker(
             "powershell-language",
             crate::lane::Answered::new(
                 "Windows PowerShell's language question",
                 crate::diagnostics::note,
-                |_| WINDOWS_POWERSHELL.file(Language::Failed),
+                move |_| WINDOWS_POWERSHELL.file(question, Language::Failed),
             ),
             move |worker| {
                 let environment =
@@ -313,7 +343,7 @@ fn start_question(program: Option<PathBuf>) -> bool {
                     Err(_) => Language::Failed,
                 };
                 say(answer, asked.err().as_deref(), &crate::diagnostics::note);
-                WINDOWS_POWERSHELL.file(answer);
+                WINDOWS_POWERSHELL.file(question, answer);
             },
         )
         .is_ok()
