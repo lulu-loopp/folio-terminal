@@ -8,7 +8,8 @@
     logged-on session (hidden console under conhost.exe, so no window stands over Folio).
 
         launch      <Candidate>\folio.exe with BT_PERF_TRACE=1, its stderr into perf.txt
-        settle      the first-launch cards dismissed with Escape (they apply nothing)
+        settle      the first-launch cards dismissed with Escape (they apply nothing); four
+                    boxed rows printed in the first tab, then a new tab opened over it
         baseline    -Seconds of the person's cycle
         hog         cpu-hog.ps1 started (2 x logical processors, Normal priority, -Seconds),
                     and -Seconds of the cycle under it
@@ -98,6 +99,17 @@ if ($h -eq [IntPtr]::Zero) { Say 'no Folio window within 120 s'; Say 'load end';
 Start-Sleep -Seconds 8
 foreach ($i in 1..2) { if (Front $h) { [void][Probe]::TapVk([uint16]27) }; Start-Sleep -Milliseconds 800 }
 Start-Sleep -Seconds 4
+# The owner's shape: a pane whose screen holds a boxed frame (an agent's TUI is one) in a tab
+# that is not on screen. Four rows with a rule in one column make the capture a frame
+# candidate; then a new tab (Ctrl+Shift+N) comes forward and the person works there.
+if (Front $h) {
+  [void][Probe]::TypeText("1..4|%{'ab $([char]0x2502) cd'}")
+  [void][Probe]::TapVk([uint16]13)
+  Start-Sleep -Seconds 3
+  [void][Probe]::Chord($true, $true, $false, [uint16]0x4E)
+  Say 'framed tab printed; a new tab opened over it'
+}
+Start-Sleep -Seconds 6
 
 Mark 'baseline'
 Cycle $h $Seconds
