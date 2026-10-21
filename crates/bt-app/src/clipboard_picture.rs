@@ -928,6 +928,31 @@ mod tests {
     }
 
     /// One real one-pixel PNG, as a clipboard would offer it.
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a saved
+    /// picture is closed when its path is answered**: the save the `clipboard-picture` worker runs
+    /// hands back the path it wrote, and at that moment nobody holds the file — the picture is
+    /// ready to be opened, dragged or attached by whatever the person hands it to next.
+    ///
+    /// MUTATION: `std::mem::forget` the written `File` in `save` (for its `drop`) — the path is
+    /// answered while the file is held, and the exclusive open is refused.
+    #[test]
+    fn a_saved_picture_is_closed_when_its_path_is_answered() {
+        let folder = scratch("answered");
+        let saved = save(
+            &folder,
+            &[a_png()],
+            UNIX_EPOCH + Duration::from_secs(1_789_569_012),
+        )
+        .expect("a picture saves");
+        let free = bt_testpath::nobody_holds(&saved);
+        let _ = fs::remove_dir_all(&folder);
+        assert!(
+            free,
+            "nobody holds the saved picture when its path is answered"
+        );
+    }
+
     fn a_png() -> PictureBytes {
         let mut bytes = Vec::new();
         image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(

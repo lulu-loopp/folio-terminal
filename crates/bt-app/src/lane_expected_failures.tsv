@@ -24,6 +24,7 @@ AFailureIsSaidOnce
 AnOrphanedAnswerReachesItsSink
 AWithdrawnRequestEndsCancelledOnce
 AWithdrawnRequestLeavesTheLine
+AnAnswerIsPublishedAfterItsResourcesAreReleased
 
 # rows
 lane	claim	failure	repair
