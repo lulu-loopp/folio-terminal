@@ -170,6 +170,35 @@ pub(crate) fn gone_place(
     unless_gone.filter(|gone| !is_dir(&gone.folder))
 }
 
+/// **What a birth is composed into**: its argv and whether it loads, the integration decision the
+/// last-resort shell is composed with too, and whether Folio's PSReadLine may go on its path.
+#[derive(Debug)]
+struct PlannedBirth {
+    composed: shell_integration::ComposedBirth,
+    integration: bool,
+    prefix: bool,
+}
+
+/// **A birth's composition, decided from the edition's answer** — [`bear`]'s decision seam
+/// (T-INTEGRATION-INJECT-2-BUILD round 4): `language` is asked only of a Windows PowerShell 5.1
+/// birth with the switch on ([`shell_integration::windows_powershell_birth`]), and `compose` is
+/// handed the integration that answer leaves — so a constrained edition's birth is composed, and
+/// its last-resort shell after it, exactly as with the switch off.
+fn plan_birth(
+    program: &Path,
+    integration: bool,
+    language: impl FnOnce() -> shell_integration::Language,
+    compose: impl FnOnce(bool) -> shell_integration::ComposedBirth,
+) -> PlannedBirth {
+    let birth = shell_integration::windows_powershell_birth(program, integration, language);
+    let integration = birth.integration;
+    PlannedBirth {
+        composed: compose(integration),
+        integration,
+        prefix: birth.prefix,
+    }
+}
+
 /// **The shell's pseudoconsole and process, made on the `bt-pty-birth` worker**: the carried
 /// folder asked about ([`gone_place`]), the PowerShell load composed (naming the script prepares
 /// it), the current account's environment read and the declarations derived from it, then
@@ -204,17 +233,20 @@ fn bear(
     // PSReadLine; a constrained edition's pane is the Shell-integration-off pane, byte for byte; a
     // birth before the answer waits for it here, on the birth worker; a failed question gives the
     // loader without the prefix.
-    let birth = shell_integration::windows_powershell_birth(
+    let planned = plan_birth(
         std::path::Path::new(&program),
         powershell_integration,
         || shell_integration::language_for_birth(ctx, std::path::Path::new(&program)),
+        |integration| {
+            shell_integration::compose_powershell_birth_loading(
+                std::path::Path::new(&program),
+                &arguments,
+                integration,
+            )
+        },
     );
-    let powershell_integration = birth.integration;
-    let composed = shell_integration::compose_powershell_birth_loading(
-        std::path::Path::new(&program),
-        &arguments,
-        powershell_integration,
-    );
+    let powershell_integration = planned.integration;
+    let composed = planned.composed;
     let args = composed.arguments;
     let fallback_args = || shell_integration::last_resort_arguments(powershell_integration);
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
@@ -250,7 +282,7 @@ fn bear(
     // worker — and its directory put first on the pane's own module path, after the row's layer.
     shell_integration::declare_psreadline_module(
         Path::new(&program),
-        composed.loads && birth.prefix,
+        composed.loads && planned.prefix,
         &before_folio,
         &folio_environment,
         &mut profile_environment,
@@ -484,6 +516,49 @@ pub(crate) fn wait_for_retirements(
 
 #[cfg(test)]
 mod tests {
+    /// RED (T-INTEGRATION-INJECT-2-BUILD round 4) — **a birth composes with the integration the
+    /// edition's answer leaves**: a constrained edition's 5.1 birth is composed — and its
+    /// last-resort shell is composed — with the switch off, a `FullLanguage` edition's with it
+    /// on and Folio's PSReadLine allowed, a failed question's with it on and no prefix.
+    ///
+    /// MUTATION: compose with the switch the row asked for (drop
+    /// `let integration = birth.integration;` in `plan_birth`) — the constrained birth is composed
+    /// with the integration on.
+    #[test]
+    fn a_birth_composes_with_the_integration_its_edition_leaves() {
+        use crate::shell_integration::{ComposedBirth, Language};
+        use std::cell::Cell;
+        for (answer, integration, prefix) in [
+            (Language::Constrained, false, false),
+            (Language::Full, true, true),
+            (Language::Failed, true, false),
+        ] {
+            let composed_with = Cell::new(None);
+            let planned = super::plan_birth(
+                std::path::Path::new("powershell.exe"),
+                true,
+                || answer,
+                |integration| {
+                    composed_with.set(Some(integration));
+                    ComposedBirth {
+                        arguments: Vec::new(),
+                        loads: integration,
+                    }
+                },
+            );
+            assert_eq!(
+                composed_with.get(),
+                Some(integration),
+                "{answer:?}: composed with"
+            );
+            assert_eq!(
+                planned.integration, integration,
+                "{answer:?}: the last resort's"
+            );
+            assert_eq!(planned.prefix, prefix, "{answer:?}: the prefix");
+        }
+    }
+
     use super::*;
 
     /// RED (T-PANIC-ROWS-HONEST) — **a birth that panics under the resident panic hook is born as

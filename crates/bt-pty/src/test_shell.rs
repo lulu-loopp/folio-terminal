@@ -1603,6 +1603,16 @@ impl TestShell {
         self.held().child_id()
     }
 
+    /// **The shell's exit signal, to wait on after a shutdown** (T-INTEGRATION-INJECT-2-BUILD
+    /// round 4). [`Self::shutdown`] reaps within the product's bounded budget and may return with
+    /// the child still ending; a test that must act only once the process has really gone takes
+    /// this while the child is alive and waits on it ([`bt_platform::exit_witness::ExitWitness`]).
+    #[cfg(windows)]
+    #[must_use]
+    pub fn exit_witness(&self) -> Option<bt_platform::exit_witness::ExitWitness> {
+        bt_platform::exit_witness::ExitWitness::of(self.child_id()?).ok()
+    }
+
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, PtyError> {
         self.held_mut().try_wait()
     }

@@ -46824,7 +46824,13 @@ impl Runtime<'_, Native> {
         let (opened, first) = startup::resume(
             &mut profile_programs,
             startup::FirstWindow {
-                language: shell_integration::begin_language_question,
+                // Only with the Shell integration switch on: a launch with it off starts no
+                // Windows PowerShell; a birth after it is turned on asks for itself.
+                language: || {
+                    shell_integration::begin_language_question(
+                        settings_store.loaded().shell_integration,
+                    )
+                },
                 migration: shell_integration::begin_startup_migration,
                 script: || {
                     // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first

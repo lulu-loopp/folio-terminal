@@ -727,6 +727,117 @@ fn a_failed_question_gives_no_prefix_and_one_line() {
     assert_eq!(language::language_from(""), Language::Failed);
 }
 
+/// RED (T-INTEGRATION-INJECT-2-BUILD round 4, ruling on nit (g)) — **only a known language mode is
+/// an answer, read from the last line that holds one**: `FullLanguage` is `Full`, PowerShell's
+/// three other modes are `Constrained`, and a line that is not a mode — or nothing — is no answer
+/// (`Failed`: the loader without the prefix, and the next birth asks again), never constrained. A
+/// stray line before the answer does not hide it.
+///
+/// MUTATION: read any other word as `Constrained` again — the stray word switches a
+/// `FullLanguage` machine's panes to the switch-off birth.
+#[test]
+fn only_a_known_language_mode_is_an_answer() {
+    use language::{Language, language_from};
+    for (stdout, wanted) in [
+        ("FullLanguage\r\n", Language::Full),
+        ("a banner line\r\nFullLanguage\r\n\r\n", Language::Full),
+        ("ConstrainedLanguage\r\n", Language::Constrained),
+        ("RestrictedLanguage", Language::Constrained),
+        ("NoLanguage\n", Language::Constrained),
+        ("", Language::Failed),
+        ("\r\n  \r\n", Language::Failed),
+        ("FullLanguage\r\nsomething else\r\n", Language::Failed),
+        ("Warning: a profile line\r\n", Language::Failed),
+    ] {
+        assert_eq!(language_from(stdout), wanted, "{stdout:?}");
+    }
+}
+
+/// RED (T-INTEGRATION-INJECT-2-BUILD round 4, nit (a)) — **a birth waits for the answer to the
+/// question that was out when it began, not through the next one**: a failed answer filed, and a
+/// new question put before the waiting birth can look, wakes it on the failure — it does not
+/// begin a second wait for the new question.
+///
+/// MUTATION: wake on "an answer is filed and no question is out" (no question number) — the birth
+/// finds the new question out, waits again, and is woken only by its answer (`Full`).
+#[test]
+fn a_birth_waits_for_its_own_question_and_not_the_next() {
+    use language::{Language, LanguageCell};
+    let cell = std::sync::Arc::new(LanguageCell::new());
+    let birth = {
+        let cell = std::sync::Arc::clone(&cell);
+        on_a_worker(move |worker| cell.for_birth(worker, || true).0)
+    };
+    while cell.waiting() == 0 && !birth.is_finished() {
+        std::thread::yield_now();
+    }
+    cell.file_and_ask_again(Language::Failed);
+    while !birth.is_finished() && cell.began_waits() < 2 {
+        std::thread::yield_now();
+    }
+    // A birth that began a second wait is released by the second question's answer, so the test
+    // ends either way and the answer says which question woke it.
+    cell.file(Language::Full);
+    assert_eq!(
+        birth.join().unwrap(),
+        Language::Failed,
+        "woken by the answer to its own question"
+    );
+    assert_eq!(cell.began_waits(), 1, "one wait");
+}
+
+/// RED (T-INTEGRATION-INJECT-2-BUILD round 4, ruling on nit (h)) — **the launch puts the language
+/// question only with the Shell integration switch on**: with it off no Windows PowerShell is
+/// started at launch, and a birth with the switch on — turned on later — asks for itself.
+///
+/// MUTATIONS: ask whatever the switch says (`asks` ignored) — the switched-off launch starts a
+/// question; drop the ask — the switched-on launch starts none.
+#[test]
+fn the_launch_asks_only_with_the_switch_on() {
+    use language::{Language, LanguageCell, begin_language_question_in, windows_powershell_birth};
+    let off = LanguageCell::new();
+    let asked = Cell::new(0);
+    let _ = begin_language_question_in(&off, false, || {
+        asked.set(asked.get() + 1);
+        true
+    });
+    assert_eq!(asked.get(), 0, "the switch off: no question at launch");
+    let birth = windows_powershell_birth(Path::new("powershell.exe"), false, || {
+        panic!("a switched-off birth asks nothing")
+    });
+    assert!(!birth.integration && !birth.prefix);
+
+    let on = std::sync::Arc::new(LanguageCell::new());
+    let _ = begin_language_question_in(&on, true, || {
+        asked.set(asked.get() + 1);
+        true
+    });
+    assert_eq!(asked.get(), 1, "the switch on: the question at launch");
+
+    // Turned on later: the launch asked nothing, and the first birth asks for itself.
+    let later = std::sync::Arc::new(LanguageCell::new());
+    let _ = begin_language_question_in(&later, false, || panic!("off at launch"));
+    let birth = {
+        let later = std::sync::Arc::clone(&later);
+        on_a_worker(move |worker| {
+            let mut asked = false;
+            let birth = windows_powershell_birth(Path::new("powershell.exe"), true, || {
+                later
+                    .for_birth(worker, || {
+                        asked = true;
+                        later.file(Language::Full);
+                        true
+                    })
+                    .0
+            });
+            (birth, asked)
+        })
+    };
+    let (birth, asked) = birth.join().unwrap();
+    assert!(asked, "the birth put the question");
+    assert!(birth.prefix, "and composed from its answer");
+}
+
 #[cfg(windows)]
 mod real_shell {
     use super::*;
@@ -1678,7 +1789,21 @@ mod real_shell {
             );
         }
 
-        pane.pty.shutdown().expect("the shell ends");
+        // **Ended, as the kernel says it**: `shutdown` reaps within the product's bounded budget
+        // and can return before the process has gone (its answer is then `None`), with the
+        // assembly still mapped. The process's own exit signal, taken while it is alive, is what
+        // the prune waits for, within the suite's patience.
+        let ended = pane
+            .pty
+            .exit_witness()
+            .expect("the shell's process is open to wait on");
+        // A `None` from the bounded reap is not a failure here: it is the case the witness exists
+        // for, and the wait below covers it and `Some` alike.
+        let _reaped = pane.pty.shutdown().expect("the shell's teardown");
+        assert!(
+            ended.ended_within(crate::lane::PATIENCE),
+            "the shell's process ended within the suite's patience (its exit signalled)"
+        );
         let kept = prune();
         assert!(kept.is_empty(), "nothing holds it now: {kept:?}");
         assert!(!module.exists(), "and it is gone");

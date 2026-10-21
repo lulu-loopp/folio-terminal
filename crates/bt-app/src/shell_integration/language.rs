@@ -43,41 +43,68 @@ pub enum Language {
 /// The question the edition is asked: the language mode its `-Command` text runs in.
 pub(crate) const LANGUAGE_COMMAND: &str = "$ExecutionContext.SessionState.LanguageMode";
 
-/// **The answer in a child's standard output**: `FullLanguage` is [`Language::Full`]; any other
-/// mode name is [`Language::Constrained`]; nothing is no answer.
+/// **The answer in a child's standard output**, read from its last line that holds anything (a
+/// banner or a stray line before it is not the answer): `FullLanguage` is [`Language::Full`];
+/// one of PowerShell's three other modes is [`Language::Constrained`]; anything else — nothing, or
+/// a word that is not a language mode — is **no answer** ([`Language::Failed`]), never a
+/// constrained one (ruling B′, review of round 3: the prefix comes only from a known answer, and an
+/// unrecognised line on a `FullLanguage` machine must not switch its panes' integration off).
 #[must_use]
 pub(crate) fn language_from(stdout: &str) -> Language {
-    match stdout.trim() {
-        "" => Language::Failed,
-        "FullLanguage" => Language::Full,
-        _ => Language::Constrained,
+    match stdout.lines().map(str::trim).rfind(|line| !line.is_empty()) {
+        Some("FullLanguage") => Language::Full,
+        Some("ConstrainedLanguage" | "RestrictedLanguage" | "NoLanguage") => Language::Constrained,
+        _ => Language::Failed,
     }
 }
 
+/// **What a cell holds**: the number of the latest question put (`0` before any), whether it is
+/// out, and the newest answer filed with the number of the question it answers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum State {
-    NotAsked,
-    Asking,
-    Heard(Language),
+struct State {
+    asked: u64,
+    out: bool,
+    answered: Option<(u64, Language)>,
 }
 
-/// **One edition's answer, and the births waiting for it.** A question is out while the state is
-/// `Asking`; every question ends by filing an answer, [`Language::Failed`] included, so a waiting
-/// birth always wakes.
+impl State {
+    /// A known answer: one a birth composes from without asking.
+    fn known(&self) -> Option<Language> {
+        match self.answered {
+            Some((_, answer @ (Language::Full | Language::Constrained))) => Some(answer),
+            _ => None,
+        }
+    }
+}
+
+/// **One edition's answer, and the births waiting for it.** Every question is numbered when it is
+/// put, and every question ends by filing an answer under its number, [`Language::Failed`]
+/// included, so a waiting birth always wakes — and wakes on the answer to the question that was
+/// out when it began waiting, or a newer one, never sleeping on through a question put after its
+/// own was answered (review of round 3, nit (a)).
 pub(crate) struct LanguageCell {
     state: Mutex<State>,
     landed: Condvar,
     /// How many births are waiting now — what a test reads to file an answer only once a birth
     /// is waiting for it.
     waiting: std::sync::atomic::AtomicUsize,
+    /// How many times any birth has begun a wait — what a test reads to see a birth wait twice.
+    #[cfg(test)]
+    began_waits: std::sync::atomic::AtomicUsize,
 }
 
 impl LanguageCell {
     pub(crate) const fn new() -> Self {
         Self {
-            state: Mutex::new(State::NotAsked),
+            state: Mutex::new(State {
+                asked: 0,
+                out: false,
+                answered: None,
+            }),
             landed: Condvar::new(),
             waiting: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            began_waits: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -93,56 +120,74 @@ impl LanguageCell {
     pub(crate) fn ask(&self, start: impl FnOnce() -> bool) {
         {
             let mut state = self.state();
-            if matches!(
-                *state,
-                State::Asking | State::Heard(Language::Full | Language::Constrained)
-            ) {
+            if state.out || state.known().is_some() {
                 return;
             }
-            *state = State::Asking;
+            state.asked += 1;
+            state.out = true;
         }
         if !start() {
             self.file(Language::Failed);
         }
     }
 
-    /// File the answer of the question out and wake every birth waiting for it.
+    /// File the answer of the question out, under its number, and wake every birth waiting.
     pub(crate) fn file(&self, answer: Language) {
-        *self.state() = State::Heard(answer);
+        let mut state = self.state();
+        state.answered = Some((state.asked, answer));
+        state.out = false;
+        drop(state);
+        self.landed.notify_all();
+    }
+
+    /// [`Self::file`], then a new question put before any waiting birth can look — the order a
+    /// failed answer and another birth's asking again can land in.
+    #[cfg(test)]
+    pub(crate) fn file_and_ask_again(&self, answer: Language) {
+        let mut state = self.state();
+        state.answered = Some((state.asked, answer));
+        state.asked += 1;
+        state.out = true;
+        drop(state);
         self.landed.notify_all();
     }
 
     /// **The answer a birth composes from**: a known answer at once; otherwise the question is put
-    /// (again, after a failure) and the birth waits for its answer — on `worker`, the birth's own,
-    /// never the window thread. Also how long it waited, when it did.
+    /// (again, after a failure) and the birth waits — on `worker`, the birth's own, never the
+    /// window thread — for the answer to the question out when it began, or a newer one. Also how
+    /// long it waited, when it did.
     pub(crate) fn for_birth(
         &self,
         worker: &WorkerCtx,
         start: impl FnOnce() -> bool,
     ) -> (Language, Option<Duration>) {
         let _ = worker;
-        if let State::Heard(answer @ (Language::Full | Language::Constrained)) = *self.state() {
+        if let Some(answer) = self.state().known() {
             return (answer, None);
         }
         self.ask(start);
         let began = Instant::now();
         let mut waited = false;
         let mut state = self.state();
+        let mine = state.asked;
         loop {
-            match *state {
-                State::Heard(answer) => return (answer, waited.then(|| began.elapsed())),
-                State::Asking | State::NotAsked => {
-                    waited = true;
-                    self.waiting
-                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-                    state = self
-                        .landed
-                        .wait(state)
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    self.waiting
-                        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                }
+            if let Some((question, answer)) = state.answered
+                && question >= mine
+            {
+                return (answer, waited.then(|| began.elapsed()));
             }
+            waited = true;
+            self.waiting
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            #[cfg(test)]
+            self.began_waits
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            state = self
+                .landed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.waiting
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         }
     }
 
@@ -150,6 +195,12 @@ impl LanguageCell {
     #[cfg(test)]
     pub(crate) fn waiting(&self) -> usize {
         self.waiting.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// How many waits births have begun, all told.
+    #[cfg(test)]
+    pub(crate) fn began_waits(&self) -> usize {
+        self.began_waits.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -173,10 +224,26 @@ impl LanguageAsked {
 
 /// **Ask Windows PowerShell its language mode, now, on a worker nobody waits for** — at launch,
 /// before the window, so the first 5.1 pane finds it answered or waits only for what is left of
-/// it. Nothing is asked off Windows.
-pub fn begin_language_question() -> LanguageAsked {
-    if bt_platform::host_platform() == bt_platform::HostPlatform::Windows {
-        WINDOWS_POWERSHELL.ask(|| start_question(None));
+/// it. Only with the Shell integration switch on (`integration`; review of round 3, nit (h)): a
+/// launch with it off starts no Windows PowerShell; a birth with the switch on — turned on later
+/// included — asks for itself. Nothing is asked off Windows.
+pub fn begin_language_question(integration: bool) -> LanguageAsked {
+    begin_language_question_in(
+        &WINDOWS_POWERSHELL,
+        integration && bt_platform::host_platform() == bt_platform::HostPlatform::Windows,
+        || start_question(None),
+    )
+}
+
+/// [`begin_language_question`] over a cell and a question handed in; `asks` is the switch's (and
+/// the platform's) answer.
+pub(crate) fn begin_language_question_in(
+    cell: &LanguageCell,
+    asks: bool,
+    start: impl FnOnce() -> bool,
+) -> LanguageAsked {
+    if asks {
+        cell.ask(start);
     }
     LanguageAsked(())
 }

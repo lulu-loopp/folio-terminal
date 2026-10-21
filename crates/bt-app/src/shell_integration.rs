@@ -56,8 +56,8 @@ use crate::{
 mod language;
 pub mod profile_marks;
 mod profile_runtime;
+pub(crate) use language::{Language, language_for_birth, windows_powershell_birth};
 pub use language::{LanguageAsked, begin_language_question};
-pub(crate) use language::{language_for_birth, windows_powershell_birth};
 // The real Windows PowerShell 5.1 panes Folio's PSReadLine is proven in (T-INTEGRATION-INJECT-2-
 // BUILD); that file says it is Windows-only, so this one names no platform for it.
 #[cfg(test)]
