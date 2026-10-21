@@ -1107,46 +1107,6 @@ pub(crate) fn raster_scale(window_scale: f64, document: WebDocument) -> f64 {
     }
 }
 
-/// **The part of a seat's `ZoomFactor` that is not the person's**: the window's
-/// scale over the scale the engine rasterises at (T-PDF-TEXT-RENDERING, cand-b2).
-///
-/// A PDF on a 1.5 display is rasterised at 2.0 ([`raster_scale`]), which on its
-/// own lays the viewer out in a CSS viewport a quarter narrower than the pane —
-/// its toolbar folds away and its page stops fitting the width. A base of
-/// 1.5 / 2.0 = 0.75 under the person's own zoom gives it back the viewport the
-/// display's own scale would have. Every other seat's base is 1.0.
-pub(crate) fn zoom_base(window_scale: f64, document: WebDocument) -> f64 {
-    window_scale / raster_scale(window_scale, document)
-}
-
-/// **The `ZoomFactor` a seat's engine is owed when its base moves**, or `None`
-/// when the engine already holds this base.
-///
-/// `engine` is the factor the engine holds now, `told` the base it was composed
-/// with (`None` for a controller that has been given no base, whose factor is
-/// the person's zoom alone — a base of 1.0) and `wanted` the base it should
-/// hold. The person's
-/// own zoom — `engine / told` — is kept; only the base under it changes.
-pub(crate) fn rebased_zoom(engine: f64, told: Option<f64>, wanted: f64) -> Option<f64> {
-    let told_base = told.unwrap_or(1.0);
-    if (told_base - wanted).abs() <= f64::EPSILON {
-        return None;
-    }
-    Some(engine / told_base * wanted)
-}
-
-/// **One notch of the person's zoom over a base**: the engine factor the next
-/// rung asks for, or `None` at the end of the ladder.
-///
-/// The ladder ([`zoom_step`]) is the person's — `engine / base` — and the
-/// factor sent is that rung times the base, so a PDF seat on a 1.5 display
-/// steps 100 % → 110 % of *its* page exactly as any other seat does.
-pub(crate) fn zoom_notch(engine: f64, base: f64, up: bool) -> Option<f64> {
-    let person = engine / base;
-    let next = zoom_step(person, up);
-    ((next - person).abs() >= f64::EPSILON).then_some(next * base)
-}
-
 impl WebPresence {
     /// The rectangle, when there is one on the glass.
     ///
@@ -2323,11 +2283,6 @@ pub(crate) struct WebSeat {
     /// the one fact besides the window's scale that decides what the engine is
     /// told about pixels ([`raster_scale`]). A page, until a PDF commits.
     document: WebDocument,
-    /// **The base under the person's zoom the engine's `ZoomFactor` was last
-    /// composed with** ([`zoom_base`]), `None` for a controller given none —
-    /// a new one, whose factor is 1.0 and the person's alone. Not forgotten on a
-    /// rehost: the controller, and the factor it holds, go with the page.
-    zoom_based: Option<f64>,
     /// **What the compositor was last told about this page's pair** — its floor
     /// and, once there is one, its visual.
     ///
@@ -2583,7 +2538,6 @@ impl WebSeat {
             scale,
             rastered: None,
             document: WebDocument::Page,
-            zoom_based: None,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
@@ -3001,9 +2955,6 @@ impl WebSeat {
                         // the engine is up is the one that says the repair is
                         // over — see [`REBUILDS_BEFORE_THE_CARD`].
                         self.rebuilds_for_a_new_version = 0;
-                        // A new controller's zoom is 1.0 and composed with no
-                        // base ([`WebSeat::zoom_based`]).
-                        self.zoom_based = None;
                     }
                 }
                 self.machine.on_controller(*generation, error.is_none())
@@ -3998,21 +3949,13 @@ impl WebSeat {
         if !self.host.has_controller() {
             return Ok(());
         }
-        if let Some(scale) = self.rasterization_owed() {
-            self.host.set_rasterization_scale(scale)?;
-            // Only once the call has returned, as everywhere else here: the
-            // cache says "the engine was told this", and a refusal told it
-            // nothing.
-            self.rastered = Some(scale);
-        }
-        // **And the base under the person's zoom, with it** ([`zoom_base`]): a
-        // raster scale above the display's is paid back in the zoom, so the
-        // page lays out in the CSS viewport the display's own scale gives.
-        let wanted = zoom_base(self.scale, self.document);
-        if let Some(factor) = rebased_zoom(self.host.zoom(), self.zoom_based, wanted) {
-            self.host.set_zoom(factor)?;
-        }
-        self.zoom_based = Some(wanted);
+        let Some(scale) = self.rasterization_owed() else {
+            return Ok(());
+        };
+        self.host.set_rasterization_scale(scale)?;
+        // Only once the call has returned, as everywhere else here: the cache
+        // says "the engine was told this", and a refusal told it nothing.
+        self.rastered = Some(scale);
         Ok(())
     }
 
@@ -4629,24 +4572,19 @@ impl WebSeat {
     /// a second copy would be a number nothing reads and everything has to
     /// remember to update — the "只写字段 = 死规格" of `docs/CONVENTIONS.md` §3, one
     /// field wide.
-    ///
-    /// **The ladder is the person's** ([`zoom_notch`]): the engine's factor is
-    /// their zoom times this seat's base ([`zoom_base`]), and what is stepped,
-    /// said and returned is their zoom.
     pub(crate) fn zoom_by(&mut self, up: bool) -> Result<Option<f64>, String> {
-        let base = self.zoom_based.unwrap_or(1.0);
         let current = self.host.zoom();
-        let Some(next) = zoom_notch(current, base, up) else {
+        let next = zoom_step(current, up);
+        if (next - current).abs() < f64::EPSILON {
             return Ok(None);
-        };
+        }
         self.host.set_zoom(next)?;
         let settled = self.host.zoom();
         if (settled - current).abs() < f64::EPSILON {
             return Ok(None);
         }
-        let person = settled / base;
-        self.zoom_said = Some((person, Instant::now()));
-        Ok(Some(person))
+        self.zoom_said = Some((settled, Instant::now()));
+        Ok(Some(settled))
     }
 
     /// The magnification this seat last moved to, and when it said so.
@@ -5319,7 +5257,6 @@ mod rehost_address_tests {
             scale: 1.0,
             rastered: None,
             document: WebDocument::Page,
-            zoom_based: None,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             last_left_press: None,
@@ -5966,63 +5903,6 @@ mod rasterization_tests {
             None,
             "a second commit of the same kind owes nothing"
         );
-    }
-
-    /// RED — **a PDF seat on a 1.5 display is laid out at the display's own
-    /// CSS viewport**: rasterised at 2.0, zoomed by a base of 0.75 (cand-b2).
-    ///
-    /// MUTATION: a base of 1.0 for every seat, and the PDF viewer lays out a
-    /// quarter narrower than the pane — its toolbar folds away (cand-b1,
-    /// photographed).
-    #[test]
-    fn a_pdf_on_a_fractional_display_is_zoomed_back_to_the_displays_layout() {
-        assert!((zoom_base(1.5, WebDocument::Pdf) - 0.75).abs() < 1e-12);
-        assert!((zoom_base(1.25, WebDocument::Pdf) - 0.625).abs() < 1e-12);
-        assert!((zoom_base(1.5, WebDocument::Page) - 1.0).abs() < 1e-12);
-        assert!((zoom_base(2.0, WebDocument::Pdf) - 1.0).abs() < 1e-12);
-        // A new controller (factor 1.0, no base) committing to a PDF.
-        assert_eq!(rebased_zoom(1.0, None, 0.75), Some(0.75));
-        // Nothing owed once it holds the base; nothing for a page at all.
-        assert_eq!(rebased_zoom(0.75, Some(0.75), 0.75), None);
-        assert_eq!(rebased_zoom(1.0, None, 1.0), None);
-    }
-
-    /// RED — **the person's zoom survives the base moving under it**: a PDF at
-    /// 125 % (factor 0.9375 over 0.75) that navigates to a page is at 125 % of
-    /// the page, and back again.
-    ///
-    /// MUTATION: send the base alone (`Some(wanted)`), and the person's 125 %
-    /// is lost on every move between a PDF and a page.
-    #[test]
-    fn the_persons_zoom_is_kept_when_the_base_under_it_moves() {
-        let held = 1.25 * 0.75;
-        let page = rebased_zoom(held, Some(0.75), 1.0).expect("the base moved");
-        assert!((page - 1.25).abs() < 1e-12, "{page}");
-        let pdf = rebased_zoom(page, Some(1.0), 0.75).expect("the base moved");
-        assert!((pdf - held).abs() < 1e-12, "{pdf}");
-    }
-
-    /// RED — **Ctrl+wheel steps the person's ladder over the base**: a PDF seat
-    /// at 100 % over 0.75 steps to 110 %, sent as 0.825, and stops at the
-    /// ladder's ends exactly where any seat does.
-    ///
-    /// MUTATION: step the engine's factor itself (`zoom_step(engine)`), and the
-    /// first notch from 0.75 lands on 0.80 — 107 % of the page — with the next
-    /// stepping by uneven amounts.
-    #[test]
-    fn a_notch_steps_the_persons_zoom_over_the_base() {
-        let next = zoom_notch(0.75, 0.75, true).expect("100 % is not the top");
-        assert!((next - 1.10 * 0.75).abs() < 1e-12, "{next}");
-        let back = zoom_notch(next, 0.75, false).expect("110 % is not the bottom");
-        assert!((back - 0.75).abs() < 1e-12, "{back}");
-        assert_eq!(zoom_notch(3.0 * 0.75, 0.75, true), None, "the top rung");
-        assert_eq!(
-            zoom_notch(0.25 * 0.75, 0.75, false),
-            None,
-            "the bottom rung"
-        );
-        let plain = zoom_notch(1.0, 1.0, true).expect("a page steps as before");
-        assert!((plain - 1.10).abs() < 1e-12);
     }
 
     /// **Which addresses are a PDF**: the file's own extension in any case,
@@ -6677,12 +6557,12 @@ mod fault_tests {
         let source = crate::test_support::squeezed_body("WebSeat", "zoom_by");
         let step = concat!(
             "letcurrent=self.host.z",
-            "oom();letSome(next)=zoom_notch(current,base,up)else"
+            "oom();letnext=zoom_step(current,up);"
         );
         assert_eq!(
             source.matches(step).count(),
             1,
-            "the ladder is walked from the engine's own factor, over this seat's base"
+            "the ladder is walked from the engine's own factor"
         );
         let after = &source[source.find(step).expect("the step just counted")..];
         assert!(
