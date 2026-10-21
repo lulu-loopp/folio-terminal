@@ -68,6 +68,34 @@ public static class LoadRowWindows {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint message, IntPtr w, IntPtr l);
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc proc, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  // The class winit registers for an application's window (winit 0.30.13,
+  // platform_impl/windows/mod.rs: `class_name: "Window Class"`); its other top-level window, the
+  // thread's event target, is `Winit Thread Event Target` and draws nothing.
+  public const string AppClass = "Window Class";
+  public static string ClassOf(IntPtr h) { var name = new StringBuilder(128); GetClassName(h, name, 128); return name.ToString(); }
+  // **Folio's window**: of the process's visible top-level windows of winit's application class,
+  // the one with the largest client area that is not empty. Every top-level window of the process
+  // is described into `seen`, so a row can say what it chose among.
+  public static IntPtr AppWindowOf(uint target, StringBuilder seen) {
+    IntPtr best = IntPtr.Zero;
+    long bestArea = 0;
+    EnumWindows((h, l) => {
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      if (pid != target) { return true; }
+      bool visible = IsWindowVisible(h);
+      RECT c; GetClientRect(h, out c);
+      long area = (long)(c.R - c.L) * (c.B - c.T);
+      string cls = ClassOf(h);
+      seen.AppendFormat("[{0} visible={1} client={2}x{3}] ", Describe(h), visible ? 1 : 0, c.R - c.L, c.B - c.T);
+      if (visible && cls == AppClass && area > bestArea) { bestArea = area; best = h; }
+      return true;
+    }, IntPtr.Zero);
+    return best;
+  }
   public const uint WM_CLOSE = 0x0010;
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder text, int max);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder text, int max);
@@ -102,13 +130,23 @@ public static class LoadRowWindows {
 }
 '@
 
+# **Folio's own window, never winit's event target** (2026-10-21, after9: the probe's
+# `AppWindow` — the largest visible window of the process — answered winit's `Winit Thread Event
+# Target` popup, and the row clicked, typed into and closed a window that draws nothing). The
+# window of winit's application class with a client area; every top-level window the process has
+# is logged beside the choice.
 function Window($procId) {
   $deadline = (Get-Date).AddSeconds(120)
   while ((Get-Date) -lt $deadline) {
-    $h = [Probe]::AppWindow([uint32]$procId)
-    if ($h -ne [IntPtr]::Zero) { return $h }
+    $seen = New-Object System.Text.StringBuilder
+    $h = [LoadRowWindows]::AppWindowOf([uint32]$procId, $seen)
+    if ($h -ne [IntPtr]::Zero) {
+      Say ("Folio's window {0}; the process's top-level windows: {1}" -f [LoadRowWindows]::Describe($h), $seen.ToString())
+      return $h
+    }
     Start-Sleep -Milliseconds 500
   }
+  Say ("FAILED window: no visible window of class '{0}' with a client area within 120 s; the process's top-level windows: {1}" -f [LoadRowWindows]::AppClass, $seen.ToString())
   return [IntPtr]::Zero
 }
 # Foreground first, as ui-probe's own law asks before a key is sent. A window Windows opened
@@ -264,7 +302,15 @@ $env:BT_PERF_TRACE = '1'
 $folio = Start-Process -FilePath $exe -RedirectStandardError $perf -PassThru
 Say "started pid=$($folio.Id)"
 $h = Window $folio.Id
-if ($h -eq [IntPtr]::Zero) { Say 'no Folio window within 120 s'; Say 'load end'; exit 1 }
+if ($h -eq [IntPtr]::Zero) {
+  $folio.Refresh()
+  if (-not $folio.HasExited) {
+    $h = $folio.MainWindowHandle
+    CloseFolio
+  }
+  EndRow
+  exit 1
+}
 Start-Sleep -Seconds 8
 if (-not (FrontWithin $h $ForegroundSeconds)) {
   Say "FAILED foreground: Folio never took the keyboard within $ForegroundSeconds s; the row measures nothing"

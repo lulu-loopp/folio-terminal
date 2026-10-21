@@ -37,7 +37,7 @@ $marks = @(Get-Content -LiteralPath $log | ForEach-Object {
         }
     })
 # A row whose driver never got the keyboard ran no phase: it says so, and its close is still a cell.
-$refused = @(Get-Content -LiteralPath $log | Where-Object { $_ -match 'FAILED foreground' })
+$refused = @(Get-Content -LiteralPath $log | Where-Object { $_ -match 'FAILED foreground|FAILED window' })
 if ($refused.Count) {
     $closing = @(Get-Content -LiteralPath $log | Where-Object { $_ -match 'close target|WM_CLOSE|close ok|FAILED close|still running|hang report' })
     $lines = @("load row '$Tag' — $Results", ('phases    NOT RUN: ' + $refused[0].Substring(25)),
