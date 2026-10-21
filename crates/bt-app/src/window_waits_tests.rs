@@ -3475,9 +3475,9 @@ fn fabrication_region(src: &Src, at: usize) -> (usize, usize) {
     (at, toks.last().map_or(at, |t| t.end))
 }
 
-/// **No capability is named where the compiler checks nothing**: `WaitToken`, `WorkerCtx` and
-/// `admission::doors` never inside an `unsafe` block, `unsafe fn`, `unsafe impl` or `unsafe
-/// extern`, nor inside a `transmute`, `zeroed`, `MaybeUninit` or `read` expression, anywhere in
+/// **No capability is named where the compiler checks nothing**: `WaitToken`, `WorkerCtx`, `Leg`
+/// (which holds a token and lends it through `Leg::arm`) and `admission::doors` never inside an
+/// `unsafe` block, `unsafe fn`, `unsafe impl` or `unsafe extern`, nor inside a `transmute`, `zeroed`, `MaybeUninit` or `read` expression, anywhere in
 /// the product; and `admission` keeps `#![forbid(unsafe_code)]` and writes no `unsafe` — both of
 /// its halves: `bt-effects`' module, which builds the capabilities, and `bt-platform`'s, the thread
 /// door that lends the worker's.
@@ -7942,15 +7942,11 @@ fn the_graphs_section_admits_no_line() {
     let failures = graphs_section_failures(REGISTRY);
     assert!(
         failures.is_empty(),
-        "the live `# graphs` section is refused:
-  {}",
-        failures.join(
-            "
-  "
-        )
+        "the live `# graphs` section is refused:\n  {}",
+        failures.join("\n  ")
     );
     for line in [
-        "S1	TraceFlush	bt-app	-	crate::trace_sink::flush	verb",
+        "S1\tTraceFlush\tbt-app\t-\tcrate::trace_sink::flush\tverb",
         "not a graph line",
     ] {
         let failures = graphs_section_failures(&planted_registry(&[], &[("graphs", line)]));
@@ -7958,12 +7954,8 @@ fn the_graphs_section_admits_no_line() {
             failures
                 .iter()
                 .any(|f| f.contains("`# graphs` admits no line") && f.contains(line)),
-            "the planted `# graphs` line `{line}` is not refused:
-  {}",
-            failures.join(
-                "
-  "
-            )
+            "the planted `# graphs` line `{line}` is not refused:\n  {}",
+            failures.join("\n  ")
         );
     }
 }
