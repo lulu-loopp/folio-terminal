@@ -1062,7 +1062,7 @@ up and three down.
 | echo / notch / output | `event_to_present_us` by `source=` | within a frame or two in every phase | seconds |
 | close | `close ok` / `FAILED close` in `load-<Tag>.txt` (with the processes still standing and `load-<Tag>-hang-reports.zip`) | Folio exits within 30 s of WM_CLOSE | still running: the row's failure |
 
-A phase whose driver cycles never reached Folio is printed `NOT EXERCISED`, and its cells are not a result. The guest is told not to sleep before the row (`powercfg` standby, monitor and hibernate timeouts on AC to 0). The row runs `-NoWait`, and the host waits for `load-<Tag>-done.txt` (bounded at 3 × `-Seconds` + 300 s).
+A phase whose driver cycles never reached Folio is printed `NOT EXERCISED`, and its cells are not a result. The guest is told not to sleep before the row (`powercfg` standby, monitor and hibernate timeouts on AC to 0). The row runs `-NoWait`, and the host waits for `load-<Tag>-done.txt` (bounded at 3 × `-Seconds` + 480 s (the driver waits up to 180 s for the foreground)).
 
 Run it twice: `-Tag before` on the build at the instrumentation commit (the named fold and the `stale_us`/`source=` cells, no fix), `-Tag after` on the fix; the report carries both tables.
 

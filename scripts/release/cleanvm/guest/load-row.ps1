@@ -34,7 +34,8 @@ param(
   [string]$Candidate = 'C:\folio-vm\candidate',
   [string]$Tag = 'run',
   [int]$Seconds = 60,
-  [string]$GuestHome = 'C:\folio-vm'
+  [string]$GuestHome = 'C:\folio-vm',
+  [int]$ForegroundSeconds = 180
 )
 $ErrorActionPreference = 'Continue'
 $exe = Join-Path $Candidate 'folio.exe'
@@ -54,6 +55,29 @@ $src = [IO.File]::ReadAllText($probe)
 $m = [regex]::Match($src, "(?s)`nAdd-Type @'`r?`n(.*?)`r?`n'@")
 Add-Type -TypeDefinition $m.Groups[1].Value
 [Probe]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) | Out-Null
+# Who holds the foreground, and whose window is under a point: the two facts a refused foreground
+# is read from (2026-10-21: two runs whose every cycle was refused said nothing about why).
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class LoadRowWindows {
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder text, int max);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder text, int max);
+  public static string Describe(IntPtr h) {
+    if (h == IntPtr.Zero) { return "none"; }
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    var title = new StringBuilder(128); GetWindowText(h, title, 128);
+    var name = new StringBuilder(128); GetClassName(h, name, 128);
+    return String.Format("hwnd={0} pid={1} class={2} title={3}", h, pid, name, title);
+  }
+  public static string At(int x, int y) { var p = new POINT(); p.X = x; p.Y = y; return Describe(WindowFromPoint(p)); }
+}
+'@
 
 function Window($procId) {
   $deadline = (Get-Date).AddSeconds(120)
@@ -80,7 +104,23 @@ function Front($h) {
     }
   }
   if ([Probe]::GetForegroundWindow() -eq $h) { return $true }
-  Say 'no foreground: nothing sent'
+  $r = New-Object PRECT
+  [void][Probe]::GetWindowRect($h, [ref]$r)
+  Say ("no foreground: nothing sent (foreground {0}; under window+(60,-60) {1}; folio pid={2})" -f `
+      [LoadRowWindows]::Describe([LoadRowWindows]::GetForegroundWindow()), [LoadRowWindows]::At($r.L + 60, $r.B - 60), $folio.Id)
+  return $false
+}
+
+# **The row starts only once Folio can be given the keys** (2026-10-21: on boots whose logon came
+# late, every cycle of a row was refused and its three phases measured nothing). Asked every few
+# seconds for up to -ForegroundSeconds; a Folio that never takes it ends the row as a failure
+# rather than as numbers.
+function FrontWithin($h, $seconds) {
+  $deadline = (Get-Date).AddSeconds($seconds)
+  while ((Get-Date) -lt $deadline) {
+    if (Front $h) { return $true }
+    Start-Sleep -Seconds 3
+  }
   return $false
 }
 function Cycle($h, $seconds) {
@@ -114,6 +154,18 @@ Say "started pid=$($folio.Id)"
 $h = Window $folio.Id
 if ($h -eq [IntPtr]::Zero) { Say 'no Folio window within 120 s'; Say 'load end'; exit 1 }
 Start-Sleep -Seconds 8
+if (-not (FrontWithin $h $ForegroundSeconds)) {
+  Say "FAILED foreground: Folio never took the foreground within $ForegroundSeconds s; the row measures nothing"
+  $closed = $folio.CloseMainWindow()
+  Say "WM_CLOSE -> $closed"
+  if (-not $folio.WaitForExit(30000)) { Say 'FAILED close: Folio still running 30 s after WM_CLOSE' }
+  Mark 'end'
+  Copy-Item -LiteralPath $diag -Destination (Join-Path $GuestHome "load-$Tag-diagnostics.log") -Force
+  Say 'load end'
+  Set-Content -LiteralPath (Join-Path $GuestHome "load-$Tag-done.txt") -Value 'done' -Encoding UTF8
+  exit 1
+}
+Say 'foreground taken'
 foreach ($i in 1..2) { if (Front $h) { [void][Probe]::TapVk([uint16]27) }; Start-Sleep -Milliseconds 800 }
 Start-Sleep -Seconds 4
 # The owner's shape: a pane whose screen holds a boxed frame (an agent's TUI is one) in a tab

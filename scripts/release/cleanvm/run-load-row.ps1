@@ -133,7 +133,7 @@ try {
     Invoke-GuestScript -Door $door -Step 'load row' -Script "$guestLoad\load-row.ps1" -NoWait `
         -Arguments @('-Candidate', $guestCandidate, '-Tag', $Tag, '-Seconds', "$Seconds", '-GuestHome', $GuestHome) | Out-Null
     if (-not $planning) {
-        $bound = (Get-Date).AddSeconds(3 * $Seconds + 300)
+        $bound = (Get-Date).AddSeconds(3 * $Seconds + 480)
         $done = $false
         while ((Get-Date) -lt $bound) {
             Invoke-Vmrun -Door $door -Step 'done?' -Verb 'fileExistsInGuest' -InGuest -Tolerant -Quiet `
@@ -141,9 +141,9 @@ try {
             if ($door.LastExit -eq 0) { $done = $true; break }
             Start-Sleep -Seconds 10
         }
-        Write-Host ("  {0,-12} {1}" -f 'row', $(if ($done) { 'the guest wrote its done marker' } else { "FAILED: no done marker within $(3 * $Seconds + 300) s" }))
+        Write-Host ("  {0,-12} {1}" -f 'row', $(if ($done) { 'the guest wrote its done marker' } else { "FAILED: no done marker within $(3 * $Seconds + 480) s" }))
     } else {
-        Write-Host ("  {0,-12} (wait for load-$Tag-done.txt, up to $(3 * $Seconds + 300) s)" -f 'done?')
+        Write-Host ("  {0,-12} (wait for load-$Tag-done.txt, up to $(3 * $Seconds + 480) s)" -f 'done?')
     }
     foreach ($name in @("load-$Tag.txt", "load-$Tag-perf.txt", "load-$Tag-diagnostics.log", "load-$Tag-hog.txt", "load-$Tag-hang-reports.zip")) {
         Invoke-Vmrun -Door $door -Step 'copy out' -Verb 'copyFileFromGuestToHost' -InGuest -Tolerant `
