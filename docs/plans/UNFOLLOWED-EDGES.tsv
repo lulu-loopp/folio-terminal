@@ -1882,6 +1882,7 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::frontmost_window	Ambiguous	fin
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::hand_the_update_over	Ambiguous	and_then	2	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::install_main_menu	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::install_main_menu	Dynamic	send	1	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::keep_what_the_systems_end_did_not_save	Ambiguous	line	1	2026-10-21: T-ENDSESSION-SAVES; `preview::Kept::line`, a sentence formatted from a buffer's name and where its edit is, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::on_window_event	Ambiguous	and_then	7	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::on_window_event	Ambiguous	is_some_and	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::on_window_event	Ambiguous	map	1	
@@ -1913,6 +1914,7 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_quit	Ambiguous	text	1
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_restore_answer	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_restore_answer	Ambiguous	iter	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_restore_answer	Ambiguous	map	1	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_session_end_keeping_in	Ambiguous	is_some_and	1	2026-10-21: T-ENDSESSION-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_tear_out	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	and_then	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	collect	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
@@ -2763,11 +2765,13 @@ crates/bt-app/src/persist.rs	bt-app crate::persist::KeybindingsStore::open	Ambig
 crates/bt-app/src/persist.rs	bt-app crate::persist::LaneShared::of	Dynamic	ledger_wake	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::flush_judged_until	Ambiguous	clone	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::flush_judged_until	Ambiguous	to_string	1	
-crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::hand_over_final	Ambiguous	map	2	
+crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::hand_over_a_new_generation	Ambiguous	clone	1	2026-10-21: T-ENDSESSION-SAVES; `String::clone` on the refusal's sentence, which calls no door
+crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::hand_over_a_new_generation	Ambiguous	to_string	1	2026-10-21: T-ENDSESSION-SAVES; `Display::to_string` on a serializer's error, which calls no door
 crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::landing_of	Ambiguous	map_err	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::receipt_overdue	Ambiguous	message	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::receipt_overdue	Ambiguous	to_string	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::said_by_the_quit	Ambiguous	is_err_and	1	
+crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::save_for_the_systems_end	Ambiguous	is_ok	1	2026-10-21: T-ENDSESSION-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::wait_for_landing	Ambiguous	clone	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::wait_for_landing	Ambiguous	map_err	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::SessionStore::wait_for_landing	Ambiguous	message	1	
@@ -5116,8 +5120,9 @@ crates/bt-app/src/session_end.rs	bt-app crate::session_end::hear	Ambiguous	set	1
 crates/bt-app/src/session_end.rs	bt-app crate::session_end::hear	Ambiguous	with	1	
 crates/bt-app/src/session_end.rs	bt-app crate::session_end::hear	Ambiguous	with_borrow_mut	1	
 crates/bt-app/src/session_end.rs	bt-app crate::session_end::holds_the_document	Ambiguous	with	1	
-crates/bt-app/src/session_end.rs	bt-app crate::session_end::settle	Ambiguous	set	1	
-crates/bt-app/src/session_end.rs	bt-app crate::session_end::settle	Ambiguous	with	1	
+crates/bt-app/src/session_end.rs	bt-app crate::session_end::owes_the_write	Ambiguous	with	1	2026-10-21: T-ENDSESSION-SAVES; a `thread_local!` `LocalKey::with` or `Cell::set` on the window thread's own end-of-session state, which calls no door
+crates/bt-app/src/session_end.rs	bt-app crate::session_end::settle	Ambiguous	set	3	2026-10-21: T-ENDSESSION-SAVES; a `thread_local!` `LocalKey::with` or `Cell::set` on the window thread's own end-of-session state, which calls no door
+crates/bt-app/src/session_end.rs	bt-app crate::session_end::settle	Ambiguous	with	4	2026-10-21: T-ENDSESSION-SAVES; a `thread_local!` `LocalKey::with` or `Cell::set` on the window thread's own end-of-session state, which calls no door
 crates/bt-app/src/session_end.rs	bt-app crate::session_end::take	Ambiguous	with_borrow_mut	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::AdvancedOpen::keys	Ambiguous	collect	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::AdvancedOpen::keys	Ambiguous	into_iter	1	
