@@ -148,34 +148,32 @@ impl EntryDoors {
 
     /// The answers `values` give, set-but-empty off for every door.
     pub(crate) fn from_values(values: DoorValues) -> Self {
-        let file = diagnostics::named_file;
-        let on = diagnostics::switched_on;
         Self {
             recording: bt_pty::PtyRecording::new(
-                file(values.pty_dump),
-                file(values.pty_input_dump),
+                diagnostics::named_file(values.pty_dump),
+                diagnostics::named_file(values.pty_input_dump),
             ),
             traces: trace::TraceFiles {
-                mouse: file(values.mouse_trace),
-                card: file(values.card_trace),
-                attention: file(values.attention_trace),
-                preview: file(values.preview_trace),
-                web: file(values.web_trace),
-                glyph_census: file(values.glyph_census),
-                ime: file(values.ime_trace),
-                focus_thumb: file(values.focus_thumb_dump),
+                mouse: diagnostics::named_file(values.mouse_trace),
+                card: diagnostics::named_file(values.card_trace),
+                attention: diagnostics::named_file(values.attention_trace),
+                preview: diagnostics::named_file(values.preview_trace),
+                web: diagnostics::named_file(values.web_trace),
+                glyph_census: diagnostics::named_file(values.glyph_census),
+                ime: diagnostics::named_file(values.ime_trace),
+                focus_thumb: diagnostics::named_file(values.focus_thumb_dump),
             },
-            chrome_dump: file(values.chrome_dump),
-            hotkey_trace: file(values.hotkey_trace),
+            chrome_dump: diagnostics::named_file(values.chrome_dump),
+            hotkey_trace: diagnostics::named_file(values.hotkey_trace),
             term: bt_term::TermDiagnostics {
-                semantic_trace: on(values.semantic_trace),
-                decor_trace: file(values.decor_trace),
+                semantic_trace: diagnostics::switched_on(values.semantic_trace),
+                decor_trace: diagnostics::named_file(values.decor_trace),
             },
-            perf: on(values.perf_trace),
-            startup: on(values.startup_trace),
-            resize: on(values.resize_trace),
-            layout_events: on(values.layout_events),
-            git: on(values.git_trace),
+            perf: diagnostics::switched_on(values.perf_trace),
+            startup: diagnostics::switched_on(values.startup_trace),
+            resize: diagnostics::switched_on(values.resize_trace),
+            layout_events: diagnostics::switched_on(values.layout_events),
+            git: diagnostics::switched_on(values.git_trace),
             named_with_a_value: values
                 .named
                 .iter()
