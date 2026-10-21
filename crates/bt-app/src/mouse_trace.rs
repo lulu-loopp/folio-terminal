@@ -45,7 +45,7 @@ pub use crate::trace::{Trace, emit};
 /// that a file which has collected several runs can still be told what it is and
 /// where each run began.
 static GATE: Gate = Gate::new(
-    "BT_MOUSE_TRACE",
+    |files| files.mouse.as_deref(),
     "# BT_MOUSE_TRACE_V1 elapsed_ms event field=value…",
 );
 

@@ -311,6 +311,75 @@ the rules on a fixture. When red, regenerate with
 edit a row. A header count that grows (reads not attributed, calls not
 followed) means the map sees less; the change that regenerates it says why.
 
+## Call graph
+
+The rule: a guard that asks what a function can run asks `bt_source::call_graph`, never a
+spelling. `Resolver::new(&[(package, &Index)], Arms)` reads a program's packages; its
+`resolve_callees(item)` turns every call site of a body into edges, and
+`CallGraph::walk(roots, boundary)` follows them from a set of roots, each item once, stopping at
+the boundary items (recorded in `stopped_at`, not expanded), and returns `Reach { reached,
+stopped_at, foreign, unresolved, implicit }`, every foreign and unresolved edge with the path
+(root … caller) that first reached it (T-BT-SOURCE-CALL-GRAPH, S-2a of
+`docs/plans/design/side-effects-contract-2026-10-11.md` revision (c)2).
+
+What it resolves: path calls through the module tree by identity (`crate`/`self`/`super`, the
+module's items, `use` renames, `pub use` re-exports across packages, globs after the module's own
+names, function-body `use`s); constructors (resolved, not walked); `Type::f` and `Self::f`;
+methods on a receiver whose type the census's steps state (parameter, `self`, a written or a
+carried `let`, a field, a pattern), through `&`, `Box`, `Rc`/`Arc` and first-party `Deref`
+targets up to 16 levels, each `Deref` step an edge; a call on a stated first-party trait (`dyn`,
+`impl`, a bound generic, a default's `self`, `Tr::m`) into every admitted impl and the default
+where it is not overridden; `<X as Tr>::m`; a type through `type` aliases (`AliasRecord`, an index
+record); an inline closure; a function named as a value; a nested `fn`. A callee outside the
+packages is `Target::Foreign` with its full path after first-party `use`s (`std::sync::Mutex::lock`)
+— a boundary, not a failure.
+
+What it marks, never drops: `Dynamic` (a stored closure, a function pointer, a called value, a
+first-party trait no impl answers, a foreign trait object with its first-party impls as
+candidates), `Ambiguous` (an untyped receiver, every first-party method of the name as candidates;
+several trait impls of one name), `Macro` (every invocation; arguments that parse as expressions
+are walked, their edges carrying the macro), `OtherArm` (only another arm's items answer, or a
+statement's or a match arm's `#[cfg]` the arms rule out), `Generated` (a derive's method,
+`#[from]`), `Path` (a refusal: two foreign globs or one and the prelude, a type the module tree
+does not hold — a macro-generated one —, a method a stated type does not declare), `Cutoff` (a
+chain past the hop limit) and `Unparsed`. A first-party impl of a foreign trait runs only through
+an implicit call (a `Drop` at a scope's end, an operator, `?`, `for`) or a foreign callback, so
+`Reach::implicit` lists every admitted one by trait — `impl Drop for ComputationLane` among
+them — for a guard to review. The module doc carries the grammar table and the kinds.
+
+A `const`'s or `static`'s initializer is a body of the graph (`Node::Value`): a use of the value
+reaches it (`Via::Deref` for a `LazyLock`, whose initializer runs on the first deref), and its
+calls and the functions it names as values are edges. An `impl` block whose self type the module
+tree does not hold — a macro-generated type — is listed with its methods
+(`Resolver::unplaced_impls`); `the_unplaced_impls_are_the_named_list` holds the list (24 blocks),
+and their methods are reachable only as `Ambiguous` candidates.
+
+**The unfollowed edges, by site.** `docs/plans/UNFOLLOWED-EDGES.tsv` lists every `Dynamic` edge
+and every `Ambiguous` edge with other than one candidate met walking from every product callable
+of bt-app — the calls the door reach does not follow — keyed by file, item, kind and the call's
+name, with `sites` (the calls behind the key) and a `reason`.
+`the_unfollowed_edges_are_the_committed_list` holds the list equal to the tree;
+`scripts/ci/check-unfollowed-edges.ps1` holds it to the merge base's, refusing a key added or
+grown unless its reason is `YYYY-MM-DD: <why>` — for a grown key, a reason other than the one the
+base's row had (`check-unfollowed-edges-tests.ps1` plants each verdict). When red, type the
+receiver or resolve the call; when the door reach must go blind there, regenerate with
+`scripts/generate-unfollowed-edges.ps1` and date the reason. A function the walk reaches for the
+first time brings its sites in as added keys — expected, and each takes a dated reason like any
+other. The per-door counts are printed by
+`window_waits_tests::the_unfollowed_edges_of_each_completions_door_are_printed`, a diagnostic.
+
+How a guard uses it: build the resolver once over the packages it judges, with `Arms` saying which
+`cfg` arms count (the default is the product as `Compilation` reads it; bt-app passes its feature
+evaluation); turn its ledger's rows into roots and boundary items; walk; judge `reached`,
+`foreign` (by path) and `unresolved` (by kind), failing closed on what it has not reviewed. A
+guard that follows an unresolved edge on its own stated rule passes it to `walk_following`, and
+the edge stays in `unresolved` all the same. Where and what to do:
+`crates/bt-source/tests/call_graph.rs` holds a fixture per grammar row and per kind
+(`tests/fixtures/call_graph/`), each red under a named mutation, and prints the walk's counts over
+the real tree (`CALL_GRAPH_REAL_TREE`; not a timing — the timing-bound list only shrinks). When a
+guard needs a shape the grammar does not have, the grammar is widened in a ticket of its own, with
+its fixture; a shape is never resolved by a guess.
+
 ## Cross-crate chains
 
 The rule: every backticked span in a chain table of `docs/ARCHITECTURE.md` §7,
@@ -359,7 +428,12 @@ contract's ledger, one row per request protocol, held by the
 in `window_waits_tests` and by the fifth and sixth checks of `scripts/ci/check-window-waits.ps1`. A door that
 reaches a lane started elsewhere is listed, with its reason, in
 `docs/plans/completions-door-starts.tsv`, which only shrinks; reachability is a call path to
-the function that starts the thread, never a shared type or module. The path follows a call on
+the function that starts the thread, never a shared type or module. Since T-BT-SOURCE-CALL-GRAPH
+the path is bt-source's call graph (above, `window_waits_tests::door_reach`), walked under the
+product's arms, following its resolved edges and two of the token resolver's reaches kept by name
+in `followed`: an untyped call whose method name one first-party method carries, and `.into()` to
+every product `From::from`; every other unresolved edge is not followed (S-2b fails closed on all
+of them). The path follows a call on
 a receiver stated to be a first-party trait (`dyn Trait` behind `&`, `Box`, `Arc` or `Rc`,
 `impl Trait`, a generic parameter bound by the trait, `self` in the trait's default method, or
 a path call `Trait::m` / `D::m` with `D: Trait`) into that trait's implementations, so a body
@@ -382,12 +456,12 @@ block; an `if let`/`while let` binding, each `let` of a chain included, from the
 `let` through the later operands and the body; a match-arm pattern, and each `let` of its guard
 from the end of that `let`, through the arm; a `for` or closure binding over its body), the
 scopes read by parsing the function body with `syn`, and a product body that does not parse
-fails the test by name; a binding in a closed block or after the call does not shadow. What is
-not followed: a
-stored closure, a function pointer, `<X as Trait>::m`, a type written through an alias, a
-standard or third-party trait object (and a foreign supertrait's methods, even on a
-first-party implementing type), and an untyped receiver whose method name is shared; those are
-S-2a's call graph.
+fails the test by name; a binding in a closed block or after the call does not shadow. The call
+graph also resolves `<X as Trait>::m` (to `X`'s impl, or the trait's default) and a type written
+through an alias (followed to what it names on every admitted arm). What is not followed: a stored
+closure, a function pointer, a standard or third-party trait object (and a foreign supertrait's
+methods, even on a first-party implementing type), and an untyped receiver whose method name is
+shared; the call graph marks each of them as an unresolved edge, and the reach leaves them out.
 When red, give the new answer, lane, thread or registry row its ledger row (or
 correct the row the code moved past); a status names the D-row or registry row
 that repairs it and only ever becomes `conforms` — never mark a row conforming
@@ -714,6 +788,51 @@ parameter and add the door it needs to the seam's trait (with its `Native` impl
 beside the others and its headless impl in `headless.rs`); never add a native
 row for code that only reads or tells the window. A row nothing writes any more
 is named too, and is taken off.
+
+## Environment doors
+
+The rule: a `BT_` variable is the person's shell speaking to one run of the
+program, so it is read once, at the program's entry, and handed to the code
+that acts on it; a library never reads one at the moment of use
+(T-DIAGNOSTIC-DOORS-AT-THE-ENTRY, 2026-10-17). Read in a library, a door is
+honoured by every binary that reaches the library — a test binary as readily as
+`folio.exe` — and a shell left with `BT_PTY_DUMP` and `BT_CARD_TRACE` set made
+the test suite write gigabytes of recordings into the folder they named.
+`bt_app::entry_doors` is the product's one reader of the recording and trace
+doors; `bt-pty` takes a `PtyRecording` on the command it spawns, `bt_app::trace`
+and the platform's IME and summon traces open what the entry installed, and the
+three crates under `bt-app` ask `bt_viewport::trace::perf`.
+
+Where and what to do: `crates/bt-source/tests/env_doors.rs` reads every product
+item (no `cfg(test)`, no integration test or build script, no `cfg` naming
+`test`) of every first-party package and judges every token `var`, `var_os`,
+`vars` and `vars_os` by a closed grammar: `std::env::var_os("…")` and
+`std::env::var("…")` (`::std` too), `env::var_os(…)` in a file with a
+module-level `use std::env;`, the bare call in a file whose `use std::env::…`
+brings the name in under its own name, and in each of them an argument that is
+one string literal or a `const NAME: &str = "…";` with one value in the same
+file. A method call, a declaration and a bare name the file does not import
+from `std::env` are no read. Every other shape that names one of the four is a
+refusal by file and line, never a silent skip: a computed argument (a
+parameter, `format!`, another module's constant, a macro's `$name`), an
+enumeration (`vars()`, `vars_os()`), the reader handed on as a value, a path
+through another module (any other bytes beside a separator, `<T as X>::var_os`
+among them), a comment between the tokens (`std::env::/*…*/var_os`), a bare
+reader under a glob of `std::env`, and a `use` that renames a reader. Extending the grammar is another ticket. Its fixture
+`tests/fixtures/env_doors` plants one function per shape, and the test holds
+the scan to a table. The list `docs/plans/ENV-DOORS.tsv` is an equality keyed
+by file and item: every item that reads a `BT_` name or holds a refusal has
+exactly its row, the row's `names` and `refused` are exactly what the item
+reads, and a row whose item reads nothing is stale. Its categories are `entry`
+(the product's entry reader and the tools' own entries), `door` (a behaviour or
+test door still read where it is used; the ticket column names the follow-up
+that moves it) and `unjudged` (a refused shape that reads no `BT_` door; the
+reason says what it reads, and T-ENV-UNJUDGED-ROWS rewrites each). A name is a
+`BT_` name in any case, as Windows reads it. **The list only shrinks**:
+`scripts/ci/check-env-doors.ps1` refuses, against the merge base, a row added
+and a row that reads a name or holds a refusal its base row did not. When red,
+move the read to the entry and hand the answer down as a parameter or an
+installed answer; the grammar is not widened to quiet a refusal.
 
 ## Runtime voice
 

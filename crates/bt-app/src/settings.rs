@@ -2166,7 +2166,7 @@ fn run_font_lane(ctx: &bt_platform::admission::WorkerCtx, lane: &FontLane) {
 /// the platform's words: the request ends `Failed`, the ledger says it once per
 /// streak, and the list on screen stays what it was.
 fn walk_the_machine(generation: u64) -> Result<FontAnswer, String> {
-    let traced = std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty());
+    let traced = crate::entry_doors::installed().perf;
     count_walk();
     let start = std::time::Instant::now();
     let monospace = bt_platform::monospace_font_families()

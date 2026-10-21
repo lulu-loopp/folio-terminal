@@ -60,6 +60,7 @@ mod diagnostics;
 mod dir_news;
 mod document_request;
 mod elevated_host;
+mod entry_doors;
 mod exit_diagnostics;
 mod explorer_menu;
 mod favicon;
@@ -2613,9 +2614,9 @@ fn peek_pixels(
 fn scale_door(
     _ctx: &bt_platform::admission::WorkerCtx,
 ) -> computation_lane::Door<ScaleWorkerRequest> {
-    // Read here rather than handed down: the lane is made before there is a `Runtime` to own the
-    // flag, and this is the same question [`Runtime::trace_perf`] asks of the same variable.
-    let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
+    // The entry's answer, taken here rather than handed down: the lane is made before there is a
+    // `Runtime` to own the flag, and this is the answer [`Runtime::trace_perf`] holds.
+    let trace_perf = entry_doors::installed().perf;
     Box::new(
         move |_ctx: &bt_platform::admission::WorkerCtx, request: ScaleWorkerRequest| {
             // **What a Lanczos3 pass actually costs on this machine**, beside the size that provoked
@@ -34699,7 +34700,7 @@ fn files_float_content_height(
 /// swallowed whole: a diagnostic that can take the window down with it is a
 /// second bug wearing the first one's clothes.
 fn dump_chrome_frame(chrome: &seats::ChromeGroup) {
-    let Some(path) = diagnostics::named_file(std::env::var_os("BT_CHROME_DUMP")) else {
+    let Some(path) = entry_doors::installed().chrome_dump.clone() else {
         return;
     };
     use std::fmt::Write as _;
@@ -34775,7 +34776,7 @@ fn dump_focus_thumb_frame(
     // projection counters and the capture counters against one another: a
     // `captures` that never moves beside a `hidden` that climbs is the whole
     // story of a column full of background tabs, and two files could not say it.
-    static FOCUS_THUMB_DUMP: trace::Dump = trace::Dump::new("BT_FOCUS_THUMB_DUMP");
+    static FOCUS_THUMB_DUMP: trace::Dump = trace::Dump::new(|files| files.focus_thumb.as_deref());
     FOCUS_THUMB_DUMP.line(|| {
         format!(
             "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={} \
@@ -34808,7 +34809,7 @@ fn dump_focus_thumb_frame(
 /// the second, and reading one file with both in it settles that without a second
 /// run.
 fn dump_overlay_frame(band: &marks::Band) {
-    let Some(path) = diagnostics::named_file(std::env::var_os("BT_CHROME_DUMP")) else {
+    let Some(path) = entry_doors::installed().chrome_dump.clone() else {
         return;
     };
     use std::fmt::Write as _;
@@ -41017,7 +41018,7 @@ fn apply_stored_terminal_font<G: Glass>(
     let files = hang_watch::during(hang_watch::Station::FontLookup, || {
         settings::monospace_family_files(family)
     });
-    if !family.is_empty() && diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE")) {
+    if !family.is_empty() && entry_doors::installed().perf {
         trace_sink::stderr_line(format!(
             "BT_PERF_TRACE monospace_family_files_us={} files={}",
             started.elapsed().as_micros(),
@@ -42811,6 +42812,7 @@ fn create_leaf_session(
                     size: pty_size(grid, PhysicalSize::new(body.width, body.height)),
                     working_directory: place.working_directory,
                     unless_gone: gone_spec,
+                    recording: entry_doors::installed().recording.clone(),
                 },
                 wake.output(),
             )
@@ -46526,15 +46528,15 @@ impl Runtime<'_, Native> {
         startup_started: Instant,
         cli: &cli::CliRequest,
     ) -> Result<(App, WindowRuntime)> {
-        // Set-but-empty is off, not on ([`diagnostics::switched_on`]).
+        // The four switches as `main` read them (`entry_doors`), set-but-empty off.
         // `BT_PERF_TRACE=` is how a shell says "not this run", and taking it as
         // on turned a profiling session into a measurement of its own
         // `eprintln!`s — the per-frame trace dominated the profile that was
         // supposed to be reading the frames.
-        let trace_startup = diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE"));
-        let trace_resize = diagnostics::switched_on(std::env::var_os("BT_RESIZE_TRACE"));
-        let trace_layout_events = diagnostics::switched_on(std::env::var_os("BT_LAYOUT_EVENTS"));
-        let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
+        let trace_startup = entry_doors::installed().startup;
+        let trace_resize = entry_doors::installed().resize;
+        let trace_layout_events = entry_doors::installed().layout_events;
+        let trace_perf = entry_doors::installed().perf;
         let phase_started = Instant::now();
         // Read the previous session before the window exists, so its bounds can
         // be the window's opening bounds rather than a correction applied after
@@ -77627,6 +77629,10 @@ fn start_video_prewarm(prewarm: fn() -> std::io::Result<()>, say: impl Fn(&str))
 }
 
 fn main() -> Result<()> {
+    // **Every diagnostic door, read once, here** (`entry_doors`, T-DIAGNOSTIC-DOORS-AT-THE-ENTRY):
+    // the recordings and traces this run was asked for, handed to each library that writes one
+    // before any station can be reached. Nothing below reads them from the environment again.
+    let doors = entry_doors::EntryDoors::at_the_entry().install();
     // **What this process was handed is passed on only by name**, before any door can start a
     // child: the uninstaller removes the data folder, and a `diagnostics.log` handle inherited
     // down a chain of Folio processes is a holder there its probe refuses on.
@@ -77957,7 +77963,7 @@ fn main() -> Result<()> {
     bt_pty::say_skipped_doors_through(diagnostics::note);
     ime_outbound::install();
     bt_render::set_trace_writer(trace_sink::stderr_line);
-    if diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE")) {
+    if doors.startup {
         trace_sink::stderr_line(format!(
             "BT_STARTUP_TRACE: from here Folio talks to {}",
             channel.label()
@@ -77992,7 +77998,7 @@ fn main() -> Result<()> {
     // decides is the silence a report is written for: a run somebody started in
     // order to measure it is worth suspending at two seconds, and a run nobody
     // asked anything of is not. See `hang_watch::TRACED_HANG_THRESHOLD`.
-    let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
+    let trace_perf = doors.perf;
     hang_watch::start(storage.join(hang_watch::REPORTS_DIRECTORY), trace_perf);
     // **And every message the pump dispatches, timed** (ticket 64). A hold the
     // self-report charged to `message pump` names the message that spent it:

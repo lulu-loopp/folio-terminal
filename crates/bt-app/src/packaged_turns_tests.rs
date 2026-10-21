@@ -423,6 +423,7 @@ fn a_store_powershell_pane_takes_its_turn_with_a_check_of_its_package() {
             size,
             working_directory: None,
             unless_gone: None,
+            recording: bt_pty::PtyRecording::none(),
         },
         Arc::new(|| ()),
     )

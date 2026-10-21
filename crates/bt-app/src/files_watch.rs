@@ -336,7 +336,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// variable for the same class of question would be one more thing to know
 /// before you can ask it. Set-but-empty is off, on `BT_PERF_TRACE`'s own rule.
 fn trace(message: &str) {
-    if std::env::var_os("BT_GIT_TRACE").is_some_and(|value| !value.is_empty()) {
+    if crate::entry_doors::installed().git {
         eprintln!("files watch: {message}");
     }
 }
