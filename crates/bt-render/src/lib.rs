@@ -9373,7 +9373,6 @@ impl WindowRenderer {
         Ok(pixels)
     }
 
-
     /// Place the terminal seat. Returns whether the rectangle changed.
     ///
     /// Red line L10 runs the other way and is worth restating here: nothing
