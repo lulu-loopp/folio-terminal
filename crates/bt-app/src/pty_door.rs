@@ -170,31 +170,33 @@ pub(crate) fn gone_place(
     unless_gone.filter(|gone| !is_dir(&gone.folder))
 }
 
-/// **What a birth is composed into**: its argv and whether it loads, the integration decision the
-/// last-resort shell is composed with too, and whether Folio's PSReadLine may go on its path.
-#[derive(Debug)]
-struct PlannedBirth {
+/// **What a birth is composed into**: its argv and whether it loads, its last-resort shell's argv
+/// (composed, when it is asked for, with the same integration decision), and whether Folio's
+/// PSReadLine may go on its path.
+struct PlannedBirth<'r> {
     composed: shell_integration::ComposedBirth,
-    integration: bool,
+    last_resort: Box<dyn Fn() -> Vec<OsString> + 'r>,
     prefix: bool,
 }
 
 /// **A birth's composition, decided from the edition's answer** — [`bear`]'s decision seam
 /// (T-INTEGRATION-INJECT-2-BUILD round 4): `language` is asked only of a Windows PowerShell 5.1
 /// birth with the switch on ([`shell_integration::windows_powershell_birth`]), and `compose` is
-/// handed the integration that answer leaves — so a constrained edition's birth is composed, and
-/// its last-resort shell after it, exactly as with the switch off.
-fn plan_birth(
+/// handed the integration that answer leaves, and so is `last_resort` when the birth asks for it —
+/// so a constrained edition's birth is composed, and its last-resort shell after it, exactly as
+/// with the switch off.
+fn plan_birth<'r>(
     program: &Path,
     integration: bool,
     language: impl FnOnce() -> shell_integration::Language,
     compose: impl FnOnce(bool) -> shell_integration::ComposedBirth,
-) -> PlannedBirth {
+    last_resort: impl Fn(bool) -> Vec<OsString> + 'r,
+) -> PlannedBirth<'r> {
     let birth = shell_integration::windows_powershell_birth(program, integration, language);
     let integration = birth.integration;
     PlannedBirth {
         composed: compose(integration),
-        integration,
+        last_resort: Box::new(move || last_resort(integration)),
         prefix: birth.prefix,
     }
 }
@@ -244,11 +246,11 @@ fn bear(
                 integration,
             )
         },
+        shell_integration::last_resort_arguments,
     );
-    let powershell_integration = planned.integration;
     let composed = planned.composed;
     let args = composed.arguments;
-    let fallback_args = || shell_integration::last_resort_arguments(powershell_integration);
+    let fallback_args = planned.last_resort;
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     // **A carried environment this system cannot give a shell refuses the birth** (F-SWEEP-2-048
     // round 3): said in the diagnostics and on the window's "Shell not started" card, never cut.
@@ -521,9 +523,11 @@ mod tests {
     /// last-resort shell is composed — with the switch off, a `FullLanguage` edition's with it
     /// on and Folio's PSReadLine allowed, a failed question's with it on and no prefix.
     ///
-    /// MUTATION: compose with the switch the row asked for (drop
+    /// MUTATIONS: compose with the switch the row asked for (drop
     /// `let integration = birth.integration;` in `plan_birth`) — the constrained birth is composed
-    /// with the integration on.
+    /// with the integration on; compose the last resort with the row's switch
+    /// (`last_resort(true)`) — the constrained birth's last resort carries the loader (review of
+    /// round 4, nit (c′)).
     #[test]
     fn a_birth_composes_with_the_integration_its_edition_leaves() {
         use crate::shell_integration::{ComposedBirth, Language};
@@ -534,6 +538,7 @@ mod tests {
             (Language::Failed, true, false),
         ] {
             let composed_with = Cell::new(None);
+            let last_resort_with = Cell::new(None);
             let planned = super::plan_birth(
                 std::path::Path::new("powershell.exe"),
                 true,
@@ -545,6 +550,10 @@ mod tests {
                         loads: integration,
                     }
                 },
+                |integration| {
+                    last_resort_with.set(Some(integration));
+                    Vec::new()
+                },
             );
             assert_eq!(
                 composed_with.get(),
@@ -552,7 +561,14 @@ mod tests {
                 "{answer:?}: composed with"
             );
             assert_eq!(
-                planned.integration, integration,
+                last_resort_with.get(),
+                None,
+                "{answer:?}: asked only when wanted"
+            );
+            let _ = (planned.last_resort)();
+            assert_eq!(
+                last_resort_with.get(),
+                Some(integration),
                 "{answer:?}: the last resort's"
             );
             assert_eq!(planned.prefix, prefix, "{answer:?}: the prefix");
