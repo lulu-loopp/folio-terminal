@@ -2107,6 +2107,85 @@ pub(crate) fn save_through(
     said
 }
 
+/// **Every dirty buffer of `pool` saved as `Save all`, the quit and a stop hand it over** (S-6b,
+/// S-6c): `PreviewPool::save_for_a_shut` on a storage lane the test holds, each job served by
+/// the worker's own step, the answers heard by the buffers; what each buffer a close would lose
+/// came to, by name (`PreviewPool::at_the_close`).
+pub(crate) fn the_saves_of(pool: &mut preview::PreviewPool) -> Vec<(String, preview::AtTheClose)> {
+    let (lane, jobs) = persist::StorageLane::scripted();
+    let mut saves = preview::PreviewSaves::on(lane);
+    let _ = pool.save_for_a_shut(&mut saves, |_| PRESSED_ON);
+    let awaited = pool.close_awaited();
+    while let Some(persist::ScriptedJob::Document(job)) = jobs.next() {
+        let _ = serve_on_a_worker(job, None);
+    }
+    let mut answers = saves.take_answers();
+    let _ = saves.deliver(&mut answers, &mut [&mut *pool]);
+    awaited
+        .into_iter()
+        .filter_map(|awaited| {
+            pool.at_the_close(awaited)
+                .map(|(name, at)| (name.to_owned(), at))
+        })
+        .collect()
+}
+
+/// **A stop that cannot ask, over `pool`** (S-6c): every dirty buffer's save handed to a
+/// storage lane the test holds, as the stop hands it (`PreviewPool::save_for_a_shut`, held in
+/// `preview::StopKeeps` with what it waits for); each queued job then served by the worker's
+/// own step, `crossings[n]` written into the file under the `n`th — the worker draining its
+/// queue before its end — and a job past the list left unanswered, as one a worker let go at
+/// its bound never answers; then what no file took kept in `recovered`
+/// (`preview::StopKeeps::keep`). On a clone of `pool`, which the stop holds as its own.
+pub(crate) fn the_stops_keep(
+    pool: &preview::PreviewPool,
+    recovered: &std::path::Path,
+    at: std::time::SystemTime,
+    crossings: &[Option<&[u8]>],
+) -> Vec<preview::Kept> {
+    the_stops_keep_and_its_pool(pool, recovered, at, crossings).0
+}
+
+/// [`the_stops_keep`], with the pool the stop held as it stands after the answers: the
+/// buffers a test asks about once the stop has kept what it kept.
+pub(crate) fn the_stops_keep_and_its_pool(
+    pool: &preview::PreviewPool,
+    recovered: &std::path::Path,
+    at: std::time::SystemTime,
+    crossings: &[Option<&[u8]>],
+) -> (Vec<preview::Kept>, preview::PreviewPool) {
+    let (lane, jobs) = persist::StorageLane::scripted();
+    let mut saves = preview::PreviewSaves::on(lane);
+    let mut held = pool.clone();
+    let refused = held.save_for_a_shut(&mut saves, |_| PRESSED_ON);
+    let mut keeps = preview::StopKeeps::default();
+    keeps.handed(
+        recovered,
+        preview::HandedOver {
+            awaited: held.close_awaited(),
+            refused: refused
+                .into_iter()
+                .map(|(_, source, why)| (source, why))
+                .collect(),
+        },
+    );
+    keeps.hold(held);
+    for crossing in crossings {
+        let Some(persist::ScriptedJob::Document(job)) = jobs.next() else {
+            break;
+        };
+        let _ = serve_on_a_worker(job, crossing.map(<[u8]>::to_vec));
+    }
+    let kept = keeps.keep(&mut saves, at);
+    drop(jobs);
+    let held = keeps
+        .held()
+        .first()
+        .cloned()
+        .expect("the stop held the pool");
+    (kept, held)
+}
+
 /// **Serve one document request on a thread the thread door started** — the
 /// storage worker's own step (`document_request::serve_document_between`) —
 /// with `crossing` written into the file between the precondition read and the

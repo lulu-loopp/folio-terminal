@@ -381,6 +381,10 @@ impl UndoLog {
     /// log*, so undoing back to it is being clean again and editing away from it
     /// is being dirty again — where before a save was the only thing that could
     /// clean a buffer, because there was no history to compare against.
+    ///
+    /// The log's own tests set the position this way; the product moves it only by a
+    /// landing ([`Self::sent_landed`]) since the window thread's writer went (S-6c).
+    #[cfg(test)]
     pub fn mark_saved(&mut self) {
         self.saved = Some(self.cursor);
         self.open = false;
@@ -419,13 +423,6 @@ impl UndoLog {
             Sent::Not => return false,
         }
         true
-    }
-
-    /// **The body sent was written over by this body or a later one** (S-6a
-    /// round 8: a quit's or a stop's writer put the body at or past its
-    /// position in the file): no position names a body owed any more.
-    pub fn forget_the_body_sent(&mut self) {
-        self.sent = Sent::Not;
     }
 
     /// **Whether the body a save sent lives only behind the cursor** (S-6a
