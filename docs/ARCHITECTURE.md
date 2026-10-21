@@ -2491,22 +2491,33 @@ the budget lines the ring refused since the line before, all three on every
 line:
 
 ```text
-Folio budget: turn=<n> wall us=<µs> frame_us=<µs> waits_us=<µs> unexplained_us=<µs> delay_us=<µs|none> suppressed=<n> refused=<n> lost=<n>
+Folio budget: turn=<n> wall us=<µs> frame_us=<µs> waits_us=<µs> unexplained_us=<µs> delay_us=<µs|none> stale_us=<µs|none> source=<WakeOwner|none> suppressed=<n> refused=<n> lost=<n>
 Folio budget: turn=<n> waits us=<µs> budget_us=8000 calls=<n> suppressed=<n> refused=<n> lost=<n>
 Folio budget: turn=<n> call us=<µs> bound_us=4000 door=<Door> row=<row> station=<Station>[ more=<n>] suppressed=<n> refused=<n> lost=<n>
 Folio budget: turn=<n> unexplained us=<µs> target_us=8000 wall_us=<µs> suppressed=<n> refused=<n> lost=<n>
+Folio budget: turn=<n> stale us=<µs> source=<WakeOwner|none> suppressed=<n> refused=<n> lost=<n>
 ```
 
 `wall` is the turn past its frame (`frame_us`), with the scheduling delay
 beside it and not in it; `waits` the union of its admitted calls past the budget;
 `call` the turn's longest admitted call past its row's bound (`more` counts the
 turn's other calls past their bound); `unexplained` its time outside every
-admitted call past the budget — never a wait. The exit summary, written by
+admitted call past the budget — never a wait. **The owed wake is judged at
+`park`** (T-WINDOW-THREAD-UNDER-LOAD): an instant still ahead is a wait, and how
+late the next turn began past it is `delay_us`; an instant already due is no
+wait at all — winit returns at once and the loop turns again — and its age when
+the next turn began is `stale_us`. `source` names the clock in the wake fold
+that asked for the instant (`wake_owner::WakeOwner`, the variant's name), on the
+`wall` line for whichever of the two the turn had. `stale` is the fifth trigger,
+crossed by every turn that began from such a park however short, so a loop
+spinning on an instant nobody consumes writes one `stale` line a second naming
+the clock, and its `suppressed=` is how many turns spun in that second. The
+exit summary, written by
 `fn main` through `trace_sink::stderr_line` just before the run's footer, is read
 from the run's atomics, so it is whole however many lines were lost:
 
 ```text
-Folio budget summary: <wall|waits|unexplained|delay> count=<n> max_us=<µs> sum_us=<µs> hist=<bucket>:<n>,…
+Folio budget summary: <wall|waits|unexplained|delay|stale> count=<n> max_us=<µs> sum_us=<µs> hist=<bucket>:<n>,…
 Folio budget summary: allowance_used count=<n> max_us=<µs> sum_us=<µs> hist=<bucket>:<n>,… allowance_us=<µs> yielded=<n>
 Folio budget summary: door=<Door> row=<row> count=<n> max_us=<µs> sum_us=<µs> hist=<bucket>:<n>,…
 Folio budget summary: lost=<n> refused=<n>

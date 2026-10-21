@@ -13003,7 +13003,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// Every animation deadline this window reports is clamped to it. Reporting
     /// an earlier one would wake the loop to be turned away by the rate gate
     /// and then re-arm the same deadline — a spin dressed as a schedule.
-    fn strip_animation_next_tick(&self, interval: Duration) -> Option<Instant> {
+    pub(in crate::runtime) fn strip_animation_next_tick(
+        &self,
+        interval: Duration,
+    ) -> Option<Instant> {
         let strip = self
             .window
             .strip_animation_ticked_at

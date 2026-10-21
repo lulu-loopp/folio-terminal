@@ -919,7 +919,6 @@ crates/bt-app/src/focus_thumb.rs	bt-app crate::focus_thumb::transcript_tail	Ambi
 crates/bt-app/src/focus_thumb.rs	bt-app crate::focus_thumb::transcript_tail	Ambiguous	map	1	
 crates/bt-app/src/focus_thumb.rs	bt-app crate::focus_thumb::transcript_tail	Ambiguous	rev	1	
 crates/bt-app/src/focus_thumb.rs	bt-app crate::focus_thumb::transcript_tail	Ambiguous	trim_end	1	
-crates/bt-app/src/foreground_program.rs	bt-app crate::foreground_program::Cadence::deadline	Ambiguous	flatten	1	
 crates/bt-app/src/foreground_program.rs	bt-app crate::foreground_program::dispatch	Ambiguous	is_ok	1	
 crates/bt-app/src/foreground_program.rs	bt-app crate::foreground_program::dispatch	Ambiguous	is_some_and	1	
 crates/bt-app/src/foreground_program.rs	bt-app crate::foreground_program::run	Ambiguous	get	1	

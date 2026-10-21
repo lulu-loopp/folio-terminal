@@ -1044,6 +1044,73 @@ the guest, the `clean` snapshot first; run by the coordinator at release time.**
 | --- | --- | --- |
 | **V0** — the debug lockdown (cheap) | `[Environment]::SetEnvironmentVariable('__PSLockdownPolicy','4','Machine')`, sign out and in; `powershell -NoProfile -Command $ExecutionContext.SessionState.LanguageMode` says `ConstrainedLanguage` | Folio started, the first Windows PowerShell pane of the launch and a second one: `$env:PSModulePath` holds no `psmodules` entry; `(Get-Module PSReadLine).ModuleBase` is the in-box 2.0.0; colouring and `Ctrl+R` history search work (the in-box editor); `diagnostics.log` has the one "runs constrained" line and, for the first pane, the "waited N ms" line. Revert: delete the variable, or the snapshot. |
 | **V1** — a real WDAC lockdown | `$x="$env:TEMP\clm.xml"; Copy-Item "$env:windir\schemas\CodeIntegrity\ExamplePolicies\DefaultWindows_Enforced.xml" $x`; admit Folio (unsigned): `New-CIPolicy -Level Hash -UserPEs -ScanPath '<Folio install folder>' -FilePath "$env:TEMP\folio.xml"`, `Merge-CIPolicy -PolicyPaths $x,"$env:TEMP\folio.xml" -OutputFilePath $x`; `ConvertFrom-CIPolicy -XmlFilePath $x -BinaryFilePath "$env:TEMP\clm.cip"`; `CiTool.exe --update-policy "$env:TEMP\clm.cip"`; `CiTool.exe --list-policies` shows it enforced; a new 5.1 says `ConstrainedLanguage`. Check `Get-Command New-CIPolicy` first (the ConfigCI module). | The rows of V0. A second pass with `AllowMicrosoft.xml` (audit mode deleted: `Set-RuleOption -FilePath $x -Option 3 -Delete`) records the same. Remove: `CiTool.exe --remove-policy <PolicyID>`, or the snapshot. |
+### 4.7 Load row: the window thread under a machine-wide CPU load (T-WINDOW-THREAD-UNDER-LOAD) <!-- zh: pending T-WINDOW-THREAD-UNDER-LOAD -->
+
+The owner's report of 2026-10-18 on a machine with nothing else running. `folio-win11`,
+`clean` snapshot, a candidate's `folio.exe`, `conpty.dll` and `OpenConsole.exe` (a release
+build's `target\release`), copied in; no install.
+
+```powershell
+$pass = Get-Content <the VM password file>   # into a variable, never printed
+pwsh -File scripts/release/cleanvm/run-load-row.ps1 -Vmx <folio-win11.vmx> -VmPassword $pass `
+    -Candidate <target\release of the candidate> -Tag before
+```
+
+`run-load-row.ps1` reverts, starts `nogui`, copies the candidate and `guest\load-row.ps1`,
+`guest\cpu-hog.ps1`, `ui-probe.ps1` in, runs the row in the logged-on session and copies out
+`load-<Tag>.txt`, `-perf.txt` (Folio's stderr under `BT_PERF_TRACE=1`), `-diagnostics.log`,
+`-hog.txt`; `read-load-row.ps1` prints the cells (`cells-<Tag>.txt`). In the guest: four rows
+with a box rule printed in the first tab (a frame candidate, as an agent's TUI is), a second
+tab opened over it, then three phases of `-Seconds` (60) each — **baseline**, **hog**
+(`cpu-hog.ps1`: 2 x logical processors spinners at the Normal priority class), **after** —
+with the person's cycle every two seconds: `1..400|%{$_}` typed and Enter, three wheel notches
+up and three down.
+
+| Cell | Read from | Expected (the fix) | Red |
+| --- | --- | --- | --- |
+| turns/s | the budget lines' `turn=` over the phase | the turn rate of the work: tens to a few hundred a second | thousands a second (the loop spins) |
+| stale turns, max, sources | `stale us=` lines and their `suppressed=` | none past a few `SearchWalk`/`ImeCursor` turns | a `stale` line a second naming a clock, `ForegroundProgram` in the unmodified build |
+| delay max | `delay_us=` on the `wall` lines | under one frame in baseline and after; the hog phase says what the guest's scheduler gives | — (reported, not judged) |
+| present cadence | `since_previous_us` of `BT_PERF_TRACE present` | about the display's frame while the pane prints | presents stop while input is sent |
+| echo / notch / output | `event_to_present_us` by `source=` | within a frame or two in every phase | seconds |
+| close | `close ok` / `FAILED close` in `load-<Tag>.txt` (with the processes still standing and `load-<Tag>-hang-reports.zip`) | Folio exits within 30 s of WM_CLOSE | still running: the row's failure |
+
+**The row runs with the first-run card already answered.** Before it launches the candidate, the guest script places `guest/load-row-settings.json` as the clean account's `%APPDATA%\Folio\settings.json`: a schema-25 document, every value the shipped default but the PowerShell invitation (`Declined`). The candidate's own migrations carry it to its version, and the v31 → v32 step writes `first_run_card: Shown`, the product's rule that a returning reader never meets the card. The welcome card and the invitation are therefore not over the pane, and they are not under test here; the first-run card is a row of its own. A guest that already holds a `settings.json` is left as it is.
+
+A phase whose driver cycles never reached Folio is printed `NOT EXERCISED`, and its cells are not a result. The guest is told not to sleep before the row (`powercfg` standby, monitor and hibernate timeouts on AC to 0). The row runs `-NoWait`, and the host waits for `load-<Tag>-done.txt` (bounded at 3 × `-Seconds` + 480 s (the driver waits up to 180 s for the foreground)).
+
+Run it twice: `-Tag before` on the build at the instrumentation commit (the named fold and the `stale_us`/`source=` cells, no fix), `-Tag after` on the fix; the report carries both tables.
+
+**Recorded 2026-10-21** (folio-win11, 2 logical processors, so the hog runs 4 Normal-priority spinners). before3 is the instrumentation build without the fixes (7d00c2ed); after10 is the fix (1b911da7, with main 453c0c7c), on the harness at 81779f7a:
+
+| cell | before3 (7d00c2ed) | after10 (1b911da7) |
+|---|---|---|
+| exercised | yes: the boxed tab printed, 18 / 17 / 19 cycles | yes: the driver chose `class=Window Class title=folio`; 19 / 18 / 20 cycles; keyboard presents 247 / 244 / 259 |
+| turns/s (baseline / hog / after) | ≥103 / ≥127 / ≥97 | ≥83 / ≥152 / ≥55 |
+| delay max | 0 / 0 / 26.5 ms | 0 / 0 / 0 |
+| stale turns (count, max) | 289, 399 ms / 374, 3.4 ms / 397, 437 ms | 229, 532 ms / 549, 462 ms / 262, 526 ms |
+| stale sources | LiveStability, StripAnimation, RefusedFrame (1–5 ms; one 42 ms), ShellCaret, ProgramsEar; TerminalThumbs ~0.4 s twice a phase | LiveStability, RefusedFrame, StripAnimation, TerminalThumbs (~0.5 s), ShellCaret (after) |
+| ForegroundProgram spin | none: the boxed tab was not an armed candidate | none (and the entry is no longer booked) |
+| keyboard echo p50 / p95 | 5.5 / 25 → 21.8 / 50 → 6.6 / 21 ms | 3.9 / 11.8 → 15.9 / 36.9 → 5.0 / 13.3 ms |
+| present cadence p50 | 8.3 → 18.9 → 9.9 ms | 5.9 → 17.8 → 16.0 ms |
+| shell output p50 | 3.1 → 3.3 → 4.2 ms | 2.3 → 3.1 → 3.6 ms |
+| close | ok | ok: `WM_CLOSE posted -> True`, Folio exited |
+
+**What the row measures, and what it does not.**
+- **CPU starvation.** Under the hog, keys echo about 4× slower at the median (3.9 → 15.9 ms; 5.5 → 21.8 ms on before3) and recover after. The present cadence settles at about one per vblank. Shell output barely moves. No wake is ever late (`delay max` 0 in every phase on the fix). That is the per-turn cost residual, measured and not fixed in T-WINDOW-THREAD-UNDER-LOAD.
+- **The stale turns** are the single-extra-turn class: clocks that came due inside the turn that booked them, at 100-odd turns a second. They are not a spin. One shape is recorded for follow-up: `TerminalThumbs` booking an instant about 0.5 s already past, once or twice a phase.
+- **The owner's spin is not reproduced here.** That needs a background tab whose pane keeps redrawing a boxed frame (an armed foreground-program candidate), and this row's boxed tab is printed once. That shape is §4.7b, a 0.4.9 row (row 26), with a trace line that the cadence armed.
+
+**The ten runs that measured nothing, and why** (each fixed in the harness this row lands with):
+
+| runs | cause | fix |
+|---|---|---|
+| before2, after, after3, after4 | the guest suspended itself (ACPI S1, 13–21 min after boot) while a slow logon held `Wait-GuestReady` | `no sleep` steps (`powercfg` standby / monitor / hibernate on AC to 0); the readiness wait prints what it waited for and how long |
+| after5 | the `no sleep` step handed powercfg its words as one argument | through `cmd /c`, not tolerant |
+| the 10-20 run, after6 | the driver was refused the foreground; the first-run card stayed up | the row waits up to 180 s for the keyboard, else `FAILED foreground`; the first run is answered before the launch |
+| main453, after7 | the foreground was taken but not the keyboard (`input_seen=false` all run) | the driver checks the foreground thread's focus window (`GetGUIThreadInfo`) and clicks a verified pixel otherwise; the reader marks `KEYS NOT SEEN BY FOLIO` |
+| after8 | the desktop held the foreground; the click point found no window | an Alt tap before the foreground is asked; a click at the window's verified centre; the close recorded on every road |
+| after6, main453, after7, after9 (the close) | `Process.CloseMainWindow()` and the probe's `AppWindow` both picked winit's `Winit Thread Event Target` popup, so the row typed into and closed a window that draws nothing | the row drives and posts WM_CLOSE to the visible window of winit's application class (`Window Class`); every top-level window is logged |
 
 ## 5. 截图清单
 
