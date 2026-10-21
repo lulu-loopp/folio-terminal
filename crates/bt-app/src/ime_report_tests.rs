@@ -268,7 +268,7 @@ fn ime_self_report_startup_and_focus_source_pin() {
     );
     assert!(
         in_product_raw(bt_source::needle!(bt_source::Pattern::text(
-            "earliest_deadline([wake_deadline, ime_deadline])"
+            "wake_owner::owned(WakeOwner::ImeReport, ime_deadline)"
         ))) > 0
     );
     for owner in ["create", "open_window"] {

@@ -20,6 +20,14 @@
 //!   was not an admitted call (**unexplained**, §C-7: a named station with no admitted call under
 //!   it is unexplained too), and the scheduling delay — how late the turn began after the wake the
 //!   loop was owed. Each into its own histogram.
+//! - **Per turn, the owed wake's owner and whether it was ever a wait** (T-WINDOW-THREAD-UNDER-
+//!   LOAD). The wake the loop parks until is named by the clock in the wake fold that asked for it
+//!   ([`crate::wake_owner::WakeOwner`]), and it is judged at `park`: an instant still ahead is a
+//!   wait, and the time the next turn began past it is its scheduling delay; an instant already
+//!   due is no wait at all — winit returns at once and the loop turns again — and the age of that
+//!   instant when the next turn began is the turn's **staleness**, its own histogram and its own
+//!   trigger. Before the split the two read as one number, and a deadline stuck in the past for
+//!   four minutes read as a loop woken four minutes late.
 //!
 //! # The union, exactly and without a buffer
 //!
@@ -67,12 +75,13 @@
 //! it.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use bt_platform::admission::{DoorKey, doors};
 
 use super::Station;
+use crate::wake_owner::WakeOwner;
 
 /// **A turn's frame when no visible window names one**: `T − t₀` with no `FrameClock` to read,
 /// which is `pace::DEFAULT_FRAME_INTERVAL` (budget note §1.2, §R-B).
@@ -97,8 +106,8 @@ pub(super) const BUDGET_LINES_KEPT: usize = 16;
 /// next line of that trigger says how many (`suppressed=`). Measured on the heartbeat's clock.
 pub(super) const COALESCE_WINDOW: Duration = Duration::from_secs(1);
 
-/// The four triggers, one coalescing window each.
-const TRIGGERS: usize = 4;
+/// The five triggers, one coalescing window each.
+const TRIGGERS: usize = 5;
 
 /// **What a turn keeps back for the present it owes**, when a window's frame sets the allowance
 /// (A4, budget note §R-B `H`): the allowance ends this long before that window's next frame
@@ -223,13 +232,17 @@ impl Tally {
 /// **What one detail line reports.** Plain data, formatted on the watchdog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Budget {
-    /// The turn's wall time ran past its frame. The scheduling delay is beside it and not in it.
+    /// The turn's wall time ran past its frame. The scheduling delay is beside it and not in it,
+    /// and so is the staleness of a wake that was already due when the loop parked; `source` is
+    /// the clock that owned whichever of the two the turn had.
     Wall {
         wall_ns: u64,
         frame_ns: u64,
         waits_ns: u64,
         unexplained_ns: u64,
         delay_ns: Option<u64>,
+        stale_ns: Option<u64>,
+        source: Option<WakeOwner>,
     },
     /// The union of the turn's admitted calls ran past [`WAIT_BUDGET`].
     Waits { waits_ns: u64, calls: u64 },
@@ -239,16 +252,36 @@ pub enum Budget {
     /// The turn's time outside every admitted call ran past [`WAIT_BUDGET`]: not a wait, and
     /// never reported as one.
     Unexplained { unexplained_ns: u64, wall_ns: u64 },
+    /// **The turn began from a park that was no wait**: the wake it was owed was already due when
+    /// the loop parked, by `stale_ns` when the turn began, and `source` is the clock that asked
+    /// for it. Every such turn crosses this trigger, however short — a loop spinning on an
+    /// instant nobody consumes is thousands of turns a second, each of them cheap — so the line's
+    /// `suppressed=` is how many turns spun in the second before it.
+    Stale {
+        stale_ns: u64,
+        source: Option<WakeOwner>,
+    },
+}
+
+/// `source=` as a line prints it: the owner's variant, or `none`.
+fn source_cell(source: Option<WakeOwner>) -> String {
+    source.map_or_else(|| String::from("none"), |owner| format!("{owner:?}"))
+}
+
+/// A duration cell that may be absent, in whole microseconds or `none`.
+fn micros_or_none(ns: Option<u64>) -> String {
+    ns.map_or_else(|| String::from("none"), |ns| micros(ns).to_string())
 }
 
 impl Budget {
-    /// Which of the four triggers this is: the index of its coalescing window.
+    /// Which of the five triggers this is: the index of its coalescing window.
     fn trigger(&self) -> usize {
         match self {
             Self::Wall { .. } => 0,
             Self::Waits { .. } => 1,
             Self::Call { .. } => 2,
             Self::Unexplained { .. } => 3,
+            Self::Stale { .. } => 4,
         }
     }
 }
@@ -277,13 +310,18 @@ impl BudgetLine {
                 waits_ns,
                 unexplained_ns,
                 delay_ns,
+                stale_ns,
+                source,
             } => format!(
-                "wall us={} frame_us={} waits_us={} unexplained_us={} delay_us={}",
+                "wall us={} frame_us={} waits_us={} unexplained_us={} delay_us={} stale_us={} \
+                 source={}",
                 micros(wall_ns),
                 micros(frame_ns),
                 micros(waits_ns),
                 micros(unexplained_ns),
-                delay_ns.map_or_else(|| String::from("none"), |ns| micros(ns).to_string())
+                micros_or_none(delay_ns),
+                micros_or_none(stale_ns),
+                source_cell(source)
             ),
             Budget::Waits { waits_ns, calls } => format!(
                 "waits us={} budget_us={} calls={calls}",
@@ -312,6 +350,11 @@ impl BudgetLine {
                 micros(unexplained_ns),
                 micros(nanos(WAIT_BUDGET)),
                 micros(wall_ns)
+            ),
+            Budget::Stale { stale_ns, source } => format!(
+                "stale us={} source={}",
+                micros(stale_ns),
+                source_cell(source)
             ),
         };
         format!(
@@ -402,6 +445,16 @@ impl TurnAllowance {
     }
 }
 
+/// An owner as one byte: its discriminant plus one, or zero for none.
+fn owner_byte(owner: Option<WakeOwner>) -> u8 {
+    owner.map_or(0, |owner| (owner as u8).saturating_add(1))
+}
+
+/// The owner [`owner_byte`] packed.
+fn owner_of(byte: u8) -> Option<WakeOwner> {
+    Option::and_then(byte.checked_sub(1), WakeOwner::from_byte)
+}
+
 /// **A window's next frame boundary after `began_ns`**, on its own phase: its last present plus
 /// the fewest whole intervals that land after the turn's start. A window that has not presented
 /// is owed its first frame now, so its next boundary is one interval on.
@@ -422,10 +475,21 @@ pub(super) struct Accounts {
     /// The wake the loop is about to park until, in heartbeat nanoseconds plus one, or zero (see
     /// [`Self::owe`]).
     due_ns: AtomicU64,
+    /// The owner of [`Self::due_ns`], as [`owner_byte`] packs it.
+    due_owner: AtomicU8,
     /// That wake, carried from `park` to the turn that follows it.
     owed_ns: AtomicU64,
+    /// Whether that wake was already due when the loop parked: no wait at all.
+    owed_past: AtomicBool,
+    /// Its owner, as [`owner_byte`] packs it.
+    owed_owner: AtomicU8,
     /// This turn's scheduling delay plus one, or zero when no owed wake had come due.
     delay_ns: AtomicU64,
+    /// This turn's staleness plus one — the age, at the turn's start, of a wake that was already
+    /// due when the loop parked — or zero when the park was a wait.
+    stale_ns: AtomicU64,
+    /// The owner of the wake this turn's delay or staleness is about, as [`owner_byte`] packs it.
+    source: AtomicU8,
     /// The shortest frame interval a visible window told this turn, or [`NO_FRAME`].
     frame_ns: AtomicU64,
     /// Admitted calls open on the window thread right now.
@@ -447,6 +511,7 @@ pub(super) struct Accounts {
     waits: Histogram,
     unexplained: Histogram,
     delay: Histogram,
+    stale: Histogram,
     /// Per registry line, in `doors::ALL`'s order.
     doors: [Histogram; DOORS],
     /// This turn's [`TurnAllowance`], field by field.
@@ -473,8 +538,13 @@ impl Accounts {
     pub(super) fn new() -> Self {
         Self {
             due_ns: AtomicU64::new(0),
+            due_owner: AtomicU8::new(0),
             owed_ns: AtomicU64::new(0),
+            owed_past: AtomicBool::new(false),
+            owed_owner: AtomicU8::new(0),
             delay_ns: AtomicU64::new(0),
+            stale_ns: AtomicU64::new(0),
+            source: AtomicU8::new(0),
             frame_ns: AtomicU64::new(NO_FRAME),
             depth: AtomicU64::new(0),
             waits_ns: AtomicU64::new(0),
@@ -487,6 +557,7 @@ impl Accounts {
             waits: Histogram::new(),
             unexplained: Histogram::new(),
             delay: Histogram::new(),
+            stale: Histogram::new(),
             doors: std::array::from_fn(|_| Histogram::new()),
             allowance_began_ns: AtomicU64::new(0),
             allowance_ends_ns: AtomicU64::new(nanos(TURN_BUDGET)),
@@ -501,30 +572,48 @@ impl Accounts {
         }
     }
 
-    /// **The loop is about to park until `deadline_ns`**: the wake it will be owed.
-    pub(super) fn owe(&self, deadline_ns: u64) {
+    /// **The loop is about to park until `deadline_ns`**, which `owner` asked for: the wake it
+    /// will be owed.
+    pub(super) fn owe(&self, deadline_ns: u64, owner: Option<WakeOwner>) {
         self.due_ns
             .store(deadline_ns.saturating_add(1), Ordering::Relaxed);
+        self.due_owner.store(owner_byte(owner), Ordering::Relaxed);
     }
 
-    /// **The loop parked**: owed the wake [`Self::owe`] named when it parked until one, and owed
-    /// nothing otherwise.
-    pub(super) fn parked(&self, until: bool) {
+    /// **The loop parked at `now_ns`**: owed the wake [`Self::owe`] named when it parked until
+    /// one, and owed nothing otherwise — and a wake already due by now is marked as no wait.
+    pub(super) fn parked(&self, until: bool, now_ns: u64) {
         let due = self.due_ns.swap(0, Ordering::Relaxed);
-        self.owed_ns
-            .store(if until { due } else { 0 }, Ordering::Relaxed);
+        let owner = self.due_owner.swap(0, Ordering::Relaxed);
+        let due = if until { due } else { 0 };
+        self.owed_ns.store(due, Ordering::Relaxed);
+        self.owed_past.store(
+            Option::is_some_and(u64::checked_sub(due, 1), |due| due <= now_ns),
+            Ordering::Relaxed,
+        );
+        self.owed_owner
+            .store(if until { owner } else { 0 }, Ordering::Relaxed);
     }
 
-    /// **A turn opens at `now_ns`**: no frame told yet, no admitted call open, and a wake that
-    /// had come due by now is its scheduling delay. Its calls start empty because the last turn's
-    /// close took them, and a call outside every turn adds none ([`Self::call`]).
+    /// **A turn opens at `now_ns`**: no frame told yet, no admitted call open, and the wake it
+    /// was owed judged — one that was a wait and had come due by now is its scheduling delay, and
+    /// one that was no wait is its staleness, each with its owner. Its calls start empty because
+    /// the last turn's close took them, and a call outside every turn adds none ([`Self::call`]).
     pub(super) fn begin(&self, now_ns: u64) {
         let owed = self.owed_ns.swap(0, Ordering::Relaxed);
-        let delay = match owed.checked_sub(1) {
-            Some(due) if now_ns >= due => (now_ns - due).saturating_add(1),
-            _ => 0,
+        let past = self.owed_past.swap(false, Ordering::Relaxed);
+        let owner = self.owed_owner.swap(0, Ordering::Relaxed);
+        let (delay, stale) = match owed.checked_sub(1) {
+            Some(due) if past => (0, now_ns.saturating_sub(due).saturating_add(1)),
+            Some(due) if now_ns >= due => ((now_ns - due).saturating_add(1), 0),
+            _ => (0, 0),
         };
         self.delay_ns.store(delay, Ordering::Relaxed);
+        self.stale_ns.store(stale, Ordering::Relaxed);
+        self.source.store(
+            if delay > 0 || stale > 0 { owner } else { 0 },
+            Ordering::Relaxed,
+        );
         self.frame_ns.store(NO_FRAME, Ordering::Relaxed);
         self.depth.store(0, Ordering::Relaxed);
         self.set_allowance(TurnAllowance::budget(now_ns));
@@ -649,6 +738,8 @@ impl Accounts {
         let over = self.over_count.swap(0, Ordering::Relaxed);
         let unexplained_ns = wall_ns - waits_ns;
         let delay_ns = self.delay_ns.load(Ordering::Relaxed).checked_sub(1);
+        let stale_ns = u64::checked_sub(self.stale_ns.load(Ordering::Relaxed), 1);
+        let source = owner_of(self.source.load(Ordering::Relaxed));
         let frame_ns = match self.frame_ns.load(Ordering::Relaxed) {
             NO_FRAME => nanos(TURN_BUDGET),
             frame => frame,
@@ -658,6 +749,9 @@ impl Accounts {
         self.unexplained.record(unexplained_ns);
         if let Some(delay) = delay_ns {
             self.delay.record(delay);
+        }
+        if let Some(stale) = stale_ns {
+            self.stale.record(stale);
         }
         let deferred_ns = self.deferred_ns.swap(0, Ordering::Relaxed);
         let deferrable = self.deferrable.swap(0, Ordering::Relaxed);
@@ -678,9 +772,14 @@ impl Accounts {
                     waits_ns,
                     unexplained_ns,
                     delay_ns,
+                    stale_ns,
+                    source,
                 },
                 now_ns,
             );
+        }
+        if let Some(stale_ns) = stale_ns {
+            self.offer(turn, Budget::Stale { stale_ns, source }, now_ns);
         }
         if waits_ns > nanos(WAIT_BUDGET) {
             self.offer(turn, Budget::Waits { waits_ns, calls }, now_ns);
@@ -764,6 +863,7 @@ impl Accounts {
             ("waits", &self.waits),
             ("unexplained", &self.unexplained),
             ("delay", &self.delay),
+            ("stale", &self.stale),
         ] {
             lines.push(format!(
                 "Folio budget summary: {name} {}",
@@ -815,6 +915,12 @@ impl Accounts {
         ]
     }
 
+    /// The turns' staleness, read.
+    #[cfg(test)]
+    pub(super) fn stale(&self) -> Tally {
+        self.stale.tally()
+    }
+
     /// The ring itself, for a case that holds it as the watchdog would.
     #[cfg(test)]
     pub(super) fn ring(&self) -> &Mutex<Vec<BudgetLine>> {
@@ -837,6 +943,7 @@ mod tests {
         nanos, said,
     };
     use crate::pace::{FrameClock, Lanes};
+    use crate::wake_owner::WakeOwner;
 
     const US: u64 = 1_000;
     const MS: u64 = 1_000_000;
@@ -1144,6 +1251,7 @@ mod tests {
                 "Folio budget summary: unexplained count=20 max_us=1000 sum_us=20000 \
                  hist=512us:20",
                 "Folio budget summary: delay count=0 max_us=0 sum_us=0 hist=-",
+                "Folio budget summary: stale count=0 max_us=0 sum_us=0 hist=-",
                 "Folio budget summary: allowance_used count=0 max_us=0 sum_us=0 hist=- \
                  allowance_us=0 yielded=0",
                 "Folio budget summary: door=PtyResize row=12 count=20 max_us=5000 \
@@ -1193,7 +1301,7 @@ mod tests {
     fn scheduling_delay_is_reported_apart_from_turn_time() {
         let heart = heart();
         heart.woke_at_ns(0);
-        let parking = heart.until(heart.origin + Duration::from_millis(10));
+        let parking = heart.until(heart.origin + Duration::from_millis(10), None);
         assert_eq!(parking, Park::Until(10));
         heart.park_at_ns(parking, 2 * MS);
         heart.woke_at_ns(13_500 * US);
@@ -1206,6 +1314,8 @@ mod tests {
                 waits_ns: 0,
                 unexplained_ns: 20 * MS,
                 delay_ns: Some(3_500 * US),
+                stale_ns: None,
+                source: None,
             }),
             "{taken:?}"
         );
@@ -1214,7 +1324,7 @@ mod tests {
         // An indefinite park owes nothing; a wake before the deadline is not late.
         heart.woke_at_ns(40 * MS);
         heart.park_at_ns(
-            heart.until(heart.origin + Duration::from_millis(60)),
+            heart.until(heart.origin + Duration::from_millis(60), None),
             41 * MS,
         );
         heart.woke_at_ns(50 * MS);
@@ -1229,12 +1339,149 @@ mod tests {
                     waits_ns: 0,
                     unexplained_ns: 20 * MS,
                     delay_ns: None,
+                    stale_ns: None,
+                    source: None,
                 },
                 suppressed: 3,
             }
             .line(0, 0),
             "Folio budget: turn=0 wall us=20000 frame_us=16000 waits_us=0 unexplained_us=20000 \
-             delay_us=none suppressed=3 refused=0 lost=0"
+             delay_us=none stale_us=none source=none suppressed=3 refused=0 lost=0"
+        );
+    }
+
+    /// RED (T-WINDOW-THREAD-UNDER-LOAD) — **a wake already due when the loop parked is stale, not
+    /// late, and the line names the clock that asked for it.**
+    ///
+    /// The owner's log of 2026-10-18 read `delay_us=22742367 … 54874513` on turns of 10–15 ms: a
+    /// deadline fixed at one instant in the past, handed to `ControlFlow::WaitUntil` on every
+    /// turn, read as a wake that arrived later and later. The loop parked here until 10 ms at
+    /// 12 ms — no wait at all — and its next turn began at 12.1 ms: 2.1 ms stale, no delay. A
+    /// spinning loop's turns are short, so the staleness has a trigger of its own that every such
+    /// turn crosses: one line in a second, the rest counted on the next.
+    ///
+    /// MUTATION: drop the `past` arm in `Accounts::begin` — the turn reads a 2.1 ms delay and no
+    /// stale line is written; store no owner in `Accounts::owe` — the line says `source=none`.
+    #[test]
+    fn a_wake_already_due_at_park_is_stale_and_names_its_owner() {
+        let heart = heart();
+        heart.woke_at_ns(11_900 * US);
+        let parking = heart.until(
+            heart.origin + Duration::from_millis(10),
+            Some(WakeOwner::ForegroundProgram),
+        );
+        heart.park_at_ns(parking, 12 * MS);
+        heart.woke_at_ns(12_100 * US);
+        heart.park_at_ns(Park::Indefinite, 12_200 * US);
+        let (taken, _) = heart.accounts.take_lines();
+        let [line] = taken.as_slice() else {
+            panic!("one line: {taken:?}")
+        };
+        assert_eq!(
+            line.budget,
+            Budget::Stale {
+                stale_ns: 2_100 * US,
+                source: Some(WakeOwner::ForegroundProgram),
+            }
+        );
+        assert_eq!(
+            line.line(0, 0),
+            "Folio budget: turn=0 stale us=2100 source=ForegroundProgram suppressed=0 refused=0 \
+             lost=0"
+        );
+        let [_, _, _, delay] = heart.accounts.turns();
+        assert_eq!(delay.count, 0, "a park that was no wait owes no delay");
+        let stale = heart.accounts.stale();
+        assert_eq!((stale.count, stale.sum_ns), (1, 2_100 * US));
+        // A spin: the same past instant, turn after turn, inside one second — counted, not written.
+        // The first of these opens after an indefinite park and owes nothing; the 49 after it
+        // each open on the same past instant.
+        for step in 1..=50_u64 {
+            let at = 12_200 * US + step * 10 * US;
+            heart.woke_at_ns(at);
+            heart.park_at_ns(
+                heart.until(
+                    heart.origin + Duration::from_millis(10),
+                    Some(WakeOwner::ForegroundProgram),
+                ),
+                at + US,
+            );
+        }
+        assert_eq!(lines(&heart), [], "inside the coalescing window");
+        assert_eq!(heart.accounts.stale().count, 50);
+        heart.woke_at_ns(1_100 * MS);
+        heart.park_at_ns(Park::Indefinite, 1_100 * MS + US);
+        let (taken, _) = heart.accounts.take_lines();
+        let [line] = taken.as_slice() else {
+            panic!("one line: {taken:?}")
+        };
+        assert_eq!(
+            line.suppressed, 49,
+            "the spin's turns, counted on the next line"
+        );
+        assert!(
+            matches!(line.budget, Budget::Stale { stale_ns, .. } if stale_ns == 1_090 * MS),
+            "{line:?}"
+        );
+    }
+
+    /// RED (T-WINDOW-THREAD-UNDER-LOAD) — **a wake that was a wait and came late names its owner
+    /// beside the delay, and reads no staleness.**
+    ///
+    /// MUTATION: keep the owner only for stale wakes in `Accounts::begin` — `source=none`.
+    #[test]
+    fn a_late_wake_names_its_owner_beside_the_delay() {
+        let heart = heart();
+        heart.woke_at_ns(0);
+        let parking = heart.until(
+            heart.origin + Duration::from_millis(10),
+            Some(WakeOwner::Toast),
+        );
+        heart.park_at_ns(parking, 2 * MS);
+        heart.woke_at_ns(13_500 * US);
+        heart.park_at_ns(Park::Indefinite, 33_500 * US);
+        let wall = heart
+            .accounts
+            .take_lines()
+            .0
+            .into_iter()
+            .find(|line| matches!(line.budget, Budget::Wall { .. }))
+            .expect("the turn ran past its frame");
+        assert_eq!(
+            wall.line(0, 0),
+            "Folio budget: turn=0 wall us=20000 frame_us=16000 waits_us=0 unexplained_us=20000 \
+             delay_us=3500 stale_us=none source=Toast suppressed=0 refused=0 lost=0"
+        );
+        assert_eq!(heart.accounts.stale().count, 0);
+        // And a wake that came early names nobody: the deadline was not what woke the turn.
+        heart.woke_at_ns(40 * MS);
+        heart.park_at_ns(
+            heart.until(
+                heart.origin + Duration::from_millis(60),
+                Some(WakeOwner::Toast),
+            ),
+            41 * MS,
+        );
+        heart.woke_at_ns(50 * MS);
+        heart.park_at_ns(Park::Indefinite, 2_000 * MS);
+        let wall = heart
+            .accounts
+            .take_lines()
+            .0
+            .into_iter()
+            .find(|line| matches!(line.budget, Budget::Wall { .. }))
+            .expect("the turn ran past its frame");
+        assert!(
+            matches!(
+                wall.budget,
+                Budget::Wall {
+                    delay_ns: None,
+                    stale_ns: None,
+                    source: None,
+                    ..
+                }
+            ),
+            "{wall:?}"
         );
     }
 
@@ -1436,7 +1683,7 @@ mod tests {
         (super::super::ADMISSION_METER.leave)(key, cookie, start, end);
         assert_eq!(reads() - turn, 1, "an admitted call's meter reads once");
         heart.frame_interval(Duration::from_millis(16));
-        heart.park(heart.until(Instant::now() + Duration::from_secs(1)));
+        heart.park(heart.until(Instant::now() + Duration::from_secs(1), None));
         assert_eq!(reads() - before, 4, "wake, pulse, the call's enter, park");
         let parked = reads();
         let _ = heart.take_slow_holds();
@@ -1689,7 +1936,7 @@ mod tests {
 
         let summary = heart.accounts.summary(0);
         assert_eq!(
-            summary[4],
+            summary[5],
             "Folio budget summary: allowance_used count=2 max_us=3000 sum_us=3000 \
              hist=<1us:1,2048us:1 allowance_us=32000 yielded=1"
         );

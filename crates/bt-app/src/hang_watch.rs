@@ -218,6 +218,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bt_platform::admission::{Cookie, DoorKey, Meter};
 use bt_platform::mem::Footprint;
 
+use crate::wake_owner::WakeOwner;
+
 pub use bt_platform::hang::Answer;
 
 /// How often the watchdog looks.
@@ -2034,11 +2036,13 @@ impl Heartbeat {
         u64::try_from(instant.saturating_duration_since(self.origin).as_nanos()).unwrap_or(u64::MAX)
     }
 
-    /// **The loop is about to park until `deadline`**: the [`Park`] it hands [`Self::park`], and
-    /// the wake the next turn is owed, kept to the nanosecond for its scheduling delay (A3).
+    /// **The loop is about to park until `deadline`**, which `owner` asked for: the [`Park`] it
+    /// hands [`Self::park`], and the wake the next turn is owed, kept to the nanosecond for its
+    /// scheduling delay (A3) — or, when it is already due by the time the loop parks, for how
+    /// stale it is (T-WINDOW-THREAD-UNDER-LOAD) — with the clock that owns it.
     #[must_use]
-    pub fn until(&self, deadline: Instant) -> Park {
-        self.accounts.owe(self.ns_at(deadline));
+    pub fn until(&self, deadline: Instant, owner: Option<WakeOwner>) -> Park {
+        self.accounts.owe(self.ns_at(deadline), owner);
         Park::Until(self.ms_at(deadline))
     }
 
@@ -2508,7 +2512,7 @@ impl Heartbeat {
     fn park_at_ns(&self, park: Park, now_ns: u64) {
         self.move_to(Station::Parked, now_ns / NS_PER_MS);
         self.close_hold(now_ns);
-        self.accounts.parked(matches!(park, Park::Until(_)));
+        self.accounts.parked(matches!(park, Park::Until(_)), now_ns);
         self.park.store(park.to_bits(), Ordering::Relaxed);
     }
 

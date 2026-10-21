@@ -126,16 +126,27 @@ function Wait-GuestReady {
         Write-Host ("  {0,-12} (wait for a guest operation, then an interactive program, up to $Seconds s)" -f 'ready?')
         return
     }
-    $deadline = (Get-Date).AddSeconds($Seconds)
+    # **What it waited for, and how long** (T-WINDOW-THREAD-UNDER-LOAD round 3): Tools answering
+    # a guest operation, then the logged-on session answering an interactive program, each
+    # printed with its seconds against the one deadline — a guest that takes minutes to give the
+    # interactive session is a guest whose own idle timers are running meanwhile.
+    $started = Get-Date
+    $deadline = $started.AddSeconds($Seconds)
+    Write-Host ("  {0,-12} (waiting for Tools, then the interactive session; deadline $Seconds s)" -f 'ready?')
     foreach ($probe in @(
-            @{ Verb = 'fileExistsInGuest'; Arguments = @('C:\Windows\System32\cmd.exe') },
-            @{ Verb = 'runProgramInGuest'; Arguments = @('-interactive', 'C:\Windows\System32\cmd.exe', '/c exit 0') })) {
+            @{ Verb = 'fileExistsInGuest'; What = 'Tools answer a guest operation'; Arguments = @('C:\Windows\System32\cmd.exe') },
+            @{ Verb = 'runProgramInGuest'; What = 'the logged-on session answers an interactive program'; Arguments = @('-interactive', 'C:\Windows\System32\cmd.exe', '/c exit 0') })) {
+        $from = Get-Date
+        $tries = 0
         while ($true) {
+            $tries++
             Invoke-Vmrun -Door $Door -Step 'ready?' -Verb $probe.Verb -Arguments $probe.Arguments -InGuest -Tolerant -Quiet | Out-Null
             if ($Door.LastExit -eq 0) { break }
-            if ((Get-Date) -ge $deadline) { throw "the guest never answered $($probe.Verb) within $Seconds s" }
+            if ((Get-Date) -ge $deadline) { throw "the guest never answered $($probe.Verb) within $Seconds s ($tries tries)" }
             Start-Sleep -Seconds 5
         }
+        Write-Host ("               {0}: {1:N0} s ({2} tries; {3:N0} s since start)" -f $probe.What,
+            ((Get-Date) - $from).TotalSeconds, $tries, ((Get-Date) - $started).TotalSeconds)
     }
     Start-Sleep -Seconds 20
     Write-Host '               the guest answers an interactive program'
