@@ -191,3 +191,38 @@ pub fn test_svg_rasterizer(bytes: &[u8]) -> Result<SvgRaster, SvgRasterError> {
 pub fn install_test_svg_rasterizer() {
     install_svg_rasterizer(test_svg_rasterizer);
 }
+
+/// **The diagnostic doors this crate writes, as the program's entry read them**
+/// (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY): `BT_SEMANTIC_TRACE` and `BT_DECOR_TRACE`. `BT_PERF_TRACE`
+/// is `bt_viewport::trace::perf`, the switch the three crates under the host share.
+///
+/// Installed by the host, never read here from the environment: a library that read them at the
+/// moment of use honoured them in every binary that made a session, a test binary as readily as
+/// the program, so a shell left with a trace switched on traced every test's session. A process
+/// that installs nothing traces nothing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TermDiagnostics {
+    /// `BT_SEMANTIC_TRACE`: one line per matched screen region, to standard error.
+    pub semantic_trace: bool,
+    /// `BT_DECOR_TRACE`: the file a session appends its decorations' snapshots to.
+    pub decor_trace: Option<std::path::PathBuf>,
+}
+
+/// [`TermDiagnostics`] with every door shut — what a process that installed nothing reads.
+static DIAGNOSTICS_OFF: TermDiagnostics = TermDiagnostics {
+    semantic_trace: false,
+    decor_trace: None,
+};
+
+static DIAGNOSTICS: OnceLock<TermDiagnostics> = OnceLock::new();
+
+/// **Install the diagnostic doors the entry read** — called once, by the host's entry, before its
+/// first session. A second installation is ignored: the process has one answer.
+pub fn install_diagnostics(diagnostics: TermDiagnostics) {
+    let _ = DIAGNOSTICS.set(diagnostics);
+}
+
+/// The installed diagnostic doors, or every door shut when nothing was installed.
+pub(crate) fn diagnostics() -> &'static TermDiagnostics {
+    DIAGNOSTICS.get().unwrap_or(&DIAGNOSTICS_OFF)
+}

@@ -8443,10 +8443,9 @@ impl WindowRenderer {
             wgpu::MultisampleState::default(),
             None,
         );
-        // Set-but-empty is off: a shell that wrote `BT_PERF_TRACE=` said "not
-        // this run", and every reader of this family in this program says the
-        // same word back.
-        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty());
+        // `BT_PERF_TRACE` as the program's entry switched it, never read here
+        // (`bt_viewport::trace::perf`).
+        let trace_perf = bt_viewport::trace::perf();
         // A window that draws into a texture is an instrument by construction —
         // `HeadlessRenderProbe` is the only thing that builds one — so its
         // shaping caches count hits, misses and evictions whether or not the
@@ -13963,11 +13962,10 @@ fn shape_chrome_labels_with_cjk(
 /// on screen. The fact worth a line is the *decision* — this face, for this
 /// requested weight, at this size — and a session makes a few dozen of those.
 fn trace_chrome_cjk_glyphs(font_system: &FontSystem, buffer: &Buffer, label: &ChromeLabel) {
-    static TRACE: OnceLock<bool> = OnceLock::new();
     static SEEN: OnceLock<
         std::sync::Mutex<std::collections::HashSet<(glyphon::fontdb::ID, u16, u32)>>,
     > = OnceLock::new();
-    if !*TRACE.get_or_init(|| std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty())) {
+    if !bt_viewport::trace::perf() {
         return;
     }
     let requested = label.weight.shaping_weight().0;
