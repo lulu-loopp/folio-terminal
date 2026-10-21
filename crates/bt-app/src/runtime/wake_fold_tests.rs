@@ -107,7 +107,7 @@ fn a_background_frame_candidates_cadence_books_no_wake_and_asks_nothing() {
     assert_eq!(
         after,
         Some(due),
-        "a turn mints no request for a pane in a tab that is not on screen: its cadence is          where it was"
+        "a turn mints no request for a pane in a tab not on screen: its cadence stays put"
     );
 }
 
