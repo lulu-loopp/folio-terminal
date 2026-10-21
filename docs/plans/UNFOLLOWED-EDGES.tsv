@@ -1880,8 +1880,12 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::for_each_window	Dynamic	answer
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::for_every_window_engines_included	Dynamic	answer	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::frontmost_window	Ambiguous	find_map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::hand_the_update_over	Ambiguous	and_then	2	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::hear_preview_save_answers	Ambiguous	get_or_insert	1	2026-10-21: T-ENDSESSION-SAVES review; moved with the preview answers' hearing out of `take_preview_save_answers` (or the documents' out of `take_document_answers`); a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::hear_preview_save_answers	Ambiguous	is_empty	1	2026-10-21: T-ENDSESSION-SAVES review; moved with the preview answers' hearing out of `take_preview_save_answers` (or the documents' out of `take_document_answers`); a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::hear_preview_save_answers	Ambiguous	map_or	1	2026-10-21: T-ENDSESSION-SAVES review; moved with the preview answers' hearing out of `take_preview_save_answers` (or the documents' out of `take_document_answers`); a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::install_main_menu	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::install_main_menu	Dynamic	send	1	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::keep_what_the_systems_end_did_not_save	Ambiguous	flatten	1	2026-10-21: T-ENDSESSION-SAVES review; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::keep_what_the_systems_end_did_not_save	Ambiguous	line	1	2026-10-21: T-ENDSESSION-SAVES; `preview::Kept::line`, a sentence formatted from a buffer's name and where its edit is, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::on_window_event	Ambiguous	and_then	7	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::on_window_event	Ambiguous	is_some_and	1	
@@ -1914,7 +1918,7 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_quit	Ambiguous	text	1
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_restore_answer	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_restore_answer	Ambiguous	iter	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_restore_answer	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_session_end_keeping_in	Ambiguous	is_some_and	1	2026-10-21: T-ENDSESSION-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_session_end_keeping_in	Ambiguous	is_some_and	2	2026-10-21: T-ENDSESSION-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door (grown by review N3: the quit's storage phase asked beside its photograph)
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_tear_out	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	and_then	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_the_quits_saves	Ambiguous	collect	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
@@ -1929,10 +1933,7 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_update_card	Ambiguous	m
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_update_card	Dynamic	verbs	2	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_window_ring	Ambiguous	flatten	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::surface_selftest_if_due	Ambiguous	elapsed	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::take_document_answers	Ambiguous	is_some_and	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::take_preview_save_answers	Ambiguous	get_or_insert	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::take_preview_save_answers	Ambiguous	is_empty	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::take_preview_save_answers	Ambiguous	map_or	1	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::take_the_documents_answers	Ambiguous	is_some_and	1	2026-10-21: T-ENDSESSION-SAVES review; moved with the preview answers' hearing out of `take_preview_save_answers` (or the documents' out of `take_document_answers`); a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::transfer_tab	Ambiguous	and_then	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::transfer_tab	Ambiguous	bit	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::transfer_tab	Ambiguous	collect	1	
@@ -2887,6 +2888,7 @@ crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	co
 crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	extend	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	filter_map	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	flat_map	1	2026-10-21: T-QUIT-AND-STOP-SAVES; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::StopKeeps::keep	Ambiguous	refusal	1	2026-10-21: T-ENDSESSION-SAVES review; `preview::SaveOutcome::refusal`, a match over a save's answer that answers its sentence, which calls no door
 crates/bt-app/src/preview.rs	bt-app crate::preview::claimed_runs	Ambiguous	find	2	
 crates/bt-app/src/preview.rs	bt-app crate::preview::claimed_runs	Ambiguous	map	2	
 crates/bt-app/src/preview.rs	bt-app crate::preview::close_bracket	Ambiguous	find	1	
@@ -4489,6 +4491,8 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::dr
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::dress_preview_rail	Dynamic	measure	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::edit_preview	Dynamic	edit	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::focused_preview_seat	Ambiguous	then_some	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::hear_preview_saves	Ambiguous	refusal	1	2026-10-21: T-ENDSESSION-SAVES review; `preview::SaveOutcome::refusal`, a match over a save's answer that answers its sentence, which calls no door
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::keep_what_the_systems_end_did_not_save	Ambiguous	extend_from_slice	1	2026-10-21: T-ENDSESSION-SAVES review; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::live_markdown_ime_cursor_area	Ambiguous	and_then	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::live_markdown_ime_cursor_area	Ambiguous	caret	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::live_markdown_ime_cursor_area	Ambiguous	clamp	2	
