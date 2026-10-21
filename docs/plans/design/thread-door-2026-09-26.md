@@ -6375,3 +6375,21 @@ engine's edges). What lands in 0.4.8 (T-A2-R1-NONLEG):
   allow-list of rounds 2–4 do not land.
 - `# counted-only` and `# emergency` with their `ruling` column, and the merge rule of (q)5, both as written; the
   script reads every key and ruling byte for byte, case included.
+
+## Revision (r), 2026-10-21 — A2p as it lands (T-A2-R2-ON-NONLEG)
+
+(l)4's A2p lands with three differences from its text. **bt-render's own unit tests do not depend on
+`bt-render-probe`** (a dev-dependency back onto a crate that depends on `bt-render` would build a second
+`bt-render` whose types are not the test's): they read frames through a `#[cfg(test)] impl WindowRenderer`
+composition (`read_back`, `probe_frame`) that submits in test code, which the product scan leaves out; the replay
+probe's unit test moved to `bt-render-probe/tests/replay_probe.rs` with its claims. **`compose_frame` and
+`handle_surface_failure` leave the inventory too**: they borrow `PresentFrame`'s token (`&WaitToken<'_,
+doors::PresentFrame>`) and are its two `owner-door-body` rows of `# effects`, so `bt-render` has no row of the
+bare-site inventory at all, where (l)4 said none outside those two; `the_product_library_holds_no_probe_effect`
+reads the registry for that — every `bt-render` door entry stands under `PresentFrame`, and a `bt-render` row under
+another door is refused by its line — and "outside the product closure" is the manifests a build of `folio.exe`
+reads, `NOT_THE_PRODUCT` and the crate's layer-6 row (`scripts/ci/crate-layers.tsv`, held by
+`check-crate-edges.ps1`), not a closure computed from the `folio` binary. **`bt_render::probe_surface` is one
+function wider than (l)4's "returns work, does not submit"**: `queue(gpu)` hands the tool the device's queue to
+submit through; it submits nothing itself, and a product crate that submitted through it would be a new bare site
+of its own crate, which the inventory refuses.

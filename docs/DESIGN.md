@@ -15857,3 +15857,5 @@ Supersedes the interim stay of row 26 (2026-09-27, *five window-thread waits the
 **What it was not.** No thread of Folio's sits between the window thread and its frame: winit 0.30.13 waits in `MsgWaitForMultipleObjectsEx` on a high-resolution waitable timer it owns on this thread, the frame clock is arithmetic, the present runs on the window thread, and a worker's wake is a `PostMessage`. A priority rule for "the frame chain" would have had nothing to raise.
 
 **Pinned by** `runtime::frame::wake_fold_tests::*` (eight cases, each RED by its mutation; `TerminalMenu`'s is a class guard over a synthetic state, its road unreachable today), `hang_watch::accounting::tests::{a_wake_already_due_at_park_is_stale_and_names_its_owner, a_late_wake_names_its_owner_beside_the_delay}`, `wake_owner::tests::*`; the load row `docs/plans/release/clean-vm.md` §4.7.
+
+**2026-10-21, T-A2-R2-ON-NONLEG.** `glyph_output.rs` lives in `crates/bt-render-probe/tests/` since this ticket (the render probe's submissions left `bt-render` for the tool crate `bt-render-probe`); §13.22's two `crates/bt-render/tests/glyph_output.rs` paths read with that.
