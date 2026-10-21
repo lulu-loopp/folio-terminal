@@ -1,6 +1,6 @@
 # the_window_threads_checks_that_are_not_rust
 #
-# Six checks — four the thread-door note 2026-09-26 gives A2a (revisions (j)1,
+# Seven checks — five the thread-door note 2026-09-26 gives A2a and A2s (revisions (j)1,
 # (j)3, (j)11.4-(j)11.6; budget note C-2) and two the side-effects contract
 # 2026-10-11 gives S-1 — each reported under its own name, all run before the
 # script answers:
@@ -22,6 +22,8 @@
 #      (`docs/plans/completions-door-starts.tsv`) and the worker door bodies no
 #      product code calls yet (`docs/plans/completions-uncalled-bodies.tsv`)
 #      only shrink (S-1).
+#   7. the two closed exception lists of the registry, `# counted-only` and
+#      `# emergency`, grow only by a row that names its ruling (A2s).
 #
 # ── 1. the_bare_site_inventory_only_shrinks
 #
@@ -47,8 +49,24 @@
 # comparison did not happen. CI checks out with full history on both jobs that
 # run this.
 #
+# A merge keeps both sides' removals (A2s; the thread-door note's rule "the
+# smaller of both sides, row by row"). Against the merge base alone a merge
+# that brings back a site and its row passes whenever the branch removed as many
+# of the same (crate, entry) itself. So every merge commit between the merge base
+# and HEAD, and a merge still open in the working tree, is held to the smaller of
+# its two parents: with p1 and p2 its parents and b their merge base,
+#
+#     per (crate, entry):           merged <= min(p1, p2)
+#     per row, a row b has:         merged <= min(p1, p2)   (the resurrection check)
+#     per row, a row b lacks:       merged <= max(p1, p2)   (a rename on one side)
+#
+# a key missing from a version read as zero. Both sides removing the same site is
+# no double count (min, not p1 + p2 - b); a row one side removed comes back only
+# if it was never in b, which is a row the other side added and its own gate held.
+#
 # Prove it fires before trusting it: `gates-can-fail` adds a bare site with its
-# row and requires this to go red.
+# row and requires this to go red, and builds a merge that resurrects a row the
+# other side removed and requires red.
 
 param(
     # The level `disallowed_methods` stands at in the two lint tables that may name it: none
@@ -197,15 +215,21 @@ $relative = "docs/plans/window-thread-bare-sites.tsv"
 $inventory = Join-Path $repo $relative
 $columns = "crate`tarm`titem`tentry`tcount"
 
+# A dictionary whose keys are compared byte for byte: PowerShell's own `@{}` and `[ordered]@{}`
+# ignore case, and `crate::x::Foo` and `crate::x::foo` are two items.
+function New-OrdinalMap {
+    return [Collections.Specialized.OrderedDictionary]::new([StringComparer]::Ordinal)
+}
+
 # The rows of one version: (crate, entry) -> total count. Item and arm remain
 # report columns in the equality test, but moves do not become historical debt.
 function Read-Inventory([string[]]$lines, [string]$where) {
-    $rows = [ordered]@{}
+    $rows = New-OrdinalMap
     $header = $false
     foreach ($line in $lines) {
         if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
         if (-not $header) {
-            if ($line -ne $columns) { throw "$where`: the columns are '$line', not '$columns'" }
+            if ($line -cne $columns) { throw "$where`: the columns are '$line', not '$columns'" }
             $header = $true
             continue
         }
@@ -220,6 +244,65 @@ function Read-Inventory([string[]]$lines, [string]$where) {
     }
     if (-not $header) { throw "$where has no column header" }
     return $rows
+}
+
+# The rows of one version, by row: (crate, arm, item, entry) -> count.
+function Read-InventoryRows([string[]]$lines, [string]$where) {
+    $rows = New-OrdinalMap
+    $header = $false
+    foreach ($line in $lines) {
+        if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
+        if (-not $header) {
+            if ($line -cne $columns) { throw "$where`: the columns are '$line', not '$columns'" }
+            $header = $true
+            continue
+        }
+        $cells = $line -split "`t"
+        if ($cells.Count -ne 5) { throw "$where`: not five cells: $line" }
+        $key = "$($cells[0])`t$($cells[1])`t$($cells[2])`t$($cells[3])"
+        if ($rows.Contains($key)) { throw "$where`: a row written twice: $line" }
+        $rows[$key] = [int]$cells[4]
+    }
+    return $rows
+}
+
+# The inventory's text at a revision, or a refusal: every revision a merge check reads has it.
+function Get-InventoryAt([string]$revision) {
+    $text = (& git show "${revision}:${relative}" 2>$null) | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "$relative is not at $revision, a revision the merge check of section 1 reads"
+    }
+    return ($text -split "`r?`n")
+}
+
+# One merge, held to the three-way bound at both keys. Returns the failures, named.
+function Test-Merge([string]$what, [string[]]$merged, [string]$p1, [string]$p2) {
+    $out = @()
+    $b = (& git merge-base $p1 $p2 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not $b) { return @("[merge] $what`: its parents $p1 and $p2 have no merge base") }
+    $b = @($b)[0]
+    $versions = @{ p1 = (Get-InventoryAt $p1); p2 = (Get-InventoryAt $p2); b = (Get-InventoryAt $b) }
+    foreach ($keying in @("family", "row")) {
+        $read = if ($keying -eq "row") { ${function:Read-InventoryRows} } else { ${function:Read-Inventory} }
+        $m = & $read $merged "$relative at $what"
+        $one = & $read $versions.p1 "$relative at $p1"
+        $two = & $read $versions.p2 "$relative at $p2"
+        $base = & $read $versions.b "$relative at $b"
+        foreach ($key in $m.Keys) {
+            $first = if ($one.Contains($key)) { $one[$key] } else { 0 }
+            $second = if ($two.Contains($key)) { $two[$key] } else { 0 }
+            $held = if ($keying -eq "row" -and -not $base.Contains($key)) {
+                [Math]::Max($first, $second)
+            } else {
+                [Math]::Min($first, $second)
+            }
+            if ($m[$key] -gt $held) {
+                $label = if ($keying -eq "row") { "the row" } else { "the (crate, entry)" }
+                $out += "[merge] $what brings back what a side removed: $label $($key -replace "`t", ' | ') holds $($m[$key]), where its parents allow $held (a merge keeps both sides' removals)"
+            }
+        }
+    }
+    return $out
 }
 
 # ── 1. the inventory (continued) ─────────────────────────────────────────────────────────────
@@ -250,6 +333,25 @@ try {
     }
     $against = "the merge base $($base.Substring(0, 12))"
     $before = Read-Inventory ($text -split "`r?`n") "$relative at $against"
+
+    # ── 1b. every merge keeps both sides' removals ──────────────────────────────────────────
+    $merges = @(& git rev-list --merges "$base..HEAD" 2>$null | Where-Object { $_ })
+    if ($LASTEXITCODE -ne 0) { throw "git rev-list --merges $base..HEAD failed" }
+    foreach ($merge in $merges) {
+        if (-not $merge) { continue }
+        $parents = @((& git rev-list --parents -n 1 $merge) -split ' ')
+        if ($parents.Count -ne 3) {
+            $failures += "[merge] $($merge.Substring(0, 12)) has $($parents.Count - 1) parents: a merge of more than two is refused, never read"
+            continue
+        }
+        $failures += Test-Merge "the merge $($merge.Substring(0, 12))" (Get-InventoryAt $merge) $parents[1] $parents[2]
+    }
+    & git rev-parse -q --verify MERGE_HEAD *> $null
+    if ($LASTEXITCODE -eq 0) {
+        $open = (& git rev-parse MERGE_HEAD)
+        $failures += Test-Merge "the open merge of $($open.Substring(0, 12))" ([IO.File]::ReadAllLines($inventory)) "HEAD" $open
+    }
+    Write-Host "the merges since $($base.Substring(0, 12)): $($merges.Count) read, each held to its parents' removals."
 
     # ── 4. a registry row without a ruling (M9) ──────────────────────────────────────────────
     $registry = "crates/bt-app/src/window_waits.tsv"
@@ -291,6 +393,50 @@ foreach ($row in $rowsNow.Keys) {
             if ($designText -notmatch "(?m)^### $([regex]::Escape($date)) —") {
                 $failures += "[ruling] registry row $row cites DESIGN.md $date, but no dated heading exists"
             }
+        }
+    }
+}
+
+# ── 7. the two closed exception lists grow only by a ruling (A2s; the R1 review's N4) ────────
+# `# counted-only` and `# emergency` (crate, arm, item, since, reason, ruling) are the functions an
+# `# effects` row of kind `drop-exception` or `emergency` may name besides the pinned `Drop`
+# bodies. A row the merge base lacks is admitted only when its ruling cell names the ticket and
+# the day of the ruling that allowed it (`T-A2-BARE-SITE-LINT 2026-10-17`), and refused otherwise;
+# a removal is always allowed. When the merge base has no such section this is the change that
+# introduces it, and that is said.
+function Read-ListedExceptions([string[]]$lines, [string]$name) {
+    $keys = @()
+    $rulings = New-OrdinalMap
+    $inside = $false
+    $header = $false
+    $present = $false
+    foreach ($line in $lines) {
+        if ($line.StartsWith("##")) { continue }
+        if ($line.StartsWith("# ")) { $inside = ($line -ceq "# $name"); if ($inside) { $present = $true }; continue }
+        if (-not $inside -or $line.Length -eq 0) { continue }
+        if (-not $header) { $header = $true; continue }
+        $cells = $line -split "`t"
+        $key = "$($cells[0]) | $($cells[1]) | $($cells[2])"
+        $keys += $key
+        $rulings[$key] = if ($cells.Count -ge 6) { $cells[5] } else { "" }
+    }
+    return @{ present = $present; keys = $keys; rulings = $rulings }
+}
+$registryNow = [IO.File]::ReadAllLines((Join-Path $repo $registry))
+foreach ($name in @("counted-only", "emergency")) {
+    $listedNow = Read-ListedExceptions $registryNow $name
+    $listedThen = Read-ListedExceptions ($then -split "`r?`n") $name
+    if (-not $listedThen.present) {
+        Write-Host "the merge base has no # $name`: this change introduces it ($($listedNow.keys.Count) rows), and there is nothing to compare."
+        continue
+    }
+    foreach ($key in $listedNow.keys) {
+        if ($listedThen.keys -ccontains $key) { continue }
+        $ruling = $listedNow.rulings[$key]
+        if ($ruling -cnotmatch '^T-[A-Z0-9-]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\z') {
+            $failures += "[exceptions] # $name adds '$key' with no ruling: a row joins only with the ticket and the day of the ruling that allowed it (its ruling cell, e.g. 'T-A2-BARE-SITE-LINT 2026-10-17')"
+        } else {
+            Write-Host "# $name adds '$key' under the ruling '$ruling'."
         }
     }
 }
