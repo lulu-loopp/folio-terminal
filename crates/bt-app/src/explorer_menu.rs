@@ -1962,7 +1962,7 @@ pub fn take_outcome() -> Option<Result<bool, PressFailure>> {
 /// The switch has one label on every machine and means a different amount on
 /// each of them, so this line is where the difference is written. It is the
 /// same job the line did while the top answer could be greyed —
-/// `psreadline::row_description`'s idiom, a control's own line carrying what
+/// the retired PSReadLine row's idiom, a control's own line carrying what
 /// the control cannot say — asked now of a switch that is never refused.
 #[must_use]
 pub fn row_description() -> &'static str {

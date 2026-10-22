@@ -641,10 +641,10 @@ pub mod doors {
         /// Row 17: the trace writer's bounded flush (`TraceFlush`).
         TraceFlush => "17", 214, [Exiting];
         /// Row 29: an update's exit guard at the process's end, bounded (`UpdateLeave`).
-        UpdateLeave => "29", 222, [Exiting];
+        UpdateLeave => "29", 112, [Exiting];
         /// Row 27: the media session's way out — the engines let go of, then the readers,
         /// waited for within their bounds before `MFShutdown` (`MediaQuiet`).
-        MediaQuiet => "27", 223, [Exiting];
+        MediaQuiet => "27", 222, [Exiting];
         /// Row 18: the launch handed to a running Folio, before the loop exists (`Starting`).
         LaunchHandOver => "18", 0, [Starting];
         /// Row 21: `CreateCoreWebView2CompositionController` (`WebController`).
@@ -899,6 +899,185 @@ pub fn admitted<D: Door, R>(
     let end = Instant::now();
     (meter.leave)(D::KEY, cookie, start, end);
     Ok(output)
+}
+
+// ---------------------------------------------------------------------------
+// The leg: one shared operation, entered from the window thread or from a worker
+// ---------------------------------------------------------------------------
+
+/// **Leave to run one shared operation of door `D`, from whichever side holds it** — the window
+/// thread's admission or a worker's context (`docs/plans/design/thread-door-2026-09-26.md`
+/// revision (m)1, R3′).
+///
+/// A shared operation is a body both sides call: the durable write that the settings store calls
+/// on the window thread and the session writer on its worker, for instance. Its functions take
+/// `&Leg<'_, doors::D>` for their operation's one door `D`, never a trait, so a leg of another
+/// door does not type. A leg is built once, at the operation's root, by one of its two
+/// constructors, and borrowed below it:
+///
+/// - [`Leg::owner`] takes the admission's [`WaitToken`] **by value**, so one admission roots one
+///   leg (`admitted::<doors::D, _>(|token| operation(&Leg::owner(token), …))`);
+/// - [`Leg::worker`] borrows the [`WorkerCtx`] the thread door or [`enter_standalone_main`] lent.
+///
+/// A body that must do something different on each side asks [`Leg::arm`]. Built only by those two
+/// constructors; `!Send`, `!Sync`, not `Clone`; it cannot outlive the admission or the borrow it
+/// was made from. **A leg carries no authority yet**: no guard recognises a function by the leg it
+/// takes, so a vocabulary site in such a function stays a bare-site row, and the registry's
+/// `shared-body` kind and `# graphs` section admit nothing. Recognising the one admitted shape, and
+/// the graph a leg's functions form, is 0.4.9's (T-LEG-AUTHORITY, the audit
+/// `T-A2-LEG-GUARD-AUDIT` of 2026-10-21).
+///
+/// **A leg is one door's** (plant 1 of (m)1.5: a `FontFamilyLookup` leg where a `TraceFlush` leg
+/// is wanted):
+///
+/// ```compile_fail
+/// use bt_effects::admission::{Leg, admitted, doors};
+/// fn flush_leg(_: &Leg<'_, doors::TraceFlush>) {}
+/// let _ = admitted::<doors::FontFamilyLookup, _>(|token| flush_leg(&Leg::owner(token)));
+/// ```
+///
+/// ```
+/// use bt_effects::admission::{Leg, admitted, doors};
+/// fn flush_leg(_: &Leg<'_, doors::TraceFlush>) {}
+/// let _ = admitted::<doors::TraceFlush, _>(|token| flush_leg(&Leg::owner(token)));
+/// ```
+///
+/// MUTATION: take the door parameter off `Leg` (one leg type for every door) and the first
+/// compiles.
+///
+/// **A worker's context is not a token** (plant 2: a `&WorkerCtx` handed to an owner body that
+/// takes `WaitToken<'_, doors::TraceFlush>`, as `trace_sink::flush` does):
+///
+/// ```compile_fail
+/// use bt_effects::admission::{WaitToken, doors, lend_worker};
+/// fn flush(_: WaitToken<'_, doors::TraceFlush>) {}
+/// let ctx = lend_worker("plant");
+/// flush(&ctx);
+/// ```
+///
+/// ```
+/// use bt_effects::admission::{Leg, doors, lend_worker};
+/// fn flush(_: &Leg<'_, doors::TraceFlush>) {}
+/// let ctx = lend_worker("plant");
+/// flush(&Leg::worker(&ctx));
+/// ```
+///
+/// MUTATION: none in this module makes the first compile; it is the type system's, kept beside the
+/// leg so a later conversion that widened `flush`'s parameter to a trait would have to delete it.
+///
+/// **The owner root consumes its token** (plant 3: `Leg::owner` handed a borrowed token, which
+/// would let one admission root two legs):
+///
+/// ```compile_fail
+/// use bt_effects::admission::{Leg, admitted, doors};
+/// let _ = admitted::<doors::TraceFlush, _>(|token| {
+///     let _leg = Leg::owner(&token);
+/// });
+/// ```
+///
+/// ```compile_fail
+/// use bt_effects::admission::{Leg, admitted, doors};
+/// let _ = admitted::<doors::TraceFlush, _>(|token| {
+///     let _first = Leg::owner(token);
+///     let _second = Leg::owner(token);
+/// });
+/// ```
+///
+/// MUTATION: derive `Clone` and `Copy` on `WaitToken` and the second compiles. The first is held
+/// twice: let the owner side keep a borrowed token (`Owner(&'a WaitToken<'a, D>)`, `owner(token:
+/// &'a WaitToken<'a, D>)`) and the controls below stop compiling while the plant still fails,
+/// because the token's lifetime is invariant and no borrow of it lives that long.
+///
+/// **It does not leave the admission** (its result cannot carry it out), **nor its thread**:
+///
+/// ```compile_fail
+/// use bt_effects::admission::{Leg, admitted, doors};
+/// let _escaped = admitted::<doors::TraceFlush, _>(|token| Leg::owner(token));
+/// ```
+///
+/// ```compile_fail
+/// fn is_send<T: Send>() {}
+/// is_send::<bt_effects::admission::Leg<'static, bt_effects::admission::doors::TraceFlush>>();
+/// ```
+///
+/// ```compile_fail
+/// fn is_sync<T: Sync>() {}
+/// is_sync::<bt_effects::admission::Leg<'static, bt_effects::admission::doors::TraceFlush>>();
+/// ```
+///
+/// ```compile_fail
+/// fn is_clone<T: Clone>() {}
+/// is_clone::<bt_effects::admission::Leg<'static, bt_effects::admission::doors::TraceFlush>>();
+/// ```
+///
+/// The control for the three probes: the same type, at the same path, where no auto trait or
+/// `Clone` is asked — so each probe above fails on the trait it asks for, not on the path.
+///
+/// ```
+/// fn is_sized<T: Sized>() {}
+/// is_sized::<bt_effects::admission::Leg<'static, bt_effects::admission::doors::TraceFlush>>();
+/// ```
+///
+/// ```
+/// use bt_effects::admission::{Arm, Leg, admitted, doors, lend_worker};
+/// let side = admitted::<doors::TraceFlush, _>(|token| {
+///     matches!(Leg::owner(token).arm(), Arm::Owner(_))
+/// });
+/// assert!(side.is_err(), "a thread with no role is refused, and the work does not run");
+/// let ctx = lend_worker("plant");
+/// assert!(matches!(Leg::<doors::TraceFlush>::worker(&ctx).arm(), Arm::Worker(_)));
+/// ```
+///
+/// MUTATION: give the owner side a `WaitToken<'static, D>` and the first compiles; replace
+/// `WaitToken`'s and `WorkerCtx`'s `_local` with `()` and the auto-trait probes compile; write
+/// `impl Clone for Leg` (a derive does not compile, the token is not `Clone`) and the last probe
+/// compiles.
+pub struct Leg<'a, D: Door> {
+    side: Side<'a, D>,
+}
+
+/// The two sides a leg may stand for. Private: a leg's side is chosen by its constructor alone.
+enum Side<'a, D: Door> {
+    Owner(WaitToken<'a, D>),
+    Worker(&'a WorkerCtx),
+}
+
+/// **Which side a leg stands for**, for the one statement in a shared body that differs between
+/// them (a nested admission on the owner side, a context handed on on the worker side). Borrowed
+/// from the leg, so it cannot outlive it and builds nothing.
+pub enum Arm<'l, 'a, D: Door> {
+    /// The window thread, inside door `D`'s admission.
+    Owner(&'l WaitToken<'a, D>),
+    /// A worker, on the context it was lent.
+    Worker(&'a WorkerCtx),
+}
+
+impl<'a, D: Door> Leg<'a, D> {
+    /// **The owner root**: the leg of the admission whose token this is. The token is consumed,
+    /// so an admission roots one leg.
+    #[must_use]
+    pub fn owner(token: WaitToken<'a, D>) -> Self {
+        Self {
+            side: Side::Owner(token),
+        }
+    }
+
+    /// **The worker root**: the leg of the worker whose context this is.
+    #[must_use]
+    pub fn worker(ctx: &'a WorkerCtx) -> Self {
+        Self {
+            side: Side::Worker(ctx),
+        }
+    }
+
+    /// Which side this leg stands for.
+    #[must_use]
+    pub fn arm(&self) -> Arm<'_, 'a, D> {
+        match &self.side {
+            Side::Owner(token) => Arm::Owner(token),
+            Side::Worker(ctx) => Arm::Worker(ctx),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

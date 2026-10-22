@@ -602,6 +602,14 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-timing-bound-tests.ps1
 
+      # The PSReadLine artefact gate holds the vendored package, its README, the build script's
+      # pinned table and Folio's manifest to one another (T-INTEGRATION-INJECT-2-BUILD). Its
+      # scratch-copy suite moves each pin alone, and puts a `.psm1` and a `FormatsToProcess`
+      # into the manifest, and requires each to be refused by the file that moved.
+      - name: the PSReadLine artefact gate can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-psreadline-artefact-tests.ps1
+
       # `docs/plans/DEAD-CODE.tsv` holds the undated `dead_code` sites the tree
       # had when the gate was written, and only shrinks; every other site is
       # dated and fails on the day after its date. Planting a row proves the
@@ -653,6 +661,144 @@ jobs:
           } finally {
             [IO.File]::WriteAllText($file, $original)
           }
+          exit 0
+
+      # A merge keeps both sides' removals (A2s). Three plants, each two sides
+      # committed from HEAD and their merge: both sides dropping one row passes
+      # (the control); one side dropping a row and the other its twin of the
+      # same (crate, entry) and count, merged with the first back, is refused by
+      # the row alone (the family total holds); and a merge that keeps a row one
+      # side renamed only by its case is refused, because keys are compared byte
+      # for byte. The checkout is put back exactly (an open merge aborted, the
+      # tree reset, the branch or detached HEAD it had) and that is checked.
+      - name: the bare-site merge check can actually fail
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $file = "docs/plans/window-thread-bare-sites.tsv"
+          $here = (git rev-parse HEAD)
+          $start = (git symbolic-ref -q HEAD)
+          $lines = [IO.File]::ReadAllText($file) -split "`n"
+          $rows = @($lines | Where-Object { $_ -and -not $_.StartsWith("#") } | Select-Object -Skip 1)
+          $cells = { param($row) $row -split "`t" }
+          $without = { param($drop) ((@($lines | Where-Object { $_ -cne $drop })) -join "`n") }
+          $git = @("-c", "user.name=gates-can-fail", "-c", "user.email=gates-can-fail@example.invalid")
+          # Two rows of one (crate, entry) with equal counts: the family bound holds when one comes back
+          # and the other stays removed, so only the row key can refuse.
+          $a = $null; $b = $null
+          foreach ($first in $rows) {
+            $f = & $cells $first
+            $twin = $rows | Where-Object { $_ -cne $first -and (& $cells $_)[0] -ceq $f[0] -and (& $cells $_)[3] -ceq $f[3] -and (& $cells $_)[4] -ceq $f[4] } | Select-Object -First 1
+            if ($twin) { $a = $first; $b = $twin; break }
+          }
+          if (-not $a) { throw "the inventory has no two rows of one (crate, entry) with equal counts to plant the row key with" }
+          # A row whose item has a lowercase letter: its case-changed twin is a rename one side makes.
+          $c = $rows | Where-Object { $_ -cne $a -and $_ -cne $b -and (& $cells $_)[2] -cmatch '[a-z]$' } | Select-Object -First 1
+          $cc = & $cells $c
+          $renamed = "$($cc[0])`t$($cc[1])`t$($cc[2].Substring(0, $cc[2].Length - 1))$($cc[2].Substring($cc[2].Length - 1).ToUpperInvariant())`t$($cc[3])`t$($cc[4])"
+          $d = $rows | Where-Object { $_ -cne $a -and $_ -cne $b -and $_ -cne $c } | Select-Object -Last 1
+          # One plant: two sides from HEAD, their merge written as `merged`, the check's refusal (or none).
+          function Plant([string]$one, [string]$two, [string]$merged) {
+            git switch --quiet --detach $here
+            [IO.File]::WriteAllText($file, $one)
+            git @git commit --quiet -am "plant: one side"
+            $side = (git rev-parse HEAD)
+            git switch --quiet --detach $here
+            [IO.File]::WriteAllText($file, $two)
+            git @git commit --quiet -am "plant: the other side"
+            git @git merge --quiet --no-ff --no-commit $side *> $null
+            [IO.File]::WriteAllText($file, $merged)
+            git add $file
+            git @git commit --quiet -m "plant: the merge"
+            try { & ./scripts/ci/check-window-waits.ps1 | Out-Null; $verdict = $null } catch { $verdict = $_.Exception.Message }
+            Write-Host "plant verdict: $(if ($verdict) { $verdict } else { 'passed' })"
+            return $verdict
+          }
+          $failures = @()
+          try {
+            # The control: both sides drop the same row, and so does the merge. Counted once, it passes.
+            $verdict = Plant (& $without $a) (& $without $a) (& $without $a)
+            if ($verdict) { $failures += "the convergent merge (both sides drop one row) is refused: $verdict" }
+            # One side drops a, the other b; the merge brings a back. The (crate, entry) total is within both
+            # sides' bound, so the row key alone refuses it.
+            $verdict = Plant (& $without $a) (& $without $b) (& $without $b)
+            $row = (($a -split "`t")[0..3] -join ' | ')
+            if (-not $verdict -or $verdict -notmatch [regex]::Escape("brings back what a side removed: the row $row holds")) {
+              $failures += "a merge that brings back the row $row one side removed was not refused by its row: $verdict"
+            }
+            if ($verdict -match 'brings back what a side removed: the \(crate, entry\)') {
+              $failures += "the same-family resurrection was refused by its total, not its row alone: $verdict"
+            }
+            # One side renames c's item by its case, the other drops d; the merge takes the other side's
+            # file, so c comes back under the spelling one side renamed away. Keys are compared byte for
+            # byte, so the row is refused; a reading that ignored case would pass it.
+            $verdict = Plant ((@($lines | ForEach-Object { if ($_ -ceq $c) { $renamed } else { $_ } })) -join "`n") (& $without $d) (& $without $d)
+            $row = (($c -split "`t")[0..3] -join ' | ')
+            if (-not $verdict -or $verdict -cnotmatch [regex]::Escape("brings back what a side removed: the row $row holds")) {
+              $failures += "a merge that keeps a row one side renamed by its case was not refused by its row: $verdict"
+            }
+          } finally {
+            & git rev-parse -q --verify MERGE_HEAD *> $null
+            if ($LASTEXITCODE -eq 0) { git merge --abort }
+            git reset --quiet --hard
+            if ($start) { git checkout --quiet --force ($start -replace '^refs/heads/', '') } else { git switch --quiet --detach $here }
+          }
+          $now = (git rev-parse HEAD)
+          $attached = (git symbolic-ref -q HEAD)
+          $dirty = (git status --porcelain)
+          if ($now -ne $here -or "$attached" -cne "$start" -or $dirty) {
+            $failures += "the plant did not put the checkout back: HEAD $now (was $here), ref '$attached' (was '$start'), status '$dirty'"
+          }
+          if ($failures) { throw ($failures -join "`n") }
+          exit 0
+
+      # The registry's two closed exception lists grow only by a ruling (A2s; the
+      # coordinator's ruling on the R1 review's N4). A `# emergency` row added
+      # without its ruling, with a lowercase one, with a day in other digits, or
+      # under a key that differs from a listed one only in case must be refused,
+      # and the row with its ruling admitted. The merge base is this commit for
+      # the plant; the ref and the file are put back, and that is checked.
+      - name: the exception lists' ruling rule can actually fail
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $file = "crates/bt-app/src/window_waits.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          $main = (git rev-parse refs/remotes/origin/main)
+          $header = "(# emergency\r?\ncrate\tarm\titem\tsince\treason\truling\r?\n)"
+          $row = "bt-app`t-`tcrate::planted`t2026-10-18`ta planted holder for the plant`t"
+          # An existing row's key with one letter's case changed: another key, so a row the base lacks.
+          $existing = "bt-app`t-`tcrate::Append_panic_report`t2026-10-18`ta case twin of a listed holder`t"
+          $failures = @()
+          # The check run with `line` added under `# emergency`; its refusal, or none.
+          function Added([string]$line) {
+            [IO.File]::WriteAllText($file, [regex]::Replace($original, $header, "`$1$line`n"))
+            try { & ./scripts/ci/check-window-waits.ps1 | Out-Null; $verdict = $null } catch { $verdict = $_.Exception.Message }
+            Write-Host "plant verdict: $(if ($verdict) { $verdict } else { 'passed' })"
+            return $verdict
+          }
+          try {
+            git update-ref refs/remotes/origin/main HEAD
+            foreach ($case in @(
+                @{ line = $row; what = "crate::planted"; why = "with no ruling" },
+                @{ line = "${row}t-a2-bare-site-lint 2026-10-18"; what = "crate::planted"; why = "a lowercase ruling" },
+                @{ line = "${row}T-A2-BARE-SITE-LINT $([char]0x0662)026-10-18"; what = "crate::planted"; why = "a day in other digits" },
+                @{ line = $existing; what = "crate::Append_panic_report"; why = "a key that differs from a listed one only in case, with no ruling" })) {
+              $refused = Added $case.line
+              if (-not $refused -or $refused -cnotmatch "\[exceptions\] # emergency adds 'bt-app \| - \| $([regex]::Escape($case.what))' with no ruling") {
+                $failures += "an exception row added with $($case.why) was not refused: $refused"
+              }
+            }
+            $refused = Added "${row}T-A2-BARE-SITE-LINT 2026-10-18"
+            if ($refused) { $failures += "an exception row added with its ruling was refused: $refused" }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+            git update-ref refs/remotes/origin/main $main
+          }
+          if ((git rev-parse refs/remotes/origin/main) -ne $main -or [IO.File]::ReadAllText($file) -cne $original -or (git status --porcelain)) {
+            $failures += "the plant did not put the checkout back (origin/main, $file, or the status)"
+          }
+          if ($failures) { throw ($failures -join "`n") }
           exit 0
 
       # The census's unknown list is keyed by identity (site, module, function,
@@ -904,6 +1050,7 @@ jobs:
           --package bt-render --package bt-winres --package bt-source
           --package bt-workbench --package bt-app --package bt-lint-probe
           --package bt-testpath --package bt-effects --package bt-compose
+          --package bt-render-probe
           -- --check
 
       # The two excluded packages are still *linted* — their libraries are
@@ -923,10 +1070,11 @@ jobs:
           -- -D warnings
 
       # Ours and alacritty's upstream suite in one go, because vendor is a
-      # member — minus the two crates whose tests are about hardware. `bt-pty`
-      # starts real ConPTY sessions and `bt-render` asks for a real adapter;
-      # each has a job of its own below, where the machine it needs is set up
-      # and where a failure means something specific.
+      # member — minus the three crates whose tests are about hardware. `bt-pty`
+      # starts real ConPTY sessions, and `bt-render` and `bt-render-probe` (the
+      # headless probe and the glyph read-back, thread-door note revision (l)4)
+      # ask for a real adapter; each has a job of its own below, where the
+      # machine it needs is set up and where a failure means something specific.
       #
       # Its own budget, under the job's, so that a run past it fails here with
       # a line naming the budget instead of being cancelled, without a reason,
@@ -939,7 +1087,7 @@ jobs:
       # clock, not by this step's.
       - name: test
         timeout-minutes: 65
-        run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render
+        run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render --exclude bt-render-probe
 
       # The adapter and cell_capture modules are the vendor compatibility seam. Their job is to
       # report terminal facts; importing document, detection, or viewport policy there recreates
@@ -1149,10 +1297,11 @@ jobs:
       - name: cargo-about
         run: cargo install cargo-about --locked --version 0.9.2 --features cli
 
-      # The three gates the licensing line owns: the generated third-party
+      # The gates the licensing line owns: the generated third-party
       # notices still match the lock file, no machine path or personal name is
-      # tracked, and every modified vendored file carries its Apache-2.0 §4(b)
-      # notice. Each says so and is skipped when it is not in the tree — this
+      # tracked, every modified vendored file carries its Apache-2.0 §4(b)
+      # notice, and the vendored PSReadLine package is the pinned one, its
+      # DLLs signed by Microsoft (T-INTEGRATION-INJECT-2-BUILD). Each says so and is skipped when it is not in the tree — this
       # branch and that one land separately, and a missing file is not a
       # violation.
       - name: the licensing line's gates
@@ -1162,7 +1311,8 @@ jobs:
             "scripts/check-notices.ps1",
             "scripts/check-machine-paths.ps1",
             "scripts/check-doc-words.ps1",
-            "scripts/check-vendor-notices.ps1"
+            "scripts/check-vendor-notices.ps1",
+            "scripts/ci/check-psreadline-artefact.ps1"
           )
           $ran = 0
           foreach ($gate in $gates) {
@@ -1287,14 +1437,14 @@ jobs:
       # DXGI prefers a `d3d10warp.dll` in the loading binary's own directory,
       # which is `target/debug/deps`.
       - name: build the render tests
-        run: cargo test -p bt-render --locked --no-run
+        run: cargo test -p bt-render -p bt-render-probe --locked --no-run
 
       - name: install WARP
         shell: pwsh
         run: ./scripts/ci/install-warp.ps1 -TargetDir target/debug
 
-      - name: test bt-render on a real device
-        run: cargo test -p bt-render --locked
+      - name: test bt-render and bt-render-probe on a real device
+        run: cargo test -p bt-render -p bt-render-probe --locked
 
   # ── the executable, started ───────────────────────────────────────────────
   #
@@ -1480,6 +1630,7 @@ jobs:
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
           -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p bt-compose -p alacritty_terminal
+          -p bt-render-probe
 
       # **The application, every target of it** (M1-10). A step of its own and
       # not a name on the line above, because the claim is a different one: the
@@ -1546,7 +1697,7 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-platform -p bt-pty -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p alacritty_terminal
-          -p bt-render -p bt-corpus -p bt-term
+          -p bt-render -p bt-render-probe -p bt-corpus -p bt-term
 
       # **The lint line, held on the second platform** — `logic`'s own clippy
       # line, word for word (ticket 72, D-63). M1-10 started it on `bt-platform`
@@ -1710,6 +1861,7 @@ jobs:
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
           -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p bt-compose -p alacritty_terminal
+          -p bt-render-probe
 
       # `core-macos`'s ten, plus `bt-pty` for the reason above and minus
       # `bt-math` for one of the same shape. `bt-render` is still checked and not

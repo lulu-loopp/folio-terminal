@@ -1,0 +1,5 @@
+paragraph: foo
+rule
+code
+| "bar"
+heading 1: baz

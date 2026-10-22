@@ -916,7 +916,7 @@ impl Phase {
     /// reserved nonce, or `None` in every other phase. The single owner of
     /// what is started at `TrialStarting` — the exit guards name it
     /// (`update_apply_windows::opens_now`), a start admits only it
-    /// (`update_startup::run`), and only it commits itself
+    /// (`update_startup::run_by`), and only it commits itself
     /// (`update_apply::commit_last_trial`).
     pub(crate) fn reserved_trial(&self) -> Option<Nonce> {
         match self {
@@ -1430,7 +1430,7 @@ impl ReceiptSight {
 /// 2026-10-08), each with its row of [`Role::beyond`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Role {
-    /// The ordinary start (`update_startup::run`) and its decisions.
+    /// The ordinary start (`update_startup::run_by`) and its decisions.
     Start,
     /// The trial's watch ([`trial_sight`]).
     TrialWatch,
@@ -3123,6 +3123,32 @@ impl Home {
             },
             installed,
         ))
+    }
+
+    /// **The installation home of the rescue copy whose executable is
+    /// `exe`**, found from its own path (T-RESCUE-COPY-CARD): on Windows
+    /// [`Home::of_rescue`]'s; on macOS the rescue clone's — `exe` inside a
+    /// bundle `<parent>/.<Bundle>.folio-update/<txn>/rescue/<Bundle>`, the
+    /// clone of the installed `<parent>/<Bundle>` ([`Home::rescue_bundle`]),
+    /// whose home is that bundle's locator. `None` for every other executable.
+    /// The `<txn>` folder's name is not checked (as in [`Home::of_rescue`]):
+    /// the start this home is found for only reads.
+    pub(crate) fn of_rescue_copy(platform: HostPlatform, exe: &Path) -> Option<Self> {
+        match platform {
+            HostPlatform::Windows => Self::of_rescue(platform, exe).map(|(home, _)| home),
+            HostPlatform::MacOs => {
+                let (bundle, _) = bundle_of(exe)?;
+                let rescue = bundle.parent()?;
+                let root = rescue.parent()?.parent()?;
+                if rescue.file_name()? != "rescue" {
+                    return None;
+                }
+                let (home, _) = Self::of_rescue_named(platform, exe, root)?;
+                let installed = home.installed_bundle()?;
+                (installed.file_name()? == bundle.file_name()?).then_some(home)
+            }
+            HostPlatform::OtherUnix => None,
+        }
     }
 
     /// **The home the entrance named, and the installed program the rescue
@@ -8015,7 +8041,7 @@ mod parse_sites {
     pub(super) const SITES: &[Site] = &[
         site(
             "H1+J1+J2",
-            "crate::update_startup::run",
+            "crate::update_startup::run_by",
             Reads::SightOfRead,
             1,
             Is::Reader(Role::Start),

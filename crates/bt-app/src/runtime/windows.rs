@@ -1,6 +1,7 @@
 //! `windows` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::Ending;
 use super::pointer::touch::let_the_system_translate_touch;
 use crate::window_seam::Native;
 use crate::window_seam::prelude::*;
@@ -28,7 +29,7 @@ use bt_persist::{SessionSidebarModeV1, SessionTabLayoutV1, SessionWindowV1, TabV
 use bt_platform::admission::{admitted, doors};
 use bt_render::{FrameSource, FrameTrigger, WindowRenderer};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -1644,17 +1645,8 @@ impl<B: Backend> Runtime<'_, B> {
     /// A save refused at the hand-over is said on the pane that shows its file,
     /// now; the wait finds it unsaved and the window stays.
     fn save_and_wait(&mut self, closes: WindowId) -> Result<()> {
-        if self.uncommitted_edit_name().is_some() {
-            self.finish_rename(RenameExit::Blur)?;
-        }
-        self.save_every_dirty_preview();
+        let awaited = self.hand_over_every_save()?;
         let now = Instant::now();
-        let awaited = self
-            .window
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.preview_pool.close_awaited())
-            .collect();
         let request = if closes == self.window_id() {
             restore::GateRequest::Shut
         } else {
@@ -1667,7 +1659,23 @@ impl<B: Backend> Runtime<'_, B> {
             until: now + restore::CLOSE_WAITS_FOR_A_SAVE,
             saving: true,
         });
-        self.repaint_preview()
+        Ok(())
+    }
+
+    /// **Every save this window owes, handed to the storage worker** — `Save all` on a
+    /// shut's question (S-6b) and this window's half of the quit's `Save` (S-6c): the open
+    /// editor committed as Enter commits it, then every dirty buffer's save handed over as
+    /// a press hands it ([`Self::save_every_dirty_preview`]; the window thread writes
+    /// nothing), the panes repainted. Answers every buffer a close of this window would
+    /// lose something of, as each stands now ([`preview::PreviewPool::close_awaited`]):
+    /// what the wait that follows waits for.
+    pub(crate) fn hand_over_every_save(&mut self) -> Result<Vec<preview::Awaited>> {
+        if self.uncommitted_edit_name().is_some() {
+            self.finish_rename(RenameExit::Blur)?;
+        }
+        let handed = self.save_every_dirty_preview();
+        self.repaint_preview()?;
+        Ok(handed.awaited)
     }
 
     /// **A close waiting for its saves, looked at again** (S-6b) — on every turn
@@ -1700,17 +1708,19 @@ impl<B: Backend> Runtime<'_, B> {
         };
         let found = crate::what_a_close_wait_found(&self.window.tabs, &wait);
         let finds = |what: preview::AtTheClose| found.iter().any(|(_, at)| *at == what);
-        if finds(preview::AtTheClose::Edited) {
-            return Ok(AfterTheWait::Nothing);
-        }
-        if finds(preview::AtTheClose::OnItsWay) && now < wait.until {
-            self.window.dirty_gate.wait(wait);
-            return Ok(AfterTheWait::Nothing);
+        let stands = restore::SavesFound::of(&found, now, wait.until);
+        match stands {
+            restore::SavesFound::Edited => return Ok(AfterTheWait::Nothing),
+            restore::SavesFound::OnTheirWay => {
+                self.window.dirty_gate.wait(wait);
+                return Ok(AfterTheWait::Nothing);
+            }
+            restore::SavesFound::PastTheBound | restore::SavesFound::Answered => {}
         }
         let Some(request) = self.close_as_it_stands(&wait) else {
             return Ok(AfterTheWait::Nothing);
         };
-        if finds(preview::AtTheClose::OnItsWay) {
+        if stands == restore::SavesFound::PastTheBound {
             self.window.dirty_gate.open_after_the_wait(request);
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
@@ -1831,73 +1841,35 @@ impl<B: Backend> Runtime<'_, B> {
             .collect()
     }
 
-    /// **Write this window's half of the save branch back** (slice E2 phase ①,
-    /// v3).
-    ///
-    /// Item by item through the pool's own [`preview::PreviewPool::save_dirty`],
-    /// which is `Ctrl+S`'s conflict check and `Ctrl+S`'s atomic write; then the
-    /// open editor, committed exactly as Enter commits it. What went through and
-    /// what did not are both reported, because a save that half worked leaves a
-    /// state no single sentence describes.
-    ///
-    /// A conflict is a failure *here* even though it is not one at the pane
-    /// (`SaveOutcome`'s own note: "the disk moved and the window is declining to
-    /// guess"). The difference is what happens next: at the pane the buffer
-    /// survives and the reader can look; at a quit the process was about to
-    /// leave, and leaving would take the buffer with it.
-    pub(crate) fn quit_save(&mut self) -> Result<quit::SaveReport> {
-        let mut report = quit::SaveReport::default();
-        for tab in &mut self.window.tabs {
-            for (name, outcome) in tab.preview_pool.save_dirty() {
-                match outcome {
-                    preview::SaveOutcome::Saved | preview::SaveOutcome::SavedOrdinarily => {
-                        report.saved.push(name);
-                    }
-                    preview::SaveOutcome::Conflict => report
-                        .failed
-                        .push((name, preview::preview_conflict_notice().to_owned())),
-                    preview::SaveOutcome::Failed(error) => {
-                        eprintln!("recoverable preview save failure: {error}");
-                        report.failed.push((name, error));
-                    }
-                }
-            }
-        }
-        if let Some(name) = self.uncommitted_edit_name() {
-            self.finish_rename(RenameExit::Blur)?;
-            report.saved.push(name);
-        }
-        // **The failures are named where they happened.** One card per window
-        // holding one, rather than a single card in whichever window the chord
-        // was pressed in: a notice belongs where the attention already is, and
-        // the buffers this sentence is about are in *this* window.
-        if !report.failed.is_empty() {
-            let names = report.failed_names().join(", ");
+    /// **What this window's buffers came to under the quit's `Save`, said on its card**
+    /// (S-6c; `FolioApp::settle_the_quits_saves`): the buffers whose saves did not land —
+    /// refused, failed, met another writer's bytes, or edited since they were handed over —
+    /// named as the synchronous save always named them ("Not saved: …"), and the ones still
+    /// on their way to the disk when the quit stopped waiting, in their own true words.
+    /// One card for each, in this window, because the buffers it names are here; the panes
+    /// have said each reason as its answer came back.
+    pub(crate) fn say_the_quits_saves(
+        &mut self,
+        not_saved: &[String],
+        on_its_way: &[String],
+    ) -> Result<()> {
+        if !not_saved.is_empty() {
             self.toast(
                 toast::ToastKind::Error,
                 toast::ToastAnchor::Window,
                 None,
-                i18n::quit_not_saved(&names),
+                i18n::quit_not_saved(&not_saved.join(", ")),
             )?;
         }
-        // The panes that were showing those buffers are looking at what is now on
-        // the disk, and the ones that failed are still dirty and still say so.
-        self.repaint_preview()?;
-        Ok(report)
-    }
-
-    /// **Keep what this window would lose, on a stop that cannot ask** (D-4,
-    /// 0.4.8 G7): every dirty preview buffer of every tab, through the quit's
-    /// judged write and, where that is refused, into `recovery`
-    /// ([`crate::keep_unsaved_edits_over`]), each said in `diagnostics.log` with
-    /// where its edit is. No card and no repaint: the window is about to be
-    /// closed by a process that is stopping.
-    pub(crate) fn keep_unsaved_edits(&mut self, recovery: &Path) {
-        for kept in
-            crate::keep_unsaved_edits_over(&mut self.window.tabs, recovery, SystemTime::now())
-        {
-            crate::diagnostics::note(&kept.line());
+        if !on_its_way.is_empty() {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::quit_save_on_its_way(&on_its_way.join(", ")),
+            )?;
         }
+        self.repaint_preview()
     }
 
     /// **Take this window off the screen and let go of everything it holds**
@@ -2147,11 +2119,88 @@ impl<B: Backend> Runtime<'_, B> {
         self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
-            || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
             || self.window.settings.is_open()
             || self.restore_card_is_up()
+    }
+
+    /// **The window lost the keyboard** (`WindowEvent::Focused(false)`) — a lifecycle door of
+    /// T-POINTER-CAPTURE's R-9, and the whole of what a blur says: the rename commits, the
+    /// gesture a held button was making is cancelled, the glance, the hint card, the palette and
+    /// the input method's caret go, and the summoned window is told it may go too.
+    pub(crate) fn window_blurred(&mut self) -> Result<()> {
+        self.observe_ime_focus(false);
+        // Losing the window is a blur, and blur commits (J102). The
+        // mock-up's editor is a real focusable element and gets this
+        // from the DOM; here it has to be said. A press that was still
+        // being held goes with it — the button-up will arrive to a
+        // window that is no longer listening.
+        let committed = self.finish_rename(RenameExit::Blur);
+        // K129. Losing the window is losing the Win32 mouse capture, and
+        // capture loss is this platform's `pointercancel`: the pointer
+        // stream ends with no button-up to end it. It is the only such
+        // signal winit surfaces — there is no `WM_CAPTURECHANGED` event —
+        // and an un-torn-down drag would leave a tab floating over a strip
+        // nobody is holding any more. Same path as Esc: never mind.
+        // F72: the same capture loss ends a divider drag, and ends it
+        // the same way — restoring the one ratio it had been moving.
+        // Left holding the button over a window that is no longer
+        // listening, the gesture was never finished, and a drag nobody
+        // finished did not choose a ratio.
+        //
+        // **And every other gesture with them** (T-POINTER-CAPTURE R-9): a
+        // thumb, a scrubber, a carried window or a selection stops following a
+        // hand that is gone, and a press handed to a program is told its
+        // button came up — one ending, which each gesture answers its own way.
+        let cancelled = self.end_capture(Ending::Cancel);
+        // P149's `window blur`: a glance is about where the pointer is,
+        // and a window that is not listening has no pointer.
+        self.hide_file_peek();
+        // And §7.1.5e′'s: a card about the keys under your hands is a
+        // card about a keyboard this window no longer has. `hide` and
+        // not `spend` — nothing was pressed, so a hand that comes back
+        // still holding `Ctrl` is answered again. And the input method's
+        // context goes with the keyboard: the keyboard's own door
+        // ([`Runtime::blurred`]) says both.
+        self.blurred();
+        // **And the command palette** (DESIGN.md §7.55): 失焦即收. It is
+        // a box for aiming at something *now*, and a window the reader
+        // has left is a window they are not aiming at — coming back to
+        // a half-typed query over a stale list would be this product
+        // holding a question nobody is still asking. It is the one
+        // popup that goes here, and the difference is real: every other
+        // one is anchored to a control the reader can see and come back
+        // to, while this one is anchored to an intent.
+        let _ = self.close_command_palette();
+        self.window.tab_clicks.interrupt();
+        self.window.ime_cursor.reset();
+        hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
+            self.destroy_ime_caret("window_blur")
+        });
+        self.set_cursor_focus(false, Instant::now());
+        // **The summoned terminal goes when the keyboard does** (§7.54),
+        // and it goes on the *next* turn: hiding a window inside the
+        // event that says it lost the focus is asking Windows to move the
+        // focus while it is telling you about the focus. A bit and a turn
+        // — see `FolioApp::settle_quake`, where every other thing this
+        // window does out of the ordinary is also spent.
+        //
+        // The switch is read there and not here for the same reason the
+        // hide is: what this arm knows is that the keyboard left, which
+        // is true whatever the row says. Only a window that is actually
+        // on the screen leaves a bit, because a blur that arrives after
+        // it has gone is a blur about nothing - hiding it is what moved
+        // the focus in the first place.
+        if self.is_quake_window() && self.app.quake.is_showing() {
+            self.app.quake.note_blur();
+        }
+        committed.and(cancelled).and_then(|()| {
+            self.publish_frame(FrameTrigger {
+                occurred_at: Instant::now(),
+                source: FrameSource::Expose,
+            })
+        })
     }
 
     /// **Close this window** (multiwindow slice C).
@@ -2178,6 +2227,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// question a shut can ask is the dirty gate, and it has already been asked,
     /// at the door, before this is reached.
     pub(crate) fn close_window(&mut self, ending: bool) -> Result<()> {
+        // **A window that closes takes the gesture it was holding** (T-POINTER-CAPTURE R-9): a
+        // cancel, said while the window, its tabs and its shells are all still here to be told.
+        self.end_capture(Ending::Cancel)?;
         // §7.1.4: "未提交的重命名在序列化前提交（blur 语义,输入到一半关窗不丢
         // 新名字）". Before the snapshot below, not after — the name has to be on
         // the tab by the time the tab is written down.

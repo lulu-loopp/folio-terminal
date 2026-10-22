@@ -13,7 +13,7 @@ use crate::test_support::{calls_of, source};
 use bt_source::{Pattern, Search, View, needle};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ── the layers are the paint list ─────────────────────────────────────────────
 
@@ -793,19 +793,17 @@ fn a_capture(
         owner,
         button,
         started: None,
+        os: None,
+        last: None,
     }
 }
 
 /// The layers that took a release before it reached the gesture that owned it
 /// (§3.1 column a), each by the door its press arm calls in `mouse_input`.
-const LAYERS_THAT_ATE_RELEASES: [(&str, &str); 24] = [
+const LAYERS_THAT_ATE_RELEASES: [(&str, &str); 23] = [
     ("the quit card", "self.quit_card_layout()"),
     ("the dirty gate", "self.dirty_gate_layout()"),
     ("the first-run card", "self.first_run_layout()"),
-    (
-        "the PSReadLine invitation",
-        "self.psreadline_invite_layout()",
-    ),
     ("the paste card", "self.paste_card_layout()"),
     ("the update card", "self.update_card_layout()"),
     ("the uninstall card", "self.uninstall_card_layout()"),
@@ -1232,8 +1230,260 @@ fn a_divider_released_anywhere_commits_through_the_whole_dispatch() {
     );
     assert_eq!(
         crate::test_support::squeezed_body("Runtime", "a_gesture_holds_the_pointer"),
-        "{self.a_capture_holds_the_pointer()}",
-        "every capture holds the pointer — the one slot, not a list of latches (supersedes \
+        "{self.app.pointer_capture.is_some()}",
+        "every capture holds the pointer — the one slot, the application's since cut 6, not a list of latches (supersedes \
          every_carry_this_window_can_hold_is_named_by_the_one_predicate)"
     );
+}
+
+// ── the endings (cut 5, R-9) ──────────────────────────────────────────────────
+
+/// **The lifecycle doors** (§4.1 cut 5's matrix): each door, and the call through which it ends
+/// the capture before it changes what the owner names. The resize door's sample is its own item
+/// (the divider's, generalised), so its row names that call; every other door calls
+/// `end_capture` itself.
+const LIFECYCLE_DOORS: [(&str, &str); 15] = [
+    ("window_blurred", "end_capture"),
+    (
+        "flush_pending_pty_resize",
+        "end_a_capture_that_lost_its_pointer",
+    ),
+    ("scale_factor_changed", "end_capture"),
+    ("hide_quake_window", "end_capture"),
+    ("close_window", "end_capture"),
+    ("activate_tab", "end_capture"),
+    ("close_tab", "end_capture"),
+    ("close_pane", "end_capture"),
+    ("toggle_pane_zoom", "end_capture"),
+    ("sweep_preview_panes", "end_capture"),
+    ("leave_preview_buffer_in", "end_capture"),
+    ("rebuild_preview_document", "end_capture"),
+    ("dismiss_float", "end_capture"),
+    ("hide_file_peek", "end_capture"),
+    ("settings_closed", "end_capture"),
+];
+
+/// **The matrix's rows that are not items yet**, each with when it lands — never silent
+/// (2026-10-21, round 2): the OS drag-out door lands with its feature (§7: no drag-out exists),
+/// and the page seat's two doors end a page's own capture, which is cut 7's. The drag-out door is
+/// asserted absent, so the day it is written this list fails until it moves into
+/// [`LIFECYCLE_DOORS`].
+const DOORS_NOT_YET_ITEMS: [(&str, &str, &str); 3] = [
+    (
+        "Runtime",
+        "drag_out_to_the_system",
+        "2026-10-21: lands with the OS drag-out feature (design §7), with `OsDragHandoff`",
+    ),
+    (
+        "WebSeat",
+        "place",
+        "2026-10-21: cut 7 — the seat's own button-up before a page leaves the glass",
+    ),
+    (
+        "WebSeat",
+        "park_for_handoff",
+        "2026-10-21: cut 7 — the seat's own button-up before a page is handed over",
+    ),
+];
+
+/// The callers of `end_capture` that are not doors of the matrix, each with the road it is: the
+/// resize door's sample, a press of the held button proving the capture stale (R-5 rule 2), and
+/// a preview surface turned to another document — the buffer-left door's twin.
+const ENDINGS_REACHED_ANOTHER_WAY: [&str; 3] = [
+    "Runtime::end_a_capture_that_lost_its_pointer",
+    "Runtime::cancel_own_capture",
+    "Runtime::land_preview_source_on",
+];
+
+/// The product callers of a method, as `Owner::name`, with how many calls each makes.
+fn product_callers(owner: &str, name: &str) -> BTreeMap<String, usize> {
+    calls_of(owner, name)
+        .in_the_product(source())
+        .owners(source())
+        .into_iter()
+        .map(|(caller, count)| {
+            (
+                format!("{}::{}", caller.type_owner.unwrap_or_default(), caller.name),
+                count,
+            )
+        })
+        .collect()
+}
+
+/// **Every product item whose body calls `type_owner::name`**, resolved by bt-source's call
+/// graph rather than by the name (a `close` is not the sheet's `close`): the items that spell
+/// the name are read first, and each is asked what its calls of that name reach. Each caller is
+/// `module::Owner::name`.
+fn resolved_callers_of(type_owner: &str, name: &str) -> BTreeSet<String> {
+    use bt_source::call_graph::{Arms, Resolver, Target};
+    let index = source();
+    let resolver = Resolver::new(&[("bt-app", index)], Arms::product())
+        .unwrap_or_else(|refusals| panic!("the call graph refuses bt-app: {refusals:?}"));
+    let callee = index
+        .one(&bt_source::ItemQuery::method(type_owner, name))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let callee = resolver
+        .id_of("bt-app", callee)
+        .expect("an indexed item is an item of the call graph");
+    let spelled = index
+        .search(&Search::new(
+            needle!(Pattern::call(name)),
+            View::Identifiers,
+        ))
+        .unwrap_or_else(|failure| panic!("{failure}"))
+        .in_the_product(index);
+    let mut callers = BTreeSet::new();
+    for caller in spelled.owners(index).into_keys() {
+        let mut query = match &caller.type_owner {
+            Some(owner) => bt_source::ItemQuery::method(owner, &caller.name),
+            None => bt_source::ItemQuery::function(&caller.name),
+        }
+        .in_module(&caller.module_path);
+        if let Some(trait_name) = &caller.trait_name {
+            query = query.of_trait(trait_name);
+        }
+        for record in index
+            .find(&query)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+        {
+            let Some(id) = resolver.id_of("bt-app", record) else {
+                continue;
+            };
+            let reaches = resolver
+                .resolve_callees(id)
+                .iter()
+                .any(|edge| edge.site.name == name && edge.to == Target::Item(callee));
+            if reaches {
+                callers.insert(format!(
+                    "{}::{}::{}",
+                    caller.module_path,
+                    caller.type_owner.clone().unwrap_or_default(),
+                    caller.name
+                ));
+            }
+        }
+    }
+    callers
+}
+
+/// RED (T-POINTER-CAPTURE cut 5, R-9) — **every lifecycle door ends the capture**, and no caller
+/// of the ending is outside the matrix: one row per door of §4.1 cut 5, read off the index, that
+/// the door's body makes its ending call, and every caller of `end_capture` is a door or one of
+/// the three roads named beside them. Two doors are reached by more than one road, so those roads
+/// are held too: every closer of the settings sheet outside the sheet's own module — a caller of
+/// `SettingsPanel::close` or `SettingsPanel::toggle`, resolved by the call graph — is
+/// `settings_closed` or a caller of it (the sheet shutting itself answers
+/// `SettingsKeyVerdict::Closed`, whose arms call it), and the dispatcher's blur arm says nothing
+/// but `window_blurred`: the dispatcher calls none of the blur's own work.
+///
+/// MUTATION: remove the `end_capture` call from `hide_quake_window` — its row names the door.
+#[test]
+fn every_lifecycle_door_ends_the_capture() {
+    for (owner, door, lands) in DOORS_NOT_YET_ITEMS {
+        // The drag-out door is not written yet; the page seat's two are, and end no capture yet.
+        let written = usize::from(owner == "WebSeat");
+        source()
+            .find(&bt_source::ItemQuery::method(owner, door).expecting(written))
+            .unwrap_or_else(|failure| {
+                panic!("`{owner}::{door}` is no longer what this list says ({lands}): {failure}")
+            });
+        assert!(
+            !product_callers("Runtime", "end_capture").contains_key(&format!("{owner}::{door}")),
+            "`{owner}::{door}` ends a capture: give it its row in the matrix ({lands})"
+        );
+    }
+    for (door, call) in LIFECYCLE_DOORS {
+        let callers = product_callers("Runtime", call);
+        assert!(
+            callers.contains_key(&format!("Runtime::{door}")),
+            "the lifecycle door `Runtime::{door}` ends the capture through `{call}`; its callers \
+             are {callers:?}"
+        );
+    }
+    let doors: BTreeSet<String> = LIFECYCLE_DOORS
+        .iter()
+        .filter(|(_, call)| *call == "end_capture")
+        .map(|(door, _)| format!("Runtime::{door}"))
+        .chain(
+            ENDINGS_REACHED_ANOTHER_WAY
+                .iter()
+                .map(|road| (*road).to_owned()),
+        )
+        .collect();
+    let ending: BTreeSet<String> = product_callers("Runtime", "end_capture")
+        .into_keys()
+        .collect();
+    assert_eq!(
+        ending, doors,
+        "every caller of `end_capture` is a door of the matrix or a road named beside it"
+    );
+    assert_eq!(
+        product_callers("Runtime", "end_a_capture_that_lost_its_pointer"),
+        BTreeMap::from([("Runtime::flush_pending_pty_resize".to_owned(), 1)]),
+        "the resize door is the one turn-by-turn sample of the system's capture"
+    );
+
+    // The settings sheet's closers.
+    let closing: BTreeSet<String> = product_callers("Runtime", "settings_closed")
+        .into_keys()
+        .collect();
+    let closers: BTreeSet<String> = ["close", "toggle"]
+        .into_iter()
+        .flat_map(|name| resolved_callers_of("SettingsPanel", name))
+        .collect();
+    for (door, why) in [
+        ("toggle_settings_panel", "the gear"),
+        (
+            "open_scheme_for_editing",
+            "the verb that hands the reader a scheme file",
+        ),
+    ] {
+        assert!(
+            closers.contains(&format!("crate::Runtime::{door}")),
+            "the call graph finds {why} shutting the sheet: {closers:?}"
+        );
+    }
+    {
+        let name = "close or toggle";
+        for closer in closers {
+            if closer.starts_with("crate::settings::") {
+                continue;
+            }
+            let (rest, item) = closer.rsplit_once("::").expect("a caller has a name");
+            let owner = rest.rsplit_once("::").map_or(rest, |(_, owner)| owner);
+            let short = format!("{owner}::{item}");
+            assert!(
+                short == "Runtime::settings_closed" || closing.contains(&short),
+                "`{closer}` shuts the settings sheet (`SettingsPanel::{name}`) without the door \
+                 that lets go of a gesture held on it; `settings_closed` is called by {closing:?}"
+            );
+        }
+    }
+
+    // The blur arm. **A deny-list, by what the index can say**: a match arm is not an item, so the
+    // index can name `window_blurred`'s callers and the calls an item makes, but not the
+    // statements of one arm; reading the arm's text would be a new source-text pin, which this
+    // ticket does not add. So the dispatcher is held to being the blur's only caller and to making
+    // none of the blur's own calls itself — a statement of the blur's work written beside
+    // `window_blurred` in the dispatcher names its call here.
+    let dispatcher = "FolioApp::on_window_event".to_owned();
+    assert_eq!(
+        product_callers("Runtime", "window_blurred"),
+        BTreeMap::from([(dispatcher.clone(), 1)]),
+        "the window event dispatcher's blur arm is the blur's one road"
+    );
+    for blur_work in [
+        "end_capture",
+        "finish_rename",
+        "hide_file_peek",
+        "blurred",
+        "close_command_palette",
+        "cancel_drag",
+        "cancel_divider_drag",
+    ] {
+        assert!(
+            !product_callers("Runtime", blur_work).contains_key(&dispatcher),
+            "the dispatcher does a blur's work (`{blur_work}`) beside `window_blurred`"
+        );
+    }
 }

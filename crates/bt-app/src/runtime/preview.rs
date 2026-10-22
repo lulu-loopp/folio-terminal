@@ -1,6 +1,7 @@
 //! `preview` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::{Gone, OwnerGone};
 use crate::computation_lane::{Asking, ComputationId};
 use crate::input::Keystroke;
 use crate::window_seam::prelude::*;
@@ -851,11 +852,11 @@ impl<B: Backend> Runtime<'_, B> {
         let start = (!stored.is_empty())
             .then(|| Path::new(&stored).parent().map(Path::to_path_buf))
             .flatten();
-        match self
-            .window
-            .image_picker
-            .request(bt_platform::FilePickKind::Image, start.as_deref())
-        {
+        match self.window.image_picker.request(
+            bt_platform::FilePickKind::Image,
+            start.as_deref(),
+            crate::i18n::Text::ImageFileType.text(),
+        ) {
             Ok(true) => self.window.image_pick_pending = Some(FilePick::BackgroundImage),
             Ok(false) => {}
             Err(error) => eprintln!("recoverable picture chooser failure: {error}"),
@@ -2340,19 +2341,9 @@ impl<B: Backend> Runtime<'_, B> {
         {
             self.preview_edit_focus = None;
         }
-        if self
-            .held_preview_selecting()
-            .copied()
-            .is_some_and(|surface| !alive.contains(&surface))
-        {
-            self.drop_preview_selecting();
-        }
-        if self
-            .held_preview_text_drag()
-            .is_some_and(|drag| !alive.contains(&drag.surface))
-        {
-            self.drop_preview_text_drag();
-        }
+        // **And the gesture held on a surface that is gone** (T-POINTER-CAPTURE R-9, owner
+        // gone): a selection, a thumb, a picture being panned, a scrubber.
+        //
         // **The card is not in `alive` and must not be swept out by its
         // absence.** [`PreviewSurface::Peek`] is not in the tree and not in the
         // float host — that is the same sentence the `Peek` arm above answers
@@ -2360,22 +2351,17 @@ impl<B: Backend> Runtime<'_, B> {
         // [`Self::hide_file_peek`] is where a gesture on the card is let go.
         // Without the guard, any seat-set change would drop a hand that is in
         // the middle of dragging a table sideways inside a glance.
-        if self.held_preview_block_drag().copied().is_some_and(|drag| {
-            drag.surface != PreviewSurface::Peek && !alive.contains(&drag.surface)
-        }) {
-            self.drop_preview_block_drag();
+        if let Some(surface) = self
+            .own_capture()
+            .and_then(|capture| capture.owner.preview_surface())
+            .filter(|surface| *surface != PreviewSurface::Peek && !alive.contains(surface))
+        {
+            self.end_capture(OwnerGone(Gone::Surface(surface)));
         }
         if self.preview_block_hover.is_some_and(|(surface, _)| {
             surface != PreviewSurface::Peek && !alive.contains(&surface)
         }) {
             self.preview_block_hover = None;
-        }
-        if self
-            .held_preview_body_drag()
-            .copied()
-            .is_some_and(|drag| !alive.contains(&drag.surface))
-        {
-            self.drop_preview_body_drag();
         }
         if self
             .preview_body_hover
@@ -3012,7 +2998,10 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some((left, at)) = left {
             self.window.tabs[index].preview_views.remember(&left, at);
         }
-        self.let_go_of_preview_gestures_on(surface);
+        // The surface is showing another document now: the gesture held on the one it left ends
+        // with it (T-POINTER-CAPTURE R-9, owner gone), as it does when the buffer is left.
+        self.end_capture(OwnerGone(Gone::Surface(surface)));
+        self.let_go_of_preview_hovers_on(surface);
         if let Some(want) = wants_read
             && !self.app.preview_worker.request(preview::PreviewRequest {
                 window: self.window_id(),
@@ -3131,53 +3120,28 @@ impl<B: Backend> Runtime<'_, B> {
                     .remember(&source, view);
             }
         }
-        self.let_go_of_preview_gestures_on(surface);
+        // **The gesture held on it ends with the document it was held on** (T-POINTER-CAPTURE
+        // R-9, owner gone): a selection of a document nobody is looking at any more, a thumb on
+        // a track that means something else in the next one.
+        self.end_capture(OwnerGone(Gone::Surface(surface)));
+        self.let_go_of_preview_hovers_on(surface);
     }
 
-    /// **What the keyboard and the hand were doing on this surface ends with
+    /// **What the keyboard and the pointer's hover were doing on this surface ends with
     /// the document it was doing it to** — the tab's singletons, cleared only
     /// when they name this surface: there is one pointer and one keyboard, so a
-    /// pane leaving a document has no business answering for a gesture that is
-    /// happening in the pane beside it.
-    fn let_go_of_preview_gestures_on(&mut self, surface: PreviewSurface) {
+    /// pane leaving a document has no business answering for a hover or a caret
+    /// that is in the pane beside it. The gesture a held button was making on it
+    /// is the capture's to end ([`Self::end_capture`]).
+    fn let_go_of_preview_hovers_on(&mut self, surface: PreviewSurface) {
         if self.preview_edit_focus == Some(surface) {
             self.preview_edit_focus = None;
-        }
-        if self.held_preview_selecting().copied() == Some(surface) {
-            self.drop_preview_selecting();
-        }
-        // A selection being drawn across a page that has just been swapped out
-        // is a selection of a document nobody is looking at any more.
-        if self
-            .held_preview_text_drag()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_text_drag();
-        }
-        // A thumb held over the swap would be dragging a block that is not there
-        // any more.
-        if self
-            .held_preview_block_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_block_drag();
         }
         if self
             .preview_block_hover
             .is_some_and(|(hovered, _)| hovered == surface)
         {
             self.preview_block_hover = None;
-        }
-        // And the body's own bar with them: the next document is a different
-        // length, so a thumb held across the swap would be dragging a track that
-        // means something else.
-        if self
-            .held_preview_body_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_body_drag();
         }
         if self
             .preview_body_hover
@@ -5995,23 +5959,6 @@ impl<B: Backend> Runtime<'_, B> {
         )
     }
 
-    /// **A gesture on a rendered page that will get no release** — the window
-    /// lost the focus, and with it the pointer capture, mid-drag (K129's
-    /// `pointercancel`, one surface along).
-    ///
-    /// The record is dropped unspent, as every other press this window cancels
-    /// on a blur is: a gesture nobody finished chose nothing. What it frees is
-    /// the span the gesture was holding (owner's ruling 2026-09-23): a drag left
-    /// standing would keep the page drawing the span it began on however the
-    /// caret moved after, so the page is laid out again from where the caret and
-    /// the rendered selection stand now.
-    pub(crate) fn cancel_preview_text_drag(&mut self) -> Result<()> {
-        if self.take_preview_text_drag().is_some() {
-            self.repaint_preview()?;
-        }
-        Ok(())
-    }
-
     /// **Whether a press on this surface may put a caret in the page** (T5 ①).
     ///
     /// Three answers folded into one so that the press does not have to hold
@@ -7819,21 +7766,90 @@ impl<B: Backend> Runtime<'_, B> {
     /// nothing — its answer said on the pane of its tab that shows its file, and
     /// a refusal at the hand-over said there now. A buffer no pane of its tab
     /// shows is said on no surface: if it does not land, the window's card names
-    /// it (`Runtime::settle_close_wait`).
-    pub(in crate::runtime) fn save_every_dirty_preview(&mut self) {
+    /// it (`Runtime::settle_close_wait`). Answers the refusals, with why, and every
+    /// buffer the wait that follows waits for ([`preview::PreviewPool::close_awaited`]).
+    pub(in crate::runtime) fn save_every_dirty_preview(&mut self) -> preview::HandedOver {
         let refused = self.app.preview_saves.save_a_window_for_a_shut(self.window);
         let now = Instant::now();
+        let mut handed = preview::HandedOver::default();
         for (surface, source, why) in refused {
             let still_shows_it = self
                 .preview_buffer_on(surface)
                 .is_some_and(|buffer| buffer.source() == &source);
             if still_shows_it {
                 self.preview_pane_mut(surface).say(Some((
-                    preview::save_notice(preview::SaveOutcome::Failed(why)),
+                    preview::save_notice(preview::SaveOutcome::Failed(why.clone())),
                     now,
                 )));
             }
+            handed.refused.push((source, why));
         }
+        handed.awaited = self
+            .window
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.preview_pool.close_awaited())
+            .collect();
+        handed
+    }
+
+    /// **Keep what this window would lose, on a stop that cannot ask** (D-4, 0.4.8 G7; S-6c):
+    /// the first half of the stop, once the window has been photographed and let go
+    /// (`FolioApp::stop_every_window`). Every dirty buffer's save is handed to the storage
+    /// worker as a press hands it ([`Self::save_every_dirty_preview`]) — the window thread
+    /// writes nothing — and every tab's pool is held past the window
+    /// ([`preview::StopKeeps`]) until the worker has ended, when what no file took is kept in
+    /// `recovery` (`App::keep_what_the_stop_did_not_save`). No card and no repaint: the
+    /// window is going with a process that is stopping, and its renderer may be what failed.
+    pub(crate) fn keep_unsaved_edits(&mut self, recovery: &Path) {
+        let handed = self.save_every_dirty_preview();
+        self.app.stop_keeps.handed(recovery, handed);
+        for tab in &mut self.window.tabs {
+            self.app
+                .stop_keeps
+                .hold(std::mem::take(&mut tab.preview_pool));
+        }
+    }
+
+    /// **Hand this window's saves over for the system's end of the session, and take nothing
+    /// from it** (T-ENDSESSION-SAVES): every dirty buffer's save handed to the storage worker as
+    /// a press hands it ([`Self::save_every_dirty_preview`]) — the window thread writes nothing —
+    /// with every pool left in its tab and the window left standing, because a session taken back
+    /// finds every window as it was. What the hand-over came to is the caller's, for
+    /// [`Self::keep_what_the_systems_end_did_not_save`] once the document behind these saves has
+    /// had its wait.
+    pub(crate) fn hand_over_for_the_systems_end(&mut self) -> preview::HandedOver {
+        self.save_every_dirty_preview()
+    }
+
+    /// **What the system's end of the session keeps of this window's edits, once the document's
+    /// wait is over and the answers have been heard** (T-ENDSESSION-SAVES): each tab's
+    /// [`preview::PreviewPool::kept_after_the_stop`] over what [`Self::hand_over_for_the_systems_end`]
+    /// handed — a buffer its save cleaned is `Saved`, and one its save did not clean, or a body a
+    /// save sent that did not land, is copied into `recovery`, never over the file (§5.3 row 20c).
+    /// The pools stay in their tabs and the buffers as they stand: dirty where the save did not
+    /// land, so a session taken back still holds the edit.
+    ///
+    /// `said` is every refusal the storage worker's answers gave (heard by
+    /// [`Self::hear_preview_saves`]): with the hand-over's own refusals, each copy's line names
+    /// why its file did not take the edit — the disk's own reason where the disk refused it.
+    pub(crate) fn keep_what_the_systems_end_did_not_save(
+        &mut self,
+        handed: &preview::HandedOver,
+        said: &[(preview::PreviewSource, String)],
+        recovery: &Path,
+        at: SystemTime,
+    ) -> Vec<preview::Kept> {
+        let mut refused = handed.refused.clone();
+        refused.extend_from_slice(said);
+        self.window
+            .tabs
+            .iter_mut()
+            .flat_map(|tab| {
+                tab.preview_pool
+                    .kept_after_the_stop(&handed.awaited, &refused, recovery, at)
+            })
+            .collect()
     }
 
     /// **The storage worker's answers about preview saves, heard by this
@@ -7843,9 +7859,15 @@ impl<B: Backend> Runtime<'_, B> {
     /// file. An
     /// answer this window holds no buffer for is left in `answers`, for the next
     /// window or the sink.
+    ///
+    /// Every answer that says the file did not take its body — the conflict, or the disk's own
+    /// refusal ([`preview::SaveOutcome::refusal`]) — is put in `refused`, before the repaint, so
+    /// a caller that keeps copies of what did not land names the reason
+    /// (`FolioApp::keep_what_the_systems_end_did_not_save`, as `preview::StopKeeps::keep` does).
     pub(crate) fn hear_preview_saves(
         &mut self,
         answers: &mut Vec<preview::SaveAnswer>,
+        refused: &mut Vec<(preview::PreviewSource, String)>,
     ) -> Result<()> {
         let mut pools: Vec<&mut preview::PreviewPool> = self
             .window
@@ -7865,6 +7887,9 @@ impl<B: Backend> Runtime<'_, B> {
             let still_shows_it = self
                 .preview_buffer_on(surface)
                 .is_some_and(|buffer| buffer.source() == &source);
+            if let Some(why) = said.clone().refusal() {
+                refused.push((source, why));
+            }
             if still_shows_it {
                 self.preview_pane_mut(surface)
                     .say(Some((preview::save_notice(said), now)));
@@ -8813,14 +8838,9 @@ impl<B: Backend> Runtime<'_, B> {
         };
         self.preview_pane_mut(surface)
             .key_parsed_source(parsed_source);
-        // Drag and hover identities are positional too; a new parse retires them.
-        if self
-            .held_preview_block_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_block_drag();
-        }
+        // Drag and hover identities are positional too; a new parse retires them — the block
+        // thumb held on one (T-POINTER-CAPTURE R-9, owner gone) and the block under the hand.
+        self.end_capture(OwnerGone(Gone::Blocks(surface)));
         if self
             .preview_block_hover
             .is_some_and(|(over, _)| over == surface)
@@ -12983,7 +13003,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// Every animation deadline this window reports is clamped to it. Reporting
     /// an earlier one would wake the loop to be turned away by the rate gate
     /// and then re-arm the same deadline — a spin dressed as a schedule.
-    fn strip_animation_next_tick(&self, interval: Duration) -> Option<Instant> {
+    pub(in crate::runtime) fn strip_animation_next_tick(
+        &self,
+        interval: Duration,
+    ) -> Option<Instant> {
         let strip = self
             .window
             .strip_animation_ticked_at
@@ -14209,6 +14232,17 @@ impl<B: Backend> crate::App<B> {
     pub(crate) fn sink_preview_save_answers(&mut self, answers: Vec<preview::SaveAnswer>) {
         for answer in answers {
             self.preview_saves.sink(answer);
+        }
+    }
+
+    /// **The second half of a stop that cannot ask** (S-6c; D-4, 0.4.8 G7), once the storage
+    /// worker has ended or been let go at its bound (`SessionStore::close`, §5.3 row 16b): the
+    /// buffers the stop held hear what came back, and whatever no file took is copied into the
+    /// `recovered` folder ([`preview::StopKeeps::keep`]), each said in `diagnostics.log` with
+    /// where its edit is. Nothing on every road but a stop.
+    pub(crate) fn keep_what_the_stop_did_not_save(&mut self, at: SystemTime) {
+        for kept in self.stop_keeps.keep(&mut self.preview_saves, at) {
+            crate::diagnostics::note(&kept.line());
         }
     }
 }

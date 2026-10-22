@@ -1020,7 +1020,7 @@ static PROBE: LazyLock<CopilotProbe> =
 
 /// Teach the probe how to bring the event loop round when its answer lands.
 ///
-/// [`crate::psreadline::install_wake`]'s twin and for its reason: a settings dialog standing on the
+/// [`crate::update::install_wake`]'s twin and for its reason: a settings dialog standing on the
 /// Agents page while the probe is still out has a row that will not correct itself — a modal is up,
 /// so there is no shell output, no hover and no keystroke coming to produce a frame.
 pub(crate) fn install_wake(wake: impl Fn() + Send + Sync + 'static) {

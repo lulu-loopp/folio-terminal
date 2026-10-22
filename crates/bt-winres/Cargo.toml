@@ -16,6 +16,17 @@ publish.workspace = true
 # it replaces, and these are not.
 
 [dependencies]
+# **Optional, and off unless a caller asks for `inflate`** (T-INTEGRATION-INJECT-2-BUILD):
+# `pinned::entry` takes one deflated entry out of a vendored package, which is what the
+# two build scripts that read one (`bt-pty`'s ConPTY sidecar, `bt-app`'s PSReadLine) and
+# the tests that hold them turn the feature on for. The macOS bundle script below
+# compiles this crate with no feature and so still with no dependency at all. The crate
+# is already in `Cargo.lock` through `flate2` and `png`, at this version, so the feature
+# costs no new package.
+miniz_oxide = { version = "=0.8.9", optional = true }
+
+[features]
+inflate = ["dep:miniz_oxide"]
 
 # **The one thing in this workspace a shell script on the Mac has to be able to
 # run.** M5-3's bundle script needs `Info.plist` with the workspace version in

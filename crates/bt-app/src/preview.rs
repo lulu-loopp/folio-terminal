@@ -26,6 +26,7 @@
 //! The two that need bytes, a binary body and a file past the head limit, are the
 //! worker's to answer.
 
+use std::borrow::Cow;
 use std::io::Read;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -34,6 +35,7 @@ use std::time::SystemTime;
 
 use crate::window_seam::LoopProxy;
 use anyhow::{Context, Result};
+use bt_detect::fence;
 use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 use winit::window::WindowId;
 
@@ -975,6 +977,9 @@ pub enum MarkdownBlock {
         items: Vec<Vec<Span>>,
     },
     Code {
+        /// The fence's language: its info string's first word
+        /// (`bt_detect::fence::FenceOpening::language`), which is what the label
+        /// shows and the highlighter is asked for.
         lang: Option<String>,
         text: String,
     },
@@ -2338,6 +2343,9 @@ pub fn parse_markdown_mapped(
     let mut list_source: Vec<TextOrigin> = Vec::new();
     let mut list_lines: Option<(usize, usize)> = None;
     let mut ordered: Option<u64> = None;
+    // The columns the open item's content stands at (CommonMark §5.2), which is
+    // what a fence inside that item is indented by before it is a fence at all.
+    let mut list_column = 0usize;
     let mut paragraph: Vec<&str> = Vec::new();
     let mut paragraph_lines: Vec<usize> = Vec::new();
     let mut index = 0usize;
@@ -2350,7 +2358,13 @@ pub fn parse_markdown_mapped(
         let line = lines[at];
 
         // ── the fence, which swallows everything until it closes ────────────
-        if let Some(rest) = line.strip_prefix("```") {
+        //
+        // Read through `bt_detect::fence`, the grammar the terminal reads its
+        // fences with (T-FENCE-GRAMMAR-SHARED): a fence is the same fence in a
+        // pane and in a preview. A fence inside a list item is read off the item's
+        // content column, and the list is cut around it — an item holds one
+        // paragraph here, not blocks, so the code stands between two lists.
+        if let Some(open) = fence_at(line, (!list.is_empty()).then_some(list_column)) {
             flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
             flush_list(
                 &mut list,
@@ -2359,21 +2373,9 @@ pub fn parse_markdown_mapped(
                 &mut list_lines,
                 &mut out,
             );
-            let lang = rest.trim();
-            let lang = (!lang.is_empty()).then(|| lang.to_owned());
-            let mut body = Vec::new();
-            index += 1;
-            while index < lines.len() && !lines[index].starts_with("```") {
-                body.push(lines[index]);
-                index += 1;
-            }
-            // A fence nobody closed still draws, rather than swallowing the rest
-            // of the document in silence (mock-up 4939) — which is what the
-            // `index < len` bound above means when the loop runs off the end.
-            index += usize::from(index < lines.len());
-            let text = body.join("\n");
-            let origins = fence_origins(&text, &body, &out);
-            out.push_lines(MarkdownBlock::Code { lang, text }, at, index - 1, origins);
+            let (block, after, origins) = fenced_code(&lines, at, open, &out);
+            out.push_lines(block, at, after - 1, origins);
+            index = after;
             continue;
         }
 
@@ -2570,6 +2572,7 @@ pub fn parse_markdown_mapped(
             if list.is_empty() {
                 ordered = number;
             }
+            list_column = list_content_column(line, item);
             let text = item.trim();
             list.push(text.to_owned());
             list_source.push(TextOrigin::slice(out.offset_of(text), text.len()));
@@ -3229,34 +3232,145 @@ fn joined_origin(lines: &[&str], out: &RangedBlocks) -> TextOrigin {
     origin
 }
 
-/// **A fence's pieces**: one per body line, tabs expanded as the page expands
-/// them.
-fn fence_origins(text: &str, body: &[&str], out: &RangedBlocks) -> BlockOrigins {
-    // `text.lines()` is `body` again — that is what `join` and `lines` are to
+/// **A fence opened on this line**: its fence, its language, and the columns of
+/// the container it stands in (0 at the top level).
+struct OpenFence {
+    fence: fence::Fence,
+    language: Option<String>,
+    container: usize,
+}
+
+/// The fence `line` opens, if it opens one, read by `bt_detect::fence`.
+///
+/// `item` is the open list item's content column, when a list is open. A list
+/// row whose item begins with a fence opens it at the item's content column
+/// (CommonMark §5.2 ex. 318, 324); a line under an open item that is indented
+/// to its content column and is a fence there opens it inside the item (ex.
+/// 321). Anything else is asked at the top level, where a fence may stand
+/// indented up to three spaces (§4.5 ex. 131–133).
+fn fence_at(line: &str, item: Option<usize>) -> Option<OpenFence> {
+    let fence_in = |content: &str, container: usize| {
+        fence::fence_opening(content).map(|opening| OpenFence {
+            fence: opening.fence,
+            language: opening.language().map(str::to_owned),
+            container,
+        })
+    };
+    if let Some((_, text)) = parse_list_row(line) {
+        let column = list_content_column(line, text);
+        return fence_in(&line[column..], column);
+    }
+    if let Some(column) = item
+        && let Some(content) = fence::strip_container_indent(line, column)
+        && let Some(found) = fence_in(&content, column)
+    {
+        return Some(found);
+    }
+    fence_in(line, 0)
+}
+
+/// The column a list item's content stands at, CommonMark §5.2: the marker and
+/// the spaces after it, unless those spaces begin indented code (or there is no
+/// content), when the content is one space past the marker. A row's marker is
+/// ASCII, so its columns are its bytes.
+fn list_content_column(line: &str, item: &str) -> usize {
+    let marker = line.len() - item.len();
+    if item.trim().is_empty() || fence::is_indented_code(item) {
+        marker
+    } else {
+        marker + (item.len() - item.trim_start_matches(' ').len())
+    }
+}
+
+/// **A fence's block**, from its opening line `start` to its closer, the end of
+/// its container, or the end of the document — a fence nobody closed still
+/// draws, rather than swallowing the rest of the document in silence (mock-up
+/// 4939). Answers the block, the line after it, and its pieces.
+///
+/// Every body line loses its container's columns and then up to the opening's
+/// own indentation (`bt_detect::fence`'s two strips, in that order); a line
+/// indented short of the container ends the container and the fence with it.
+fn fenced_code(
+    lines: &[&str],
+    start: usize,
+    open: OpenFence,
+    out: &RangedBlocks,
+) -> (MarkdownBlock, usize, BlockOrigins) {
+    let mut body: Vec<(Cow<'_, str>, &str)> = Vec::new();
+    let mut index = start + 1;
+    while let Some(&line) = lines.get(index) {
+        let Some(content) = fence::strip_container_indent(line, open.container) else {
+            break;
+        };
+        if fence::fence_closes(&content, &open.fence) {
+            index += 1;
+            break;
+        }
+        let drawn = match content {
+            Cow::Borrowed(content) => fence::strip_fence_indent(content, &open.fence),
+            Cow::Owned(content) => {
+                Cow::Owned(fence::strip_fence_indent(&content, &open.fence).into_owned())
+            }
+        };
+        body.push((drawn, line));
+        index += 1;
+    }
+    let text = body
+        .iter()
+        .map(|(drawn, _)| drawn.as_ref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // `text.lines()` is the body again — that is what `join` and `lines` are to
     // each other — except that a body ending in a blank line loses it to the
     // break that joined it. Zipping walks the pieces the page will draw, which
     // is the numbering that has to agree.
-    BlockOrigins::new(
+    let origins = BlockOrigins::new(
         text.lines()
-            .zip(body)
-            .map(|(_, line)| tab_origin(line, out.offset_of(line)))
+            .zip(&body)
+            .map(|(_, (drawn, source))| fence_line_origin(drawn, source, out))
             .collect(),
-    )
+    );
+    let block = MarkdownBlock::Code {
+        lang: open.language,
+        text,
+    };
+    (block, index, origins)
 }
 
-/// **One fence line's map**, [`expand_tabs`]'s walk read for provenance rather
-/// than for text.
+/// **One fence line's map**: what the strips left of `source`, its tabs
+/// expanded as the page expands them.
+///
+/// `bt_detect::fence` answers a stripped line as a suffix of the source line,
+/// with spaces in front of it exactly where it split a tab. So the longest run
+/// the drawn line and its source end on together is the copied part, and
+/// whatever stands before it is those spaces — the page's own, like the spaces a
+/// tab expands to.
+fn fence_line_origin(drawn: &str, source: &str, out: &RangedBlocks) -> TextOrigin {
+    let copied = drawn
+        .bytes()
+        .rev()
+        .zip(source.bytes().rev())
+        .take_while(|(drawn, source)| drawn == source)
+        .count();
+    let split = drawn.len() - copied;
+    let rest = &source[source.len() - copied..];
+    let mut origin = TextOrigin::new();
+    origin.drawn(split);
+    tab_origin(rest, out.offset_of(rest), split, &mut origin);
+    origin
+}
+
+/// **One fence line's tabs**, [`expand_tabs`]'s walk read for provenance rather
+/// than for text, from `column` on.
 ///
 /// A tab is one source byte drawn as up to four spaces, and none of those spaces
 /// is a copy of it: they are the fence's own indentation, spelled by the
 /// renderer. The characters either side of it are copies like any other.
-fn tab_origin(line: &str, at: usize) -> TextOrigin {
-    let mut origin = TextOrigin::new();
+fn tab_origin(line: &str, at: usize, mut column: usize, origin: &mut TextOrigin) {
     if !line.contains('\t') {
         origin.copied(at, line.len());
-        return origin;
+        return;
     }
-    let mut column = 0usize;
     let mut byte = 0usize;
     for cluster in bt_unicode::graphemes(line) {
         if cluster == "\t" {
@@ -3269,7 +3383,6 @@ fn tab_origin(line: &str, at: usize) -> TextOrigin {
         }
         byte += cluster.len();
     }
-    origin
 }
 
 /// **A display formula's one piece**: `$$`, the body, `$$`.
@@ -6066,7 +6179,7 @@ impl PreviewBuffer {
         if self.head_asked {
             // Answered by the read's landing, not before it (round 8): a
             // keystroke before then is on a body that is not the other
-            // writer's, and the quit's writer still refuses.
+            // writer's, and the quit's save still sends nothing.
             self.on_disk.leave_the_conflict_unanswered();
             self.read_after = true;
             return true;
@@ -6091,8 +6204,8 @@ impl PreviewBuffer {
     /// (round 6, the coordinator's ruling R1): after a conflict or a refusal
     /// over a body undone since the press, the only copy of what was sent is in
     /// the redo history — or, its tail discarded, nowhere but here. A quit's and
-    /// a stop's roads owe it ([`PreviewPool::save_dirty`],
-    /// [`PreviewPool::keep_dirty`]).
+    /// a stop's roads owe it ([`PreviewPool::quit_names`],
+    /// [`PreviewPool::kept_after_the_stop`]).
     ///
     /// **Judged by the history, not by the bytes** (round 7, the coordinator's
     /// ruling): the body sent is owed only while it lives behind the cursor —
@@ -6163,6 +6276,26 @@ impl PreviewBuffer {
         }
     }
 
+    /// **This buffer's save, handed to the storage worker for a shut's `Save all`, a quit's
+    /// `Save` or a stop that cannot ask** (S-6b, S-6c; [`PreviewPool::save_for_a_shut`]): a
+    /// dirty body is sent as a press sends it ([`Self::request_save`]), its answer owed to
+    /// `asked_from`. A clean one has nothing to send, and one whose conflict the pane said and
+    /// nobody has answered is not sent: none of these is the person's answer to bytes they may
+    /// not have seen (S-6a's ruling). Answers the refusal made at the hand-over, if one was.
+    pub(crate) fn save_for_a_shut(
+        &mut self,
+        saves: &mut PreviewSaves,
+        asked_from: crate::PreviewSurface,
+    ) -> Option<String> {
+        if !self.dirty || self.on_disk.has_an_unanswered_conflict() {
+            return None;
+        }
+        match self.request_save(saves, asked_from) {
+            SaveAsked::Refused(why) => Some(why),
+            SaveAsked::Sent | SaveAsked::Pending => None,
+        }
+    }
+
     /// **What has become of this buffer, for a close that waits for it**
     /// (S-6b; [`crate::restore::CloseWait`]) — read on each turn the wait is looked at.
     ///
@@ -6190,89 +6323,11 @@ impl PreviewBuffer {
         }
     }
 
-    /// **Write the body back to its file now, on the thread that calls this** —
-    /// what a quit's `Save` and a stop that cannot ask still do on the window
-    /// thread ([`PreviewPool::save_dirty`], [`PreviewPool::keep_dirty`]; row 20's
-    /// residue, which S-6c moves onto the storage worker's `Documents` phase).
-    /// Every interactive save is a request instead ([`Self::request_save`]).
-    ///
-    /// **Under the same precondition as every save**: the file's exact bytes
-    /// must be [`OnDisk`]'s, decided by the one function the worker decides it
-    /// with ([`crate::document_request::precondition`]). A file that holds other
-    /// bytes is [`SaveOutcome::Conflict`] (ruling 8⑨), and the revision stays
-    /// what it was: unlike the conflict an interactive save answers, which the
-    /// pane says to the person and a second press answers, nobody here has seen
-    /// the other writer's bytes, and a stop that cannot ask must not write over
-    /// them on the strength of a quit's attempt — so the next press meets them
-    /// and says the conflict once more, and the press after that writes. A
-    /// conflict the pane has said and no press has answered is a conflict here
-    /// too, whatever the precondition would say (the coordinator's ruling: a
-    /// stop never writes over bytes the person has not acted on). A save already on the worker
-    /// is not written over: the buffer answers [`SaveOutcome::Failed`], and the
-    /// quit that asked stays (S-6a's choice (b); S-6c's `Documents` phase waits
-    /// for the answer instead).
-    ///
-    /// The write keeps what the file carried (audit 3 F-1,
-    /// [`bt_persist::atomic_replace_keeping_metadata`]), in the encoding the
-    /// file was read in, mark included (T2 ①). **On the Windows preserving arm
-    /// the step is `ReplaceFileW`, a sequence and not one atomic rename**: a
-    /// power loss between its two moves leaves the document under the backup
-    /// name, recoverable by hand (`docs/DESIGN.md`, 2026-09-20, known limits).
-    /// A link is replaced by a file and a second hard-linked name keeps the old
-    /// bytes, as they always were on this road (J5 Q5(b) is ruled for the
-    /// worker's road and built there first).
-    pub fn write_now_for_quit(&mut self) -> SaveOutcome {
-        let Some(path) = self.source.file_path().map(Path::to_path_buf) else {
-            return SaveOutcome::Failed(NO_FILE_BEHIND_THIS_VIEW.to_owned());
-        };
-        let Some(content) = self.content.as_deref() else {
-            return SaveOutcome::Failed(crate::i18n::Text::PreviewNothingToSave.text().to_owned());
-        };
-        if self.on_disk.is_out() {
-            return SaveOutcome::Failed(crate::i18n::Text::PreviewSaveOnItsWay.text().to_owned());
-        }
-        // **A conflict the pane said and nobody has answered** (S-6a, the
-        // coordinator's ruling): the revision is the other writer's bytes, so
-        // the precondition would hold — and a quit or a stop is not the
-        // person's answer. Only a press is.
-        if self.on_disk.has_an_unanswered_conflict() {
-            return SaveOutcome::Conflict;
-        }
-        let expected = self.on_disk.expected();
-        match crate::document_request::precondition(
-            read_for_the_precondition(&path),
-            expected.as_deref(),
-        ) {
-            crate::document_request::Precondition::Holds => {}
-            crate::document_request::Precondition::Moved(_)
-            | crate::document_request::Precondition::Raced => return SaveOutcome::Conflict,
-            crate::document_request::Precondition::Unread(error) => {
-                return SaveOutcome::Failed(error);
-            }
-        }
-        let bytes = self.encoding.encode(content);
-        if let Err(error) = bt_persist::atomic_replace_keeping_metadata(&path, &bytes) {
-            return SaveOutcome::Failed(error.to_string());
-        }
-        // **A body sent that did not land, written over by this body or a later
-        // one** (round 8): the bytes and the history's position of it are
-        // settled — what the file holds now is that body's successor.
-        let supersedes = !self.undo.the_body_sent_is_behind();
-        self.on_disk.placed(bytes.into(), supersedes);
-        if supersedes {
-            self.undo.forget_the_body_sent();
-        }
-        // **Where the file now stands in this body's history** (ticket T3): as
-        // a landed request marks it ([`Self::hear_save`]).
-        self.undo.mark_saved();
-        self.dirty = self.undo.is_dirty();
-        SaveOutcome::Saved
-    }
-
     /// **A copy of this buffer's body in `folder`, never over the file it came from** (D-4,
-    /// 0.4.8 G7): what a stop that cannot wait for the reader keeps of an edit
-    /// [`Self::write_now_for_quit`] could not write back — the file refused, it changed on disk
-    /// since it was read, or a save of it was still on the storage worker.
+    /// 0.4.8 G7): what a stop that cannot wait for the reader keeps of an edit its save did
+    /// not write back ([`PreviewPool::kept_after_the_stop`], S-6c) — the file refused, it
+    /// changed on disk since it was read, or the save had not answered when the storage
+    /// worker ended.
     ///
     /// In the encoding the file was read in, mark included, as a save writes it, under a
     /// name that says when and what: `<UTC instant> <file name>`, with ` (n)` before the name when
@@ -7352,41 +7407,6 @@ impl PreviewPool {
             .map(|buffer| buffer.name.as_str())
     }
 
-    /// **Write every dirty buffer in this pool back**, in the pool's own order,
-    /// and report what each one came to (multiwindow slice E2 phase ①).
-    ///
-    /// One door for the quit card's `Save`, and it goes through
-    /// [`PreviewBuffer::write_now_for_quit`] — the byte precondition every save
-    /// is conditional on, and the write, on the window thread until S-6c moves
-    /// the quit's saves into the storage worker's `Documents` phase. A buffer
-    /// whose interactive save is still on the worker is not written over: it
-    /// answers as not saved, and the quit that asked stays (S-6a).
-    ///
-    /// **Every dirty buffer is tried, including the ones after a failure.**
-    /// Stopping at the first refusal would hand the reader a list they cannot
-    /// act on: half of it saved, half of it never attempted, and no way to tell
-    /// which is which.
-    pub fn save_dirty(&mut self) -> Vec<(String, SaveOutcome)> {
-        self.buffers
-            .iter_mut()
-            .filter(|buffer| buffer.dirty || buffer.owed_unlanded().is_some())
-            .map(|buffer| {
-                // **A body sent that did not land, no longer the body** (R1): the
-                // quit does not drop it unseen — the buffer is refused, and the
-                // card names it, as a save on its way is. A conflict that stands
-                // is named as the conflict (round 7).
-                let outcome = if buffer.owed_unlanded().is_some()
-                    && !buffer.on_disk.has_an_unanswered_conflict()
-                {
-                    SaveOutcome::Failed(crate::i18n::Text::PreviewSaveUnlanded.text().to_owned())
-                } else {
-                    buffer.write_now_for_quit()
-                };
-                (buffer.name.clone(), outcome)
-            })
-            .collect()
-    }
-
     /// **The names a close's question owes** (S-6b; the coordinator's ruling
     /// on R1): every buffer a close would lose something of — its edits, or a
     /// save of it that has not landed ([`PreviewBuffer::a_close_loses_something`]).
@@ -7453,12 +7473,9 @@ impl PreviewPool {
         shown_on: impl Fn(&PreviewSource) -> crate::PreviewSurface,
     ) -> Vec<(crate::PreviewSurface, PreviewSource, String)> {
         let mut refused = Vec::new();
-        for buffer in self.buffers.iter_mut().filter(|buffer| buffer.dirty) {
-            if buffer.on_disk.has_an_unanswered_conflict() {
-                continue;
-            }
+        for buffer in &mut self.buffers {
             let surface = shown_on(&buffer.source);
-            if let SaveAsked::Refused(why) = buffer.request_save(saves, surface) {
+            if let Some(why) = buffer.save_for_a_shut(saves, surface) {
                 refused.push((surface, buffer.source.clone(), why));
             }
         }
@@ -7494,19 +7511,33 @@ impl PreviewPool {
         Ok((buffer.source.clone(), said))
     }
 
-    /// **Keep every dirty buffer when the process stops without asking anybody** (D-4, 0.4.8
-    /// G7): the controlled failure road's half of the quit's judged write, and nothing else.
+    /// **What a stop that cannot ask keeps of this pool, once the storage worker has ended**
+    /// (D-4, 0.4.8 G7; S-6c) — the second half of the stop: every dirty buffer's save was
+    /// handed to the worker as a press hands it, the worker served what was queued within the
+    /// stop's waits (`SessionStore::close`: the session's last write, §5.3 row 16, then the
+    /// worker's end, row 16b), and each buffer has heard what
+    /// came back ([`PreviewSaves::deliver`]). Now, in the pool's order:
     ///
-    /// Each dirty buffer goes through [`PreviewBuffer::write_now_for_quit`] — the door
-    /// [`Self::save_dirty`] writes through, with the byte precondition every save is
-    /// conditional on — so a file that can still be written carries the edit. A buffer the
-    /// write leaves dirty, because the file refused, changed on disk since it was read, or has
-    /// a save of it still on the storage worker (which this road never writes over), cannot
-    /// stay in memory for the reader to look at as it does after a refused quit: the process is
-    /// going. Its body is copied into `recovery` ([`PreviewBuffer::recovery_copy`]), never over
-    /// the file. Every dirty buffer is tried, in the pool's order, and each answers what became
-    /// of it ([`Kept`]).
-    pub fn keep_dirty(&mut self, recovery: &Path, at: SystemTime) -> Vec<Kept> {
+    /// - a body a save sent that did not land and is no longer the body (R1,
+    ///   [`PreviewBuffer::owed_unlanded`]) is copied into `recovery`, never over the file;
+    /// - a buffer still dirty — its save refused, met another writer's bytes, or not answered
+    ///   before the worker ended — cannot stay in memory for the reader to look at, as it
+    ///   does after a withdrawn quit: the process is going. Its body is copied into
+    ///   `recovery` ([`PreviewBuffer::recovery_copy`]), never over the file, `refused` saying
+    ///   why: `said` (what its save's answer said), else a save still on its way, else the
+    ///   conflict nobody answered, else that the file was not written;
+    /// - a buffer dirty when the stop handed its save over (`awaited`) and clean now is
+    ///   [`Kept::Saved`]: the file carries the edit.
+    ///
+    /// The copies are the one write this road still makes on the window thread (§5.3 row
+    /// 20b): the worker that could take them has ended and no turn follows.
+    pub(crate) fn kept_after_the_stop(
+        &mut self,
+        awaited: &[Awaited],
+        said: &[(PreviewSource, String)],
+        recovery: &Path,
+        at: SystemTime,
+    ) -> Vec<Kept> {
         let mut kept = Vec::new();
         for buffer in &mut self.buffers {
             let name = buffer.name.clone();
@@ -7534,16 +7565,27 @@ impl PreviewPool {
                 );
             }
             if !buffer.dirty {
+                let was_dirty = awaited
+                    .iter()
+                    .any(|asked| asked.incarnation == buffer.incarnation && asked.dirty);
+                if was_dirty {
+                    kept.push(Kept::Saved { name, file });
+                }
                 continue;
             }
-            let refused = match buffer.write_now_for_quit() {
-                SaveOutcome::Saved | SaveOutcome::SavedOrdinarily => {
-                    kept.push(Kept::Saved { name, file });
-                    continue;
-                }
-                SaveOutcome::Conflict => preview_conflict_notice().to_owned(),
-                SaveOutcome::Failed(error) => error,
-            };
+            let refused = said
+                .iter()
+                .find(|(source, _)| *source == buffer.source)
+                .map(|(_, why)| why.clone())
+                .unwrap_or_else(|| {
+                    if buffer.on_disk.is_out() {
+                        crate::i18n::Text::PreviewSaveOnItsWay.text().to_owned()
+                    } else if buffer.on_disk.has_an_unanswered_conflict() {
+                        preview_conflict_notice().to_owned()
+                    } else {
+                        crate::i18n::Text::PreviewSaveNotStarted.text().to_owned()
+                    }
+                });
             kept.push(match buffer.recovery_copy(recovery, at) {
                 Ok(copy) => Kept::Copied {
                     name,
@@ -8185,6 +8227,19 @@ pub enum SaveOutcome {
     Failed(String),
 }
 
+impl SaveOutcome {
+    /// **Why the file did not take the body, if it did not** — the sentence a copy's line
+    /// names (`Kept::Copied`'s `refused`): the conflict's notice, or the disk's own reason.
+    /// `None` for a save that landed.
+    pub(crate) fn refusal(self) -> Option<String> {
+        match self {
+            Self::Conflict => Some(preview_conflict_notice().to_owned()),
+            Self::Failed(why) => Some(why),
+            Self::Saved | Self::SavedOrdinarily => None,
+        }
+    }
+}
+
 /// **What a preview save does on a volume that cannot exchange two files in
 /// one step** — FAT and exFAT removable media on macOS, and Windows file systems
 /// that refuse the replacement: the one switch for the policy (S-6a round 2),
@@ -8316,17 +8371,6 @@ impl OnDisk {
     /// A Reload discarded the body a pending press was for.
     fn drop_the_pending_press(&mut self) {
         self.again = false;
-    }
-
-    /// Bytes the window thread placed in the file itself (a quit's or a
-    /// stop's writer). `supersedes`: the body written is the body a save sent
-    /// that did not land, or comes after it in the history — that body is owed
-    /// nowhere now (round 8).
-    fn placed(&mut self, bytes: Arc<[u8]>, supersedes: bool) {
-        self.bytes = Some(bytes);
-        if supersedes {
-            self.unlanded = None;
-        }
     }
 
     /// What a save is conditional on.
@@ -8854,7 +8898,7 @@ fn unanswered(owed: &OwedSave, cause: Refusal) -> DocumentAnswer {
 }
 
 /// **The folder in the data directory where a stop that cannot ask keeps the edits it could not
-/// write back** ([`PreviewPool::keep_dirty`]; D-4, 0.4.8 G7). It is the reader's: Folio never
+/// write back** ([`PreviewPool::kept_after_the_stop`]; D-4, 0.4.8 G7). It is the reader's: Folio never
 /// removes anything in it, the diagnostics line names each copy, and the next start says where
 /// they are ([`crate::recovered`], T-RECOVERED-FOLDER).
 pub const RECOVERED_FOLDER: &str = "recovered";
@@ -8900,7 +8944,93 @@ pub fn keep_in_recovered(
     unreachable!("a folder holds fewer than u32::MAX copies of one name from one instant")
 }
 
-/// **What became of one dirty buffer on a stop that could not ask** ([`PreviewPool::keep_dirty`]).
+/// **The buffers a stop that cannot ask handed to the storage worker, held past their
+/// windows** (S-6c; D-4, 0.4.8 G7).
+///
+/// A stop's two halves are a turn apart that never comes: the first hands every dirty
+/// buffer's save to the worker, as a press hands it, once its window has been photographed and
+/// let go (`Runtime::keep_unsaved_edits`), and holds each tab's pool here; the second runs once
+/// the worker has ended — the stop's waits are `SessionStore::close`'s two, the session's last
+/// write (§5.3 row 16), queued behind these saves, then the worker's end (row 16b), each
+/// within the writer's budget, so up to about twice 3 s; saves ahead can spend the session
+/// write's budget, which leaves `session.lock` standing — and hears the answers, then keeps in `recovered`
+/// whatever no file took ([`Self::keep`]). Empty on every other road.
+#[derive(Debug, Default)]
+pub(crate) struct StopKeeps {
+    /// Where the copies go: the data directory's [`RECOVERED_FOLDER`].
+    recovery: Option<PathBuf>,
+    /// Every buffer the stop handed over or held, as it stood when its save was handed over.
+    awaited: Vec<Awaited>,
+    /// The saves refused at the hand-over, with why.
+    refused: Vec<(PreviewSource, String)>,
+    /// Every tab's pool, taken from its window once the window was let go.
+    pools: Vec<PreviewPool>,
+}
+
+impl StopKeeps {
+    /// **One window's saves, handed over** — what they wait for and what was refused — and
+    /// where what does not land is kept.
+    pub(crate) fn handed(&mut self, recovery: &Path, handed: HandedOver) {
+        self.recovery = Some(recovery.to_path_buf());
+        self.awaited.extend(handed.awaited);
+        self.refused.extend(handed.refused);
+    }
+
+    /// One tab's pool, held until the worker has ended.
+    pub(crate) fn hold(&mut self, pool: PreviewPool) {
+        self.pools.push(pool);
+    }
+
+    /// **The second half of the stop**, once the storage worker has ended (or was let go at its
+    /// bound): every answer that came back heard by the buffer that asked
+    /// ([`PreviewSaves::deliver`]; the rest to the sink), then each pool's
+    /// [`PreviewPool::kept_after_the_stop`]. Once: a second keep has nowhere to keep into and
+    /// keeps nothing. The buffers stay held, as they stood after their answers, until the
+    /// process is gone.
+    pub(crate) fn keep(&mut self, saves: &mut PreviewSaves, at: SystemTime) -> Vec<Kept> {
+        let Some(recovery) = self.recovery.take() else {
+            return Vec::new();
+        };
+        let mut pools = std::mem::take(&mut self.pools);
+        let mut answers = saves.take_answers();
+        let heard = saves.deliver(&mut answers, &mut pools.iter_mut().collect::<Vec<_>>());
+        for answer in answers {
+            saves.sink(answer);
+        }
+        let mut said = std::mem::take(&mut self.refused);
+        said.extend(
+            heard
+                .into_iter()
+                .filter_map(|(_, source, said)| Some((source, said?.refusal()?))),
+        );
+        let awaited = std::mem::take(&mut self.awaited);
+        let kept = pools
+            .iter_mut()
+            .flat_map(|pool| pool.kept_after_the_stop(&awaited, &said, &recovery, at))
+            .collect();
+        self.pools = pools;
+        kept
+    }
+
+    /// The pools the stop holds, as they stand — a test's look at the buffers after their
+    /// answers.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> &[PreviewPool] {
+        &self.pools
+    }
+}
+
+/// **What handing every save of a window over came to** (S-6b's `Save all`, S-6c's quit and
+/// stop): every buffer a close of the window would lose something of, as each stood then
+/// ([`PreviewPool::close_awaited`]) — what the wait that follows waits for — and each save
+/// refused at the hand-over, with why.
+#[derive(Debug, Default)]
+pub(crate) struct HandedOver {
+    pub(crate) awaited: Vec<Awaited>,
+    pub(crate) refused: Vec<(PreviewSource, String)>,
+}
+
+/// **What became of one dirty buffer on a stop that could not ask** ([`PreviewPool::kept_after_the_stop`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kept {
     /// The file carries the edit.
@@ -9158,13 +9288,11 @@ fn read_up_to(path: &Path, limit: usize) -> HeadOutcome {
 }
 
 /// **The whole file's bytes, read to be compared** — the watcher's question
-/// ([`PreviewWant::Compare`], on the preview worker) and the quit's
-/// precondition ([`read_for_the_precondition`]): the preview's own read, up to
+/// ([`PreviewWant::Compare`], on the preview worker): the preview's own read, up to
 /// the bound a save writes within ([`bt_persist::MAX_DOCUMENT_BYTES`]) rather
 /// than the edit ceiling, so a file Folio saved larger than it opened is read
 /// whole. Its text becomes a buffer's body only where an opening would have
-/// read the file whole ([`PreviewBuffer::land_read`]); the quit's precondition
-/// asks only its bytes.
+/// read the file whole ([`PreviewBuffer::land_read`]).
 pub fn read_to_compare(path: &Path) -> HeadOutcome {
     read_up_to(path, COMPARE_BYTES)
 }
@@ -9173,34 +9301,6 @@ pub fn read_to_compare(path: &Path) -> HeadOutcome {
 /// ([`bt_persist::MAX_DOCUMENT_BYTES`]). A file the stat puts past it is not
 /// read at all, and answers as cut short.
 const COMPARE_BYTES: usize = bt_persist::MAX_DOCUMENT_BYTES as usize;
-
-/// **The file's bytes as a save's precondition reads them on the window
-/// thread** — the quit's and the stop's synchronous writer
-/// ([`PreviewBuffer::write_now_for_quit`], row 20's residue until S-6c), read
-/// through the preview's own read ([`read_up_to`]) up to the storage worker's
-/// bound ([`bt_persist::MAX_DOCUMENT_BYTES`]), so the window thread and the
-/// worker compare the same bytes against the same revision
-/// ([`crate::document_request::precondition`]).
-fn read_for_the_precondition(path: &Path) -> bt_persist::StableRead {
-    match read_to_compare(path) {
-        HeadOutcome::Read {
-            bytes: Some(bytes), ..
-        } => bt_persist::StableRead::Bytes(bytes),
-        HeadOutcome::Refused(PreviewRefusal::Fault(PreviewFault::NotFound)) => {
-            bt_persist::StableRead::Absent
-        }
-        HeadOutcome::Read { bytes: None, .. } => bt_persist::StableRead::Unobtained(format!(
-            "it is more than the {} bytes a save compares",
-            bt_persist::MAX_DOCUMENT_BYTES
-        )),
-        HeadOutcome::Refused(refusal) => {
-            bt_persist::StableRead::Unobtained(format!("it could not be read: {refusal:?}"))
-        }
-        HeadOutcome::TooLargeToEdit { file_bytes, .. } => bt_persist::StableRead::Unobtained(
-            format!("it could not be read whole ({file_bytes} bytes)"),
-        ),
-    }
-}
 
 /// **A document a program composed — a diff, a commit's reading of a file —
 /// read the way a file's bytes are read** (AUDIT-hardcode RT-4).
@@ -10069,6 +10169,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// **The quit's `Save` of `buffer`** (S-6c): handed over as the quit hands it
+    /// ([`PreviewBuffer::save_for_a_shut`]) to a storage lane the test holds, each job served
+    /// by the worker's own step with `crossing` written into the file under it, every answer
+    /// heard by the buffer — a press pending behind a landing is sent and served in turn — and
+    /// what the quit's wait then finds of it ([`PreviewBuffer::at_the_close`], what
+    /// `FolioApp::settle_the_quits_saves` decides on).
+    fn the_quits_save_of(buffer: &mut PreviewBuffer, crossing: Option<&[u8]>) -> AtTheClose {
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        let mut saves = PreviewSaves::on(lane);
+        let _ = buffer.save_for_a_shut(&mut saves, crate::test_support::PRESSED_ON);
+        let asked = Awaited::now(buffer);
+        while let Some(crate::persist::ScriptedJob::Document(job)) = jobs.next() {
+            let _ = crate::test_support::serve_on_a_worker(job, crossing.map(<[u8]>::to_vec));
+            for answer in saves.take_answers() {
+                let _ = buffer.hear_save_answer(answer, &mut saves);
+            }
+        }
+        buffer.at_the_close(asked)
+    }
+
+    impl PreviewBuffer {
+        /// Whether a quit would name nothing of this buffer ([`PreviewPool::quit_names`]'s
+        /// rule): not dirty, and no body sent that did not land owed.
+        fn quit_owes_nothing(&self) -> bool {
+            !self.dirty && self.owed_unlanded().is_none()
+        }
     }
 
     fn buffer<'pool>(pool: &'pool PreviewPool, path: &str) -> &'pool PreviewBuffer {
@@ -13595,6 +13723,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a
+    /// preview read's answer arrives with its file already closed**: the real `bt-preview-worker`
+    /// reads a real file's body, and the moment its answer is in the channel nobody holds the file
+    /// and a writer saving over it finishes — the gesture of an editor saving the file the pane has
+    /// just shown.
+    ///
+    /// MUTATION: leak a handle on the file in `read_up_to`
+    /// (`std::mem::forget(std::fs::File::open(path))`) — the answer arrives while the file is held,
+    /// and the exclusive open is refused.
+    #[test]
+    fn a_preview_reads_answer_arrives_with_its_file_closed() {
+        let dir = bt_testpath::temp_path("folio-preview-answered");
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("笔记 notes.txt");
+        std::fs::write(&path, "第一行 the first line\n").expect("a file to read");
+        let mut buffer = PreviewBuffer::new(PreviewSource::file(path.clone()), "notes".to_owned());
+        let want = buffer
+            .claim_head_read()
+            .expect("a fresh buffer asks for its body");
+        let events = crate::headless::LoopEvents::default();
+        let worker = PreviewWorker::spawn(events.proxy()).expect("the worker starts");
+        assert!(worker.request(PreviewRequest {
+            window: WindowId::from(1_u64),
+            tab: crate::TabId(1),
+            source: PreviewSource::file(path.clone()),
+            want,
+        }));
+        let answer = crate::lane::receive(&worker.responses, "the read's answer");
+        let free = bt_testpath::nobody_holds(&path);
+        let written = std::fs::write(&path, "saved over\n");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(answer.answer, PreviewAnswer::Head { .. }),
+            "the body is answered"
+        );
+        assert!(free, "and nobody holds the file when the answer is in");
+        assert!(written.is_ok(), "and the writer finishes: {written:?}");
+    }
+
     // T-MD-LOADING-STATE: exercise the actual request selection and arrival.
     fn loading_open(path: &Path) -> PreviewBuffer {
         let mut buffer = PreviewBuffer::new(
@@ -15260,20 +15428,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// RED (S-6a) — **the quit's and the stop's writers judge by the same bytes**
-    /// (`write_now_for_quit`, under `document_request::precondition`).
+    /// RED (S-6a; S-6c) — **the quit's and the stop's saves judge by the same bytes as every
+    /// save**: they are the press's own request on the storage worker, under
+    /// `document_request::precondition`.
     ///
-    /// The other writer's same-second rewrite keeps the stamp: the quit's save
-    /// branch answers a conflict and writes nothing, and the stop that cannot
-    /// ask keeps the edit as a copy in the recovered folder, never over their
-    /// file. And a save still on the storage worker is not written over by
-    /// either: the quit answers it as not saved (S-6a's choice (b): the quit
-    /// stays), the stop copies.
+    /// The other writer's same-second rewrite keeps the stamp: the stop that cannot ask hands
+    /// the save over, the worker meets their bytes and writes nothing, and the edit is kept as
+    /// a copy in the recovered folder, never over their file; the quit's save meets the same
+    /// conflict, and their bytes stay. And a save still on the storage worker is not written
+    /// over by either: the quit waits for it (it is on its way), the stop copies the body.
     ///
-    /// MUTATION: decide `write_now_for_quit`'s precondition by the stamp
-    /// (`file_mtime(&path) != self.watch_stamp` → `Conflict`, else write) — the
-    /// quit writes over their bytes. And: drop its `is_out()` arm — the quit
-    /// writes over the save on its way.
+    /// MUTATION: in `PreviewBuffer::save_for_a_shut`, send nothing (`return None` first) —
+    /// the quit's save finds no conflict, the buffer `NotSaved`.
     #[test]
     fn the_quit_and_stop_saves_use_the_same_byte_precondition() {
         let dir = scratch("quit-precondition");
@@ -15285,20 +15451,12 @@ mod tests {
             content.push_str("新 new\n");
             true
         }));
-        pool.insert(buffer);
         let theirs = "他们的 theirs\n".as_bytes();
         rewrite_keeping_the_stamp(&path, theirs);
+        pool.insert(buffer.clone());
 
-        assert_eq!(
-            pool.save_dirty(),
-            vec![("账本 ledger.md".to_owned(), SaveOutcome::Conflict)]
-        );
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            theirs,
-            "the quit wrote nothing"
-        );
-        let kept = pool.keep_dirty(&recovered, SystemTime::UNIX_EPOCH);
+        let kept =
+            crate::test_support::the_stops_keep(&pool, &recovered, SystemTime::UNIX_EPOCH, &[None]);
         assert!(
             matches!(&kept[..], [Kept::Copied { .. }]),
             "the stop kept a copy: {kept:?}"
@@ -15307,6 +15465,16 @@ mod tests {
             std::fs::read(&path).unwrap(),
             theirs,
             "never over their file"
+        );
+        assert_eq!(
+            the_quits_save_of(&mut buffer, None),
+            AtTheClose::Conflict,
+            "the quit's save meets their bytes"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            theirs,
+            "the quit wrote nothing"
         );
 
         // A save on its way is not written over.
@@ -15323,22 +15491,25 @@ mod tests {
             buffer.request_save(&mut saves, crate::test_support::PRESSED_ON),
             SaveAsked::Sent
         );
-        on_its_way.insert(buffer);
+        on_its_way.insert(buffer.clone());
         assert_eq!(
-            on_its_way.save_dirty(),
-            vec![(
-                "途中 underway.md".to_owned(),
-                SaveOutcome::Failed(crate::i18n::Text::PreviewSaveOnItsWay.text().to_owned())
-            )]
+            the_quits_save_of(&mut buffer, None),
+            AtTheClose::OnItsWay,
+            "the quit waits for the save on its way"
         );
         assert!(matches!(
-            &on_its_way.keep_dirty(&recovered, SystemTime::UNIX_EPOCH)[..],
+            &crate::test_support::the_stops_keep(
+                &on_its_way,
+                &recovered,
+                SystemTime::UNIX_EPOCH,
+                &[]
+            )[..],
             [Kept::Copied { .. }]
         ));
         assert_eq!(
             std::fs::read_to_string(&underway).unwrap(),
             "起 start\n",
-            "neither writer wrote over the save on its way"
+            "neither wrote over the save on its way"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -15489,13 +15660,13 @@ mod tests {
     /// over bytes the person has not acted on.**
     ///
     /// A save meets another program's write: the conflict is said, and the
-    /// revision is their bytes. Before any press, the quit's writer answers the
-    /// conflict again and writes nothing, and a stop keeps the edit as a copy in
+    /// revision is their bytes. Before any press, the quit sends nothing and finds
+    /// the conflict again, and a stop sends nothing and keeps the edit as a copy in
     /// the recovered folder — their file is untouched. The next press is the
     /// person's answer, and it lands.
     ///
-    /// MUTATION: drop `write_now_for_quit`'s unanswered-conflict arm — the stop
-    /// writes the edit over their file.
+    /// MUTATION: drop `PreviewBuffer::save_for_a_shut`'s unanswered-conflict arm —
+    /// the stop's save lands the edit over their file.
     #[test]
     fn a_stop_after_a_conflict_nobody_answered_keeps_a_copy_and_their_bytes() {
         let dir = scratch("stop-after-conflict");
@@ -15516,12 +15687,14 @@ mod tests {
 
         let mut pool = PreviewPool::default();
         pool.insert(buffer);
+        let mut quit = pool.buffers().next().unwrap().clone();
         assert_eq!(
-            pool.save_dirty(),
-            vec![("协议 terms.md".to_owned(), SaveOutcome::Conflict)],
-            "the quit says the conflict again and writes nothing"
+            the_quits_save_of(&mut quit, None),
+            AtTheClose::Conflict,
+            "the quit sends nothing over the conflict nobody answered, and finds it"
         );
-        let kept = pool.keep_dirty(&recovered, SystemTime::UNIX_EPOCH);
+        let kept =
+            crate::test_support::the_stops_keep(&pool, &recovered, SystemTime::UNIX_EPOCH, &[None]);
         let [Kept::Copied { copy, .. }] = &kept[..] else {
             panic!("the stop keeps a copy: {kept:?}");
         };
@@ -16031,7 +16204,7 @@ mod tests {
             content.push_str("再 again\n");
             true
         }));
-        assert_eq!(buffer.write_now_for_quit(), SaveOutcome::Saved);
+        assert_eq!(the_quits_save_of(&mut buffer, None), AtTheClose::Saved);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "二 v2\n再 again\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -16358,12 +16531,17 @@ mod tests {
             buffer.owed_unlanded().is_none(),
             "the Reload discarded the body sent: nothing of it is owed"
         );
-        assert_eq!(buffer.write_now_for_quit(), SaveOutcome::Conflict);
+        assert_eq!(the_quits_save_of(&mut buffer, None), AtTheClose::Conflict);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "他们的 T\n");
         let recovered = dir.join(RECOVERED_FOLDER);
         let mut pool = PreviewPool::default();
         pool.insert(buffer);
-        let kept = pool.keep_dirty(&recovered, SystemTime::UNIX_EPOCH);
+        let kept = crate::test_support::the_stops_keep(
+            &pool,
+            &recovered,
+            SystemTime::UNIX_EPOCH,
+            &[None, None],
+        );
         assert!(
             matches!(&kept[..], [Kept::Copied { .. }]),
             "the stop keeps one copy, of the body typed on: {kept:?}"
@@ -16433,8 +16611,13 @@ mod tests {
         let mut pool = PreviewPool::default();
         pool.insert(buffer);
         assert!(
-            pool.keep_dirty(&dir.join(RECOVERED_FOLDER), SystemTime::UNIX_EPOCH)
-                .is_empty(),
+            crate::test_support::the_stops_keep(
+                &pool,
+                &dir.join(RECOVERED_FOLDER),
+                SystemTime::UNIX_EPOCH,
+                &[None, None]
+            )
+            .is_empty(),
             "a stop owes nothing"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -16554,11 +16737,12 @@ mod tests {
     ///
     /// The press meets another writer's file (a conflict, "edits kept"), and
     /// the person undoes back to the body as read — clean, the body sent only a
-    /// redo away. The quit's card names the buffer and its save branch refuses
-    /// it; the stop keeps a copy of the body sent, and their file is untouched.
+    /// redo away. The quit's card names the buffer and its `Save` sends nothing
+    /// for it, finding the conflict; the stop keeps a copy of the body sent, and
+    /// their file is untouched.
     ///
-    /// MUTATION: drop `keep_dirty`'s owed-body arm — the stop keeps nothing of
-    /// the body sent.
+    /// MUTATION: drop `kept_after_the_stop`'s owed-body arm — the stop keeps
+    /// nothing of the body sent.
     #[test]
     fn a_body_sent_that_did_not_land_is_owed_by_the_quit_and_the_stop() {
         let dir = scratch("owed-unlanded");
@@ -16584,12 +16768,18 @@ mod tests {
             ["提纲 outline.md"],
             "the quit's card names it"
         );
+        let mut quit = pool.buffers().next().unwrap().clone();
         assert_eq!(
-            pool.save_dirty(),
-            vec![("提纲 outline.md".to_owned(), SaveOutcome::Conflict)],
-            "the conflict that stands is what the quit names (round 7)"
+            the_quits_save_of(&mut quit, None),
+            AtTheClose::Conflict,
+            "the conflict that stands is what the quit finds (round 7)"
         );
-        let kept = pool.keep_dirty(&recovered, SystemTime::UNIX_EPOCH);
+        let kept = crate::test_support::the_stops_keep(
+            &pool,
+            &recovered,
+            SystemTime::UNIX_EPOCH,
+            &[None, None],
+        );
         let [Kept::Copied { copy, .. }] = &kept[..] else {
             panic!("the stop keeps a copy of the body sent: {kept:?}");
         };
@@ -16742,13 +16932,13 @@ mod tests {
     /// read after it is armed and brings their bytes. ② The Reload's read
     /// landed after the other writer wrote — the body is exactly their bytes:
     /// answered, nothing owed, and a keystroke on it is an ordinary edit the
-    /// quit's writer writes over their bytes (round 9); the same when the worker
+    /// quit's save writes over their bytes (round 9); the same when the worker
     /// meets them as a crossing writer and puts them back (`Conflict`, round 9).
     /// ③ The Reload's read landed before the other
     /// writer wrote (the body is the old file, clean): answered when the body
     /// read it asks takes the file. ④ The Reload's read landed and the person
     /// typed on: the conflict stands — the strip goes up, no press has answered
-    /// it, the quit's writer refuses.
+    /// it, the quit's save sends nothing.
     ///
     /// MUTATION: count every reloaded conflict as answered
     /// (`a_reload_answers_the_conflict` answering `true`) — ④ leaves the typed
@@ -16838,8 +17028,8 @@ mod tests {
                         true
                     }));
                     assert_eq!(
-                        buffer.write_now_for_quit(),
-                        SaveOutcome::Saved,
+                        the_quits_save_of(&mut buffer, None),
+                        AtTheClose::Saved,
                         "{case}: an ordinary edit over the file it was read from"
                     );
                     assert_eq!(
@@ -16870,7 +17060,11 @@ mod tests {
                     assert!(buffer.on_disk.has_an_unanswered_conflict(), "{case}");
                     assert_eq!(buffer.disk, DiskNews::Changed, "{case}");
                     assert!(buffer.dirty, "{case}");
-                    assert_eq!(buffer.write_now_for_quit(), SaveOutcome::Conflict, "{case}");
+                    assert_eq!(
+                        the_quits_save_of(&mut buffer, None),
+                        AtTheClose::Conflict,
+                        "{case}"
+                    );
                     assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs, "{case}");
                 }
             }
@@ -16964,7 +17158,7 @@ mod tests {
     ///
     /// MUTATION: answer the conflict at once (drop both
     /// `leave_the_conflict_unanswered` in `a_reload_answers_the_conflict`) — the
-    /// quit's writer writes the typed body over the other writer's bytes.
+    /// quit's save writes the typed body over the other writer's bytes.
     #[test]
     fn a_keystroke_before_the_reloads_read_lands_leaves_the_conflict_standing() {
         let dir = scratch("keystroke-before-reload-read");
@@ -17004,9 +17198,9 @@ mod tests {
                 true
             }));
             assert_eq!(
-                buffer.write_now_for_quit(),
-                SaveOutcome::Conflict,
-                "{case}: the quit's writer refuses"
+                the_quits_save_of(&mut buffer, None),
+                AtTheClose::Conflict,
+                "{case}: the quit's save sends nothing"
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs, "{case}");
             let landed = match out {
@@ -17092,17 +17286,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// RED (S-6a round 8, nit) — **the quit's writer settles a body sent that
-    /// did not land when it writes that body or a later one.**
+    /// RED (S-6a round 8, nit; S-6c) — **the quit's save settles a body sent that
+    /// did not land when it sends that body or a later one.**
     ///
     /// A save refused, the person types on past the body sent, and the quit's
-    /// writer writes the body: the bytes sent are owed nowhere now. An undo
-    /// back past the press is then an ordinary edit away from the file, which
-    /// the quit writes — not a body sent that did not land, which it refuses.
+    /// save sends the body, which lands: the bytes sent are owed nowhere now. An
+    /// undo back past the press is then an ordinary edit away from the file, which
+    /// the quit saves — not a body sent that did not land, which it would name.
     ///
-    /// MUTATION: leave `placed`'s `unlanded` and the history's position as they
-    /// were — the undo finds the body sent behind, and the quit refuses a body
-    /// whose successor is on the disk.
+    /// MUTATION: leave the landing's `unlanded` (`OnDisk::hear`'s `Landed` arm) and
+    /// the history's position of the body sent (`UndoLog::sent_landed`) as they
+    /// were — the undo finds the body sent behind, owed, though its successor is
+    /// on the disk.
     #[test]
     fn the_quits_writer_settles_a_body_sent_that_it_writes_past() {
         let dir = scratch("quit-settles-unlanded");
@@ -17134,7 +17329,7 @@ mod tests {
             content.push_str("后来 later\n");
             true
         }));
-        assert_eq!(buffer.write_now_for_quit(), SaveOutcome::Saved);
+        assert_eq!(the_quits_save_of(&mut buffer, None), AtTheClose::Saved);
         let written = std::fs::read(&path).unwrap();
         assert!(buffer.undo_edit().is_some());
         assert!(buffer.undo_edit().is_some());
@@ -17143,14 +17338,14 @@ mod tests {
             buffer.owed_unlanded().is_none(),
             "the body sent is owed nowhere"
         );
-        let mut pool = PreviewPool::default();
-        pool.insert(buffer);
-        let outcomes = pool.save_dirty();
-        assert_eq!(outcomes.len(), 1);
         assert_eq!(
-            outcomes[0].1,
-            SaveOutcome::Saved,
-            "the quit writes the undone body"
+            the_quits_save_of(&mut buffer, None),
+            AtTheClose::Saved,
+            "the quit saves the undone body"
+        );
+        assert!(
+            buffer.quit_owes_nothing(),
+            "and owes nothing of it afterwards"
         );
         assert_ne!(std::fs::read(&path).unwrap(), written);
         let _ = std::fs::remove_dir_all(&dir);
@@ -17162,12 +17357,12 @@ mod tests {
     /// The answer names no other writer's bytes, so there is nothing for a
     /// press to answer: with the Reload's body clean, or typed on since, the
     /// pane says the file changed and was reloaded, no conflict is unanswered,
-    /// and the quit's writer writes against the bytes the file held before the
+    /// and the quit's save writes against the bytes the file held before the
     /// press — the file still holds them.
     ///
     /// MUTATION: hear `MovedDuringRead` as naming their bytes
     /// (`Heard::Conflict { named: true }`) — the typed row's conflict is left
-    /// unanswered and the quit's writer refuses it.
+    /// unanswered and the quit's save sends nothing for it.
     #[test]
     fn a_file_moving_during_the_read_after_a_reload_leaves_no_conflict_waiting() {
         let dir = scratch("moving-after-reload");
@@ -17214,7 +17409,11 @@ mod tests {
             assert!(!buffer.on_disk.has_an_unanswered_conflict(), "{case}");
             assert!(buffer.on_disk.holds("原 O\n".as_bytes()), "{case}");
             if case == "typed" {
-                assert_eq!(buffer.write_now_for_quit(), SaveOutcome::Saved, "{case}");
+                assert_eq!(
+                    the_quits_save_of(&mut buffer, None),
+                    AtTheClose::Saved,
+                    "{case}"
+                );
                 assert_eq!(
                     std::fs::read_to_string(&path).unwrap(),
                     "原 O\n键 typed\n",
@@ -17350,8 +17549,8 @@ mod tests {
     /// not land owes is judged by the history.**
     ///
     /// ① A refused save, then more typing: the body is newer than the one sent
-    /// — simply dirty. The quit's save branch writes it, and a stop writes it
-    /// with no stray copy of the body sent. ② A refused save, then an undo past
+    /// — simply dirty. The quit's save sends it and it lands, and a stop's save
+    /// lands it with no stray copy of the body sent. ② A refused save, then an undo past
     /// it: the body sent lives only in the redo history — the stop keeps a copy
     /// of exactly it.
     ///
@@ -17392,18 +17591,27 @@ mod tests {
         refuse(&mut buffer);
         type_into(&mut buffer, &mut caret, 0);
         let body = buffer.content.clone().unwrap();
-        let mut pool = PreviewPool::default();
-        pool.insert(buffer.clone());
-        assert_eq!(
-            pool.save_dirty(),
-            vec![("甲 typed-on.md".to_owned(), SaveOutcome::Saved)],
-            "the quit writes the newer body"
+        assert!(
+            buffer.owed_unlanded().is_none(),
+            "simply dirty: nothing sent is owed"
         );
+        let mut quit = buffer.clone();
+        assert_eq!(
+            the_quits_save_of(&mut quit, None),
+            AtTheClose::Saved,
+            "the quit saves the newer body"
+        );
+        assert!(quit.quit_owes_nothing());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), &*body);
         std::fs::write(&path, "原 O\n").unwrap();
         let mut pool = PreviewPool::default();
         pool.insert(buffer);
-        let kept = pool.keep_dirty(&recovered, SystemTime::UNIX_EPOCH);
+        let kept = crate::test_support::the_stops_keep(
+            &pool,
+            &recovered,
+            SystemTime::UNIX_EPOCH,
+            &[None, None],
+        );
         assert!(
             matches!(&kept[..], [Kept::Saved { .. }]),
             "the stop writes the body, and keeps no stray copy: {kept:?}"
@@ -17417,7 +17625,12 @@ mod tests {
         assert!(buffer.undo_edit().is_some());
         let mut pool = PreviewPool::default();
         pool.insert(buffer);
-        let kept = pool.keep_dirty(&recovered, SystemTime::UNIX_EPOCH);
+        let kept = crate::test_support::the_stops_keep(
+            &pool,
+            &recovered,
+            SystemTime::UNIX_EPOCH,
+            &[None, None],
+        );
         let [Kept::Copied { copy, .. }] = &kept[..] else {
             panic!("the stop keeps a copy of the body sent: {kept:?}");
         };
@@ -17626,9 +17839,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **A save keeps what the file carried** (audit 3, F-1), on both roads:
-    /// the storage worker's exchange for every interactive save (S-6a) and the
-    /// quit's and the stop's writer ([`PreviewBuffer::write_now_for_quit`]).
+    /// **A save keeps what the file carried** (audit 3, F-1): a press's save and
+    /// the quit's (S-6c), both the storage worker's exchange (S-6a).
     ///
     /// What a file carries is a different thing on every platform — streams,
     /// a DACL and an attribute word on Windows, a mode and extended attributes
@@ -17639,9 +17851,9 @@ mod tests {
     /// the Mark of the Web, an alternate data stream on NTFS, a file of its own
     /// on APFS — reads back after each save as it read before.
     ///
-    /// Red gate: write the quit's save with `bt_persist::atomic_write` in
-    /// `write_now_for_quit`, and on Windows the stream is gone after the second
-    /// save. **The red is Windows-only**: on APFS the name is a sibling file,
+    /// Red gate: write the quit's save on the window thread with
+    /// `bt_persist::atomic_write` in place of its hand-over, and on Windows the
+    /// stream is gone after the second save. **The red is Windows-only**: on APFS the name is a sibling file,
     /// which no writer touches, so this test holds there under the mutation
     /// too — macOS's carried metadata is pinned by the writers' own suites.
     #[test]
@@ -17674,7 +17886,7 @@ mod tests {
             content.push_str("再改 again\n");
             true
         });
-        assert_eq!(buffer.write_now_for_quit(), SaveOutcome::Saved);
+        assert_eq!(the_quits_save_of(&mut buffer, None), AtTheClose::Saved);
         assert_eq!(
             std::fs::read_to_string(&mark).unwrap(),
             zone,
@@ -17735,8 +17947,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// RED (multiwindow slice E2 phase ①, acceptance gate 1 + v3 复审 ④-a) —
-    /// **the quit's save branch tries every dirty buffer, and reports what each
+    /// RED (multiwindow slice E2 phase ①, acceptance gate 1 + v3 复审 ④-a; S-6c) —
+    /// **the quit's save branch sends every dirty buffer, and finds what each
     /// one came to.**
     ///
     /// Three buffers and three fates, injected the way the two cases already
@@ -17752,9 +17964,9 @@ mod tests {
     /// on showing them. And **the third buffer was tried at all**, which is the
     /// half a loop that stopped at the first failure would silently lose.
     ///
-    /// Red gate: make `save_dirty` stop at the first non-`Saved` outcome and the
-    /// list is one long; skip the dirty filter and the clean buffer appears in a
-    /// report about unsaved work.
+    /// Red gate: make `PreviewPool::save_for_a_shut` stop after the first buffer
+    /// it hands over and one save is sent; skip `PreviewBuffer::save_for_a_shut`'s
+    /// dirty check and the clean buffer is sent too.
     #[test]
     fn the_quits_save_branch_tries_every_dirty_buffer_and_names_what_refused() {
         let dir = scratch("quit-save");
@@ -17800,18 +18012,35 @@ mod tests {
             pool.insert(buffer);
         }
 
-        let report = pool.save_dirty();
+        let (lane, jobs) = crate::persist::StorageLane::scripted();
+        let mut saves = PreviewSaves::on(lane);
         assert_eq!(
-            report
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect::<Vec<_>>(),
-            ["lands.txt", "conflicted.txt", "refused.txt"],
-            "every dirty buffer is tried, in the pool's own order, and no clean one is"
+            pool.save_for_a_shut(&mut saves, |_| crate::test_support::PRESSED_ON),
+            Vec::new(),
+            "nothing is refused at the hand-over"
         );
-        assert_eq!(report[0].1, SaveOutcome::Saved);
-        assert_eq!(report[1].1, SaveOutcome::Conflict);
-        assert!(matches!(report[2].1, SaveOutcome::Failed(_)));
+        let awaited = pool.close_awaited();
+        let mut sent = 0;
+        while let Some(crate::persist::ScriptedJob::Document(job)) = jobs.next() {
+            let _ = crate::test_support::serve_on_a_worker(job, None);
+            sent += 1;
+        }
+        assert_eq!(sent, 3, "every dirty buffer is sent, and no clean one is");
+        let mut answers = saves.take_answers();
+        let _ = saves.deliver(&mut answers, &mut [&mut pool]);
+        let found: Vec<(&str, AtTheClose)> = awaited
+            .iter()
+            .filter_map(|awaited| pool.at_the_close(*awaited))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("lands.txt", AtTheClose::Saved),
+                ("conflicted.txt", AtTheClose::Conflict),
+                ("refused.txt", AtTheClose::NotSaved),
+            ],
+            "each in the pool's own order, and what it came to"
+        );
 
         assert_eq!(
             std::fs::read_to_string(dir.join("lands.txt")).unwrap(),
@@ -18476,10 +18705,6 @@ mod tests {
             jobs.next().is_none(),
             "and nothing is asked of the storage worker"
         );
-        assert!(matches!(
-            buffer.write_now_for_quit(),
-            SaveOutcome::Failed(_)
-        ));
         assert_eq!(
             buffer.body_notice(),
             None,
@@ -19631,5 +19856,285 @@ mod tests {
             read(&utf16),
             ("中文 ok".to_owned(), HeadEncoding::Utf16Le, false)
         );
+    }
+
+    /// **What the page draws for one document**, one line a block, in the words a
+    /// person would use for it: what kind of block, then its text, a fence's
+    /// lines each quoted on a line of their own. A code span
+    /// and every other styled run carry their style, so a fence that became a
+    /// code span (or the other way round) is a different page.
+    fn page_of(src: &str) -> String {
+        fn spans(spans: &[Span]) -> String {
+            spans
+                .iter()
+                .map(|span| match span.style {
+                    SpanStyle::Plain => span.text.clone(),
+                    style => format!("[{style:?}:{}]", span.text),
+                })
+                .collect()
+        }
+        let mut page = String::new();
+        for block in parse_markdown(src) {
+            match block {
+                MarkdownBlock::Code { lang, text } => {
+                    page.push_str("code");
+                    if let Some(lang) = lang {
+                        page.push(' ');
+                        page.push_str(&lang);
+                    }
+                    page.push('\n');
+                    if !text.is_empty() {
+                        // Quoted, so a line's own blanks and tabs are visible.
+                        for line in text.split('\n') {
+                            page.push_str(&format!("| {line:?}\n"));
+                        }
+                    }
+                }
+                MarkdownBlock::Paragraph(runs) => {
+                    page.push_str(&format!("paragraph: {}\n", spans(&runs)));
+                }
+                MarkdownBlock::Heading { level, spans: runs } => {
+                    page.push_str(&format!("heading {level}: {}\n", spans(&runs)));
+                }
+                MarkdownBlock::List { ordered, items } => {
+                    page.push_str(&format!("list {ordered:?}\n"));
+                    for item in items {
+                        page.push_str(&format!("- {}\n", spans(&item)));
+                    }
+                }
+                MarkdownBlock::Quote(paragraphs) => {
+                    page.push_str("quote\n");
+                    for paragraph in paragraphs {
+                        page.push_str(&format!("> {}\n", spans(&paragraph)));
+                    }
+                }
+                MarkdownBlock::Rule => page.push_str("rule\n"),
+                other => page.push_str(&format!("{other:?}\n")),
+            }
+        }
+        page
+    }
+
+    /// RED (T-FENCE-GRAMMAR-SHARED, 2026-10-21) — **a fence is the same fence in a
+    /// pane and in a preview.** One fixture per CommonMark 0.31.2 example of a
+    /// fenced code block (§4.5, ex. 119–147) and per list or quote example that
+    /// holds one (ex. 237, 263, 278, 318, 321, 324), each beside the page it
+    /// draws (`tests/fixtures/preview-fences/<example>.page`). The preview reads
+    /// fences through `bt_detect::fence`, the grammar the terminal's detector
+    /// reads them with, so `~~~` fences, openers and closers indented up to three
+    /// spaces, closers that are too short or carry an info string, and a fence
+    /// inside a list item all draw as CommonMark draws them. `tab-split` is §2.2's
+    /// tab straddling the opener's indentation; `list-tab` is a tab in a list
+    /// item's line, counted from its real column (2 to 4), not from the item's.
+    ///
+    /// Where a page still differs from CommonMark it is the preview's block
+    /// grammar, not the fence's, and the page says so: a quote holds no code
+    /// (ex. 128, 237), there is no indented code (ex. 134, 263) and no setext
+    /// heading (ex. 141), and a list item holds one paragraph, so the list is cut
+    /// around a fence inside an item (ex. 318, 321, 324).
+    ///
+    /// MUTATION: put the private grammar back (`strip_prefix("```")` to open,
+    /// `starts_with("```")` to close) and the eighteen examples where it
+    /// disagreed with the terminal's (120, 123–125, 127, 131–133, 135, 136,
+    /// 138, 139, 141, 143–147) draw other pages, as do 278, 318, 321, 324 and
+    /// `tab-split`.
+    #[test]
+    fn every_commonmark_fence_example_draws_its_page() {
+        let fixtures = [
+            (
+                "ex119",
+                include_str!("../tests/fixtures/preview-fences/ex119.md"),
+                include_str!("../tests/fixtures/preview-fences/ex119.page"),
+            ),
+            (
+                "ex120",
+                include_str!("../tests/fixtures/preview-fences/ex120.md"),
+                include_str!("../tests/fixtures/preview-fences/ex120.page"),
+            ),
+            (
+                "ex121",
+                include_str!("../tests/fixtures/preview-fences/ex121.md"),
+                include_str!("../tests/fixtures/preview-fences/ex121.page"),
+            ),
+            (
+                "ex122",
+                include_str!("../tests/fixtures/preview-fences/ex122.md"),
+                include_str!("../tests/fixtures/preview-fences/ex122.page"),
+            ),
+            (
+                "ex123",
+                include_str!("../tests/fixtures/preview-fences/ex123.md"),
+                include_str!("../tests/fixtures/preview-fences/ex123.page"),
+            ),
+            (
+                "ex124",
+                include_str!("../tests/fixtures/preview-fences/ex124.md"),
+                include_str!("../tests/fixtures/preview-fences/ex124.page"),
+            ),
+            (
+                "ex125",
+                include_str!("../tests/fixtures/preview-fences/ex125.md"),
+                include_str!("../tests/fixtures/preview-fences/ex125.page"),
+            ),
+            (
+                "ex126",
+                include_str!("../tests/fixtures/preview-fences/ex126.md"),
+                include_str!("../tests/fixtures/preview-fences/ex126.page"),
+            ),
+            (
+                "ex127",
+                include_str!("../tests/fixtures/preview-fences/ex127.md"),
+                include_str!("../tests/fixtures/preview-fences/ex127.page"),
+            ),
+            (
+                "ex128",
+                include_str!("../tests/fixtures/preview-fences/ex128.md"),
+                include_str!("../tests/fixtures/preview-fences/ex128.page"),
+            ),
+            (
+                "ex129",
+                include_str!("../tests/fixtures/preview-fences/ex129.md"),
+                include_str!("../tests/fixtures/preview-fences/ex129.page"),
+            ),
+            (
+                "ex130",
+                include_str!("../tests/fixtures/preview-fences/ex130.md"),
+                include_str!("../tests/fixtures/preview-fences/ex130.page"),
+            ),
+            (
+                "ex131",
+                include_str!("../tests/fixtures/preview-fences/ex131.md"),
+                include_str!("../tests/fixtures/preview-fences/ex131.page"),
+            ),
+            (
+                "ex132",
+                include_str!("../tests/fixtures/preview-fences/ex132.md"),
+                include_str!("../tests/fixtures/preview-fences/ex132.page"),
+            ),
+            (
+                "ex133",
+                include_str!("../tests/fixtures/preview-fences/ex133.md"),
+                include_str!("../tests/fixtures/preview-fences/ex133.page"),
+            ),
+            (
+                "ex134",
+                include_str!("../tests/fixtures/preview-fences/ex134.md"),
+                include_str!("../tests/fixtures/preview-fences/ex134.page"),
+            ),
+            (
+                "ex135",
+                include_str!("../tests/fixtures/preview-fences/ex135.md"),
+                include_str!("../tests/fixtures/preview-fences/ex135.page"),
+            ),
+            (
+                "ex136",
+                include_str!("../tests/fixtures/preview-fences/ex136.md"),
+                include_str!("../tests/fixtures/preview-fences/ex136.page"),
+            ),
+            (
+                "ex137",
+                include_str!("../tests/fixtures/preview-fences/ex137.md"),
+                include_str!("../tests/fixtures/preview-fences/ex137.page"),
+            ),
+            (
+                "ex138",
+                include_str!("../tests/fixtures/preview-fences/ex138.md"),
+                include_str!("../tests/fixtures/preview-fences/ex138.page"),
+            ),
+            (
+                "ex139",
+                include_str!("../tests/fixtures/preview-fences/ex139.md"),
+                include_str!("../tests/fixtures/preview-fences/ex139.page"),
+            ),
+            (
+                "ex140",
+                include_str!("../tests/fixtures/preview-fences/ex140.md"),
+                include_str!("../tests/fixtures/preview-fences/ex140.page"),
+            ),
+            (
+                "ex141",
+                include_str!("../tests/fixtures/preview-fences/ex141.md"),
+                include_str!("../tests/fixtures/preview-fences/ex141.page"),
+            ),
+            (
+                "ex142",
+                include_str!("../tests/fixtures/preview-fences/ex142.md"),
+                include_str!("../tests/fixtures/preview-fences/ex142.page"),
+            ),
+            (
+                "ex143",
+                include_str!("../tests/fixtures/preview-fences/ex143.md"),
+                include_str!("../tests/fixtures/preview-fences/ex143.page"),
+            ),
+            (
+                "ex144",
+                include_str!("../tests/fixtures/preview-fences/ex144.md"),
+                include_str!("../tests/fixtures/preview-fences/ex144.page"),
+            ),
+            (
+                "ex145",
+                include_str!("../tests/fixtures/preview-fences/ex145.md"),
+                include_str!("../tests/fixtures/preview-fences/ex145.page"),
+            ),
+            (
+                "ex146",
+                include_str!("../tests/fixtures/preview-fences/ex146.md"),
+                include_str!("../tests/fixtures/preview-fences/ex146.page"),
+            ),
+            (
+                "ex147",
+                include_str!("../tests/fixtures/preview-fences/ex147.md"),
+                include_str!("../tests/fixtures/preview-fences/ex147.page"),
+            ),
+            (
+                "ex237",
+                include_str!("../tests/fixtures/preview-fences/ex237.md"),
+                include_str!("../tests/fixtures/preview-fences/ex237.page"),
+            ),
+            (
+                "ex263",
+                include_str!("../tests/fixtures/preview-fences/ex263.md"),
+                include_str!("../tests/fixtures/preview-fences/ex263.page"),
+            ),
+            (
+                "ex278",
+                include_str!("../tests/fixtures/preview-fences/ex278.md"),
+                include_str!("../tests/fixtures/preview-fences/ex278.page"),
+            ),
+            (
+                "ex318",
+                include_str!("../tests/fixtures/preview-fences/ex318.md"),
+                include_str!("../tests/fixtures/preview-fences/ex318.page"),
+            ),
+            (
+                "ex321",
+                include_str!("../tests/fixtures/preview-fences/ex321.md"),
+                include_str!("../tests/fixtures/preview-fences/ex321.page"),
+            ),
+            (
+                "ex324",
+                include_str!("../tests/fixtures/preview-fences/ex324.md"),
+                include_str!("../tests/fixtures/preview-fences/ex324.page"),
+            ),
+            (
+                "tab-split",
+                include_str!("../tests/fixtures/preview-fences/tab-split.md"),
+                include_str!("../tests/fixtures/preview-fences/tab-split.page"),
+            ),
+            (
+                "list-tab",
+                include_str!("../tests/fixtures/preview-fences/list-tab.md"),
+                include_str!("../tests/fixtures/preview-fences/list-tab.page"),
+            ),
+        ];
+        let wrong: Vec<String> = fixtures
+            .iter()
+            .filter_map(|(name, src, expected)| {
+                let drawn = page_of(src);
+                (drawn != *expected)
+                    .then(|| format!("{name}:\n{drawn}--- expected ---\n{expected}=== end ==="))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }

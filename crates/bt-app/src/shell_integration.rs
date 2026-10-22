@@ -53,8 +53,16 @@ use crate::{
     profiles::{self, Integration, Profile, windows_to_wsl},
 };
 
+mod language;
 pub mod profile_marks;
 mod profile_runtime;
+pub(crate) use language::{Language, language_for_birth, windows_powershell_birth};
+pub use language::{LanguageAsked, begin_language_question};
+// The real Windows PowerShell 5.1 panes Folio's PSReadLine is proven in (T-INTEGRATION-INJECT-2-
+// BUILD); that file says it is Windows-only, so this one names no platform for it.
+#[cfg(test)]
+#[path = "shell_integration_psreadline_tests.rs"]
+mod psreadline_tests;
 pub use profile_runtime::{
     Migrated, ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
     begin_profile_observation_for, begin_removal, begin_startup_migration, profile_installs_for,
@@ -424,9 +432,11 @@ impl WriteNotice {
 /// **One file of this build's, written into a directory, and kept current**
 /// (review row R4-6).
 ///
-/// The compare-and-repair all three installed scripts go through, as a function
-/// of a directory so it can be exercised against a temp one rather than against
-/// the machine's own `%APPDATA%`.
+/// The compare-and-repair all three installed scripts go through — and, since
+/// T-INTEGRATION-INJECT-2-BUILD, each of the PSReadLine module's six files
+/// ([`install_psreadline_module_at`]), which are bytes and not text, hence
+/// `contents` — as a function of a directory so it can be exercised against a
+/// temp one rather than against the machine's own `%APPDATA%`.
 ///
 /// Rewritten only when it differs, so that the common start — the same build
 /// opening the same kind of tab again — is one read rather than one write, and
@@ -434,7 +444,12 @@ impl WriteNotice {
 /// Rewritten *whenever* it differs, which is the half that was missing for
 /// PowerShell: an upgraded, deleted or truncated copy is the same finding as a
 /// copy that was never there.
-fn install_script_at(directory: &Path, name: &str, text: &str) -> std::io::Result<PathBuf> {
+fn install_script_at(
+    directory: &Path,
+    name: &str,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<PathBuf> {
+    let contents = contents.as_ref();
     let path = directory.join(name);
     std::fs::create_dir_all(directory)?;
     // The launch worker and a pane birth can arrive together. A native
@@ -443,15 +458,15 @@ fn install_script_at(directory: &Path, name: &str, text: &str) -> std::io::Resul
     // permission or volume failure still returns promptly and is never cached.
     let mut failure = None;
     for _ in 0..3 {
-        if bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, &path)
-            .is_ok_and(|existing| existing == text)
+        if bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, &path)
+            .is_ok_and(|existing| existing == contents)
         {
             return Ok(path);
         }
         let written = if path.exists() {
-            bt_persist::atomic_replace_preserving(&path, text.as_bytes())
+            bt_persist::atomic_replace_preserving(&path, contents)
         } else {
-            bt_persist::atomic_write(&path, text.as_bytes())
+            bt_persist::atomic_write(&path, contents)
         };
         match written {
             Ok(_) => return Ok(path),
@@ -1443,6 +1458,17 @@ pub fn compose_powershell_birth(
     arguments: &[OsString],
     powershell_integration: bool,
 ) -> Vec<OsString> {
+    compose_powershell_birth_loading(program, arguments, powershell_integration).arguments
+}
+
+/// [`compose_powershell_birth`], saying whether the loader went in — which is the one decision a
+/// Windows PowerShell pane's PSReadLine prefix shares with it ([`declare_psreadline_module`]).
+#[must_use]
+pub fn compose_powershell_birth_loading(
+    program: &Path,
+    arguments: &[OsString],
+    powershell_integration: bool,
+) -> ComposedBirth {
     compose_with_prepared_and_retry(
         program,
         arguments,
@@ -1450,6 +1476,24 @@ pub fn compose_powershell_birth(
         powershell_script_for_birth,
         schedule_parse_retry,
     )
+}
+
+/// **A PowerShell birth's argv, and whether it carries Folio's loader.**
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComposedBirth {
+    pub arguments: Vec<OsString>,
+    /// The loader was composed into `arguments` (`-NoExit -Command <loader>`, or appended to the
+    /// row's own command text); `false` when they are the row's own words.
+    pub loads: bool,
+}
+
+impl ComposedBirth {
+    fn as_written(arguments: &[OsString]) -> Self {
+        Self {
+            arguments: arguments.to_vec(),
+            loads: false,
+        }
+    }
 }
 
 /// [`compose_powershell_birth`] with the preparation handed in: `prepare` is asked only when the
@@ -1462,6 +1506,7 @@ fn compose_with_prepared(
     prepare: impl FnOnce() -> Option<PathBuf>,
 ) -> Vec<OsString> {
     compose_with_prepared_and_retry(program, arguments, powershell_integration, prepare, |_| {})
+        .arguments
 }
 
 /// The birth seam with its background retry handed in. The callback is told
@@ -1473,15 +1518,15 @@ fn compose_with_prepared_and_retry(
     powershell_integration: bool,
     prepare: impl FnOnce() -> Option<PathBuf>,
     retry: impl FnOnce(ParseQuestion),
-) -> Vec<OsString> {
+) -> ComposedBirth {
     if !powershell_integration || !is_powershell(program) {
-        return arguments.to_vec();
+        return ComposedBirth::as_written(arguments);
     }
     let Some(parsed) = classify_powershell_arguments(program, arguments) else {
-        return arguments.to_vec();
+        return ComposedBirth::as_written(arguments);
     };
     if parsed.non_interactive {
-        return arguments.to_vec();
+        return ComposedBirth::as_written(arguments);
     }
     let parse_answer = match &parsed.terminal {
         PowerShellTerminal::Command { .. } | PowerShellTerminal::EncodedCommand { .. } => {
@@ -1490,7 +1535,7 @@ fn compose_with_prepared_and_retry(
         PowerShellTerminal::None => None,
         PowerShellTerminal::File
         | PowerShellTerminal::CommandWithArgs
-        | PowerShellTerminal::Stdin => return arguments.to_vec(),
+        | PowerShellTerminal::Stdin => return ComposedBirth::as_written(arguments),
     };
     if matches!(
         parsed.terminal,
@@ -1500,13 +1545,18 @@ fn compose_with_prepared_and_retry(
         if let Some(text) = command_text(program, arguments) {
             retry(ParseQuestion::new(program, arguments, text));
         }
-        return arguments.to_vec();
+        return ComposedBirth::as_written(arguments);
     }
     let Some(script) = prepare().filter(|path| path.is_file()) else {
-        return arguments.to_vec();
+        return ComposedBirth::as_written(arguments);
     };
-    composed_powershell_arguments(program, arguments, &script, parse_answer)
-        .unwrap_or_else(|| arguments.to_vec())
+    match composed_powershell_arguments(program, arguments, &script, parse_answer) {
+        Some(arguments) => ComposedBirth {
+            arguments,
+            loads: true,
+        },
+        None => ComposedBirth::as_written(arguments),
+    }
 }
 
 /// The complete argument list `bt-pty`'s last-resort retry is started with when a pane's own
@@ -1569,6 +1619,14 @@ fn powershell_single_quoted(value: &Path) -> String {
 }
 
 /// The command text appended after `-NoExit -Command`.
+///
+/// **Whether `PSConsoleHostReadLine` exists is asked of the function drive, not of command
+/// discovery** (T-INTEGRATION-INJECT-2-BUILD, measured 2026-10-17). A Windows PowerShell pane
+/// that loaded Folio's binary-only module has no such function until this text defines it, and
+/// `Get-Command PSConsoleHostReadLine` for a name nothing loaded defines is an autoload: discovery
+/// finds the in-box PSReadLine 2.0.0, whose manifest exports that function, and imports it as a
+/// second PSReadLine beside Folio's (`Get-Module PSReadLine` then answered `2.4.5 2.0.0`). The
+/// function drive answers what is defined and loads nothing.
 #[must_use]
 pub fn powershell_load_command(program: &Path, script: &Path) -> String {
     let path = powershell_single_quoted(script);
@@ -1578,7 +1636,7 @@ pub fn powershell_load_command(program: &Path, script: &Path) -> String {
         ""
     };
     format!(
-        "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ {revive}if ((Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and -not (Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction Ignore)) {{ if (-not $Global:__FolioShellIntegration) {{ $Global:__FolioShellIntegration = @{{}} }}; $Global:__FolioShellIntegration.ReadLineType = (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | Where-Object ImplementingAssembly | Select-Object -Last 1).ImplementingAssembly.GetType('Microsoft.PowerShell.PSConsoleReadLine'); function global:PSConsoleHostReadLine {{ $lastRunStatus = $?; Microsoft.PowerShell.Core\\Set-StrictMode -Off; $Global:__FolioShellIntegration.ReadLineType::ReadLine($host.Runspace, $ExecutionContext, $lastRunStatus) }} }}; if (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) {{ $folioScript = $null; try {{ $folioScript = [IO.File]::ReadAllText({path}) }} catch {{}}; if ($null -ne $folioScript) {{ . ([scriptblock]::Create($folioScript)) }} }} }}"
+        "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ {revive}if ((Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and -not (Test-Path Function:PSConsoleHostReadLine)) {{ if (-not $Global:__FolioShellIntegration) {{ $Global:__FolioShellIntegration = @{{}} }}; $Global:__FolioShellIntegration.ReadLineType = (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | Where-Object ImplementingAssembly | Select-Object -Last 1).ImplementingAssembly.GetType('Microsoft.PowerShell.PSConsoleReadLine'); function global:PSConsoleHostReadLine {{ $lastRunStatus = $?; Microsoft.PowerShell.Core\\Set-StrictMode -Off; $Global:__FolioShellIntegration.ReadLineType::ReadLine($host.Runspace, $ExecutionContext, $lastRunStatus) }} }}; if (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) {{ $folioScript = $null; try {{ $folioScript = [IO.File]::ReadAllText({path}) }} catch {{}}; if ($null -ne $folioScript) {{ . ([scriptblock]::Create($folioScript)) }} }} }}"
     )
 }
 
@@ -2892,7 +2950,7 @@ struct ProfileSlot {
 /// round 2): observation workers can overlap — every Profiles-page open starts one, and a
 /// one-click install observes again — so what each publishes carries the number its run took,
 /// and an answer from a run older than the one already filed is refused (the
-/// `psreadline::PsReadLineProbe` rule). Counted from `1`.
+/// rule the retired PSReadLine probe kept). Counted from `1`.
 static OBSERVATION_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Number an observation run.
@@ -3984,12 +4042,20 @@ static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
 /// Teach the probe how to bring the event loop round when an answer lands.
 ///
-/// [`crate::psreadline::install_wake`]'s twin and for its reason: a pane that
-/// has started, printed its prompt and gone quiet produces no further frame on
-/// its own, so an answer that landed after that frame would sit unread until the
-/// reader typed something.
+/// A pane that has started, printed its prompt and gone quiet produces no further frame on its
+/// own, so an answer that landed after that frame would sit unread until the reader typed
+/// something.
 pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
+}
+
+/// **Bring the window round for an answer about a legacy PowerShell artefact** — the earlier
+/// Folio's PSReadLine copy (`psreadline::begin_legacy_removal`), which the window takes on the
+/// same wake as the `$PROFILE` line's (`AppEvent::PowerShellProfileProbed`).
+pub(crate) fn wake_for_profile_answers() {
+    if let Some(wake) = WAKE.get() {
+        wake();
+    }
 }
 
 /// **The environment a probe's child runs in** (T-PROBE-NO-CACHED-FAILURE): the one a pane of the
@@ -4685,14 +4751,16 @@ fn trial_script_directory() -> Option<PathBuf> {
     Some(crate::update_trial::temp_folder(&std::env::temp_dir(), txn).join(SCRIPT_DIRECTORY))
 }
 
-/// Remove the script copy owned by a transaction after that transaction's
+/// Remove the script and PSReadLine copies owned by a transaction after that transaction's
 /// own directory has been retired: the transaction's temporary folder
-/// ([`crate::update_trial::temp_folder`], the name [`trial_script_directory`]
-/// writes under), its script folder and then the folder itself when nothing
-/// else is in it. No durable Folio or user directory is beneath this path.
+/// ([`crate::update_trial::temp_folder`], the name [`trial_script_directory`] and
+/// [`trial_psmodules_directory`] write under), its script and module folders and then the folder
+/// itself when nothing else is in it. No durable Folio or user directory is beneath this path. A
+/// module a trial pane's shell still holds stays until the next retirement asks.
 pub(crate) fn remove_trial_script(txn: crate::update_txn::TxnId) {
     let root = crate::update_trial::temp_folder(&std::env::temp_dir(), txn);
     let _ = std::fs::remove_dir_all(root.join(SCRIPT_DIRECTORY));
+    let _ = std::fs::remove_dir_all(root.join(PSMODULES_DIRECTORY));
     let _ = std::fs::remove_dir(root);
 }
 
@@ -4711,6 +4779,444 @@ fn powershell_script_in_trial(
         return Ok(durable);
     }
     install_script_at(trial_directory, SCRIPT_FILE_PS1, text)
+}
+
+// ── Folio's PSReadLine in a Windows PowerShell pane (T-INTEGRATION-INJECT-2-BUILD) ───────────
+//
+// The design is `docs/plans/design/integration-inject-2-2026-10-15.md` §2.2–§2.3, and the owner's
+// rulings of 2026-10-15: the binary is Microsoft's signed 2.4.5 (Q1), and Folio's copy wins in
+// Folio's 5.1 panes whatever the account has installed (Q2). A 5.1 console host imports
+// PSReadLine while it creates its runspace, before any profile runs and before `-Command`, and a
+// second import binds to the assembly already loaded — so the editor is chosen by the module path
+// the host searches, or not at all. Folio composes a pane-only `PSModulePath` whose first entry is
+// a directory holding only Folio's binary-only module, and declares it on the pane's command.
+
+/// The directory under Folio's local data folder the module's artefacts live in:
+/// `%LOCALAPPDATA%\Folio\psmodules\<artefact>\PSReadLine\2.4.5\`.
+const PSMODULES_DIRECTORY: &str = "psmodules";
+
+/// The module's durable artefact directory (`psmodules\<artefact>`), prepared once per process —
+/// outside a trial, or after its commit.
+static DURABLE_PSREADLINE_MODULE: OnceLock<PathBuf> = OnceLock::new();
+/// The artefact directory an update's trial names while its writes are held back.
+static TRIAL_PSREADLINE_MODULE: OnceLock<PathBuf> = OnceLock::new();
+/// The cause of a failed module preparation, said once ([`WriteNotice`]).
+static PSREADLINE_MODULE_NOTICE: WriteNotice = WriteNotice::new();
+/// Whether this process has removed the artefacts other builds left (once: at the launch's
+/// preparation, or at the first durable preparation of a birth, whichever comes first).
+static PSREADLINE_PRUNED: std::sync::Once = std::sync::Once::new();
+
+/// **Folio's local data folder**, `%LOCALAPPDATA%\Folio`, where the module is a machine-local
+/// cache of what the executable carries (the note's §2.2: local, not roaming; WebView2's root).
+/// `None` off Windows and when the account names no local application data folder.
+fn local_data_root() -> Option<PathBuf> {
+    if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
+        return None;
+    }
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map(|base| PathBuf::from(base).join("Folio"))
+}
+
+/// **The module, written into `psmodules` and kept current**: each of the executable's module
+/// files ([`crate::psreadline::module_files`], the manifest last) compared with what is on disk
+/// under `psmodules\<artefact>\` and written only where it differs, through the atomic replace
+/// every script goes through ([`install_script_at`]). Answers the artefact directory — the one
+/// entry a pane's `PSModulePath` is given. A function of the directory so a test writes into one
+/// of its own; nothing else is read or written.
+///
+/// The manifest lands last, so a write that stops part-way leaves a directory PowerShell does not
+/// read as a module (a version folder is a module by its `PSReadLine.psd1`), and the next birth
+/// tries again.
+pub(crate) fn install_psreadline_module_at(psmodules: &Path) -> std::io::Result<PathBuf> {
+    install_psreadline_files_at(
+        psmodules,
+        crate::psreadline::ARTEFACT,
+        crate::psreadline::module_files(),
+    )
+}
+
+/// [`install_psreadline_module_at`] over an artefact and its files handed in. An executable that
+/// carries no module (any target but Windows) has nothing to write, which is an error here and a
+/// question its callers never ask.
+fn install_psreadline_files_at(
+    psmodules: &Path,
+    artefact: &str,
+    files: &[(&str, &[u8])],
+) -> std::io::Result<PathBuf> {
+    if files.is_empty() {
+        return Err(std::io::Error::other(
+            "this executable carries no PSReadLine module",
+        ));
+    }
+    let directory = psmodules.join(artefact);
+    for (name, bytes) in files {
+        // Each file into its own directory (`PSReadLine/2.4.5/netstd/…`), made level by level.
+        let path = directory.join(name);
+        let (Some(parent), Some(leaf)) = (path.parent(), path.file_name()) else {
+            return Err(std::io::Error::other(format!("{name} names no file")));
+        };
+        install_script_at(parent, &leaf.to_string_lossy(), bytes)?;
+    }
+    Ok(directory)
+}
+
+/// **The artefact directory a Windows PowerShell birth names in its module path** — called on
+/// the birth worker, never on the window thread, and only for a pane that also gets Folio's
+/// loader ([`declare_psreadline_module`]). The rule is [`powershell_script_for_birth`]'s:
+///
+/// - **Not a trial, or a committed one**: the durable copy under Folio's local data folder,
+///   compared once per process with the bytes this build carries and repaired where it differs.
+///   Once it stands, the artefacts other builds left are removed ([`prune_psreadline_artefacts`]).
+/// - **A trial not yet committed**: the durable copy when it already holds this build's bytes,
+///   read and never written; otherwise this build's module written into the trial's own folder
+///   under the system temporary directory, which the trial's cleanup removes. The commit releases
+///   [`update_trial::Writer::PsReadLineModule`], whose preparation writes the durable copy.
+///
+/// `None` — the pane then gets the account's PSReadLine, exactly as before this build — when the
+/// executable carries no module, when there is no local data folder, or when the write failed: a
+/// failure is said once in `diagnostics.log` and retried by the next birth
+/// (T-PROBE-NO-CACHED-FAILURE).
+///
+/// [`update_trial::Writer::PsReadLineModule`]: crate::update_trial::Writer::PsReadLineModule
+pub fn psreadline_module_for_birth() -> Option<PathBuf> {
+    if crate::psreadline::module_files().is_empty() {
+        return None;
+    }
+    let durable = local_data_root()?.join(PSMODULES_DIRECTORY);
+    if crate::update_trial::defer(crate::update_trial::Writer::PsReadLineModule) {
+        if let Some(path) = TRIAL_PSREADLINE_MODULE.get().filter(|path| path.is_dir()) {
+            return Some(path.clone());
+        }
+        let prepared = PSREADLINE_MODULE_NOTICE.said(
+            &psreadline_module_noun(),
+            psreadline_module_in_trial(&durable, &trial_psmodules_directory()?),
+            &crate::diagnostics::note,
+        )?;
+        let _ = TRIAL_PSREADLINE_MODULE.set(prepared.clone());
+        return Some(prepared);
+    }
+    if let Some(path) = DURABLE_PSREADLINE_MODULE.get().filter(|path| path.is_dir()) {
+        return Some(path.clone());
+    }
+    let prepared = PSREADLINE_MODULE_NOTICE.said(
+        &psreadline_module_noun(),
+        install_psreadline_module_at(&durable),
+        &crate::diagnostics::note,
+    )?;
+    let _ = DURABLE_PSREADLINE_MODULE.set(prepared.clone());
+    prune_psreadline_artefacts_once(&durable);
+    Some(prepared)
+}
+
+/// What a failed module write is called in `diagnostics.log`: the module and its version, so a
+/// line read beside a pane's own `Get-Module` names the copy it is about.
+fn psreadline_module_noun() -> String {
+    format!(
+        "Folio's PSReadLine {} module",
+        crate::psreadline::SHIPPED_VERSION
+    )
+}
+
+/// The trial half of [`psreadline_module_for_birth`]'s rule, over directories a test can name:
+/// the durable artefact when every file of it already holds this build's bytes (read only),
+/// otherwise the module written into `trial_psmodules`. Never writes into `durable_psmodules`.
+fn psreadline_module_in_trial(
+    durable_psmodules: &Path,
+    trial_psmodules: &Path,
+) -> std::io::Result<PathBuf> {
+    let durable = durable_psmodules.join(crate::psreadline::ARTEFACT);
+    let files = crate::psreadline::module_files();
+    let whole = files.iter().all(|(name, bytes)| {
+        bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, durable.join(name))
+            .is_ok_and(|existing| existing == *bytes)
+    });
+    if whole {
+        return Ok(durable);
+    }
+    install_psreadline_module_at(trial_psmodules)
+}
+
+/// A trial's own `psmodules`: under its transaction's folder in the system temporary directory,
+/// beside the script's ([`trial_script_directory`]); [`remove_trial_script`] removes the folder.
+fn trial_psmodules_directory() -> Option<PathBuf> {
+    let txn = crate::update_startup::trial()
+        .map(|(txn, _)| txn)
+        .or_else(crate::update_startup::held)?;
+    Some(crate::update_trial::temp_folder(&std::env::temp_dir(), txn).join(PSMODULES_DIRECTORY))
+}
+
+/// [`prune_psreadline_artefacts`] over the durable `psmodules`, once per process, outside a
+/// trial (the old build's artefact is the old build's until the trial is committed, and the
+/// commit's preparation asks again).
+fn prune_psreadline_artefacts_once(durable_psmodules: &Path) {
+    if crate::update_trial::defer(crate::update_trial::Writer::PsReadLineModule) {
+        return;
+    }
+    PSREADLINE_PRUNED.call_once(|| {
+        for (artefact, why) in prune_psreadline_artefacts(
+            durable_psmodules,
+            crate::psreadline::ARTEFACT,
+            &crate::psreadline::directory_entries,
+            &|path| std::fs::remove_file(path),
+        ) {
+            crate::diagnostics::note(&format!(
+                "Folio's PSReadLine artefact {artefact} from another build was kept ({why}); the \
+                 next launch tries again"
+            ));
+        }
+    });
+}
+
+/// The launch preparation's half: the durable `psmodules` pruned, without writing the module —
+/// that is a Windows PowerShell birth's, so a machine that never opens one is given none.
+fn prune_psreadline_artefacts_at_launch() {
+    if let Some(root) = local_data_root() {
+        prune_psreadline_artefacts_once(&root.join(PSMODULES_DIRECTORY));
+    }
+}
+
+/// What is directly in a directory, and which of it is itself one
+/// (`psreadline::directory_entries`, handed in).
+type DirectoryEntries = dyn Fn(&Path) -> std::io::Result<Vec<(OsString, bool)>>;
+
+/// **The artefacts other builds left, removed when nothing holds them** (the note's §2.2): every
+/// directory under `psmodules` but `keep`. A content-addressed directory is never rewritten, so a
+/// build that ships a new package writes a sibling, and this is what retires the old one.
+///
+/// **The module's assembly goes first, and it is the test of whether anything holds the
+/// artefact.** A shell that has the module loaded has its assembly
+/// (`PSReadLine\<version>\Microsoft.PowerShell.PSReadLine.dll`) mapped, and Windows refuses to
+/// delete a mapped image — measured by `a_loaded_artefact_is_kept_until_its_shell_ends`. The
+/// assembly is the first file of the module a shell loads, so when it can be deleted nothing has
+/// the module loaded, and the rest of the directory follows; when it cannot, nothing of the
+/// artefact has been touched, and it stays whole for the next launch. Answers each artefact kept,
+/// with why. `entries` and `remove_file` are the disk, handed in.
+fn prune_psreadline_artefacts(
+    psmodules: &Path,
+    keep: &str,
+    entries: &DirectoryEntries,
+    remove_file: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> Vec<(String, String)> {
+    let mut kept = Vec::new();
+    let Ok(artefacts) = entries(psmodules) else {
+        return kept;
+    };
+    'artefacts: for (name, is_directory) in artefacts {
+        let name = name.to_string_lossy().into_owned();
+        if name == keep || !is_directory {
+            continue;
+        }
+        let artefact = psmodules.join(&name);
+        let module = artefact.join(crate::psreadline::MODULE_NAME);
+        for (version, is_directory) in entries(&module).unwrap_or_default() {
+            if !is_directory {
+                continue;
+            }
+            let assembly = module.join(version).join(crate::psreadline::ASSEMBLY);
+            match remove_file(&assembly) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    kept.push((name, error.to_string()));
+                    continue 'artefacts;
+                }
+            }
+        }
+        if let Err(error) = std::fs::remove_dir_all(&artefact) {
+            kept.push((name, error.to_string()));
+        }
+    }
+    kept
+}
+
+/// **A Windows PowerShell pane's module path, composed** (the note's §2.3, spike Follow-up C):
+///
+/// ```text
+/// PSModulePath = <folio> ; [<documents>\WindowsPowerShell\Modules ;] <value>
+/// ```
+///
+/// - `folio` is the artefact directory, which holds only `PSReadLine`, so the prefix shadows
+///   nothing else; an entry of `value` naming it already is dropped there (no double entry).
+/// - `value` is the module path the pane would otherwise have — the environment Folio builds for
+///   the birth after the row's own layer, `environment` — and is kept, entry for entry, after
+///   Folio's.
+/// - The Documents entry is added only where 5.1 would have added it itself: `value` unset or
+///   equal (ignoring case) to the machine's own value, and the entry not already in `value`. 5.1
+///   keeps any other inherited value as it is. **Both sides are compared expanded**, as 5.1
+///   compares them (its `GetExpandedEnvironmentVariable`): an account's fresh block carries
+///   `%ProgramFiles%\WindowsPowerShell\Modules` unexpanded — Windows expands `%SystemRoot%` in it
+///   and not `%ProgramFiles%` (measured 2026-10-17) — while the machine's value comes back
+///   expanded, so a comparison of the raw texts would drop the Documents entry on a stock machine.
+///   `value`'s references are expanded over `environment`, the block the pane is started with,
+///   which is the block the child expands them over.
+/// - With `value` unset, 5.1 itself would compose the Documents entry and the machine's value, so
+///   that is what follows Folio's; with no machine value either there is nothing to compose that
+///   would still find the system's own modules, and the answer is `None` (no prefix).
+///
+/// `None` as well when `folio` cannot be an entry of the path (it holds the separator).
+#[must_use]
+pub(crate) fn compose_module_path(
+    folio: &Path,
+    documents: Option<&Path>,
+    value: Option<&OsStr>,
+    machine: Option<&OsStr>,
+    environment: &[(OsString, OsString)],
+) -> Option<OsString> {
+    let folio = folio.as_os_str().to_string_lossy();
+    if folio.is_empty() || folio.contains(';') {
+        return None;
+    }
+    let expand = |text: &str| expand_environment_references(text, environment);
+    let same = |left: &str, right: &str| {
+        let (left, right) = (expand(left), expand(right));
+        left.trim_end_matches(['\\', '/'])
+            .eq_ignore_ascii_case(right.trim_end_matches(['\\', '/']))
+    };
+    let inherited = match value {
+        Some(value) => value.to_string_lossy().into_owned(),
+        None => machine?.to_string_lossy().into_owned(),
+    };
+    let defaulted = match (value, machine) {
+        (None, _) => true,
+        (Some(value), Some(machine)) => expand(&value.to_string_lossy())
+            .eq_ignore_ascii_case(&expand(&machine.to_string_lossy())),
+        (Some(_), None) => false,
+    };
+    let entries: Vec<&str> = inherited
+        .split(';')
+        .filter(|entry| !entry.is_empty() && !same(entry, &folio))
+        .collect();
+    let mut composed = vec![folio.into_owned()];
+    if defaulted && let Some(documents) = documents {
+        let personal = documents
+            .join("WindowsPowerShell")
+            .join("Modules")
+            .to_string_lossy()
+            .into_owned();
+        if !personal.contains(';') && !entries.iter().any(|entry| same(entry, &personal)) {
+            composed.push(personal);
+        }
+    }
+    composed.extend(entries.into_iter().map(str::to_owned));
+    Some(OsString::from(composed.join(";")))
+}
+
+/// **`text` with each `%NAME%` replaced by `NAME`'s value in `environment`** (names compared
+/// ignoring case, as Windows compares them), the way `ExpandEnvironmentStrings` reads a value: a
+/// reference to a name the block does not hold is left as written, and the scan goes on from its
+/// closing `%`.
+fn expand_environment_references(text: &str, environment: &[(OsString, OsString)]) -> String {
+    let mut expanded = String::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('%') {
+        expanded.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('%') else {
+            expanded.push_str(&rest[open..]);
+            return expanded;
+        };
+        let name = &after[..close];
+        let value = (!name.is_empty())
+            .then(|| {
+                environment
+                    .iter()
+                    .find(|(key, _)| environment_name_eq(key, OsStr::new(name)))
+            })
+            .flatten();
+        match value {
+            Some((_, value)) => {
+                expanded.push_str(&value.to_string_lossy());
+                rest = &after[close + 1..];
+            }
+            None => {
+                expanded.push('%');
+                expanded.push_str(name);
+                rest = &after[close..];
+            }
+        }
+    }
+    expanded.push_str(rest);
+    expanded
+}
+
+/// The variable a PowerShell's module path is in.
+const MODULE_PATH: &str = "PSModulePath";
+
+/// **What a Windows PowerShell birth's module path is decided from**, read on the birth worker:
+/// the artefact directory (writing it if need be), the account's Documents and the machine's own
+/// `PSModulePath`. A seam so a test hands in its own.
+pub(crate) struct ModulePathFacts {
+    pub(crate) module: Option<PathBuf>,
+    pub(crate) documents: Option<PathBuf>,
+    pub(crate) machine: Option<OsString>,
+}
+
+impl ModulePathFacts {
+    /// The machine's: [`psreadline_module_for_birth`], the Documents known folder and the
+    /// machine block.
+    pub(crate) fn of_this_machine() -> Self {
+        Self {
+            module: psreadline_module_for_birth(),
+            documents: crate::psreadline::documents_directory(),
+            machine: bt_platform::environment::machine_variable(MODULE_PATH),
+        }
+    }
+}
+
+/// **Declare Folio's PSReadLine on a Windows PowerShell pane's command** (the note's §2.3).
+///
+/// Only when the pane also gets Folio's loader (`loads`): a binary-only module leaves the host on
+/// its legacy line editor without the `PSConsoleHostReadLine` the loader defines, so the prefix
+/// and the loader are one decision. So no prefix for pwsh 7 (which puts its own module folders
+/// first and ships 2.4.5 in-box), for a row the composer did not load into (`-File`,
+/// `-NonInteractive`, an uncomposable argv, the Shell integration switch off) — each of those panes
+/// gets the account's PSReadLine, exactly as before. **`loads` is the birth's decision from the
+/// edition's known language-mode answer** ([`windows_powershell_birth`], ruling B′): a pane is
+/// given the prefix only when Windows PowerShell answered `FullLanguage`; a constrained edition's
+/// pane is the switch-off pane and a failed question's pane gets the loader without the prefix,
+/// both decided before this is called. `facts` is asked only for a pane that will be composed.
+///
+/// The composed value is written into the last layer, `profile`, replacing the row's own
+/// `PSModulePath` (which it carries after Folio's entry): it is declared on the command
+/// explicitly, because `portable_pty`'s builder rebuilds `PSModulePath` from the registry
+/// otherwise (`declare_probe_module_path`'s finding). It stays for the pane's life (the spike's
+/// disposition (i): removing it after the load pulls 2.0.0 in as a second module).
+pub(crate) fn declare_psreadline_module(
+    program: &Path,
+    loads: bool,
+    before_folio: &[(OsString, OsString)],
+    folio: &[(OsString, OsString)],
+    profile: &mut Vec<(OsString, OsString)>,
+    facts: impl FnOnce() -> ModulePathFacts,
+) {
+    if !loads || !is_powershell(program) || is_pwsh(program) {
+        return;
+    }
+    let facts = facts();
+    let Some(module) = facts.module else {
+        return;
+    };
+    // Names are compared by the spawn's own rule (`bt_pty::same_environment_name`), the one the
+    // pane's environment is layered by: the value found is the one the pane would read, and the
+    // rows replaced are the ones that would have set it.
+    let pane = bt_pty::spawn_environment(before_folio, &[], folio, profile);
+    let value = pane
+        .iter()
+        .find(|(name, _)| bt_pty::same_environment_name(name, OsStr::new(MODULE_PATH)))
+        .map(|(_, value)| value.as_os_str())
+        .filter(|value| !value.is_empty());
+    let Some(composed) = compose_module_path(
+        &module,
+        facts.documents.as_deref(),
+        value,
+        facts.machine.as_deref(),
+        &pane,
+    ) else {
+        return;
+    };
+    profile.retain(|(name, _)| !bt_pty::same_environment_name(name, OsStr::new(MODULE_PATH)));
+    profile.push((OsString::from(MODULE_PATH), composed));
 }
 
 /// **Prepare the script ahead of the first PowerShell birth, on a worker nobody waits for.**
@@ -4732,6 +5238,8 @@ enum PowershellPreparation {
 #[derive(Clone, Copy)]
 struct PreparationEffects {
     script: fn() -> Option<PathBuf>,
+    /// Remove the PSReadLine artefacts other builds left ([`prune_psreadline_artefacts`]).
+    prune: fn(),
     parse: ParseProbe,
     /// The environment the parse questions are asked in, read on the worker.
     environment: fn(&bt_platform::admission::WorkerCtx) -> ProbeEnvironment,
@@ -4742,6 +5250,7 @@ impl PreparationEffects {
     /// current logon environment.
     const MACHINE: Self = Self {
         script: powershell_script_for_birth,
+        prune: prune_psreadline_artefacts_at_launch,
         parse: run_parse_probe,
         environment: |worker| ProbeEnvironment::current(worker, "PowerShell parse probe"),
     };
@@ -4757,6 +5266,7 @@ fn spawn_powershell_preparation(
         move |ctx| match work {
             PowershellPreparation::ScriptAndQuestions(questions) => {
                 let _ = (effects.script)();
+                (effects.prune)();
                 if questions.is_empty() {
                     return;
                 }
@@ -5996,7 +6506,8 @@ mod tests {
     /// **Taken in turn by the tests that file Windows PowerShell's edition** on the process's
     /// observations: each reads the row that edition's newest filing decides, and the suite runs
     /// tests on parallel threads.
-    static WINDOWS_POWERSHELL_OBSERVATIONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(super) static WINDOWS_POWERSHELL_OBSERVATIONS: std::sync::Mutex<()> =
+        std::sync::Mutex::new(());
 
     /// RED (T-OBSERVATION-REFUSAL-ON-THE-PAGE) — **an observation the Profiles page asked for and
     /// the thread door refused is said on the page's rows, and the next open asks again.** The
@@ -6764,7 +7275,7 @@ mod tests {
         assert!(parse_profile_observation("  \r\n").is_none());
     }
 
-    fn scopes(
+    pub(super) fn scopes(
         machine_policy: crate::psreadline::ExecutionPolicy,
         user_policy: crate::psreadline::ExecutionPolicy,
         process: crate::psreadline::ExecutionPolicy,
@@ -6862,10 +7373,11 @@ mod tests {
             assert_eq!(policy_cause(list, here, row), cause, "{name}");
         }
         // And `Changeable` means the command works: the CurrentUser scope it writes, then read.
-        let command_policy = crate::psreadline::ExecutionPolicy::parse(
-            POLICY_COMMAND.rsplit(' ').next().expect("a policy word"),
+        assert_eq!(
+            POLICY_COMMAND.rsplit(' ').next(),
+            Some(POLICY_COMMAND_POLICY.name()),
+            "the command writes the policy the cause promises, in Get-ExecutionPolicy's own word"
         );
-        assert_eq!(command_policy, POLICY_COMMAND_POLICY);
         assert!(POLICY_COMMAND.contains("-Scope CurrentUser"));
         for list in [
             scopes(none, none, none, Restricted, none),
@@ -6874,7 +7386,7 @@ mod tests {
         ] {
             assert_eq!(policy_cause(list, here, Absent), Changeable);
             let after = PolicyScopes {
-                current_user: command_policy,
+                current_user: POLICY_COMMAND_POLICY,
                 ..list
             };
             assert_eq!(policy_cause(after, here, Absent), Allows, "{list:?}");
@@ -8261,7 +8773,8 @@ mod tests {
                     Ok(())
                 });
             },
-        );
+        )
+        .arguments;
         assert_eq!(actual, arguments);
         assert!(!prepared.get());
         assert_eq!(
@@ -8482,6 +8995,14 @@ mod tests {
             assert!(!load.contains("$Global:__FolioReadLineType"));
         }
         assert!(!winps.contains("GetAssemblies"));
+        // **One road** (T-INTEGRATION-INJECT-2-BUILD round 3b, ruling B′): the loader acts only in
+        // `FullLanguage`; the round-2 give-back that removed Folio's module and imported another
+        // in any other mode is gone, because a constrained edition's pane is never given the
+        // prefix to give back.
+        for load in [&winps, &pwsh] {
+            assert!(!load.contains("} else {"), "{load}");
+            assert!(!load.contains("Remove-Module"), "{load}");
+        }
         assert_eq!(pwsh.contains("GetAssemblies"), cfg!(windows));
         assert_eq!(
             pwsh.contains("Microsoft.PowerShell.PSReadLine.dll"),
@@ -8641,7 +9162,7 @@ mod tests {
     /// `bt_pty::test_shell` so the test shell does not read the row a second, different way
     /// (`-noe -c` is the genuine Visual Studio row, and the subject here).
     #[cfg(windows)]
-    fn test_shell_shape(
+    pub(super) fn test_shell_shape(
         program: &Path,
         arguments: &[OsString],
     ) -> bt_pty::test_shell::PowerShellShape {
@@ -8909,14 +9430,17 @@ mod tests {
             .expect("the birth worker's body");
         assert_eq!(
             birth
-                .matches("shell_integration::compose_powershell_birth(")
+                .matches("shell_integration::compose_powershell_birth_loading(")
                 .count(),
             1,
-            "the birth worker composes the pane's argv"
+            "the birth worker composes the pane's argv (and learns whether the loader went in)"
         );
+        // The retry's composer is handed to `pty_door::plan_birth`, which composes it with the
+        // integration the edition's answer leaves; that decision is driven by
+        // `pty_door::tests::a_birth_composes_with_the_integration_its_edition_leaves`.
         assert!(
-            birth.contains("shell_integration::last_resort_arguments(powershell_integration)"),
-            "and the retry's, with the same switch"
+            birth.contains("shell_integration::last_resort_arguments,"),
+            "and the retry's, with the one composer"
         );
 
         let found = index
@@ -9258,6 +9782,7 @@ mod tests {
             &programs,
             PreparationEffects {
                 script: no_script,
+                prune: || {},
                 parse: NeverAnswers::probe,
                 environment: |_| ProbeEnvironment::Inherited,
             },

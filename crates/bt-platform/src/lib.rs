@@ -16,6 +16,9 @@ pub mod elevated_protocol;
 pub mod environment;
 /// The process-wide file-read ledger, `bt-effects`' (re-exported whole).
 pub use bt_effects::file_reads;
+/// That a process has ended, as the kernel signals it: a test's wait for a child it started.
+#[cfg(windows)]
+pub mod exit_witness;
 pub mod foreground_program;
 /// The folder a process is standing in, read from outside it (T-CWD-FROM-PROCESS).
 pub mod process_folder;
@@ -2651,12 +2654,6 @@ pub const NOTIFICATION_AUMID: &str = "Folio.Terminal";
 pub fn notification_aumid_key() -> String {
     format!(r"Software\Classes\AppUserModelId\{NOTIFICATION_AUMID}")
 }
-
-/// The name shown on the toast and in Windows' own notification settings.
-///
-/// The product name and not the window title: what this names is the *sender*,
-/// and the sender is Folio however many windows it has open.
-pub const NOTIFICATION_DISPLAY_NAME: &str = "Folio";
 
 /// One toast, as the XML the notification platform parses.
 ///
@@ -12230,9 +12227,10 @@ mod windows_impl {
         /// `wake` is called from whatever thread the platform delivers a click
         /// on. It must do nothing but nudge the event loop — the launch string
         /// is already in the queue by then, and [`Self::take_activations`] is
-        /// where it is read, on the loop's own thread.
-        pub fn new(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
-            Self::register_identity()?;
+        /// where it is read, on the loop's own thread. `display_name` is
+        /// [`Self::register_identity`]'s.
+        pub fn new(display_name: &str, wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
+            Self::register_identity(display_name)?;
             Self::without_registration(wake)
         }
 
@@ -12240,11 +12238,15 @@ mod windows_impl {
         /// `HKCU\Software\Classes\AppUserModelId\<AUMID>` that names the sender
         /// on a toast and in Windows' notification settings (the uninstall
         /// ledger's *Toast identity*). The one durable write [`Self::new`] makes.
-        pub fn register_identity() -> Result<(), String> {
+        ///
+        /// `display_name` is the caller's product name — the *sender*, not a
+        /// window title — passed in so the name is typed once, in `bt-app`
+        /// (T-NATIVE-LABELS-FROM-THE-CALLER).
+        pub fn register_identity(display_name: &str) -> Result<(), String> {
             write_registry_string(
                 &super::notification_aumid_key(),
                 "DisplayName",
-                super::NOTIFICATION_DISPLAY_NAME,
+                display_name,
             )
         }
 
@@ -13265,7 +13267,9 @@ mod windows_impl {
         }
     }
 
-    type MathMenuState = DeferredState<(), Result<bool, String>>;
+    /// The posted request carries the one row's title as the caller wrote it, so the menu reads
+    /// in the language in force when it was asked for (T-NATIVE-LABELS-FROM-THE-CALLER).
+    type MathMenuState = DeferredState<Vec<u16>, Result<bool, String>>;
 
     /// Formula context-menu bridge whose nested native message pump never starts inside a winit
     /// application callback. `request` only posts a private window message. The subclass receives
@@ -13301,8 +13305,11 @@ mod windows_impl {
 
         /// Queue the native menu once. A second request while the first is posted, showing, or
         /// waiting to be consumed is an ordinary coalesced UI race and returns `Ok(false)`.
-        pub fn request(&self) -> Result<bool, String> {
-            if !self.state.begin_request(()) {
+        ///
+        /// `copy_latex` is the menu's one row, in the caller's words: this crate has no table
+        /// of its own to read a title from (T-NATIVE-LABELS-FROM-THE-CALLER).
+        pub fn request(&self, copy_latex: &str) -> Result<bool, String> {
+            if !self.state.begin_request(wide_null(copy_latex)) {
                 return Ok(false);
             }
             // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
@@ -13363,21 +13370,23 @@ mod windows_impl {
         unsafe { Arc::increment_strong_count(state_pointer) };
         // SAFETY: the increment immediately above created the strong reference consumed here.
         let state = unsafe { Arc::from_raw(state_pointer) };
-        if state.begin_showing().is_some() {
-            state.complete(track_math_context_menu(hwnd));
+        if let Some(copy_latex) = state.begin_showing() {
+            state.complete(track_math_context_menu(hwnd, &copy_latex));
         }
         LRESULT(0)
     }
 
-    fn track_math_context_menu(hwnd: HWND) -> Result<bool, String> {
+    fn track_math_context_menu(hwnd: HWND, copy_latex: &[u16]) -> Result<bool, String> {
         // SAFETY: the HWND and menu belong to the current GUI thread. This function is reached only
         // from the posted-message subclass, after winit's initiating callback has returned.
         unsafe {
             let menu =
                 CreatePopupMenu().map_err(|error| format!("CreatePopupMenu failed: {error}"))?;
             let result = (|| {
-                AppendMenuW(menu, MF_STRING, 1, windows::core::w!("Copy LaTeX"))
-                    .map_err(|error| format!("AppendMenuW(Copy LaTeX) failed: {error}"))?;
+                // SAFETY (of the pointer): `copy_latex` is NUL-terminated and outlives the call;
+                // `AppendMenuW` copies the text into the menu.
+                AppendMenuW(menu, MF_STRING, 1, PCWSTR(copy_latex.as_ptr()))
+                    .map_err(|error| format!("AppendMenuW(formula menu) failed: {error}"))?;
                 let mut cursor = POINT::default();
                 GetCursorPos(&mut cursor)
                     .map_err(|error| format!("GetCursorPos failed: {error}"))?;
@@ -13498,8 +13507,10 @@ mod windows_impl {
         }
     }
 
+    /// The kind, the start folder and the image filter's name in the caller's words
+    /// (T-NATIVE-LABELS-FROM-THE-CALLER) — all three only meaningful while the request is posted.
     type ImagePickerState =
-        DeferredState<(ShellPickKind, Vec<u16>), Result<Option<PathBuf>, String>>;
+        DeferredState<(ShellPickKind, Vec<u16>, String), Result<Option<PathBuf>, String>>;
 
     /// The system's own **file** chooser — [`FolderPicker`]'s twin, and every
     /// word of its doc comment applies unchanged.
@@ -13563,7 +13574,16 @@ mod windows_impl {
         /// `start` is a **folder** and not the picture currently chosen: a shell
         /// item that is a file is not a place to open at, and the useful place
         /// to open at is the one the last picture came from.
-        pub fn request(&self, kind: ShellPickKind, start: Option<&Path>) -> Result<bool, String> {
+        ///
+        /// `image_types` is the name the dialog shows beside the image filter, in the
+        /// caller's words; it is read only for [`ShellPickKind::Image`], the one kind
+        /// whose filter is named in a reader's language rather than by a format.
+        pub fn request(
+            &self,
+            kind: ShellPickKind,
+            start: Option<&Path>,
+            image_types: &str,
+        ) -> Result<bool, String> {
             let start = start
                 .map(|start| {
                     let mut units = start.as_os_str().encode_wide().collect::<Vec<_>>();
@@ -13571,7 +13591,10 @@ mod windows_impl {
                     units
                 })
                 .unwrap_or_default();
-            if !self.state.begin_request((kind, start)) {
+            if !self
+                .state
+                .begin_request((kind, start, image_types.to_owned()))
+            {
                 return Ok(false);
             }
             // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
@@ -13634,8 +13657,8 @@ mod windows_impl {
         unsafe { Arc::increment_strong_count(state_pointer) };
         // SAFETY: the increment immediately above created the strong reference consumed here.
         let state = unsafe { Arc::from_raw(state_pointer) };
-        if let Some((kind, start)) = state.begin_showing() {
-            state.complete(show_shell_picker(hwnd, &start, kind));
+        if let Some((kind, start, image_types)) = state.begin_showing() {
+            state.complete(show_shell_picker(hwnd, &start, kind, &image_types));
         }
         LRESULT(0)
     }
@@ -14016,7 +14039,8 @@ mod windows_impl {
         // SAFETY: the increment immediately above created the strong reference consumed here.
         let state = unsafe { Arc::from_raw(state_pointer) };
         if let Some(start) = state.begin_showing() {
-            state.complete(show_shell_picker(hwnd, &start, ShellPickKind::Folder));
+            // A folder chooser has no filter, so no filter name.
+            state.complete(show_shell_picker(hwnd, &start, ShellPickKind::Folder, ""));
         }
         LRESULT(0)
     }
@@ -14060,10 +14084,14 @@ mod windows_impl {
     /// over MTP, a search results folder — that has no directory behind it for
     /// anything here to enumerate. For a picture it does a second job: an image
     /// on a phone over MTP has no path for the decoder to open.
+    ///
+    /// `image_types` names the image filter for [`ShellPickKind::Image`] and is
+    /// not read for the other kinds.
     fn show_shell_picker(
         hwnd: HWND,
         start: &[u16],
         kind: ShellPickKind,
+        image_types: &str,
     ) -> Result<Option<PathBuf>, String> {
         // SAFETY: every call below runs on the window's own GUI thread, reached only from the
         // posted-message subclass after winit's initiating callback has returned. The apartment
@@ -14120,7 +14148,7 @@ mod windows_impl {
                 let filter_name: Vec<u16>;
                 let filter_spec: Vec<u16>;
                 if kind == ShellPickKind::Image {
-                    filter_name = wide_null("Images");
+                    filter_name = wide_null(image_types);
                     filter_spec = wide_null(&crate::image_file_filter_spec());
                     let filters = [COMDLG_FILTERSPEC {
                         pszName: PCWSTR(filter_name.as_ptr()),
@@ -16822,14 +16850,28 @@ mod windows_impl {
         fn deferred_menu_state_requires_posted_dispatch_before_showing() {
             let state = MathMenuState::new();
             assert_eq!(state.take_result(), None);
-            assert!(state.begin_request(()));
-            assert!(!state.begin_request(()));
+            assert!(state.begin_request(wide_null("one")));
+            assert!(!state.begin_request(wide_null("two")));
             assert_eq!(state.take_result(), None);
             assert!(state.begin_showing().is_some());
             assert!(state.begin_showing().is_none());
             state.complete(Ok(true));
             assert_eq!(state.take_result(), Some(Ok(true)));
-            assert!(state.begin_request(()));
+            assert!(state.begin_request(wide_null("one")));
+        }
+
+        /// PIN (T-NATIVE-LABELS-FROM-THE-CALLER) — **the menu's row is the title the
+        /// caller passed at `request`, carried to the dispatch that pops it**, and it is
+        /// the first request's title that a coalesced second request leaves in place.
+        ///
+        /// MUTATION: drop the title from the posted request and this has nothing to
+        /// compare.
+        #[test]
+        fn the_formula_menu_carries_the_callers_title_to_the_dispatch() {
+            let state = MathMenuState::new();
+            assert!(state.begin_request(wide_null("复制 LaTeX")));
+            assert!(!state.begin_request(wide_null("Copy LaTeX")));
+            assert_eq!(state.begin_showing(), Some(wide_null("复制 LaTeX")));
         }
 
         /// PIN — the gesture's own arguments survive the deferral, and only the
@@ -16939,13 +16981,17 @@ mod windows_impl {
             let pictures = ImagePickerState::new();
             let start: Vec<u16> = "C:\\Users\\me\\Pictures\0".encode_utf16().collect();
 
-            assert!(pictures.begin_request((ShellPickKind::Image, start.clone())));
+            assert!(pictures.begin_request((
+                ShellPickKind::Image,
+                start.clone(),
+                "图片".to_owned()
+            )));
             assert!(
                 folders.begin_request(Vec::new()),
                 "a pending picture request must not swallow a folder request"
             );
             assert!(
-                !pictures.begin_request((ShellPickKind::Program, Vec::new())),
+                !pictures.begin_request((ShellPickKind::Program, Vec::new(), String::new())),
                 "a second ask for the same gesture is coalesced, not stacked — \
                  including one for the other row this bridge answers, which is \
                  what keeps a program from arriving on the wallpaper's row"
@@ -16953,7 +16999,7 @@ mod windows_impl {
 
             assert_eq!(
                 pictures.begin_showing(),
-                Some((ShellPickKind::Image, start)),
+                Some((ShellPickKind::Image, start, "图片".to_owned())),
                 "the kind travels with the request, so the dialog that opens is \
                  the one that was asked for"
             );
@@ -21435,7 +21481,7 @@ mod macos_notification_backend_tests {
             [
                 (
                     "new",
-                    "pubfnnew(wake:Box<dynFn()+Send>)->Result<Self,String>",
+                    "pubfnnew(display_name:&str,wake:Box<dynFn()+Send>)->Result<Self,String>",
                 ),
                 (
                     "show",

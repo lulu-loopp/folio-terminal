@@ -141,10 +141,11 @@ impl RowKind {
 /// out to be asking the identical question — a `PSReadLine 补丁` row on a Mac is
 /// the card's “a row nobody could have asked for” one page along, and answering
 /// it twice would be two tables to keep in step. So the type stays here, where
-/// it was argued for, and [`crate::settings::visible_rows_for`] reads it. Five
-/// rows of that dialog declare a facility and three of them name one the card
-/// never had a row for: [`Self::PsReadLineModule`], [`Self::WindowBackdrop`]
-/// and [`Self::OptionKey`].
+/// it was argued for, and [`crate::settings::visible_rows_for`] reads it. Three
+/// rows of that dialog declare a facility and two of them name one the card
+/// never had a row for: [`Self::WindowBackdrop`] and [`Self::OptionKey`] (a
+/// third, the retired PSReadLine row's, went with that row:
+/// T-INTEGRATION-INJECT-2-BUILD).
 /// What each surface still owns is what it *does* with the answer — the card
 /// drops the question, the page drops the row.
 ///
@@ -198,20 +199,6 @@ pub enum Capability {
     /// and is its own ticket — until then the card would be asking about tools
     /// it cannot see.
     AgentDiscovery,
-    /// Replacing the readline module one shell loads.
-    ///
-    /// Windows only, and the narrowest of the six: the thing installed is a
-    /// `.psm1` for `Windows PowerShell 5.1`, written under the account's
-    /// `Documents` folder, to work around a redraw fault in the module that
-    /// edition ships. There is no shell off Windows that loads it and no fault
-    /// there to repair.
-    ///
-    /// **No first-run row, and that is not an omission**: the card asks about
-    /// writes into other people's files that Folio would make *on its own*, and
-    /// this one is only ever made by a reader pressing the row. The facility is
-    /// in this table because the Settings row has to ask the same question the
-    /// other three ask.
-    PsReadLineModule,
     /// The blurred material a window can be given instead of a ground of its
     /// own — what `bt_platform::set_system_backdrop` asks for.
     ///
@@ -262,10 +249,9 @@ impl Capability {
     pub const fn on(self, platform: HostPlatform) -> bool {
         match self {
             Self::UpdateCheck => true,
-            Self::ExplorerMenu
-            | Self::AgentDiscovery
-            | Self::PsReadLineModule
-            | Self::WindowBackdrop => matches!(platform, HostPlatform::Windows),
+            Self::ExplorerMenu | Self::AgentDiscovery | Self::WindowBackdrop => {
+                matches!(platform, HostPlatform::Windows)
+            }
             Self::OptionKey => matches!(platform, HostPlatform::MacOs),
         }
     }

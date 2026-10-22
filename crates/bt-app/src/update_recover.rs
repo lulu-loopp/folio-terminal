@@ -63,7 +63,8 @@
 //! incomplete.*); the new build plainly once `Committed`, and before that only
 //! as a trial (`--update-trial <txn> <nonce>`); on Windows, where the install
 //! folder holds neither whole set, the rescue copy with `--update-failed`
-//! (O's own image, whose own home holds no journal). The same holds when the
+//! (O's own image, which finds the install's home from its own path and
+//! shows that journal's card, T-RESCUE-COPY-CARD). The same holds when the
 //! recovery itself fails, when its lock wait runs out, when the standalone
 //! main is refused, and on a panic. **The one exception is the run at logon
 //! that did nothing a person is owed a window for** — no command line, and no
@@ -694,6 +695,10 @@ impl<W: crate::update_apply_windows::World> crate::update_apply_windows::World
 
     fn moved(&mut self, done: &crate::update_txn::Move) {
         self.world.moved(done);
+    }
+
+    fn move_held(&mut self, step: &crate::update_txn::Move) {
+        self.world.move_held(step);
     }
 
     fn carry(

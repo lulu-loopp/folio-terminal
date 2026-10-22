@@ -76,11 +76,11 @@ impl<B: Backend> Runtime<'_, B> {
                     eprintln!("recoverable save dialog failure: {error}");
                 }
             }
-            settings::ConfigurationDoor::Import => match self
-                .window
-                .image_picker
-                .request(bt_platform::FilePickKind::SettingsFile, None)
-            {
+            settings::ConfigurationDoor::Import => match self.window.image_picker.request(
+                bt_platform::FilePickKind::SettingsFile,
+                None,
+                crate::i18n::Text::ImageFileType.text(),
+            ) {
                 Ok(true) => self.window.image_pick_pending = Some(FilePick::SettingsImport),
                 // Already queued or already open: whoever asked first keeps it.
                 Ok(false) => {}
@@ -572,13 +572,11 @@ impl<B: Backend> Runtime<'_, B> {
             SettingChange::WebPages(scheme) => {
                 self.apply_web_color_scheme(scheme)?;
             }
-            // Read where they are used, so the store is their door: the answer
-            // the PSReadLine card was given, the open Advanced groups, the
-            // summoned terminal's profile — stored
-            // by id, which is what its row's press stores too, rather than
-            // through the row's index into this table — and its top gap.
-            ref change @ (SettingChange::PsReadLineInvite(_)
-            | SettingChange::AdvancedOpen(_)
+            // Read where they are used, so the store is their door: the open
+            // Advanced groups, the summoned terminal's profile — stored by id,
+            // which is what its row's press stores too, rather than through the
+            // row's index into this table — and its top gap.
+            ref change @ (SettingChange::AdvancedOpen(_)
             | SettingChange::QuakeProfile(_)
             | SettingChange::QuakeTopGap(_)) => self.store_imported_value(change),
         }

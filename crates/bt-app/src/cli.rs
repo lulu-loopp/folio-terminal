@@ -152,6 +152,13 @@ pub struct CliRequest {
     /// (0.4.8 E4). The value is the operating system's last refusal, kept as
     /// given; `crate::update_startup` puts it on the card.
     pub update_journal_held: Option<String>,
+    /// `--update-held-file <name>` — **beside `--update-journal-held`: the
+    /// refusal was a move of the member `name`, not a journal write**
+    /// (T-UPDATE-MOVE-HELD-RETRY): another program held that file of the
+    /// update open past the holder's window. Kept as given;
+    /// `crate::update_startup` names the file on the card instead of the
+    /// update record.
+    pub update_held_file: Option<String>,
     /// `--update-feed <file-URL>` — **this process's update check and
     /// download read a local release feed instead of github.com** (0.4.6
     /// U-30b; `crate::update::Feed`).
@@ -248,6 +255,15 @@ pub enum CliFault {
     Repeated(&'static str),
     /// A second bare path. One command line names one place.
     ExtraPath(String),
+    /// **A flag that only says something beside another, given without it**
+    /// (T-UPDATE-MOVE-HELD-RETRY: [`UPDATE_HELD_FILE_FLAG`] names the member
+    /// whose refusal [`UPDATE_JOURNAL_HELD_FLAG`] carries). Refused by name
+    /// rather than dropped, for [`CliFault::Repeated`]'s reason: a line that
+    /// says half of a thing was not written by the build that writes it.
+    Unpaired {
+        flag: &'static str,
+        needs: &'static str,
+    },
 }
 
 impl CliFault {
@@ -275,6 +291,9 @@ impl CliFault {
             Self::UnknownFlag(flag) => Some(i18n::CliText::UnknownFlag(flag).text()),
             Self::Repeated(flag) => Some(i18n::CliText::RepeatedFlag(flag).text()),
             Self::ExtraPath(path) => Some(i18n::CliText::ExtraPath(path).text()),
+            Self::Unpaired { flag, needs } => {
+                Some(i18n::CliText::UnpairedFlag { flag, needs }.text())
+            }
         }
     }
 }
@@ -432,6 +451,14 @@ pub const UPDATE_FAILED_FLAG: &str = "--update-failed";
 /// window ([`CliRequest::update_journal_held`], 0.4.8 E4). One value; like the
 /// other update words, never typed by a person and not in the usage block.
 pub const UPDATE_JOURNAL_HELD_FLAG: &str = "--update-journal-held";
+/// `--update-held-file <name>`: written after [`UPDATE_JOURNAL_HELD_FLAG`]
+/// when the held file was a member the flip or its rollback moves, not the
+/// journal ([`CliRequest::update_held_file`], T-UPDATE-MOVE-HELD-RETRY). One
+/// value; never typed by a person and not in the usage block. The build that
+/// writes it and the build it starts are the same (the applier's own, or the
+/// rescue copy, which is O's image); a build that predates the word refuses
+/// it by name (`CliFault::UnknownFlag`), so it is never sent to one.
+pub const UPDATE_HELD_FILE_FLAG: &str = "--update-held-file";
 /// `--update-feed <file-URL>`: an ordinary start whose update check and
 /// download read a local release feed (U-30b, [`CliRequest::update_feed`]) —
 /// typed by the person rehearsing an update on a clean machine
@@ -582,6 +609,14 @@ where
                 let error = value_for(UPDATE_JOURNAL_HELD_FLAG, flag, &arg, &mut args)?;
                 request.update_journal_held = Some(error.to_string_lossy().into_owned());
             }
+            // The same rule: the word and the member's name are two arguments.
+            Some(flag) if flag == UPDATE_HELD_FILE_FLAG => {
+                if request.update_held_file.is_some() {
+                    return Err(CliFault::Repeated(UPDATE_HELD_FILE_FLAG));
+                }
+                let name = value_for(UPDATE_HELD_FILE_FLAG, flag, &arg, &mut args)?;
+                request.update_held_file = Some(name.to_string_lossy().into_owned());
+            }
             // The same rule once more: the word and the feed's URL are two
             // arguments.
             Some(flag) if flag == UPDATE_FEED_FLAG => {
@@ -617,6 +652,14 @@ where
                 request.path = Some(PathBuf::from(arg));
             }
         }
+    }
+    // The member's name says something only beside the refusal it was the
+    // move of: alone it is half a line no build writes.
+    if request.update_held_file.is_some() && request.update_journal_held.is_none() {
+        return Err(CliFault::Unpaired {
+            flag: UPDATE_HELD_FILE_FLAG,
+            needs: UPDATE_JOURNAL_HELD_FLAG,
+        });
     }
     Ok(request)
 }
@@ -1747,6 +1790,7 @@ mod tests {
                 update_trial: None,
                 update_failed: None,
                 update_journal_held: None,
+                update_held_file: None,
                 update_feed: None,
             }
         );
@@ -2429,6 +2473,58 @@ mod tests {
                 refusal
             ]),
             CliFault::Repeated(UPDATE_JOURNAL_HELD_FLAG)
+        );
+    }
+
+    /// RED (T-UPDATE-MOVE-HELD-RETRY) — **`--update-held-file <name>` is one
+    /// value, kept as given, beside `--update-journal-held`, and refused like
+    /// any other flag when the value is missing or the word is given twice.**
+    ///
+    /// MUTATIONS: drop the `UPDATE_HELD_FILE_FLAG` arm of `parse` (the word
+    /// is an unknown flag); drop the unpaired check at the end of `parse` (the
+    /// name alone is taken and silently dropped by the start).
+    #[test]
+    fn the_held_file_word_takes_the_member_s_name_as_given() {
+        let journal = r"C:\Folio 终端\.folio-update\journal.json";
+        let refusal = "另一个程序正在使用此文件，进程无法访问。 (os error 32)";
+        let request = parsed(&[
+            "--update-failed",
+            journal,
+            "--update-journal-held",
+            refusal,
+            "--update-held-file",
+            "folio.exe",
+            "--tab",
+        ]);
+        assert_eq!(request.update_journal_held.as_deref(), Some(refusal));
+        assert_eq!(request.update_held_file.as_deref(), Some("folio.exe"));
+        assert!(request.tab);
+        assert_eq!(parsed(&[]).update_held_file, None);
+        assert_eq!(
+            refused(&["--update-held-file"]),
+            CliFault::MissingValue(UPDATE_HELD_FILE_FLAG)
+        );
+        assert_eq!(
+            refused(&[
+                "--update-held-file",
+                "folio.exe",
+                "--update-held-file",
+                "folio.exe"
+            ]),
+            CliFault::Repeated(UPDATE_HELD_FILE_FLAG)
+        );
+        // Alone, it is refused by name — never dropped.
+        assert_eq!(
+            refused(&[
+                "--update-failed",
+                journal,
+                "--update-held-file",
+                "folio.exe"
+            ]),
+            CliFault::Unpaired {
+                flag: UPDATE_HELD_FILE_FLAG,
+                needs: UPDATE_JOURNAL_HELD_FLAG,
+            }
         );
     }
 

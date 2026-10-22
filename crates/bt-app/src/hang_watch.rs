@@ -218,6 +218,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bt_platform::admission::{Cookie, DoorKey, Meter};
 use bt_platform::mem::Footprint;
 
+use crate::wake_owner::WakeOwner;
+
 pub use bt_platform::hang::Answer;
 
 /// How often the watchdog looks.
@@ -326,7 +328,7 @@ const NS_PER_MS: u64 = 1_000_000;
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 224;
+const STATION_COUNT: usize = 223;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -501,8 +503,7 @@ pub enum Station {
     Picture = 20,
     /// `Runtime::apply_file_index_results` — the palette's index of a folder.
     FileIndex = 21,
-    /// The probe and settings family — `PsReadLineProbed`,
-    /// `PowerShellProfileProbed`, `CopilotProbed`, `UpdateChecked`,
+    /// The probe and settings family — `PowerShellProfileProbed`, `CopilotProbed`, `UpdateChecked`,
     /// `ExplorerPackageChanged`, `FontsScanned`, `ProgramsAnswered`, `SchemesChanged`,
     /// `StorageChanged`, `SystemPreferencesChanged`, `NotificationClicked`.
     ///
@@ -847,7 +848,6 @@ pub enum Station {
     SharedLock = 109,
     EventGate = 110,
     ClockRaiseFirstRunIfDue = 111,
-    ClockRaisePsreadlineInviteIfDue = 112,
     ClockAdvanceCursorBlinkIfDue = 113,
     ClockAdvanceRenameBlinkIfDue = 114,
     ClockAdvanceSchemeWatch = 115,
@@ -1058,11 +1058,16 @@ pub enum Station {
     UpdateJobProgress = 221,
     /// **An update's exit guard at the process's end** — `update_handoff::leave_armed`, after
     /// the loop (§5.3 row 29; door `UpdateLeave`, 0.4.6 U-34).
-    UpdateLeave = 222,
+    ///
+    /// **Byte 112**, the one the PSReadLine invitation's clock held until that clock retired with
+    /// the invitation (T-INTEGRATION-INJECT-2-BUILD): the last station moved into the hole so the
+    /// bytes stay one run and every other station keeps the byte its door names.
+    UpdateLeave = 112,
     /// **The media session's way out** — `bt_platform::video::shutdown_media_session`, after
     /// the loop: the engines the windows let go of, then the first-frame readers, waited for
     /// within their bounds before `MFShutdown` (§5.3 row 27; door `MediaQuiet`, T-DROP-DOORS).
-    MediaQuiet = 223,
+    /// Byte 222, the run's end since `UpdateLeave` took byte 112.
+    MediaQuiet = 222,
 }
 
 impl Station {
@@ -1182,7 +1187,6 @@ impl Station {
             Self::SharedLock => "shared lock acquisition",
             Self::EventGate => "window event gates",
             Self::ClockRaiseFirstRunIfDue => "first run",
-            Self::ClockRaisePsreadlineInviteIfDue => "PSReadLine invite",
             Self::ClockAdvanceCursorBlinkIfDue => "shell caret",
             Self::ClockAdvanceRenameBlinkIfDue => "rename caret",
             Self::ClockAdvanceSchemeWatch => "schemes watch",
@@ -1426,7 +1430,7 @@ impl Station {
             109 => Self::SharedLock,
             110 => Self::EventGate,
             111 => Self::ClockRaiseFirstRunIfDue,
-            112 => Self::ClockRaisePsreadlineInviteIfDue,
+            112 => Self::UpdateLeave,
             113 => Self::ClockAdvanceCursorBlinkIfDue,
             114 => Self::ClockAdvanceRenameBlinkIfDue,
             115 => Self::ClockAdvanceSchemeWatch,
@@ -1537,8 +1541,7 @@ impl Station {
             219 => Self::TrialWritesReleased,
             220 => Self::UpdateJobOffer,
             221 => Self::UpdateJobProgress,
-            222 => Self::UpdateLeave,
-            223 => Self::MediaQuiet,
+            222 => Self::MediaQuiet,
             _ => Self::Starting,
         }
     }
@@ -2033,11 +2036,13 @@ impl Heartbeat {
         u64::try_from(instant.saturating_duration_since(self.origin).as_nanos()).unwrap_or(u64::MAX)
     }
 
-    /// **The loop is about to park until `deadline`**: the [`Park`] it hands [`Self::park`], and
-    /// the wake the next turn is owed, kept to the nanosecond for its scheduling delay (A3).
+    /// **The loop is about to park until `deadline`**, which `owner` asked for: the [`Park`] it
+    /// hands [`Self::park`], and the wake the next turn is owed, kept to the nanosecond for its
+    /// scheduling delay (A3) — or, when it is already due by the time the loop parks, for how
+    /// stale it is (T-WINDOW-THREAD-UNDER-LOAD) — with the clock that owns it.
     #[must_use]
-    pub fn until(&self, deadline: Instant) -> Park {
-        self.accounts.owe(self.ns_at(deadline));
+    pub fn until(&self, deadline: Instant, owner: Option<WakeOwner>) -> Park {
+        self.accounts.owe(self.ns_at(deadline), owner);
         Park::Until(self.ms_at(deadline))
     }
 
@@ -2507,7 +2512,7 @@ impl Heartbeat {
     fn park_at_ns(&self, park: Park, now_ns: u64) {
         self.move_to(Station::Parked, now_ns / NS_PER_MS);
         self.close_hold(now_ns);
-        self.accounts.parked(matches!(park, Park::Until(_)));
+        self.accounts.parked(matches!(park, Park::Until(_)), now_ns);
         self.park.store(park.to_bits(), Ordering::Relaxed);
     }
 

@@ -135,8 +135,6 @@ WindowRuntime.present_diagnostics	-	PROJ	frame	the 2026-09-25 table
 WindowRuntime.preview_menu	-	VIEW	preview	proposed by census-1
 WindowRuntime.preview_name_clicks	-	VIEW	preview	the 2026-09-25 table
 WindowRuntime.profile_menu	-	VIEW	profiles	proposed by census-1
-WindowRuntime.psreadline_invite	-	OBS	first_run	the 2026-09-25 table
-WindowRuntime.psreadline_size_changed	-	VIEW	first_run	the 2026-09-25 table
 WindowRuntime.pty_coalesce	-	PROJ	terminal	the 2026-09-25 table
 WindowRuntime.rail_scroll	-	VIEW	panes	the 2026-09-25 table
 WindowRuntime.rename	-	VIEW	tabs	the 2026-09-25 table

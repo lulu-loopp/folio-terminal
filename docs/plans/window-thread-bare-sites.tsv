@@ -4,7 +4,9 @@
 ## One row per (crate, cfg arm, item, vocabulary entry): a site of an entry of `window_waits.tsv`'s `# vocabulary`
 ## in the product (bt-app and every first-party package it depends on; libraries and the `folio` binary; test code,
 ## build scripts, examples, development binaries and `vendor/` out), outside the body of a registered door function
-## (a function taking a `WaitToken` of a `# doors` line), with the number of such sites in that item. The reading is
+## (one taking the `WaitToken` of a `# doors` line, or one `# effects` lists under a kind whose rule admits it: a
+## `worker-door-body` taking a `WorkerCtx`, a `drop-exception`, an `emergency`), with the number of such sites in that
+## item. The reading is
 ## platform-blind: a Windows arm and its macOS twin are two rows. A feature is read as a build of `folio.exe` sets
 ## it (T-TEST-SHELL-HYGIENE): one that only a dev-dependency names (`bt-pty`'s `test-shell`, `bt-platform`'s
 ## `trust-harness`) is off, so an item standing on it is not in the product. `arm` is the `cfg` the item stands on,
@@ -54,8 +56,6 @@ bt-app	-	crate::persist::relocate	std::fs::rename	1
 bt-app	-	crate::preview::read_size	std::fs::metadata	1
 bt-app	-	crate::preview::run_preview_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::preview_watch::Stamp::of	std::fs::metadata	1
-bt-app	-	crate::psreadline::install_checked	std::fs::create_dir_all	1
-bt-app	-	crate::psreadline::install_checked	std::fs::write	1
 bt-app	-	crate::psreadline::installed_disk::<System as Disk>::entries	std::fs::read_dir	1
 bt-app	-	crate::raster_peek_page	std::fs::metadata	1
 bt-app	-	crate::rebuild_every_native_surface	pollster::block_on	1
@@ -197,12 +197,6 @@ bt-pty	-	crate::reap_within	std::thread::sleep	1
 bt-pty	-	crate::shell::<SystemShellEnvironment as ShellEnvironment>::is_file	std::fs::metadata	1
 bt-pty	-	crate::spawn_dump_publisher	std::fs::File::sync_data	2
 bt-pty	-	crate::spawn_dump_publisher	std::thread::sleep	1
-bt-render	-	crate::WindowRenderer::compose_frame	wgpu::Queue::present	1
-bt-render	-	crate::WindowRenderer::compose_frame	wgpu::Queue::submit	1
-bt-render	-	crate::WindowRenderer::handle_surface_failure	wgpu::Queue::submit	1
-bt-render	-	crate::WindowRenderer::probe_frame	wgpu::Queue::present	1
-bt-render	-	crate::WindowRenderer::probe_frame	wgpu::Queue::submit	1
-bt-render	-	crate::WindowRenderer::read_back	wgpu::Queue::submit	1
 bt-term	-	crate::inline_image::LocalImageStamp::of	std::fs::metadata	1
 bt-term	-	crate::session::path_exists	std::fs::metadata	1
 bt-term	-	crate::session::verify_path	std::fs::metadata	1

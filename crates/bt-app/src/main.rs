@@ -157,6 +157,11 @@ mod profiles_merge;
 mod programs_ear;
 mod programs_lane;
 mod psreadline;
+// The build script's PSReadLine package reader and its pins (T-INTEGRATION-INJECT-2-BUILD),
+// compiled here only so its tests run: `build.rs` reaches the same file by `#[path]`, and what
+// ships is the container it writes (`psreadline::module_files`).
+#[cfg(test)]
+mod psreadline_artefact;
 mod pty_door;
 mod quake;
 mod quit;
@@ -234,6 +239,7 @@ mod update_trial;
 mod update_txn;
 mod version;
 mod video_seat;
+mod wake_owner;
 mod watch_clock;
 mod watch_steward;
 mod web_spare;
@@ -261,6 +267,7 @@ use bt_persist::{
 };
 use input::Keystroke;
 use text_scale::{TextScale, TextStep};
+use wake_owner::WakeOwner;
 use window_seam::prelude::*;
 use window_seam::{LoopProxy, Native};
 // `main`'s event-loop builder methods, at module level: `main` is on the window-seam native list,
@@ -333,7 +340,12 @@ const INITIAL_HEIGHT: f64 = 600.0;
 ///
 /// It is not `CARGO_PKG_NAME`: the crate is `bt-app` and stays `bt-app`, because
 /// a crate name is a thing other Rust code says and this is a thing people say.
-pub(crate) const APP_NAME: &str = "Folio";
+///
+/// **And it is typed once** (T-NATIVE-LABELS-FROM-THE-CALLER): the name this
+/// terminal announces to its children is the same word, so the constant is
+/// `bt_pty`'s rather than a second literal; `bt-platform`, which cannot depend
+/// on either crate, is handed it where it names the product (the toast sender).
+pub(crate) const APP_NAME: &str = bt_pty::TERM_PROGRAM;
 
 /// **How long a quit waits for the panes it has told to go**
 /// (T-PANE-CLOSE-OFF-THREAD).
@@ -574,24 +586,14 @@ enum AppEvent {
     /// must wake only the seat that asked rather than every tree, every preview
     /// and every formula in the tab.
     GitReady,
-    /// **The PSReadLine probe answered** (§7.1.6c-5).
-    ///
-    /// The fifth of the same family and separate for the same reason, read from
-    /// the other end: it is the only one whose answer can land while a *modal*
-    /// is up. A dialog standing on the Terminal page draws a row that says
-    /// "Checking this machine's PSReadLine", and while it is up there is no
-    /// shell output, no hover and no keystroke to produce the frame that would
-    /// replace that line — so the probe has to ask for one itself.
-    PsReadLineProbed,
     /// **A PowerShell has said where its own `$PROFILE` is** (§7.1.6j).
     ///
-    /// The sixth of the same family, and separate from `PsReadLineProbed` for
-    /// the reason that one is separate from `GitReady`: the answers arrive from
-    /// two different processes at two different moments, and one variant would
-    /// mean a probe that finished first waking the window a second time when the
-    /// other did. Its own wake is owed for the reason that one's is: a pane that
-    /// has printed its prompt and gone quiet produces no further frame, so an
-    /// answer landing after that frame would sit unread until somebody typed.
+    /// The fifth of the same family. Its own wake is owed: a pane that has printed its prompt
+    /// and gone quiet produces no further frame, so an answer landing after that frame would sit
+    /// unread until somebody typed. It also carries the earlier Folio's PSReadLine copy's
+    /// observation and removal (`psreadline::begin_legacy_observation`,
+    /// `psreadline::begin_legacy_removal`; T-INTEGRATION-INJECT-2-BUILD), which are answers
+    /// about the same family of legacy PowerShell artefacts for the same Terminal page.
     PowerShellProfileProbed,
     /// **The copilot version probe answered** (`attention_copilot`).
     ///
@@ -950,8 +952,7 @@ impl AppEvent {
             Self::ClipboardAnswered => Station::ClipboardRead,
             Self::FileIndexReady => Station::FileIndex,
             Self::WebPageSpoke => Station::WebSpoke,
-            Self::PsReadLineProbed
-            | Self::PowerShellProfileProbed
+            Self::PowerShellProfileProbed
             | Self::CopilotProbed
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
@@ -13456,6 +13457,10 @@ struct App<B: Backend = Native> {
     /// `AppEvent::DocumentsAnswered` by the buffer that asked, in whichever
     /// window its tab now stands.
     preview_saves: preview::PreviewSaves,
+    /// **The buffers a stop that cannot ask handed to the storage worker**, held past their
+    /// windows until the worker has ended (S-6c; [`preview::StopKeeps`]). Empty on every
+    /// other road.
+    stop_keeps: preview::StopKeeps,
     preview_worker: preview::PreviewWorker,
     preview_worker_running: bool,
     preview_worker_notice_pending: bool,
@@ -13553,25 +13558,6 @@ struct App<B: Backend = Native> {
     // whatever this machine has registered for it, which is very often that same
     // editor. A start-up probe kept for a row nobody draws is a filesystem walk
     // answering a question the product no longer asks.
-    /// This user's Documents folder, asked of Windows once.
-    ///
-    /// Once because it cannot move under a running process, and stored rather
-    /// than re-asked because both the row and the dialog need it and a known
-    /// folder lookup is a COM call.
-    psreadline_documents: Option<PathBuf>,
-    /// Last observed Folio module: `None` is unread; `Some(InstalledCopy::None)`
-    /// is a completed reading that found no Folio copy.
-    ///
-    /// Cached because it is nine file reads and a version-resource walk, and the
-    /// settings dialog asks on every frame it draws. Read once when the probe
-    /// lands, after an install/removal, and on opening the Terminal page. The
-    /// App owns the slot, so additional windows do not repeat the first read.
-    ///
-    /// **Three answers since 2026-08-18**, and the middle one is why: a module an
-    /// older Folio wrote is neither "ours" nor "somebody else's", and a `bool`
-    /// made it the second, which is how it became a module this product had
-    /// installed and would not remove.
-    psreadline_installed: Option<psreadline::InstalledCopy>,
     /// Whether the ready first-run attempt has been consumed, even if no card
     /// could open. This is an edge latch, not another agent-availability cache.
     first_run_attempted: bool,
@@ -13584,9 +13570,8 @@ struct App<B: Backend = Native> {
     first_run_waited_for_agent_folders: bool,
     /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
     ///
-    /// Cached for [`Self::psreadline_installed`]'s reason and no other: the
-    /// settings dialog asks on every frame it draws, and the answer is four
-    /// registry opens. It is refreshed at the three moments it can change — the
+    /// Cached for one reason and no other: the settings dialog asks on every
+    /// frame it draws, and the answer is four registry opens. It is refreshed at the three moments it can change — the
     /// launch, an install and a removal — and at no other, because nothing else
     /// in this process can move it.
     ///
@@ -13875,6 +13860,10 @@ struct App<B: Backend = Native> {
     /// in whichever window it arrives and even after the capture has ended.
     /// See [`runtime::pointer::ButtonSet`].
     swallowed: runtime::pointer::ButtonSet,
+    /// Every capture a lifecycle door ended (T-POINTER-CAPTURE R-9), by its owner's name and the
+    /// ending's, for a test to read which ending each door ran.
+    #[cfg(test)]
+    capture_endings: Vec<(&'static str, &'static str)>,
     /// **A cross-window release that has been decided and not yet performed**
     /// (multiwindow slice F2).
     ///
@@ -14009,7 +13998,6 @@ struct AppParts<B: Backend> {
     motion: Motion,
     profile_programs: profiles::ProfilePrograms,
     startup_shells: Option<StartupShells>,
-    psreadline_documents: Option<PathBuf>,
     context_menu_installed: bool,
     claude_hooks_installed: bool,
     codex_notify_installed: bool,
@@ -14064,7 +14052,6 @@ impl<B: Backend> App<B> {
             motion,
             profile_programs,
             startup_shells,
-            psreadline_documents,
             context_menu_installed,
             claude_hooks_installed,
             codex_notify_installed,
@@ -14094,6 +14081,7 @@ impl<B: Backend> App<B> {
         } = parts;
         Self {
             preview_saves,
+            stop_keeps: preview::StopKeeps::default(),
             git_mutations,
             gpu,
             tab_ids,
@@ -14116,7 +14104,6 @@ impl<B: Backend> App<B> {
             motion,
             profile_programs,
             startup_shells,
-            psreadline_documents,
             context_menu_installed,
             claude_hooks_installed,
             codex_notify_installed,
@@ -14163,7 +14150,6 @@ impl<B: Backend> App<B> {
             scheme_fault: None,
             scheme_source: [None, None],
             program_news: window_news::WindowSeats::default(),
-            psreadline_installed: None,
             first_run_attempted: false,
             first_run_waited_for_channel: false,
             first_run_waited_for_agent_folders: false,
@@ -14188,6 +14174,8 @@ impl<B: Backend> App<B> {
             drag_broker: None,
             pointer_capture: None,
             swallowed: runtime::pointer::ButtonSet::default(),
+            #[cfg(test)]
+            capture_endings: Vec::new(),
             pending_handover: None,
             quit_requested: false,
             quit: None,
@@ -16127,9 +16115,6 @@ struct WindowRuntime<B: Backend = Native> {
     /// **The ended tabs whose close waits for saves on their way** (S-6b), kept
     /// by the loop's cleanup (`Runtime::reap_exited_tabs`).
     exited_tab_waits: ExitedTabWaits,
-    /// The PSReadLine invitation, when the probe has found a shell that would
-    /// benefit (§7.1.6c-3b).
-    psreadline_invite: psreadline::Invite,
     /// **What the pointer is over on the multi-line paste card** (0.4.4 ticket 02) — the card's
     /// only state of its own. Whether it is up at all is not stored here: it is
     /// [`LeafSession::pending_paste`], read through `Runtime::paste_card_seat`.
@@ -16148,12 +16133,6 @@ struct WindowRuntime<B: Backend = Native> {
     /// its own. The state that says "once, ever" is in `settings.json`; this is
     /// only the surface.
     first_run: first_run::Card,
-    /// Whether the size row has been answered since the invitation was refused.
-    ///
-    /// The one exception in the trigger table, and it is deliberately *not*
-    /// persisted: it is a fact about this sitting, and a file that remembered it
-    /// would let a refusal from last month be re-opened by a font change today.
-    psreadline_size_changed: bool,
     /// **Which window the gate's confirmed answer has asked to go**, if it has —
     /// this window after its own shut, or the run's last ordinary window after
     /// the run's end was answered here, in the summoned terminal
@@ -18910,10 +18889,10 @@ fn earliest_deadline<const N: usize>(deadlines: [Option<Instant>; N]) -> Option<
 /// Keeping the names beside the fold, rather than reconstructing them after the
 /// fact, makes the idle probe report evidence: ties retain the first entry, just
 /// as [`Iterator::min`] did before the entries were named.
-fn earliest_named_deadline<const N: usize>(
-    names: [&'static str; N],
+fn earliest_named_deadline<T: Copy, const N: usize>(
+    names: [T; N],
     deadlines: [Option<Instant>; N],
-) -> Option<(&'static str, Instant)> {
+) -> Option<(T, Instant)> {
     names
         .into_iter()
         .zip(deadlines)
@@ -19647,30 +19626,63 @@ fn what_a_close_wait_found(
     wait.awaited
         .iter()
         .map(|awaited| {
-            tabs.iter()
-                .find_map(|tab| tab.preview_pool.at_the_close(*awaited))
-                .map_or_else(
-                    || (String::new(), preview::AtTheClose::Saved),
-                    |(name, found)| (name.to_owned(), found),
-                )
+            where_a_save_stands(tabs, *awaited).map_or_else(
+                || (String::new(), preview::AtTheClose::Saved),
+                |(name, found)| (name.to_owned(), found),
+            )
         })
         .collect()
 }
 
-/// **Keep every dirty preview buffer of these tabs before a stop that cannot ask**
-/// (D-4, 0.4.8 G7) — the whole of [`Runtime::keep_unsaved_edits`] except its
-/// diagnostics lines. Every tab's pool and not the active tab's, on the quit
-/// gate's own reasoning: a dirty buffer on a tab nobody is looking at is still a
-/// dirty buffer. Each pool keeps its own through
-/// [`preview::PreviewPool::keep_dirty`].
-fn keep_unsaved_edits_over(
-    tabs: &mut [TabState],
-    recovery: &Path,
-    at: SystemTime,
-) -> Vec<preview::Kept> {
-    tabs.iter_mut()
-        .flat_map(|tab| tab.preview_pool.keep_dirty(recovery, at))
-        .collect()
+/// **What has become of one buffer a wait for saves is about**, with its name, if one of
+/// these tabs' pools holds it ([`preview::PreviewPool::at_the_close`]) — a close's wait reads
+/// its own window's tabs ([`what_a_close_wait_found`]), a quit's every window's
+/// (`FolioApp::settle_the_quits_saves`, S-6c), because a tab may move between windows
+/// while the quit waits.
+fn where_a_save_stands(
+    tabs: &[TabState],
+    awaited: preview::Awaited,
+) -> Option<(&str, preview::AtTheClose)> {
+    tabs.iter()
+        .find_map(|tab| tab.preview_pool.at_the_close(awaited))
+}
+
+/// **Buffer names by the window that holds them** (S-6c): what the quit's save step says on
+/// each window's card, in the order each window was first named.
+#[derive(Debug, Default)]
+struct ByWindow(Vec<(WindowId, Vec<String>)>);
+
+impl ByWindow {
+    fn add(&mut self, window: WindowId, name: String) {
+        match self.0.iter_mut().find(|(id, _)| *id == window) {
+            Some((_, names)) => names.push(name),
+            None => self.0.push((window, vec![name])),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The windows named, in order.
+    fn windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.0.iter().map(|(id, _)| *id)
+    }
+
+    /// The names in `window`.
+    fn of(&self, window: WindowId) -> &[String] {
+        self.0
+            .iter()
+            .find(|(id, _)| *id == window)
+            .map_or(&[], |(_, names)| names.as_slice())
+    }
+
+    /// Every name, window by window.
+    fn names(&self) -> impl Iterator<Item = &str> {
+        self.0
+            .iter()
+            .flat_map(|(_, names)| names.iter().map(String::as_str))
+    }
 }
 
 /// **The stores a trial's release writes through** (T-QUIT-DOCUMENTS round 3): the
@@ -19714,20 +19726,14 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::PowerShellScript => {
             shell_integration::begin_powershell_script_preparation();
         }
-        Writer::PsReadLineUpgrade => {
-            if let Some(documents) = psreadline::documents_directory()
-                && let Some(replacement) = psreadline::upgrade_recorded(
-                    &documents,
-                    &persist::storage_dir(),
-                    stores.settings.loaded().psreadline_invite,
-                )
-            {
-                eprintln!("{}", replacement.log_line());
-            }
+        // The same worker: the durable module is a birth's to write, and the artefacts the old
+        // build left are removed now that nothing of the old build is running.
+        Writer::PsReadLineModule => {
+            shell_integration::begin_powershell_script_preparation();
         }
         Writer::ExplorerRepair => explorer_menu::begin_probe(),
         Writer::ToastIdentity => {
-            if let Err(error) = bt_platform::Notifier::register_identity() {
+            if let Err(error) = bt_platform::Notifier::register_identity(APP_NAME) {
                 eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
             }
         }
@@ -19914,6 +19920,17 @@ struct SystemBox;
 impl NativeSay for SystemBox {
     fn say(&mut self, text: &str) {
         bt_platform::message_box(APP_NAME, text);
+    }
+}
+
+/// **The system's end of the session says a lost change in `diagnostics.log` only**
+/// (T-ENDSESSION-SAVES): the shutdown screen is up, and a box of the system's own would be one
+/// more window standing in the way of the shutdown, ended with the process before anybody read it.
+struct IntoTheLog;
+
+impl NativeSay for IntoTheLog {
+    fn say(&mut self, text: &str) {
+        diagnostics::note(text);
     }
 }
 
@@ -21213,23 +21230,6 @@ struct DividerDrag {
     /// split, and theorem N says every ratio outside a focus set is bit-identical
     /// before and after.
     grip: DividerGrip,
-    /// **Which window held the pointer when this gesture began** — the fact that ends it when the
-    /// system takes the pointer away (Codex review 2026-09-17; the same reading `DragGuard` makes
-    /// for a cross-window drag).
-    ///
-    /// A divider drag is torn down by the button coming up, by `Esc`, by the layout being
-    /// re-solved, and by the window losing focus. None of those is capture loss: Windows announces
-    /// it with `WM_CAPTURECHANGED`, winit 0.30.13 answers that message by zeroing its own capture
-    /// count and emitting nothing, and a steal need not blur this window. Left holding a button
-    /// nobody will report the release of, `divider_drag` stays `Some` forever —
-    /// `flush_pending_pty_resize` reads that as a hand still on the geometry, so from that moment
-    /// no resize of this window's panes can ever be released or settled. Sampled, not subscribed,
-    /// for `DragGuard`'s reason and at the one moment anybody asks.
-    ///
-    /// On macOS this is `None` at the press and `None` at every turn after it, which is the right
-    /// answer rather than a missing one: AppKit has no per-thread capture to lose, and the mouse-up
-    /// that ends a drag is delivered to the window that received the mouse-down.
-    capture: Option<bt_platform::NativeWindow>,
 }
 
 /// **What a divider drag is actually moving** — §3.4's two kinds of seam.
@@ -22371,8 +22371,10 @@ fn coalesce_pty_resize_on_grid_change(
 ///
 /// The user's 2026-08-06 ruling turned it off on sight — freezing the reflow and cropping the old
 /// width read worse than the artefact it prevented — kept the machine as a policy bit at `false`,
-/// and ordered the root cause fixed instead. That fix shipped: the patched PSReadLine re-anchors
-/// itself, and `scripts/shell-integration/folio.ps1` needs no reflection repair at ≥ 2.4.6. The
+/// and ordered the root cause fixed instead. That fix shipped, as the patched PSReadLine that
+/// re-anchored itself; since T-INTEGRATION-INJECT-2-BUILD the root cause is repaired on Microsoft's
+/// own 2.4.5 — every pane's, Windows PowerShell's included — by `folio.ps1`'s reflection repair on
+/// the resize chord. The
 /// same ruling ends 「修好后扣留政策位永久退役」, and this is that retirement. A bit nailed to
 /// `false` in front of a state machine nothing can reach is not an option the product has; it is a
 /// second reading of the resize path that no test of the shipping one covers.
@@ -22657,22 +22659,23 @@ impl PtyInput {
     }
 }
 
-/// **Whether the hand that began a divider drag is still on it** (Codex review 2026-09-17).
+/// **Whether the hand that began a gesture is still on it** (Codex review 2026-09-17, for the
+/// divider; T-POINTER-CAPTURE cut 5, R-9, for every gesture).
 ///
 /// Two samples of one platform fact — which window of this thread holds the pointer — taken at the
 /// press and now. Equality is the whole predicate, and it has to be equality rather than "this
 /// window holds it": on macOS the answer is `None` at both ends, because AppKit has no per-thread
-/// capture to report, and a rule phrased as "we hold it" would cancel every divider drag on that
+/// capture to report, and a rule phrased as "we hold it" would cancel every gesture on that
 /// platform on its first turn. Two `None`s mean nothing was taken away, which is the truth there.
 ///
 /// The gesture this ends is the one no event reports. Windows says capture loss with
 /// `WM_CAPTURECHANGED`; winit 0.30.13 answers it by zeroing its own capture count and emitting
 /// nothing, and a steal need not blur this window, so `Focused(false)` — the path that already
-/// ends a drag — may never come. What is left is a `divider_drag` that stays `Some` for the rest
-/// of the window's life, which `flush_pending_pty_resize` reads as a hand still on the geometry:
-/// after that no pane of this window can release a resize to its child or settle the transaction
-/// its own reflow opened.
-fn divider_drag_still_holds_its_pointer(
+/// ends a gesture — may never come. What is left is a capture that stays held for the rest of the
+/// window's life: a divider that `flush_pending_pty_resize` reads as a hand still on the geometry,
+/// so that no pane of this window can release a resize to its child, and a thumb, a selection or a
+/// press that goes on following a hand nobody is holding down.
+fn a_capture_still_holds_its_pointer(
     at_the_press: Option<bt_platform::NativeWindow>,
     now: Option<bt_platform::NativeWindow>,
 ) -> bool {
@@ -30194,13 +30197,6 @@ fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
         .min()
 }
 
-fn foreground_program_deadline(tabs: &[TabState]) -> Option<Instant> {
-    tabs.iter()
-        .flat_map(TabState::leaves)
-        .filter_map(|(_, leaf)| foreground_program::deadline(leaf))
-        .min()
-}
-
 fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<String>) {
     for line in lines {
         attention_trace::emit(trace, || line);
@@ -31434,7 +31430,7 @@ impl NotificationDesk {
             let opened = if update_trial::defer(update_trial::Writer::ToastIdentity) {
                 bt_platform::Notifier::without_registration(wake)
             } else {
-                bt_platform::Notifier::new(wake)
+                bt_platform::Notifier::new(APP_NAME, wake)
             };
             match opened {
                 Ok(voice) => self.voice = Some(voice),
@@ -42656,13 +42652,6 @@ fn create_leaf_session(
             .is_some_and(|row| shell_integration::listens_for_a_locale(environment, &row.env))
         && locale_declaration::at_birth() == locale_declaration::AtBirth::Waiting;
     let in_birth = rows_wait || locale_waits;
-    // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
-    // this process, because the module that is broken is the one `Windows
-    // PowerShell 5.1` ships and nothing else on this machine is affected by it.
-    // Idempotent — see `psreadline::begin_probe`.
-    if !in_birth && spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
-        psreadline::begin_probe(psreadline::ProbeTrigger::Birth);
-    }
     // There used to be a second trigger here (§7.40 ③): a `wsl.exe` started
     // beside this spawn to ask the default distribution which shell it logs
     // into. It is gone as of 2026-09-07, because nothing waited for it and so
@@ -45267,6 +45256,11 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         for line in leaf.session.take_keyboard_protocol_notes() {
             diagnostics::note(&line);
         }
+        // **A pane whose PSReadLine is not Folio's after its profile ran** says so once, in the
+        // log and nowhere else (T-INTEGRATION-INJECT-2-BUILD round 2), on the same road.
+        for line in leaf.session.take_line_editor_notes() {
+            diagnostics::note(&line);
+        }
         Ok(DrainOutcome {
             // Taken here because this is the one place every leaf of every tab
             // passes through on every turn, which is the same sentence
@@ -45748,7 +45742,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
                 session_end::hear(end);
                 let _ = proxy.send_event(AppEvent::SessionEnding);
             }),
-            Box::new(|| i18n::Text::ShutdownSavingLayout.text().to_owned()),
+            Box::new(|| i18n::Text::ShutdownSavingWork.text().to_owned()),
         )
     };
     // **A window is born knowing its display's rate**, before it has drawn
@@ -46012,11 +46006,9 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         root_menu_shell_folders: Vec::new(),
         dirty_gate: restore::DirtyGate::default(),
         exited_tab_waits: ExitedTabWaits::default(),
-        psreadline_invite: psreadline::Invite::default(),
         paste_card_hover: None,
         update_card: update_card::Card::default(),
         first_run: first_run::Card::default(),
-        psreadline_size_changed: false,
         window_close_requested: None,
         shell_exit_close_requested: false,
         preview_menu: profiles::PreviewMenu::default(),
@@ -46572,22 +46564,8 @@ impl Runtime<'_, Native> {
             eprintln!("BT_PERSIST another Folio holds this data directory; nothing here is saved");
             settings_fault.get_or_insert_with(crate::i18n::second_instance_notice);
         }
-        // Before the first pane can start a probe of its own. A no-op unless
-        // `BT_PSREADLINE_PROBE` is set — see `psreadline::probe_override_from_env`
-        // for why the door exists and what it deliberately does not override.
-        psreadline::install_probe_override();
-        // And how the answer gets back to a window that may be sitting on a
-        // modal when it lands (§7.1.6c-5). Installed here, once, because the
-        // wake belongs to this process's event loop rather than to whichever of
-        // the probe's two triggers fires first — the pane starts it, the dialog
-        // needs the repaint, and they are not the same call.
-        {
-            let proxy = proxy.clone();
-            psreadline::install_wake(move || {
-                let _ = proxy.send_event(AppEvent::PsReadLineProbed);
-            });
-        }
-        // And the second probe's, beside it and for its argument (§7.1.6j).
+        // The `$PROFILE` probe's wake (§7.1.6j), installed here, once, because the wake belongs to
+        // this process's event loop; the earlier Folio's PSReadLine copy's answers ride it too.
         {
             let proxy = proxy.clone();
             shell_integration::install_wake(move || {
@@ -46874,32 +46852,26 @@ impl Runtime<'_, Native> {
         let focus_mode = settings_store.loaded().focus_mode;
         // Every row unknown until the walk asked for above has answered it.
         let mut profile_programs = profiles::ProfilePrograms::unknown();
-        // **Folio's own older PSReadLine is replaced here, without asking**
-        // (ruling 2026-09-21, option A; ticket 56). At the launch and before the
-        // first window, because a pane of this Folio starting a PowerShell is
-        // what would hold the old DLL open and make the write fail; and before
-        // the profile migration's worker, which takes the same marks lock. Only
-        // a build Folio recorded installing and older than the bundled one is
-        // touched (`psreadline::upgrade_decision`); a failure is one line here
-        // and the next launch tries again. On this thread, as the Settings
-        // row's own install is (RULES §38's debt).
-        let psreadline_documents = psreadline::documents_directory();
-        if let Some(documents) = psreadline_documents.as_deref()
-            && let Some(replacement) = psreadline::upgrade_recorded(
-                documents,
-                &persist::storage_dir(),
-                settings_store.loaded().psreadline_invite,
-            )
-        {
-            eprintln!("{}", replacement.log_line());
-        }
-        // **The first window, in `startup::resume`'s order**: the startup migration and
-        // the script's preparation, the window, the PowerShell questions, the first tab. What the
+        // **An earlier Folio's PSReadLine in Documents is looked for, never written**
+        // (T-INTEGRATION-INJECT-2-BUILD, owner ruling Q4): Folio's own panes run Folio's own
+        // module from its local data folder, so the launch replaces nothing; it only finds out,
+        // on a worker, whether the Terminal page owes the copy's removal row.
+        psreadline::begin_legacy_observation();
+        // **The first window, in `startup::resume`'s order**: Windows PowerShell's language
+        // question, the startup migration and the script's preparation, the window, the
+        // PowerShell questions, the first tab. What the
         // steps share is the program walk's answers, adopted by the window's title and by the
         // questions, and read by the first tab.
         let (opened, first) = startup::resume(
             &mut profile_programs,
             startup::FirstWindow {
+                // Only with the Shell integration switch on: a launch with it off starts no
+                // Windows PowerShell; a birth after it is turned on asks for itself.
+                language: || {
+                    shell_integration::begin_language_question(
+                        settings_store.loaded().shell_integration,
+                    )
+                },
                 migration: shell_integration::begin_startup_migration,
                 script: || {
                     // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
@@ -47533,7 +47505,6 @@ impl Runtime<'_, Native> {
             motion: read_motion_preference(),
             profile_programs,
             startup_shells,
-            psreadline_documents,
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
@@ -48087,26 +48058,6 @@ impl<B: Backend> Runtime<'_, B> {
         let content =
             self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
         let content_us = trace_start.map_or(0, |start| start.elapsed().as_micros());
-        // **The probe's second trigger** (§7.1.6c-5), and it is here because this
-        // is the one place that knows which page is being shown *and* is reached
-        // by every road to showing it — the gear, a press on the rail, an arrow
-        // walking it, and a page the dialog fell back to because the one it was
-        // on lost its rows. A trigger hung off those four separately is a
-        // trigger with a fifth door somebody will add later.
-        let psreadline_opened = self
-            .window
-            .settings
-            .take_psreadline_open_edge(content.probes_psreadline(self.window.settings.category()));
-        if psreadline_opened {
-            // Asked at every visit (T-PROBE-NO-CACHED-FAILURE): a module installed or updated
-            // while Folio runs is seen here, and a failed check is asked again. One probe per
-            // visit, never per frame while this page is open.
-            psreadline::begin_probe(psreadline::ProbeTrigger::TerminalPage);
-            // An out-of-band module change becomes visible when the reader
-            // opens its page. A redraw or hover on the open page is not an edge.
-            self.psreadline_documents();
-            self.refresh_psreadline_installed();
-        }
         // **The agent rows' own edge**, and it is not a convenience: their switches are inert
         // while the file they name is one this build will not edit, so a press cannot be what
         // notices that the reader has unpicked the link or cleared the read-only bit. Opening the
@@ -48136,21 +48087,12 @@ impl<B: Backend> Runtime<'_, B> {
             self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
         // Use the refreshed fact on this very layout, including its geometry.
-        let refreshed_values = (psreadline_opened || agents_opened).then(|| {
-            let state = self.psreadline_row_state();
-            settings::SettingsValues {
-                psreadline: state,
-                psreadline_install_available: psreadline::install_available(
-                    psreadline::probe(),
-                    state,
-                ) && self.app.psreadline_documents.is_some(),
-                psreadline_remove_available: psreadline::remove_available(state),
-                claude_hooks: self.app.claude_hooks_installed,
-                codex_notify: self.app.codex_notify_installed,
-                copilot_hooks: self.app.copilot_hooks_installed,
-                agent_config_refusals: self.app.agent_config_refusals,
-                ..values.clone()
-            }
+        let refreshed_values = agents_opened.then(|| settings::SettingsValues {
+            claude_hooks: self.app.claude_hooks_installed,
+            codex_notify: self.app.codex_notify_installed,
+            copilot_hooks: self.app.copilot_hooks_installed,
+            agent_config_refusals: self.app.agent_config_refusals,
+            ..values.clone()
         });
         let content = settings::SettingsContent {
             values: refreshed_values.as_ref().unwrap_or(&values),
@@ -48262,6 +48204,10 @@ impl<B: Backend> Runtime<'_, B> {
                 settings::retain_powershell_profile_remover(
                     &mut rows,
                     shell_integration::powershell_profile_line_present(),
+                );
+                settings::retain_legacy_psreadline_remover(
+                    &mut rows,
+                    psreadline::legacy_copy_present(),
                 );
                 rows
             },
@@ -48594,12 +48540,6 @@ impl<B: Backend> Runtime<'_, B> {
             // so the row has to report what it can see: the window it is standing
             // in. See `settings::SettingsValues::focus_mode`.
             focus_mode: self.window.focus_mode,
-            psreadline: self.psreadline_row_state(),
-            psreadline_install_available: psreadline::install_available(
-                psreadline::probe(),
-                self.psreadline_row_state(),
-            ) && self.app.psreadline_documents.is_some(),
-            psreadline_remove_available: psreadline::remove_available(self.psreadline_row_state()),
             profile_available: (0..profiles::count())
                 .map(|index| self.app.profile_programs.row_is_available(index))
                 .collect(),
@@ -49057,6 +48997,9 @@ impl<B: Backend> Runtime<'_, B> {
             &self.app.settings_store.loaded().terminal_cjk_font_family,
         );
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        if self.window.settings.is_open() {
+            self.settings_closed();
+        }
         self.window.settings.toggle(self.settings_dialog(
             &rows,
             &shortcuts,
@@ -49090,6 +49033,17 @@ impl<B: Backend> Runtime<'_, B> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **The settings sheet closes** — a lifecycle door (T-POINTER-CAPTURE R-9, owner gone):
+    /// a slider or the menu bar held on it is let go of, so a hand that pressed `Esc` mid-drag
+    /// leaves nothing latched behind a sheet that is no longer there. Asked by every road that
+    /// shuts the sheet: the gear's toggle, the sheet's own `Esc` and its own close press, and a
+    /// verb that hands the reader a document instead.
+    fn settings_closed(&mut self) {
+        self.end_capture(runtime::pointer::OwnerGone(
+            runtime::pointer::Gone::SettingsSheet,
+        ));
     }
 
     /// **Take a picker item** — everything choosing one does to the process.
@@ -49279,21 +49233,13 @@ impl<B: Backend> Runtime<'_, B> {
                 .loaded()
                 .terminal_cjk_font_family
                 .clone();
-            if self.apply_terminal_font(family, cjk_family, size)? {
-                // S110's one exception to "asked once": the row whose visible
-                // consequence on an unpatched 5.1 *is* the bug the module fixes.
-                // See `psreadline::invite_decision`.
-                self.window.psreadline_size_changed = true;
-            }
+            self.apply_terminal_font(family, cjk_family, size)?;
         }
         if let Some(name) = settings::light_scheme_requested(target) {
             self.apply_scheme(Some(name.to_owned()), None)?;
         }
         if let Some(name) = settings::dark_scheme_requested(target) {
             self.apply_scheme(None, Some(name.to_owned()))?;
-        }
-        if let Some(install) = settings::psreadline_requested(target) {
-            self.apply_psreadline(install)?;
         }
         // Both rail combos go through the one constructor: the layout choice
         // keeps the sidebar mode standing and the sidebar choice keeps the
@@ -49401,6 +49347,9 @@ impl<B: Backend> Runtime<'_, B> {
                 }
                 None if row == settings::SettingsRow::PowerShellProfileLine => {
                     shell_integration::begin_removal();
+                }
+                None if row == settings::SettingsRow::LegacyPsReadLine => {
+                    psreadline::begin_legacy_removal(self.window_id());
                 }
                 None => {}
             },
@@ -49614,7 +49563,6 @@ impl<B: Backend> Runtime<'_, B> {
             // somebody moves it, and this is the one row in the dialog whose
             // reset would switch a network request back on.
             | Row::AutoCheck
-            | Row::PsReadLine
             | Row::Scrollback
             | Row::LineWrapping
             | Row::CopyOnSelect
@@ -49657,6 +49605,7 @@ impl<B: Backend> Runtime<'_, B> {
             | Row::ImportSettings
             | Row::SettingsFolder
             | Row::PowerShellProfileLine
+            | Row::LegacyPsReadLine
             // And the uninstaller's rows (T-UNINSTALL-UX): a door, a switch that
             // lives for one visit, and a fact about who installed this copy.
             | Row::Uninstall
@@ -49706,7 +49655,6 @@ impl<B: Backend> Runtime<'_, B> {
         let card_above = self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
-            || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
             || self.uninstall_card_is_up();
@@ -50156,11 +50104,11 @@ impl<B: Backend> Runtime<'_, B> {
             .map(|editor| PathBuf::from(editor.program.text()))
             .and_then(|path| path.parent().map(Path::to_path_buf))
             .filter(|parent| parent.as_os_str().len() > 1);
-        match self
-            .window
-            .image_picker
-            .request(bt_platform::FilePickKind::Program, start.as_deref())
-        {
+        match self.window.image_picker.request(
+            bt_platform::FilePickKind::Program,
+            start.as_deref(),
+            crate::i18n::Text::ImageFileType.text(),
+        ) {
             Ok(true) => self.window.image_pick_pending = Some(FilePick::ProfileProgram),
             // Already queued or already open: a second press while one is up is
             // one dialog, not two, and whoever asked first keeps the answer.
@@ -50490,6 +50438,8 @@ impl<B: Backend> Runtime<'_, B> {
             (_, settings::SettingsKeyVerdict::Chose(target)) => {
                 self.apply_settings_choice(target)?
             }
+            // The sheet's own close press shut it.
+            (_, settings::SettingsKeyVerdict::Closed) => self.settings_closed(),
             _ => {}
         }
         if let Some(position) = self.window.pointer_position {
@@ -50864,6 +50814,7 @@ impl<B: Backend> Runtime<'_, B> {
         // **The dialog goes.** It is the one verb in it whose answer is a
         // document, and a modal standing over the document it just handed you is
         // a modal in the way.
+        self.settings_closed();
         self.window.settings.close();
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
@@ -56424,6 +56375,11 @@ impl<B: Backend> App<B> {
         // doors (§5.3 rows 16 and 16b).
         bt_platform::admission::exiting();
         self.session_store.close();
+        // **And, after a stop that cannot ask, what no file took** (S-6c): the storage worker
+        // has served what was queued before its end, the preview's saves among it, inside the
+        // close's one bound; the buffers the stop held hear the answers, and what did not land
+        // is copied into `recovered` (§5.3 row 20b). Nothing is held on any other road.
+        self.keep_what_the_stop_did_not_save(SystemTime::now());
     }
 
     /// **Ask for the quit transaction**, from whichever of the three doors the
@@ -56677,6 +56633,13 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
     /// Every window, in no particular order: for a question whose answer does not depend on it.
     fn values(&self) -> impl Iterator<Item = &W> {
         self.open.values()
+    }
+
+    /// Every window with its key, in the opening order.
+    fn in_order(&self) -> impl Iterator<Item = (K, &W)> {
+        self.order
+            .iter()
+            .filter_map(|key| self.open.get(key).map(|window| (*key, window)))
     }
 
     /// The key of the window at `index` in the opening order.
@@ -57984,7 +57947,7 @@ mod mouse_trace_station_tests {
         // at=in-pane` line above it. 26 → 27 the same day: a notch on a band
         // painted above the panes that does not scroll is swallowed, with its
         // own `wheel_route taken=overlay at=over-pane` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 27);
+        assert_every_exit_is_traced("mouse_wheel", 28);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
@@ -62309,8 +62272,10 @@ mod page_under_a_laden_hand_tests {
         let asked = web_page_at
             .find("self.a_gesture_holds_the_pointer()")
             .expect("the page's door subtracts a hand that is already carrying");
+        // The scan is the page layer's own question since T-POINTER-CAPTURE cut 6, which the
+        // wheel asks without the hand's subtraction.
         let scan = web_page_at
-            .find("self.web_page_shown_at(position)")
+            .find("self.page_under_the_hand(position)")
             .expect("the page's door scans the pages it knows about");
         assert!(
             asked < scan,
@@ -62384,7 +62349,9 @@ mod page_under_the_tab_list_tests {
     /// already given away.
     #[test]
     fn the_tab_list_is_asked_before_any_page_is() {
-        let web_page_at = method_body("Runtime", "web_page_at");
+        // The page layer's own question since T-POINTER-CAPTURE cut 6 (`web_page_at` is it with
+        // a held gesture subtracted).
+        let web_page_at = method_body("Runtime", "page_under_the_hand");
         let asked = web_page_at
             .find("tab_list_target_at")
             .expect("the page's door subtracts the tab list");
@@ -65159,7 +65126,7 @@ mod application_change_tests {
             .find("settle_application_change")
             .expect("the loop settles what the application changed");
         let waited = door
-            .find("wake_deadline")
+            .find("let mut wake = ")
             .expect("the loop asks every window for its next wake-up");
         assert!(
             settled < waited,
@@ -65216,6 +65183,10 @@ struct FolioApp<B: Backend = Native> {
     /// Inputs from which the installed macOS menu was derived. Compared before
     /// allocating a fresh plan or crossing into AppKit.
     main_menu_inputs: Option<MainMenuInputs>,
+    /// **The clock the standing `ControlFlow::WaitUntil` is owed to**
+    /// (T-WINDOW-THREAD-UNDER-LOAD), set beside it by [`Self::park_until`] on every road that
+    /// sets one; `None` with `Wait`.
+    wake_owner: Option<WakeOwner>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65310,6 +65281,7 @@ impl<B: Backend> FolioApp<B> {
             delegate,
             termination: None,
             main_menu_inputs: None,
+            wake_owner: None,
         }
     }
 
@@ -67471,7 +67443,7 @@ impl<B: Backend> FolioApp<B> {
     }
 
     /// **The system is ending the session, or took the end back: settle what it said**
-    /// (B-ENDSESSION; `docs/M2-persistence-schema-v1.md` §5.5).
+    /// (B-ENDSESSION, T-ENDSESSION-SAVES; `docs/M2-persistence-schema-v1.md` §5.5).
     ///
     /// Windows' side of what [`Self::begin_the_systems_quit`] is on macOS, and a different shape
     /// for a reason the platform gives: AppKit waits for an answer the application gives when it
@@ -67485,22 +67457,55 @@ impl<B: Backend> FolioApp<B> {
     /// A save that did not land leaves the sentinel standing and the disk holding the last
     /// completed save, which is still whole because the hold kept every later change off it; the
     /// system is not kept waiting for it.
+    ///
+    /// [`Self::settle_session_end_keeping_in`], what no file takes kept in the data directory's
+    /// `recovered` folder.
     fn settle_session_end(&mut self) {
+        let _ = self
+            .settle_session_end_keeping_in(&persist::storage_dir().join(preview::RECOVERED_FOLDER));
+    }
+
+    /// [`Self::settle_session_end`], what no file takes kept in `recovery` — a test's own folder
+    /// in a test. Answers what became of every dirty preview buffer.
+    ///
+    /// **The edits go ahead of the document** (T-ENDSESSION-SAVES, ruled 2026-10-21). On the
+    /// first question of a span ([`session_end::owes_the_write`]), before the document is written:
+    /// every owed hand-editable document is handed to the storage worker once more, then every
+    /// dirty preview buffer's save, as a press hands it ([`Self::hand_over_for_the_systems_end`]).
+    /// The document follows them onto the same worker, which serves its queue in order, so its one
+    /// bounded wait (§5.3 row 16, `SESSION_SAVE_BUDGET`) is the drain of everything ahead of it —
+    /// one budget, counted from this turn's start (`asked_at`), which fits the five seconds
+    /// Windows allows from when it sends `WM_ENDSESSION` — possibly while this turn runs. Then the answers
+    /// are heard as the loop's own turn hears them, every buffer staying in its tab, and whatever
+    /// did not land is copied into `recovery` (§5.3 row 20c) before the line comes down. A save
+    /// stalled on the disk delays the document behind it: the sentinel stays, and the next start
+    /// offers the layout back — the edits are worth more than the last moments of layout.
+    fn settle_session_end_keeping_in(&mut self, recovery: &Path) -> Vec<preview::Kept> {
         let heard = session_end::take();
-        if heard.is_empty() {
-            return;
+        let mut kept = Vec::new();
+        if heard.is_empty() || self.app.is_none() {
+            return kept;
         }
-        let Some(app) = self.app.as_mut() else {
-            return;
-        };
+        // The one budget counts from here: the hand-overs ahead of the document spend it.
+        let asked_at = Instant::now();
         let mut lines_down = false;
         for end in heard {
-            let a_quit_holds_it = app
-                .quit
-                .as_ref()
-                .is_some_and(quit::Quit::document_is_frozen);
-            match session_end::settle(end, &mut app.session_store, a_quit_holds_it) {
-                session_end::Settled::Saved(Ok(())) | session_end::Settled::LeftToTheQuit => {
+            let quit = self.app.as_ref().and_then(|app| app.quit.as_ref());
+            let a_quit_holds_it = quit.is_some_and(quit::Quit::document_is_frozen);
+            // **A quit in its documents or recovery phase owns the four documents** and their
+            // copies, as one past its photograph owns everything (`LeftToTheQuit`): this road
+            // neither retries them — `quit_begin` would reset the quit's own recovery — nor
+            // copies them.
+            let documents = !quit.is_some_and(quit::Quit::holds_the_storage_worker);
+            let handed = session_end::owes_the_write(end, a_quit_holds_it)
+                .then(|| self.hand_over_for_the_systems_end(documents));
+            let Some(app) = self.app.as_mut() else {
+                return kept;
+            };
+            match session_end::settle(end, &mut app.session_store, a_quit_holds_it, asked_at) {
+                session_end::Settled::Saved(Ok(()))
+                | session_end::Settled::LeftToTheQuit
+                | session_end::Settled::AlreadySaved => {
                     lines_down = true;
                 }
                 session_end::Settled::Saved(Err(refusal)) => {
@@ -67514,6 +67519,14 @@ impl<B: Backend> FolioApp<B> {
                 // they stand are the layout again.
                 session_end::Settled::TakenBack => app.record_session(Instant::now()),
             }
+            if let Some(handed) = handed {
+                kept.extend(self.keep_what_the_systems_end_did_not_save(
+                    &handed,
+                    documents,
+                    recovery,
+                    SystemTime::now(),
+                ));
+            }
         }
         if lines_down {
             for window in self.windows.values() {
@@ -67522,6 +67535,87 @@ impl<B: Backend> FolioApp<B> {
                 }
             }
         }
+        kept
+    }
+
+    /// **Everything the system's end of the session would lose, handed to the storage worker,
+    /// and nothing taken from any window** (T-ENDSESSION-SAVES): first every owed hand-editable
+    /// document, once more (`QuitDocument::quit_begin`: the end is a trigger an owed edit is
+    /// retried on, §4.1), then each standing window's dirty preview buffers
+    /// ([`Runtime::hand_over_for_the_systems_end`]) — all of it ahead of the session document,
+    /// which the caller writes next. Answers what each window handed over, by window.
+    ///
+    /// `documents` is false while a quit holds the storage worker for its documents and their
+    /// copies: those are the quit's, and are left to it.
+    fn hand_over_for_the_systems_end(
+        &mut self,
+        documents: bool,
+    ) -> Vec<(WindowId, preview::HandedOver)> {
+        if documents && let Some(app) = self.app.as_mut() {
+            app.with_documents(|documents| {
+                for document in documents.iter_mut() {
+                    document.quit_begin();
+                }
+            });
+        }
+        let mut handed = Vec::new();
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
+                let id = runtime.window.window.id();
+                handed.push((id, runtime.hand_over_for_the_systems_end()));
+            }
+        }
+        handed
+    }
+
+    /// **After the document's wait: what landed heard, and what did not kept**
+    /// (T-ENDSESSION-SAVES). The answers the worker gave are taken as the loop's turn takes them
+    /// — the session's receipts, each buffer its own, each document store its own — and **all of
+    /// them before anything that failed on the way is said**: a window whose repaint refused does
+    /// not keep the document stores from hearing theirs. Then each window's buffers that a save
+    /// did not clean are copied into `recovery` ([`Runtime::keep_what_the_systems_end_did_not_save`],
+    /// each line naming why its file did not take the edit — the disk's own reason where it
+    /// refused) — the buffers stay in their tabs as they now stand, dirty where the save did not
+    /// land — and, unless a quit holds them (`documents` false), each document still owed is
+    /// copied beside them, a loss said in `diagnostics.log` alone ([`IntoTheLog`]). Every line
+    /// is offered to `diagnostics.log`.
+    fn keep_what_the_systems_end_did_not_save(
+        &mut self,
+        handed: &[(WindowId, preview::HandedOver)],
+        documents: bool,
+        recovery: &Path,
+        at: SystemTime,
+    ) -> Vec<preview::Kept> {
+        if let Some(app) = self.app.as_mut() {
+            app.session_store.take_receipts();
+        }
+        let (said, previews) = self.hear_preview_save_answers();
+        let heard = self.take_the_documents_answers();
+        for error in [previews.err(), heard.err()].into_iter().flatten() {
+            diagnostics::note(&format!(
+                "{APP_NAME}: the session is ending and an answer from the disk was not heard: \
+                 {error:#}"
+            ));
+        }
+        let mut kept = Vec::new();
+        for (id, handed) in handed {
+            if let Some(mut runtime) = self.runtime(*id) {
+                kept.extend(
+                    runtime.keep_what_the_systems_end_did_not_save(handed, &said, recovery, at),
+                );
+            }
+        }
+        for one in &kept {
+            diagnostics::note(&one.line());
+        }
+        if documents && let Some(app) = self.app.as_mut() {
+            app.with_documents(|documents| {
+                keep_owed_documents_over(documents, recovery, at, &mut TheDisk, &mut IntoTheLog)
+            });
+        }
+        kept
     }
 
     /// One launch's tab, in a window that is already standing.
@@ -67658,6 +67752,13 @@ impl<B: Backend> FolioApp<B> {
             app.session_store.take_receipts();
         }
         self.take_preview_save_answers()?;
+        self.take_the_documents_answers()
+    }
+
+    /// **What the storage worker answered the four documents, heard by the first standing
+    /// window** — [`Self::take_document_answers`]'s second half, on its own for the system's end
+    /// of the session, which hears every answer before it says any failure.
+    fn take_the_documents_answers(&mut self) -> Result<()> {
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
         // recovery phases take the answers themselves, on the turn this wake brings, and merge
         // without the doors.
@@ -67688,11 +67789,19 @@ impl<B: Backend> FolioApp<B> {
     /// recorded and then ignored (C6). Not held back by a quit: these answers are
     /// the buffers', and the quit's documents phase takes only the stores'.
     fn take_preview_save_answers(&mut self) -> Result<()> {
+        self.hear_preview_save_answers().1
+    }
+
+    /// [`Self::take_preview_save_answers`], answering also every refusal the answers gave, by
+    /// the file each was for ([`Runtime::hear_preview_saves`]) — gathered whatever a window's
+    /// repaint answered.
+    fn hear_preview_save_answers(&mut self) -> (Vec<(preview::PreviewSource, String)>, Result<()>) {
+        let mut refused = Vec::new();
         let Some(mut answers) = self.app.as_mut().map(App::take_preview_save_answers) else {
-            return Ok(());
+            return (refused, Ok(()));
         };
         if answers.is_empty() {
-            return Ok(());
+            return (refused, Ok(()));
         }
         // Every standing window hears its buffers' answers whatever another
         // window's repaint answered, and every answer taken is ended — heard,
@@ -67701,7 +67810,7 @@ impl<B: Backend> FolioApp<B> {
         for index in 0..self.windows.len() {
             if let Some(mut runtime) = self.runtime_at(index)
                 && runtime.window.leaving.is_none()
-                && let Err(error) = runtime.hear_preview_saves(&mut answers)
+                && let Err(error) = runtime.hear_preview_saves(&mut answers, &mut refused)
             {
                 first_error.get_or_insert(error);
             }
@@ -67709,7 +67818,7 @@ impl<B: Backend> FolioApp<B> {
         if let Some(app) = self.app.as_mut() {
             app.sink_preview_save_answers(answers);
         }
-        first_error.map_or(Ok(()), Err)
+        (refused, first_error.map_or(Ok(()), Err))
     }
 
     /// **Every window's close that waits for its saves, looked at** (S-6b) — once
@@ -68045,7 +68154,7 @@ impl<B: Backend> FolioApp<B> {
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
-        let owed = runtime.hide_quake_window();
+        let owed = runtime.hide_quake_window()?;
         // **After the window is off the screen, never before.** Windows gives the
         // foreground to *something* the moment a foreground window is hidden, and
         // a handover made first would be undone by that. macOS does the same
@@ -68586,7 +68695,11 @@ impl<B: Backend> FolioApp<B> {
     /// Spent at the loop's two doors, exactly as the pending window is and for
     /// the same reason: it needs the `ActiveEventLoop` and every window at once,
     /// and a `Runtime` has never held either.
-    fn settle_quit(&mut self, event_loop: &B::Loop) -> Result<()> {
+    ///
+    /// `now` is the turn's instant: the save step's bound is read against it
+    /// (S-6c), as a close's wait is read against the instant
+    /// [`Self::settle_close_waits`] is handed.
+    fn settle_quit(&mut self, event_loop: &B::Loop, now: Instant) -> Result<()> {
         self.begin_quit_if_asked()?;
         loop {
             self.deliver_the_quits_update_report();
@@ -68602,15 +68715,27 @@ impl<B: Backend> FolioApp<B> {
                 // Both of these are waits, and the loop has to go back round for
                 // them: one for a press, one for a browser process.
                 quit::QuitStep::Ask | quit::QuitStep::WaitForPages => return Ok(()),
+                // **The saves on the storage worker, and the quit waits for them** (S-6c): handed
+                // over once, as `Ctrl+S` hands one, then looked at on every turn their answers wake
+                // (`AppEvent::DocumentsAnswered`) until all have answered or the bound
+                // (`Quit::deadline`) has passed — never a wait on this thread.
                 quit::QuitStep::Save => {
-                    let mut report = quit::SaveReport::default();
-                    self.for_each_window(|runtime| {
-                        let theirs = runtime.quit_save()?;
-                        report.saved.extend(theirs.saved);
-                        report.failed.extend(theirs.failed);
-                        Ok(())
-                    })?;
-                    self.report_to_quit(|quit| quit.saved(&report));
+                    let handed = self
+                        .app
+                        .as_ref()
+                        .and_then(|app| app.quit.as_ref())
+                        .is_some_and(|quit| quit.saves_awaited().is_some());
+                    if !handed {
+                        let mut awaited = Vec::new();
+                        self.for_each_window(|runtime| {
+                            awaited.extend(runtime.hand_over_every_save()?);
+                            Ok(())
+                        })?;
+                        self.report_to_quit(|quit| quit.saves_handed_over(awaited, now));
+                    }
+                    if !self.settle_the_quits_saves(now)? {
+                        return Ok(());
+                    }
                 }
                 quit::QuitStep::Discard => {
                     self.for_each_window(|runtime| runtime.quit_discard())?;
@@ -68866,6 +68991,122 @@ impl<B: Backend> FolioApp<B> {
                 }
             }
         }
+    }
+
+    /// **The quit's saves, looked at** (S-6c) — on each turn of its save step, once every
+    /// save has been handed to the storage worker. Answers whether the step is decided: the
+    /// quit gone on to its documents, or withdrawn; `false` while it waits.
+    ///
+    /// Each buffer it waits for is found in whichever standing window holds it now
+    /// (`where_a_save_stands`: a tab may have moved), and what they came to is read as a
+    /// close's wait reads it ([`restore::SavesFound`]). First match:
+    ///
+    /// | found | what happens |
+    /// |---|---|
+    /// | a body edited (or reloaded) since its save was handed over | withdrawn; the window's card names it, once ("Not saved: …"): the new body is a new save, and the next quit asks again |
+    /// | a save still on its way, before the bound | the quit goes on waiting |
+    /// | a save still on its way at the bound | withdrawn; the window's card names it in true words ("Still on its way to the disk: …"), beside any that did not land; its late answer is its buffer's, or the sink's |
+    /// | every save landed, and no window holds anything a quit would lose | the quit goes on, to its documents |
+    /// | a conflict, a save that did not land (refused, failed, the worker gone), or a buffer still owed | withdrawn; the panes said why (a conflict: nothing was written over the other writer's bytes); the window's card names them |
+    fn settle_the_quits_saves(&mut self, now: Instant) -> Result<bool> {
+        let Some((awaited, until)) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.quit.as_ref())
+            .and_then(quit::Quit::saves_awaited)
+            .map(|(awaited, until)| (awaited.to_vec(), until))
+        else {
+            return Ok(true);
+        };
+        // Each buffer, where it stands now: its window, its name, what it came to. One no
+        // standing window holds any more — its tab closed, its window gone — loses nothing.
+        let mut found: Vec<(WindowId, String, preview::AtTheClose)> = Vec::new();
+        for awaited in awaited {
+            let place = self
+                .windows
+                .in_order()
+                .filter(|(_, window)| window.leaving.is_none())
+                .find_map(|(id, window)| {
+                    where_a_save_stands(&window.tabs, awaited)
+                        .map(|(name, at)| (id, name.to_owned(), at))
+                });
+            found.extend(place);
+        }
+        let read: Vec<(String, preview::AtTheClose)> = found
+            .iter()
+            .map(|(_, name, at)| (name.clone(), *at))
+            .collect();
+        let named = |what: &[preview::AtTheClose]| {
+            let mut by_window = ByWindow::default();
+            for (window, name, at) in &found {
+                if what.contains(at) {
+                    by_window.add(*window, name.clone());
+                }
+            }
+            by_window
+        };
+        let (not_saved, on_its_way) = match restore::SavesFound::of(&read, now, until) {
+            restore::SavesFound::OnTheirWay => return Ok(false),
+            // **Superseded** — the body handed over is not the body any more: the quit is
+            // withdrawn and says which, once; the new body is a new save, which the next quit
+            // asks the card about.
+            restore::SavesFound::Edited => {
+                (named(&[preview::AtTheClose::Edited]), ByWindow::default())
+            }
+            // **At the bound** — what is still on its way is said as that, and whatever has
+            // answered without landing is named beside it.
+            restore::SavesFound::PastTheBound => (
+                named(&[preview::AtTheClose::Conflict, preview::AtTheClose::NotSaved]),
+                named(&[preview::AtTheClose::OnItsWay]),
+            ),
+            // **Every save has answered**: what each window still holds that a quit would lose
+            // (`quit_names`) — a conflict, a save that did not land, a body owed (R1) or typed
+            // into since — is what did not get saved.
+            restore::SavesFound::Answered => {
+                let mut left = ByWindow::default();
+                for (id, window) in self.windows.in_order() {
+                    if window.leaving.is_some() {
+                        continue;
+                    }
+                    for tab in &window.tabs {
+                        for name in tab.preview_pool.quit_names() {
+                            left.add(id, name.to_owned());
+                        }
+                    }
+                }
+                if left.is_empty() {
+                    // **Every save landed**: the quit goes on through the doors it always did.
+                    self.report_to_quit(|quit| quit.saved(&quit::SaveReport::default()));
+                    return Ok(true);
+                }
+                (left, ByWindow::default())
+            }
+        };
+        let mut said: Vec<WindowId> = Vec::new();
+        for id in not_saved.windows().chain(on_its_way.windows()) {
+            if said.contains(&id) {
+                continue;
+            }
+            said.push(id);
+            if let Some(mut runtime) = self.runtime(id) {
+                runtime.say_the_quits_saves(not_saved.of(id), on_its_way.of(id))?;
+            }
+        }
+        // Each with what its window's card said of it.
+        let report = quit::SaveReport {
+            saved: Vec::new(),
+            failed: not_saved
+                .names()
+                .map(|name| (name.to_owned(), i18n::quit_not_saved(name)))
+                .chain(
+                    on_its_way
+                        .names()
+                        .map(|name| (name.to_owned(), i18n::quit_save_on_its_way(name))),
+                )
+                .collect(),
+        };
+        self.report_to_quit(|quit| quit.saved(&report));
+        Ok(true)
     }
 
     /// Open the transaction, if a chord asked for one and none is under way.
@@ -69273,14 +69514,20 @@ impl<B: Backend> FolioApp<B> {
     /// controlled failure ([`Self::fail`], twelve sites) and a loop stopped by
     /// something that is not a window closing (`exiting`).
     ///
-    /// First every window keeps what it would lose ([`Runtime::keep_unsaved_edits`]):
-    /// each dirty preview buffer written back through the quit's judged write, or,
-    /// where the file refuses or has changed on disk, copied into the data
-    /// directory's [`preview::RECOVERED_FOLDER`] — with one diagnostics line each
-    /// saying where the edit is. The writes are made on this thread and are done
-    /// when the call returns, as the quit's are; nothing waits for anything else.
-    /// Then every window, because the stop is the process's: a shell left running
-    /// behind a window nobody can see is the one outcome worse than stopping.
+    /// First the four hand-editable documents' owed changes are copied into the data
+    /// directory's [`preview::RECOVERED_FOLDER`]. Then every window, because the stop is the
+    /// process's: a shell left running behind a window nobody can see is the one outcome
+    /// worse than stopping. **Then every window keeps what it would lose**
+    /// ([`Runtime::keep_unsaved_edits`], S-6c): each dirty preview buffer's save is handed to
+    /// the storage worker as a press hands it — the window thread writes nothing over a file
+    /// — and the buffers are held past their windows; `App::finish`, which follows on both
+    /// roads, waits for the session's last write (§5.3 row 16, queued behind those saves) and
+    /// the worker's end (row 16b), each within the writer's budget, and what did
+    /// not land is copied into `recovered` then, with one diagnostics line each saying where
+    /// the edit is. Every window keeps its edits whatever another window's close answered,
+    /// and after it has been photographed and let go: its open editor is committed by the
+    /// close before its saves are handed over, and the pools it is photographed with are
+    /// still in its tabs.
     /// `ending` for every one of them, and that is the point: this is the process
     /// stopping, not somebody closing five windows, so what was open stays in the
     /// file and nothing is filed away as "closed".
@@ -69289,19 +69536,20 @@ impl<B: Backend> FolioApp<B> {
     /// `ending` to this road or a row of its table, and the twelve `fail` sites to
     /// theirs.
     fn stop_every_window(&mut self) -> Result<()> {
-        let recovery = persist::storage_dir().join(preview::RECOVERED_FOLDER);
-        self.for_each_window(|runtime| {
-            runtime.keep_unsaved_edits(&recovery);
-            Ok(())
-        })?;
-        // **And the four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
+        self.stop_every_window_keeping_in(&persist::storage_dir().join(preview::RECOVERED_FOLDER))
+    }
+
+    /// [`Self::stop_every_window`], what no file takes kept in `recovery` — the data
+    /// directory's `recovered` folder on both roads, a test's own folder in a test.
+    fn stop_every_window_keeping_in(&mut self, recovery: &Path) -> Result<()> {
+        // **The four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
         // revisions (c)2 and (d)3), into the same folder — and every one that could be kept
         // nowhere said through the system's own box, before a window closes.
         if let Some(app) = self.app.as_mut() {
             app.with_documents(|documents| {
                 keep_owed_documents_over(
                     documents,
-                    &recovery,
+                    recovery,
                     SystemTime::now(),
                     &mut TheDisk,
                     &mut SystemBox,
@@ -69310,7 +69558,18 @@ impl<B: Backend> FolioApp<B> {
             // **And a trial release a quit held, disposed of** (T-QUIT-DOCUMENTS round 4).
             dispose_of_a_held_release_on_a_stop(app.quit.as_mut(), &mut app.session_store);
         }
-        self.for_each_window(|runtime| runtime.close_window(true))
+        let closed = self.for_each_window(|runtime| runtime.close_window(true));
+        // Every window `for_each_window` walks, whatever another's close answered — and not a
+        // window already leaving: it left through its own gate, which asked about every edit
+        // it held (discarded, or saved before it went), and its close has run.
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
+                runtime.keep_unsaved_edits(recovery);
+            }
+        }
+        closed
     }
 
     fn about_to_wait_inner(&mut self, event_loop: &B::Loop) {
@@ -69366,7 +69625,7 @@ impl<B: Backend> FolioApp<B> {
             };
             let gone = self.every_page_has_gone();
             self.report_to_quit(|quit| quit.pages(gone, now));
-            if let Err(error) = self.settle_quit(event_loop) {
+            if let Err(error) = self.settle_quit(event_loop, now) {
                 self.fail(event_loop, error);
                 return;
             }
@@ -69375,9 +69634,12 @@ impl<B: Backend> FolioApp<B> {
                 .as_ref()
                 .and_then(|app| app.quit.as_ref())
                 .and_then(quit::Quit::deadline);
-            event_loop.set_control_flow(
-                earliest_deadline([waking, bound])
-                    .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+            self.park_until(
+                event_loop,
+                wake_owner::earliest_wake([
+                    wake_owner::owned(WakeOwner::Retirement, waking),
+                    wake_owner::owned(WakeOwner::QuitBound, bound),
+                ]),
             );
             return;
         }
@@ -69429,7 +69691,7 @@ impl<B: Backend> FolioApp<B> {
             // line, exactly as the drag handover above does, so that the press,
             // the window and the frame it appears in are all one turn.
             .and_then(|()| self.settle_quake(event_loop))
-            .and_then(|()| self.settle_quit(event_loop))
+            .and_then(|()| self.settle_quit(event_loop, Instant::now()))
         {
             self.fail(event_loop, error);
             return;
@@ -69446,8 +69708,8 @@ impl<B: Backend> FolioApp<B> {
         // deadline joins the same fold every window's clocks reach through, which
         // is what lets a spring come due over a window that will hear nothing
         // else at all.
-        let mut wake_deadline = match self.drive_drag_broker(now) {
-            Ok(deadline) => deadline,
+        let mut wake = match self.drive_drag_broker(now) {
+            Ok(deadline) => wake_owner::owned(WakeOwner::DragBroker, deadline),
             Err(error) => {
                 self.fail(event_loop, error);
                 return;
@@ -69458,16 +69720,24 @@ impl<B: Backend> FolioApp<B> {
         // leaving — and a sweep that turned thirty clocks over a hidden window
         // first would be drawing frames for a reader who has already closed it.
         match self.reap_leaving_windows(event_loop, now) {
-            Ok(deadline) => wake_deadline = earliest_deadline([wake_deadline, deadline]),
+            Ok(deadline) => {
+                wake = wake_owner::earliest_wake([
+                    wake,
+                    wake_owner::owned(WakeOwner::WindowReap, deadline),
+                ]);
+            }
             Err(error) => {
                 self.fail(event_loop, error);
                 return;
             }
         }
         let programs_deadline = self.advance_programs_ear(now);
-        wake_deadline = earliest_deadline([wake_deadline, programs_deadline]);
         let index_deadline = self.advance_index_ear(now);
-        wake_deadline = earliest_deadline([wake_deadline, index_deadline]);
+        wake = wake_owner::earliest_wake([
+            wake,
+            wake_owner::owned(WakeOwner::ProgramsEar, programs_deadline),
+            wake_owner::owned(WakeOwner::IndexEar, index_deadline),
+        ]);
         if self.windows.is_empty() {
             // **An application with no windows waits, and waits properly**
             // (M3-1). Until this ticket an empty registry was a loop that had
@@ -69480,10 +69750,11 @@ impl<B: Backend> FolioApp<B> {
             // and both of those wake the loop themselves — **and the spare web
             // controller, while it lets go** (ticket 60, SW-2): no window is left to
             // wake the loop for its browser-exit wait, so its instant is the one kept.
-            event_loop.set_control_flow(match self.run_end(wake_deadline) {
-                web_spare::RunControl::WaitUntil(at) => ControlFlow::WaitUntil(at),
-                web_spare::RunControl::Exit | web_spare::RunControl::Wait => ControlFlow::Wait,
-            });
+            let run_end = match self.run_end(Option::map(wake, |(_, at)| at)) {
+                web_spare::RunControl::WaitUntil(at) => Some((WakeOwner::RunEnd, at)),
+                web_spare::RunControl::Exit | web_spare::RunControl::Wait => None,
+            };
+            self.park_until(event_loop, run_end);
             return;
         }
         // **The kernel's news about repositories, filed under every window that
@@ -69511,11 +69782,14 @@ impl<B: Backend> FolioApp<B> {
             // `Runtime::turn` — it is the opening order, and a closed window at
             // the head of it must not take the job away from the rest.
             let ime_deadline = runtime.service_ime_report(now);
-            wake_deadline = earliest_deadline([wake_deadline, ime_deadline]);
+            wake = wake_owner::earliest_wake([
+                wake,
+                wake_owner::owned(WakeOwner::ImeReport, ime_deadline),
+            ]);
             let turn = runtime.turn(now, application_clocks);
             application_clocks = false;
             match turn {
-                Ok(deadline) => wake_deadline = earliest_deadline([wake_deadline, deadline]),
+                Ok(window_wake) => wake = wake_owner::earliest_wake([wake, window_wake]),
                 Err(error) => {
                     self.fail(event_loop, error);
                     return;
@@ -69533,9 +69807,23 @@ impl<B: Backend> FolioApp<B> {
         // **And every close's bound, while it waits for its saves** (S-6b): the answers
         // wake the loop themselves; the clock is only the bound.
         let close_wake = self.close_waits_wake(now);
-        let wake_deadline = earliest_deadline([wake_deadline, quit_wake, close_wake]);
+        let wake = wake_owner::earliest_wake([
+            wake,
+            wake_owner::owned(WakeOwner::QuitBound, quit_wake),
+            wake_owner::owned(WakeOwner::CloseWait, close_wake),
+        ]);
+        self.park_until(event_loop, wake);
+    }
+
+    /// **The loop's control flow for this turn, and the clock that set it**
+    /// (T-WINDOW-THREAD-UNDER-LOAD): `WaitUntil` the wake's instant, or `Wait` when no clock
+    /// asked for one. The owner is kept beside the control flow it chose, so the parking
+    /// [`Self::about_to_wait`] records names the clock it is owed — and a turn that leaves early,
+    /// setting nothing, leaves both standing together.
+    fn park_until(&mut self, event_loop: &B::Loop, wake: Option<(WakeOwner, Instant)>) {
+        self.wake_owner = wake.map(|(owner, _)| owner);
         event_loop
-            .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+            .set_control_flow(wake.map_or(ControlFlow::Wait, |(_, at)| ControlFlow::WaitUntil(at)));
     }
 
     /// **One window event, dispatched** — `ApplicationHandler::window_event`'s whole answer,
@@ -69778,84 +70066,9 @@ impl<B: Backend> FolioApp<B> {
                 // opinion off the event (§7.46 ②).
                 WindowEvent::ThemeChanged(_) => runtime.os_theme_changed().map(|_| ()),
                 WindowEvent::RedrawRequested => runtime.redraw(),
-                WindowEvent::Focused(false) => {
-                    runtime.observe_ime_focus(false);
-                    // Losing the window is a blur, and blur commits (J102). The
-                    // mock-up's editor is a real focusable element and gets this
-                    // from the DOM; here it has to be said. A press that was still
-                    // being held goes with it — the button-up will arrive to a
-                    // window that is no longer listening.
-                    let committed = runtime.finish_rename(RenameExit::Blur);
-                    // K129. Losing the window is losing the Win32 mouse capture, and
-                    // capture loss is this platform's `pointercancel`: the pointer
-                    // stream ends with no button-up to end it. It is the only such
-                    // signal winit surfaces — there is no `WM_CAPTURECHANGED` event —
-                    // and an un-torn-down drag would leave a tab floating over a strip
-                    // nobody is holding any more. Same path as Esc: never mind.
-                    // F72: the same capture loss ends a divider drag, and ends it
-                    // the same way — restoring the one ratio it had been moving.
-                    // Left holding the button over a window that is no longer
-                    // listening, the gesture was never finished, and a drag nobody
-                    // finished did not choose a ratio.
-                    let cancelled = runtime
-                        .cancel_drag()
-                        .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
-                    // And a drag across a rendered page, which is holding the
-                    // span it began on until a release that will not come
-                    // (owner's ruling 2026-09-23).
-                    let cancelled = cancelled
-                        .and_then(|either| runtime.cancel_preview_text_drag().map(|()| either));
-                    runtime.drop_tab_press();
-                    runtime.drop_pane_press();
-                    runtime.drop_row_press();
-                    // P149's `window blur`: a glance is about where the pointer is,
-                    // and a window that is not listening has no pointer.
-                    runtime.hide_file_peek();
-                    // And §7.1.5e′'s: a card about the keys under your hands is a
-                    // card about a keyboard this window no longer has. `hide` and
-                    // not `spend` — nothing was pressed, so a hand that comes back
-                    // still holding `Ctrl` is answered again. And the input method's
-                    // context goes with the keyboard: the keyboard's own door
-                    // ([`Runtime::blurred`]) says both.
-                    runtime.blurred();
-                    // **And the command palette** (DESIGN.md §7.55): 失焦即收. It is
-                    // a box for aiming at something *now*, and a window the reader
-                    // has left is a window they are not aiming at — coming back to
-                    // a half-typed query over a stale list would be this product
-                    // holding a question nobody is still asking. It is the one
-                    // popup that goes here, and the difference is real: every other
-                    // one is anchored to a control the reader can see and come back
-                    // to, while this one is anchored to an intent.
-                    let _ = runtime.close_command_palette();
-                    runtime.window.tab_clicks.interrupt();
-                    runtime.window.ime_cursor.reset();
-                    hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
-                        runtime.destroy_ime_caret("window_blur")
-                    });
-                    runtime.set_cursor_focus(false, Instant::now());
-                    // **The summoned terminal goes when the keyboard does** (§7.54),
-                    // and it goes on the *next* turn: hiding a window inside the
-                    // event that says it lost the focus is asking Windows to move the
-                    // focus while it is telling you about the focus. A bit and a turn
-                    // — see `FolioApp::settle_quake`, where every other thing this
-                    // window does out of the ordinary is also spent.
-                    //
-                    // The switch is read there and not here for the same reason the
-                    // hide is: what this arm knows is that the keyboard left, which
-                    // is true whatever the row says. Only a window that is actually
-                    // on the screen leaves a bit, because a blur that arrives after
-                    // it has gone is a blur about nothing - hiding it is what moved
-                    // the focus in the first place.
-                    if runtime.is_quake_window() && runtime.app.quake.is_showing() {
-                        runtime.app.quake.note_blur();
-                    }
-                    committed.and(cancelled.map(|_| ())).and_then(|()| {
-                        runtime.publish_frame(FrameTrigger {
-                            occurred_at: Instant::now(),
-                            source: FrameSource::Expose,
-                        })
-                    })
-                }
+                // **Losing the window is one lifecycle door** (T-POINTER-CAPTURE R-9): the gesture
+                // a held button was making ends with it, and everything else a blur says follows.
+                WindowEvent::Focused(false) => runtime.window_blurred(),
                 WindowEvent::Focused(true) => {
                     runtime.observe_ime_focus(true);
                     // **A taskbar flash ends here** (`FLASHW_TIMERNOFG`: until the window comes to
@@ -69984,7 +70197,7 @@ impl<B: Backend> FolioApp<B> {
             // queued by the same turn is in the registry before it is photographed.
             let result = result.and_then(|()| {
                 hang_watch::during(hang_watch::Station::EventQuit, || {
-                    self.settle_quit(event_loop)
+                    self.settle_quit(event_loop, Instant::now())
                 })
             });
             if let Err(error) = result {
@@ -70013,11 +70226,15 @@ impl<B: Backend> FolioApp<B> {
 ///   Silence well past it is a promise that was not kept.
 /// * `Poll` — nothing is handed over at all; the loop comes straight back
 ///   round, so it is judged as a thread holding control.
-fn parking(control_flow: ControlFlow, heart: &hang_watch::Heartbeat) -> hang_watch::Park {
+fn parking(
+    control_flow: ControlFlow,
+    owner: Option<WakeOwner>,
+    heart: &hang_watch::Heartbeat,
+) -> hang_watch::Park {
     match control_flow {
         ControlFlow::Poll => hang_watch::Park::Running,
         ControlFlow::Wait => hang_watch::Park::Indefinite,
-        ControlFlow::WaitUntil(deadline) => heart.until(deadline),
+        ControlFlow::WaitUntil(deadline) => heart.until(deadline, owner),
     }
 }
 
@@ -70091,18 +70308,19 @@ mod resident_run_tests {
     fn every_control_flow_says_what_it_owes_the_window_thread() {
         let heart = hang_watch::Heartbeat::new();
         assert_eq!(
-            parking(ControlFlow::Wait, &heart),
+            parking(ControlFlow::Wait, None, &heart),
             hang_watch::Park::Indefinite,
             "an idle window is owed nothing at all, and that is what stops the \
              watchdog reading its silence as a fault"
         );
         assert_eq!(
-            parking(ControlFlow::Poll, &heart),
+            parking(ControlFlow::Poll, None, &heart),
             hang_watch::Park::Running,
             "a loop that hands nothing over is judged as one holding control"
         );
         let hang_watch::Park::Until(deadline) = parking(
             ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5)),
+            None,
             &heart,
         ) else {
             panic!("a deadline is a deadline");
@@ -70115,7 +70333,8 @@ mod resident_run_tests {
         let past = Instant::now()
             .checked_sub(Duration::from_secs(1))
             .unwrap_or_else(Instant::now);
-        let hang_watch::Park::Until(already) = parking(ControlFlow::WaitUntil(past), &heart) else {
+        let hang_watch::Park::Until(already) = parking(ControlFlow::WaitUntil(past), None, &heart)
+        else {
             panic!("a deadline is a deadline");
         };
         assert!(
@@ -70387,9 +70606,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 if let Some(door) = self.delegate.as_ref() {
                     door.ready();
                 }
-                event_loop.set_control_flow(ControlFlow::WaitUntil(
-                    Instant::now() + STARTUP_PTY_POLL_INTERVAL,
-                ));
+                self.park_until(
+                    event_loop,
+                    Some((
+                        WakeOwner::StartupPoll,
+                        Instant::now() + STARTUP_PTY_POLL_INTERVAL,
+                    )),
+                );
             }
             Err(error) => self.fail(event_loop, error),
         }
@@ -70566,19 +70789,6 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // order the worker served them, in the window that turns the application's clocks —
             // the window the storage pass's cards belong to.
             AppEvent::DocumentsAnswered => self.take_document_answers(),
-            // The answer is already in `psreadline::probe()`; what is owed is a
-            // frame that reads it. `refresh_chrome` rebuilds the row's sentence
-            // from scratch — `SettingsRow::description` asks `row_state` afresh
-            // every time — so there is nothing to apply, only something to draw.
-            // On every window, because the row is a fact about this machine and
-            // any of them may be showing it.
-            AppEvent::PsReadLineProbed => self.for_each_window(|runtime| {
-                if runtime.refresh_chrome() {
-                    runtime.present_chrome_change()
-                } else {
-                    Ok(())
-                }
-            }),
             // The answer is already in the legacy-profile observation or
             // removal report. What is owed is a frame that reveals or hides the
             // conditional Settings cleanup verb, plus any removal result.
@@ -70588,15 +70798,28 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // here. A removal that found nothing to remove changed nothing,
                 // so it says nothing.
                 let mut removal = shell_integration::take_removal();
-                // Each answer is addressed to the window whose click asked for it; an answer
-                // for a window that has since closed is delivered nowhere.
+                // Each answer below is addressed to the window whose click asked for it; an answer
+                // for a window that has since closed is delivered nowhere. The earlier Folio's
+                // PSReadLine copy's removal is said as the report is
+                // (`psreadline::LegacyRemoval::window_text`): a copy gone since the row was drawn
+                // says nothing.
+                let legacy = psreadline::take_legacy_removals();
                 let installs = shell_integration::take_profile_installs();
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()?;
                     }
-                    if let Some((refused, text)) =
-                        removal.take().and_then(|report| report.window_text())
+                    let window = runtime.window_id();
+                    for (refused, text) in removal
+                        .take()
+                        .and_then(|report| report.window_text())
+                        .into_iter()
+                        .chain(
+                            legacy
+                                .iter()
+                                .filter(|(asked_by, _)| *asked_by == window)
+                                .filter_map(|(_, answer)| answer.window_text()),
+                        )
                     {
                         runtime.toast(
                             if refused {
@@ -70957,7 +71180,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         panic_selftest_if_due();
         self.surface_selftest_if_due();
         self.about_to_wait_inner(event_loop);
-        hang_watch::park(parking(event_loop.control_flow(), hang_watch::heartbeat()));
+        let (owner, heart) = (self.wake_owner, hang_watch::heartbeat());
+        hang_watch::park(parking(event_loop.control_flow(), owner, heart));
     }
 
     /// **The platform woke this thread.** See [`hang_watch::Heartbeat::woke`].
@@ -78466,7 +78690,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 29] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 30] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -78515,6 +78739,9 @@ mod platform_gate_tests {
         "psreadline.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
+        // Windows-only test fixtures: real Windows PowerShell 5.1 panes running Folio's
+        // PSReadLine through a real ConPTY, beside the composition's every-platform tests.
+        "shell_integration_psreadline_tests.rs",
         // Native invalid-name, Windows spelling and direct CRT test fixtures only;
         // the pure encoders stay here as paste-paths design section 5 specifies.
         "shell_literal.rs",
@@ -79294,7 +79521,7 @@ mod cross_window_drag_tests {
         // all is never.
         let wait = method_body("FolioApp", "about_to_wait_inner");
         let (before, after) = wait
-            .split_once("let mut wake_deadline = match self.drive_drag_broker(now)")
+            .split_once("let mut wake = match self.drive_drag_broker(now)")
             .expect(
                 "the broker is turned once a loop, and its answer is what the \
                  windows' own deadlines are then folded into",
@@ -79305,7 +79532,7 @@ mod cross_window_drag_tests {
              so promote, transfer, open and place all land in one turn:\n{wait}"
         );
         assert!(
-            after.contains("earliest_deadline([wake_deadline, deadline])"),
+            after.contains("wake_owner::earliest_wake([wake, window_wake])"),
             "every window's clocks fold onto the broker's rather than replacing \
              it:\n{after}"
         );
@@ -80483,20 +80710,12 @@ mod palette_wiring_tests {
             "a press outside the box puts it away"
         );
 
-        // **The third way out is not in `Runtime` at all**: the two focus arms
-        // live in `<FolioApp as ApplicationHandler>::window_event`, which the
-        // query says and the deleted reading could not — it took the first
-        // `WindowEvent::Focused(false) => {` in the file, and the literal three
-        // lines above is one of them.
-        let dispatch = item_body(&ItemQuery::method("FolioApp", "on_window_event"));
-        let blur = dispatch
-            .find("WindowEvent::Focused(false) => {")
-            .expect("the window answers losing focus");
-        let end = dispatch[blur..]
-            .find("WindowEvent::Focused(true) => {")
-            .expect("and getting it back");
+        // **The third way out is losing the window**: the dispatcher's blur arm
+        // is one call (T-POINTER-CAPTURE cut 5, `Runtime::window_blurred`, held to
+        // being the arm's only work by `every_lifecycle_door_ends_the_capture`),
+        // and the blur's own body puts the palette away.
         assert!(
-            dispatch[blur..blur + end].contains("runtime.close_command_palette()"),
+            method_body("Runtime", "window_blurred").contains("self.close_command_palette()"),
             "and a window the reader has left is not one they are aiming in"
         );
     }
@@ -80892,7 +81111,6 @@ mod edit_menu_clipboard_tests {
             "self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)",
             "self.window.dirty_gate.is_open()",
             "self.window.first_run.is_open()",
-            "self.window.psreadline_invite.is_open()",
             "self.paste_card_seat().is_some()",
             "self.update_card_is_up()",
             "self.settings_layout().is_some()",

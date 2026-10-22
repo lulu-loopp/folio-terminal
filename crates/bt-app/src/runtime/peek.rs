@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::CaptureOwner;
+use super::pointer::{Gone, OwnerGone};
 use crate::computation_lane::Asking;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -965,6 +966,11 @@ impl<B: Backend> Runtime<'_, B> {
     /// Answers whether a card that was **showing** came down — a matured peek,
     /// not a timer — because that is the only case that owes a frame.
     pub(crate) fn hide_file_peek(&mut self) -> bool {
+        // **The hand that was on it goes first** (T-POINTER-CAPTURE R-9, owner gone): on its head,
+        // its thumb, or a gesture inside its page. A press whose card has gone has nothing left
+        // to promote, and a promotion that fired afterwards would open a window over a file
+        // nobody is pointing at any more.
+        self.end_capture(OwnerGone(Gone::GlanceCard));
         let showing = self
             .window
             .file_peek
@@ -992,11 +998,6 @@ impl<B: Backend> Runtime<'_, B> {
         // again too (below).
         self.window.peek_card_pending = None;
         self.window.file_peek = None;
-        // And the hand that was on its head. A press whose card has gone has
-        // nothing left to promote, and a promotion that fired afterwards would
-        // open a window over a file nobody is pointing at any more.
-        self.drop_file_peek_press();
-        self.drop_glance_thumb();
         self.window.peek_buffer.clear();
         // And the parsed document with it: a card that is down is holding a
         // markdown layout for a file nobody is looking at.
@@ -1014,17 +1015,9 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some(slot) = self.window.peek_page.as_mut() {
             slot.asked.clear();
         }
-        // And any hand that was on a block inside it. The card's surface is the
-        // one the sweep deliberately never retires ([`Self::sweep_preview_panes`]),
-        // because its life is this field's — so this is where that life ends for
-        // the gestures too.
-        if self
-            .held_preview_block_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == PreviewSurface::Peek)
-        {
-            self.drop_preview_block_drag();
-        }
+        // (A hand that was on a block inside it was let go of by the ending at the top: the
+        // card's surface is the one the sweep deliberately never retires
+        // ([`Self::sweep_preview_panes`]), because its life is this field's.)
         if self
             .preview_block_hover
             .is_some_and(|(surface, _)| surface == PreviewSurface::Peek)
@@ -1487,7 +1480,19 @@ impl<B: Backend> Runtime<'_, B> {
             })
             | hang_watch::during(hang_watch::Station::ClockFileClose, || {
                 self.expire_file_peek(now)
-            });
+            })
+            // **A shown card whose buffer has gone is taken down** (T-WINDOW-THREAD-UNDER-LOAD).
+            // It is a view of a buffer ([`Self::file_peek_subject`]); with none behind it the
+            // paint draws no card, and a card that is still reported shown owes a frame no frame
+            // can pay — the debt books the last present's frame, an instant in the past once
+            // nothing presents, on every turn.
+            | (self
+                .window
+                .file_peek
+                .as_ref()
+                .is_some_and(|peek| peek.clock.is_shown())
+                && self.file_peek_subject().is_none()
+                && self.hide_file_peek());
         if !moved && !self.animation_frame_is_due() {
             return Ok(());
         }

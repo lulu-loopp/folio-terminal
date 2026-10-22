@@ -268,24 +268,8 @@ impl<B: Backend> Runtime<'_, B> {
                 ),
                 ModalBand::Fixed,
             )
-        } else if let Some(layout) = self.psreadline_invite_layout() {
-            // **Under the gate and over the settings dialog.** The gate stands in
-            // front of an action already under way and nothing may cover it; this
-            // stands in front of a shell that has just started, which outranks a
-            // dialog the user opened on purpose — and the dialog is where the
-            // same question keeps a row, so nothing is lost by being covered.
-            let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-            (
-                restore::invite_build(
-                    &layout,
-                    (width as f32, height as f32),
-                    self.window.psreadline_invite.hover(),
-                ),
-                ModalBand::Fixed,
-            )
         } else if let Some(layout) = self.paste_card_layout() {
-            // **The multi-line paste card** (0.4.4 ticket 02), under the invitation and over the
-            // settings dialog. It is raised by the reader's own `Ctrl+V` into a shell, which no
+            // **The multi-line paste card** (0.4.4 ticket 02), over the settings dialog. It is raised by the reader's own `Ctrl+V` into a shell, which no
             // dialog above it lets through, so the order below it is a formality; what can rise
             // over it is only a surface raised by something other than a key.
             let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
@@ -523,9 +507,9 @@ impl<B: Backend> Runtime<'_, B> {
         // the frame a departure begins on.
         let holding = band.holding();
         let live = match band {
-            // Nothing this slice animates: the quit card, the dirty gate, the
-            // PowerShell invite and the restore prompt are drawn exactly as they
-            // were, and an empty band is empty.
+            // Nothing this slice animates: the quit card, the dirty gate and the
+            // restore prompt are drawn exactly as they were, and an empty band is
+            // empty.
             ModalBand::Fixed => modal.into(),
             ModalBand::Menu(popup, travel) => {
                 self.stage(Layered::Popup(popup), modal.into(), Some(travel), now)

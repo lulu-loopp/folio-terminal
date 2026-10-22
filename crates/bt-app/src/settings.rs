@@ -1834,8 +1834,7 @@ fn count_walk() {
     MONOSPACE_SCANS.with(|walks| walks.set(walks.get() + 1));
 }
 
-/// How the worker's answer brings the event loop round — `psreadline::WAKE`'s
-/// shape, for its reason: the answer is published on a thread with no window,
+/// How the worker's answer brings the event loop round: the answer is published on a thread with no window,
 /// and the window that needs the repaint is very often sitting on a modal with
 /// nothing else coming to make it draw.
 static MONOSPACE_WAKE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> =
@@ -1885,9 +1884,9 @@ pub fn monospace_scans() -> u64 {
 
 /// Teach the scan how to bring the event loop round when its answer lands.
 ///
-/// Called once, at startup, beside the four probes' own — see
-/// `psreadline::install_wake`, whose argument this is word for word: the wake
-/// belongs to the process's event loop and not to whichever call happens to
+/// Called once, at startup, beside the probes' own — see
+/// `shell_integration::install_wake`, whose argument this is word for word: the
+/// wake belongs to the process's event loop and not to whichever call happens to
 /// start the walk.
 pub fn install_font_scan_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = MONOSPACE_WAKE.set(Box::new(wake));
@@ -3418,8 +3417,8 @@ pub enum SettingsRow {
     /// could press, and it now says what the press they *can* make will do.
     ///
     /// **The second row in this dialog whose answer is a fact about the machine
-    /// rather than a line in `settings.json`**, and it is filed beside
-    /// [`Self::PsReadLine`] in every respect but its page. What is being read is
+    /// rather than a line in `settings.json`**, and it was filed beside the retired
+    /// PSReadLine row in every respect but its page. What is being read is
     /// whether two keys exist under `HKCU\Software\Classes` and whether a package
     /// is registered for this user, and both are read back off the machine every
     /// time the dialog is drawn — see [`crate::context_menu`] and
@@ -3437,7 +3436,7 @@ pub enum SettingsRow {
     /// leaves no state this row can see and cannot clear.
     ///
     /// **Nothing on it is ever refused**, which retired the greyed-item
-    /// machinery it borrowed from [`Self::PsReadLine`] and
+    /// machinery it borrowed from the retired PSReadLine row and
     /// [`Self::DefaultProfile`] for one afternoon: a machine that cannot reach
     /// the first page can still hold the classic entry, so both of a switch's
     /// states are always honourable and the machine decides only how much `On`
@@ -3707,24 +3706,6 @@ pub enum SettingsRow {
     /// grid and tell every shell its new cell size, and a font size change is
     /// the same event arriving through another door.
     FontSize,
-    /// **The Terminal page's first row**, and therefore the row that puts that
-    /// page in the rail (§7.1.6c-3b).
-    ///
-    /// An On/Off picker and not a pair of buttons, and the choice is worth
-    /// stating because the ticket left it open. What the user is deciding is a
-    /// state — *is Folio's patched PSReadLine installed on this machine* — and a
-    /// state with two values is what every other picker in this dialog already
-    /// draws. A button row would have needed a tenth row function, a new hit
-    /// target, a new focus stop and a new drawing, to express the same two
-    /// answers less clearly.
-    ///
-    /// Both items can be unavailable, which is the second reason the combo fits:
-    /// `On` is dark under an execution policy that would refuse the module, and
-    /// `Off` is dark unless the copy on disk is byte for byte the one Folio
-    /// wrote. That is [`Self::DefaultProfile`]'s greyed-item machinery, already
-    /// spelled once for both the hit test and the draw, and the description
-    /// carries the reason.
-    PsReadLine,
     /// **How much of its own past one pane keeps** — the Terminal page's second
     /// row (P2-9 slice 2, 2026-08-19).
     ///
@@ -3834,15 +3815,22 @@ pub enum SettingsRow {
     /// been interrupted by their agent finishing is looking for the switch that
     /// stops it, and a switch behind a disclosure is a switch they do not find.
     TurnEndNotifications,
-    /// Whether new PowerShell panes receive Folio's process-scoped integration.
-    /// Directly under [`Self::PsReadLine`] because both controls describe the
-    /// PowerShell pane Folio is about to start. It is not an Advanced row: the
-    /// feature is on by default and its switch must be visible where its effect
-    /// is described.
+    /// Whether new PowerShell panes receive Folio's process-scoped integration — and, for a
+    /// Windows PowerShell pane, Folio's own PSReadLine with it (T-INTEGRATION-INJECT-2-BUILD:
+    /// the prefix and the loader are one decision, so this switch is also the road back to the
+    /// account's own editor). It is not an Advanced row: the feature is on by default and its
+    /// switch must be visible where its effect is described.
     ShellIntegration,
     /// Conditional cleanup door for a `$PROFILE` line written by an earlier
     /// Folio. It is absent when the startup worker found no such line.
     PowerShellProfileLine,
+    /// **Conditional cleanup door for the PSReadLine copy an earlier Folio wrote into Documents**
+    /// (T-INTEGRATION-INJECT-2-BUILD, owner ruling Q4), on [`Self::PowerShellProfileLine`]'s
+    /// precedent: the copy stays where it is, Windows Terminal and the account's other hosts keep
+    /// what they have, and this row offers its removal only while the remover would act
+    /// (`psreadline::legacy_copy_present`, observed on a worker). Folio's own panes no longer load
+    /// it. It replaces the Terminal page's install row and the invitation, which are retired.
+    LegacyPsReadLine,
     /// **Whether Claude Code tells this window when it is waiting for you**
     /// (`docs/plans/attention/plan.md` §3.3, ruled 2026-08-25).
     ///
@@ -4007,9 +3995,9 @@ impl SettingsRow {
             // And the row that is about the pane's other axis: how a line wider
             // than the pane is set is the same kind of question as how much of
             // the past the pane keeps, asked sideways.
-            Self::PsReadLine
-            | Self::ShellIntegration
+            Self::ShellIntegration
             | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine
             | Self::Scrollback
             | Self::LineWrapping
             | Self::CopyOnSelect
@@ -4160,7 +4148,7 @@ impl SettingsRow {
             Self::ContextMenu => Some(Capability::ExplorerMenu),
             Self::ShellIntegration => None,
             Self::PowerShellProfileLine => None,
-            Self::PsReadLine => Some(Capability::PsReadLineModule),
+            Self::LegacyPsReadLine => None,
             Self::Acrylic => Some(Capability::WindowBackdrop),
             Self::OptionSendsAlt => Some(Capability::OptionKey),
             _ => None,
@@ -4185,6 +4173,7 @@ impl SettingsRow {
             Self::TurnEndNotifications => Text::RowTurnEndNotifications.text(),
             Self::ShellIntegration => Text::RowShellIntegration.text(),
             Self::PowerShellProfileLine => Text::RowPowerShellProfileLine.text(),
+            Self::LegacyPsReadLine => Text::RowLegacyPsReadLine.text(),
             Self::ClaudeHooks => Text::RowClaudeHooks.text(),
             Self::CodexNotify => Text::RowCodexNotify.text(),
             Self::CopilotHooks => Text::RowCopilotHooks.text(),
@@ -4213,7 +4202,6 @@ impl SettingsRow {
             Self::FontSize => Text::RowFontSize.text(),
             Self::LightScheme => Text::RowLightScheme.text(),
             Self::DarkScheme => Text::RowDarkScheme.text(),
-            Self::PsReadLine => Text::RowPsReadLine.text(),
             Self::ProfileName => Text::ProfilesRowName.text(),
             Self::ProfileProgram => Text::ProfilesRowProgram.text(),
             Self::ProfileLogin => Text::ProfilesRowLogin.text(),
@@ -4360,6 +4348,7 @@ impl SettingsRow {
             // that is coming.
             Self::ShellIntegration => Text::DescShellIntegration.text(),
             Self::PowerShellProfileLine => Text::DescPowerShellProfileLine.text(),
+            Self::LegacyPsReadLine => Text::DescLegacyPsReadLine.text(),
             // Two facts and no opinion, `Explorer context menu`'s shape: what
             // is written, and where. The second is there because a reader who
             // does not know a terminal is about to edit a file belonging to
@@ -4457,15 +4446,9 @@ impl SettingsRow {
             // The folder is named on the dark half alone — see the two strings.
             Self::LightScheme => Text::DescLightScheme.text(),
             Self::DarkScheme => Text::DescDarkScheme.text(),
-            // The one description in the dialog that reports a fact about the
-            // machine rather than about the setting: which PSReadLine is
-            // installed, and what that costs today. It is also where the reason
-            // a greyed item is grey is written — see the variant.
-            Self::PsReadLine => crate::psreadline::row_description(values.psreadline),
             // **A refusal replaces the sentence**, which is this dialog's own
-            // idiom for a control that cannot act — the same line
-            // `psreadline::row_description` writes on its greyed row and the same
-            // line an unavailable profile carries. The field keeps what was typed
+            // idiom for a control that cannot act — the same line an unavailable
+            // profile carries. The field keeps what was typed
             // while it says so, because the refusal is a state the reader is
             // standing in and not an error they submitted.
             Self::ProfileName => values
@@ -4483,8 +4466,7 @@ impl SettingsRow {
             Self::ProfileStartAt => Text::ProfilesRowStartingDirDesc.text(),
             // **The row's sentence becomes the reason** on a built-in, which is
             // this dialog's own idiom for a control that is not the reader's to
-            // press — the same line `psreadline::row_description` writes and the
-            // same line an unavailable row carries. The five identity colours
+            // press — the same line an unavailable row carries. The five identity colours
             // are not this product's to repaint (S98/S31).
             Self::ProfileColour => values.editor.map_or_else(
                 || Text::ProfilesRowColourDesc.text(),
@@ -4508,8 +4490,8 @@ impl SettingsRow {
             Self::ImageFit => Text::DescImageFit.text(),
             Self::ImageOpacity => Text::DescImageOpacity.text(),
             // The two rows that can be greyed whole say *why* on this line
-            // instead of saying what they do — `psreadline::row_description`'s
-            // ruling, generalised: there is one muted line under a title, and a
+            // instead of saying what they do — the ruling the retired PSReadLine
+            // row was the first to follow (§7.47), generalised: there is one muted line under a title, and a
             // row that cannot act has exactly one thing worth putting on it. It
             // states the fact and does not apologise for it (user ruling
             // 2026-08-17: UI copy carries no editorial).
@@ -4649,7 +4631,8 @@ impl SettingsRow {
             Self::ExportSettings
             | Self::ImportSettings
             | Self::SettingsFolder
-            | Self::PowerShellProfileLine => SettingsControl::Link,
+            | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine => SettingsControl::Link,
             // The uninstaller's door is a door like them; on a copy a package
             // manager installed, the row states the fact instead (T-UNINSTALL-UX).
             Self::Uninstall => SettingsControl::Link,
@@ -4744,8 +4727,8 @@ impl SettingsRow {
             // thing, and the answer to "why does this key not do what it does
             // everywhere else" must not be behind a disclosure.
             | Self::OptionSendsAlt
-            // Not advanced, on `PsReadLine`'s own measure: it is a row that
-            // repairs something the reader has already gone looking for, and a
+            // Not advanced: it is a row that repairs something the reader has
+            // already gone looking for, and a
             // reader who wants Folio in their right-click menu has no reason to
             // guess that the answer is behind a disclosure.
             | Self::ContextMenu
@@ -4764,9 +4747,9 @@ impl SettingsRow {
             | Self::QuakeTopGap
             | Self::QuakeDismiss
             | Self::QuakeRestore
-            | Self::PsReadLine
             | Self::ShellIntegration
             | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine
             // On the row above's test, said again for the reader who has just watched an agent
             // wait for them with nothing on its tab: this is what they are looking for, and a
             // switch behind a disclosure is a switch they will not find.
@@ -4900,7 +4883,6 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::KeyHints
             | Self::OptionSendsAlt
-            | Self::PsReadLine
             | Self::CopyOnSelect
             | Self::MultilinePaste
             | Self::Notifications
@@ -4979,7 +4961,10 @@ impl SettingsRow {
             | Self::AboutIssues
             | Self::AboutLicences
             | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder
-            | Self::PowerShellProfileLine | Self::Uninstall | Self::UninstallBy => 0,
+            | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine
+            | Self::Uninstall
+            | Self::UninstallBy => 0,
         }
     }
 
@@ -5002,7 +4987,6 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::KeyHints
             | Self::OptionSendsAlt
-            | Self::PsReadLine
             | Self::CopyOnSelect
             | Self::MultilinePaste
             | Self::Notifications
@@ -5134,6 +5118,7 @@ impl SettingsRow {
             | Self::ImportSettings
             | Self::SettingsFolder
             | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine
             | Self::Uninstall
             | Self::UninstallBy => None,
         }
@@ -5229,18 +5214,6 @@ impl SettingsRow {
     /// row is a copy of.
     #[must_use]
     pub fn value_text(self, values: &SettingsValues) -> Option<&'static str> {
-        // **Before the editor's own gate**, because this row is not the editor's
-        // and its answer is a fact about the machine rather than about a profile.
-        // `Update` is not one of the row's two items and never can be — `On` and
-        // `Off` are what a reader does to this row — but it is what the row's
-        // *value* is when an older Folio build is the module on disk, and the
-        // button is the one place on the row a reader looks for that
-        // (§7.1.6c-3b, user ruling 2026-08-18).
-        if self == Self::PsReadLine
-            && values.psreadline == crate::psreadline::RowState::UpdateAvailable
-        {
-            return Some(Text::PsReadLineUpdate.text());
-        }
         let editor = values.editor?;
         match self {
             Self::ProfileStartAt => editor.fixed_folder,
@@ -5385,19 +5358,9 @@ impl SettingsRow {
                     .copied()
                     .unwrap_or(false),
             },
-            // The second row whose items can be unavailable, and the only one
-            // where choosing an unavailable item would *do* something: `On`
-            // under a refusing execution policy writes files no shell will load,
-            // and `Off` on a module Folio did not write deletes somebody else's
-            // directory. Answered once, read by the hit test and the draw alike.
-            Self::PsReadLine => match FORMULA_OPTIONS.get(index).copied() {
-                Some(true) => values.psreadline_install_available,
-                Some(false) => values.psreadline_remove_available,
-                None => false,
-            },
             // **The three agent rows, when the file is one this build will not edit** (re-review
             // f): a link out of the agent's own folder, a file shared by hard links, a read-only
-            // one. `PsReadLine`'s rule above, for its reason — the row's line already says what
+            // one. The rule a row whose items can be unavailable keeps — the row's line already says what
             // the machine is, and a switch that stayed pressable would be offering an action the
             // line says will not happen. Neither `On` nor `Off`: there is no press that reaches
             // that file, in either direction.
@@ -5502,8 +5465,7 @@ impl SettingsRow {
             Self::CopilotHooks => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.copilot_hooks),
-            // **The state of the machine, read from two stores at once**, like
-            // `PsReadLine` below and for the same reason: what is ticked is
+            // **The state of the machine, read from two stores at once**: what is ticked is
             // whether Explorer's menu carries the verb at all, which only the
             // registry and the deployment database can answer. Never a stored
             // answer — a `settings.json` copy of either would be free to
@@ -5563,22 +5525,6 @@ impl SettingsRow {
             Self::FontSize => Some(values.font_size),
             Self::LightScheme => Some(values.light_scheme),
             Self::DarkScheme => Some(values.dark_scheme),
-            // The *state of the machine*, not a stored preference: what the row
-            // shows ticked is whether the module is on disk, which is what a
-            // reader is actually asking. `settings.json`'s own field records
-            // whether they were asked, which is a different question and has no
-            // picker.
-            Self::PsReadLine => FORMULA_OPTIONS.iter().position(|it| {
-                *it == matches!(
-                    values.psreadline,
-                    // An older Folio build's module is still a module that is
-                    // *there*, so the tick stands on `On` and the button says
-                    // `Update` beside it. A tick on `Off` would be the row
-                    // claiming the directory is empty while offering to empty it.
-                    crate::psreadline::RowState::InstalledByFolio
-                        | crate::psreadline::RowState::UpdateAvailable
-                )
-            }),
             // The *resolved* default, which is why the caller hands over an index
             // rather than the stored id. **Mock-up bug not copied** (2471): its
             // combo button is born with the literal text `PowerShell` and only
@@ -5637,6 +5583,7 @@ impl SettingsRow {
             | Self::ImportSettings
             | Self::SettingsFolder
             | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine
             | Self::Uninstall
             | Self::UninstallBy => None,
         }
@@ -5661,6 +5608,7 @@ impl SettingsRow {
             Self::SettingsFolder => Some(Text::AboutOpen.text()),
             Self::Uninstall => Some(Text::UninstallVerb.text()),
             Self::PowerShellProfileLine => Some(Text::RemovePowerShellProfileLine.text()),
+            Self::LegacyPsReadLine => Some(Text::RemoveLegacyPsReadLine.text()),
             // The manager's own name: a proper noun, in no column of the table.
             Self::UninstallBy => crate::uninstall::managed_uninstall()
                 .map(|(manager, _)| crate::uninstall::manager_name(manager)),
@@ -5702,6 +5650,7 @@ impl SettingsRow {
                 | Self::ImportSettings
                 | Self::Uninstall
                 | Self::PowerShellProfileLine
+                | Self::LegacyPsReadLine
         )
     }
 
@@ -5996,6 +5945,28 @@ pub fn retain_powershell_profile_remover(rows: &mut Vec<SettingsRow>, line_prese
     }
 }
 
+/// **Apply the worker-observed state of an earlier Folio's PSReadLine copy** (owner ruling Q4,
+/// T-INTEGRATION-INJECT-2-BUILD) — [`retain_powershell_profile_remover`]'s twin: the one-shot
+/// removal verb stands under the switch (and under the `$PROFILE` line's verb when that one
+/// stands) only while `copy_present`, which is the remover's own predicate
+/// (`psreadline::legacy_removable`), and is gone otherwise.
+pub fn retain_legacy_psreadline_remover(rows: &mut Vec<SettingsRow>, copy_present: bool) {
+    rows.retain(|row| *row != SettingsRow::LegacyPsReadLine);
+    if !copy_present {
+        return;
+    }
+    let after = rows
+        .iter()
+        .position(|row| *row == SettingsRow::PowerShellProfileLine)
+        .or_else(|| {
+            rows.iter()
+                .position(|row| *row == SettingsRow::ShellIntegration)
+        });
+    if let Some(after) = after {
+        rows.insert(after + 1, SettingsRow::LegacyPsReadLine);
+    }
+}
+
 /// The order, with no platform question asked of it.
 fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // ── Appearance, everyday ──
@@ -6050,8 +6021,8 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // card is, and this row is the only place in the dialog that sentence can be
     // read. It is *not* behind the disclosure — the reader it exists for is one
     // who has already looked at the column and found it showing the wrong
-    // thirteen rows, which is `PsReadLine`'s own measure for what does not
-    // belong under Advanced.
+    // thirteen rows, which is this dialog's measure for what does not belong
+    // under Advanced.
     rows.push(SettingsRow::FocusCardHeight);
     // ── Appearance, advanced ──
     //
@@ -6141,15 +6112,10 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::QuakeTopGap);
     rows.push(SettingsRow::QuakeDismiss);
     rows.push(SettingsRow::QuakeRestore);
-    rows.push(SettingsRow::PsReadLine);
-    // **Beside it**, because the two are this page's PowerShell controls: first
-    // the module this shell already loads, then what Folio loads into its own
-    // new panes. The conditional cleanup verb for an old profile line follows
-    // the switch it is about.
+    // This page's PowerShell control: what Folio loads into its own new panes (the integration,
+    // and Folio's PSReadLine in a Windows PowerShell pane). The conditional cleanup verbs for an
+    // earlier Folio's profile line and PSReadLine copy follow the switch they are about.
     rows.push(SettingsRow::ShellIntegration);
-    // **Under the PSReadLine row**, which is the mock-up's own order for this page
-    // (4838, then 4862): the row that reports a fact about the machine stands
-    // first and the row that changes what a pane does stands under it.
     rows.push(SettingsRow::Scrollback);
     // **Directly under it**, which is the mock-up's own order again (6000) and
     // the pairing the page is built on: the two rows are the pane's two axes.
@@ -6477,31 +6443,10 @@ impl SettingsContent<'_> {
         }
     }
 
-    /// **Whether showing this page has to ask the machine about PSReadLine**
-    /// (§7.1.6c-5).
-    ///
-    /// Derived from the page's own rows rather than named as a category, for the
-    /// reason every other answer in this file is derived that way: the row is
-    /// what needs the probe, so moving it to another page moves the trigger with
-    /// it and a page that loses it stops asking.
-    ///
-    /// The bug it closes is one a user reported by not reporting it: the probe
-    /// was started by the first `Windows PowerShell` pane and by nothing else,
-    /// so a reader who had never opened one — every WSL and `pwsh` user — found
-    /// this row reading "Checking this machine's PSReadLine" for as long as they
-    /// cared to look at it. The row is drawn from an answer nobody had asked
-    /// for.
-    #[must_use]
-    pub fn probes_psreadline(&self, category: SettingsCategory) -> bool {
-        self.rows
-            .iter()
-            .any(|row| *row == SettingsRow::PsReadLine && row.category() == category)
-    }
-
     /// **Whether showing this page has to ask the machine which copilot it has.**
     ///
-    /// [`Self::probes_psreadline`]'s twin, derived from the page's own rows for that one's reason:
-    /// the row is what needs the answer, so moving it moves the trigger and a build that has lost
+    /// Derived from the page's own rows rather than named as a category: the row is what needs
+    /// the answer, so moving it moves the trigger and a build that has lost
     /// the row stops starting a node process to answer a question nobody prints.
     #[must_use]
     pub fn probes_copilot(&self, category: SettingsCategory) -> bool {
@@ -6512,7 +6457,7 @@ impl SettingsContent<'_> {
 
     /// **Whether this page carries a row about an agent's own configuration file.**
     ///
-    /// [`Self::probes_psreadline`]'s shape and for its reason: the rows are what need the answer,
+    /// [`Self::probes_copilot`]'s shape and for its reason: the rows are what need the answer,
     /// so moving one moves the trigger and a build that has lost them re-reads nothing.
     #[must_use]
     pub fn shows_agents(&self, category: SettingsCategory) -> bool {
@@ -6626,8 +6571,8 @@ pub struct SettingsValues {
     /// Whether Explorer's right-click menu carries Folio's verb — **read off the
     /// registry, not out of `settings.json`**.
     ///
-    /// [`SettingsValues::psreadline`]'s ruling for a second row: what the tick
-    /// says is what the machine is, so a hand-edited registry, a copy of Folio
+    /// A fact about the machine, not a stored answer: what the tick says is what
+    /// the machine is, so a hand-edited registry, a copy of Folio
     /// uninstalled from another folder or a restored backup all move this row
     /// rather than leaving it claiming something that is no longer true.
     pub context_menu: bool,
@@ -6754,13 +6699,6 @@ pub struct SettingsValues {
     pub light_scheme: usize,
     /// The same for the dark picker.
     pub dark_scheme: usize,
-    /// What the PSReadLine row is describing, reconciled from the out-of-band
-    /// probe and the module actually on disk.
-    pub psreadline: crate::psreadline::RowState,
-    /// Whether the row's `On` item can be chosen on this machine.
-    pub psreadline_install_available: bool,
-    /// Whether its `Off` item can be — true only for a module Folio wrote.
-    pub psreadline_remove_available: bool,
     /// Which profiles this machine can start, in table order.
     ///
     /// A `Vec` rather than a borrowed `ProfilePrograms`, and a `Vec` rather than
@@ -6925,9 +6863,6 @@ impl SettingsValues {
             font_size: font_size_index(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
             light_scheme: scheme_index(bt_persist::DEFAULT_LIGHT_SCHEME, true),
             dark_scheme: scheme_index(bt_persist::DEFAULT_DARK_SCHEME, false),
-            psreadline: crate::psreadline::RowState::Outdated,
-            psreadline_install_available: true,
-            psreadline_remove_available: false,
             // A fully equipped machine, so a geometry test is not quietly also a
             // test of what is installed on the one running it.
             profile_available: vec![true; profiles::count()],
@@ -7070,11 +7005,9 @@ impl EditorSubject {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SettingsPanel {
     open: bool,
-    /// Whether this visit has consumed the PSReadLine row's disk-read edge.
-    /// Reset by the panel's own page/open/close transitions, even if no layout
-    /// was requested between closing and reopening.
-    psreadline_visit_read: bool,
-    /// The same latch for the three agent rows. Their switches are inert while the file they name
+    /// Whether this visit has consumed the three agent rows' disk-read edge, reset by the
+    /// panel's own page/open/close transitions, even if no layout was requested between closing
+    /// and reopening. Their switches are inert while the file they name
     /// is one this build will not edit, so a press cannot be what notices that the reader has
     /// unpicked the link or cleared the read-only bit — opening the page is (re-review, round 3).
     agents_visit_read: bool,
@@ -7404,18 +7337,9 @@ impl SettingsPanel {
         self.category
     }
 
-    /// Consume the first showing of the PSReadLine row on this page visit.
-    pub fn take_psreadline_open_edge(&mut self, showing: bool) -> bool {
-        if !self.open || !showing {
-            return false;
-        }
-        !std::mem::replace(&mut self.psreadline_visit_read, true)
-    }
-
     /// Consume the first showing of the agent rows on this page visit.
     ///
-    /// [`Self::take_psreadline_open_edge`]'s twin, and the same three properties: an edge and not
-    /// a state, reset by every road off the page (another category, a close, a reopen, a page the
+    /// An edge and not a state, reset by every road off the page (another category, a close, a reopen, a page the
     /// dialog fell back to), and false while the page is merely being redrawn.
     pub fn take_agents_open_edge(&mut self, showing: bool) -> bool {
         if !self.open || !showing {
@@ -7493,7 +7417,6 @@ impl SettingsPanel {
             return false;
         }
         self.category = category;
-        self.psreadline_visit_read = false;
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
         self.update_mark_carried = false;
@@ -7528,7 +7451,6 @@ impl SettingsPanel {
         self.open = !self.open;
         self.uninstall_remove_data = false;
         self.uninstall_card = None;
-        self.psreadline_visit_read = false;
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
         self.update_mark_carried = false;
@@ -7609,7 +7531,6 @@ impl SettingsPanel {
         self.open = false;
         self.uninstall_remove_data = false;
         self.uninstall_card = None;
-        self.psreadline_visit_read = false;
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
         self.update_mark_carried = false;
@@ -7944,7 +7865,6 @@ impl SettingsPanel {
         // existing under it.
         if !content.has_content(self.category) {
             self.category = content.first_category();
-            self.psreadline_visit_read = false;
             self.agents_visit_read = false;
             self.profiles_visit_read = false;
             self.update_mark_carried = false;
@@ -10737,26 +10657,6 @@ pub fn dark_scheme_requested(target: SettingsTarget) -> Option<&'static str> {
     match target {
         SettingsTarget::Choice(SettingsRow::DarkScheme, index) => {
             scheme_labels(false).get(index).copied()
-        }
-        _ => None,
-    }
-}
-
-/// Whether the patched PSReadLine was asked for or asked to go.
-///
-/// **A greyed item answers here too** (§7.47). The row's two items go dark on a
-/// machine that cannot honour them, and until 2026-08-29 a press on one was
-/// dropped by the hit test and never reached this function — so the product
-/// refused an install and said nothing, on any surface. The press now arrives,
-/// and the runtime hands it to the one door
-/// (`crate::psreadline::apply`), which either does the thing or returns the
-/// sentence that says why it did not.
-#[must_use]
-pub fn psreadline_requested(target: SettingsTarget) -> Option<bool> {
-    match target {
-        SettingsTarget::Choice(SettingsRow::PsReadLine, index)
-        | SettingsTarget::ChoiceRefused(SettingsRow::PsReadLine, index) => {
-            FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -16994,47 +16894,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn psreadline_page_open_is_an_edge_even_without_a_closed_layout() {
-        let rows = [SettingsRow::PsReadLine];
-        let mut panel = SettingsPanel::default();
-        assert!(!panel.take_psreadline_open_edge(true));
-        panel.toggle(content(&rows, &[]));
-        assert!(panel.take_psreadline_open_edge(true));
-        for _ in 0..200 {
-            assert!(!panel.take_psreadline_open_edge(true));
-        }
-        assert!(!panel.select_category(SettingsCategory::Terminal));
-        assert!(!panel.take_psreadline_open_edge(true));
-        panel.select_category(SettingsCategory::General);
-        assert!(!panel.take_psreadline_open_edge(false));
-        panel.select_category(SettingsCategory::Terminal);
-        assert!(panel.take_psreadline_open_edge(true));
-        panel.close();
-        panel.toggle(content(&rows, &[]));
-        assert!(
-            panel.take_psreadline_open_edge(true),
-            "close/reopen needs no intervening layout"
-        );
-        panel.toggle(content(&rows, &[]));
-        assert!(!panel.take_psreadline_open_edge(true));
-        panel.toggle(content(&rows, &[]));
-        assert!(panel.take_psreadline_open_edge(true));
-        panel.select_category(SettingsCategory::General);
-        panel.keep_focus_reachable(content(&rows, &[]));
-        assert_eq!(panel.category(), SettingsCategory::Terminal);
-        assert!(
-            panel.take_psreadline_open_edge(true),
-            "fallback also opens a new visit"
-        );
-        assert!(panel.close_one_layer());
-        panel.toggle(content(&rows, &[]));
-        assert!(
-            panel.take_psreadline_open_edge(true),
-            "Escape also rearms the visit"
-        );
-    }
-
     /// RED (mutation: return `self.open` instead of consuming the visit latch)
     /// — profile and policy facts refresh once per Profiles-page visit, never
     /// once per frame.
@@ -17062,7 +16921,7 @@ mod tests {
     ///
     /// The switch takes no press while the file it names is one this build will not edit, so the
     /// press cannot be what notices that the reader has unpicked the link or cleared the read-only
-    /// bit. Opening the page is, on `PsReadLine`'s own latch: an edge per visit, rearmed by every
+    /// bit. Opening the page is, on the Profiles page's latch: an edge per visit, rearmed by every
     /// road off the page, and never a per-frame read — two hundred layouts on the open page ask
     /// the disk nothing.
     ///
@@ -17078,7 +16937,9 @@ mod tests {
         let page = content(&rows, &[]);
         assert!(page.shows_agents(SettingsCategory::Agents));
         assert!(!page.shows_agents(SettingsCategory::Terminal));
-        assert!(!content(&[SettingsRow::PsReadLine], &[]).shows_agents(SettingsCategory::Agents));
+        assert!(
+            !content(&[SettingsRow::ShellIntegration], &[]).shows_agents(SettingsCategory::Agents)
+        );
 
         let mut panel = SettingsPanel::default();
         assert!(
@@ -18868,8 +18729,8 @@ mod tests {
         visible_rows(TabLayoutMode::Horizontal)
     }
 
-    /// [`visible_rows`] asked of a named platform — the page a Windows row (`PsReadLine`,
-    /// `Acrylic`, the Explorer verb) stands on, read on every runner. On the platform this
+    /// [`visible_rows`] asked of a named platform — the page a Windows row (`Acrylic`, the
+    /// Explorer verb) stands on, read on every runner. On the platform this
     /// build is, it is [`visible_rows`] itself.
     fn rows_on(platform: bt_platform::HostPlatform, tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
         uninstall_rows_for(
@@ -20042,13 +19903,12 @@ mod tests {
     /// entry whose English is the string this row just said — cannot reach a
     /// string the row did not say.
     ///
-    /// **Two sentences are deliberately outside it**, and both for the same
-    /// reason the picker column is: `psreadline::row_description`'s four
-    /// composed lines and `update::row_description`'s carry a version string
-    /// read off this machine, so their length is a fact about the machine rather
-    /// than about the copy. What is held here instead is the entry each of them
+    /// **One sentence is deliberately outside it**, for the reason the picker
+    /// column is: `update::row_description`'s composed line carries a version
+    /// string read off this machine, so its length is a fact about the machine
+    /// rather than about the copy. What is held here instead is the entry it
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 25] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 22] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -20121,13 +19981,7 @@ mod tests {
                 Text::DescExplorerFirstPageAwaitingShell,
                 Windows,
             ),
-            // The three PSReadLine states that are an entry rather than a
-            // composed line. See this constant's own note for the four that are
-            // not.
-            (SettingsRow::PsReadLine, Text::PsReadLineProbing, Windows),
-            (SettingsRow::PsReadLine, Text::PsReadLineRowGone, Windows),
-            (SettingsRow::PsReadLine, Text::PsReadLineRowNotOurs, Windows),
-            // The sentence with no version in it, for the row above's reason.
+            // The sentence with no version in it, for this constant's own note.
             (SettingsRow::AutoCheck, Text::DescAutoCheck, Windows),
             // The Mac columns. `LaunchOpens`, `TurnEndNotifications`,
             // `QuakeHotkey` and `OptionSendsAlt` are the rows whose sentence has
@@ -22188,9 +22042,9 @@ mod tests {
              `Focus card height` under the row that turns the mode on"
         );
         assert!(
-            !SettingsRow::PsReadLine.advanced(),
-            "the PSReadLine row repairs something the reader has already watched \
-             go wrong, so it is the last row in the dialog that may be hidden"
+            !SettingsRow::LegacyPsReadLine.advanced(),
+            "the earlier PSReadLine copy's removal row is a door the reader has come \
+             looking for, so it is not one the dialog may hide"
         );
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let rows = visible_rows(layout);
@@ -25914,73 +25768,6 @@ mod tests {
         }
     }
 
-    /// PIN (§7.1.6c-5) — **the page that shows the answer is a page that asks
-    /// the question.**
-    ///
-    /// `Terminal` is the one page in this dialog drawn out of an out-of-band
-    /// reading, and until this slice the reading was started by the first
-    /// `Windows PowerShell` pane and by nothing else. Every user who opens WSL
-    /// or `pwsh` and never a 5.1 pane therefore read "Checking this machine's
-    /// PSReadLine" for as long as they cared to look — a row waiting on an
-    /// answer nobody had asked for.
-    ///
-    /// The trigger is derived from the row rather than named as a category,
-    /// which is what the second half pins: no other page asks, and the day the
-    /// row moves the asking moves with it.
-    ///
-    /// Red gate: return `false` unconditionally and the first assertion goes
-    /// red; return `true` for every page and the loop does.
-    #[test]
-    fn showing_the_page_the_probe_answers_on_is_what_starts_the_probe() {
-        // **The Windows page, named** (§13.32 ①): this claim is about rows a
-        // Mac is no longer offered, so it asks for the list by platform rather
-        // than for whatever list the runner happens to have.
-        let rows = visible_rows_for(
-            bt_platform::HostPlatform::Windows,
-            TabLayoutMode::Horizontal,
-        );
-        let lines = shortcut_lines();
-        let content = content(&rows, &lines);
-        assert!(
-            content.probes_psreadline(SettingsCategory::Terminal),
-            "the page holding the PSReadLine row is the page that starts the \
-             probe"
-        );
-        for category in SettingsCategory::ALL {
-            if category == SettingsCategory::Terminal {
-                continue;
-            }
-            assert!(
-                !content.probes_psreadline(category),
-                "{category:?} starts a process to answer a question it does not \
-                 draw"
-            );
-        }
-        // The derivation, not the name: a build whose row list has lost the row
-        // has no page that asks, whatever the categories are called.
-        let without: Vec<SettingsRow> = rows
-            .iter()
-            .copied()
-            .filter(|row| *row != SettingsRow::PsReadLine)
-            .collect();
-        let thinner = SettingsContent {
-            rows: &without,
-            shortcuts: &lines,
-            profiles: &[],
-            scheme_files: &[],
-            advanced: AdvancedOpen::default(),
-            advanced_reveal: None,
-            editor: None,
-            values: Box::leak(Box::new(SettingsValues::sample())),
-        };
-        for category in SettingsCategory::ALL {
-            assert!(
-                !thinner.probes_psreadline(category),
-                "{category:?} asks for an answer no row on it would print"
-            );
-        }
-    }
-
     /// PIN — the Startup row is the picker built from the `˅` menu's own list,
     /// and every profile on it wears that menu's own mark.
     ///
@@ -27177,7 +26964,6 @@ mod tests {
             .filter(|row| row.category() == SettingsCategory::Terminal)
             .collect::<Vec<_>>(),
             vec![
-                SettingsRow::PsReadLine,
                 SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
@@ -27185,10 +26971,10 @@ mod tests {
                 SettingsRow::MultilinePaste,
                 SettingsRow::Notifications
             ],
-            "the Terminal page begins with the PSReadLine fact and process-scoped integration \
-             switch, then the pane's two axes — what it keeps of what has gone past, and what it \
-             does with a line wider than itself — and last the only row on this page whose answer \
-             shows up outside this window; the legacy-line remover is inserted only when observed"
+            "the Terminal page begins with the process-scoped integration switch, then the pane's \
+             two axes — what it keeps of what has gone past, and what it does with a line wider \
+             than itself — and last the only row on this page whose answer shows up outside this \
+             window; the two cleanup verbs are inserted only when observed"
         );
     }
 
@@ -27223,7 +27009,7 @@ mod tests {
         );
         for target in [
             SettingsTarget::Choice(SettingsRow::BlockMaxHeight, 0),
-            SettingsTarget::Choice(SettingsRow::PsReadLine, 1),
+            SettingsTarget::Choice(SettingsRow::ShellIntegration, 1),
             SettingsTarget::Combo(SettingsRow::Scrollback),
             SettingsTarget::Scrim,
         ] {
@@ -27250,9 +27036,8 @@ mod tests {
     /// PIN — **the Line wrapping row stands on the Terminal page directly under
     /// `Scrollback`**, which is the mock-up's own order for it (6000).
     ///
-    /// The page reads downwards as one shell's story: what is wrong with the module
-    /// this shell loads, what this shell is not loading, what the pane keeps of what
-    /// has already gone past, how the pane sets a line too long for it, and last the
+    /// The page reads downwards as one shell's story: what Folio loads into this
+    /// shell, what the pane keeps of what has already gone past, how the pane sets a line too long for it, and last the
     /// only row here whose answer shows up outside this window. The adjacency to
     /// `Scrollback` is the load-bearing half: both rows answer what the pane does
     /// with output it has already been handed, and a row about the desktop standing
@@ -27275,7 +27060,6 @@ mod tests {
         assert_eq!(
             terminal,
             vec![
-                SettingsRow::PsReadLine,
                 SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
@@ -27331,6 +27115,74 @@ mod tests {
             SettingsRow::PowerShellProfileLine.stated_value(),
             Some("Remove the line from $PROFILE")
         );
+    }
+
+    /// RED (owner ruling Q4, T-INTEGRATION-INJECT-2-BUILD) — **the earlier PSReadLine copy's
+    /// removal row stands only while a copy is observed, once, under the switch and under the
+    /// `$PROFILE` line's verb when that one stands.** The copy stays in Documents until the reader
+    /// presses this; a row that stood with nothing to remove would be offering a press that does
+    /// nothing, and a row that went with a copy still there would leave the uninstaller as the only
+    /// way out.
+    ///
+    /// MUTATION: insert the row whatever `copy_present` says and the absent arm goes red; drop the
+    /// leading `retain` and a second observation stands it twice.
+    #[test]
+    fn the_earlier_psreadline_remover_exists_only_while_a_copy_is_observed() {
+        let base = visible_rows_for(
+            bt_platform::HostPlatform::Windows,
+            TabLayoutMode::Horizontal,
+        );
+        assert!(!base.contains(&SettingsRow::LegacyPsReadLine));
+
+        let mut absent = base.clone();
+        retain_legacy_psreadline_remover(&mut absent, false);
+        assert_eq!(absent, base, "no copy, no row, and nothing else moved");
+
+        let mut present = base.clone();
+        retain_legacy_psreadline_remover(&mut present, true);
+        retain_legacy_psreadline_remover(&mut present, true);
+        let at = |rows: &[SettingsRow], row| rows.iter().position(|it| *it == row);
+        assert_eq!(
+            present
+                .iter()
+                .filter(|row| **row == SettingsRow::LegacyPsReadLine)
+                .count(),
+            1,
+            "observed twice, stood once"
+        );
+        assert_eq!(
+            at(&present, SettingsRow::LegacyPsReadLine),
+            at(&present, SettingsRow::ShellIntegration).map(|it| it + 1),
+            "under the switch whose pane no longer loads it"
+        );
+
+        let mut both = base.clone();
+        retain_powershell_profile_remover(&mut both, true);
+        retain_legacy_psreadline_remover(&mut both, true);
+        assert_eq!(
+            at(&both, SettingsRow::LegacyPsReadLine),
+            at(&both, SettingsRow::PowerShellProfileLine).map(|it| it + 1),
+            "and under the profile line's verb when both stand"
+        );
+
+        retain_legacy_psreadline_remover(&mut present, false);
+        assert_eq!(
+            present, base,
+            "the press that removed it takes the row with it"
+        );
+
+        assert_eq!(
+            SettingsRow::LegacyPsReadLine.stated_value(),
+            Some("Remove it from Documents")
+        );
+        assert_eq!(
+            SettingsRow::LegacyPsReadLine.category(),
+            SettingsCategory::Terminal
+        );
+        assert!(matches!(
+            SettingsRow::LegacyPsReadLine.control(),
+            SettingsControl::Link
+        ));
     }
 
     /// PIN (user ruling 2026-08-25) — **the Agents page holds the rows about the
@@ -27693,124 +27545,45 @@ mod tests {
     /// arm and this fails on the first item.
     #[test]
     fn a_press_on_a_greyed_item_names_it_instead_of_being_swallowed() {
-        // The PSReadLine row is a Windows page's, read on every runner.
-        let placed = open_rows_measured_on(
-            bt_platform::HostPlatform::Windows,
+        // The Claude Code row over a configuration this build will not edit: neither item is
+        // available (re-review f), which is the shape the retired PSReadLine row first had.
+        let placed = open_rows_measured(
             1.0,
-            Some(SettingsRow::PsReadLine),
+            Some(SettingsRow::ClaudeHooks),
             TabLayoutMode::Horizontal,
             0.0,
         );
-        // What a `Restricted` machine draws: the module is old, and neither
-        // verb is available.
         let blocked = SettingsValues {
-            psreadline: crate::psreadline::RowState::Outdated,
-            psreadline_install_available: false,
-            psreadline_remove_available: false,
+            agent_config_refusals: [Some(Text::AgentConfigLink.text()), None, None],
             ..values()
         };
         assert_eq!(
-            SettingsRow::PsReadLine.option_count(),
+            SettingsRow::ClaudeHooks.option_count(),
             FORMULA_OPTIONS.len()
         );
-        for (index, wanted) in FORMULA_OPTIONS.into_iter().enumerate() {
+        for index in 0..FORMULA_OPTIONS.len() {
             assert!(
-                !SettingsRow::PsReadLine.option_enabled(index, &blocked),
+                !SettingsRow::ClaudeHooks.option_enabled(index, &blocked),
                 "item {index} must be dark on this machine"
             );
             let (x, y) = centre(placed.items[index]);
             let target = hit(&placed, &blocked, x, y);
             assert_eq!(
                 target,
-                SettingsTarget::ChoiceRefused(SettingsRow::PsReadLine, index),
+                SettingsTarget::ChoiceRefused(SettingsRow::ClaudeHooks, index),
                 "a press on the dark item must name it"
             );
             assert_eq!(
-                psreadline_requested(target),
-                Some(wanted),
-                "and reach the one door, which is what answers with a reason"
+                claude_hooks_requested(target),
+                None,
+                "and it asks for no write the row's line says will not happen"
             );
         }
         // And the lit item is untouched: it still chooses.
-        let free = SettingsValues {
-            psreadline_install_available: true,
-            ..blocked
-        };
         let (x, y) = centre(placed.items[0]);
         assert_eq!(
-            hit(&placed, &free, x, y),
-            SettingsTarget::Choice(SettingsRow::PsReadLine, 0)
-        );
-    }
-
-    /// PIN (user ruling 2026-08-18) — **the PSReadLine row reads `Update` when an
-    /// older Folio build's module is the one on disk, and its two items are
-    /// still `On` and `Off`.**
-    ///
-    /// The value and the items answer two different questions — what this row is
-    /// *at*, and what a reader may do to it — and only the first of them has a
-    /// third answer. A third item would have been a second way to say what `On`
-    /// already says, on the one row in the dialog whose `Off` deletes a directory
-    /// outside this product's own data folder.
-    ///
-    /// Red gate: drop the `value_text` arm and the button falls back to `On`,
-    /// which is the row saying nothing about the newer module it is holding.
-    #[test]
-    fn the_psreadline_row_says_update_over_an_older_folio_build() {
-        use crate::psreadline::RowState;
-
-        let updatable = SettingsValues {
-            psreadline: RowState::UpdateAvailable,
-            psreadline_install_available: true,
-            psreadline_remove_available: true,
-            ..values()
-        };
-        assert_eq!(
-            SettingsRow::PsReadLine.value_text(&updatable),
-            Some(Text::PsReadLineUpdate.text()),
-            "the button says what pressing it would do"
-        );
-        assert_eq!(
-            SettingsRow::PsReadLine.selected_index(&updatable),
-            Some(0),
-            "and the tick stays on On, because the module *is* there — a tick \
-             on Off would be the row claiming an empty directory it is \
-             offering to empty"
-        );
-        assert_eq!(
-            SettingsRow::PsReadLine.option_count(),
-            2,
-            "two items, not three: On and Off are what a reader does to this row"
-        );
-        assert!(SettingsRow::PsReadLine.option_enabled(0, &updatable));
-        assert!(SettingsRow::PsReadLine.option_enabled(1, &updatable));
-
-        // And the row that is simply installed says nothing extra.
-        let installed = SettingsValues {
-            psreadline: RowState::InstalledByFolio,
-            psreadline_install_available: false,
-            psreadline_remove_available: true,
-            ..values()
-        };
-        assert_eq!(SettingsRow::PsReadLine.value_text(&installed), None);
-        assert_eq!(SettingsRow::PsReadLine.selected_index(&installed), Some(0));
-
-        // The word is drawn where the button is, and not only computed — on the Windows
-        // page, which is the one that holds this row, read on every runner.
-        let placed = shaped_scrolled_on(
-            bt_platform::HostPlatform::Windows,
-            SettingsCategory::Terminal,
-            AdvancedOpen::default(),
-            None,
-            UNSCROLLED,
-        );
-        let labels = labels_of(&placed, None, &updatable);
-        assert!(
-            labels
-                .iter()
-                .any(|label| label.text == Text::PsReadLineUpdate.text()),
-            "drawn: {:?}",
-            labels.iter().map(|it| it.text.clone()).collect::<Vec<_>>()
+            hit(&placed, &values(), x, y),
+            SettingsTarget::Choice(SettingsRow::ClaudeHooks, 0)
         );
     }
 
@@ -28625,20 +28398,20 @@ mod tests {
     /// platform this build has no backdrop door for has nothing for a reason to
     /// be about. `Capability::WindowBackdrop` is where that is said once.
     ///
-    /// MUTATIONS: make any of the five facilities answer `true` everywhere and
+    /// **The PSReadLine row left the dialog** (T-INTEGRATION-INJECT-2-BUILD): what stands
+    /// in its place is the earlier copy's removal row, inserted only where a copy is
+    /// observed, which no Mac has.
+    ///
+    /// MUTATIONS: make `ExplorerMenu` or `WindowBackdrop` answer `true` everywhere and
     /// the first assertion names it; return `None` from `SettingsRow::needs` for
-    /// one of the four Windows rows and the same assertion names it; take
+    /// either Windows row and the same assertion names it; take
     /// `OptionKey` off `OptionSendsAlt` and the Windows half goes red, because
     /// that row would then be offered to a keyboard that has no Option key.
     #[test]
     fn a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got() {
         use bt_platform::HostPlatform::{MacOs, Windows};
 
-        const NOT_ON_A_MAC: [SettingsRow; 3] = [
-            SettingsRow::ContextMenu,
-            SettingsRow::PsReadLine,
-            SettingsRow::Acrylic,
-        ];
+        const NOT_ON_A_MAC: [SettingsRow; 2] = [SettingsRow::ContextMenu, SettingsRow::Acrylic];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let mac = visible_rows_for(MacOs, layout);
             let windows = visible_rows_for(Windows, layout);
@@ -28662,7 +28435,7 @@ mod tests {
                 "{layout:?}: a Windows keyboard has no Option key"
             );
             // Everything else is on both pages, in the same order, which is what
-            // says the filter took the five rows and nothing else.
+            // says the filter took the three rows and nothing else.
             let expected: Vec<SettingsRow> = windows
                 .iter()
                 .copied()
@@ -28675,7 +28448,7 @@ mod tests {
             sorted_expected.sort_by_key(|row| format!("{row:?}"));
             assert_eq!(
                 sorted_mac, sorted_expected,
-                "{layout:?}: the two pages differ by more than the five rows \
+                "{layout:?}: the two pages differ by more than the three rows \
                  that declare a facility"
             );
         }
@@ -29282,7 +29055,6 @@ mod tests {
                 SettingsRow::QuakeTopGap,
                 SettingsRow::QuakeDismiss,
                 SettingsRow::QuakeRestore,
-                SettingsRow::PsReadLine,
                 SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
@@ -29357,7 +29129,6 @@ mod tests {
                 SettingsRow::QuakeTopGap,
                 SettingsRow::QuakeDismiss,
                 SettingsRow::QuakeRestore,
-                SettingsRow::PsReadLine,
                 SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
@@ -35170,13 +34941,14 @@ pub(crate) mod font_lane_adapter {
                 .unwrap_or_else(PoisonError::into_inner)
                 .get(&generation)
                 .copied();
-            if let Some(question) = question {
-                door.execute(question);
-            }
-            Ok((
+            // The suite's file, held while the walk runs.
+            let held = question.map(|question| door.execute(question));
+            let walked = Ok((
                 answer(format!("Lane Contract Mono {generation}")),
                 Vec::new(),
-            ))
+            ));
+            drop(held);
+            walked
         });
         let (heard, counted) = (Arc::clone(&probe), Arc::clone(&said));
         let lane: &'static FontLane = Box::leak(Box::new(FontLane::new(

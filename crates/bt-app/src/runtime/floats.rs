@@ -1,6 +1,7 @@
 //! `floats` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::{Gone, OwnerGone};
 use crate::window_seam::prelude::*;
 use crate::{
     CardWords, DropLanding, FileMenuState, FileMenuTarget, FileMenuTreeRow, HoverFloat, Layered,
@@ -1872,7 +1873,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// reason: a menu cannot be both waiting to open its child and holding it
     /// open against the rows.
     pub(in crate::runtime) fn advance_term_menu(&mut self, now: Instant) -> Result<()> {
-        let Some(menu) = self.window.term_menu.as_ref() else {
+        let Some(menu) = self.window.term_menu.as_mut() else {
             return Ok(());
         };
         let Some(due) = menu.submenu_hold_until else {
@@ -1881,6 +1882,13 @@ impl<B: Backend> Runtime<'_, B> {
         if now < due {
             return Ok(());
         }
+        // **A matured hold is spent on the turn it comes due, whatever follows**
+        // (T-WINDOW-THREAD-UNDER-LOAD). Left standing by a road below that cannot act — a rest
+        // whose pointer has left the window, a heading that has no child to open — it was an
+        // instant in the past that the wake fold handed `ControlFlow::WaitUntil` on every turn,
+        // and the loop spun until the next pointer move. Whatever the roads below arm again
+        // (the hover they drive) is a new hold of its own.
+        menu.submenu_hold_until = None;
         if menu.submenu_open {
             self.set_term_submenu(false)?;
             if let Some(position) = self.window.pointer_position {
@@ -1967,13 +1975,16 @@ impl<B: Backend> Runtime<'_, B> {
         position: Option<PhysicalPosition<f64>>,
         now: Instant,
     ) {
-        // **A drag owns the pointer outright**, and a gesture in flight is not a
-        // hover — the same rule the tip, the layout peek and the float's own
+        // **A held gesture owns the pointer outright**, and a gesture in flight is
+        // not a hover — the same rule the tip, the layout peek and the float's own
         // intent already live by (`rebuild_tooltip_anchors` empties its whole
         // list for the length of a drag). A menu dropped under a pane being
         // carried across the window would be a menu nobody asked for, standing
-        // in the way of the drop.
-        if self.held_drag().is_some() || self.held_float_drag().copied().is_some() {
+        // in the way of the drop; and the same menu opened by a divider, a thumb
+        // or a selection resting on a `⌄` would eat the release the gesture is
+        // owed (T-POINTER-CAPTURE R-7, cut 6: every gesture in the slot, not the
+        // drag and the float carry alone).
+        if self.a_gesture_holds_the_pointer() {
             self.window.chevrons.clear();
             return;
         }
@@ -3464,6 +3475,10 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// Begin one float's exit (§7.1.2's remaining closers, and only those).
     pub(in crate::runtime) fn dismiss_float(&mut self, id: float::FloatId) -> Result<bool> {
+        // **The gesture held on the window goes before the window does** (T-POINTER-CAPTURE R-9,
+        // owner gone): its carry, a press on its head, a thumb, a selection or a picture pan
+        // inside it, a row of its tree.
+        self.end_capture(OwnerGone(Gone::Float(id)));
         if !self.window.float.dismiss(id, Instant::now()) {
             return Ok(false);
         }

@@ -152,11 +152,22 @@ pub enum FileScoped {
     /// the committed file is the subject. It is YAML run by GitHub and cannot
     /// ask this crate's index.
     TheGateCanaries,
+    /// `scripts/ci/check-psreadline-artefact.ps1`, the PSReadLine pin gate, naming
+    /// `crates/bt-app/src/psreadline_artefact.rs` (T-INTEGRATION-INJECT-2-BUILD).
+    ///
+    /// A pin of the vendored PSReadLine package is written in three files — the package's own
+    /// README, the build script's table and Folio's manifest — and the gate's fact is that the
+    /// three spell the same hashes and version as the package holds. The table's *written text*
+    /// is one of the three places, so the file is the subject, as the README and the manifest
+    /// are; the build script's own refusal is the gate that asks the program. It runs in CI's
+    /// `licensing` job, which builds nothing, and is a PowerShell gate that cannot ask this
+    /// crate's index.
+    ThePsReadLineArtefactGate,
 }
 
 impl FileScoped {
     /// Every entry. The allowlist is small enough to be an array and only shrinks.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::VendoredAddedFiles,
         Self::TheTripwireItself,
         Self::TheDeadCodeGate,
@@ -166,6 +177,7 @@ impl FileScoped {
         Self::TheReaderShapesMeasurement,
         Self::TheTopicMover,
         Self::TheGateCanaries,
+        Self::ThePsReadLineArtefactGate,
     ];
 
     /// Where the reader lives, from the workspace root, with forward slashes.
@@ -181,6 +193,7 @@ impl FileScoped {
             Self::TheReaderShapesMeasurement => "scripts/dev/bt-app-reader-shapes.py",
             Self::TheTopicMover => "scripts/dev/bt-app-move-topic.py",
             Self::TheGateCanaries => ".github/workflows/ci.yml",
+            Self::ThePsReadLineArtefactGate => "scripts/ci/check-psreadline-artefact.ps1",
         }
     }
 
@@ -226,6 +239,11 @@ impl FileScoped {
                 "each canary plants a gate's defect into a committed source file, requires the \
                  refusal and writes the file back: a defect in a committed file is the proof's \
                  subject; CI's YAML"
+            }
+            Self::ThePsReadLineArtefactGate => {
+                "a PSReadLine pin is written in three files and the gate holds their text to the \
+                 package: the build script's table, as written, is one of the three; a \
+                 PowerShell gate in a job that builds nothing"
             }
         }
     }

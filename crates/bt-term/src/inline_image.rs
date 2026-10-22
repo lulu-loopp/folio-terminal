@@ -1565,6 +1565,10 @@ pub(crate) enum InlineImageStreamAction {
     /// one already standing is a question about the session's own ledger, and it is answered one
     /// layer up in [`crate::session::DualPlaneSession`]. This scanner only says what arrived.
     AttentionRequest(crate::session::AttentionRequest),
+    /// One `OSC 777;folio-psreadline;<version>`: Folio's PowerShell integration saying that the
+    /// pane's PSReadLine after the profile ran is not the one Folio gave it, and which version it
+    /// is (T-INTEGRATION-INJECT-2-BUILD). A report for the log, nothing else.
+    ForeignLineEditor(String),
     /// One OSC 7 report: the `file://` URI bytes the shell named its working directory with. An
     /// empty payload is the report "I no longer have one to give", which is a fact of its own and
     /// therefore still an action.
@@ -2170,12 +2174,20 @@ fn finish_osc_9(actions: &mut Vec<InlineImageStreamAction>, payload: &[u8], over
     );
 }
 
+/// `OSC 777`'s verb for Folio's own report about a pane's PSReadLine ([`finish_osc_777`]).
+const FOLIO_PSREADLINE_VERB: &[u8] = b"folio-psreadline";
+
 /// Read one terminated `OSC 777`.
 ///
-/// The sequence has a verb slot and exactly one verb anybody sends; WezTerm says so outright
+/// The sequence has a verb slot and exactly one verb anybody else sends; WezTerm says so outright
 /// ("only the notify extension is supported") and so does this. An unknown verb is dropped whole
 /// rather than read as a title, because `OSC 777;foo;bar` is somebody else's extension and its
 /// second field is not a name for anything.
+///
+/// **One verb is Folio's own**: `folio-psreadline;<version>`, which Folio's PowerShell integration
+/// (`folio.ps1`) sends once when the pane's PSReadLine after the profile ran is not the copy Folio
+/// put on the pane's module path. A version is digits, letters, `.`, `-` and `+`, at most 64 of
+/// them; anything else is not a version and the sequence is dropped.
 ///
 /// `OSC 777;notify;<title>` with no body is a notification: a title is a message. `OSC 777;notify`
 /// with neither is not — there is nothing in it to show.
@@ -2184,6 +2196,23 @@ fn finish_osc_777(actions: &mut Vec<InlineImageStreamAction>, payload: &[u8], ov
         return;
     }
     let (verb, rest) = split_once(payload, b';');
+    if verb == FOLIO_PSREADLINE_VERB {
+        if let Some(version) = rest
+            .filter(|version| {
+                !version.is_empty()
+                    && version.len() <= 64
+                    && version
+                        .iter()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(byte))
+            })
+            .and_then(|version| std::str::from_utf8(version).ok())
+        {
+            actions.push(InlineImageStreamAction::ForeignLineEditor(
+                version.to_owned(),
+            ));
+        }
+        return;
+    }
     if verb != b"notify" {
         return;
     }
@@ -4197,6 +4226,7 @@ mod tests {
                         | InlineImageStreamAction::Progress(_)
                         | InlineImageStreamAction::Notification(_)
                         | InlineImageStreamAction::AttentionRequest(_)
+                        | InlineImageStreamAction::ForeignLineEditor(_)
                         | InlineImageStreamAction::TooLarge => {
                             panic!("fixture contains no image")
                         }
@@ -4493,6 +4523,30 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked
+    /// descriptor is not seen by `bt_testpath::nobody_holds`, so there the
+    /// release is stated, not proven) — **a background picture is decoded from
+    /// a file already closed when the picture comes back**: the
+    /// `background-picture` worker hands the window what this returns, and at
+    /// that moment nothing holds the file (`bt_testpath::nobody_holds`).
+    ///
+    /// MUTATION: leak a handle on the file in `decode_background_image`
+    /// (`std::mem::forget(std::fs::File::open(path))`) — the picture comes back
+    /// while the file is held, and the exclusive open is refused.
+    #[test]
+    fn a_background_picture_comes_back_with_its_file_closed() {
+        let directory = bt_testpath::temp_path("betterterminal-background-closed");
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("壁纸 wallpaper.png");
+        let plane: image::ImageBuffer<image::Luma<u8>, Vec<u8>> = image::ImageBuffer::new(8, 8);
+        plane.save_with_format(&path, ImageFormat::Png).unwrap();
+        let ground = decode_background_image(&path, (64, 64));
+        let free = bt_testpath::nobody_holds(&path);
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(ground.is_ok(), "the picture decodes");
+        assert!(free, "and nothing holds its file when it comes back");
     }
 
     /// PIN — **the resample target is the largest monitor, one scale on both

@@ -20,6 +20,7 @@ use crate::{
     Runtime, TabId, TabPress, TerminalColumnDrag, TerminalThumbDrag, settings,
 };
 use winit::event::MouseButton;
+use winit::keyboard::ModifiersState;
 use winit::window::WindowId;
 
 use super::PointerHit;
@@ -86,6 +87,26 @@ pub(crate) struct PointerCapture {
         reason = "T-POINTER-CAPTURE until 2026-12-31: the press road reads it once it dispatches on the router (cut 8a)"
     )]
     pub(crate) started: Option<PointerHit>,
+    /// **Which window held the loop thread's mouse capture when the gesture began** — the
+    /// divider's own sample (Codex review 2026-09-17), taken for every gesture (R-9, cut 5): a
+    /// capture that is no longer the one taken at the press is a gesture the system took away
+    /// with no button-up and no blur ([`Runtime::end_a_capture_that_lost_its_pointer`]). `None`
+    /// where the platform has no per-thread capture (macOS), so there it never fires.
+    pub(crate) os: Option<bt_platform::NativeWindow>,
+    /// **The last report a press handed to the program was given** (§2.2's release snapshot),
+    /// for the one owner whose ending is a message to somebody else: a forwarded press that ends
+    /// without its release tells the program its button came up, at this cell and with these
+    /// modifiers — never the keys held when the ending happened. `None` for every other owner.
+    pub(crate) last: Option<ReleaseSnapshot>,
+}
+
+/// **What a forwarded press last told its program** (§2.2): the cell and the modifiers of the
+/// last mouse report actually sent, press or motion. The program, the encoding and the button
+/// are the route's own ([`MouseRoute::Forward`]), so they are not copied here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ReleaseSnapshot {
+    pub(crate) cell: bt_render::GridHit,
+    pub(crate) modifiers: ModifiersState,
 }
 
 /// **The buttons that went down while a capture was held** (R-5 rule 3):
@@ -421,10 +442,6 @@ impl<B: Backend> Runtime<'_, B> {
         gesture_door!(@window take self GlanceThumb)
     }
 
-    pub(crate) fn drop_glance_thumb(&mut self) {
-        gesture_door!(@window drop self GlanceThumb)
-    }
-
     pub(crate) fn held_video_bar_drag(&self) -> Option<&PreviewSurface> {
         gesture_door!(@window held self VideoBar)
     }
@@ -485,10 +502,6 @@ impl<B: Backend> Runtime<'_, B> {
         gesture_door!(@tab latch self PreviewBodyThumb value)
     }
 
-    pub(crate) fn drop_preview_body_drag(&mut self) {
-        gesture_door!(@tab drop self PreviewBodyThumb)
-    }
-
     pub(crate) fn held_preview_block_drag(&self) -> Option<&PreviewBlockDrag> {
         gesture_door!(@tab held self BlockThumb)
     }
@@ -499,10 +512,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     pub(crate) fn latch_preview_block_drag(&mut self, value: PreviewBlockDrag) {
         gesture_door!(@tab latch self BlockThumb value)
-    }
-
-    pub(crate) fn drop_preview_block_drag(&mut self) {
-        gesture_door!(@tab drop self BlockThumb)
     }
 
     pub(crate) fn held_preview_image_drag(&self) -> Option<&ImageDrag> {
@@ -529,10 +538,6 @@ impl<B: Backend> Runtime<'_, B> {
         gesture_door!(@tab latch self EditSelection value)
     }
 
-    pub(crate) fn drop_preview_selecting(&mut self) {
-        gesture_door!(@tab drop self EditSelection)
-    }
-
     pub(crate) fn held_preview_text_drag(&self) -> Option<&PreviewTextDrag> {
         gesture_door!(@tab held self RenderedSelection)
     }
@@ -547,10 +552,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     pub(crate) fn latch_preview_text_drag(&mut self, value: PreviewTextDrag) {
         gesture_door!(@tab latch self RenderedSelection value)
-    }
-
-    pub(crate) fn drop_preview_text_drag(&mut self) {
-        gesture_door!(@tab drop self RenderedSelection)
     }
 
     pub(crate) fn held_terminal_thumb_drag(&self) -> Option<&TerminalThumbDrag> {
@@ -606,12 +607,6 @@ impl<B: Backend> Runtime<'_, B> {
             .filter(|capture| capture.window == window && predicate(capture))
     }
 
-    /// **Whether a gesture of this window holds the pointer** — any of them,
-    /// by the one slot ([`crate::Runtime::a_gesture_holds_the_pointer`]).
-    pub(crate) fn a_capture_holds_the_pointer(&self) -> bool {
-        self.own_capture().is_some()
-    }
-
     pub(crate) fn drop_own_capture(&mut self) {
         let window = self.window.window.id();
         let _ = self
@@ -621,6 +616,10 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **Latch a gesture**, replacing what the slot holds
     /// ([`App::latch_capture`]'s reason).
+    ///
+    /// **The system's capture is sampled once per gesture.** What the slot already holds here is
+    /// an earlier stage of this same gesture (a pane press becoming a drag), so its sample is the
+    /// one taken at the press and is kept; a gesture's first latch takes it now.
     pub(crate) fn latch_capture(&mut self, owner: CaptureOwner, button: MouseButton) {
         let started = self
             .window
@@ -629,12 +628,36 @@ impl<B: Backend> Runtime<'_, B> {
             .as_ref()
             .and_then(|(_, hit)| hit.clone());
         let window = self.window.window.id();
+        let os = match self.app.pointer_capture.as_ref() {
+            Some(held) if held.window == window && held.button == button => held.os,
+            _ => bt_platform::thread_mouse_capture(),
+        };
         self.app.latch_capture(PointerCapture {
             window,
             owner,
             button,
             started,
+            os,
+            last: None,
         });
+    }
+
+    /// **Remember what a forwarded press last told its program** (§2.2), on the route's own
+    /// capture: written by the press that latched it and by every move reported under it, so an
+    /// ending that owes the program a release sends it there ([`Self::end_capture`]).
+    pub(crate) fn note_the_last_report_sent(
+        &mut self,
+        cell: bt_render::GridHit,
+        modifiers: ModifiersState,
+    ) {
+        if let Some(capture) = self.capture_where_mut(|capture| {
+            matches!(
+                capture.owner,
+                CaptureOwner::Route(MouseRoute::Forward { .. })
+            )
+        }) {
+            capture.last = Some(ReleaseSnapshot { cell, modifiers });
+        }
     }
 
     /// The drag in the hand.

@@ -1089,6 +1089,38 @@ mod bt_environment_doc_tests {
     /// the published list, and the source is what it is compared against.
     const DOCUMENT: &str = include_str!("../../../docs/BT-ENVIRONMENT.md");
 
+    /// **Folio's PowerShell integration script, as it ships** (T-INTEGRATION-INJECT-2-BUILD round 4
+    /// nits): the third list. A shipped script's `$env:BT_…` reads are names the release archive
+    /// honours that no Rust string literal spells; they are held equal to the document's section
+    /// for them, both ways.
+    const SHIPPED_SCRIPT: &str = include_str!("../../../scripts/shell-integration/folio.ps1");
+
+    /// The heading of the document's section for the shipped script's names.
+    const SCRIPT_SECTION: &str = "### Read by the shipped `folio.ps1`, set only by tests";
+
+    /// Every `BT_…` name the script reads from its environment (`$env:BT_…`).
+    fn names_the_script_reads(text: &str) -> BTreeSet<String> {
+        text.match_indices("$env:BT_")
+            .map(|(index, _)| {
+                text[index + "$env:".len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                    .collect::<String>()
+            })
+            .filter(|name| name.len() > 3)
+            .collect()
+    }
+
+    /// The document's section for the shipped script: from its heading to the next heading.
+    fn script_section(document: &str) -> &str {
+        let start = document
+            .find(SCRIPT_SECTION)
+            .expect("BT-ENVIRONMENT.md has the shipped script's section");
+        let body = &document[start + SCRIPT_SECTION.len()..];
+        let end = body.find("\n#").map_or(body.len(), |at| at + 1);
+        &body[..end]
+    }
+
     /// **The text of every `.rs` file that can end up in `folio.exe`** —
     /// `bt_source::universes::shipped_program`: `crates/` and `vendor/`, with
     /// `bin/` and `tests/` directories left out (development binaries that no
@@ -1193,10 +1225,25 @@ mod bt_environment_doc_tests {
             undocumented.is_empty(),
             "these names are in the source and not in docs/BT-ENVIRONMENT.md: {undocumented:?}"
         );
-        let stale: Vec<&String> = in_document.difference(&in_source).collect();
+        // The third list: what the shipped script reads, equal to its section, both ways.
+        let the_script_reads = names_the_script_reads(SHIPPED_SCRIPT);
+        assert!(
+            the_script_reads.len() > 1,
+            "the script's reads were found: {the_script_reads:?}"
+        );
+        let in_section = names_in_document(script_section(DOCUMENT));
+        assert_eq!(
+            in_section, the_script_reads,
+            "BT-ENVIRONMENT.md's section for the shipped folio.ps1 names exactly what it reads"
+        );
+        let stale: Vec<&String> = in_document
+            .difference(&in_source)
+            .filter(|name| !the_script_reads.contains(*name))
+            .collect();
         assert!(
             stale.is_empty(),
-            "these names are in docs/BT-ENVIRONMENT.md and not in the source: {stale:?}"
+            "these names are in docs/BT-ENVIRONMENT.md and neither in the source nor read by the \
+             shipped script: {stale:?}"
         );
     }
 
