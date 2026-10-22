@@ -45,6 +45,7 @@ impl<B: Backend> Runtime<'_, B> {
                 update_failed: None,
                 update_feed: None,
                 update_journal_held: None,
+                update_held_file: None,
             },
             self.default_profile(),
             cli::machine_path_kind,

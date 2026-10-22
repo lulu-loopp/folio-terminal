@@ -25,7 +25,8 @@
 //!   [`write_journal`] — `install_txn::durable_write`'s order, its rename
 //!   asked again for [`Limits::journal_held_within`] while another program
 //!   holds the journal open, each round said (U-34, 0.4.8 E4); an effect is
-//!   asked of `update_txn::may` first;
+//!   asked of `update_txn::may` first; the Windows layout's member moves are
+//!   asked again the same way ([`move_held_within`], T-UPDATE-MOVE-HELD-RETRY);
 //! * [`wait_for_the_claim`] — §C.4's authoritative test that the old build is
 //!   gone: the data directory's claim, tried until had and let go at once;
 //! * [`watch_trial`] — a trial waited for (W7, W8, M7, M8), on both platforms:
@@ -106,7 +107,9 @@ pub(crate) struct Limits {
     pub(crate) end_within: Duration,
     /// **How long a journal write refused because another program holds
     /// `journal.json` open is asked again** ([`JOURNAL_HELD_WITHIN`] in the
-    /// product; [`write_journal`]).
+    /// product; [`write_journal`]) — **and each member move of the Windows
+    /// flip or of its rollback that another program's hold refuses**, its own
+    /// window per move ([`move_held_within`], T-UPDATE-MOVE-HELD-RETRY).
     pub(crate) journal_held_within: Duration,
 }
 
@@ -267,15 +270,44 @@ pub(crate) const JOURNAL_HELD_WITHIN: Duration = Duration::from_secs(10);
 /// intervals that would overshoot its end by seconds.
 const JOURNAL_HELD_PAUSE_CAP: Duration = Duration::from_millis(500);
 
-/// **A journal write that did not land** ([`write_journal`]).
+/// **A journal write, or a member's move, that did not land**
+/// ([`write_journal`], [`move_held_within`]).
 #[derive(Debug)]
 pub(crate) struct Unwritten {
     /// The last failure, as a sentence.
     pub(crate) said: String,
     /// **The operating system's refusal when another program still held
-    /// `journal.json` open at the window's end** — the hold outlasted it.
-    /// `None` for any other failure.
+    /// the file open at the window's end** — the hold outlasted it. `None`
+    /// for any other failure.
     pub(crate) held: Option<String>,
+}
+
+/// **What another program held open past its holder's window** (0.4.8 E4;
+/// T-UPDATE-MOVE-HELD-RETRY): the journal (`file` `None`), or the member the
+/// flip or its rollback moves (`file` its name); `error` is the operating
+/// system's last refusal. What the build a road leaves behind is told
+/// ([`journal_held_words`], [`held_file_words`]), so its card names the hold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HeldPast {
+    pub(crate) file: Option<String>,
+    pub(crate) error: String,
+}
+
+impl HeldPast {
+    /// The journal, held past the window with `error`.
+    pub(crate) fn journal(error: String) -> Self {
+        Self { file: None, error }
+    }
+
+    /// The words a start sent to report carries for this hold, after
+    /// [`failed_words`].
+    pub(crate) fn words(&self) -> Vec<OsString> {
+        let mut words = journal_held_words(&self.error).to_vec();
+        if let Some(file) = &self.file {
+            words.extend(held_file_words(file));
+        }
+        words
+    }
 }
 
 /// **Write the journal's bytes durably** (`install_txn::DurableWrite`:
@@ -308,11 +340,11 @@ pub(crate) fn write_journal(
 ) -> Result<(), Unwritten> {
     let began = Instant::now();
     let mut write = install_txn::DurableWrite::new(path, bytes);
-    let written = write_held_within(
+    let written = asked_while_held(
         within,
+        &Asked::JOURNAL,
         || write.ask(),
-        install_txn::Failure::refused_while_open,
-        |failure| failure.error.to_string(),
+        held_refusal,
         &mut || began.elapsed(),
         &mut |pause| {
             bt_platform::wait::sleep_within(worker, pause);
@@ -342,56 +374,130 @@ fn given_up_said(
     written
 }
 
-/// [`write_journal`]'s rounds, with the write, its two readings of a failure,
-/// the time since the first ask and the pause handed in. No clock of its own:
-/// `elapsed` answers how long the write has been asked, and `wait` pauses
-/// (and answers whether to ask again).
-fn write_held_within<E: fmt::Display>(
+/// **Move `from` to `to` durably** (`install_txn::durable_move`: never over a
+/// file), and while the move is refused because another program holds the
+/// file open (`install_txn::Failure::refused_while_open`: Windows only) — an
+/// on-access scan of the freshly staged set, an indexer, a sync tool — ask
+/// the same move again through `worker`'s wait door until `within` has passed
+/// since the first ask (T-UPDATE-MOVE-HELD-RETRY: the flip's and the
+/// rollback's moves, [`Limits::journal_held_within`], [`JOURNAL_HELD_WITHIN`]
+/// in the product — E4's window and its reason, counted per move as E4
+/// counts it per write). Every round asks the one move: nothing else is moved
+/// between two rounds, and a refusal that is not a hold — the destination
+/// already taken (I1′), a flush after a rename that landed — is answered at
+/// once. **Each refused round says one line** through `say`, `opening` first
+/// (``BT_UPDATE_APPLY `<name>` held by another program``, or
+/// `BT_UPDATE_ROLLBACK`'s); `look` is asked after each, before the pause.
+///
+/// # Errors
+/// The last failure, and the refusal when it was a hold that outlasted the
+/// window.
+pub(crate) fn move_held_within(
+    worker: &WorkerCtx,
+    from: &Path,
+    to: &Path,
     within: Duration,
-    mut write: impl FnMut() -> Result<(), E>,
-    is_held: impl Fn(&E) -> bool,
-    refusal: impl Fn(&E) -> String,
+    opening: &str,
+    say: &mut dyn FnMut(&str),
+    look: &mut dyn FnMut(),
+) -> Result<(), Unwritten> {
+    let began = Instant::now();
+    asked_while_held(
+        within,
+        &Asked {
+            opening,
+            verb: "move",
+        },
+        || install_txn::durable_move(from, to),
+        held_refusal,
+        &mut || began.elapsed(),
+        &mut |pause| {
+            look();
+            bt_platform::wait::sleep_within(worker, pause);
+            true
+        },
+        say,
+    )
+}
+
+/// **The system's refusal of a rename another program's hold refused**
+/// (`install_txn::Failure::refused_while_open`), or `None` for any other
+/// failure.
+fn held_refusal(failure: &install_txn::Failure) -> Option<String> {
+    failure
+        .refused_while_open()
+        .then(|| failure.error.to_string())
+}
+
+/// **What a held ask is, in its rounds' lines**: the line's first words, up
+/// to `held by another program`, and the noun of its give-up (`the write is
+/// given up`, `the move is given up`).
+struct Asked<'a> {
+    opening: &'a str,
+    verb: &'a str,
+}
+
+impl Asked<'static> {
+    /// [`write_journal`]'s.
+    const JOURNAL: Self = Self {
+        opening: "BT_UPDATE_JOURNAL held by another program",
+        verb: "write",
+    };
+}
+
+/// The rounds of an ask another program's hold refuses — [`write_journal`]'s
+/// and [`move_held_within`]'s — with the ask, its reading of a failure (the
+/// system's refusal when the failure is a hold, `None` when it is not), the
+/// time since the first ask and the pause handed in. No clock of its own:
+/// `elapsed` answers how long the ask has been made, and `wait` pauses (and
+/// answers whether to ask again).
+fn asked_while_held<E: fmt::Display>(
+    within: Duration,
+    asked: &Asked<'_>,
+    mut ask: impl FnMut() -> Result<(), E>,
+    held_with: impl Fn(&E) -> Option<String>,
     elapsed: &mut dyn FnMut() -> Duration,
     wait: &mut dyn FnMut(Duration) -> bool,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Unwritten> {
+    let Asked { opening, verb } = asked;
     let mut pause = Duration::from_millis(10);
     loop {
-        let failure = match write() {
+        let failure = match ask() {
             Ok(()) => return Ok(()),
             Err(failure) => failure,
         };
-        if !is_held(&failure) {
+        let Some(refusal) = held_with(&failure) else {
             return Err(Unwritten {
                 said: failure.to_string(),
                 held: None,
             });
-        }
+        };
         let spent = elapsed();
         let left = within.saturating_sub(spent);
         if left.is_zero() {
             say(&format!(
-                "BT_UPDATE_JOURNAL held by another program for {:.2} s, past the {} s window: {}; the write is given up",
+                "{opening} for {:.2} s, past the {} s window: {}; the {verb} is given up",
                 spent.as_secs_f64(),
                 within.as_secs(),
-                refusal(&failure)
+                refusal
             ));
             return Err(Unwritten {
                 said: failure.to_string(),
-                held: Some(refusal(&failure)),
+                held: Some(refusal),
             });
         }
         let next = pause.min(left);
         say(&format!(
-            "BT_UPDATE_JOURNAL held by another program for {:.2} s: {}; asked again in {} ms",
+            "{opening} for {:.2} s: {}; asked again in {} ms",
             spent.as_secs_f64(),
-            refusal(&failure),
+            refusal,
             next.as_millis()
         ));
         if !wait(next) {
             return Err(Unwritten {
                 said: failure.to_string(),
-                held: Some(refusal(&failure)),
+                held: Some(refusal),
             });
         }
         pause = pause.saturating_mul(2).min(JOURNAL_HELD_PAUSE_CAP);
@@ -468,6 +574,13 @@ impl<'w> Journaled<'w> {
 
     pub(crate) fn phase(&self) -> PhaseKind {
         self.journal.body.phase.kind()
+    }
+
+    /// **The worker this holder writes from, and its window for a held
+    /// file** — what a layout's moves are asked again through and for
+    /// ([`move_held_within`]).
+    pub(crate) fn held_door(&self) -> (&'w WorkerCtx, Duration) {
+        (self.worker, self.held_within)
     }
 
     /// **Record `event` as `actor`**: the next phase by the protocol, allowed
@@ -3031,6 +3144,17 @@ pub(crate) fn journal_held_words(error: &str) -> [OsString; 2] {
     ]
 }
 
+/// **The words that name the member another program held open past the
+/// window** — `--update-held-file <name>` (T-UPDATE-MOVE-HELD-RETRY), after
+/// [`journal_held_words`], whose refusal it was: the card then names the file
+/// instead of the update record.
+pub(crate) fn held_file_words(name: &str) -> [OsString; 2] {
+    [
+        OsString::from(cli::UPDATE_HELD_FILE_FLAG),
+        OsString::from(name),
+    ]
+}
+
 /// **The words that start the installed build as the trial of `txn`**:
 /// `--update-trial <txn> <nonce>` (U-12's frozen v1 flag).
 pub(crate) fn trial_words(txn: TxnId, nonce: &Nonce) -> [OsString; 3] {
@@ -3511,7 +3635,7 @@ mod held_journal_tests {
 
     /// A journal held for `held` by another program — "拒绝访问。" in the
     /// system's words on this machine's language, a mixed-script refusal —
-    /// written through [`write_held_within`] with `within`: the answer, every
+    /// written through [`asked_while_held`] with `within`: the answer, every
     /// line said, and the time asked for in all.
     fn held_for(
         held: Duration,
@@ -3519,8 +3643,9 @@ mod held_journal_tests {
     ) -> (Result<(), Unwritten>, Vec<String>, Duration) {
         let now = std::cell::Cell::new(Duration::ZERO);
         let mut said = Vec::new();
-        let answer = write_held_within(
+        let answer = asked_while_held(
             within,
+            &Asked::JOURNAL,
             || {
                 if now.get() < held {
                     Err(Refusal("拒绝访问。 Access is denied. (os error 5)"))
@@ -3528,8 +3653,7 @@ mod held_journal_tests {
                     Ok(())
                 }
             },
-            |_| true,
-            |refusal| refusal.0.to_owned(),
+            |refusal| Some(refusal.0.to_owned()),
             &mut || now.get(),
             &mut |pause| {
                 now.set(now.get() + pause);
@@ -3577,7 +3701,7 @@ mod held_journal_tests {
     /// that the write is given up; a hold that is let go says only its own
     /// rounds, and a refusal that is no hold is not asked again.
     ///
-    /// MUTATION: say nothing in `write_held_within` (both `say(..)` calls
+    /// MUTATION: say nothing in `asked_while_held` (both `say(..)` calls
     /// removed) — no line.
     #[test]
     fn every_held_round_is_said_with_its_refusal_and_its_time() {
@@ -3607,20 +3731,116 @@ mod held_journal_tests {
         // Not a hold: one ask, nothing said.
         let mut asks = 0;
         let mut said = Vec::new();
-        let answer = write_held_within(
+        let answer = asked_while_held(
             JOURNAL_HELD_WITHIN,
+            &Asked::JOURNAL,
             || {
                 asks += 1;
                 Err(Refusal("磁盘已满 the disk is full"))
             },
-            |_| false,
-            |refusal| refusal.0.to_owned(),
+            |_| None,
             &mut || Duration::ZERO,
             &mut |_| true,
             &mut |line| said.push(line.to_owned()),
         );
         let refused = answer.expect_err("refused");
         assert_eq!((asks, said.len(), refused.held), (1, 0, None));
+    }
+
+    /// RED (T-UPDATE-MOVE-HELD-RETRY) — **a member's move held for a moment
+    /// is asked again, its rounds said with the member's name, and lands; one
+    /// held past the window is given up as a move, the refusal kept for the
+    /// card** — the journal's window and pauses, on a clock of the test's own.
+    ///
+    /// MUTATION: in `asked_while_held`, give up at the first held round (the
+    /// old bare move) — the moment's hold is not carried.
+    #[test]
+    fn a_held_move_is_asked_again_and_said_with_its_member() {
+        let held_for = |held: Duration| {
+            let now = std::cell::Cell::new(Duration::ZERO);
+            let mut said = Vec::new();
+            let answer = asked_while_held(
+                JOURNAL_HELD_WITHIN,
+                &Asked {
+                    opening: "BT_UPDATE_APPLY `folio.exe` held by another program",
+                    verb: "move",
+                },
+                || {
+                    if now.get() < held {
+                        Err(Refusal(
+                            "另一个程序正在使用此文件，进程无法访问。 (os error 32)",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |refusal| Some(refusal.0.to_owned()),
+                &mut || now.get(),
+                &mut |pause| {
+                    now.set(now.get() + pause);
+                    true
+                },
+                &mut |line| said.push(line.to_owned()),
+            );
+            (answer, said)
+        };
+        // 10 and 20 ms: two refused rounds, then the move lands.
+        let (answer, said) = held_for(Duration::from_millis(25));
+        assert!(answer.is_ok(), "{said:?}");
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(
+            said.iter().all(|line| line
+                .starts_with("BT_UPDATE_APPLY `folio.exe` held by another program for ")
+                && line.contains("(os error 32); asked again in ")),
+            "{said:?}"
+        );
+        // Past the window: the move is given up, and the refusal kept.
+        let (answer, said) = held_for(Duration::from_secs(60));
+        let refused = answer.expect_err("given up");
+        assert_eq!(
+            refused.held.as_deref(),
+            Some("另一个程序正在使用此文件，进程无法访问。 (os error 32)")
+        );
+        assert_eq!(
+            said.last().map(String::as_str),
+            Some(
+                "BT_UPDATE_APPLY `folio.exe` held by another program for 10.00 s, past the 10 s window: 另一个程序正在使用此文件，进程无法访问。 (os error 32); the move is given up"
+            )
+        );
+    }
+
+    /// RED (T-UPDATE-MOVE-HELD-RETRY) — **only a rename another program's
+    /// hold refused is a hold**: "already exists" at the destination (I1′: a
+    /// move never replaces), and a flush after a rename that landed, are
+    /// answered at once, never asked again — on Windows, where a hold is a
+    /// refusal; elsewhere nothing is.
+    ///
+    /// MUTATION: `held_refusal` answers `Some` for every failure.
+    #[test]
+    fn only_a_held_rename_is_asked_again() {
+        let failure = |stage, code| install_txn::Failure {
+            stage,
+            path: PathBuf::from("set").join("folio.exe"),
+            error: io::Error::from_raw_os_error(code),
+        };
+        let windows = bt_platform::host_platform() == bt_platform::HostPlatform::Windows;
+        assert_eq!(
+            held_refusal(&failure(install_txn::Stage::Rename, 32)).is_some(),
+            windows
+        );
+        assert_eq!(
+            held_refusal(&failure(install_txn::Stage::Rename, 5)).is_some(),
+            windows
+        );
+        // ERROR_ALREADY_EXISTS, and a refused flush after the rename.
+        assert_eq!(
+            held_refusal(&failure(install_txn::Stage::Rename, 183)),
+            None
+        );
+        assert_eq!(
+            held_refusal(&failure(install_txn::Stage::FlushDirectory, 5)),
+            None
+        );
     }
 
     /// RED (T-JOURNAL-WRITE-UNDER-HOLD, round 3) — **a write given up whose

@@ -697,6 +697,10 @@ impl<W: crate::update_apply_windows::World> crate::update_apply_windows::World
         self.world.moved(done);
     }
 
+    fn move_held(&mut self, step: &crate::update_txn::Move) {
+        self.world.move_held(step);
+    }
+
     fn carry(
         &mut self,
         worker: &WorkerCtx,

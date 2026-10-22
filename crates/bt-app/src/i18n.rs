@@ -3244,6 +3244,10 @@ text_entries! {
     /// Another program held the update's journal open past the applier's window
     /// (`update_job::Failure::JournalHeld`; 0.4.8 E4); `{error}` is the system's refusal.
     UpdateFailedJournalHeld,
+    /// Another program held a member of the update open past the applier's window
+    /// (`update_job::Failure::JournalHeld` with its `file`; T-UPDATE-MOVE-HELD-RETRY); `{file}` is
+    /// the member's name, `{error}` the system's refusal.
+    UpdateFailedFileHeld,
     /// After *Updated.*, when the update was committed after its trial ended holding a person's
     /// change (`update_job::TrialChanges::NotKept`; 0.4.8 E4); `{detail}` is the detail it follows.
     UpdateCardTrialNotKept,
@@ -6432,6 +6436,11 @@ impl Text {
                 "Another program held the update record open: {error}",
                 "另一个程序占用了更新记录：{error}",
             ),
+            Self::UpdateFailedFileHeld => pick(
+                lang,
+                "Another program held {file} open: {error}",
+                "Another program held {file} open: {error}", // zh: pending T-UPDATE-MOVE-HELD-RETRY
+            ),
             Self::UpdateCardTrialNotKept => pick(
                 lang,
                 "{detail} Changes made before Folio confirmed the update were not kept.",
@@ -6624,6 +6633,10 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-UPDATE-MOVE-HELD-RETRY — the failed card's heading when another program
+        // held a member of the update open past the applier's window.
+        (Self::UpdateFailedFileHeld, HostPlatform::Windows),
+        (Self::UpdateFailedFileHeld, HostPlatform::MacOs),
         // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER — the formula's right-click row and the
         // Windows file chooser's image filter name, now passed into the system's own surfaces.
         (Self::FormulaMenuCopyLatex, HostPlatform::Windows),
@@ -7098,6 +7111,18 @@ pub fn update_card_not_kept(detail: &str) -> String {
 pub fn update_failed_journal_held(error: &str) -> String {
     Text::UpdateFailedJournalHeld
         .text()
+        .replace("{error}", error)
+}
+
+/// **The failed card's reason when another program held a member of the
+/// update open** — `Another program held folio.exe open: The process cannot
+/// access the file because it is being used by another process. (os error
+/// 32)` (T-UPDATE-MOVE-HELD-RETRY), filled from [`Text::UpdateFailedFileHeld`].
+#[must_use]
+pub fn update_failed_file_held(file: &str, error: &str) -> String {
+    Text::UpdateFailedFileHeld
+        .text()
+        .replace("{file}", file)
         .replace("{error}", error)
 }
 
@@ -8125,6 +8150,9 @@ pub enum CliText<'a> {
     RepeatedFlag(&'a str),
     /// A second bare path. One command line names one place.
     ExtraPath(&'a str),
+    /// A flag that only says something beside another, given without it
+    /// (`crate::cli::CliFault::Unpaired`, T-UPDATE-MOVE-HELD-RETRY).
+    UnpairedFlag { flag: &'a str, needs: &'a str },
     /// `--cwd` named something that is not a folder.
     ///
     /// The second sentence is the half the reader cannot see for themselves: the
@@ -8212,6 +8240,10 @@ impl CliText<'_> {
                 Lang::English => format!("{flag} was given twice."),
                 Lang::Chinese => format!("{flag} 给了两次。"),
             },
+            Self::UnpairedFlag { flag, needs } => match lang {
+                Lang::English => format!("{flag} was given without {needs}."),
+                Lang::Chinese => format!("给了 {flag}，却没有给 {needs}。"),
+            },
             Self::ExtraPath(path) => match lang {
                 Lang::English => format!("One path at a time — {path} is the second."),
                 Lang::Chinese => format!("一次只能给一个路径，{path} 是第二个。"),
@@ -8273,7 +8305,7 @@ impl CliText<'_> {
     /// The samples deliberately contain no Han characters of their own, so that
     /// the Chinese column's own words are what the Han test finds.
     #[cfg(test)]
-    pub const SAMPLES: [Self; 11] = [
+    pub const SAMPLES: [Self; 12] = [
         Self::Usage {
             profile_ids: "pwsh, winps",
         },
@@ -8281,6 +8313,10 @@ impl CliText<'_> {
         Self::UnknownFlag("--nope"),
         Self::RepeatedFlag("--profile"),
         Self::ExtraPath(r"D:\b"),
+        Self::UnpairedFlag {
+            flag: "--update-held-file",
+            needs: "--update-journal-held",
+        },
         Self::NoSuchFolder(r"D:\gone"),
         Self::NoSuchProfile("fish"),
         Self::NoSuchPath(r"D:\gone"),
@@ -10043,6 +10079,7 @@ mod tests {
                 | CliText::UnknownFlag(_)
                 | CliText::RepeatedFlag(_)
                 | CliText::ExtraPath(_)
+                | CliText::UnpairedFlag { .. }
                 | CliText::NoSuchFolder(_)
                 | CliText::NoSuchProfile(_)
                 | CliText::NoSuchPath(_)

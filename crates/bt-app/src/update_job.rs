@@ -560,8 +560,15 @@ pub(crate) enum Failure {
     /// window for a refused write** (0.4.8 E4): `error` is the operating
     /// system's last refusal, `then` the failure the journal itself shows. The
     /// card names the hold and its error and says what `then` did; it never
-    /// says that the new version did not start.
-    JournalHeld { error: String, then: Box<Failure> },
+    /// says that the new version did not start. **`file` names the member the
+    /// flip or its rollback moves when the held file was one**
+    /// (T-UPDATE-MOVE-HELD-RETRY): the card then names that file instead of
+    /// the update record; `None` is the journal.
+    JournalHeld {
+        error: String,
+        file: Option<String>,
+        then: Box<Failure>,
+    },
     /// **The update was committed after its trial ended, and what the person
     /// changed in the trial was not kept** (0.4.8 E4, R3): the trial's writes
     /// were held until a commit it never saw, and the trial left its mark in
