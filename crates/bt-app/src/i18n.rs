@@ -4006,17 +4006,17 @@ impl Text {
             Self::MergedProfileValue => pick(
                 lang,
                 "{profile}: {field}",
-                "{profile}: {field}", // zh: pending T-STORE-MERGE-PROFILES-PINS
+                "{profile}：{field}",
             ),
             Self::MergedProfilesOrder => pick(
                 lang,
                 "Order of the profiles",
-                "Order of the profiles", // zh: pending T-STORE-MERGE-PROFILES-PINS
+                "配置文件的顺序",
             ),
             Self::MergedProfileHidden => pick(
                 lang,
                 "Hidden from the pickers",
-                "Hidden from the pickers", // zh: pending T-STORE-MERGE-PROFILES-PINS
+                "从选择器中隐藏",
             ),
             Self::SeatOverflowOne => pick(
                 lang,
@@ -6633,13 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-STORE-MERGE-PROFILES-PINS — what a profiles merge names on its card.
-        (Self::MergedProfileValue, HostPlatform::Windows),
-        (Self::MergedProfileValue, HostPlatform::MacOs),
-        (Self::MergedProfilesOrder, HostPlatform::Windows),
-        (Self::MergedProfilesOrder, HostPlatform::MacOs),
-        (Self::MergedProfileHidden, HostPlatform::Windows),
-        (Self::MergedProfileHidden, HostPlatform::MacOs),
         // 0.4.8 E5: the card of a rollback that did not keep what a Folio ran over it changed.
         (Self::UpdateFailedUndone, HostPlatform::Windows),
         (Self::UpdateFailedUndone, HostPlatform::MacOs),
