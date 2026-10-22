@@ -1092,10 +1092,10 @@ pub(crate) fn web_document(uri: &str) -> WebDocument {
 /// pane at 150 % showed it, standalone Edge moved to the same 150 % display
 /// showed it, the same Edge window at 200 % did not, and an HTML page in the
 /// same pane at 150 % did not. So a PDF seat is handed an integer scale and the
-/// viewer draws the page it draws at 200 %: it fits the page to the pane's
-/// physical width either way, so the page costs about the same pixels; what
-/// changes is the viewer's own toolbar, laid out in CSS pixels that are now
-/// larger by the ratio of the two scales — a third at 150 % — and drawn so.
+/// viewer lays itself out as it does at 200 %: in a CSS viewport narrower by the
+/// ratio of the two scales (a quarter at 150 %), its controls drawn that much
+/// larger. How large the page is drawn in that viewport is the viewer's own
+/// choice.
 ///
 /// Every other document keeps the window's number: an HTML page laid out at
 /// 2.0 on a 1.5 display would be a page drawn a third larger than its author

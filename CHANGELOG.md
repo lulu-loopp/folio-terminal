@@ -25,7 +25,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
-- A PDF previewed in a pane on a display scaled to 125 %, 150 % or 175 % no longer shows letters of uneven weight and words with gaps in them. On such a display the PDF viewer's own controls are drawn larger than before (a third larger at 150 %), and its toolbar shrinks to its short form, or is not shown, in panes narrower than about 1150 pixels at 150 %. <!-- pending the refit check --> <!-- zh: pending T-PDF-TEXT-RENDERING -->
+- A PDF previewed in a pane on a display scaled to 125 %, 150 % or 175 % no longer shows letters of uneven weight and words with gaps in them. On such a display the PDF viewer's own controls are drawn larger than before (a third larger at 150 %), and its toolbar is shortened in panes narrower than about 1800 pixels at 150 %, shortened again below about 1150, and may not be shown at all. <!-- pending the refit check --> <!-- zh: pending T-PDF-TEXT-RENDERING -->
 - When Folio cannot save your window layout (a full disk, a folder that became read-only), it tells you once and stops trying again every couple of seconds; it tries again at your next change and when you quit. <!-- zh: pending T-SESSION-WRITER-NO-TIMER-RETRY -->
 - A picture that could not be loaded is no longer read again and again while the window holds many other pictures. <!-- zh: pending T-PEEK-CACHE-QUESTION-RECORDS -->
 - A GIF caught while it was being written plays once the write finishes. <!-- zh: pending T-ANIMATION-RECORDS-BOUND -->
