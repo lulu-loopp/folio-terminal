@@ -4871,12 +4871,12 @@ impl Text {
             Self::GateSaveStillOnItsWay => pick(
                 lang,
                 "A save is still on its way to the disk.",
-                "A save is still on its way to the disk.", // zh: pending T-CLOSE-GATE-WAITS
+                "仍有保存正在写入磁盘。",
             ),
             Self::GateTitleSaveNotLanded => pick(
                 lang,
                 "A save has not reached the disk. Close anyway?",
-                "A save has not reached the disk. Close anyway?", // zh: pending T-CLOSE-GATE-WAITS
+                "有保存尚未写入磁盘。仍要关闭？",
             ),
             Self::GateTitleGitDiscard => pick(lang, "Discard changes?", "放弃改动？"),
             Self::GateTitleGitDelete => pick(lang, "Delete this file?", "删除这个文件？"),
@@ -6633,14 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-CLOSE-GATE-WAITS — the line a close's question adds when its wait for a
-        // save on its way ran out.
-        (Self::GateSaveStillOnItsWay, HostPlatform::Windows),
-        (Self::GateSaveStillOnItsWay, HostPlatform::MacOs),
-        // zh: pending T-CLOSE-GATE-WAITS — the title of a close's question over saves that have
-        // not landed, with no unsaved edits.
-        (Self::GateTitleSaveNotLanded, HostPlatform::Windows),
-        (Self::GateTitleSaveNotLanded, HostPlatform::MacOs),
         // zh: pending T-CLIPBOARD-LANE — the notice a terminal paste says when the clipboard was
         // busy past its deadline.
         (Self::PasteClipboardBusy, HostPlatform::Windows),
