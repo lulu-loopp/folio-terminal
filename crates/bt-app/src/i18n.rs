@@ -4286,7 +4286,7 @@ impl Text {
             Self::CapPowerShellCheckNotRun => pick(
                 lang,
                 "PowerShell integration could not be determined for these arguments: the check could not run. Folio asks again when this page opens.",
-                "PowerShell integration could not be determined for these arguments: the check could not run. Folio asks again when this page opens.", // zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE
+                "自定义启动参数，PowerShell 整合状态未知：检测未能运行。再次打开此页时重新检测。",
             ),
             Self::CapPowerShellConstrained => pick(
                 lang,
@@ -6633,10 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE — the Profiles row of an edition whose
-        // `$PROFILE` check could not run.
-        (Self::CapPowerShellCheckNotRun, HostPlatform::Windows),
-        (Self::CapPowerShellCheckNotRun, HostPlatform::MacOs),
         // zh: pending T-PREVIEW-NO-EXCHANGE-RULING — the sentence a preview save written by an
         // ordinary write says the first time on each drive that cannot exchange.
         (Self::PreviewSavedOrdinarily, HostPlatform::Windows),
