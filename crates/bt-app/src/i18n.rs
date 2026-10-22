@@ -4928,7 +4928,7 @@ impl Text {
             Self::ShutdownSavingWork => pick(
                 lang,
                 "Saving your work",
-                "Saving your work", // zh: pending T-ENDSESSION-SAVES
+                "正在保存你的工作",
             ),
             Self::QuitDocumentsNotSaved => pick(
                 lang,
@@ -6633,10 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-ENDSESSION-SAVES — the line the shutdown screen shows while the edits,
-        // the owed documents and the layout are written.
-        (Self::ShutdownSavingWork, HostPlatform::Windows),
-        (Self::ShutdownSavingWork, HostPlatform::MacOs),
         // zh: pending T-CWD-FROM-PROCESS — the foot of a files card or column opened on the home
         // folder because the pane's folder could not be read.
         (Self::FilesFolderUnknown, HostPlatform::Windows),
