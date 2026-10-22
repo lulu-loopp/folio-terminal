@@ -3232,6 +3232,10 @@ text_entries! {
     /// Another program held the update's journal open past the applier's window
     /// (`update_job::Failure::JournalHeld`; 0.4.8 E4); `{error}` is the system's refusal.
     UpdateFailedJournalHeld,
+    /// Another program held a member of the update open past the applier's window
+    /// (`update_job::Failure::JournalHeld` with its `file`; T-UPDATE-MOVE-HELD-RETRY); `{file}` is
+    /// the member's name, `{error}` the system's refusal.
+    UpdateFailedFileHeld,
     /// After *Updated.*, when the update was committed after its trial ended holding a person's
     /// change (`update_job::TrialChanges::NotKept`; 0.4.8 E4); `{detail}` is the detail it follows.
     UpdateCardTrialNotKept,
@@ -6405,6 +6409,11 @@ impl Text {
                 "Another program held the update record open: {error}",
                 "另一个程序占用了更新记录：{error}",
             ),
+            Self::UpdateFailedFileHeld => pick(
+                lang,
+                "Another program held {file} open: {error}",
+                "Another program held {file} open: {error}", // zh: pending T-UPDATE-MOVE-HELD-RETRY
+            ),
             Self::UpdateCardTrialNotKept => pick(
                 lang,
                 "{detail} Changes made before Folio confirmed the update were not kept.",
@@ -6597,6 +6606,10 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-UPDATE-MOVE-HELD-RETRY — the failed card's heading when another program
+        // held a member of the update open past the applier's window.
+        (Self::UpdateFailedFileHeld, HostPlatform::Windows),
+        (Self::UpdateFailedFileHeld, HostPlatform::MacOs),
         // zh: pending T-ENDSESSION-SAVES — the line the shutdown screen shows while the edits,
         // the owed documents and the layout are written.
         (Self::ShutdownSavingWork, HostPlatform::Windows),
@@ -7065,6 +7078,18 @@ pub fn update_card_not_kept(detail: &str) -> String {
 pub fn update_failed_journal_held(error: &str) -> String {
     Text::UpdateFailedJournalHeld
         .text()
+        .replace("{error}", error)
+}
+
+/// **The failed card's reason when another program held a member of the
+/// update open** — `Another program held folio.exe open: The process cannot
+/// access the file because it is being used by another process. (os error
+/// 32)` (T-UPDATE-MOVE-HELD-RETRY), filled from [`Text::UpdateFailedFileHeld`].
+#[must_use]
+pub fn update_failed_file_held(file: &str, error: &str) -> String {
+    Text::UpdateFailedFileHeld
+        .text()
+        .replace("{file}", file)
         .replace("{error}", error)
 }
 

@@ -315,10 +315,20 @@ pub(crate) struct Start<'a> {
     pub(crate) trial: Option<&'a cli::UpdateTrialArg>,
     pub(crate) failed: Option<&'a Path>,
     /// **The operating system's refusal of a journal write that outlasted its
-    /// holder's window** (`--update-journal-held`, 0.4.8 E4): the lock holder
-    /// that started this build with `--update-failed` names it, and the card
-    /// says it.
-    pub(crate) journal_held: Option<&'a str>,
+    /// holder's window** (`--update-journal-held`, 0.4.8 E4) — or of a
+    /// member's move, which `--update-held-file` names
+    /// (T-UPDATE-MOVE-HELD-RETRY): the lock holder that started this build
+    /// with `--update-failed` names it, and the card says it.
+    pub(crate) journal_held: Option<HeldTold<'a>>,
+}
+
+/// **What a start was told another program held open past its holder's
+/// window** ([`Start::journal_held`]): the system's refusal, and the member
+/// it was a move of — `None` for the journal.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HeldTold<'a> {
+    pub(crate) error: &'a str,
+    pub(crate) file: Option<&'a str>,
 }
 
 /// What the pass decided.
@@ -364,7 +374,13 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
         argv: &argv,
         trial: request.update_trial.as_ref(),
         failed: request.update_failed.as_deref(),
-        journal_held: request.update_journal_held.as_deref(),
+        journal_held: request
+            .update_journal_held
+            .as_deref()
+            .map(|error| HeldTold {
+                error,
+                file: request.update_held_file.as_deref(),
+            }),
     };
     match run(&start, &mut Machine) {
         Verdict::Exit(code) => bt_platform::leave_process(code),
@@ -498,8 +514,9 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             AfterRollback::Incomplete => unfinished(&seen, start.home, false),
         })
         .map(|failure| match start.journal_held {
-            Some(error) => Failure::JournalHeld {
-                error: error.to_owned(),
+            Some(told) => Failure::JournalHeld {
+                error: told.error.to_owned(),
+                file: told.file.map(str::to_owned),
                 then: Box::new(failure),
             },
             None => failure,
@@ -556,8 +573,9 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             let failed = match action {
                 StartAction::Retire => match undone(&seen, world) {
                     Some(undone) => Some(match failed {
-                        Some(Failure::JournalHeld { error, .. }) => Failure::JournalHeld {
+                        Some(Failure::JournalHeld { error, file, .. }) => Failure::JournalHeld {
                             error,
+                            file,
                             then: Box::new(undone),
                         },
                         _ => undone,
@@ -2854,7 +2872,7 @@ mod tests {
                     argv: &argv,
                     trial,
                     failed: Some(&journal),
-                    journal_held,
+                    journal_held: journal_held.map(|error| HeldTold { error, file: None }),
                 },
                 world,
             )
@@ -3014,6 +3032,7 @@ mod tests {
                 failed,
                 Some(Failure::JournalHeld {
                     error: refusal.to_owned(),
+                    file: None,
                     then: Box::new(Failure::Interrupted),
                 })
             );
@@ -3044,6 +3063,75 @@ mod tests {
                 "{failed:?}"
             );
             assert_eq!(card.folder.as_deref(), Some(scene.home.root()));
+        }
+
+        /// RED (T-UPDATE-MOVE-HELD-RETRY) — **a start told that another
+        /// program held a member of the update open past its holder's window
+        /// names that file, with the system's refusal, over what the journal
+        /// shows** — never the update record, which was not the held file.
+        ///
+        /// MUTATION: in `run`, drop `told.file` (`file: None`) — the card
+        /// names the update record.
+        #[test]
+        fn a_member_held_past_the_window_is_named_on_the_card_by_its_file() {
+            use crate::update_card;
+            use crate::update_job::Job;
+            use crate::update_txn::{Outcome, Phase};
+            let Some(scene) = Scene::new("member-held") else {
+                return;
+            };
+            let refusal = "另一个程序正在使用此文件，进程无法访问。 (os error 32)";
+            // The flip's move cut by the hold, then rolled back: retired, no
+            // trial begun.
+            write_phase(
+                &scene,
+                Phase::Retired {
+                    outcome: Outcome::RolledBack,
+                    untried: true,
+                },
+            );
+            let journal = scene.home.journal();
+            let argv = [
+                OsString::from(cli::UPDATE_FAILED_FLAG),
+                journal.clone().into_os_string(),
+            ];
+            let mut world = Recorded {
+                admission: Some(scene.home.admission()),
+                ..Recorded::default()
+            };
+            let (failed, ..) = continued_with(run(
+                &Start {
+                    own_exe: &scene.own_exe,
+                    home: &scene.home,
+                    argv: &argv,
+                    trial: None,
+                    failed: Some(&journal),
+                    journal_held: Some(HeldTold {
+                        error: refusal,
+                        file: Some("folio.exe"),
+                    }),
+                },
+                &mut world,
+            ));
+            assert_eq!(
+                failed,
+                Some(Failure::JournalHeld {
+                    error: refusal.to_owned(),
+                    file: Some("folio.exe".to_owned()),
+                    then: Box::new(Failure::Interrupted),
+                })
+            );
+            let job: Job<u32> = Job::with_offers(true).after_rollback(failed);
+            let card = update_card::paint(job.state()).expect("a card");
+            assert_eq!(
+                (card.heading.as_deref(), card.detail.as_deref()),
+                (
+                    Some(
+                        "Another program held folio.exe open: 另一个程序正在使用此文件，进程无法访问。 (os error 32)"
+                    ),
+                    Some(crate::i18n::Text::UpdateCardRestored.text())
+                )
+            );
         }
 
         /// RED (0.4.8 E4, R3) — **the start that retires a transaction
@@ -3215,6 +3303,7 @@ mod tests {
                 failed,
                 Some(Failure::JournalHeld {
                     error: "拒绝访问。 (os error 5)".to_owned(),
+                    file: None,
                     then: Box::new(Failure::Undone {
                         version: version.to_owned()
                     }),

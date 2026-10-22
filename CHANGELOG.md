@@ -31,6 +31,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- On Windows, an update is no longer rolled back, or left unfinished, because an antivirus or another program held one of Folio's files for a moment while the update moved it into place or back: Folio waits up to ten seconds for each file, and if one stays held, the card names that file, with the error Windows gave. <!-- zh: pending T-UPDATE-MOVE-HELD-RETRY -->
 - On Windows, saving over a recording or another file right after Folio has shown it is no longer refused because Folio still has the file open. <!-- zh: pending T-ANSWER-AFTER-THE-FILE-IS-CLOSED -->
 - A window no longer keeps one processor busy after a clock it was waiting for has passed (most often an agent's pane in a tab not on screen), which under a heavy CPU load left the terminal slow to draw and scroll. <!-- zh: pending T-WINDOW-THREAD-UNDER-LOAD -->
 - When Folio cannot save your window layout (a full disk, a folder that became read-only), it tells you once and stops trying again every couple of seconds; it tries again at your next change and when you quit. <!-- zh: pending T-SESSION-WRITER-NO-TIMER-RETRY -->

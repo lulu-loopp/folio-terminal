@@ -176,6 +176,8 @@ struct Fake {
     trial: Trial,
     home: Home,
     on_move: Option<MoveHook>,
+    /// Looks at each refused round of a held move (T-UPDATE-MOVE-HELD-RETRY).
+    on_move_held: Option<MoveHook>,
     on_disarm: Option<DisarmHook>,
     /// **Hold `journal.json` open without delete sharing from the trial's
     /// launch** (U-34), as a scanner might: every rename over it is refused
@@ -357,6 +359,12 @@ impl World for Fake {
     fn moved(&mut self, done: &Move) {
         if let Some(look) = &mut self.on_move {
             look(done);
+        }
+    }
+
+    fn move_held(&mut self, step: &Move) {
+        if let Some(look) = &mut self.on_move_held {
+            look(step);
         }
     }
 
@@ -578,6 +586,7 @@ impl Install {
             trial,
             home: self.home.clone(),
             on_move: None,
+            on_move_held: None,
             on_disarm: None,
             hold_at_launch: false,
             held: None,
@@ -6053,6 +6062,7 @@ fn bare_world(home: Home) -> Fake {
         trial: Trial::Silent,
         home,
         on_move: None,
+        on_move_held: None,
         on_disarm: None,
         hold_at_launch: false,
         held: None,
@@ -7020,4 +7030,352 @@ fn the_windows_exit_opens_the_rescue_over_a_journal_it_cannot_read() {
         Opens::Installed { failed: false },
         "no journal at all"
     );
+}
+
+// ── a member held at move time (T-UPDATE-MOVE-HELD-RETRY) ───────────────────
+//
+// The flip's and the rollback's moves, refused because another program holds
+// the member open — a scanner's hold, sharing reading and writing but not
+// deletion (`trust_harness::hold_without_delete_sharing`), so the staged
+// set's revalidation and the rollback's digests read through it as they do
+// through an on-access scan — are asked again within the window, each round
+// said; the hold is let go at a counted round through `World::move_held`, so
+// no verdict here is a measure of time.
+
+/// The hold this section's tests take, shared between the looks that take it
+/// and let it go.
+type SharedHold = Arc<Mutex<Option<std::fs::File>>>;
+
+/// The flip's first move into the install: how many moves come before it,
+/// and its member's name.
+fn first_move_in(install: &Install) -> (usize, String) {
+    let moves = install.inventories.forward_moves();
+    let at = moves
+        .iter()
+        .position(|step| step.to == Place::Install)
+        .expect("the flip moves a new file in");
+    (at, moves[at].name.clone())
+}
+
+/// **Let the hold go at the `let_go_at`-th refused round of `name`'s move**
+/// (never with `None`), counting that move's refused rounds.
+fn let_go_at_round(
+    world: &mut Fake,
+    hold: &SharedHold,
+    name: &str,
+    let_go_at: Option<usize>,
+) -> Arc<Mutex<usize>> {
+    let rounds = Arc::new(Mutex::new(0_usize));
+    let (counted, hold, name) = (Arc::clone(&rounds), Arc::clone(hold), name.to_owned());
+    world.on_move_held = Some(Box::new(move |step| {
+        if step.name != name {
+            return;
+        }
+        let mut rounds = counted.lock().unwrap();
+        *rounds += 1;
+        if Some(*rounds) == let_go_at {
+            hold.lock().unwrap().take();
+        }
+    }));
+    rounds
+}
+
+/// **`set\<name>` held from the instant the flip has made every move before
+/// the first one in** — after the staged set was verified, as a scan of the
+/// fresh set would — and let go at the `let_go_at`-th refused round of its
+/// move.
+fn held_in_set_at_the_flip(
+    install: &Install,
+    world: &mut Fake,
+    let_go_at: Option<usize>,
+) -> (SharedHold, Arc<Mutex<usize>>, String) {
+    let (before, name) = first_move_in(install);
+    let hold: SharedHold = Arc::new(Mutex::new(None));
+    let rounds = let_go_at_round(world, &hold, &name, let_go_at);
+    let (taken, held) = (Arc::clone(&hold), install.folder(Place::Set).join(&name));
+    let mut moves = 0;
+    world.on_move = Some(Box::new(move |_| {
+        moves += 1;
+        if moves == before {
+            *taken.lock().unwrap() = Some(
+                bt_platform::trust_harness::hold_without_delete_sharing(&held)
+                    .expect("the test holds the staged file"),
+            );
+        }
+    }));
+    (hold, rounds, name)
+}
+
+/// The lines that say a round of `name`'s move, under `subject`, was refused
+/// and asked again.
+fn held_rounds_said(world: &Fake, subject: &str, name: &str) -> usize {
+    let opening = format!("{subject} `{name}` held by another program for ");
+    world
+        .said
+        .iter()
+        .filter(|line| line.starts_with(&opening) && line.contains("; asked again in "))
+        .count()
+}
+
+/// Whether `words` carry a hold of the member `name`: `--update-journal-held`
+/// with the system's refusal, then `--update-held-file <name>`.
+fn names_the_held_file(words: &[OsString], name: &str) -> bool {
+    words.windows(4).any(|four| {
+        four[0] == cli::UPDATE_JOURNAL_HELD_FLAG
+            && !four[1].is_empty()
+            && four[2] == cli::UPDATE_HELD_FILE_FLAG
+            && four[3] == name
+    })
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **a member of the staged set held for a
+/// moment at its move into the install is asked again, and the update goes
+/// on to its commit**: the move refused twice, each round one
+/// `` BT_UPDATE_APPLY `<name>` `` line, then let go and moved. Before, the
+/// first refusal cut the flip and a sound update was rolled back.
+///
+/// MUTATION: in `update_apply::move_held_within`, read no failure as a hold
+/// (`|_| None`) — the first refusal cuts, and the road rolls back.
+#[test]
+fn a_member_held_for_a_moment_at_the_flip_is_moved_once_let_go() {
+    let Some(install) = Install::new("held-flip") else {
+        return;
+    };
+    let mut world = install.world(Trial::Answers);
+    let (hold, rounds, name) = held_in_set_at_the_flip(&install, &mut world, Some(2));
+    let (ended, world) = applied(&install, limits(20_000, 20_000), world);
+    drop(hold);
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert_eq!(*rounds.lock().unwrap(), 2, "{:?}", world.said);
+    assert_eq!(
+        held_rounds_said(&world, "BT_UPDATE_APPLY", &name),
+        2,
+        "{:?}",
+        world.said
+    );
+    assert!(install.holds(Place::Install, &install.new));
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **a member held past the window cuts
+/// the flip with the member and the hold named, the rollback restores the
+/// old build, and the build started after it is told which file was held**
+/// (`--update-held-file <name>` after `--update-journal-held <refusal>`), so
+/// its card names the file — never the update record.
+///
+/// MUTATION: in `update_apply_windows::cut`, keep no file (`file: None`) —
+/// the start is told the journal was held.
+#[test]
+fn a_member_held_past_the_window_is_named_and_the_old_build_restored() {
+    let Some(install) = Install::new("held-flip-long") else {
+        return;
+    };
+    let mut world = install.world(Trial::Answers);
+    let (hold, rounds, name) = held_in_set_at_the_flip(&install, &mut world, None);
+    let (ended, world) = applied(&install, limits(20_000, 20_000), world);
+    drop(hold);
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(*rounds.lock().unwrap() > 1, "{:?}", world.said);
+    assert!(
+        said_at(
+            &world,
+            &format!(
+                "BT_UPDATE_APPLY the move of `{name}` failed: another program held it open past the window: "
+            )
+        )
+        .is_some(),
+        "{:?}",
+        world.said
+    );
+    assert!(
+        said_at(&world, "; the move is given up").is_some(),
+        "{:?}",
+        world.said
+    );
+    rolled_back_on_disk(&install);
+    let [(program, words)] = world.opened.as_slice() else {
+        panic!("one start: {:?} {:?}", world.opened, world.said);
+    };
+    assert_eq!(program, &install.installed, "the old build opens");
+    assert!(words.starts_with(&failed_words(&install.home)), "{words:?}");
+    assert!(names_the_held_file(words, &name), "{words:?}");
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **a move refused because its
+/// destination is already taken is no hold: the flip is cut at once**, no
+/// round asked or said (I1′: a move never replaces), and the rollback stops
+/// at the foreign file as before.
+///
+/// MUTATION: `update_apply::held_refusal` answers `Some` for every failure
+/// — the "already exists" refusal is asked again for the window, each round
+/// said.
+#[test]
+fn a_taken_destination_cuts_the_flip_without_asking_again() {
+    let Some(install) = Install::new("taken-dest") else {
+        return;
+    };
+    let mut world = install.world(Trial::Answers);
+    let (before, _) = first_move_in(&install);
+    let rounds = let_go_at_round(&mut world, &Arc::new(Mutex::new(None)), "folio.exe", None);
+    let obstacle = install.installed.clone();
+    let mut moves = 0;
+    world.on_move = Some(Box::new(move |_| {
+        moves += 1;
+        if moves == before {
+            std::fs::write(&obstacle, b"somebody else's file").unwrap();
+        }
+    }));
+    let (ended, world) = applied(&install, limits(20_000, 20_000), world);
+    assert!(
+        matches!(ended, Ended::Stuck(_)),
+        "{ended:?} {:?}",
+        world.said
+    );
+    assert_eq!(*rounds.lock().unwrap(), 0, "{:?}", world.said);
+    assert_eq!(
+        said_at(&world, "held by another program"),
+        None,
+        "{:?}",
+        world.said
+    );
+    assert!(
+        said_at(
+            &world,
+            "BT_UPDATE_APPLY the move of `folio.exe` failed: install_txn "
+        )
+        .is_some(),
+        "{:?}",
+        world.said
+    );
+}
+
+/// What [`held_in_backup_at_the_rollback`] sets up: the install, the world,
+/// the hold, its counted rounds and the held member's name.
+type HeldAtTheRollback = (Install, Fake, SharedHold, Arc<Mutex<usize>>, String);
+
+/// **A rollback's road with the old `name` held in `backup\`**: the flip
+/// done, the journal at `RollbackIntent` with no trial, and the hold let go
+/// at the `let_go_at`-th refused round of its move back.
+fn held_in_backup_at_the_rollback(
+    tag: &str,
+    let_go_at: Option<usize>,
+) -> Option<HeldAtTheRollback> {
+    let install = Install::new(tag)?;
+    flipped_at(
+        &install,
+        Phase::RollbackIntent {
+            trial: None,
+            trial_started: false,
+        },
+    );
+    let name = install.inventories.old_present[0].name.clone();
+    let hold: SharedHold = Arc::new(Mutex::new(Some(
+        bt_platform::trust_harness::hold_without_delete_sharing(
+            &install.folder(Place::Backup).join(&name),
+        )
+        .expect("the test holds the old file in the backup"),
+    )));
+    let mut world = install.world(Trial::Silent);
+    let rounds = let_go_at_round(&mut world, &hold, &name, let_go_at);
+    Some((install, world, hold, rounds, name))
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **the rollback's move back of an old
+/// file held for a moment is asked again, and the rollback finishes**: two
+/// refused rounds, each one `` BT_UPDATE_ROLLBACK `<name>` `` line, then
+/// `RolledBack` and the old build whole. Before, the first refusal left the
+/// rollback `Stuck`.
+///
+/// MUTATION: in `update_apply::move_held_within`, read no failure as a hold
+/// (`|_| None`) — `Stuck` at the first refusal.
+#[test]
+fn an_old_file_held_for_a_moment_at_the_rollback_is_moved_back_once_let_go() {
+    let Some((install, world, hold, rounds, name)) =
+        held_in_backup_at_the_rollback("held-back", Some(2))
+    else {
+        return;
+    };
+    let (code, world) = recovered(&install, limits(20_000, 20_000), world);
+    drop(hold);
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert_eq!(*rounds.lock().unwrap(), 2, "{:?}", world.said);
+    assert_eq!(
+        held_rounds_said(&world, "BT_UPDATE_ROLLBACK", &name),
+        2,
+        "{:?}",
+        world.said
+    );
+    assert_eq!(install.header().outcome, HeaderOutcome::RolledBack);
+    rolled_back_on_disk(&install);
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **an old file held past the window
+/// leaves the rollback `Stuck` with the member and the hold named, and the
+/// build started after it is told which file was held.**
+///
+/// MUTATION: in `update_apply_windows::cut`, keep no file (`file: None`) —
+/// the start is told the journal was held.
+#[test]
+fn an_old_file_held_past_the_window_leaves_the_rollback_stuck_and_named() {
+    let Some((install, world, hold, rounds, name)) =
+        held_in_backup_at_the_rollback("held-back-long", None)
+    else {
+        return;
+    };
+    let (code, world) = recovered(&install, limits(20_000, 20_000), world);
+    drop(hold);
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert!(*rounds.lock().unwrap() > 1, "{:?}", world.said);
+    let Phase::Stuck { last_error, .. } = install.on_disk().body.phase else {
+        panic!("{:?} {:?}", install.on_disk().body.phase, world.said);
+    };
+    assert!(
+        last_error.starts_with(&format!(
+            "the move of `{name}` to Install: another program held it open past the window: "
+        )),
+        "{last_error}"
+    );
+    let [(_, words)] = world.opened.as_slice() else {
+        panic!("one start: {:?} {:?}", world.opened, world.said);
+    };
+    assert!(names_the_held_file(words, &name), "{words:?}");
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **the phase's right to a move is asked
+/// before its first attempt, never after**: under a journal whose phase does
+/// not allow the applier to move (`Handoff`), the flip refuses with the
+/// right named, nothing is moved and no round is asked — however long a
+/// member is held, the effect is asked once per step, outside its rounds.
+///
+/// MUTATION: in `Ours::activate`, ask `journal.may` after the move — the
+/// first old file is moved before the refusal.
+#[test]
+fn the_right_to_a_move_is_asked_before_its_first_attempt() {
+    let Some(install) = Install::new("held-may") else {
+        return;
+    };
+    assert_eq!(install.on_disk().body.phase.kind(), PhaseKind::Handoff);
+    let (home, installed, txn, inventories, journal, world) = (
+        install.home.clone(),
+        install.installed.clone(),
+        install.txn,
+        install.inventories.clone(),
+        install.on_disk(),
+        install.world(Trial::Silent),
+    );
+    let (answer, said) = on_a_worker(move |worker| {
+        let mut world = world;
+        let journaled = Journaled::of(&home, worker, journal, Duration::from_secs(2));
+        let site = Site {
+            home: &home,
+            installed: &installed,
+            txn,
+            inventories: &inventories,
+        };
+        let answer = Ours.activate(&site, &journaled, &mut world);
+        (answer, world.said)
+    });
+    let refused = answer.expect_err("the phase does not allow a move");
+    assert!(refused.contains("may not"), "{refused}");
+    assert!(said.is_empty(), "{said:?}");
+    nothing_moved(&install);
 }
