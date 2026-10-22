@@ -33,6 +33,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Fixed
 
 - When an update could not be finished and Folio opened from the copy it keeps for that case, the window now shows the card that says the update is not finished and names its folder, as the installed Folio's window does. <!-- zh: pending T-RESCUE-COPY-CARD -->
+- The copy Folio opens when an update could not be finished is no longer offered that update and no longer checks for updates; before, an update started from it would have been prepared inside that copy's folder instead of the installed Folio's. <!-- zh: pending T-RESCUE-WINDOW-NO-OFFER -->
 - On Windows, saving over a recording or another file right after Folio has shown it is no longer refused because Folio still has the file open. <!-- zh: pending T-ANSWER-AFTER-THE-FILE-IS-CLOSED -->
 - A window no longer keeps one processor busy after a clock it was waiting for has passed (most often an agent's pane in a tab not on screen), which under a heavy CPU load left the terminal slow to draw and scroll. <!-- zh: pending T-WINDOW-THREAD-UNDER-LOAD -->
 - When Folio cannot save your window layout (a full disk, a folder that became read-only), it tells you once and stops trying again every couple of seconds; it tries again at your next change and when you quit. <!-- zh: pending T-SESSION-WRITER-NO-TIMER-RETRY -->
