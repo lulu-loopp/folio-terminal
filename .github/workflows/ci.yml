@@ -1050,6 +1050,7 @@ jobs:
           --package bt-render --package bt-winres --package bt-source
           --package bt-workbench --package bt-app --package bt-lint-probe
           --package bt-testpath --package bt-effects --package bt-compose
+          --package bt-render-probe
           -- --check
 
       # The two excluded packages are still *linted* — their libraries are
@@ -1069,10 +1070,11 @@ jobs:
           -- -D warnings
 
       # Ours and alacritty's upstream suite in one go, because vendor is a
-      # member — minus the two crates whose tests are about hardware. `bt-pty`
-      # starts real ConPTY sessions and `bt-render` asks for a real adapter;
-      # each has a job of its own below, where the machine it needs is set up
-      # and where a failure means something specific.
+      # member — minus the three crates whose tests are about hardware. `bt-pty`
+      # starts real ConPTY sessions, and `bt-render` and `bt-render-probe` (the
+      # headless probe and the glyph read-back, thread-door note revision (l)4)
+      # ask for a real adapter; each has a job of its own below, where the
+      # machine it needs is set up and where a failure means something specific.
       #
       # Its own budget, under the job's, so that a run past it fails here with
       # a line naming the budget instead of being cancelled, without a reason,
@@ -1085,7 +1087,7 @@ jobs:
       # clock, not by this step's.
       - name: test
         timeout-minutes: 65
-        run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render
+        run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render --exclude bt-render-probe
 
       # The adapter and cell_capture modules are the vendor compatibility seam. Their job is to
       # report terminal facts; importing document, detection, or viewport policy there recreates
@@ -1435,14 +1437,14 @@ jobs:
       # DXGI prefers a `d3d10warp.dll` in the loading binary's own directory,
       # which is `target/debug/deps`.
       - name: build the render tests
-        run: cargo test -p bt-render --locked --no-run
+        run: cargo test -p bt-render -p bt-render-probe --locked --no-run
 
       - name: install WARP
         shell: pwsh
         run: ./scripts/ci/install-warp.ps1 -TargetDir target/debug
 
-      - name: test bt-render on a real device
-        run: cargo test -p bt-render --locked
+      - name: test bt-render and bt-render-probe on a real device
+        run: cargo test -p bt-render -p bt-render-probe --locked
 
   # ── the executable, started ───────────────────────────────────────────────
   #
@@ -1628,6 +1630,7 @@ jobs:
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
           -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p bt-compose -p alacritty_terminal
+          -p bt-render-probe
 
       # **The application, every target of it** (M1-10). A step of its own and
       # not a name on the line above, because the claim is a different one: the
@@ -1694,7 +1697,7 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-platform -p bt-pty -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p alacritty_terminal
-          -p bt-render -p bt-corpus -p bt-term
+          -p bt-render -p bt-render-probe -p bt-corpus -p bt-term
 
       # **The lint line, held on the second platform** — `logic`'s own clippy
       # line, word for word (ticket 72, D-63). M1-10 started it on `bt-platform`
@@ -1858,6 +1861,7 @@ jobs:
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
           -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p bt-compose -p alacritty_terminal
+          -p bt-render-probe
 
       # `core-macos`'s ten, plus `bt-pty` for the reason above and minus
       # `bt-math` for one of the same shape. `bt-render` is still checked and not

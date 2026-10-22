@@ -15219,9 +15219,10 @@ fn live_detection_context_signature(
         .flat_map(|scan| scan.inputs().iter())
     {
         let trimmed = input.text.trim();
+        // A row that can move a fence is one the detector's own grammar opens one on: every line
+        // `fence_closes` accepts is also an opener, so openers cover closers too.
         let structural = may_contain_math(trimmed, inline_formulas)
-            || trimmed.starts_with("```")
-            || trimmed.starts_with("~~~");
+            || bt_detect::fence::fence_opening(&input.text).is_some();
         if structural {
             if !framed {
                 // The unframed signature is the historical `LiveDetectionInput` hash byte for

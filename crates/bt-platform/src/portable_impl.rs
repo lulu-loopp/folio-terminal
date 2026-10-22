@@ -553,19 +553,20 @@ pub struct Notifier {
 #[cfg(not(any(windows, target_os = "macos")))]
 impl Notifier {
     /// Refused. Notifications are M4-6.
-    pub fn new(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
-        let _ = wake;
+    pub fn new(display_name: &str, wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
+        let _ = (display_name, wake);
         Err(not_here("desktop notifications"))
     }
 
     /// Nothing to write: this arm registers no identity.
-    pub fn register_identity() -> Result<(), String> {
+    pub fn register_identity(display_name: &str) -> Result<(), String> {
+        let _ = display_name;
         Ok(())
     }
 
     /// [`Self::new`]: this arm writes no identity to defer.
     pub fn without_registration(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
-        Self::new(wake)
+        Self::new("", wake)
     }
 
     /// Unreachable: there is no value of this type.
@@ -635,7 +636,8 @@ impl MathContextMenu {
     }
 
     /// Ask for the menu. Refused, with the reason a toast can carry.
-    pub fn request(&self) -> Result<bool, String> {
+    pub fn request(&self, copy_latex: &str) -> Result<bool, String> {
+        let _ = copy_latex;
         Err(not_here("the formula menu"))
     }
 
@@ -706,8 +708,13 @@ impl ImagePicker {
     }
 
     /// Ask for the chooser. Refused.
-    pub fn request(&self, kind: ShellPickKind, start: Option<&Path>) -> Result<bool, String> {
-        let _ = (kind, start);
+    pub fn request(
+        &self,
+        kind: ShellPickKind,
+        start: Option<&Path>,
+        image_types: &str,
+    ) -> Result<bool, String> {
+        let _ = (kind, start, image_types);
         Err(not_here("the file chooser"))
     }
 
@@ -1932,7 +1939,9 @@ mod refusal_tests {
         #[cfg(not(any(windows, target_os = "macos")))]
         {
             let menu = MathContextMenu::new(window()).expect("built above");
-            let refusal = menu.request().expect_err("there is no menu to pop");
+            let refusal = menu
+                .request("Copy LaTeX")
+                .expect_err("there is no menu to pop");
             assert!(
                 refusal.contains("not on this platform"),
                 "a refusal says which platform it is about: {refusal}"
@@ -1947,7 +1956,9 @@ mod refusal_tests {
 
             let picture = ImagePicker::new(window()).expect("built above");
             assert!(
-                picture.request(ShellPickKind::Image, None).is_err(),
+                picture
+                    .request(ShellPickKind::Image, None, "Images")
+                    .is_err(),
                 "there is no panel to sheet"
             );
 

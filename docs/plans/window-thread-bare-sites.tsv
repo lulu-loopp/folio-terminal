@@ -197,12 +197,6 @@ bt-pty	-	crate::reap_within	std::thread::sleep	1
 bt-pty	-	crate::shell::<SystemShellEnvironment as ShellEnvironment>::is_file	std::fs::metadata	1
 bt-pty	-	crate::spawn_dump_publisher	std::fs::File::sync_data	2
 bt-pty	-	crate::spawn_dump_publisher	std::thread::sleep	1
-bt-render	-	crate::WindowRenderer::compose_frame	wgpu::Queue::present	1
-bt-render	-	crate::WindowRenderer::compose_frame	wgpu::Queue::submit	1
-bt-render	-	crate::WindowRenderer::handle_surface_failure	wgpu::Queue::submit	1
-bt-render	-	crate::WindowRenderer::probe_frame	wgpu::Queue::present	1
-bt-render	-	crate::WindowRenderer::probe_frame	wgpu::Queue::submit	1
-bt-render	-	crate::WindowRenderer::read_back	wgpu::Queue::submit	1
 bt-term	-	crate::inline_image::LocalImageStamp::of	std::fs::metadata	1
 bt-term	-	crate::session::path_exists	std::fs::metadata	1
 bt-term	-	crate::session::verify_path	std::fs::metadata	1

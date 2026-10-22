@@ -29,7 +29,8 @@
     -Plan is a comma list of steps:
       launchfeed | launchplain | offer | update | waitverified | restart |
       waitalloc | cancel | later | close | nosleep | preload | fastupdate |
-      fastcancel | shot:<name> | sleep:<s> | waitphase:<Phase>
+      fastcancel | shot:<name> | sleep:<s> | waitphase:<Phase> |
+      answerfirstrun | card:<name> | waithold
     `preload`, `fastupdate` and `fastcancel` press through the probe's own class
     loaded once into this process: a ui-probe run costs seconds on the guest,
     mostly compiling that class, and a Cancel has to land inside a download of a
@@ -66,9 +67,60 @@ function Phase {
     if ($m.Success) { return $m.Groups[1].Value } else { return '?' }
   } catch { return $null }
 }
+# Any folio.exe with a window: the installed one, or (E1-b) the rescue copy
+# in the transaction's rescue folder that an exit guard opened. The installed one first.
 function WindowPid {
-  $p = @(Get-Process folio -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe -and $_.MainWindowHandle -ne [IntPtr]::Zero })
+  $p = @(Get-Process folio -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } |
+      Sort-Object @{ Expression = { $_.Path -ne $exe } })
   if ($p.Count -gt 0) { return $p[0].Id } else { return $null }
+}
+# **Folio's own window, for the close** (cleanvm-harness pitfall 3): `Process.CloseMainWindow()`
+# picks winit's thread event-target popup, whose procedure destroys it and closes nothing. The
+# close is posted to the process's visible window of winit's application class.
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class KeysWindows {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc proc, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L; public int T; public int R; public int B; }
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder text, int max);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint message, IntPtr w, IntPtr l);
+  public const uint WM_CLOSE = 0x0010;
+  public static IntPtr[] AppWindowsOf(uint target) {
+    var all = new System.Collections.Generic.List<IntPtr>();
+    EnumWindows((h, l) => {
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      if (pid != target || !IsWindowVisible(h)) { return true; }
+      var name = new StringBuilder(128); GetClassName(h, name, 128);
+      if (name.ToString() == "Window Class") { all.Add(h); }
+      return true;
+    }, IntPtr.Zero);
+    return all.ToArray();
+  }
+}
+'@
+# **Every Folio window is closed, then every folio.exe must be gone**: a plain start while Folio
+# runs is handed to it and opens a second window in the same process (seen in E1-b's RV-W11), so
+# closing one window leaves the process running and the next plain start hands over again.
+function CloseFolio {
+  $procs = @(Get-Process folio -ErrorAction SilentlyContinue)
+  if ($procs.Count -eq 0) { Say 'close: no Folio running'; return }
+  foreach ($p in $procs) {
+    $hs = @([KeysWindows]::AppWindowsOf([uint32]$p.Id))
+    foreach ($h in $hs) {
+      $ok = [KeysWindows]::PostMessage($h, [KeysWindows]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+      Say "WM_CLOSE posted to hwnd=$h of pid=$($p.Id) -> $ok"
+    }
+  }
+  # bounded: Folio's own close budget is seconds; 30 s is load-row's bound for the same close
+  $gone = $true
+  foreach ($p in $procs) { if (-not $p.WaitForExit(30000)) { $gone = $false; Say "close: pid=$($p.Id) still running 30 s after its windows were closed" } }
+  Say "every folio.exe exited within 30 s: $gone"
 }
 function WaitWindow {
   $deadline = (Get-Date).AddSeconds($WaitSeconds)
@@ -127,7 +179,14 @@ foreach ($step in ($Plan -split ',')) {
   Say "step $step"
   switch -Regex ($step) {
     '^launchfeed$' { $p = Start-Process -FilePath $exe -ArgumentList @('--update-feed', $FeedUrl) -PassThru; Say "started pid=$($p.Id) with --update-feed $FeedUrl" }
-    '^launchplain$' { $p = Start-Process -FilePath $exe -PassThru; Say "started pid=$($p.Id) plain" }
+    # The start's own words go to its standard error only (`update_startup`'s `Machine::say`: the
+    # start pass runs before diagnostics.log is open, and a start that hands itself to a rescue
+    # leaves before it ever is), so a plain start's are kept in updater-stderr-<Tag>.txt.
+    '^launchplain$' {
+      $err = Join-Path $GuestHome "updater-stderr-$Tag.txt"
+      $p = Start-Process -FilePath $exe -RedirectStandardError $err -PassThru
+      Say "started pid=$($p.Id) plain (standard error to $err)"
+    }
     '^offer$' {
       $w = WaitWindow; Say "window pid=$w"
       $deadline = (Get-Date).AddSeconds($WaitSeconds)
@@ -149,8 +208,38 @@ foreach ($step in ($Plan -split ',')) {
     '^preload$' { Load-Probe; Say 'probe class loaded' }
     '^cancel$' { $w = WindowPid; Probe @('key', '-ProcId', "$w", '-Name', 'Tab'); Probe @('key', '-ProcId', "$w", '-Name', 'Enter') }
     '^later$' { $w = WindowPid; Probe @('key', '-ProcId', "$w", '-Name', 'Escape') }
-    '^nosleep$' { & powercfg.exe /change monitor-timeout-ac 0; & powercfg.exe /change standby-timeout-ac 0; Say 'display and standby timeouts off (guest power plan)' }
-    '^close$' { $w = WindowPid; if ($w) { $ok = (Get-Process -Id $w).CloseMainWindow(); Say "WM_CLOSE to pid=$w -> $ok" } }
+    '^nosleep$' { & powercfg.exe /change monitor-timeout-ac 0; & powercfg.exe /change standby-timeout-ac 0; & powercfg.exe /change hibernate-timeout-ac 0; Say 'display, standby and hibernate timeouts off (guest power plan)' }
+    '^close$' { CloseFolio }
+    # E1-b's held rescue: the watcher's hold taken before Folio starts (bounded: the watcher polls
+    # every 25 ms once its 1-2 s of startup are done; 60 s means it never will).
+    '^waithold$' {
+      $deadline = (Get-Date).AddSeconds(60); $held = $false
+      while (-not $held -and (Get-Date) -lt $deadline) {
+        $held = @(Get-ChildItem -LiteralPath $GuestHome -Filter 'updater-watch-*.txt' -File | Where-Object { Select-String -LiteralPath $_.FullName -Pattern 'RESCUE HOLD taken' -SimpleMatch -Quiet }).Count -gt 0
+        if (-not $held) { Start-Sleep -Milliseconds 250 }
+      }
+      Say "rescue hold taken: $held"
+    }
+    # The first-run card answered before Folio's first start (cleanvm-harness pitfall 4): an
+    # old-schema settings document the candidate's own migrations carry to `first_run_card: Shown`
+    # (the same document load-row.ps1 places). A guest that holds one already is left as it is.
+    '^answerfirstrun$' {
+      $data = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Folio'
+      $settings = Join-Path $data 'settings.json'
+      if (Test-Path -LiteralPath $settings) { Say 'settings.json already present: left as it is' }
+      else {
+        [IO.Directory]::CreateDirectory($data) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'first-run-settings.json') -Destination $settings
+        Say 'first run answered: a schema-25 settings.json placed for the candidate to migrate'
+      }
+    }
+    # The card Folio's window shows, read by the OCR (card.ps1), the capture beside the text.
+    '^card:(.+)$' {
+      $o = Join-Path $shots "$Tag-card-$($Matches[1])"
+      $r = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'card.ps1') -Out $o 2>&1 | Out-String
+      $t = if (Test-Path -LiteralPath "$o.txt") { (Get-Content -LiteralPath "$o.txt") -join ' | ' } else { "no text: $($r.Trim())" }
+      Say "card $($Matches[1]): $t"
+    }
     '^shot:(.+)$' { Shot $Matches[1] }
     '^sleep:(\d+)$' { Start-Sleep -Seconds ([int]$Matches[1]) }
     '^waitphase:(\w+)$' { [void](WaitPhase $Matches[1]) }

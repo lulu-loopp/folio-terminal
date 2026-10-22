@@ -1,0 +1,4 @@
+paragraph: foo
+code
+| "bar"
+paragraph: baz

@@ -153,6 +153,9 @@ bt-testpath = { path = "../bt-testpath" }
 # The build script's PSReadLine reader (`src/psreadline_artefact.rs`) is held to the real package
 # by the crate's tests, which therefore name the feature it reads with too.
 bt-winres = { path = "../bt-winres", features = ["inflate"] }
+# The read-back the macOS glyph test and the video probe take their pixels through: a tool
+# crate's, since the probe's GPU submissions left `bt-render` (thread-door note revision (l)4).
+bt-render-probe = { path = "../bt-render-probe" }
 # **The crate this package's guards ask about itself** — the mechanism of
 # `docs/plans/bt-app-split-prep.md`. A guard that reads `include_str!("main.rs")`
 # is bound to a file, and a fact that moves to a file beside it stops being read

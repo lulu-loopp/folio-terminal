@@ -54,7 +54,13 @@ foreach ($name in 'diagnostics.log', 'update-check.json') {
 Get-ChildItem -LiteralPath $data -Force -ErrorAction SilentlyContinue | ForEach-Object { '{0,12} {1} {2}' -f $_.Length, $_.LastWriteTime.ToString('HH:mm:ss'), $_.Name } | Set-Content (Join-Path $out 'appdata-folio.txt')
 & reg.exe export 'HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' (Join-Path $out 'run-key.reg') /y 2>&1 | Out-Null
 @(Get-CimInstance Win32_Process -Filter "Name='folio.exe' OR Name='OpenConsole.exe'" -ErrorAction SilentlyContinue | ForEach-Object { "$($_.ProcessId) parent=$($_.ParentProcessId) created=$($_.CreationDate) $($_.ExecutablePath) :: $($_.CommandLine)" }) | Set-Content (Join-Path $out 'processes.txt')
-Get-ChildItem -LiteralPath $GuestHome -Filter 'updater-*.txt' -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $out }
+# Read with every sharing flag: a running Folio's standard error (updater-stderr-*.txt) is still open.
+Get-ChildItem -LiteralPath $GuestHome -Filter 'updater-*.txt' -File | ForEach-Object {
+  try {
+    $fs = [IO.File]::Open($_.FullName, 'Open', 'Read', [IO.FileShare]'ReadWrite, Delete')
+    try { $to = [IO.File]::Create((Join-Path $out $_.Name)); try { $fs.CopyTo($to) } finally { $to.Dispose() } } finally { $fs.Dispose() }
+  } catch { "$($_.Exception.Message)" | Set-Content (Join-Path $out "$($_.Name).err") }
+}
 if (Test-Path -LiteralPath (Join-Path $GuestHome 'shots')) { Copy-Item -LiteralPath (Join-Path $GuestHome 'shots') -Destination (Join-Path $out 'shots') -Recurse }
 $zip = Join-Path $GuestHome "updater-$Tag.zip"
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }

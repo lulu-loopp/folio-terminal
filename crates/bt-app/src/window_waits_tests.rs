@@ -46,24 +46,38 @@ fn section(name: &str, columns: &[&str]) -> Vec<Vec<&'static str>> {
 
 /// [`section`], of a registry's text.
 fn section_in<'r>(registry: &'r str, name: &str, columns: &[&str]) -> Vec<Vec<&'r str>> {
+    numbered_section_in(registry, name, columns)
+        .into_iter()
+        .map(|(_, cells)| cells)
+        .collect()
+}
+
+/// [`section_in`], each line with its 1-based line number in `registry`.
+fn numbered_section_in<'r>(
+    registry: &'r str,
+    name: &str,
+    columns: &[&str],
+) -> Vec<(usize, Vec<&'r str>)> {
     let marker = format!("# {name}");
     let mut lines = registry
         .lines()
-        .skip_while(|line| *line != marker)
+        .enumerate()
+        .skip_while(|(_, line)| *line != marker)
         .skip(1)
-        .take_while(|line| !line.starts_with("# "))
-        .filter(|line| !line.is_empty() && !line.starts_with("##"));
+        .take_while(|(_, line)| !line.starts_with("# "))
+        .filter(|(_, line)| !line.is_empty() && !line.starts_with("##"));
     let header: Vec<&str> = lines
         .next()
         .unwrap_or_else(|| panic!("the registry has a `{marker}` section with a header"))
+        .1
         .split('\t')
         .collect();
     assert_eq!(header, columns, "`{marker}`'s columns");
     lines
-        .map(|line| {
+        .map(|(at, line)| {
             let cells: Vec<&str> = line.split('\t').collect();
             assert_eq!(cells.len(), columns.len(), "`{marker}`: {line}");
-            cells
+            (at + 1, cells)
         })
         .collect()
 }
@@ -334,7 +348,13 @@ fn the_architecture_table_is_the_registry() {
 /// The first-party packages that are not in `folio.exe`: development tools, and `bt-testpath`,
 /// which only tests and the test-support features name. Every other workspace member outside
 /// `vendor/` must be one `bt-app` depends on.
-const NOT_THE_PRODUCT: [&str; 4] = ["bt-corpus", "bt-lint-probe", "bt-source", "bt-testpath"];
+const NOT_THE_PRODUCT: [&str; 5] = [
+    "bt-corpus",
+    "bt-lint-probe",
+    "bt-render-probe",
+    "bt-source",
+    "bt-testpath",
+];
 
 /// **The product as a build of `folio.exe` sees it**: the first-party packages in it, each with
 /// the first-party packages its product code can name (its *product* dependency edges), and the
@@ -8187,6 +8207,92 @@ fn a_counted_only_drop_closes_and_never_waits() {
             .contains("the emergency holder `planted crate::gone_holder` is not in the product")),
         "a stale emergency holder is not refused:\n  {}",
         failures.join("\n  ")
+    );
+}
+
+// ── the render probe: a tool's submissions (revision (l)4, A2p) ───────────────────────────────
+
+/// The one door `bt-render`'s product serves with a GPU submission or present: a window's present
+/// (`compose_frame` and the surface failure it absorbs). Which functions those are is the registry's
+/// to say — its `# effects` rows of `bt-render` — and this guard reads them there.
+const RENDER_EFFECT_DOOR: &str = "PresentFrame";
+
+/// Why `the_product_library_holds_no_probe_effect` fails, over the registry text `registry` and
+/// the product's sites split at the doors (`bare`, `in_doors`, as [`vocabulary_sites`] answers):
+/// a `bt-render` bare site, a `bt-render` door function holding an effect under a door other than
+/// [`RENDER_EFFECT_DOOR`], and a `bt-render` row of `# effects` whose door is another — the last
+/// named by its line of `crates/bt-app/src/window_waits.tsv`.
+fn probe_effect_failures(
+    registry: &str,
+    bare: &BTreeMap<BareKey, usize>,
+    in_doors: &DoorEffects,
+) -> Vec<String> {
+    let mut failures: Vec<String> = bare
+        .iter()
+        .filter(|((package, _, _, _), _)| package == "bt-render")
+        .map(|((_, arm, item, entry), count)| {
+            format!("{item} {arm}: {entry} ×{count}, outside every door of bt-render")
+        })
+        .collect();
+    for ((package, arm, item), (door, effects)) in in_doors {
+        if package == "bt-render" && door != RENDER_EFFECT_DOOR {
+            failures.push(format!(
+                "{item} {arm}: {} under door `{door}`, where bt-render's product holds GPU effects \
+                 only under `{RENDER_EFFECT_DOOR}`",
+                effects_spelled(effects)
+            ));
+        }
+    }
+    for (line, cells) in numbered_section_in(registry, "effects", &EFFECT_COLUMNS) {
+        if cells[0] == "bt-render" && cells[6] != RENDER_EFFECT_DOOR {
+            failures.push(format!(
+                "crates/bt-app/src/window_waits.tsv:{line}: `{}` {} is a bt-render row under door \
+                 `{}`; bt-render's product holds GPU effects only under `{RENDER_EFFECT_DOOR}`",
+                cells[2], cells[1], cells[6]
+            ));
+        }
+    }
+    failures
+}
+
+/// RED (A2p, the thread-door note's revision (l)4) — **the product library holds no probe
+/// effect**: `bt-render` has no bare site, and every function of its product that holds a
+/// vocabulary effect stands under [`RENDER_EFFECT_DOOR`], as every `bt-render` row of the
+/// registry's `# effects` says. The headless probe's submit and present and the read-back's submit
+/// are `bt-render-probe`'s, a tool crate; `bt_render::probe_surface` prepares, encodes and reads
+/// and hands the work over.
+///
+/// MUTATION: put `gpu.queue.submit(std::iter::empty());` back into
+/// `WindowRenderer::read_back_work` and this names it as a bare site of `bt-render`; give a
+/// `bt-render` row of `# effects` another door and this names the row's line.
+#[test]
+fn the_product_library_holds_no_probe_effect() {
+    let world = World::new();
+    let (bare, in_doors) = vocabulary_sites(&world);
+    let failures = probe_effect_failures(REGISTRY, &bare, &in_doors);
+    assert!(
+        failures.is_empty(),
+        "bt-render's product holds a probe effect:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// RED (A2p, the thread-door note's revision (l)4) — **the probe crate is outside the product
+/// closure**: no `[dependencies]` or `[target.….dependencies]` table of a manifest reached from
+/// `bt-app` through those tables — the dependencies `folio.exe` links — names `bt-render-probe`,
+/// optional or not (so it is not even a candidate of [`product`]). Dev- and build-dependencies are
+/// not read: a test, an example or a build script may name it. That it is a declared tool is
+/// `NOT_THE_PRODUCT`'s, held by `the_universe_is_the_product_and_its_tools_are_declared`; its
+/// layer, 6, is `scripts/ci/crate-layers.tsv`'s, held by `scripts/ci/check-crate-edges.ps1`.
+///
+/// MUTATION: name `bt-render-probe` in `bt-app`'s `[dependencies]` and this fails.
+#[test]
+fn the_probe_crate_is_outside_the_product_closure() {
+    let candidates = product_candidate_manifests();
+    assert!(
+        !candidates.contains_key("bt-render-probe"),
+        "a product manifest's dependency table names bt-render-probe: {:?}",
+        candidates.keys().collect::<Vec<_>>()
     );
 }
 
