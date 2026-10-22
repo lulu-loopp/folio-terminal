@@ -3834,7 +3834,7 @@ impl Text {
             Self::FilesFolderUnknown => pick(
                 lang,
                 "Folder unknown",
-                "Folder unknown", // zh: pending T-CWD-FROM-PROCESS
+                "文件夹未知",
             ),
             // "File Explorer" is a Windows product and has a Chinese name of its
             // own; using the English one here would send the reader looking for
@@ -6633,10 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-CWD-FROM-PROCESS — the foot of a files card or column opened on the home
-        // folder because the pane's folder could not be read.
-        (Self::FilesFolderUnknown, HostPlatform::Windows),
-        (Self::FilesFolderUnknown, HostPlatform::MacOs),
         // zh: pending T-INTEGRATION-INJECT-2-BUILD — the removal row for the PSReadLine copy an
         // earlier Folio wrote into Documents, and what its press says.
         (Self::RowLegacyPsReadLine, HostPlatform::Windows),
