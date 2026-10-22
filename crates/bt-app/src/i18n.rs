@@ -4806,14 +4806,14 @@ impl Text {
                 lang,
                 platform,
                 "Copy LaTeX",
-                "Copy LaTeX", // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER
+                "复制 LaTeX",
                 "Copy LaTeX",
-                "Copy LaTeX", // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER
+                "复制 LaTeX",
             ),
             Self::ImageFileType => pick_platform(
                 lang, platform, "Images",
-                "Images", // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER
-                "Images", "Images", // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER
+                "图片",
+                "Images", "图片",
             ),
 
             // ── the pane's `⌄` menu ────────────────────────────────────────
@@ -6633,12 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER — the formula's right-click row and the
-        // Windows file chooser's image filter name, now passed into the system's own surfaces.
-        (Self::FormulaMenuCopyLatex, HostPlatform::Windows),
-        (Self::FormulaMenuCopyLatex, HostPlatform::MacOs),
-        (Self::ImageFileType, HostPlatform::Windows),
-        (Self::ImageFileType, HostPlatform::MacOs),
         // zh: pending T-ENDSESSION-SAVES — the line the shutdown screen shows while the edits,
         // the owed documents and the layout are written.
         (Self::ShutdownSavingWork, HostPlatform::Windows),
