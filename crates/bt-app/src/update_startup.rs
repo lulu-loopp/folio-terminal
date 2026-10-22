@@ -165,6 +165,19 @@ static STAND_IN: OnceLock<()> = OnceLock::new();
 /// the process, as a held start does ([`is_held`]).
 static STOOD_DOWN: OnceLock<()> = OnceLock::new();
 
+/// **This process is the rescue copy** ([`Starter::RescueCopy`],
+/// T-RESCUE-WINDOW-NO-OFFER): set only by [`pass`], from the start's own
+/// place ([`home_of_start`]), with the word or without it.
+static RESCUE_COPY: OnceLock<()> = OnceLock::new();
+
+/// **Whether this process is the rescue copy** — a temporary window that is
+/// never the install: the update job never offers it an update
+/// (`update_job::NotEligible::RescueCopy`) and its update check never asks
+/// (`update::spawn_check`).
+pub(crate) fn rescue_copy() -> bool {
+    RESCUE_COPY.get().is_some()
+}
+
 /// What [`TRIAL`] holds.
 struct Trial {
     txn: TxnId,
@@ -373,6 +386,9 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
     let Some((home, starter)) = home_of_start(bt_platform::host_platform(), &own_exe) else {
         return Admitted(());
     };
+    if starter == Starter::RescueCopy {
+        let _ = RESCUE_COPY.set(());
+    }
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     let start = Start {
         own_exe: &own_exe,
@@ -3586,6 +3602,216 @@ mod tests {
             assert!(scene.rescue.is_file(), "the folder it runs from stays");
             assert_eq!(scene.listing(), before);
             assert!(world.entrances.is_empty() && world.spawned.is_empty());
+            let _ = std::fs::remove_dir_all(&scene.root);
+        }
+
+        /// **A driver that records the home its Prepare would stage into** —
+        /// `update_prepare_windows::eligible` of the executable it was made
+        /// for, the exact step 1 of the product's Windows driver — and starts.
+        struct StagingHomes {
+            exe: PathBuf,
+            homes: std::cell::RefCell<Vec<PathBuf>>,
+        }
+
+        impl crate::update_job::Driver for StagingHomes {
+            fn prepare(
+                &self,
+                _: &crate::update_job::Offer,
+                _: &crate::update_job::SharedTransport,
+                _: &crate::update_job::Poster,
+            ) -> Result<(), crate::update_job::Refused> {
+                let (home, _) = crate::update_prepare_windows::eligible(
+                    &self.exe,
+                    Some(crate::install_channel::Channel::Ours),
+                )
+                .expect("the scene's copy takes the Windows road");
+                self.homes.borrow_mut().push(home.root().to_path_buf());
+                Ok(())
+            }
+        }
+
+        /// **What a launch of `exe` does with the update job** over the card
+        /// `failed`: the day's check knows `tag`, the copy is `Ours`, and
+        /// `rescue_copy` is the start's fact (`update_startup::rescue_copy`).
+        /// The unasked offer is considered, then About → Version's asked one
+        /// ([`Job::offer_again`]), and a raised offer is pressed through
+        /// [`StagingHomes`]. Answers the job and the homes a Prepare was
+        /// started for.
+        fn launch_job(
+            exe: &Path,
+            failed: Option<Failure>,
+            rescue_copy: bool,
+            tag: &str,
+        ) -> (crate::update_job::Job<u32>, Vec<PathBuf>) {
+            use crate::update_job::{Gathered, Job, Presenters, State, Verb};
+            let presenters = Presenters {
+                visited: &[1],
+                open: &[1],
+                quake: None,
+            };
+            let gathered = Gathered {
+                check: Some(bt_persist::UpdateCheckV1 {
+                    latest_tag: Some(tag.to_owned()),
+                    ..bt_persist::UpdateCheckV1::default()
+                }),
+                channel: Some(crate::install_channel::Channel::Ours),
+                running: crate::version::VERSION,
+                capable: true,
+                recorded: false,
+                trial: false,
+                rescue_copy,
+                platform: bt_platform::HostPlatform::Windows,
+            };
+            let driver = StagingHomes {
+                exe: exe.to_path_buf(),
+                homes: std::cell::RefCell::new(Vec::new()),
+            };
+            let transport: crate::update_job::SharedTransport =
+                std::sync::Arc::new(crate::update_job::NoDownloadDoor);
+            let mut job: Job<u32> = Job::with_offers(true).after_rollback(failed);
+            job.hand_over(&presenters);
+            let _ = job.consider(gathered, &presenters, || TxnId::new([0x3c; 16]));
+            if matches!(job.state(), State::Failed(..)) {
+                // The reader closes the card, as About's Retry needs.
+                let _ = job.answer_verb(Verb::Later, &driver, &transport);
+            }
+            if !matches!(job.state(), State::Available(_)) {
+                let _ = job.offer_again(1, Some(tag));
+            }
+            if matches!(job.state(), State::Available(_)) {
+                job.answer_verb(Verb::Press, &driver, &transport)
+                    .expect("a raised offer takes the press");
+            }
+            let homes = driver.homes.into_inner();
+            (job, homes)
+        }
+
+        /// RED (T-RESCUE-WINDOW-NO-OFFER) — **a rescue copy is never offered an
+        /// update, and nothing it does stages under `rescue\`**: over a
+        /// `Terminal` journal (the rollback's card, and the interrupted one,
+        /// which do not say the update is incomplete) and started without the
+        /// word (no card at all), its job decides `RescueCopy` — no unasked
+        /// offer, no asked one, no press reaching a driver — and About →
+        /// Version shows the releases page, Retry disabled under a card, and
+        /// Check disabled when nothing newer is known. The installed build's
+        /// launch over the same scene is offered and stages into the install's
+        /// home, as before (the control).
+        ///
+        /// MUTATION: drop the `rescue_copy` clause of `Evidence::eligibility` —
+        /// the rescue copy's offer is raised, pressed, and its Prepare's home is
+        /// `…\<txn>\rescue\.folio-update`: the guard assertion goes red.
+        /// MUTATION: drop `&& job.may_check()` from `update_card::version_row`'s
+        /// two Check controls — the row with nothing newer known draws an
+        /// enabled Check that asks nothing.
+        #[test]
+        fn the_rescue_copy_is_never_offered_an_update_and_stages_nothing_under_rescue() {
+            use crate::i18n::Lang;
+            use crate::update_card::{VersionControl, VersionLink, version_row};
+            use crate::update_job::{NotEligible, State};
+            let Some(scene) = Scene::new("rescue-copy-no-offer") else {
+                return;
+            };
+            let tag = "v99.0.0";
+            let under_rescue = |home: &PathBuf| {
+                home.components()
+                    .any(|part| part.as_os_str() == std::ffi::OsStr::new("rescue"))
+            };
+            scene.journal_of(
+                Class::Terminal,
+                crate::update_txn::HeaderOutcome::RolledBack,
+            );
+            let mut world = Recorded::default();
+            let (rolled_back, _, _) =
+                continued_with(run_rescue_copy(&scene, true, None, &mut world));
+            assert_eq!(rolled_back, Some(Failure::RolledBack));
+            let (_, starter) =
+                home_of_start(bt_platform::HostPlatform::Windows, &scene.rescue).unwrap();
+            assert_eq!(starter, Starter::RescueCopy);
+
+            for card in [Some(Failure::RolledBack), Some(Failure::Interrupted)] {
+                let (job, homes) = launch_job(&scene.rescue, card.clone(), true, tag);
+                assert!(
+                    !homes.iter().any(under_rescue),
+                    "{card:?}: a rescue copy staged into {homes:?}"
+                );
+                assert!(homes.is_empty(), "{card:?}: no Prepare at all: {homes:?}");
+                assert_eq!(job.answer(), Some(&Err(NotEligible::RescueCopy)));
+                assert_eq!(job.asked_offer(Some(tag)), None);
+                assert!(!matches!(job.state(), State::Available(_)));
+                let row = version_row(
+                    &job,
+                    crate::update::CheckView::default(),
+                    Some(tag),
+                    0,
+                    Lang::English,
+                );
+                assert_eq!(
+                    (row.control, row.link),
+                    (
+                        VersionControl::Retry { enabled: false },
+                        Some(VersionLink::Details)
+                    ),
+                    "{card:?}: the failure row first, Retry disabled"
+                );
+            }
+
+            // Started without the word (double-clicked): no card, and the same.
+            let mut world = Recorded::default();
+            let (no_card, _, _) = continued_with(run_rescue_copy(&scene, false, None, &mut world));
+            assert_eq!(no_card, None);
+            let (job, homes) = launch_job(&scene.rescue, no_card, true, tag);
+            assert!(
+                !homes.iter().any(under_rescue),
+                "a rescue copy staged into {homes:?}"
+            );
+            assert!(homes.is_empty(), "no Prepare at all: {homes:?}");
+            assert!(matches!(job.state(), State::Idle), "{:?}", job.state());
+            assert_eq!(job.answer(), Some(&Err(NotEligible::RescueCopy)));
+            assert!(!job.may_check());
+            let row = version_row(
+                &job,
+                crate::update::CheckView::default(),
+                Some(tag),
+                0,
+                Lang::English,
+            );
+            assert_eq!(
+                (row.control, row.link),
+                (
+                    VersionControl::OpenReleases,
+                    Some(VersionLink::WhatsNew {
+                        tag: tag.to_owned()
+                    })
+                ),
+                "the releases page, as for a copy its updater cannot reach"
+            );
+            let row = version_row(
+                &job,
+                crate::update::CheckView::default(),
+                None,
+                0,
+                Lang::English,
+            );
+            assert_eq!(
+                row.control,
+                VersionControl::Check { enabled: false },
+                "nothing newer known: Check drawn disabled, never a button that asks nothing"
+            );
+
+            // The control: the installed build over the same scene is offered,
+            // and its Prepare stages into the install's own home.
+            let (install, starter) =
+                home_of_start(bt_platform::HostPlatform::Windows, &scene.own_exe).unwrap();
+            assert_eq!(starter, Starter::Install);
+            for card in [Some(Failure::RolledBack), None] {
+                let (job, homes) = launch_job(&scene.own_exe, card.clone(), false, tag);
+                assert!(job.may_check());
+                assert_eq!(
+                    homes,
+                    vec![install.root().to_path_buf()],
+                    "{card:?}: the install is offered and stages into its own home"
+                );
+            }
             let _ = std::fs::remove_dir_all(&scene.root);
         }
     }

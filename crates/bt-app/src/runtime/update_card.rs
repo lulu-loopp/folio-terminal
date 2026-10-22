@@ -422,6 +422,7 @@ mod tests {
             capable: true,
             recorded: false,
             trial: false,
+            rescue_copy: false,
             platform: HostPlatform::Windows,
         }
     }

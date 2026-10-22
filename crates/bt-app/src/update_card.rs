@@ -918,7 +918,7 @@ pub(crate) fn version_row<W: Copy + Eq>(
                 now_ms,
             )),
             control: VersionControl::Check {
-                enabled: !check.checking,
+                enabled: !check.checking && job.may_check(),
             },
             link: None,
         };
@@ -926,7 +926,7 @@ pub(crate) fn version_row<W: Copy + Eq>(
     VersionRow {
         value: line(Text::VersionUpToDate.in_lang(lang).to_owned()),
         control: VersionControl::Check {
-            enabled: !check.checking,
+            enabled: !check.checking && job.may_check(),
         },
         link: None,
     }
@@ -1134,6 +1134,7 @@ mod tests {
             capable: true,
             recorded: false,
             trial: false,
+            rescue_copy: false,
             platform: HostPlatform::Windows,
         }
     }

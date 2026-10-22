@@ -1536,10 +1536,13 @@ pub fn begin_now() -> bool {
 }
 
 /// Whether this entry may start the shared check worker. Automatic check gates
-/// only the scheduled entry; a reader's Check is independent of it.
+/// only the scheduled entry; a reader's Check is independent of it. **The
+/// rescue copy asks nothing** by either entry (`update_startup::rescue_copy`,
+/// T-RESCUE-WINDOW-NO-OFFER): it is a temporary window, never the install, and
+/// the account's `update-check.json` is not its to stamp.
 #[must_use]
-const fn check_entry_allowed(now: bool, automatic: bool) -> bool {
-    now || automatic
+const fn check_entry_allowed(now: bool, automatic: bool, rescue_copy: bool) -> bool {
+    !rescue_copy && (now || automatic)
 }
 
 fn spawn_check(now: bool, now_ms: u64) -> bool {
@@ -1550,7 +1553,7 @@ fn spawn_check(now: bool, now_ms: u64) -> bool {
         owner.settle();
         crate::update_job::evidence_landed();
     };
-    if !check_entry_allowed(now, owner.enabled()) {
+    if !check_entry_allowed(now, owner.enabled(), crate::update_startup::rescue_copy()) {
         settled_without_asking();
         return false;
     }
@@ -1612,20 +1615,32 @@ fn spawn_check(now: bool, now_ms: u64) -> bool {
 /// next look. The caller is the first open window's application-clock turn.
 /// The request itself remains on [`spawn_check`]'s existing worker.
 ///
-/// **Not during an update's trial.** The check's writes are held then, so
-/// [`spawn_check`] would settle without asking, wake the loop, and be asked
-/// again on the turn that wake makes — a loop. [`release_trial`] starts the
-/// check once the trial is committed.
+/// **Not during an update's trial, and never in the rescue copy.** The
+/// check's writes are held in a trial, and the rescue copy asks nothing
+/// ([`check_entry_allowed`]), so [`spawn_check`] would settle without asking,
+/// wake the loop, and be asked again on the turn that wake makes — a loop.
+/// [`release_trial`] starts the check once the trial is committed; the rescue
+/// copy's is held for its life.
 pub(crate) fn advance_schedule(now: Instant, now_ms: u64) -> Option<Instant> {
     let owner = OWNER.get()?;
-    let trial_holds = crate::update_trial::writes_are_deferred();
-    if owner.schedule(now_ms, trial_holds) == Schedule::Start {
+    let held = schedule_held(
+        crate::update_trial::writes_are_deferred(),
+        crate::update_startup::rescue_copy(),
+    );
+    if owner.schedule(now_ms, held) == Schedule::Start {
         let _ = spawn_check(false, now_ms);
     }
-    match owner.schedule(now_ms, trial_holds) {
+    match owner.schedule(now_ms, held) {
         Schedule::After(milliseconds) => now.checked_add(Duration::from_millis(milliseconds)),
         Schedule::Off | Schedule::Held | Schedule::InFlight | Schedule::Start => None,
     }
+}
+
+/// **Whether the automatic schedule is held** ([`Schedule::Held`]): while an
+/// update's trial holds the check's writes, and for the life of the rescue
+/// copy, whose check never asks ([`check_entry_allowed`]).
+const fn schedule_held(trial_holds: bool, rescue_copy: bool) -> bool {
+    trial_holds || rescue_copy
 }
 
 /// The next instant About's relative failed-check text changes, while that page
@@ -1658,6 +1673,7 @@ mod tests {
     use super::{
         CHECK_INTERVAL_MS, CLAIM_STALE_MS, OfferState, Outcome, Releases, STATE_FILE_NAME,
         Schedule, Version, check_entry_allowed, due, eligible, mark_is_lit, newer_than, newest_tag,
+        schedule_held,
     };
     use bt_persist::UpdateCheckV1;
     use bt_source::{Index, Needle, Pattern, Scope, Search, View};
@@ -2814,10 +2830,45 @@ mod tests {
     /// refused while Off and this goes red.
     #[test]
     fn automatic_check_off_stops_only_the_scheduled_entry() {
-        assert!(!check_entry_allowed(false, false));
-        assert!(check_entry_allowed(false, true));
-        assert!(check_entry_allowed(true, false));
-        assert!(check_entry_allowed(true, true));
+        assert!(!check_entry_allowed(false, false, false));
+        assert!(check_entry_allowed(false, true, false));
+        assert!(check_entry_allowed(true, false, false));
+        assert!(check_entry_allowed(true, true, false));
+    }
+
+    /// RED (T-RESCUE-WINDOW-NO-OFFER) — **the rescue copy asks nothing**: not
+    /// the launch's or the clock's scheduled entry, not a reader's Check,
+    /// whatever Automatic check says; and its schedule is held for its life,
+    /// so the settle-without-asking `spawn_check` answers it with does not
+    /// wake the clock into asking again every turn.
+    ///
+    /// MUTATION: drop `!rescue_copy &&` from `check_entry_allowed` (every
+    /// entry is admitted again), or `|| rescue_copy` from `schedule_held` (the
+    /// held row answers `Start`); either goes red.
+    #[test]
+    fn the_rescue_copy_never_checks_and_its_schedule_is_held() {
+        for (now, automatic) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert!(
+                !check_entry_allowed(now, automatic, true),
+                "now {now}, automatic {automatic}"
+            );
+        }
+        let root = dir("schedule-rescue-copy");
+        let owner = OfferState::load(&root, true);
+        let now = 1_756_000_000_000u64;
+        assert_eq!(
+            owner.schedule(now, schedule_held(false, true)),
+            Schedule::Held
+        );
+        assert_eq!(
+            owner.schedule(now, schedule_held(true, false)),
+            Schedule::Held
+        );
+        assert_eq!(
+            owner.schedule(now, schedule_held(false, false)),
+            Schedule::Start
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// RED (T-UPDATE-DAILY) — **a due check runs while an older offer is open
@@ -2868,6 +2919,7 @@ mod tests {
             capable: true,
             recorded: false,
             trial: false,
+            rescue_copy: false,
             platform: bt_platform::HostPlatform::Windows,
         };
         let presenters = Presenters {
@@ -3037,6 +3089,7 @@ mod tests {
             capable: true,
             recorded: false,
             trial: false,
+            rescue_copy: false,
             platform: bt_platform::HostPlatform::Windows,
         };
         let presenters = Presenters {

@@ -687,6 +687,7 @@ fn press_as(
             capable: true,
             recorded,
             trial: false,
+            rescue_copy: false,
             platform: HostPlatform::MacOs,
         },
         &Presenters {
@@ -1487,6 +1488,7 @@ fn a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle() {
         capable: true,
         recorded: false,
         trial: false,
+        rescue_copy: false,
         platform: HostPlatform::MacOs,
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
