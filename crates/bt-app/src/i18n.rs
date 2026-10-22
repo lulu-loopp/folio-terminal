@@ -3996,12 +3996,12 @@ impl Text {
             Self::SettingsFileKept => pick(
                 lang,
                 "{file} could not be read; the settings already in force were kept",
-                "{file} could not be read; the settings already in force were kept", // zh: pending T-STORE-MERGE-SETTINGS
+                "{file} 无法读取；保留了正在生效的设置",
             ),
             Self::KeybindingsFileKept => pick(
                 lang,
                 "{file} could not be read; the shortcuts already in force were kept",
-                "{file} could not be read; the shortcuts already in force were kept", // zh: pending T-STORE-MERGE-SETTINGS
+                "{file} 无法读取；保留了正在生效的快捷键",
             ),
             Self::MergedProfileValue => pick(
                 lang,
@@ -6633,12 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-STORE-MERGE-SETTINGS — the "kept" card for a settings or
-        // keybindings file that will not parse mid-run.
-        (Self::SettingsFileKept, HostPlatform::Windows),
-        (Self::SettingsFileKept, HostPlatform::MacOs),
-        (Self::KeybindingsFileKept, HostPlatform::Windows),
-        (Self::KeybindingsFileKept, HostPlatform::MacOs),
         // zh: pending T-STORE-MERGE-PROFILES-PINS — what a profiles merge names on its card.
         (Self::MergedProfileValue, HostPlatform::Windows),
         (Self::MergedProfileValue, HostPlatform::MacOs),
