@@ -4146,32 +4146,32 @@ impl Text {
             Self::HandoffNotFoundSuffix => pick(
                 lang,
                 " · not found",
-                " · not found", // zh: pending T-HANDOFF-DOOR-REASON
+                " · 找不到",
             ),
             Self::HandoffNotFound => pick(
                 lang,
                 "not found",
-                "not found", // zh: pending T-HANDOFF-DOOR-REASON
+                "找不到",
             ),
             Self::HandoffAccessDeniedSuffix => pick(
                 lang,
                 " · access denied",
-                " · access denied", // zh: pending T-HANDOFF-DOOR-REASON
+                " · 拒绝访问",
             ),
             Self::HandoffAccessDenied => pick(
                 lang,
                 "access denied",
-                "access denied", // zh: pending T-HANDOFF-DOOR-REASON
+                "拒绝访问",
             ),
             Self::HandoffNotOpenedSuffix => pick(
                 lang,
                 " · not opened",
-                " · not opened", // zh: pending T-HANDOFF-DOOR-REASON
+                " · 未打开",
             ),
             Self::HandoffNotOpened => pick(
                 lang,
                 "not opened",
-                "not opened", // zh: pending T-HANDOFF-DOOR-REASON
+                "未打开",
             ),
 
             // ── a drag's landing caption ───────────────────────────────────
@@ -6633,21 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-HANDOFF-DOOR-REASON — what a link, an address or the fonts card says when
-        // the hand-off door found its target was not there, was refused access to it, or was
-        // refused it for a reason of no named kind.
-        (Self::HandoffNotFoundSuffix, HostPlatform::Windows),
-        (Self::HandoffNotFoundSuffix, HostPlatform::MacOs),
-        (Self::HandoffNotFound, HostPlatform::Windows),
-        (Self::HandoffNotFound, HostPlatform::MacOs),
-        (Self::HandoffAccessDeniedSuffix, HostPlatform::Windows),
-        (Self::HandoffAccessDeniedSuffix, HostPlatform::MacOs),
-        (Self::HandoffAccessDenied, HostPlatform::Windows),
-        (Self::HandoffAccessDenied, HostPlatform::MacOs),
-        (Self::HandoffNotOpenedSuffix, HostPlatform::Windows),
-        (Self::HandoffNotOpenedSuffix, HostPlatform::MacOs),
-        (Self::HandoffNotOpened, HostPlatform::Windows),
-        (Self::HandoffNotOpened, HostPlatform::MacOs),
         // zh: pending H2-NITS — a Profiles ghost row's value that each pane has
         // its own of.
         (Self::ProfilesEnvPerPane, HostPlatform::Windows),
