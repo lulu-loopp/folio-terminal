@@ -383,9 +383,9 @@ fn given_up_said(
 /// counts it per write). Every round asks the one move: nothing else is moved
 /// between two rounds, and a refusal that is not a hold — the destination
 /// already taken (I1′), a flush after a rename that landed — is answered at
-/// once. **Each refused round says one line** through `say`, `subject` first
-/// (``BT_UPDATE_APPLY `<name>` ``, ``BT_UPDATE_ROLLBACK `<name>` ``); `look`
-/// is asked after each, before the pause.
+/// once. **Each refused round says one line** through `say`, `opening` first
+/// (``BT_UPDATE_APPLY `<name>` held by another program``, or
+/// `BT_UPDATE_ROLLBACK`'s); `look` is asked after each, before the pause.
 ///
 /// # Errors
 /// The last failure, and the refusal when it was a hold that outlasted the
@@ -395,7 +395,7 @@ pub(crate) fn move_held_within(
     from: &Path,
     to: &Path,
     within: Duration,
-    subject: &str,
+    opening: &str,
     say: &mut dyn FnMut(&str),
     look: &mut dyn FnMut(),
 ) -> Result<(), Unwritten> {
@@ -403,7 +403,7 @@ pub(crate) fn move_held_within(
     asked_while_held(
         within,
         &Asked {
-            subject,
+            opening,
             verb: "move",
         },
         || install_txn::durable_move(from, to),
@@ -427,17 +427,18 @@ fn held_refusal(failure: &install_txn::Failure) -> Option<String> {
         .then(|| failure.error.to_string())
 }
 
-/// **What a held ask is, in its rounds' lines**: the line's first words, and
-/// the noun of its give-up (`the write is given up`, `the move is given up`).
+/// **What a held ask is, in its rounds' lines**: the line's first words, up
+/// to `held by another program`, and the noun of its give-up (`the write is
+/// given up`, `the move is given up`).
 struct Asked<'a> {
-    subject: &'a str,
+    opening: &'a str,
     verb: &'a str,
 }
 
 impl Asked<'static> {
     /// [`write_journal`]'s.
     const JOURNAL: Self = Self {
-        subject: "BT_UPDATE_JOURNAL",
+        opening: "BT_UPDATE_JOURNAL held by another program",
         verb: "write",
     };
 }
@@ -457,7 +458,7 @@ fn asked_while_held<E: fmt::Display>(
     wait: &mut dyn FnMut(Duration) -> bool,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Unwritten> {
-    let Asked { subject, verb } = asked;
+    let Asked { opening, verb } = asked;
     let mut pause = Duration::from_millis(10);
     loop {
         let failure = match ask() {
@@ -474,7 +475,7 @@ fn asked_while_held<E: fmt::Display>(
         let left = within.saturating_sub(spent);
         if left.is_zero() {
             say(&format!(
-                "{subject} held by another program for {:.2} s, past the {} s window: {}; the {verb} is given up",
+                "{opening} for {:.2} s, past the {} s window: {}; the {verb} is given up",
                 spent.as_secs_f64(),
                 within.as_secs(),
                 refusal
@@ -486,7 +487,7 @@ fn asked_while_held<E: fmt::Display>(
         }
         let next = pause.min(left);
         say(&format!(
-            "{subject} held by another program for {:.2} s: {}; asked again in {} ms",
+            "{opening} for {:.2} s: {}; asked again in {} ms",
             spent.as_secs_f64(),
             refusal,
             next.as_millis()
@@ -3756,7 +3757,7 @@ mod held_journal_tests {
             let answer = asked_while_held(
                 JOURNAL_HELD_WITHIN,
                 &Asked {
-                    subject: "BT_UPDATE_APPLY `folio.exe`",
+                    opening: "BT_UPDATE_APPLY `folio.exe` held by another program",
                     verb: "move",
                 },
                 || {
@@ -3817,7 +3818,7 @@ mod held_journal_tests {
             path: PathBuf::from("set").join("folio.exe"),
             error: io::Error::from_raw_os_error(code),
         };
-        let windows = cfg!(windows);
+        let windows = bt_platform::host_platform() == bt_platform::HostPlatform::Windows;
         assert_eq!(
             held_refusal(&failure(install_txn::Stage::Rename, 32)).is_some(),
             windows

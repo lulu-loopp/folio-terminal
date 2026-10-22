@@ -389,7 +389,14 @@ impl ApplyPoints for Ours {
             journal.may(Actor::Applier, effect)?;
             let from = site.folder(step.from)?.join(&step.name);
             let to = site.folder(step.to)?.join(&step.name);
-            if let Err(unmoved) = held_move(journal, "BT_UPDATE_APPLY", &step, &from, &to, world) {
+            if let Err(unmoved) = held_move(
+                journal,
+                &format!("BT_UPDATE_APPLY `{}` held by another program", step.name),
+                &step,
+                &from,
+                &to,
+                world,
+            ) {
                 return Ok(cut(
                     &format!("the move of `{}` failed", step.name),
                     &step,
@@ -419,8 +426,14 @@ impl ApplyPoints for Ours {
             journal.may(actor, effect)?;
             let from = site.folder(step.from)?.join(&step.name);
             let to = site.folder(step.to)?.join(&step.name);
-            if let Err(unmoved) = held_move(journal, "BT_UPDATE_ROLLBACK", step, &from, &to, world)
-            {
+            if let Err(unmoved) = held_move(
+                journal,
+                &format!("BT_UPDATE_ROLLBACK `{}` held by another program", step.name),
+                step,
+                &from,
+                &to,
+                world,
+            ) {
                 return Ok(cut(
                     &format!("the move of `{}` to {:?}", step.name, step.to),
                     step,
@@ -484,17 +497,16 @@ impl ApplyPoints for Ours {
 /// **One move of the flip or of its rollback**, asked again while another
 /// program's hold refuses it (`update_apply::move_held_within`): through the
 /// journal holder's wait door and within its window, each refused round said
-/// as `` <subject> `<name>` … `` and looked at by `world`.
+/// after `opening` and looked at by `world`.
 fn held_move(
     journal: &Journaled<'_>,
-    subject: &str,
+    opening: &str,
     step: &Move,
     from: &Path,
     to: &Path,
     world: &mut dyn World,
 ) -> Result<(), crate::update_apply::Unwritten> {
     let (worker, within) = journal.held_door();
-    let subject = format!("{subject} `{}`", step.name);
     // One world behind two seams, each round's line said as it happens and
     // the round looked at after it; never both at once.
     let world = std::cell::RefCell::new(world);
@@ -503,7 +515,7 @@ fn held_move(
         from,
         to,
         within,
-        &subject,
+        opening,
         &mut |line| world.borrow_mut().say(line),
         &mut || world.borrow_mut().move_held(step),
     )

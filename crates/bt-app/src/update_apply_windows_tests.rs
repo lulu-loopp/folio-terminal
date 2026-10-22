@@ -7106,14 +7106,13 @@ fn held_in_set_at_the_flip(
     (hold, rounds, name)
 }
 
-/// The lines that say a round of `name`'s move, under `subject`, was refused
-/// and asked again.
-fn held_rounds_said(world: &Fake, subject: &str, name: &str) -> usize {
-    let opening = format!("{subject} `{name}` held by another program for ");
+/// The lines that say a round of a move was refused and asked again, each
+/// beginning with `opening`.
+fn held_rounds_said(world: &Fake, opening: &str) -> usize {
     world
         .said
         .iter()
-        .filter(|line| line.starts_with(&opening) && line.contains("; asked again in "))
+        .filter(|line| line.starts_with(opening) && line.contains("; asked again in "))
         .count()
 }
 
@@ -7148,7 +7147,10 @@ fn a_member_held_for_a_moment_at_the_flip_is_moved_once_let_go() {
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert_eq!(*rounds.lock().unwrap(), 2, "{:?}", world.said);
     assert_eq!(
-        held_rounds_said(&world, "BT_UPDATE_APPLY", &name),
+        held_rounds_said(
+            &world,
+            &format!("BT_UPDATE_APPLY `{name}` held by another program for ")
+        ),
         2,
         "{:?}",
         world.said
@@ -7299,7 +7301,10 @@ fn an_old_file_held_for_a_moment_at_the_rollback_is_moved_back_once_let_go() {
     assert_eq!(code, 0, "{:?}", world.said);
     assert_eq!(*rounds.lock().unwrap(), 2, "{:?}", world.said);
     assert_eq!(
-        held_rounds_said(&world, "BT_UPDATE_ROLLBACK", &name),
+        held_rounds_said(
+            &world,
+            &format!("BT_UPDATE_ROLLBACK `{name}` held by another program for ")
+        ),
         2,
         "{:?}",
         world.said
