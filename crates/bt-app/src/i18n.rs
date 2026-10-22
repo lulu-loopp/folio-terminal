@@ -3814,11 +3814,7 @@ impl Text {
                 "This video did not finish loading",
                 "此视频未能加载完成",
             ),
-            Self::VideoNoLength => pick(
-                lang,
-                "No length",
-                "无时长",
-            ),
+            Self::VideoNoLength => pick(lang, "No length", "无时长"),
             Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
             Self::PreviewFlipToPage => pick(lang, "View page", "查看页面"),
             Self::FileMenuCopyPath => pick(lang, "Copy path", "复制路径"),
@@ -3831,11 +3827,7 @@ impl Text {
             Self::FilesPermissionDenied => pick(lang, "Permission denied", "没有权限"),
             Self::FilesNotFound => pick(lang, "Folder not found", "文件夹不存在"),
             Self::FilesUnreadable => pick(lang, "Could not read folder", "无法读取文件夹"),
-            Self::FilesFolderUnknown => pick(
-                lang,
-                "Folder unknown",
-                "文件夹未知",
-            ),
+            Self::FilesFolderUnknown => pick(lang, "Folder unknown", "文件夹未知"),
             // "File Explorer" is a Windows product and has a Chinese name of its
             // own; using the English one here would send the reader looking for
             // something their Start menu does not have.
@@ -3933,16 +3925,12 @@ impl Text {
             Self::PreviewNothingToSave => {
                 pick(lang, "there is nothing to save", "没有要保存的内容")
             }
-            Self::PreviewSaveNotStarted => pick(
-                lang,
-                "the file could not be written",
-                "文件无法写入",
-            ),
-            Self::PreviewSaveTooLarge => pick(
-                lang,
-                "it is larger than {limit}",
-                "文件超过 {limit}",
-            ),
+            Self::PreviewSaveNotStarted => {
+                pick(lang, "the file could not be written", "文件无法写入")
+            }
+            Self::PreviewSaveTooLarge => {
+                pick(lang, "it is larger than {limit}", "文件超过 {limit}")
+            }
             Self::PreviewSaveLink => pick(
                 lang,
                 "the file is a link or has a second name",
@@ -4003,31 +3991,13 @@ impl Text {
                 "{file} could not be read; the shortcuts already in force were kept",
                 "{file} 无法读取；保留了正在生效的快捷键",
             ),
-            Self::MergedProfileValue => pick(
-                lang,
-                "{profile}: {field}",
-                "{profile}：{field}",
-            ),
-            Self::MergedProfilesOrder => pick(
-                lang,
-                "Order of the profiles",
-                "配置文件的顺序",
-            ),
-            Self::MergedProfileHidden => pick(
-                lang,
-                "Hidden from the pickers",
-                "从选择器中隐藏",
-            ),
-            Self::SeatOverflowOne => pick(
-                lang,
-                "1 more does not fit",
-                "还有 1 个放不下",
-            ),
-            Self::SeatOverflowMany => pick(
-                lang,
-                "{count} more do not fit",
-                "还有 {count} 个放不下",
-            ),
+            Self::MergedProfileValue => pick(lang, "{profile}: {field}", "{profile}：{field}"),
+            Self::MergedProfilesOrder => pick(lang, "Order of the profiles", "配置文件的顺序"),
+            Self::MergedProfileHidden => pick(lang, "Hidden from the pickers", "从选择器中隐藏"),
+            Self::SeatOverflowOne => pick(lang, "1 more does not fit", "还有 1 个放不下"),
+            Self::SeatOverflowMany => {
+                pick(lang, "{count} more do not fit", "还有 {count} 个放不下")
+            }
             Self::PreviewFailedImageLoad => pick(
                 lang,
                 "Preview failed: image could not be loaded",
@@ -4113,66 +4083,30 @@ impl Text {
                 pick(lang, " · no program to open it", " · 无程序可打开")
             }
             Self::HyperlinkNoProgram => pick(lang, "no program to open it", "无程序可打开"),
-            Self::HandoffCouldNotRunSuffix => pick(
-                lang,
-                " · the hand-off could not run",
-                " · 未能交给系统打开",
-            ),
-            Self::HandoffCouldNotRun => pick(
-                lang,
-                "the hand-off could not run",
-                "未能交给系统打开",
-            ),
-            Self::HandoffsStoppedSuffix => pick(
-                lang,
-                " · hand-offs have stopped",
-                " · 已停止交给系统打开",
-            ),
-            Self::HandoffsStopped => pick(
-                lang,
-                "hand-offs have stopped",
-                "已停止交给系统打开",
-            ),
+            Self::HandoffCouldNotRunSuffix => {
+                pick(lang, " · the hand-off could not run", " · 未能交给系统打开")
+            }
+            Self::HandoffCouldNotRun => {
+                pick(lang, "the hand-off could not run", "未能交给系统打开")
+            }
+            Self::HandoffsStoppedSuffix => {
+                pick(lang, " · hand-offs have stopped", " · 已停止交给系统打开")
+            }
+            Self::HandoffsStopped => pick(lang, "hand-offs have stopped", "已停止交给系统打开"),
             Self::HandoffsTooManySuffix => pick(
                 lang,
                 " · too many hand-offs at once",
                 " · 同时交给系统打开的太多",
             ),
-            Self::HandoffsTooMany => pick(
-                lang,
-                "too many hand-offs at once",
-                "同时交给系统打开的太多",
-            ),
-            Self::HandoffNotFoundSuffix => pick(
-                lang,
-                " · not found",
-                " · 找不到",
-            ),
-            Self::HandoffNotFound => pick(
-                lang,
-                "not found",
-                "找不到",
-            ),
-            Self::HandoffAccessDeniedSuffix => pick(
-                lang,
-                " · access denied",
-                " · 拒绝访问",
-            ),
-            Self::HandoffAccessDenied => pick(
-                lang,
-                "access denied",
-                "拒绝访问",
-            ),
-            Self::HandoffNotOpenedSuffix => pick(
-                lang,
-                " · not opened",
-                " · 未打开",
-            ),
-            Self::HandoffNotOpened => pick(
-                lang,
-                "not opened",
-                "未打开",
-            ),
+            Self::HandoffsTooMany => {
+                pick(lang, "too many hand-offs at once", "同时交给系统打开的太多")
+            }
+            Self::HandoffNotFoundSuffix => pick(lang, " · not found", " · 找不到"),
+            Self::HandoffNotFound => pick(lang, "not found", "找不到"),
+            Self::HandoffAccessDeniedSuffix => pick(lang, " · access denied", " · 拒绝访问"),
+            Self::HandoffAccessDenied => pick(lang, "access denied", "拒绝访问"),
+            Self::HandoffNotOpenedSuffix => pick(lang, " · not opened", " · 未打开"),
+            Self::HandoffNotOpened => pick(lang, "not opened", "未打开"),
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragSwapPanes => pick(lang, "Swap panes", "交换窗格"),
@@ -4413,11 +4347,7 @@ impl Text {
             Self::ProfilesEnvAdd => pick(lang, "Add", "添加"),
             Self::ProfilesEnvName => pick(lang, "Name", "名称"),
             Self::ProfilesEnvValue => pick(lang, "Value", "值"),
-            Self::ProfilesEnvPerPane => pick(
-                lang,
-                "Set per pane",
-                "每个窗格各自设定",
-            ),
+            Self::ProfilesEnvPerPane => pick(lang, "Set per pane", "每个窗格各自设定"),
             Self::ProfilesAuto => pick(lang, "Auto", "自动"),
             Self::ProfilesOn => pick(lang, "On", "开"),
             Self::ProfilesOff => pick(lang, "Off", "关"),
@@ -4808,11 +4738,9 @@ impl Text {
                 "Copy LaTeX",
                 "复制 LaTeX",
             ),
-            Self::ImageFileType => pick_platform(
-                lang, platform, "Images",
-                "图片",
-                "Images", "图片",
-            ),
+            Self::ImageFileType => {
+                pick_platform(lang, platform, "Images", "图片", "Images", "图片")
+            }
 
             // ── the pane's `⌄` menu ────────────────────────────────────────
             Self::PaneMenuSplitWith => pick(lang, "Split with", "拆分并运行"),
@@ -4923,26 +4851,18 @@ impl Text {
                 "session.json could not be written. Nothing was closed.",
                 "session.json 写入失败。没有关闭任何窗口。",
             ),
-            Self::ShutdownSavingWork => pick(
-                lang,
-                "Saving your work",
-                "正在保存你的工作",
-            ),
-            Self::QuitDocumentsNotSaved => pick(
-                lang,
-                "{files} could not be saved.",
-                "无法保存 {files}。",
-            ),
+            Self::ShutdownSavingWork => pick(lang, "Saving your work", "正在保存你的工作"),
+            Self::QuitDocumentsNotSaved => {
+                pick(lang, "{files} could not be saved.", "无法保存 {files}。")
+            }
             Self::QuitSaveOnItsWay => pick(
                 lang,
                 "Still on its way to the disk: {names}",
                 "仍在写入磁盘：{names}",
             ),
-            Self::QuitLeaveWithoutChange => pick(
-                lang,
-                "Leave without this change",
-                "放弃这项更改并退出",
-            ),
+            Self::QuitLeaveWithoutChange => {
+                pick(lang, "Leave without this change", "放弃这项更改并退出")
+            }
             Self::StoppedChangeLost => pick(
                 lang,
                 "Folio stopped. A change to {file} could not be kept.",
@@ -4953,37 +4873,17 @@ impl Text {
                 "Folio stopped. Changes to {files} could not be kept.",
                 "Folio 已停止。对 {files} 的更改未能保留。",
             ),
-            Self::ListSeparator => pick(
-                lang, ", ", "、",
-            ),
-            Self::ListLast => pick(
-                lang,
-                "{names} and {last}",
-                "{names} 和 {last}",
-            ),
+            Self::ListSeparator => pick(lang, ", ", "、"),
+            Self::ListLast => pick(lang, "{names} and {last}", "{names} 和 {last}"),
             Self::ListMore => pick(
                 lang,
                 "{names} and {count} more",
                 "{names} 以及另外 {count} 个",
             ),
-            Self::MergeFileLine => pick(
-                lang,
-                "{file}: {clauses}.",
-                "{file}：{clauses}。",
-            ),
-            Self::MergeFromDisk => pick(
-                lang,
-                "{names} came from disk",
-                "{names} 取自磁盘",
-            ),
-            Self::MergeNotApplied => pick(
-                lang,
-                "{names} not applied",
-                "{names} 未生效",
-            ),
-            Self::MergeClauseSeparator => pick(
-                lang, "; ", "；",
-            ),
+            Self::MergeFileLine => pick(lang, "{file}: {clauses}.", "{file}：{clauses}。"),
+            Self::MergeFromDisk => pick(lang, "{names} came from disk", "{names} 取自磁盘"),
+            Self::MergeNotApplied => pick(lang, "{names} not applied", "{names} 未生效"),
+            Self::MergeClauseSeparator => pick(lang, "; ", "；"),
 
             // ── the preview pane's lock (§7.7 ⑧) ───────────────────────────
             Self::PreviewLock => pick(
@@ -5349,21 +5249,17 @@ impl Text {
                 "Remove the line from $PROFILE",
                 "从 $PROFILE 移除此行",
             ),
-            Self::RowLegacyPsReadLine => pick(
-                lang,
-                "Earlier PSReadLine copy",
-                "旧的 PSReadLine 副本",
-            ),
+            Self::RowLegacyPsReadLine => {
+                pick(lang, "Earlier PSReadLine copy", "旧的 PSReadLine 副本")
+            }
             Self::DescLegacyPsReadLine => pick(
                 lang,
                 "An earlier Folio put it in Documents. Folio no longer uses it.",
                 "早先的 Folio 将它放在「文档」中。Folio 已不再使用它。",
             ),
-            Self::RemoveLegacyPsReadLine => pick(
-                lang,
-                "Remove it from Documents",
-                "从「文档」移除",
-            ),
+            Self::RemoveLegacyPsReadLine => {
+                pick(lang, "Remove it from Documents", "从「文档」移除")
+            }
             Self::LegacyPsReadLineRemovedToast => pick(
                 lang,
                 "Removed. PowerShell windows opened from now on use their own PSReadLine.",
@@ -5796,11 +5692,7 @@ impl Text {
                 "This address does not open in a preview.",
                 "这个地址不在预览中打开。",
             ),
-            Self::WebAddressNoSuchFile => pick(
-                lang,
-                "No such file",
-                "文件不存在",
-            ),
+            Self::WebAddressNoSuchFile => pick(lang, "No such file", "文件不存在"),
             Self::WebFailAddressInvalidSay => {
                 pick(lang, "This address is not valid.", "这个地址无效。")
             }
@@ -6444,11 +6336,7 @@ impl Text {
                 "{detail} Changes made before Folio confirmed the update were not kept.",
                 "{detail}更新确认前所做的更改没有保留。",
             ),
-            Self::UpdateFailedUndone => pick(
-                lang,
-                "The update was undone.",
-                "更新已撤销。",
-            ),
+            Self::UpdateFailedUndone => pick(lang, "The update was undone.", "更新已撤销。"),
             Self::UpdateCardUndone => pick(
                 lang,
                 "Changes made in Folio {version} were not kept.",
@@ -6458,11 +6346,7 @@ impl Text {
                 pick(lang, "The restart did not happen.", "未能重启。")
             }
             Self::ShellDidNotStart => pick(lang, "Shell not started", "Shell 未启动"),
-            Self::ShellBirthDeath => pick(
-                lang,
-                "exited at birth",
-                "启动即退出",
-            ),
+            Self::ShellBirthDeath => pick(lang, "exited at birth", "启动即退出"),
         }
     }
 
