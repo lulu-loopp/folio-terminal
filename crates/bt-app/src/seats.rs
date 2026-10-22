@@ -623,6 +623,20 @@ impl Seats {
         self.zoom == Some(seat)
     }
 
+    /// **Whether [`Self::toggle_zoom`] on `seat` would zoom into it** — and so take every other
+    /// pane off the glass — rather than let a zoom go or do nothing (T-POINTER-CAPTURE R-9: the
+    /// door that ends a gesture held on a pane leaving the glass asks this before the toggle).
+    #[must_use]
+    pub fn toggle_would_zoom_in(&self, seat: SeatId) -> bool {
+        self.zoom_can_toggle(seat) && self.zoom != Some(seat)
+    }
+
+    /// Whether [`Self::toggle_zoom`] on `seat` changes anything at all: a lone pane has nothing
+    /// to zoom out of, and a seat not in the tree is no pane.
+    fn zoom_can_toggle(&self, seat: SeatId) -> bool {
+        self.pane_count() >= 2 && self.tree.find_seat(seat).is_some()
+    }
+
     /// **Zoom this pane, or let it go if it is already the one on the stage**
     /// (§7.1.6l). Answers whether anything changed.
     ///
@@ -650,10 +664,10 @@ impl Seats {
     /// looking at — so there is no remembered focus anywhere and nothing to
     /// restore.
     pub fn toggle_zoom(&mut self, seat: SeatId) -> bool {
-        if self.pane_count() < 2 || self.tree.find_seat(seat).is_none() {
+        if !self.zoom_can_toggle(seat) {
             return false;
         }
-        self.zoom = (self.zoom != Some(seat)).then_some(seat);
+        self.zoom = self.toggle_would_zoom_in(seat).then_some(seat);
         if self.zoom.is_some() {
             self.focus = seat;
         }
