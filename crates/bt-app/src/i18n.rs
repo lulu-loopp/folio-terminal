@@ -6439,7 +6439,7 @@ impl Text {
             Self::UpdateFailedFileHeld => pick(
                 lang,
                 "Another program held {file} open: {error}",
-                "Another program held {file} open: {error}", // zh: pending T-UPDATE-MOVE-HELD-RETRY
+                "另一个程序占用了 {file}：{error}",
             ),
             Self::UpdateCardTrialNotKept => pick(
                 lang,
@@ -6633,10 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-UPDATE-MOVE-HELD-RETRY — the failed card's heading when another program
-        // held a member of the update open past the applier's window.
-        (Self::UpdateFailedFileHeld, HostPlatform::Windows),
-        (Self::UpdateFailedFileHeld, HostPlatform::MacOs),
         // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER — the formula's right-click row and the
         // Windows file chooser's image filter name, now passed into the system's own surfaces.
         (Self::FormulaMenuCopyLatex, HostPlatform::Windows),
