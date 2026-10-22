@@ -8278,12 +8278,14 @@ fn the_product_library_holds_no_probe_effect() {
 }
 
 /// RED (A2p, the thread-door note's revision (l)4) — **the probe crate is outside the product
-/// closure**: no dependency table a build of `folio.exe` reads names `bt-render-probe`, optional or
-/// not (so it is not even a candidate of [`product`]), and it is a declared tool
-/// ([`NOT_THE_PRODUCT`]). Its layer, 6, is `scripts/ci/crate-layers.tsv`'s, held by
-/// `scripts/ci/check-crate-edges.ps1`.
+/// closure**: no `[dependencies]` or `[target.….dependencies]` table of a manifest reached from
+/// `bt-app` through those tables — the dependencies `folio.exe` links — names `bt-render-probe`,
+/// optional or not (so it is not even a candidate of [`product`]). Dev- and build-dependencies are
+/// not read: a test, an example or a build script may name it. That it is a declared tool is
+/// `NOT_THE_PRODUCT`'s, held by `the_universe_is_the_product_and_its_tools_are_declared`; its
+/// layer, 6, is `scripts/ci/crate-layers.tsv`'s, held by `scripts/ci/check-crate-edges.ps1`.
 ///
-/// MUTATION: name `bt-render-probe` in `bt-app`'s `[dependencies]` and the first assertion fails.
+/// MUTATION: name `bt-render-probe` in `bt-app`'s `[dependencies]` and this fails.
 #[test]
 fn the_probe_crate_is_outside_the_product_closure() {
     let candidates = product_candidate_manifests();
@@ -8292,7 +8294,6 @@ fn the_probe_crate_is_outside_the_product_closure() {
         "a product manifest's dependency table names bt-render-probe: {:?}",
         candidates.keys().collect::<Vec<_>>()
     );
-    assert!(NOT_THE_PRODUCT.contains(&"bt-render-probe"));
 }
 
 /// The committed inventory's rows, keyed, each count a positive integer and each key once.
