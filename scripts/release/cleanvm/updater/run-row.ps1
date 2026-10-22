@@ -350,7 +350,7 @@ function Invoke-Row([hashtable] $spec) {
         Say "row $name done"
         return
     }
-    $answer = if ($spec.Overlay) { 'answerfirstrun,' } else { '' }
+    $answer = if ($spec.Overlay -or ($spec.ContainsKey('Answer') -and $spec.Answer)) { 'answerfirstrun,' } else { '' }
     Start-Keys $name "nosleep,$($answer)launchfeed,$($spec.Plan)"
 
     if ($spec.Cut) {
@@ -406,7 +406,9 @@ function Invoke-Row([hashtable] $spec) {
         $verdict = if ($spec.Cut) { Get-RowVerdict -Cut -Marker $markerText -WatchLog $watchLog } else { Get-RowVerdict -WatchLog $watchLog }
         if (-not $verdict.Failed -and $spec.Expect) {
             # E1-b's overlay rows: reaching the state is not the result; the expected cells are.
-            $verdict = Get-PlantedVerdict -Expect $spec.Expect -Evidence $evidence
+            # A live row with cells reads its last timed collection and its second plan's.
+            $verdict = if ($spec.Cut) { Get-PlantedVerdict -Expect $spec.Expect -Evidence $evidence }
+            else { Get-PlantedVerdict -Expect $spec.Expect -Evidence $evidence -FirstCollection "t$($spec.CollectAt[-1])" -LastCollection 'then' }
         }
         Save-Verdict $name $verdict $evidence
     }

@@ -108,6 +108,9 @@ function Get-UpdaterRows {
     Add-Cut 'RV-W1' $rvUpdate -Overlay -Expect $guard
     Add-Cut 'RV-W2' "$rvUpdate,waitverified" -Overlay -Expect $guard
     foreach ($w in 'W3', 'W4', 'W5', 'W6', 'W7', 'W8', 'W12') { Add-Cut "RV-$w" $rvRestart -Overlay -Expect $guard }
+    # RV-W6 (T-RESCUE-COPY-CARD): B's rescue finds neither whole set live, `Stuck`, and opens its
+    # rescue copy, which says *Update incomplete.* with the folder.
+    $rows['RV-W6'].Expect = @{ JournalGuard = $true; Window = 'any'; Card = 'incomplete' }
     foreach ($w in 'W9', 'W11') { Add-Cut "RV-$w" $rvRestart @('-KillNewInstallProcess') -Overlay -Expect $guard }
     Add-Cut 'RV-W10' $rvRestart @('-KillNewInstallProcess', '-HoldPath', '.folio-update\*\backup\folio.msix', '-HoldAt', '*') -Overlay -Expect $guard
 
@@ -159,6 +162,13 @@ function Get-UpdaterRows {
     $retired = @{ Journal = 'settled'; Card = 'none'; Window = 'installed'; NoLines = @($handedOff) }
     Add-Planted 'RW-retired-outcome-B' 'retired' 'retired-outcome' 'B' $retired $retired
     Add-Planted 'BC-retired-outcome' 'retired' 'retired-outcome' 'B' $retired
+    # The receipt v2 cell (live): A installed, A -> B through the feed (both signed by the same
+    # identity); B as the trial writes its receipt as v2, which A's holder never accepts: said once,
+    # no receipt, rollback, A restored with its card. The first run is answered (no Later).
+    Add-Live 'RW-receipt-v2' "$rvRestart,card:start1" @('-StopReadingAt', 'Handoff') @(240) 'close,sleep:8,launchplain,sleep:40,card:start2'
+    $rows['RW-receipt-v2'].Answer = $true
+    $rows['RW-receipt-v2'].Expect = @{ Journal = 'settled'; Card = 'restored'; Window = 'installed'
+        Lines = @('BT_UPDATE_APPLY the receipt: version 2 is not one this build reads', 'RolledBack') }
     return $rows
 }
 
@@ -243,13 +253,14 @@ function Get-CardKind {
 #            lines that interval added) or had a header A acts on by its frozen promise before (A1)
 # Answers @{ Failed; Cells = [ordered]@{ <cell> = @{ Want; Got; Ok } }; Line }.
 function Get-PlantedVerdict {
-    param([Parameter(Mandatory)] [hashtable] $Expect, [Parameter(Mandatory)] [string] $Evidence)
+    param([Parameter(Mandatory)] [hashtable] $Expect, [Parameter(Mandatory)] [string] $Evidence,
+        [string] $FirstCollection = 'after-start1', [string] $LastCollection = 'after-start2')
     $cells = [ordered]@{}
     function Text([string] $path) { if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllText($path) } else { $null } }
     function Lines([string] $path) { if (Test-Path -LiteralPath $path) { @([IO.File]::ReadAllLines($path)) } else { @() } }
     function Cell([string] $name, $want, $got) { $cells[$name] = @{ Want = $want; Got = $got; Ok = ($want -eq $got) } }
-    $start1 = Join-Path $Evidence 'after-start1'
-    $start2 = Join-Path $Evidence 'after-start2'
+    $start1 = Join-Path $Evidence $FirstCollection
+    $start2 = Join-Path $Evidence $LastCollection
     # A planted row stands on its plant: `guest\plant.ps1` ends its log with `PLANT DONE` or
     # `PLANT FAILED: <why>`, and a row whose plant failed is no reading of any cell.
     $plantLog = @(Get-ChildItem -LiteralPath $start1 -File -Filter 'updater-plant-*.txt' -ErrorAction SilentlyContinue | Select-Object -First 1)
