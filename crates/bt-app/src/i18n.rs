@@ -6449,12 +6449,12 @@ impl Text {
             Self::UpdateFailedUndone => pick(
                 lang,
                 "The update was undone.",
-                "The update was undone.", // zh: pending E5
+                "更新已撤销。",
             ),
             Self::UpdateCardUndone => pick(
                 lang,
                 "Changes made in Folio {version} were not kept.",
-                "Changes made in Folio {version} were not kept.", // zh: pending E5
+                "在 Folio {version} 中所做的更改没有保留。",
             ),
             Self::UpdateCardRestartMissed => {
                 pick(lang, "The restart did not happen.", "未能重启。")
@@ -6633,11 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // 0.4.8 E5: the card of a rollback that did not keep what a Folio ran over it changed.
-        (Self::UpdateFailedUndone, HostPlatform::Windows),
-        (Self::UpdateFailedUndone, HostPlatform::MacOs),
-        (Self::UpdateCardUndone, HostPlatform::Windows),
-        (Self::UpdateCardUndone, HostPlatform::MacOs),
         // 0.4.8 M-SWEEP-048: the address field's sentence for a path that names no file.
         (Self::WebAddressNoSuchFile, HostPlatform::Windows),
         (Self::WebAddressNoSuchFile, HostPlatform::MacOs),
