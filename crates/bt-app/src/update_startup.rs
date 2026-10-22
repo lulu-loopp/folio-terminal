@@ -3596,7 +3596,7 @@ mod tests {
                     argv: &argv,
                     trial: None,
                     failed: sent.then_some(journal.as_path()),
-                    journal_held,
+                    journal_held: journal_held.map(|error| HeldTold { error, file: None }),
                 },
                 starter,
                 world,
@@ -3674,6 +3674,7 @@ mod tests {
                 failed,
                 Some(Failure::JournalHeld {
                     error: "held".to_owned(),
+                    file: None,
                     then: Box::new(Failure::Newer {
                         folder: folder.clone(),
                         version: Some(LATER_BUILD.to_owned()),
