@@ -5354,22 +5354,22 @@ impl Text {
             Self::RowLegacyPsReadLine => pick(
                 lang,
                 "Earlier PSReadLine copy",
-                "Earlier PSReadLine copy", // zh: pending T-INTEGRATION-INJECT-2-BUILD
+                "旧的 PSReadLine 副本",
             ),
             Self::DescLegacyPsReadLine => pick(
                 lang,
                 "An earlier Folio put it in Documents. Folio no longer uses it.",
-                "An earlier Folio put it in Documents. Folio no longer uses it.", // zh: pending T-INTEGRATION-INJECT-2-BUILD
+                "早先的 Folio 将它放在「文档」中。Folio 已不再使用它。",
             ),
             Self::RemoveLegacyPsReadLine => pick(
                 lang,
                 "Remove it from Documents",
-                "Remove it from Documents", // zh: pending T-INTEGRATION-INJECT-2-BUILD
+                "从「文档」移除",
             ),
             Self::LegacyPsReadLineRemovedToast => pick(
                 lang,
                 "Removed. PowerShell windows opened from now on use their own PSReadLine.",
-                "Removed. PowerShell windows opened from now on use their own PSReadLine.", // zh: pending T-INTEGRATION-INJECT-2-BUILD
+                "已移除。此后打开的 PowerShell 窗口使用各自的 PSReadLine。",
             ),
             Self::ShellProfileAddedToast => pick(
                 lang,
@@ -6633,16 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-INTEGRATION-INJECT-2-BUILD — the removal row for the PSReadLine copy an
-        // earlier Folio wrote into Documents, and what its press says.
-        (Self::RowLegacyPsReadLine, HostPlatform::Windows),
-        (Self::RowLegacyPsReadLine, HostPlatform::MacOs),
-        (Self::DescLegacyPsReadLine, HostPlatform::Windows),
-        (Self::DescLegacyPsReadLine, HostPlatform::MacOs),
-        (Self::RemoveLegacyPsReadLine, HostPlatform::Windows),
-        (Self::RemoveLegacyPsReadLine, HostPlatform::MacOs),
-        (Self::LegacyPsReadLineRemovedToast, HostPlatform::Windows),
-        (Self::LegacyPsReadLineRemovedToast, HostPlatform::MacOs),
         // zh: pending T-PROFILE-INSTALL-REFUSED-START — a change whose worker would not start, or
         // stopped before it finished.
         (Self::ChangeNotStarted, HostPlatform::Windows),
