@@ -4938,7 +4938,7 @@ impl Text {
             Self::QuitSaveOnItsWay => pick(
                 lang,
                 "Still on its way to the disk: {names}",
-                "Still on its way to the disk: {names}", // zh: pending T-QUIT-AND-STOP-SAVES
+                "仍在写入磁盘：{names}",
             ),
             Self::QuitLeaveWithoutChange => pick(
                 lang,
@@ -6633,10 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-QUIT-AND-STOP-SAVES — the card a quit raises over saves still on their
-        // way to the disk when it stopped waiting.
-        (Self::QuitSaveOnItsWay, HostPlatform::Windows),
-        (Self::QuitSaveOnItsWay, HostPlatform::MacOs),
         // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
         (Self::ShellBirthDeath, HostPlatform::Windows),
         (Self::ShellBirthDeath, HostPlatform::MacOs),
