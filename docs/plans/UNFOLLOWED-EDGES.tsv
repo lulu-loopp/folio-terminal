@@ -6719,6 +6719,7 @@ crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::is_last_trial	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous	collect	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous	skip	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::perform	Ambiguous	to_string	2	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::rescue_copy	Ambiguous	is_some	1	2026-10-22: T-RESCUE-WINDOW-NO-OFFER; `Option::is_some` on the `OnceLock` read `update_startup::rescue_copy` answers, a standard-library method on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::retire	Ambiguous	to_string	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::retire	Dynamic	kept	2	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	flatten	2	2026-10-21: T-RESCUE-COPY-CARD; the same sites as `update_startup::run`'s rows, the pass renamed `run_by` (the rescue copy's start); a standard-library method (Option, bool) on a receiver the grammar does not type, which reaches no door
