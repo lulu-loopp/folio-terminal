@@ -4969,20 +4969,20 @@ impl Text {
             Self::MergeFileLine => pick(
                 lang,
                 "{file}: {clauses}.",
-                "{file}: {clauses}.", // zh: pending T-STORE-NOTICE
+                "{file}：{clauses}。",
             ),
             Self::MergeFromDisk => pick(
                 lang,
                 "{names} came from disk",
-                "{names} came from disk", // zh: pending T-STORE-NOTICE
+                "{names} 取自磁盘",
             ),
             Self::MergeNotApplied => pick(
                 lang,
                 "{names} not applied",
-                "{names} not applied", // zh: pending T-STORE-NOTICE
+                "{names} 未生效",
             ),
             Self::MergeClauseSeparator => pick(
-                lang, "; ", "; ", // zh: pending T-STORE-NOTICE
+                lang, "; ", "；",
             ),
 
             // ── the preview pane's lock (§7.7 ⑧) ───────────────────────────
@@ -6631,16 +6631,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-STORE-NOTICE — the storage pass's card: what the files' values
-        // replaced and what was not applied.
-        (Self::MergeFileLine, HostPlatform::Windows),
-        (Self::MergeFileLine, HostPlatform::MacOs),
-        (Self::MergeFromDisk, HostPlatform::Windows),
-        (Self::MergeFromDisk, HostPlatform::MacOs),
-        (Self::MergeNotApplied, HostPlatform::Windows),
-        (Self::MergeNotApplied, HostPlatform::MacOs),
-        (Self::MergeClauseSeparator, HostPlatform::Windows),
-        (Self::MergeClauseSeparator, HostPlatform::MacOs),
         // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER — a Git page's write or checkout Folio
         // did not run (the repository's lane full, its worker gone or not started) or did not finish.
         (Self::GitNotRunFull, HostPlatform::Windows),
