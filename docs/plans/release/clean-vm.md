@@ -972,18 +972,20 @@ cell, written to `<row>\verdict.txt`.
 
 | ✓ | row | word / rescue | expected (A, the hatch) | expected (A-mut: the mutation column) |
 | --- | --- | --- | --- | --- |
-| ☐ | RV-W1 … RV-W12 | B's own journal; A laid over | A never deletes or rewrites a journal it did not settle: a change between two collections has a rescue's `BT_UPDATE_RECOVER … recovery ended` line in that interval, or a `terminal`, `preparing` or `deferred` header before it (A1); a Folio window at the end | — |
+| ☐ | RV-W1 … RV-W12 | B's own journal; A laid over | A never deletes or rewrites a journal it did not settle: a change between two collections has a rescue's `BT_UPDATE_RECOVER … recovery ended` line in that interval, or a `terminal`, `preparing` or `deferred` header before it (A1); a Folio window at the end. **RV-W4** (Handoff with the Run value, before Armed) is not reached by the harness: twice the journal already read `Moving` when the watcher froze on the Run value (the window is milliseconds wide); it goes to 0.4.9 (E1-b-rest) | — |
+| ☐ | RV-W6 | as above, cut at `Moving` | B's rescue finds neither whole set live → `Stuck`, and opens its rescue copy, which shows *Update incomplete.* with the folder (T-RESCUE-COPY-CARD) — when B carries that fix; a B built before it opens the rescue copy with no card | — |
 | ☐ | BC-class … BC-retired-outcome | each word; B's rescue (B installed) | B reads its word and settles: `recovery ended RolledBack`, the journal gone, *Previous version restored.* | — |
 | ☐ | RW-class-B, RW-outcome-B, RW-v-B | header word; B's rescue | A hands it to B's rescue (`an update is being finished by …\rescue\folio.exe`), which settles it as above | A continues plainly, nothing handed over, no card (`… is left as it is`) |
 | ☐ | RW-class-none, -held (and outcome, v) | header word; no rescue / B's held share-none | held-writes continue: `could not be started; Folio starts with its writes held`, the journal byte for byte, *An update by a newer Folio is not finished.* … *Changes made in this session are not kept.* | as above |
-| ☐ | RW-class-A (and outcome, v) | header word; A placed as the rescue (R2-19) | A as the recovery stands aside (`recovery ended StoodAside(`), the exit guard opens the rescue copy, never the installed build plainly, and that window shows the newer Folio's card. **On main the rescue copy shows no card** (it reads its own home, `H\<txn>\rescue\.folio-update`): the row fails there — T-RESCUE-COPY-CARD | as above |
+| ☐ | RW-class-A (and outcome, v) | header word; A placed as the rescue (R2-19) | A as the recovery stands aside (`recovery ended StoodAside(`), the exit guard opens the rescue copy, never the installed build plainly, and that window shows the newer Folio's card (T-RESCUE-COPY-CARD: the rescue copy reads the real home's journal; before it, the rescue copy read its own home and showed no card) | as above |
 | ☐ | RW-phase-B, RW-layout-B, RW-adapter-B | body word; B's rescue | the header hands it over; B settles it | the same (the control) |
 | ☐ | RW-phase-none, -held (and layout, adapter) | body word; no rescue / held | held-writes continue; the card is the newer Folio's whenever A cannot read the journal whole (`update_startup::unfinished`), with the not-kept sentence | continues plainly (`Folio starts without it`), no card |
-| ☐ | RW-phase-A (and layout, adapter) | body word; A as the rescue | as RW-class-A: stands aside, the rescue copy's window with the card (fails on main as above) | `recovery ended Left(`, the rescue copy's window, no card |
+| ☐ | RW-phase-A (and layout, adapter) | body word; A as the rescue | as RW-class-A: stands aside, the rescue copy's window with the newer Folio's card | `recovery ended Left(`, the rescue copy's window, no card |
 | ☐ | RW-retired-outcome-B | `Retired.outcome` (terminal header) | A retires it on its frozen header (A1): the journal gone, nothing handed over, no card (a plain start) | the same |
 
-Not yet staged here: the receipt v2 cell (a B trial under an A holder: an A -> B update with B
-signed), and the macOS rows (`mac/row.sh`; B and C signed and notarised on the Mac).
+| ☐ | RW-receipt-v2 | live: A installed, A -> B through the feed (A and B signed by the same identity; first run answered) | B as the trial writes its receipt as v2; A's holder never accepts it: `BT_UPDATE_APPLY the receipt: version 2 is not one this build reads`, no receipt by the deadline, rollback (`RolledBack`), the journal gone, A restored with *The new version did not start. / Previous version restored.* (cells read from the `t240` and `then` collections) | — |
+
+Not yet staged here: the macOS rows (`mac/row.sh`; B and C signed and notarised on the Mac).
 
 #### 每一行检查什么(通用)
 

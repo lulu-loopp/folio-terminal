@@ -411,6 +411,18 @@ try {
     [IO.File]::WriteAllLines((Join-Path $failedPlant 'after-start1\updater-plant-x.txt'), @('00:00:01 placed a', '00:00:02 PLANT FAILED: no rescue'))
     $v = Get-PlantedVerdict -Expect $heldCell -Evidence $failedPlant
     Check ($v.Failed -and $v.Cells['Planted'].Got -match 'PLANT FAILED: no rescue') "a row whose plant failed fails, whatever its other cells say ($($v.Line))"
+    # A live row's cells are read from its own collections (RW-receipt-v2: `t240`, `then`).
+    $live = Join-Path $scratch 'live'
+    [IO.Directory]::CreateDirectory((Join-Path $live 't240\shots')) | Out-Null
+    [IO.Directory]::CreateDirectory((Join-Path $live 'then')) | Out-Null
+    [IO.File]::WriteAllLines((Join-Path $live 't240\shots\RW-receipt-v2-card-start1.txt'), @($installed, 'The new version did not start.', 'Previous version restored.'))
+    [IO.File]::WriteAllLines((Join-Path $live 'then\diagnostics.log'), @('BT_UPDATE_APPLY the receipt: version 2 is not one this build reads', 'BT_UPDATE_APPLY transaction x wrote [Armed, Moving, Trial, RollbackIntent, RolledBack, Retired]'))
+    $receiptRow = (Get-UpdaterRows)['RW-receipt-v2']
+    Check ($receiptRow.Answer -and -not $receiptRow.Cut) 'the receipt v2 row is a live row that answers the first run'
+    $v = Get-PlantedVerdict -Expect $receiptRow.Expect -Evidence $live -FirstCollection 't240' -LastCollection 'then'
+    Check (-not $v.Failed) "a live row's cells read from t240 and then pass ($($v.Line))"
+    $v = Get-PlantedVerdict -Expect $receiptRow.Expect -Evidence $live
+    Check ($v.Failed) "the same evidence read from after-start1/after-start2 finds nothing ($($v.Line))"
     $aside = @{ Journal = 'kept'; Card = 'newer'; Window = 'rescue' }
     $v = Get-PlantedVerdict -Expect $aside -Evidence (New-Evidence 'aside' $tpl @() @($rescueWin, 'PS C:\>'))
     Check ($v.Failed -and $v.Cells['Window'].Ok -and $v.Cells['Card'].Got -eq 'none') "the rescue copy's window with no card fails the card cell only ($($v.Line))"
