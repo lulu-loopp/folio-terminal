@@ -4021,12 +4021,12 @@ impl Text {
             Self::SeatOverflowOne => pick(
                 lang,
                 "1 more does not fit",
-                "1 more does not fit", // zh: pending H2
+                "还有 1 个放不下",
             ),
             Self::SeatOverflowMany => pick(
                 lang,
                 "{count} more do not fit",
-                "{count} more do not fit", // zh: pending H2
+                "还有 {count} 个放不下",
             ),
             Self::PreviewFailedImageLoad => pick(
                 lang,
@@ -6633,11 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending H2 — the crowded pane strip's tail line (AUDIT-hardcode SEAT-1).
-        (Self::SeatOverflowOne, HostPlatform::Windows),
-        (Self::SeatOverflowOne, HostPlatform::MacOs),
-        (Self::SeatOverflowMany, HostPlatform::Windows),
-        (Self::SeatOverflowMany, HostPlatform::MacOs),
         // zh: pending S-5 — what a link, an address or the fonts card says when its hand-off
         // could not run, or the hand-off lane's worker stopped with it owed.
         (Self::HandoffCouldNotRunSuffix, HostPlatform::Windows),
@@ -11215,8 +11210,7 @@ mod tests {
     /// table's, in both languages, with the verb agreeing with the count.**
     ///
     /// It was an English sentence with an English plural rule written in
-    /// `seats.rs`, so the Chinese window drew English. The Chinese rows are
-    /// pending (`CHINESE_PENDING`), and the entries are the table's either way.
+    /// `seats.rs`, so the Chinese window drew English.
     ///
     /// MUTATION: drop the one-seat template from `seat_overflow_notice_in` —
     /// "1 more do not fit" goes red.
