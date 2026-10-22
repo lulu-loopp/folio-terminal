@@ -3986,12 +3986,12 @@ impl Text {
             Self::RecoveredEditKept => pick(
                 lang,
                 "An unsaved edit was kept at {folder}",
-                "An unsaved edit was kept at {folder}", // zh: pending T-RECOVERED-FOLDER
+                "一处未保存的编辑已保留在 {folder}",
             ),
             Self::RecoveredEditsKept => pick(
                 lang,
                 "{count} unsaved edits were kept at {folder}",
-                "{count} unsaved edits were kept at {folder}", // zh: pending T-RECOVERED-FOLDER
+                "{count} 处未保存的编辑已保留在 {folder}",
             ),
             Self::SettingsFileKept => pick(
                 lang,
@@ -6633,12 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-RECOVERED-FOLDER — the start's toast for the edits a stop kept in the
-        // recovered folder.
-        (Self::RecoveredEditKept, HostPlatform::Windows),
-        (Self::RecoveredEditKept, HostPlatform::MacOs),
-        (Self::RecoveredEditsKept, HostPlatform::Windows),
-        (Self::RecoveredEditsKept, HostPlatform::MacOs),
         // zh: pending T-STORE-MERGE-SETTINGS — the "kept" card for a settings or
         // keybindings file that will not parse mid-run.
         (Self::SettingsFileKept, HostPlatform::Windows),
