@@ -390,8 +390,13 @@ const HELD_LONGEST_PAUSE: Duration = Duration::from_secs(4);
 /// program moved by hand as a dead applier left it, a journal or a receipt
 /// written through `install_txn`'s doors, the transaction folder they are in
 /// — which an on-access scan (an antivirus, an indexer) opens next and holds
-/// for a moment. The refused rename leaves both names as they were, so the
-/// step is made again whole.
+/// for a moment. A refused rename moves nothing, so the step is made again
+/// whole. It is not always tidy: when a door's write is refused, the door
+/// removes its own fresh temporary on a best-effort basis, and a scanner
+/// still holding that temporary makes the removal fail without a word. So
+/// a retried pass of `durable_write` or `durable_create` can leave a
+/// `.<name>.<pid>.<n>.tmp` beside the journal or the receipt. The target
+/// itself is written whole or not at all.
 ///
 /// The refusal is the one the product's own retries ask about,
 /// [`install_txn::Failure::refused_while_open`]: Windows only, so elsewhere
@@ -430,6 +435,23 @@ pub fn done_once_let_go<T>(
 /// As [`done_once_let_go`].
 pub fn renamed_once_let_go(from: &Path, to: &Path) {
     renamed_once_let_go_pausing(from, to, &mut std::thread::sleep);
+}
+
+/// **`from` moved to `to` through `install_txn::durable_move`** (never over
+/// a file, both directories flushed), made again while another program
+/// holds the file, as [`done_once_let_go`] makes a step. The line after a
+/// retried move, and the panic, name both `from` and `to`.
+///
+/// # Panics
+/// As [`done_once_let_go`].
+pub fn moved_once_let_go(from: &Path, to: &Path) {
+    done_once_let_go_pausing(
+        "moved_once_let_go",
+        "moved",
+        &format!("{} -> {}", from.display(), to.display()),
+        || install_txn::durable_move(from, to),
+        &mut std::thread::sleep,
+    );
 }
 
 /// [`renamed_once_let_go`], `pause` called between attempts (the harness

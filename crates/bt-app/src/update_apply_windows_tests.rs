@@ -34,7 +34,7 @@ use std::time::Duration;
 use bt_platform::logon_hook::{self, Registry};
 use bt_platform::trust::FileVersion;
 use bt_platform::trust_harness::{
-    Behaviour, IDENTITY, TestCa, done_once_let_go, renamed_once_let_go,
+    Behaviour, IDENTITY, TestCa, done_once_let_go, moved_once_let_go, renamed_once_let_go,
 };
 use bt_winres::digest::sha256;
 
@@ -541,8 +541,9 @@ impl Install {
                 layout: Layout::Members(self.inventories.clone()),
             },
         };
+        let bytes = journal.encode();
         done_once_let_go(&self.home.journal(), || {
-            install_txn::durable_write(&self.home.journal(), &journal.encode())
+            install_txn::durable_write(&self.home.journal(), &bytes)
         });
     }
 
@@ -674,7 +675,7 @@ impl Install {
             if step.to == Place::Backup {
                 std::fs::create_dir_all(self.folder(Place::Backup)).unwrap();
             }
-            done_once_let_go(&to, || install_txn::durable_move(&from, &to));
+            moved_once_let_go(&from, &to);
         }
     }
 
