@@ -6222,12 +6222,12 @@ impl Text {
             Self::ChangeNotStarted => pick(
                 lang,
                 "Folio could not start this change, so nothing was changed.",
-                "Folio could not start this change, so nothing was changed.", // zh: pending T-PROFILE-INSTALL-REFUSED-START
+                "Folio 无法开始这项更改，未做任何改动。",
             ),
             Self::ChangeStopped => pick(
                 lang,
                 "Folio stopped before this change finished.",
-                "Folio stopped before this change finished.", // zh: pending T-PROFILE-INSTALL-REFUSED-START
+                "这项更改完成前 Folio 已停止。",
             ),
 
             // ── the application menu bar (M3-2, macOS) ─────────────────────
@@ -6633,12 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-PROFILE-INSTALL-REFUSED-START — a change whose worker would not start, or
-        // stopped before it finished.
-        (Self::ChangeNotStarted, HostPlatform::Windows),
-        (Self::ChangeNotStarted, HostPlatform::MacOs),
-        (Self::ChangeStopped, HostPlatform::Windows),
-        (Self::ChangeStopped, HostPlatform::MacOs),
         // zh: pending T-OBSERVATION-REFUSAL-ON-THE-PAGE — the Profiles row of an edition whose
         // `$PROFILE` check could not run.
         (Self::CapPowerShellCheckNotRun, HostPlatform::Windows),
@@ -7237,8 +7231,7 @@ pub fn explorer_first_page_failed(message: &str) -> String {
 pub fn explorer_first_page_remove_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Windows would not remove the package: {message}"),
-        // zh: pending T-PROFILE-INSTALL-REFUSED-START
-        Lang::Chinese => format!("Windows would not remove the package: {message}"),
+        Lang::Chinese => format!("Windows 拒绝移除这个包：{message}"),
     }
 }
 
