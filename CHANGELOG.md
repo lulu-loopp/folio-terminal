@@ -6,6 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.4.8-preview — 2026-10-DD
+
 ### Added
 
 - The file search in the palette is kept current in the background, so its rows are ready when it opens. <!-- zh: 搜索面板中的文件搜索现在在后台保持更新，打开时结果已经就绪。 -->
@@ -25,6 +29,13 @@ All notable changes to Folio are recorded here. The format follows
 - In a Windows PowerShell pane, Folio now uses its own copy of Microsoft's PSReadLine 2.4.5, so a long command you are still typing stays in one piece when the pane is resized. It is kept in Folio's own folder and used by Folio's panes only: nothing is installed for the rest of your account, nothing is asked, and Windows Terminal and other windows keep the PSReadLine they have. <!-- zh: Windows PowerShell 窗格现在使用 Folio 自带的一份微软 PSReadLine 2.4.5，调整窗格大小时，正在输入的长命令不再错乱。它放在 Folio 自己的文件夹中，只供 Folio 的窗格使用：不为账户的其他部分安装任何东西，也不询问，Windows Terminal 和其他窗口仍使用原有的 PSReadLine。 -->
 - If an earlier Folio installed its PSReadLine into Documents, Folio no longer uses or updates it; Settings ▸ Terminal offers to remove it from Documents while it is there, and uninstalling Folio removes it. <!-- zh: 旧版 Folio 若在「文档」中装过它的 PSReadLine，Folio 不再使用或更新它；它还在时，设置 ▸ 终端会提供从「文档」移除，卸载 Folio 时也会将它移除。 -->
 - The formula's right-click menu and the picture filter in the Windows file chooser take their words from Folio's interface language, as the rest of Folio does. <!-- zh: 公式的右键菜单和 Windows 文件选择框中的图片筛选项，现在与 Folio 其他部分一样使用 Folio 的界面语言。 -->
+- On macOS and Linux, a profile that asks for PowerShell 7 now finds a `pwsh` on `PATH` (it used to find nothing outside Windows). <!-- zh: macOS 和 Linux 上，要求 PowerShell 7 的配置文件现在能找到 `PATH` 中的 `pwsh`（以前在 Windows 以外什么也找不到）。 -->
+- A copy installed with winget still updates with `winget upgrade`; the card is for zip, scoop and Homebrew copies. <!-- zh: 用 winget 安装的副本仍通过 `winget upgrade` 更新；更新卡片用于 zip、scoop 和 Homebrew 安装的副本。 -->
+- A Homebrew-installed copy is recognized from Homebrew's own record even when an official cask does not add Folio's install attributes. <!-- zh: 即使官方 cask 没有添加 Folio 的安装属性，用 Homebrew 安装的副本也能根据 Homebrew 自己的记录识别。 -->
+- A long address in a web pane shows its site and page instead of being cut off: the middle of the path folds into …, and a narrow pane keeps the site. <!-- zh: 网页窗格中的长地址显示站点和页面，不再被截断：路径中段折叠为 …，窄窗格保留站点。 -->
+- What you install or change while Folio runs is seen without a restart: a Copilot CLI (or the Node.js it needs) on the Agents page, a display's refresh rate, a keyboard layout that moves the summon key, and a new `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `COPILOT_HOME`; files added inside folded folders appear the next time you open the command palette, a picture that was not ready the first time you hovered it shows on the next hover, and on macOS a font installed while Folio runs can be chosen and used. <!-- zh: Folio 运行期间安装或更改的内容无需重启即可识别：Agent 页上的 Copilot CLI（或它所需的 Node.js）、显示器刷新率、改变快捷终端快捷键位置的键盘布局，以及新的 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` 或 `COPILOT_HOME`；折叠文件夹中新增的文件在下次打开搜索面板时出现，首次悬停时未就绪的图片在下次悬停时显示；macOS 上，Folio 运行期间安装的字体可以选用。 -->
+- Folio's window no longer waits while Folio looks for installed programs: usually the shell is already running when the window first appears, but on the first start after the computer boots (or when `PATH` holds a slow network folder) the window opens first, its tab says "Terminal", and whatever you type is held until the shell starts. <!-- zh: Folio 查找已安装程序时，窗口不再等待：通常窗口出现时 shell 已在运行；但在开机后首次启动时（或 `PATH` 中有较慢的网络文件夹时），窗口先打开，标签页显示「终端」，输入的内容会保留到 shell 启动。 -->
+- Folio's window now appears before its shells have started, instead of waiting for each one: on a slow start a tab shows its profile's name (or "Terminal") and whatever you type is kept until the shell is ready. If a shell cannot start, Folio says why and keeps running. <!-- zh: Folio 的窗口现在会在 shell 启动前出现，不再逐个等待：启动较慢时，标签页显示配置文件名称（或「终端」），输入的内容保留到 shell 就绪。shell 无法启动时，Folio 说明原因并继续运行。 -->
 
 ### Removed
 
@@ -98,7 +109,6 @@ All notable changes to Folio are recorded here. The format follows
 - Closing the last window no longer throws away an unsaved edit in the summoned terminal: Folio shows it and asks first, and Cancel keeps the window open. <!-- zh: 关闭最后一个窗口时，快捷终端中未保存的编辑不再被丢弃：Folio 先显示它并询问，选取消则窗口保持打开。 -->
 - Enabling and undoing the PowerShell integration from two windows never removes your own line from your PowerShell profile: if the profile changed since the page looked at it, Folio changes nothing and asks you to reload the page. <!-- zh: 从两个窗口启用和撤销 PowerShell 整合，不再删掉 PowerShell 配置文件里你自己写的行：此页读取之后配置文件若有改动，Folio 不做修改，并提示重新加载此页。 -->
 - Uninstalling Folio while an update's new version is still being tried no longer leaves a `folio-trial-…` folder behind in your temporary folder. <!-- zh: 更新的新版本仍在试运行时卸载 Folio，不再在临时文件夹中留下 `folio-trial-…` 文件夹。 -->
-- An update no longer rolls back because an antivirus or backup program held one of its files for a few seconds: Folio waits up to ten seconds, and if the file stays held, the card says so, with the error Windows gave. <!-- zh: 杀毒或备份程序短暂占用某个更新文件时，更新不再回滚：Folio 最多等待十秒；文件仍被占用时，卡片会说明，并附上 Windows 给出的错误。 -->
 - The card after an unfinished update says what happened — that the update stopped before the new version started, or that it did not finish while the new version is already running — instead of always saying the new version did not start. <!-- zh: 未完成的更新之后，卡片说明实际发生了什么——更新在新版本启动前停止，或新版本已在运行而更新未完成——不再一律显示新版本未能启动。 -->
 - If you change a setting in the first window of a new version and the update is only finished later, the next start says those changes were not kept, instead of losing them without a word. <!-- zh: 在新版本的第一个窗口中改了设置、更新却稍后才完成时，下次启动会说明这些更改没有保留，不再无声丢失。 -->
 - On a Mac, Folio now says when changes made during an update's trial were not kept. <!-- zh: Mac 上，更新试运行期间所做的更改没有保留时，Folio 现在会说明。 -->
@@ -148,16 +158,6 @@ All notable changes to Folio are recorded here. The format follows
 - In the terminal, a fence line followed by anything other than spaces or tabs (such as a full-width space) no longer ends a code block, so a formula below it stays text, as in the preview. <!-- zh: 终端中，后面跟着空格或制表符以外字符（如全角空格）的围栏行不再结束代码块，因此其下方的公式仍为文本，与预览一致。 -->
 - A drag, a selection, a scroll thumb or a press you are holding now ends when what it was about goes away — you switch tabs, close the pane or tab, the window loses focus, or Windows takes the mouse away — instead of going on after you let go; a divider goes back to where it was and a tab in your hand goes home, and a program you were clicking in is told the button came up. <!-- zh: 正在进行的拖动、选择、滚动滑块或按住的按键，现在会在其对象消失时结束——切换标签页、关闭窗格或标签页、窗口失去焦点，或 Windows 收回鼠标——不再在你松手后继续；分隔条回到原位，手中的标签回到原处，你正在点击的程序会收到按键已松开的通知。 -->
 - While you hold a mouse button in a drag or a selection, resting on a ⌄ no longer opens its menu, no tooltip, flyout or hover preview appears, and a web page under the pointer neither reacts nor scrolls on the wheel; a touch pan made meanwhile is ignored. <!-- zh: 拖动或选择时按住鼠标键，停在 ⌄ 上不再打开其菜单，也不会出现工具提示、弹出面板或悬停预览，指针下的网页不响应也不随滚轮滚动；此间的触摸平移会被忽略。 -->
-
-### Changed
-
-- On macOS and Linux, a profile that asks for PowerShell 7 now finds a `pwsh` on `PATH` (it used to find nothing outside Windows). <!-- zh: macOS 和 Linux 上，要求 PowerShell 7 的配置文件现在能找到 `PATH` 中的 `pwsh`（以前在 Windows 以外什么也找不到）。 -->
-- A copy installed with winget still updates with `winget upgrade`; the card is for zip, scoop and Homebrew copies. <!-- zh: 用 winget 安装的副本仍通过 `winget upgrade` 更新；更新卡片用于 zip、scoop 和 Homebrew 安装的副本。 -->
-- A Homebrew-installed copy is recognized from Homebrew's own record even when an official cask does not add Folio's install attributes. <!-- zh: 即使官方 cask 没有添加 Folio 的安装属性，用 Homebrew 安装的副本也能根据 Homebrew 自己的记录识别。 -->
-- A long address in a web pane shows its site and page instead of being cut off: the middle of the path folds into …, and a narrow pane keeps the site. <!-- zh: 网页窗格中的长地址显示站点和页面，不再被截断：路径中段折叠为 …，窄窗格保留站点。 -->
-- What you install or change while Folio runs is seen without a restart: a Copilot CLI (or the Node.js it needs) on the Agents page, a display's refresh rate, a keyboard layout that moves the summon key, and a new `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `COPILOT_HOME`; files added inside folded folders appear the next time you open the command palette, a picture that was not ready the first time you hovered it shows on the next hover, and on macOS a font installed while Folio runs can be chosen and used. <!-- zh: Folio 运行期间安装或更改的内容无需重启即可识别：Agent 页上的 Copilot CLI（或它所需的 Node.js）、显示器刷新率、改变快捷终端快捷键位置的键盘布局，以及新的 `CLAUDE_CONFIG_DIR`、`CODEX_HOME` 或 `COPILOT_HOME`；折叠文件夹中新增的文件在下次打开搜索面板时出现，首次悬停时未就绪的图片在下次悬停时显示；macOS 上，Folio 运行期间安装的字体可以选用。 -->
-- Folio's window no longer waits while Folio looks for installed programs: usually the shell is already running when the window first appears, but on the first start after the computer boots (or when `PATH` holds a slow network folder) the window opens first, its tab says "Terminal", and whatever you type is held until the shell starts. <!-- zh: Folio 查找已安装程序时，窗口不再等待：通常窗口出现时 shell 已在运行；但在开机后首次启动时（或 `PATH` 中有较慢的网络文件夹时），窗口先打开，标签页显示「终端」，输入的内容会保留到 shell 启动。 -->
-- Folio's window now appears before its shells have started, instead of waiting for each one: on a slow start a tab shows its profile's name (or "Terminal") and whatever you type is kept until the shell is ready. If a shell cannot start, Folio says why and keeps running. <!-- zh: Folio 的窗口现在会在 shell 启动前出现，不再逐个等待：启动较慢时，标签页显示配置文件名称（或「终端」），输入的内容保留到 shell 就绪。shell 无法启动时，Folio 说明原因并继续运行。 -->
 
 ### Internal
 
