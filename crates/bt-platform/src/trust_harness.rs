@@ -16,7 +16,7 @@
 //! Off Windows there is no world: [`TestCa::new`] answers `Unsupported`, and a
 //! test that needs one says what the product does there instead.
 
-use std::io;
+use std::io::{self, Write as _};
 use std::path::Path;
 use std::time::Duration;
 
@@ -397,8 +397,9 @@ const HELD_LONGEST_PAUSE: Duration = Duration::from_secs(4);
 /// [`install_txn::Failure::refused_while_open`]: Windows only, so elsewhere
 /// the first failure is the answer. Any other failure panics at once; a hold
 /// that outlasts [`HELD_ATTEMPTS`] panics naming every refusal. A step that
-/// lands after a refusal says so in one line on standard error, so a pass a
-/// retry bought stays visible in a gate's log.
+/// lands after a refusal says so in one line on the process's standard error
+/// (past the test harness's capture), so a pass a retry bought stays visible
+/// in a gate's log.
 ///
 /// Not for a test whose subject is the refusal: that test makes its step
 /// bare and asserts what it answers.
@@ -470,7 +471,11 @@ fn done_once_let_go_pausing<T>(
         match step() {
             Ok(answer) => {
                 if !refused.is_empty() {
-                    eprintln!(
+                    // Straight to the process's standard error, not `eprintln!`: the test
+                    // harness captures that macro's output for a test that passes, and a
+                    // pass a retry bought is exactly the one the log must still show.
+                    let _ = writeln!(
+                        io::stderr(),
                         "{door}: {what} refused {} times, then {done}",
                         refused.len()
                     );
