@@ -4695,22 +4695,22 @@ impl Text {
             Self::GitNotRunFull => pick(
                 lang,
                 "Too many git actions are waiting in this repository; this one was not run",
-                "Too many git actions are waiting in this repository; this one was not run", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
+                "此仓库中等待的 git 操作过多，这一项未执行",
             ),
             Self::GitNotRunWorkerGone => pick(
                 lang,
                 "Git actions in this repository stopped; this one was not run",
-                "Git actions in this repository stopped; this one was not run", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
+                "此仓库的 git 操作已停止，这一项未执行",
             ),
             Self::GitNotRunNotStarted => pick(
                 lang,
                 "Folio could not start this git action",
-                "Folio could not start this git action", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
+                "Folio 无法启动这项 git 操作",
             ),
             Self::GitUnfinished => pick(
                 lang,
                 "Folio could not finish this git action; the page was read again",
-                "Folio could not finish this git action; the page was read again", // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER
+                "Folio 未能完成这项 git 操作，已重新读取此页",
             ),
             Self::GitWorkerStopped => pick(
                 lang,
@@ -6631,16 +6631,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-GIT-MUTATIONS-ON-THE-STORAGE-WORKER — a Git page's write or checkout Folio
-        // did not run (the repository's lane full, its worker gone or not started) or did not finish.
-        (Self::GitNotRunFull, HostPlatform::Windows),
-        (Self::GitNotRunFull, HostPlatform::MacOs),
-        (Self::GitNotRunWorkerGone, HostPlatform::Windows),
-        (Self::GitNotRunWorkerGone, HostPlatform::MacOs),
-        (Self::GitNotRunNotStarted, HostPlatform::Windows),
-        (Self::GitNotRunNotStarted, HostPlatform::MacOs),
-        (Self::GitUnfinished, HostPlatform::Windows),
-        (Self::GitUnfinished, HostPlatform::MacOs),
         // zh: pending T-GIT-DOCUMENT-GATED-BY-POOL — a git document whose question nobody will
         // answer.
         (Self::GitDocumentUnanswered, HostPlatform::Windows),
