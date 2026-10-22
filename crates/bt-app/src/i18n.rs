@@ -3981,7 +3981,7 @@ impl Text {
             Self::PreviewSaveTooMany => pick(
                 lang,
                 "too many saves are already on their way to the disk",
-                "too many saves are already on their way to the disk", // zh: pending T-STORAGE-WORKER-ON-THE-SEAM
+                "正在写入磁盘的保存已经太多",
             ),
             Self::RecoveredEditKept => pick(
                 lang,
@@ -6654,8 +6654,6 @@ impl Text {
         (Self::PreviewSaveReloaded, HostPlatform::MacOs),
         (Self::PreviewSaveUnlanded, HostPlatform::Windows),
         (Self::PreviewSaveUnlanded, HostPlatform::MacOs),
-        (Self::PreviewSaveTooMany, HostPlatform::Windows),
-        (Self::PreviewSaveTooMany, HostPlatform::MacOs),
         // zh: pending T-CLOSE-GATE-WAITS — the line a close's question adds when its wait for a
         // save on its way ran out.
         (Self::GateSaveStillOnItsWay, HostPlatform::Windows),
