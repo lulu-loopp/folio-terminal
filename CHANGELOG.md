@@ -159,6 +159,15 @@ Nothing yet.
 - A drag, a selection, a scroll thumb or a press you are holding now ends when what it was about goes away — you switch tabs, close the pane or tab, the window loses focus, or Windows takes the mouse away — instead of going on after you let go; a divider goes back to where it was and a tab in your hand goes home, and a program you were clicking in is told the button came up. <!-- zh: 正在进行的拖动、选择、滚动滑块或按住的按键，现在会在其对象消失时结束——切换标签页、关闭窗格或标签页、窗口失去焦点，或 Windows 收回鼠标——不再在你松手后继续；分隔条回到原位，手中的标签回到原处，你正在点击的程序会收到按键已松开的通知。 -->
 - While you hold a mouse button in a drag or a selection, resting on a ⌄ no longer opens its menu, no tooltip, flyout or hover preview appears, and a web page under the pointer neither reacts nor scrolls on the wheel; a touch pan made meanwhile is ignored. <!-- zh: 拖动或选择时按住鼠标键，停在 ⌄ 上不再打开其菜单，也不会出现工具提示、弹出面板或悬停预览，指针下的网页不响应也不随滚轮滚动；此间的触摸平移会被忽略。 -->
 
+### Known issues
+
+- Updating from 0.4.7 or 0.4.6 still uses that version's updater: a program that holds Folio's update record or one of its files for a few seconds can still roll the update back, and a window that opens from the kept copy shows no card. Updates from 0.4.8 on use 0.4.8's updater, which handles both. <!-- zh: 从 0.4.7 或 0.4.6 更新仍使用该版本的更新器：程序占用 Folio 的更新记录或某个文件几秒钟，仍可能使更新回滚；从保留的副本打开的窗口不显示卡片。从 0.4.8 起的更新使用 0.4.8 的更新器，这两点都已处理。 -->
+- Updating from 0.4.6 still uses 0.4.6's updater: on macOS, do not open Folio while the update is finishing, or 0.4.6 may come back although 0.4.8 works. <!-- zh: 从 0.4.6 更新仍使用 0.4.6 的更新器：在 macOS 上，更新收尾时手动打开 Folio，更新器可能把正常运行的 0.4.8 换回 0.4.6。 -->
+- macOS: the first self-update makes macOS show its "…software was added that can run in the background" notice for Folio's login item; it is the updater's recovery entry and is removed once the update finishes. <!-- zh: macOS：首次自行更新时，macOS 会提示"已添加可在后台运行的软件"；该登录项是更新器的恢复入口，更新完成后自动移除。 -->
+- A copy installed with Homebrew before 0.4.8 takes this update with `brew upgrade`; from then on it updates itself from About. <!-- zh: 0.4.8 之前用 Homebrew 安装的副本，这次更新请用 `brew upgrade`；之后即可在关于页中自行更新。 -->
+- A PDF whose address does not end in `.pdf` is still drawn stretched on a scaled display. <!-- zh: 地址不以 `.pdf` 结尾的 PDF，在缩放的显示器上仍会被拉伸。 -->
+- Windows, with PowerShell 7 installed from the Microsoft Store: if Folio is ended from outside or crashes at the moment it starts that PowerShell to learn about it, the PowerShell can stay behind, paused, until it is ended in Task Manager. macOS: after a force quit or a crash, a command Folio had started to learn about the machine finishes on its own instead of being stopped. <!-- zh: Windows，从微软商店安装了 PowerShell 7 时：如果 Folio 恰在启动该 PowerShell 以了解其信息时被外部结束或崩溃，该 PowerShell 可能暂停并一直留在后台，直到在任务管理器中结束它。macOS：Folio 被强制退出或崩溃后，它为了解本机环境而启动的命令会自行运行结束，而不是被停止。 -->
+
 ### Internal
 
 - The diagnostics line Folio writes when an input method breaks its own composition bracket now carries the window's input-method facts at that moment (whether the window still had its input context and the keyboard focus), read at most 32 times per window. <!-- zh: 输入法打破自身组字边界时，Folio 写入的诊断行现在附带窗口当时的输入法状态（窗口是否仍有输入上下文和键盘焦点），每个窗口最多读取 32 次。 -->
