@@ -5092,7 +5092,7 @@ impl Text {
             Self::GitDocumentUnanswered => pick(
                 lang,
                 "Not loaded. Open it again to retry",
-                "Not loaded. Open it again to retry", // zh: pending T-GIT-DOCUMENT-GATED-BY-POOL
+                "未载入。重新打开即可重试",
             ),
 
             // ── a drag's landing caption ───────────────────────────────────
@@ -6630,12 +6630,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-GIT-DOCUMENT-GATED-BY-POOL — a git document whose question nobody will
-        // answer.
-        (Self::GitDocumentUnanswered, HostPlatform::Windows),
-        (Self::GitDocumentUnanswered, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
