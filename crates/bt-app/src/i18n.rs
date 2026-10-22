@@ -3329,7 +3329,7 @@ impl Text {
             Self::PasteClipboardBusy => pick(
                 lang,
                 "The clipboard was busy, so nothing was pasted. Try again.",
-                "The clipboard was busy, so nothing was pasted. Try again.", // zh: pending T-CLIPBOARD-LANE
+                "剪贴板被占用，没有粘贴任何内容。再试一次。",
             ),
             Self::PasteClipboardPicture => pick(
                 lang,
@@ -6633,10 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-CLIPBOARD-LANE — the notice a terminal paste says when the clipboard was
-        // busy past its deadline.
-        (Self::PasteClipboardBusy, HostPlatform::Windows),
-        (Self::PasteClipboardBusy, HostPlatform::MacOs),
         // zh: pending T-QUIT-AND-STOP-SAVES — the card a quit raises over saves still on their
         // way to the disk when it stopped waiting.
         (Self::QuitSaveOnItsWay, HostPlatform::Windows),
