@@ -4116,32 +4116,32 @@ impl Text {
             Self::HandoffCouldNotRunSuffix => pick(
                 lang,
                 " · the hand-off could not run",
-                " · the hand-off could not run", // zh: pending S-5
+                " · 未能交给系统打开",
             ),
             Self::HandoffCouldNotRun => pick(
                 lang,
                 "the hand-off could not run",
-                "the hand-off could not run", // zh: pending S-5
+                "未能交给系统打开",
             ),
             Self::HandoffsStoppedSuffix => pick(
                 lang,
                 " · hand-offs have stopped",
-                " · hand-offs have stopped", // zh: pending S-5
+                " · 已停止交给系统打开",
             ),
             Self::HandoffsStopped => pick(
                 lang,
                 "hand-offs have stopped",
-                "hand-offs have stopped", // zh: pending S-5
+                "已停止交给系统打开",
             ),
             Self::HandoffsTooManySuffix => pick(
                 lang,
                 " · too many hand-offs at once",
-                " · too many hand-offs at once", // zh: pending S-5
+                " · 同时交给系统打开的太多",
             ),
             Self::HandoffsTooMany => pick(
                 lang,
                 "too many hand-offs at once",
-                "too many hand-offs at once", // zh: pending S-5
+                "同时交给系统打开的太多",
             ),
             Self::HandoffNotFoundSuffix => pick(
                 lang,
@@ -6633,20 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending S-5 — what a link, an address or the fonts card says when its hand-off
-        // could not run, or the hand-off lane's worker stopped with it owed.
-        (Self::HandoffCouldNotRunSuffix, HostPlatform::Windows),
-        (Self::HandoffCouldNotRunSuffix, HostPlatform::MacOs),
-        (Self::HandoffCouldNotRun, HostPlatform::Windows),
-        (Self::HandoffCouldNotRun, HostPlatform::MacOs),
-        (Self::HandoffsStoppedSuffix, HostPlatform::Windows),
-        (Self::HandoffsStoppedSuffix, HostPlatform::MacOs),
-        (Self::HandoffsStopped, HostPlatform::Windows),
-        (Self::HandoffsStopped, HostPlatform::MacOs),
-        (Self::HandoffsTooManySuffix, HostPlatform::Windows),
-        (Self::HandoffsTooManySuffix, HostPlatform::MacOs),
-        (Self::HandoffsTooMany, HostPlatform::Windows),
-        (Self::HandoffsTooMany, HostPlatform::MacOs),
         // zh: pending T-HANDOFF-DOOR-REASON — what a link, an address or the fonts card says when
         // the hand-off door found its target was not there, was refused access to it, or was
         // refused it for a reason of no named kind.
