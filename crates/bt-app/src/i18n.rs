@@ -3949,7 +3949,7 @@ impl Text {
             Self::PreviewSaveUnread => pick(
                 lang,
                 "the file could not be read to check it",
-                "无法读取文件以作核对",
+                "无法读取文件进行核对",
             ),
             Self::PreviewSaveOnItsWay => pick(
                 lang,
@@ -3969,7 +3969,7 @@ impl Text {
             Self::PreviewSaveTooMany => pick(
                 lang,
                 "too many saves are already on their way to the disk",
-                "正在写入磁盘的保存已经太多",
+                "已有太多保存在等待写入磁盘",
             ),
             Self::RecoveredEditKept => pick(
                 lang,
@@ -4096,11 +4096,13 @@ impl Text {
             Self::HandoffsTooManySuffix => pick(
                 lang,
                 " · too many hand-offs at once",
-                " · 同时交给系统打开的太多",
+                " · 同时交给系统打开的项目太多",
             ),
-            Self::HandoffsTooMany => {
-                pick(lang, "too many hand-offs at once", "同时交给系统打开的太多")
-            }
+            Self::HandoffsTooMany => pick(
+                lang,
+                "too many hand-offs at once",
+                "同时交给系统打开的项目太多",
+            ),
             Self::HandoffNotFoundSuffix => pick(lang, " · not found", " · 找不到"),
             Self::HandoffNotFound => pick(lang, "not found", "找不到"),
             Self::HandoffAccessDeniedSuffix => pick(lang, " · access denied", " · 拒绝访问"),
@@ -4797,12 +4799,12 @@ impl Text {
             Self::GateSaveStillOnItsWay => pick(
                 lang,
                 "A save is still on its way to the disk.",
-                "仍有保存正在写入磁盘。",
+                "仍有一次保存正在写入磁盘。",
             ),
             Self::GateTitleSaveNotLanded => pick(
                 lang,
                 "A save has not reached the disk. Close anyway?",
-                "有保存尚未写入磁盘。仍要关闭？",
+                "有一次保存尚未写入磁盘。仍要关闭？",
             ),
             Self::GateTitleGitDiscard => pick(lang, "Discard changes?", "放弃改动？"),
             Self::GateTitleGitDelete => pick(lang, "Delete this file?", "删除这个文件？"),
@@ -5255,7 +5257,7 @@ impl Text {
             Self::DescLegacyPsReadLine => pick(
                 lang,
                 "An earlier Folio put it in Documents. Folio no longer uses it.",
-                "早先的 Folio 将它放在「文档」中。Folio 已不再使用它。",
+                "旧版 Folio 将它放在「文档」中。Folio 已不再使用它。",
             ),
             Self::RemoveLegacyPsReadLine => {
                 pick(lang, "Remove it from Documents", "从「文档」移除")
@@ -5263,7 +5265,7 @@ impl Text {
             Self::LegacyPsReadLineRemovedToast => pick(
                 lang,
                 "Removed. PowerShell windows opened from now on use their own PSReadLine.",
-                "已移除。此后打开的 PowerShell 窗口使用各自的 PSReadLine。",
+                "已移除。此后打开的 PowerShell 窗口使用 PowerShell 自带的 PSReadLine。",
             ),
             Self::ShellProfileAddedToast => pick(
                 lang,
@@ -6414,8 +6416,9 @@ impl Text {
     /// punctuation Chinese writes (`、`, `；`, `：`, `。`). They are exempt from
     /// the Han-character pin because a correct Chinese column has nothing for
     /// that pin to find, and held to a pin of their own instead: what is left
-    /// once the placeholders are taken out is full-width punctuation, with no
-    /// ASCII in it, so the English column copied over still fails.
+    /// once the placeholders are taken out is CJK or full-width punctuation
+    /// (U+3000–303F, U+FF00–FFEF) and nothing else: no ASCII, so the English
+    /// column copied over fails, and no Han, so a row with words listed here fails.
     #[cfg(test)]
     const PUNCTUATION_ONLY: [Self; 4] = [
         Self::ListSeparator,
@@ -9956,9 +9959,10 @@ mod tests {
     /// from its English, so the test above would pass it.
     ///
     /// An entry on [`Text::PUNCTUATION_ONLY`] has no word to carry; its Chinese
-    /// column, placeholders taken out, is full-width punctuation and nothing
-    /// else. MUTATION: give `ListSeparator` its English `", "` in the Chinese
-    /// column and the second assertion names it.
+    /// column, placeholders taken out, is CJK or full-width punctuation
+    /// (U+3000–303F, U+FF00–FFEF) and nothing else. MUTATIONS: give
+    /// `ListSeparator` its English `", "` in the Chinese column, or add
+    /// `QuitSave` (全部保存) to that list, and the punctuation assertion names it.
     #[test]
     fn every_chinese_entry_carries_at_least_one_han_character() {
         for entry in Text::ALL {
@@ -9982,7 +9986,11 @@ mod tests {
                         }
                     }
                     assert!(
-                        !rest.is_empty() && !rest.chars().any(|c| c.is_ascii()),
+                        !rest.is_empty()
+                            && rest.chars().all(|c| {
+                                ('\u{3000}'..='\u{303f}').contains(&c)
+                                    || ('\u{ff00}'..='\u{ffef}').contains(&c)
+                            }),
                         "{entry:?} reads {chinese:?} on {platform:?}: outside its \
                          placeholders it should be full-width punctuation alone"
                     );
