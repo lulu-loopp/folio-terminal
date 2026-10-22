@@ -459,7 +459,7 @@ impl Probe {
                 .join(format!("{name}-{:.1}s.png", state.position_secs));
             // A probe whose device has gone away has no evidence to write down,
             // and saying so is more use than a PNG of nothing.
-            match offscreen.read_back(gpu) {
+            match bt_render_probe::read_back(offscreen, gpu) {
                 Ok(pixels) => write_png(pixels, WIDTH, HEIGHT, &file),
                 Err(error) => {
                     eprintln!("PROBE could not read the frame back: {error}");

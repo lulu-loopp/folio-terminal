@@ -120,8 +120,16 @@ impl<B: Backend> Runtime<'_, B> {
     /// second scroll road, and nothing here recognises anything: the system
     /// said it was a pan, and [`pan_on_the_wheel_road`] only changes its
     /// currency.
+    ///
+    /// **Under a held gesture a parked pan is discarded** (T-POINTER-CAPTURE
+    /// §7, cut 6, cell B19): its opening point is a pointer move, which would
+    /// drag the held owner to the finger, and a second pointer is not something
+    /// the capture has.
     pub(crate) fn spend_parked_pans(&mut self) -> Result<()> {
         let steps = std::mem::take(&mut *self.window.parked_pans.borrow_mut());
+        if self.app.pointer_capture.is_some() {
+            return Ok(());
+        }
         for step in steps {
             let (pointer, wheel) = pan_on_the_wheel_road(step);
             if let Some(position) = pointer {

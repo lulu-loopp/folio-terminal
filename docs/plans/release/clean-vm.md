@@ -923,6 +923,67 @@ M 表的原始定义见 (b).2 的 macOS 表;上表与它的差别只在 M4/M5/M6
 
 macOS 上,trial 在被观察前结束(M9 在 `Trial` 之前被杀)不再耗费 90 秒:applier 看到启动结束(`the trial ended before it could be seen`)后立即回滚。此条适用于候选版 A 为 0.4.7 或更高;被信号杀死的 `open` 视为未知(applier 照常等待 trial 至截止时间)。
 
+#### E1-b: the journal escape hatch (RV, RW; 0.4.8) <!-- zh: pending T-JOURNAL-ESCAPE-HATCH E1-b -->
+
+What a build does with an update journal it cannot read whole (DESIGN 2026-10-08, E1-a1/E1-a2):
+the rows reverse the usual pair. **A** is the build under test (it carries the hatch); **B** is a
+rehearsal successor built from a throwaway branch that is never merged or shipped: it reads one
+test-only word per journal vocabulary as the word it replaces (class `rehearsal_destructive`,
+outcome `rehearsal_rolled_back`, header `v` 2, phase `RehearsalRolledBack`, layout
+`RehearsalMembers`, adapter `RehearsalOurs`, `Retired.outcome` `RehearsalRolledBack`) and writes
+its receipt as v2; **C** is B with the next version number. **A-mut** is A built from a second
+throwaway branch with the hatch's arms put back to their pre-E1 behaviour (the start's unknown
+header continued plainly with no card, the held-writes continue removed, the Windows exit guard's
+`Installed{failed:false}`, the holders' `Left`/`Refused`, the door's header-alone exit). B and C
+are signed with the release identity (the B -> C update needs it); A and A-mut need not be.
+
+Snapshots: `a-installed` (A), `amut-installed` (A-mut), `b-installed` (B), each by
+`install-candidate.ps1`. The planted rows plant from journals B wrote itself: `rolled-back.json`,
+the journal at RV-W11's marker, and `retired.json`, its `Retired{RolledBack}`.
+
+```powershell
+$pass = Get-Content <the VM password file>   # into a variable, never printed
+# RV: B installed, the feed holds C, A's archive laid over the install at the W state
+pwsh -File scripts/release/cleanvm/updater/run-row.ps1 -Vmx <folio-win11.vmx> -VmPassword $pass `
+    -Snapshot b-installed -Feed <feed of C> -OverlayZip <folio-A-windows-x64.zip> -Row RV-W11,RV-W6
+# the controls (R2-17): B installed meets the planted journal and settles it
+pwsh -File scripts/release/cleanvm/updater/run-row.ps1 ... -Snapshot b-installed -Feed <feed of C> `
+    -TemplateDir <folder> -RescueB <B's folio.exe> -Row BC-class,BC-phase
+# RW: A installed; then the same rows on A-mut with -Mutant
+pwsh -File scripts/release/cleanvm/updater/run-row.ps1 ... -Snapshot a-installed -Feed <feed of C> `
+    -TemplateDir <folder> -RescueB <B's folio.exe> -Row RW-class-B,RW-class-none,RW-phase-B,RW-phase-none,RW-class-A,RW-phase-A
+pwsh -File scripts/release/cleanvm/updater/run-row.ps1 ... -Snapshot amut-installed -Mutant ...
+```
+
+**An RV row** is a W row of the table above run on B -> C, with one difference at the marker
+(`guest\watch.ps1 -OverlayZip`): the frozen processes are ended (each within `$KillWithinMs`; a
+running or suspended `folio.exe` keeps its image open and cannot be written over), every member of
+A's archive is written over the install and flushed, `.folio-update` is left as it is, and only
+then the marker and the cut. Then logon (+45 s), start1, start2, as for every cut row.
+
+**A planted row** runs no update: the host writes `H\journal.json` from B's journal with one word
+replaced (`rows.ps1` `Get-PlantedJournal`; `written_by` stays B's version), `guest\plant.ps1` puts
+it in place with the rescue copy the row names, and Folio is started plainly twice. The first run
+is answered beforehand (`keys.ps1 answerfirstrun`), each start's card is read by the operating
+system's OCR over Folio's own window (`guest\card.ps1`, the capture kept beside the text), and the
+close is `WM_CLOSE` to Folio's `Window Class` window. The verdict is `Get-PlantedVerdict`, cell by
+cell, written to `<row>\verdict.txt`.
+
+| ✓ | row | word / rescue | expected (A, the hatch) | expected (A-mut: the mutation column) |
+| --- | --- | --- | --- | --- |
+| ☐ | RV-W1 … RV-W12 | B's own journal; A laid over | A never deletes or rewrites a journal it did not settle: a change between two collections has a rescue's `BT_UPDATE_RECOVER … recovery ended` line in that interval, or a `terminal`, `preparing` or `deferred` header before it (A1); a Folio window at the end | — |
+| ☐ | BC-class … BC-retired-outcome | each word; B's rescue (B installed) | B reads its word and settles: `recovery ended RolledBack`, the journal gone, *Previous version restored.* | — |
+| ☐ | RW-class-B, RW-outcome-B, RW-v-B | header word; B's rescue | A hands it to B's rescue (`an update is being finished by …\rescue\folio.exe`), which settles it as above | A continues plainly, nothing handed over, no card (`… is left as it is`) |
+| ☐ | RW-class-none, -held (and outcome, v) | header word; no rescue / B's held share-none | held-writes continue: `could not be started; Folio starts with its writes held`, the journal byte for byte, *An update by a newer Folio is not finished.* … *Changes made in this session are not kept.* | as above |
+| ☐ | RW-class-A (and outcome, v) | header word; A placed as the rescue (R2-19) | A as the recovery stands aside (`recovery ended StoodAside(`), the exit guard opens the rescue copy, never the installed build plainly, and that window shows the newer Folio's card. **On main the rescue copy shows no card** (it reads its own home, `H\<txn>\rescue\.folio-update`): the row fails there — T-RESCUE-COPY-CARD | as above |
+| ☐ | RW-phase-B, RW-layout-B, RW-adapter-B | body word; B's rescue | the header hands it over; B settles it | the same (the control) |
+| ☐ | RW-phase-none, -held (and layout, adapter) | body word; no rescue / held | held-writes continue; the card is the newer Folio's whenever A cannot read the journal whole (`update_startup::unfinished`), with the not-kept sentence | continues plainly (`Folio starts without it`), no card |
+| ☐ | RW-phase-A (and layout, adapter) | body word; A as the rescue | as RW-class-A: stands aside, the rescue copy's window with the card (fails on main as above) | `recovery ended Left(`, the rescue copy's window, no card |
+| ☐ | RW-retired-outcome-B | `Retired.outcome` (terminal header) | A retires it on its frozen header (A1): the journal gone, nothing handed over, no card (a plain start) | the same |
+
+Not yet staged here: the receipt v2 cell (a B trial under an A holder: an A -> B update with B
+signed), and the macOS rows (`mac/row.sh`; B and C signed and notarised on the Mac).
+
 #### 每一行检查什么(通用)
 
 对每一行,重启后(或每个收集时刻)收集以下证据:

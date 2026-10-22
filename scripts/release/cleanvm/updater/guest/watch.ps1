@@ -66,7 +66,10 @@ param(
   [switch]$KillNewInstallProcess,
   [string]$StopReadingAt = '',
   [int]$HoldJournalOnRun = 0,
-  [string]$HoldRescueAt = ''
+  [string]$HoldRescueAt = '',
+  # E1-b's RV rows: the release archive of the build under test (A), laid over the install the
+  # moment the row's state is reached; `.folio-update` is left as it is
+  [string]$OverlayZip = ''
 )
 $ErrorActionPreference = 'Continue'
 $install = Join-Path $GuestHome 'folio'
@@ -75,6 +78,8 @@ $journalPath = Join-Path $H 'journal.json'
 $log = Join-Path $GuestHome "updater-watch-$Tag.txt"
 $hist = Join-Path $GuestHome "updater-journal-$Tag.txt"
 $marker = if ($Row) { Join-Path $GuestHome "updater-marker-$Row.txt" } else { $null }
+# The state a row waits for: an RV row (`RV-W6`) waits for the W row's state (`W6`).
+$state = $Row -replace '^RV-', ''
 . (Join-Path $PSScriptRoot 'waits.ps1')
 
 Add-Type -TypeDefinition @'
@@ -148,7 +153,7 @@ function Dir-Sig {
 # The W table's states (self-update-2026-09-16.md (b).2): the phase, and for W3/W4 the Run value,
 # for W7/W8 the receipt.
 function Reached($phase, $run, $rcpt) {
-  switch ($Row) {
+  switch ($state) {
     'W1' { return $phase -eq 'Allocated' }
     'W2' { return $phase -eq 'Prepared' }
     'W3' { return ($phase -eq 'Handoff' -and $run.Count -eq 0) }
@@ -204,7 +209,40 @@ function Kill-NewInstallProcess {
   return $false
 }
 
-Say "watch start row=$Row freeze=$Freeze hold=$HoldPath@$HoldAt/$HoldSeconds journalHold=$HoldJournalOnRun rescueHold=$HoldRescueAt@$HoldSeconds noRead=$NoRead stopReadingAt=$StopReadingAt poll=${PollMs}ms"
+# **A downgrade by hand at the row's state** (E1-b RV, design note section 4): the frozen
+# processes are ended first - a running or suspended folio.exe keeps its image open and its file
+# cannot be written over - each within $KillWithinMs, then every member of A's archive is written
+# over the install (the archive's one top folder lifted, as in-guest.ps1's unpack does), each file
+# flushed; `.folio-update` is never touched. The power is cut after the marker, as for any cut
+# row. A process that outlives its bound, or a member that cannot be written, fails the row.
+function Lay-Over {
+  foreach ($p in @(Get-Process folio -ErrorAction SilentlyContinue)) {
+    if (-not (Stop-Within -Process $p -Kill { param($x) $x.Kill() })) {
+      Fail-Row "overlay: folio.exe pid=$($p.Id) still running $KillWithinMs ms after it was ended"; return $false
+    }
+  }
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $zip = [IO.Compression.ZipFile]::OpenRead($OverlayZip)
+  $written = @()
+  try {
+    foreach ($e in $zip.Entries) {
+      if (-not $e.Name) { continue }
+      $rel = ($e.FullName -replace '\\', '/') -replace '^[^/]+/', ''
+      $dest = Join-Path $install ($rel -replace '/', '\')
+      [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($dest)) | Out-Null
+      try {
+        $in = $e.Open()
+        $fs = New-Object IO.FileStream($dest, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $in.CopyTo($fs); $fs.Flush($true) } finally { $fs.Dispose(); $in.Dispose() }
+      } catch { Fail-Row "overlay: $rel could not be written: $($_.Exception.Message)"; return $false }
+      $written += "$rel=$($e.Length)"
+    }
+  } finally { $zip.Dispose() }
+  Say "OVERLAY laid A's archive over the install ($($written.Count) files: $($written -join ' '))"
+  return $true
+}
+
+Say "watch start row=$Row freeze=$Freeze hold=$HoldPath@$HoldAt/$HoldSeconds journalHold=$HoldJournalOnRun rescueHold=$HoldRescueAt@$HoldSeconds noRead=$NoRead stopReadingAt=$StopReadingAt overlay=$OverlayZip poll=${PollMs}ms"
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 $lastText = $null; $lastRun = ''; $lastRcpt = ''
 $seenJournal = $false; $done = $false
@@ -240,7 +278,7 @@ while ((Get-Date) -lt $deadline -and -not $done) {
   # no sleep) within $W4RunWithinMs, freeze on the first FolioUpdate-* value, and only then read
   # the journal. A change of the journal's directory entry with no Run value ends the wait (the
   # state is gone; the loop below reads what came instead); the bound's end fails the row.
-  if ($Row -eq 'W4' -and $phase -eq 'Handoff' -and $run.Count -eq 0) {
+  if ($state -eq 'W4' -and $phase -eq 'Handoff' -and $run.Count -eq 0) {
     $rk = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Run')
     try { $w4 = Wait-RunValue -RunKey $rk -EntrySig { Dir-Sig } }
     finally { $rk.Dispose() }
@@ -249,8 +287,8 @@ while ((Get-Date) -lt $deadline -and -not $done) {
     $text = Read-Journal; $phase = Phase-Of $text; $run = Run-Values; $lastSig = Dir-Sig
     Say "W4 wait ended ($($w4.Outcome) after $($w4.ElapsedMs) ms: $($w4.Seen)): phase=$phase run=[$($run -join ';')]"
   }
-  if ($Row -and $spins.ContainsKey($Row) -and ($spins[$Row][0] -contains $phase)) {
-    $starts = $spins[$Row][0]; $target = $spins[$Row][1]
+  if ($Row -and $spins.ContainsKey($state) -and ($spins[$state][0] -contains $phase)) {
+    $starts = $spins[$state][0]; $target = $spins[$state][1]
     $spinClock = [Diagnostics.Stopwatch]::StartNew()
     $spinOut = 'bound'
     # the processes that exist now (O, the applier) are suspended first, from this list, so the
@@ -287,12 +325,16 @@ while ((Get-Date) -lt $deadline -and -not $done) {
     $listing = @(Get-ChildItem -LiteralPath $install -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object { "{0,12} {1}" -f $(if ($_.PSIsContainer) { '<dir>' } else { $_.Length }), $_.FullName })
     $record = @('== watch log') + $buf + @('', '== journal at the marker', (Read-Journal), '', '== install folder at the marker') + $listing
     Write-Flushed (Join-Path $GuestHome "updater-atmarker-$Tag.txt") (($record -join "`r`n") + "`r`n")
+    if ($OverlayZip) {
+      $laid = Lay-Over
+      if (-not $laid) { break }
+    }
     Write-Flushed $marker "row=$Row phase=$phase at=$(Now)`r`n"
     $done = $true; break
   }
   $missed = $null
-  if ($Row -and $seenJournal -and ($phase -eq 'Retired' -or -not $text -or ($Row -ne 'W13' -and $phase -eq 'Abandoned'))) { $missed = "phase now $(if ($text) { $phase } else { '<absent>' })" }
-  elseif ($Row -and $beyond.ContainsKey($Row) -and ($beyond[$Row] -contains $phase)) { $missed = "phase already $phase" }
+  if ($Row -and $seenJournal -and ($phase -eq 'Retired' -or -not $text -or ($state -ne 'W13' -and $phase -eq 'Abandoned'))) { $missed = "phase now $(if ($text) { $phase } else { '<absent>' })" }
+  elseif ($Row -and $beyond.ContainsKey($state) -and ($beyond[$state] -contains $phase)) { $missed = "phase already $phase" }
   if ($missed) {
     Say "ROW $Row MISSED: $missed"
     Write-Flushed (Join-Path $GuestHome "updater-atmarker-$Tag.txt") ((@('== watch log (row missed)') + $buf) -join "`r`n")
@@ -309,7 +351,7 @@ while ((Get-Date) -lt $deadline -and -not $done) {
     } catch { Say "JOURNAL HOLD failed: $($_.Exception.Message)"; $HoldJournalOnRun = 0 }
   }
   if ($jhold -and (Get-Date) -gt $jholdUntil) { $jhold.Dispose(); $jhold = $null; $HoldJournalOnRun = 0; Say 'JOURNAL HOLD released' }
-  if ($HoldRescueAt -and -not $rhold -and $phase -eq $HoldRescueAt) {
+  if ($HoldRescueAt -and -not $rhold -and ($HoldRescueAt -eq '*' -or $phase -eq $HoldRescueAt)) {
     $rx = @(Get-ChildItem -LiteralPath $H -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path (Join-Path $_.FullName 'rescue') 'folio.exe' } | Where-Object { Test-Path -LiteralPath $_ })
     if ($rx.Count -gt 0) {
       try {

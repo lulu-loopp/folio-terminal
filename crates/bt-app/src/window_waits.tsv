@@ -255,6 +255,8 @@ bt-platform	[target_os = "macos"]	crate::macos_impl::program_path_directory_in	s
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::fs::canonicalize 1, std::fs::metadata 1, std::sync::mpsc::Receiver::recv 1, std::thread::JoinHandle::join 2	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::retire_within	std::thread::JoinHandle::join 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
+bt-render	-	crate::WindowRenderer::compose_frame	wgpu::Queue::present 1, wgpu::Queue::submit 1	owner-door-body	WaitToken	PresentFrame
+bt-render	-	crate::WindowRenderer::handle_surface_failure	wgpu::Queue::submit 1	owner-door-body	WaitToken	PresentFrame
 
 # graphs
 graph	door	crate	arm	item	role

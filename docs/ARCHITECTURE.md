@@ -134,7 +134,7 @@ transaction lock and record `Moving → TrialStarting { nonce, began_ms }`; only
 then is the same new image requested once more with both frozen words. The
 reserved nonce (`update_txn::Phase::reserved_trial`) is then the one owner of
 what is started: `update_apply_windows::opens_now` names it
-(`Opens::LastTrial`), `update_startup::run` admits only it, and a start whose
+(`Opens::LastTrial`), `update_startup::run_by` admits only it, and a start whose
 rescue build is refused continues as it. That trial commits itself once ready
 (`update_apply::commit_last_trial`: `TrialStarting → Committed` by
 `LastTrialReady`, its own receipt read back under the transaction lock, naming
@@ -313,12 +313,14 @@ it closes.
 
 ### 3.1 The graph
 
-Twenty-one first-party crates under `crates/`, plus `vendor/alacritty_terminal`.
-Three of the twenty-one arrived on 2026-10-08: `bt-testpath`, which no shipped build
+Twenty-two first-party crates under `crates/`, plus `vendor/alacritty_terminal`.
+Three of them arrived on 2026-10-08: `bt-testpath`, which no shipped build
 contains: it is every tested crate's dev-dependency and the optional dependency
 of the two test-support features, `bt-pty`'s `test-shell` and `bt-platform`'s
 `trust-harness`, and it depends on nothing; `bt-effects` (CC-3), layer 0; and
-`bt-compose` (CC-6a), layer 6. Normal and
+`bt-compose` (CC-6a), layer 6. `bt-render-probe` arrived on 2026-10-21 (A2p, the
+thread-door note's revision (l)4), also layer 6: the headless render probe and the
+read-back, whose GPU submissions are a tool's and not the product library's. Normal and
 target-specific edges as the manifests declare them (2026-09-23; `bt-workbench`
 2026-09-25; `bt-effects` and `bt-compose` 2026-10-08; `bt-compose`'s math edges
 and `bt-term`'s last `bt-math` edge gone 2026-10-09):
@@ -334,15 +336,18 @@ bt-doc          ← bt-detect, bt-viewport, bt-render, bt-term, bt-math, bt-comp
 bt-layout       ← bt-workbench, bt-app (itself: no dependencies at all; pure solver)
 bt-workbench    ← bt-app (itself: bt-layout only — §3.3's shrink-only exception)
 bt-platform     ← bt-persist, bt-app, bt-lint-probe
-bt-viewport     ← bt-render, bt-term, bt-compose
-bt-detect       ← bt-term, bt-compose
+bt-viewport     ← bt-render, bt-term, bt-compose, bt-render-probe
+bt-detect       ← bt-term, bt-compose, bt-app (the preview reads `fence`, `table` and
+                  `delimiter_is_escaped`: one grammar for a pane and a preview)
 bt-math         ← bt-compose (not bt-term since CC-7: the host installs the
                   SVG codec into it)
 bt-term         ← bt-compose, bt-app (bt-pty only as a dev-dependency, since
                   2026-09-21; bt-term's own tests name bt-compose as one, for
                   a real typesetter, since 2026-10-09 — the engine and its em
                   key through bt-compose's re-export)
-bt-render       ← bt-compose, bt-app
+bt-render       ← bt-compose, bt-app, bt-render-probe
+bt-render-probe ← bt-corpus (bt-app only as a dev-dependency; itself: bt-render,
+                  bt-viewport, wgpu and web-time)
 bt-compose      ← bt-app, bt-corpus (itself: bt-term, bt-viewport, bt-render,
                   bt-doc, bt-detect, bt-math, unicode-width and web-time)
 bt-pty          ← bt-app
@@ -351,7 +356,8 @@ bt-app          ← (nothing; the top)
 
 `bt-winres` ← `bt-app` for SHA-256 alone (`bt_winres::digest`, the update pass's
 image check, 0.4.6 U-12; it is also a build dependency, which is what it is for
-everywhere else). `bt-corpus` is a tool; `bt-source` is read by tests only
+everywhere else). `bt-corpus` and `bt-render-probe` are tools (no product crate depends on the
+second; `window_waits_tests::the_probe_crate_is_outside_the_product_closure`); `bt-source` is read by tests only
 (a dev-dependency of `bt-app`, `bt-layout` and `bt-render`). `bt-app` is the only crate that may ask
 what platform it is on, and only in the files named by
 `FILES_THAT_MAY_NAME_A_PLATFORM` in `main.rs`.

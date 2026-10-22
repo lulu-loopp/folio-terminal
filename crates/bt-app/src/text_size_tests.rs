@@ -656,9 +656,10 @@ fn the_rung_has_one_owner() {
         "WindowRenderer::prepare_peek_draws",
         "WindowRenderer::peek_box_rects",
         "WindowRenderer::float_tag_rects",
-        // the single-seat door and the replay probe, whose one pane has no rung
+        // the single-seat door and the replay probe's encoding (`bt_render::probe_surface`;
+        // its submit is `bt-render-probe`'s), whose one pane has no rung
         "WindowRenderer::present",
-        "WindowRenderer::probe_frame",
+        "WindowRenderer::probe_frame_work",
     ];
     for name in owner_names(&inside, render) {
         assert!(

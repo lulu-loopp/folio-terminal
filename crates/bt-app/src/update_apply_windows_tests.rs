@@ -3980,7 +3980,8 @@ fn the_logon_run_starts_nothing_only_when_nobody_is_waiting() {
 
 /// RED (U-34) — **an exit whose start is refused tries the next program the
 /// disk names before it gives up**: the installed build will not start, and the
-/// rescue copy — O's own image, whose own home holds no journal — is started
+/// rescue copy — O's own image, which reads the install's journal for its
+/// card — is started
 /// with `--update-failed <journal>` instead.
 ///
 /// The verifier's table: "spawn of the owed opening fails → none (one line

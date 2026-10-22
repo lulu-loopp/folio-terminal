@@ -8,7 +8,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use bt_compose::{render_detection_task, render_live_detection_task};
 use bt_math::MathEngine;
-use bt_render::{HeadlessRenderProbe, RenderProbeSample};
+use bt_render::RenderProbeSample;
+use bt_render_probe::HeadlessRenderProbe;
 use bt_term::{DualPlaneSession, LayoutKey, SessionMathTask};
 use bt_viewport::ViewportProjection;
 

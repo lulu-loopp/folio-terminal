@@ -1,0 +1,35 @@
+# **The render probe** (thread-door note 2026-09-26, revision (l)4: A2p).
+#
+# A tool crate, never part of `folio.exe`: it owns the headless render probe `bt-replay` and
+# `bt-zoom-perf` time frames through, and the read-back the glyph and pixel gates take their
+# evidence through. Both submit to the GPU queue, and the probe presents a swapchain frame if it
+# is ever given one; those submissions are the tools', so they live here and not in `bt-render`,
+# whose `probe_surface` module prepares and encodes the work and hands it over unsubmitted.
+#
+# Who depends on it: `bt-corpus`'s binaries (a normal dependency of a tool), and `bt-app`'s
+# example and macOS glyph test (a dev-dependency). No product crate names it in
+# `[dependencies]`; `window_waits_tests::the_probe_crate_is_outside_the_product_closure` holds
+# that. Its library root carries the excluded form `#![allow(clippy::disallowed_methods)]` of
+# revision (j)2, so no `clippy.toml` shield is added to the configuration fence.
+[package]
+name = "bt-render-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+bt-render = { path = "../bt-render" }
+bt-viewport = { path = "../bt-viewport" }
+web-time.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+bt-doc = { path = "../bt-doc" }
+bt-effects = { path = "../bt-effects" }
+bt-transcript = { path = "../bt-transcript" }
+pollster.workspace = true
+
+[lints]
+workspace = true

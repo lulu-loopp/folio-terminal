@@ -1306,6 +1306,7 @@ impl<B: Backend> Runtime<'_, B> {
                     self.apply_slider(row, value)?;
                 }
                 settings::SettingsKeyVerdict::Closed => {
+                    self.settings_closed();
                     if let Some(position) = self.window.pointer_position {
                         self.update_chrome_hover(position)?;
                     }

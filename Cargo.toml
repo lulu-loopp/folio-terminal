@@ -19,6 +19,7 @@ members = [
     "crates/bt-persist",
     "crates/bt-unicode",
     "crates/bt-render",
+    "crates/bt-render-probe",
     "crates/bt-source",
     "crates/bt-testpath",
     "crates/bt-winres",

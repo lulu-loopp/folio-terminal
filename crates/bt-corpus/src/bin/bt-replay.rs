@@ -9,9 +9,9 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use bt_corpus::{Chunking, Corpus, EventKind};
 use bt_render::{
-    FrameContentDigest, HeadlessRenderProbe, RenderProbeSample, frame_content_digest,
-    frame_is_alternate_screen,
+    FrameContentDigest, RenderProbeSample, frame_content_digest, frame_is_alternate_screen,
 };
+use bt_render_probe::HeadlessRenderProbe;
 use bt_term::{DualPlaneSession, TerminalAdapter};
 use bt_viewport::{ViewportFrame, ViewportProjection};
 use vte::{Params, Parser, Perform};
