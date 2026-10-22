@@ -140,12 +140,13 @@ pub(crate) enum WindowEffect {
     MinClientSize(Option<(u32, u32)>),
     /// The folder chooser asked for, starting where it was told.
     FolderAsked(Option<PathBuf>),
-    /// The file chooser asked for one kind of file.
-    FileAsked(bt_platform::FilePickKind, Option<PathBuf>),
+    /// The file chooser asked for one kind of file, with the image filter's name the caller
+    /// passed.
+    FileAsked(bt_platform::FilePickKind, Option<PathBuf>, String),
     /// The save dialog asked for, with its starting folder and name.
     SaveAsked(Option<PathBuf>, String),
-    /// The formula's menu asked for.
-    MathMenuAsked,
+    /// The formula's menu asked for, with the row title the caller passed.
+    MathMenuAsked(String),
     /// The input method's system caret placed.
     ImeCaret(i32, i32),
     /// The input method's system caret taken down.
@@ -1293,9 +1294,13 @@ impl ImagePickerDoor for HeadlessPicker {
         &self,
         kind: bt_platform::FilePickKind,
         start: Option<&Path>,
+        image_types: &str,
     ) -> Result<bool, String> {
-        self.ledger
-            .record(WindowEffect::FileAsked(kind, start.map(Path::to_path_buf)));
+        self.ledger.record(WindowEffect::FileAsked(
+            kind,
+            start.map(Path::to_path_buf),
+            image_types.to_owned(),
+        ));
         Ok(true)
     }
     fn take_result(&self) -> Option<Result<Option<PathBuf>, String>> {
@@ -1317,8 +1322,9 @@ impl SavePickerDoor for HeadlessPicker {
 }
 
 impl MathMenuDoor for HeadlessPicker {
-    fn request(&self) -> Result<bool, String> {
-        self.ledger.record(WindowEffect::MathMenuAsked);
+    fn request(&self, copy_latex: &str) -> Result<bool, String> {
+        self.ledger
+            .record(WindowEffect::MathMenuAsked(copy_latex.to_owned()));
         Ok(true)
     }
     fn take_result(&self) -> Option<Result<bool, String>> {
@@ -2008,10 +2014,15 @@ mod tests {
             .expect("recorded");
 
         FolderPickerDoor::request(&parts.folder_picker, Some(&folder)).expect("asked");
-        ImagePickerDoor::request(&parts.image_picker, bt_platform::FilePickKind::Image, None)
-            .expect("asked");
+        ImagePickerDoor::request(
+            &parts.image_picker,
+            bt_platform::FilePickKind::Image,
+            None,
+            "图片 images",
+        )
+        .expect("asked");
         SavePickerDoor::request(&parts.save_picker, Some(&folder), "导出.json").expect("asked");
-        MathMenuDoor::request(&parts.math_menu).expect("asked");
+        MathMenuDoor::request(&parts.math_menu, "复制 copy").expect("asked");
         parts
             .folder_picker
             .answers
@@ -2093,9 +2104,13 @@ mod tests {
                 WindowEffect::TitleBarBoxes(vec![[0, 0, 10, 10]]),
                 WindowEffect::MinClientSize(Some((300, 200))),
                 WindowEffect::FolderAsked(Some(folder.clone())),
-                WindowEffect::FileAsked(bt_platform::FilePickKind::Image, None),
+                WindowEffect::FileAsked(
+                    bt_platform::FilePickKind::Image,
+                    None,
+                    "图片 images".to_owned()
+                ),
                 WindowEffect::SaveAsked(Some(folder), "导出.json".to_owned()),
-                WindowEffect::MathMenuAsked,
+                WindowEffect::MathMenuAsked("复制 copy".to_owned()),
                 WindowEffect::ImeCaret(5, 6),
                 WindowEffect::ImeCaretDestroyed,
                 WindowEffect::ControlFlow(ControlFlow::Poll),

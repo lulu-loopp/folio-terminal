@@ -1,6 +1,7 @@
 //! `preview` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::{Gone, OwnerGone};
 use crate::computation_lane::{Asking, ComputationId};
 use crate::input::Keystroke;
 use crate::window_seam::prelude::*;
@@ -851,11 +852,11 @@ impl<B: Backend> Runtime<'_, B> {
         let start = (!stored.is_empty())
             .then(|| Path::new(&stored).parent().map(Path::to_path_buf))
             .flatten();
-        match self
-            .window
-            .image_picker
-            .request(bt_platform::FilePickKind::Image, start.as_deref())
-        {
+        match self.window.image_picker.request(
+            bt_platform::FilePickKind::Image,
+            start.as_deref(),
+            crate::i18n::Text::ImageFileType.text(),
+        ) {
             Ok(true) => self.window.image_pick_pending = Some(FilePick::BackgroundImage),
             Ok(false) => {}
             Err(error) => eprintln!("recoverable picture chooser failure: {error}"),
@@ -2340,19 +2341,9 @@ impl<B: Backend> Runtime<'_, B> {
         {
             self.preview_edit_focus = None;
         }
-        if self
-            .held_preview_selecting()
-            .copied()
-            .is_some_and(|surface| !alive.contains(&surface))
-        {
-            self.drop_preview_selecting();
-        }
-        if self
-            .held_preview_text_drag()
-            .is_some_and(|drag| !alive.contains(&drag.surface))
-        {
-            self.drop_preview_text_drag();
-        }
+        // **And the gesture held on a surface that is gone** (T-POINTER-CAPTURE R-9, owner
+        // gone): a selection, a thumb, a picture being panned, a scrubber.
+        //
         // **The card is not in `alive` and must not be swept out by its
         // absence.** [`PreviewSurface::Peek`] is not in the tree and not in the
         // float host — that is the same sentence the `Peek` arm above answers
@@ -2360,22 +2351,17 @@ impl<B: Backend> Runtime<'_, B> {
         // [`Self::hide_file_peek`] is where a gesture on the card is let go.
         // Without the guard, any seat-set change would drop a hand that is in
         // the middle of dragging a table sideways inside a glance.
-        if self.held_preview_block_drag().copied().is_some_and(|drag| {
-            drag.surface != PreviewSurface::Peek && !alive.contains(&drag.surface)
-        }) {
-            self.drop_preview_block_drag();
+        if let Some(surface) = self
+            .own_capture()
+            .and_then(|capture| capture.owner.preview_surface())
+            .filter(|surface| *surface != PreviewSurface::Peek && !alive.contains(surface))
+        {
+            self.end_capture(OwnerGone(Gone::Surface(surface)));
         }
         if self.preview_block_hover.is_some_and(|(surface, _)| {
             surface != PreviewSurface::Peek && !alive.contains(&surface)
         }) {
             self.preview_block_hover = None;
-        }
-        if self
-            .held_preview_body_drag()
-            .copied()
-            .is_some_and(|drag| !alive.contains(&drag.surface))
-        {
-            self.drop_preview_body_drag();
         }
         if self
             .preview_body_hover
@@ -3012,7 +2998,10 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some((left, at)) = left {
             self.window.tabs[index].preview_views.remember(&left, at);
         }
-        self.let_go_of_preview_gestures_on(surface);
+        // The surface is showing another document now: the gesture held on the one it left ends
+        // with it (T-POINTER-CAPTURE R-9, owner gone), as it does when the buffer is left.
+        self.end_capture(OwnerGone(Gone::Surface(surface)));
+        self.let_go_of_preview_hovers_on(surface);
         if let Some(want) = wants_read
             && !self.app.preview_worker.request(preview::PreviewRequest {
                 window: self.window_id(),
@@ -3131,53 +3120,28 @@ impl<B: Backend> Runtime<'_, B> {
                     .remember(&source, view);
             }
         }
-        self.let_go_of_preview_gestures_on(surface);
+        // **The gesture held on it ends with the document it was held on** (T-POINTER-CAPTURE
+        // R-9, owner gone): a selection of a document nobody is looking at any more, a thumb on
+        // a track that means something else in the next one.
+        self.end_capture(OwnerGone(Gone::Surface(surface)));
+        self.let_go_of_preview_hovers_on(surface);
     }
 
-    /// **What the keyboard and the hand were doing on this surface ends with
+    /// **What the keyboard and the pointer's hover were doing on this surface ends with
     /// the document it was doing it to** — the tab's singletons, cleared only
     /// when they name this surface: there is one pointer and one keyboard, so a
-    /// pane leaving a document has no business answering for a gesture that is
-    /// happening in the pane beside it.
-    fn let_go_of_preview_gestures_on(&mut self, surface: PreviewSurface) {
+    /// pane leaving a document has no business answering for a hover or a caret
+    /// that is in the pane beside it. The gesture a held button was making on it
+    /// is the capture's to end ([`Self::end_capture`]).
+    fn let_go_of_preview_hovers_on(&mut self, surface: PreviewSurface) {
         if self.preview_edit_focus == Some(surface) {
             self.preview_edit_focus = None;
-        }
-        if self.held_preview_selecting().copied() == Some(surface) {
-            self.drop_preview_selecting();
-        }
-        // A selection being drawn across a page that has just been swapped out
-        // is a selection of a document nobody is looking at any more.
-        if self
-            .held_preview_text_drag()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_text_drag();
-        }
-        // A thumb held over the swap would be dragging a block that is not there
-        // any more.
-        if self
-            .held_preview_block_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_block_drag();
         }
         if self
             .preview_block_hover
             .is_some_and(|(hovered, _)| hovered == surface)
         {
             self.preview_block_hover = None;
-        }
-        // And the body's own bar with them: the next document is a different
-        // length, so a thumb held across the swap would be dragging a track that
-        // means something else.
-        if self
-            .held_preview_body_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_body_drag();
         }
         if self
             .preview_body_hover
@@ -5993,23 +5957,6 @@ impl<B: Backend> Runtime<'_, B> {
             self.preview_live_caret(surface).map(|caret| caret.caret),
             offset,
         )
-    }
-
-    /// **A gesture on a rendered page that will get no release** — the window
-    /// lost the focus, and with it the pointer capture, mid-drag (K129's
-    /// `pointercancel`, one surface along).
-    ///
-    /// The record is dropped unspent, as every other press this window cancels
-    /// on a blur is: a gesture nobody finished chose nothing. What it frees is
-    /// the span the gesture was holding (owner's ruling 2026-09-23): a drag left
-    /// standing would keep the page drawing the span it began on however the
-    /// caret moved after, so the page is laid out again from where the caret and
-    /// the rendered selection stand now.
-    pub(crate) fn cancel_preview_text_drag(&mut self) -> Result<()> {
-        if self.take_preview_text_drag().is_some() {
-            self.repaint_preview()?;
-        }
-        Ok(())
     }
 
     /// **Whether a press on this surface may put a caret in the page** (T5 ①).
@@ -8891,14 +8838,9 @@ impl<B: Backend> Runtime<'_, B> {
         };
         self.preview_pane_mut(surface)
             .key_parsed_source(parsed_source);
-        // Drag and hover identities are positional too; a new parse retires them.
-        if self
-            .held_preview_block_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_block_drag();
-        }
+        // Drag and hover identities are positional too; a new parse retires them — the block
+        // thumb held on one (T-POINTER-CAPTURE R-9, owner gone) and the block under the hand.
+        self.end_capture(OwnerGone(Gone::Blocks(surface)));
         if self
             .preview_block_hover
             .is_some_and(|(over, _)| over == surface)

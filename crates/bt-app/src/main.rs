@@ -340,7 +340,12 @@ const INITIAL_HEIGHT: f64 = 600.0;
 ///
 /// It is not `CARGO_PKG_NAME`: the crate is `bt-app` and stays `bt-app`, because
 /// a crate name is a thing other Rust code says and this is a thing people say.
-pub(crate) const APP_NAME: &str = "Folio";
+///
+/// **And it is typed once** (T-NATIVE-LABELS-FROM-THE-CALLER): the name this
+/// terminal announces to its children is the same word, so the constant is
+/// `bt_pty`'s rather than a second literal; `bt-platform`, which cannot depend
+/// on either crate, is handed it where it names the product (the toast sender).
+pub(crate) const APP_NAME: &str = bt_pty::TERM_PROGRAM;
 
 /// **How long a quit waits for the panes it has told to go**
 /// (T-PANE-CLOSE-OFF-THREAD).
@@ -13855,6 +13860,10 @@ struct App<B: Backend = Native> {
     /// in whichever window it arrives and even after the capture has ended.
     /// See [`runtime::pointer::ButtonSet`].
     swallowed: runtime::pointer::ButtonSet,
+    /// Every capture a lifecycle door ended (T-POINTER-CAPTURE R-9), by its owner's name and the
+    /// ending's, for a test to read which ending each door ran.
+    #[cfg(test)]
+    capture_endings: Vec<(&'static str, &'static str)>,
     /// **A cross-window release that has been decided and not yet performed**
     /// (multiwindow slice F2).
     ///
@@ -14165,6 +14174,8 @@ impl<B: Backend> App<B> {
             drag_broker: None,
             pointer_capture: None,
             swallowed: runtime::pointer::ButtonSet::default(),
+            #[cfg(test)]
+            capture_endings: Vec::new(),
             pending_handover: None,
             quit_requested: false,
             quit: None,
@@ -19722,7 +19733,7 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         }
         Writer::ExplorerRepair => explorer_menu::begin_probe(),
         Writer::ToastIdentity => {
-            if let Err(error) = bt_platform::Notifier::register_identity() {
+            if let Err(error) = bt_platform::Notifier::register_identity(APP_NAME) {
                 eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
             }
         }
@@ -21219,23 +21230,6 @@ struct DividerDrag {
     /// split, and theorem N says every ratio outside a focus set is bit-identical
     /// before and after.
     grip: DividerGrip,
-    /// **Which window held the pointer when this gesture began** — the fact that ends it when the
-    /// system takes the pointer away (Codex review 2026-09-17; the same reading `DragGuard` makes
-    /// for a cross-window drag).
-    ///
-    /// A divider drag is torn down by the button coming up, by `Esc`, by the layout being
-    /// re-solved, and by the window losing focus. None of those is capture loss: Windows announces
-    /// it with `WM_CAPTURECHANGED`, winit 0.30.13 answers that message by zeroing its own capture
-    /// count and emitting nothing, and a steal need not blur this window. Left holding a button
-    /// nobody will report the release of, `divider_drag` stays `Some` forever —
-    /// `flush_pending_pty_resize` reads that as a hand still on the geometry, so from that moment
-    /// no resize of this window's panes can ever be released or settled. Sampled, not subscribed,
-    /// for `DragGuard`'s reason and at the one moment anybody asks.
-    ///
-    /// On macOS this is `None` at the press and `None` at every turn after it, which is the right
-    /// answer rather than a missing one: AppKit has no per-thread capture to lose, and the mouse-up
-    /// that ends a drag is delivered to the window that received the mouse-down.
-    capture: Option<bt_platform::NativeWindow>,
 }
 
 /// **What a divider drag is actually moving** — §3.4's two kinds of seam.
@@ -22665,22 +22659,23 @@ impl PtyInput {
     }
 }
 
-/// **Whether the hand that began a divider drag is still on it** (Codex review 2026-09-17).
+/// **Whether the hand that began a gesture is still on it** (Codex review 2026-09-17, for the
+/// divider; T-POINTER-CAPTURE cut 5, R-9, for every gesture).
 ///
 /// Two samples of one platform fact — which window of this thread holds the pointer — taken at the
 /// press and now. Equality is the whole predicate, and it has to be equality rather than "this
 /// window holds it": on macOS the answer is `None` at both ends, because AppKit has no per-thread
-/// capture to report, and a rule phrased as "we hold it" would cancel every divider drag on that
+/// capture to report, and a rule phrased as "we hold it" would cancel every gesture on that
 /// platform on its first turn. Two `None`s mean nothing was taken away, which is the truth there.
 ///
 /// The gesture this ends is the one no event reports. Windows says capture loss with
 /// `WM_CAPTURECHANGED`; winit 0.30.13 answers it by zeroing its own capture count and emitting
 /// nothing, and a steal need not blur this window, so `Focused(false)` — the path that already
-/// ends a drag — may never come. What is left is a `divider_drag` that stays `Some` for the rest
-/// of the window's life, which `flush_pending_pty_resize` reads as a hand still on the geometry:
-/// after that no pane of this window can release a resize to its child or settle the transaction
-/// its own reflow opened.
-fn divider_drag_still_holds_its_pointer(
+/// ends a gesture — may never come. What is left is a capture that stays held for the rest of the
+/// window's life: a divider that `flush_pending_pty_resize` reads as a hand still on the geometry,
+/// so that no pane of this window can release a resize to its child, and a thumb, a selection or a
+/// press that goes on following a hand nobody is holding down.
+fn a_capture_still_holds_its_pointer(
     at_the_press: Option<bt_platform::NativeWindow>,
     now: Option<bt_platform::NativeWindow>,
 ) -> bool {
@@ -31435,7 +31430,7 @@ impl NotificationDesk {
             let opened = if update_trial::defer(update_trial::Writer::ToastIdentity) {
                 bt_platform::Notifier::without_registration(wake)
             } else {
-                bt_platform::Notifier::new(wake)
+                bt_platform::Notifier::new(APP_NAME, wake)
             };
             match opened {
                 Ok(voice) => self.voice = Some(voice),
@@ -49002,6 +48997,9 @@ impl<B: Backend> Runtime<'_, B> {
             &self.app.settings_store.loaded().terminal_cjk_font_family,
         );
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        if self.window.settings.is_open() {
+            self.settings_closed();
+        }
         self.window.settings.toggle(self.settings_dialog(
             &rows,
             &shortcuts,
@@ -49035,6 +49033,17 @@ impl<B: Backend> Runtime<'_, B> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **The settings sheet closes** — a lifecycle door (T-POINTER-CAPTURE R-9, owner gone):
+    /// a slider or the menu bar held on it is let go of, so a hand that pressed `Esc` mid-drag
+    /// leaves nothing latched behind a sheet that is no longer there. Asked by every road that
+    /// shuts the sheet: the gear's toggle, the sheet's own `Esc` and its own close press, and a
+    /// verb that hands the reader a document instead.
+    fn settings_closed(&mut self) {
+        self.end_capture(runtime::pointer::OwnerGone(
+            runtime::pointer::Gone::SettingsSheet,
+        ));
     }
 
     /// **Take a picker item** — everything choosing one does to the process.
@@ -50095,11 +50104,11 @@ impl<B: Backend> Runtime<'_, B> {
             .map(|editor| PathBuf::from(editor.program.text()))
             .and_then(|path| path.parent().map(Path::to_path_buf))
             .filter(|parent| parent.as_os_str().len() > 1);
-        match self
-            .window
-            .image_picker
-            .request(bt_platform::FilePickKind::Program, start.as_deref())
-        {
+        match self.window.image_picker.request(
+            bt_platform::FilePickKind::Program,
+            start.as_deref(),
+            crate::i18n::Text::ImageFileType.text(),
+        ) {
             Ok(true) => self.window.image_pick_pending = Some(FilePick::ProfileProgram),
             // Already queued or already open: a second press while one is up is
             // one dialog, not two, and whoever asked first keeps the answer.
@@ -50429,6 +50438,8 @@ impl<B: Backend> Runtime<'_, B> {
             (_, settings::SettingsKeyVerdict::Chose(target)) => {
                 self.apply_settings_choice(target)?
             }
+            // The sheet's own close press shut it.
+            (_, settings::SettingsKeyVerdict::Closed) => self.settings_closed(),
             _ => {}
         }
         if let Some(position) = self.window.pointer_position {
@@ -50803,6 +50814,7 @@ impl<B: Backend> Runtime<'_, B> {
         // **The dialog goes.** It is the one verb in it whose answer is a
         // document, and a modal standing over the document it just handed you is
         // a modal in the way.
+        self.settings_closed();
         self.window.settings.close();
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
@@ -57935,7 +57947,7 @@ mod mouse_trace_station_tests {
         // at=in-pane` line above it. 26 → 27 the same day: a notch on a band
         // painted above the panes that does not scroll is swallowed, with its
         // own `wheel_route taken=overlay at=over-pane` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 27);
+        assert_every_exit_is_traced("mouse_wheel", 28);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
@@ -62260,8 +62272,10 @@ mod page_under_a_laden_hand_tests {
         let asked = web_page_at
             .find("self.a_gesture_holds_the_pointer()")
             .expect("the page's door subtracts a hand that is already carrying");
+        // The scan is the page layer's own question since T-POINTER-CAPTURE cut 6, which the
+        // wheel asks without the hand's subtraction.
         let scan = web_page_at
-            .find("self.web_page_shown_at(position)")
+            .find("self.page_under_the_hand(position)")
             .expect("the page's door scans the pages it knows about");
         assert!(
             asked < scan,
@@ -62335,7 +62349,9 @@ mod page_under_the_tab_list_tests {
     /// already given away.
     #[test]
     fn the_tab_list_is_asked_before_any_page_is() {
-        let web_page_at = method_body("Runtime", "web_page_at");
+        // The page layer's own question since T-POINTER-CAPTURE cut 6 (`web_page_at` is it with
+        // a held gesture subtracted).
+        let web_page_at = method_body("Runtime", "page_under_the_hand");
         let asked = web_page_at
             .find("tab_list_target_at")
             .expect("the page's door subtracts the tab list");
@@ -68138,7 +68154,7 @@ impl<B: Backend> FolioApp<B> {
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
-        let owed = runtime.hide_quake_window();
+        let owed = runtime.hide_quake_window()?;
         // **After the window is off the screen, never before.** Windows gives the
         // foreground to *something* the moment a foreground window is hidden, and
         // a handover made first would be undone by that. macOS does the same
@@ -70050,84 +70066,9 @@ impl<B: Backend> FolioApp<B> {
                 // opinion off the event (§7.46 ②).
                 WindowEvent::ThemeChanged(_) => runtime.os_theme_changed().map(|_| ()),
                 WindowEvent::RedrawRequested => runtime.redraw(),
-                WindowEvent::Focused(false) => {
-                    runtime.observe_ime_focus(false);
-                    // Losing the window is a blur, and blur commits (J102). The
-                    // mock-up's editor is a real focusable element and gets this
-                    // from the DOM; here it has to be said. A press that was still
-                    // being held goes with it — the button-up will arrive to a
-                    // window that is no longer listening.
-                    let committed = runtime.finish_rename(RenameExit::Blur);
-                    // K129. Losing the window is losing the Win32 mouse capture, and
-                    // capture loss is this platform's `pointercancel`: the pointer
-                    // stream ends with no button-up to end it. It is the only such
-                    // signal winit surfaces — there is no `WM_CAPTURECHANGED` event —
-                    // and an un-torn-down drag would leave a tab floating over a strip
-                    // nobody is holding any more. Same path as Esc: never mind.
-                    // F72: the same capture loss ends a divider drag, and ends it
-                    // the same way — restoring the one ratio it had been moving.
-                    // Left holding the button over a window that is no longer
-                    // listening, the gesture was never finished, and a drag nobody
-                    // finished did not choose a ratio.
-                    let cancelled = runtime
-                        .cancel_drag()
-                        .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
-                    // And a drag across a rendered page, which is holding the
-                    // span it began on until a release that will not come
-                    // (owner's ruling 2026-09-23).
-                    let cancelled = cancelled
-                        .and_then(|either| runtime.cancel_preview_text_drag().map(|()| either));
-                    runtime.drop_tab_press();
-                    runtime.drop_pane_press();
-                    runtime.drop_row_press();
-                    // P149's `window blur`: a glance is about where the pointer is,
-                    // and a window that is not listening has no pointer.
-                    runtime.hide_file_peek();
-                    // And §7.1.5e′'s: a card about the keys under your hands is a
-                    // card about a keyboard this window no longer has. `hide` and
-                    // not `spend` — nothing was pressed, so a hand that comes back
-                    // still holding `Ctrl` is answered again. And the input method's
-                    // context goes with the keyboard: the keyboard's own door
-                    // ([`Runtime::blurred`]) says both.
-                    runtime.blurred();
-                    // **And the command palette** (DESIGN.md §7.55): 失焦即收. It is
-                    // a box for aiming at something *now*, and a window the reader
-                    // has left is a window they are not aiming at — coming back to
-                    // a half-typed query over a stale list would be this product
-                    // holding a question nobody is still asking. It is the one
-                    // popup that goes here, and the difference is real: every other
-                    // one is anchored to a control the reader can see and come back
-                    // to, while this one is anchored to an intent.
-                    let _ = runtime.close_command_palette();
-                    runtime.window.tab_clicks.interrupt();
-                    runtime.window.ime_cursor.reset();
-                    hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
-                        runtime.destroy_ime_caret("window_blur")
-                    });
-                    runtime.set_cursor_focus(false, Instant::now());
-                    // **The summoned terminal goes when the keyboard does** (§7.54),
-                    // and it goes on the *next* turn: hiding a window inside the
-                    // event that says it lost the focus is asking Windows to move the
-                    // focus while it is telling you about the focus. A bit and a turn
-                    // — see `FolioApp::settle_quake`, where every other thing this
-                    // window does out of the ordinary is also spent.
-                    //
-                    // The switch is read there and not here for the same reason the
-                    // hide is: what this arm knows is that the keyboard left, which
-                    // is true whatever the row says. Only a window that is actually
-                    // on the screen leaves a bit, because a blur that arrives after
-                    // it has gone is a blur about nothing - hiding it is what moved
-                    // the focus in the first place.
-                    if runtime.is_quake_window() && runtime.app.quake.is_showing() {
-                        runtime.app.quake.note_blur();
-                    }
-                    committed.and(cancelled.map(|_| ())).and_then(|()| {
-                        runtime.publish_frame(FrameTrigger {
-                            occurred_at: Instant::now(),
-                            source: FrameSource::Expose,
-                        })
-                    })
-                }
+                // **Losing the window is one lifecycle door** (T-POINTER-CAPTURE R-9): the gesture
+                // a held button was making ends with it, and everything else a blur says follows.
+                WindowEvent::Focused(false) => runtime.window_blurred(),
                 WindowEvent::Focused(true) => {
                     runtime.observe_ime_focus(true);
                     // **A taskbar flash ends here** (`FLASHW_TIMERNOFG`: until the window comes to
@@ -80769,20 +80710,12 @@ mod palette_wiring_tests {
             "a press outside the box puts it away"
         );
 
-        // **The third way out is not in `Runtime` at all**: the two focus arms
-        // live in `<FolioApp as ApplicationHandler>::window_event`, which the
-        // query says and the deleted reading could not — it took the first
-        // `WindowEvent::Focused(false) => {` in the file, and the literal three
-        // lines above is one of them.
-        let dispatch = item_body(&ItemQuery::method("FolioApp", "on_window_event"));
-        let blur = dispatch
-            .find("WindowEvent::Focused(false) => {")
-            .expect("the window answers losing focus");
-        let end = dispatch[blur..]
-            .find("WindowEvent::Focused(true) => {")
-            .expect("and getting it back");
+        // **The third way out is losing the window**: the dispatcher's blur arm
+        // is one call (T-POINTER-CAPTURE cut 5, `Runtime::window_blurred`, held to
+        // being the arm's only work by `every_lifecycle_door_ends_the_capture`),
+        // and the blur's own body puts the palette away.
         assert!(
-            dispatch[blur..blur + end].contains("runtime.close_command_palette()"),
+            method_body("Runtime", "window_blurred").contains("self.close_command_palette()"),
             "and a window the reader has left is not one they are aiming in"
         );
     }

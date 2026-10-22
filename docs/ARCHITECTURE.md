@@ -337,7 +337,8 @@ bt-layout       ← bt-workbench, bt-app (itself: no dependencies at all; pure s
 bt-workbench    ← bt-app (itself: bt-layout only — §3.3's shrink-only exception)
 bt-platform     ← bt-persist, bt-app, bt-lint-probe
 bt-viewport     ← bt-render, bt-term, bt-compose, bt-render-probe
-bt-detect       ← bt-term, bt-compose
+bt-detect       ← bt-term, bt-compose, bt-app (the preview reads `fence`, `table` and
+                  `delimiter_is_escaped`: one grammar for a pane and a preview)
 bt-math         ← bt-compose (not bt-term since CC-7: the host installs the
                   SVG codec into it)
 bt-term         ← bt-compose, bt-app (bt-pty only as a dev-dependency, since

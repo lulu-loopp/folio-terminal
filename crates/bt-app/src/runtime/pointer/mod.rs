@@ -13,6 +13,7 @@
 //! (`every_pointer_read_is_the_routers_or_a_captures`, §4.2).
 
 mod capture;
+mod ending;
 mod release;
 mod router;
 pub(crate) mod touch;
@@ -23,6 +24,7 @@ pub(crate) use capture::{
     PressVerdict, ReleaseVerdict, cancel_then_route, press_against_the_slot,
     release_against_the_slot,
 };
+pub(crate) use ending::{Ending, Gone, Leaving, OwnerGone};
 
 #[cfg(test)]
 pub(crate) use router::{BANDS_THAT_TAKE_NO_POINTER, POINTER_LAYERS_TOP_FIRST, Visits};
@@ -114,6 +116,39 @@ pub(crate) struct PointerMemo {
 }
 
 impl<B: Backend> Runtime<'_, B> {
+    /// **The hosted page under the hand** — the page layer's own answer, whatever gesture is
+    /// held: the page whose shown bounds hold the point, less what stands over it there (the tab
+    /// list, a download sheet, an open search capsule). [`Runtime::web_page_at`] is this with a
+    /// held gesture subtracted, for the press, the hover and the cursor; the wheel asks this
+    /// itself, because under a held gesture a notch over a page is the page layer's to swallow
+    /// rather than a notch over nothing (R-10, cut 6).
+    pub(crate) fn page_under_the_hand(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<crate::LeafId> {
+        let (x, y) = (position.x as f32, position.y as f32);
+        if self.tab_list_target_at(position).is_some() {
+            return None;
+        }
+        if self
+            .window
+            .web_sheet_layouts
+            .iter()
+            .any(|(_, layout)| crate::websheet::covers(layout, x, y))
+        {
+            return None;
+        }
+        let inside = |box_: [f32; 4]| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3];
+        if self
+            .window
+            .search_layout
+            .is_some_and(|capsule| self.window.search.is_open() && inside(capsule.frame))
+        {
+            return None;
+        }
+        self.web_page_shown_at(position)
+    }
+
     /// **Where the cursor is, this instant, in this window's own pixels**
     /// (GitHub issue #1 ②, owner's ruling 2026-09-16: a drop lands in the pane
     /// under the cursor).
@@ -336,3 +371,7 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "held_tests.rs"]
+mod held_tests;
