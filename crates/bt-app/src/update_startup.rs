@@ -449,7 +449,8 @@ pub(crate) fn home_of_start(
 }
 
 /// **The pass over any home**, for the installed build's start
-/// ([`Starter::Install`]): the tests' door to [`run_by`].
+/// ([`Starter::Install`]): the tests' door to [`run_by`], kept so the
+/// tests' call sites stay as they were when the pass gained its starter.
 #[cfg(test)]
 pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     run_by(start, Starter::Install, world)
@@ -1644,7 +1645,7 @@ mod tests {
         ///
         /// U-10 decision 13: a start deletes only with the transaction lock free.
         ///
-        /// MUTATION: in `run`, build the view with `lock_free: true` whatever
+        /// MUTATION: in `run_by`, build the view with `lock_free: true` whatever
         /// `take_lock` answered.
         #[test]
         fn a_retirement_waits_for_a_free_transaction_lock() {
@@ -1673,7 +1674,7 @@ mod tests {
         /// process started before the home existed holds no lock (the mover lists
         /// processes for those).
         ///
-        /// MUTATION: in `run`, drop the admission (`let admission = None;` after
+        /// MUTATION: in `run_by`, drop the admission (`let admission = None;` after
         /// `admit`).
         #[test]
         fn a_start_holds_its_admission_shared_while_it_runs() {
@@ -1723,7 +1724,7 @@ mod tests {
         /// decides." The lock is asked for (a discard would need it) and given
         /// back.
         ///
-        /// MUTATION: in `run`, `std::mem::forget(lock)` in the `Continue` arm
+        /// MUTATION: in `run_by`, `std::mem::forget(lock)` in the `Continue` arm
         /// (the lock is never given back).
         #[test]
         fn a_waiting_transaction_lets_its_own_build_continue() {
@@ -1758,7 +1759,7 @@ mod tests {
         /// journal names a folder that is not there (U-10 decision 14). The
         /// digests are the real SHA-256 of the real files.
         ///
-        /// MUTATION: in `run`, take `rescue_image` from `image(start.own_exe)` (the
+        /// MUTATION: in `run_by`, take `rescue_image` from `image(start.own_exe)` (the
         /// two digests are then always equal).
         #[test]
         fn an_install_replaced_by_hand_abandons_only_the_transaction() {
@@ -1799,7 +1800,7 @@ mod tests {
         /// helper"; F-7: the start carrying the trial nonce runs, and its write
         /// gate (U-13) reads the fact kept here.
         ///
-        /// MUTATION: in `run`, build the view with `trial_of: None`.
+        /// MUTATION: in `run_by`, build the view with `trial_of: None`.
         #[test]
         fn only_the_trial_of_the_destructive_transaction_continues() {
             let Some(scene) = Scene::new("trial") else {
@@ -1838,7 +1839,7 @@ mod tests {
         /// `--update-failed <journal>` so that Folio opens at all; handing it
         /// back would send it round again.
         ///
-        /// MUTATION: in `run`, build the view with `sent_by_rollback: false`.
+        /// MUTATION: in `run_by`, build the view with `sent_by_rollback: false`.
         #[test]
         fn a_start_sent_after_a_rollback_continues_with_its_card() {
             use crate::update_txn::HeaderOutcome;
@@ -1981,7 +1982,7 @@ mod tests {
         /// read at all, and so needs no check. A word naming another place —
         /// a stale path, a path spelt differently — shows the same folder.
         ///
-        /// MUTATION: in `run`, take `Incomplete`'s folder from the word's
+        /// MUTATION: in `run_by`, take `Incomplete`'s folder from the word's
         /// value again (`journal.parent()`).
         #[test]
         fn the_incomplete_card_names_its_own_homes_folder_whatever_the_word_says() {
@@ -2540,7 +2541,7 @@ mod tests {
         /// invariant: a start that continues past an unsettled journal says
         /// so).
         ///
-        /// MUTATION: drop the `world.say` in `run`'s unreadable arm, or its
+        /// MUTATION: drop the `world.say` in `run_by`'s unreadable arm, or its
         /// card (`failed: None`).
         #[test]
         fn an_unreadable_journal_is_left_alone() {
@@ -2648,7 +2649,7 @@ mod tests {
             }
         }
 
-        /// RED (E1; role #1, the ordinary start, sites H1 `run`'s read, J1 the
+        /// RED (E1; role #1, the ordinary start, sites H1 `run_by`'s read, J1 the
         /// U-35 reservation, J2 `rolled_back_untried`) — **a start acts on the
         /// header of a journal it cannot read whole and never on its unknown
         /// body**: an unknown header word is a `destructive` transaction with
@@ -2664,7 +2665,7 @@ mod tests {
         /// retired, a `deferred` one over an install replaced by hand
         /// discarded.
         ///
-        /// MUTATION: in `run`, answer a journal of which nothing reads with a
+        /// MUTATION: in `run_by`, answer a journal of which nothing reads with a
         /// plain `Verdict::Continue` and no card (`failed: None`) — the
         /// pre-E1 start.
         #[test]

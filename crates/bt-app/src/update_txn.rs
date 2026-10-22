@@ -3131,6 +3131,8 @@ impl Home {
     /// bundle `<parent>/.<Bundle>.folio-update/<txn>/rescue/<Bundle>`, the
     /// clone of the installed `<parent>/<Bundle>` ([`Home::rescue_bundle`]),
     /// whose home is that bundle's locator. `None` for every other executable.
+    /// The `<txn>` folder's name is not checked (as in [`Home::of_rescue`]):
+    /// the start this home is found for only reads.
     pub(crate) fn of_rescue_copy(platform: HostPlatform, exe: &Path) -> Option<Self> {
         match platform {
             HostPlatform::Windows => Self::of_rescue(platform, exe).map(|(home, _)| home),

@@ -134,7 +134,7 @@ transaction lock and record `Moving → TrialStarting { nonce, began_ms }`; only
 then is the same new image requested once more with both frozen words. The
 reserved nonce (`update_txn::Phase::reserved_trial`) is then the one owner of
 what is started: `update_apply_windows::opens_now` names it
-(`Opens::LastTrial`), `update_startup::run` admits only it, and a start whose
+(`Opens::LastTrial`), `update_startup::run_by` admits only it, and a start whose
 rescue build is refused continues as it. That trial commits itself once ready
 (`update_apply::commit_last_trial`: `TrialStarting → Committed` by
 `LastTrialReady`, its own receipt read back under the transaction lock, naming

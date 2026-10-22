@@ -5782,7 +5782,7 @@ A2c2b and A2anim have landed, and A2e requires it empty.**
 |---:|---|---|---|---|---|---|
 | C1 | bt-persist · `migrate::read_bounded` | all | `open` · Settings | window (`StoreOpen`'s births; `StoreReread`'s rereads and import; the front door's `say` inside `LaunchHandOver`); `bt-update-check`; standalone `--explorer-command` and the front door's parse fault | S3, shared | A2b2a |
 | C2 | bt-app · `main.rs` `probe_input` | all | `read` · Other | window, birth (`BT_PROBE_INPUT`), under `StoreOpen` | window | A2b2a |
-| C3 | bt-app · `update_startup::run` (the journal) | all | `read` · Install | window, Starting (`UpdateMounts`) | window | A2b2a |
+| C3 | bt-app · `update_startup::run_by` (the journal) | all | `read` · Install | window, Starting (`UpdateMounts`) | window | A2b2a |
 | C4 | bt-app · `update_startup::image` (the running and rescue executables, whole) | all | `read` · Install | window, Starting (`UpdateMounts`) | window | A2b2a |
 | C5 | bt-render · `terminal_font_system` | [windows] ×2, [macos] ×1 | `opaque` · Fonts | window, the first window, inside `GpuOpen` | window | A2b2a (the owner table's `GpuOpen` row) |
 | C6 | bt-render · `load_chrome_sans_family` | [windows] | `opaque` · Fonts | window, inside `GpuOpen` | window | A2b2a (the same row) |
