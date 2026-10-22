@@ -3812,12 +3812,12 @@ impl Text {
             Self::VideoDidNotLoad => pick(
                 lang,
                 "This video did not finish loading",
-                "This video did not finish loading", // zh: pending T-VIDEO-ENGINE-NO-DURATION
+                "此视频未能加载完成",
             ),
             Self::VideoNoLength => pick(
                 lang,
                 "No length",
-                "No length", // zh: pending T-VIDEO-ENGINE-NO-DURATION
+                "无时长",
             ),
             Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
             Self::PreviewFlipToPage => pick(lang, "View page", "查看页面"),
@@ -6631,12 +6631,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-VIDEO-ENGINE-NO-DURATION — a video that never finished loading, and the
-        // bar of one that declares no length.
-        (Self::VideoDidNotLoad, HostPlatform::Windows),
-        (Self::VideoDidNotLoad, HostPlatform::MacOs),
-        (Self::VideoNoLength, HostPlatform::Windows),
-        (Self::VideoNoLength, HostPlatform::MacOs),
         // zh: pending T-STORE-NOTICE — the storage pass's card: what the files' values
         // replaced and what was not applied.
         (Self::MergeFileLine, HostPlatform::Windows),
