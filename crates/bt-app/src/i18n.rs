@@ -5801,7 +5801,7 @@ impl Text {
             Self::WebAddressNoSuchFile => pick(
                 lang,
                 "No such file",
-                "No such file", // zh: pending M-SWEEP-048
+                "文件不存在",
             ),
             Self::WebFailAddressInvalidSay => {
                 pick(lang, "This address is not valid.", "这个地址无效。")
@@ -6633,9 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // 0.4.8 M-SWEEP-048: the address field's sentence for a path that names no file.
-        (Self::WebAddressNoSuchFile, HostPlatform::Windows),
-        (Self::WebAddressNoSuchFile, HostPlatform::MacOs),
         // zh: pending H2 — the crowded pane strip's tail line (AUDIT-hardcode SEAT-1).
         (Self::SeatOverflowOne, HostPlatform::Windows),
         (Self::SeatOverflowOne, HostPlatform::MacOs),
