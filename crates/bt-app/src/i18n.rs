@@ -3921,7 +3921,7 @@ impl Text {
             Self::PreviewSavedOrdinarily => pick(
                 lang,
                 "Saved · this drive cannot replace a file in one step",
-                "Saved · this drive cannot replace a file in one step", // zh: pending T-PREVIEW-NO-EXCHANGE-RULING
+                "已保存 · 此磁盘不支持一步替换文件",
             ),
             Self::PreviewConflict => pick(
                 lang,
@@ -6633,10 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-PREVIEW-NO-EXCHANGE-RULING — the sentence a preview save written by an
-        // ordinary write says the first time on each drive that cannot exchange.
-        (Self::PreviewSavedOrdinarily, HostPlatform::Windows),
-        (Self::PreviewSavedOrdinarily, HostPlatform::MacOs),
         // zh: pending S-6a — the two clauses a preview save that never reached the disk is
         // "not saved" for.
         (Self::PreviewSaveNotStarted, HostPlatform::Windows),
