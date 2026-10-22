@@ -396,7 +396,7 @@ crates/bt-app/src/cli.rs	bt-app crate::cli::explorer_command	Ambiguous	next	1
 crates/bt-app/src/cli.rs	bt-app crate::cli::explorer_command	Ambiguous	to_str	1	
 crates/bt-app/src/cli.rs	bt-app crate::cli::is_flag	Ambiguous	get	1	
 crates/bt-app/src/cli.rs	bt-app crate::cli::parse	Ambiguous	eq_ignore_ascii_case	2	
-crates/bt-app/src/cli.rs	bt-app crate::cli::parse	Ambiguous	into_owned	6	
+crates/bt-app/src/cli.rs	bt-app crate::cli::parse	Ambiguous	into_owned	7	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/cli.rs	bt-app crate::cli::parse	Ambiguous	next	1	
 crates/bt-app/src/cli.rs	bt-app crate::cli::parse	Ambiguous	starts_with	1	
 crates/bt-app/src/cli.rs	bt-app crate::cli::parse	Ambiguous	to_owned	1	
@@ -1492,6 +1492,8 @@ crates/bt-app/src/i18n.rs	bt-app crate::i18n::update_card_trial_not_kept	Ambiguo
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::update_card_trial_not_kept	Ambiguous	text	1	
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::update_card_undone	Ambiguous	replace	1	
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::update_card_undone	Ambiguous	text	1	
+crates/bt-app/src/i18n.rs	bt-app crate::i18n::update_failed_file_held	Ambiguous	replace	2	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/i18n.rs	bt-app crate::i18n::update_failed_file_held	Ambiguous	text	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; i18n::Text::text on the heading's entry, a table read that reaches no door
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::update_failed_journal_held	Ambiguous	replace	1	
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::update_failed_journal_held	Ambiguous	text	1	
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::update_failed_space	Ambiguous	replace	1	
@@ -1779,7 +1781,7 @@ crates/bt-app/src/launch_wire.rs	bt-app crate::launch_wire::LaunchRequest::decod
 crates/bt-app/src/launch_wire.rs	bt-app crate::launch_wire::LaunchRequest::decode	Ambiguous	ok	1	
 crates/bt-app/src/launch_wire.rs	bt-app crate::launch_wire::LaunchRequest::decode	Ambiguous	skip	1	
 crates/bt-app/src/launch_wire.rs	bt-app crate::launch_wire::LaunchRequest::decode	Ambiguous	to_owned	1	
-crates/bt-app/src/launch_wire.rs	bt-app crate::launch_wire::LaunchRequest::decode	Dynamic	bounded	5	
+crates/bt-app/src/launch_wire.rs	bt-app crate::launch_wire::LaunchRequest::decode	Dynamic	bounded	6	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; decode's local `bounded` closure, a bounds check over the frame's JSON object, for the new failed_held_file key
 crates/bt-app/src/launch_wire.rs	bt-app crate::launch_wire::LaunchRequest::encode	Ambiguous	into_owned	4	
 crates/bt-app/src/launch_wire.rs	bt-app crate::launch_wire::LaunchRequest::encode	Ambiguous	to_string	1	
 crates/bt-app/src/launch_wire.rs	bt-app crate::launch_wire::LaunchRequest::from_cli	Ambiguous	to_path_buf	1	
@@ -6238,6 +6240,7 @@ crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::<WindowDuty as std
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::<WindowRefusal as std::fmt::Debug>::fmt	Ambiguous	field	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::<WindowRefusal as std::fmt::Debug>::fmt	Ambiguous	finish	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ExitGuard::leave	Ambiguous	clone	1	
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::HeldPast::words	Ambiguous	extend	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::Journaled::record_as	Ambiguous	encode	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::Journaled::record_as	Ambiguous	kind	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::MarkWriteFailure::from_result	Ambiguous	to_string	1	
@@ -6245,6 +6248,16 @@ crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::Opens::words	Ambig
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ask_for_the_window_until	Ambiguous	is_zero	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ask_for_the_window_until	Dynamic	ask	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::ask_for_the_window_until	Dynamic	wait	1	
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Ambiguous	as_millis	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; write_held_within's own call, renamed asked_while_held: a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Ambiguous	as_secs_f64	2	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; write_held_within's own call, renamed asked_while_held: a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Ambiguous	is_zero	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; write_held_within's own call, renamed asked_while_held: a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Ambiguous	saturating_mul	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; write_held_within's own call, renamed asked_while_held: a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Ambiguous	to_string	3	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; write_held_within's own call, renamed asked_while_held: a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Dynamic	ask	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a seam closure of the held rounds (the ask, its reading of a failure, the elapsed time, the pause, the line, the look), whose product bodies are install_txn's durable_move or DurableWrite::ask, Instant::elapsed, wait::sleep_within on the holder's worker and the world's say
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Dynamic	elapsed	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a seam closure of the held rounds (the ask, its reading of a failure, the elapsed time, the pause, the line, the look), whose product bodies are install_txn's durable_move or DurableWrite::ask, Instant::elapsed, wait::sleep_within on the holder's worker and the world's say
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Dynamic	held_with	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a seam closure of the held rounds (the ask, its reading of a failure, the elapsed time, the pause, the line, the look), whose product bodies are install_txn's durable_move or DurableWrite::ask, Instant::elapsed, wait::sleep_within on the holder's worker and the world's say
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Dynamic	say	2	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a seam closure of the held rounds (the ask, its reading of a failure, the elapsed time, the pause, the line, the look), whose product bodies are install_txn's durable_move or DurableWrite::ask, Instant::elapsed, wait::sleep_within on the holder's worker and the world's say
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::asked_while_held	Dynamic	wait	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a seam closure of the held rounds (the ask, its reading of a failure, the elapsed time, the pause, the line, the look), whose product bodies are install_txn's durable_move or DurableWrite::ask, Instant::elapsed, wait::sleep_within on the holder's worker and the world's say
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::before_deciding	Dynamic	end	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::carry_the_start_with	Ambiguous	saturating_duration_since	3	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::carry_the_start_with	Dynamic	ahead_runs	1	
@@ -6264,6 +6277,8 @@ crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::given_up_said	Dyna
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::launched_trial	Ambiguous	any	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::launched_trial	Ambiguous	find	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::launched_trial	Ambiguous	map	1	
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::move_held_within	Ambiguous	elapsed	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::move_held_within	Dynamic	look	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a seam closure of the held rounds (the ask, its reading of a failure, the elapsed time, the pause, the line, the look), whose product bodies are install_txn's durable_move or DurableWrite::ask, Instant::elapsed, wait::sleep_within on the holder's worker and the world's say
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::note_settled_unkept	Dynamic	say	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::note_unkept_after_trial_decision	Ambiguous	is_zero	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::note_unkept_after_trial_decision	Ambiguous	saturating_duration_since	1	
@@ -6309,19 +6324,7 @@ crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::watch_trial	Dynami
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::watch_trial	Dynamic	launch_over	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::watch_trial	Dynamic	say	5	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::window_holder_using	Dynamic	in_flight	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_held_within	Ambiguous	as_millis	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_held_within	Ambiguous	as_secs_f64	2	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_held_within	Ambiguous	is_zero	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_held_within	Ambiguous	saturating_mul	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_held_within	Ambiguous	to_string	3	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_held_within	Dynamic	elapsed	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_held_within	Dynamic	is_held	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_held_within	Dynamic	refusal	4	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_held_within	Dynamic	say	2	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_held_within	Dynamic	wait	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_held_within	Dynamic	write	1	
 crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_journal	Ambiguous	elapsed	1	
-crates/bt-app/src/update_apply.rs	bt-app crate::update_apply::write_journal	Ambiguous	to_string	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::<Machine as Hands>::exchange	Ambiguous	to_string	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::<Machine as Hands>::say	Ambiguous	as_bytes	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::Launch::over	Ambiguous	code	1	
@@ -6410,6 +6413,7 @@ crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Tx
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::begin_retrial	Ambiguous	extend	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::begin_retrial	Ambiguous	extend_from_slice	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::finish_rollback	Ambiguous	and_then	1	
+crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::held_past	Ambiguous	or_else	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::move_back	Ambiguous	activate_back	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::of	Ambiguous	to_string	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::ready_to_move	Ambiguous	is_file	1	
@@ -6424,6 +6428,8 @@ crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::ap
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::apply_under_the_lock_with	Dynamic	hold	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::digest_at	Ambiguous	is_file	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::digest_at	Ambiguous	ok	1	
+crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::held_move	Ambiguous	move_held	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a World method called through the RefCell that lends the applier's world to the held rounds' two seams; its product bodies are Machine's and LoggedWindows' (the line appended to the log; move_held a no-op)
+crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::held_move	Ambiguous	say	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a World method called through the RefCell that lends the applier's world to the held rounds' two seams; its product bodies are Machine's and LoggedWindows' (the line appended to the log; move_held a no-op)
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::live_set	Dynamic	at	3	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::read_digest_at	Ambiguous	is_file	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::read_digest_at	Ambiguous	to_string	1	
@@ -6704,6 +6710,7 @@ crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::held	Ambiguous
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::is_held	Ambiguous	is_some	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::is_last_trial	Ambiguous	is_some	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous	collect	1	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous	map	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous	skip	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::perform	Ambiguous	to_string	2	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::retire	Ambiguous	to_string	1	
