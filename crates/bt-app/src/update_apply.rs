@@ -107,7 +107,9 @@ pub(crate) struct Limits {
     pub(crate) end_within: Duration,
     /// **How long a journal write refused because another program holds
     /// `journal.json` open is asked again** ([`JOURNAL_HELD_WITHIN`] in the
-    /// product; [`write_journal`]).
+    /// product; [`write_journal`]) — **and each member move of the Windows
+    /// flip or of its rollback that another program's hold refuses**, its own
+    /// window per move ([`move_held_within`], T-UPDATE-MOVE-HELD-RETRY).
     pub(crate) journal_held_within: Duration,
 }
 

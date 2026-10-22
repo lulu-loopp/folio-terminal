@@ -8117,6 +8117,9 @@ pub enum CliText<'a> {
     RepeatedFlag(&'a str),
     /// A second bare path. One command line names one place.
     ExtraPath(&'a str),
+    /// A flag that only says something beside another, given without it
+    /// (`crate::cli::CliFault::Unpaired`, T-UPDATE-MOVE-HELD-RETRY).
+    UnpairedFlag { flag: &'a str, needs: &'a str },
     /// `--cwd` named something that is not a folder.
     ///
     /// The second sentence is the half the reader cannot see for themselves: the
@@ -8204,6 +8207,10 @@ impl CliText<'_> {
                 Lang::English => format!("{flag} was given twice."),
                 Lang::Chinese => format!("{flag} 给了两次。"),
             },
+            Self::UnpairedFlag { flag, needs } => match lang {
+                Lang::English => format!("{flag} was given without {needs}."),
+                Lang::Chinese => format!("给了 {flag}，却没有给 {needs}。"),
+            },
             Self::ExtraPath(path) => match lang {
                 Lang::English => format!("One path at a time — {path} is the second."),
                 Lang::Chinese => format!("一次只能给一个路径，{path} 是第二个。"),
@@ -8265,7 +8272,7 @@ impl CliText<'_> {
     /// The samples deliberately contain no Han characters of their own, so that
     /// the Chinese column's own words are what the Han test finds.
     #[cfg(test)]
-    pub const SAMPLES: [Self; 11] = [
+    pub const SAMPLES: [Self; 12] = [
         Self::Usage {
             profile_ids: "pwsh, winps",
         },
@@ -8273,6 +8280,10 @@ impl CliText<'_> {
         Self::UnknownFlag("--nope"),
         Self::RepeatedFlag("--profile"),
         Self::ExtraPath(r"D:\b"),
+        Self::UnpairedFlag {
+            flag: "--update-held-file",
+            needs: "--update-journal-held",
+        },
         Self::NoSuchFolder(r"D:\gone"),
         Self::NoSuchProfile("fish"),
         Self::NoSuchPath(r"D:\gone"),
@@ -10035,6 +10046,7 @@ mod tests {
                 | CliText::UnknownFlag(_)
                 | CliText::RepeatedFlag(_)
                 | CliText::ExtraPath(_)
+                | CliText::UnpairedFlag { .. }
                 | CliText::NoSuchFolder(_)
                 | CliText::NoSuchProfile(_)
                 | CliText::NoSuchPath(_)

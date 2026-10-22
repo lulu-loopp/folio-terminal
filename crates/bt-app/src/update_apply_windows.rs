@@ -493,7 +493,6 @@ impl ApplyPoints for Ours {
     }
 }
 
-/// **The layouts of this road** as the product has them: [`Ours`] alone.
 /// **One move of the flip or of its rollback**, asked again while another
 /// program's hold refuses it (`update_apply::move_held_within`): through the
 /// journal holder's wait door and within its window, each refused round said
@@ -540,6 +539,7 @@ fn cut(what: &str, step: &Move, unmoved: crate::update_apply::Unwritten) -> Acti
     }
 }
 
+/// **The layouts of this road** as the product has them: [`Ours`] alone.
 #[must_use]
 pub(crate) fn own_layouts() -> Layouts<dyn ApplyPoints> {
     Layouts::of(Arc::new(Ours))

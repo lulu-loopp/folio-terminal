@@ -3068,7 +3068,9 @@ mod tests {
         /// RED (T-UPDATE-MOVE-HELD-RETRY) — **a start told that another
         /// program held a member of the update open past its holder's window
         /// names that file, with the system's refusal, over what the journal
-        /// shows** — never the update record, which was not the held file.
+        /// shows** — *Previous version restored.* after the flip's cut, *Update
+        /// incomplete.* and the folder after the rollback's (`Stuck`) — never
+        /// the update record, which was not the held file.
         ///
         /// MUTATION: in `run`, drop `told.file` (`file: None`) — the card
         /// names the update record.
@@ -3132,6 +3134,52 @@ mod tests {
                     Some(crate::i18n::Text::UpdateCardRestored.text())
                 )
             );
+
+            // The rollback's move back cut by the hold: `Stuck`, the update
+            // incomplete, its folder named under the held file's heading.
+            write_phase(
+                &scene,
+                Phase::Stuck {
+                    trial: None,
+                    trial_started: false,
+                    last_error: format!(
+                        "the move of `folio.exe` to Install: another program held it open past the window: {refusal}"
+                    ),
+                    attempts: 1,
+                    retrial: None,
+                },
+            );
+            let mut world = Recorded {
+                admission: Some(scene.home.admission()),
+                ..Recorded::default()
+            };
+            let (failed, ..) = continued_with(run(
+                &Start {
+                    own_exe: &scene.own_exe,
+                    home: &scene.home,
+                    argv: &argv,
+                    trial: None,
+                    failed: Some(&journal),
+                    journal_held: Some(HeldTold {
+                        error: refusal,
+                        file: Some("folio.exe"),
+                    }),
+                },
+                &mut world,
+            ));
+            let job: Job<u32> = Job::with_offers(true).after_rollback(failed.clone());
+            let card = update_card::paint(job.state()).expect("a card");
+            assert_eq!(
+                (card.heading.as_deref(), card.detail.as_deref()),
+                (
+                    Some(
+                        "Another program held folio.exe open: 另一个程序正在使用此文件，进程无法访问。 (os error 32)"
+                    ),
+                    Some(crate::i18n::Text::UpdateCardIncomplete.text())
+                ),
+                "{failed:?}"
+            );
+            assert_eq!(card.folder.as_deref(), Some(scene.home.root()));
         }
 
         /// RED (0.4.8 E4, R3) — **the start that retires a transaction

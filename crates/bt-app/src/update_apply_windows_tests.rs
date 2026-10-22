@@ -7348,8 +7348,9 @@ fn an_old_file_held_past_the_window_leaves_the_rollback_stuck_and_named() {
 /// RED (T-UPDATE-MOVE-HELD-RETRY) — **the phase's right to a move is asked
 /// before its first attempt, never after**: under a journal whose phase does
 /// not allow the applier to move (`Handoff`), the flip refuses with the
-/// right named, nothing is moved and no round is asked — however long a
-/// member is held, the effect is asked once per step, outside its rounds.
+/// right named, nothing is moved and no round is asked. This pins
+/// "before"; "once per step" holds by structure — the call sits outside
+/// the retry (`update_apply::move_held_within`), which never asks it.
 ///
 /// MUTATION: in `Ours::activate`, ask `journal.may` after the move — the
 /// first old file is moved before the refusal.

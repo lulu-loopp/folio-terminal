@@ -255,6 +255,15 @@ pub enum CliFault {
     Repeated(&'static str),
     /// A second bare path. One command line names one place.
     ExtraPath(String),
+    /// **A flag that only says something beside another, given without it**
+    /// (T-UPDATE-MOVE-HELD-RETRY: [`UPDATE_HELD_FILE_FLAG`] names the member
+    /// whose refusal [`UPDATE_JOURNAL_HELD_FLAG`] carries). Refused by name
+    /// rather than dropped, for [`CliFault::Repeated`]'s reason: a line that
+    /// says half of a thing was not written by the build that writes it.
+    Unpaired {
+        flag: &'static str,
+        needs: &'static str,
+    },
 }
 
 impl CliFault {
@@ -282,6 +291,9 @@ impl CliFault {
             Self::UnknownFlag(flag) => Some(i18n::CliText::UnknownFlag(flag).text()),
             Self::Repeated(flag) => Some(i18n::CliText::RepeatedFlag(flag).text()),
             Self::ExtraPath(path) => Some(i18n::CliText::ExtraPath(path).text()),
+            Self::Unpaired { flag, needs } => {
+                Some(i18n::CliText::UnpairedFlag { flag, needs }.text())
+            }
         }
     }
 }
@@ -640,6 +652,14 @@ where
                 request.path = Some(PathBuf::from(arg));
             }
         }
+    }
+    // The member's name says something only beside the refusal it was the
+    // move of: alone it is half a line no build writes.
+    if request.update_held_file.is_some() && request.update_journal_held.is_none() {
+        return Err(CliFault::Unpaired {
+            flag: UPDATE_HELD_FILE_FLAG,
+            needs: UPDATE_JOURNAL_HELD_FLAG,
+        });
     }
     Ok(request)
 }
@@ -2460,8 +2480,9 @@ mod tests {
     /// value, kept as given, beside `--update-journal-held`, and refused like
     /// any other flag when the value is missing or the word is given twice.**
     ///
-    /// MUTATION: drop the `UPDATE_HELD_FILE_FLAG` arm of `parse` (the word is
-    /// an unknown flag).
+    /// MUTATIONS: drop the `UPDATE_HELD_FILE_FLAG` arm of `parse` (the word
+    /// is an unknown flag); drop the unpaired check at the end of `parse` (the
+    /// name alone is taken and silently dropped by the start).
     #[test]
     fn the_held_file_word_takes_the_member_s_name_as_given() {
         let journal = r"C:\Folio 终端\.folio-update\journal.json";
@@ -2491,6 +2512,19 @@ mod tests {
                 "folio.exe"
             ]),
             CliFault::Repeated(UPDATE_HELD_FILE_FLAG)
+        );
+        // Alone, it is refused by name — never dropped.
+        assert_eq!(
+            refused(&[
+                "--update-failed",
+                journal,
+                "--update-held-file",
+                "folio.exe"
+            ]),
+            CliFault::Unpaired {
+                flag: UPDATE_HELD_FILE_FLAG,
+                needs: UPDATE_JOURNAL_HELD_FLAG,
+            }
         );
     }
 
