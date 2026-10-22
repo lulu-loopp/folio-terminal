@@ -6406,6 +6406,24 @@ impl Text {
         Self::CleanupMarkSavedState,
     ];
 
+    /// **The entries whose Chinese column holds no word**: placeholders and
+    /// punctuation only — a joiner between names or clauses, or a frame around
+    /// two values whose words arrive at run time.
+    ///
+    /// Not [`Self::UNTRANSLATED`]: these do differ from the English, by the
+    /// punctuation Chinese writes (`、`, `；`, `：`, `。`). They are exempt from
+    /// the Han-character pin because a correct Chinese column has nothing for
+    /// that pin to find, and held to a pin of their own instead: what is left
+    /// once the placeholders are taken out is full-width punctuation, with no
+    /// ASCII in it, so the English column copied over still fails.
+    #[cfg(test)]
+    const PUNCTUATION_ONLY: [Self; 4] = [
+        Self::ListSeparator,
+        Self::MergeClauseSeparator,
+        Self::MergedProfileValue,
+        Self::MergeFileLine,
+    ];
+
     /// **The uninstaller's inventory rows that name a Windows thing** — the second
     /// exemption of `no_string_a_mac_reader_meets_names_a_windows_program`
     /// (T-UNINSTALL-UX).
@@ -9936,6 +9954,11 @@ mod tests {
     /// The failure this catches is the half-translation: a sentence whose
     /// technical tokens were kept and whose words were forgotten still differs
     /// from its English, so the test above would pass it.
+    ///
+    /// An entry on [`Text::PUNCTUATION_ONLY`] has no word to carry; its Chinese
+    /// column, placeholders taken out, is full-width punctuation and nothing
+    /// else. MUTATION: give `ListSeparator` its English `", "` in the Chinese
+    /// column and the second assertion names it.
     #[test]
     fn every_chinese_entry_carries_at_least_one_han_character() {
         for entry in Text::ALL {
@@ -9947,6 +9970,24 @@ mod tests {
                     continue;
                 }
                 let chinese = entry.on(Lang::Chinese, platform);
+                if Text::PUNCTUATION_ONLY.contains(&entry) {
+                    let mut rest = String::new();
+                    let mut in_placeholder = false;
+                    for c in chinese.chars() {
+                        match c {
+                            '{' => in_placeholder = true,
+                            '}' => in_placeholder = false,
+                            _ if !in_placeholder => rest.push(c),
+                            _ => {}
+                        }
+                    }
+                    assert!(
+                        !rest.is_empty() && !rest.chars().any(|c| c.is_ascii()),
+                        "{entry:?} reads {chinese:?} on {platform:?}: outside its \
+                         placeholders it should be full-width punctuation alone"
+                    );
+                    continue;
+                }
                 assert!(
                     chinese
                         .chars()
