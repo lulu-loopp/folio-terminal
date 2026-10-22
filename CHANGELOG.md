@@ -8,7 +8,7 @@ All notable changes to Folio are recorded here. The format follows
 
 Nothing yet.
 
-## 0.4.8-preview — 2026-10-DD
+## 0.4.8-preview — 2026-10-23
 
 ### Added
 
