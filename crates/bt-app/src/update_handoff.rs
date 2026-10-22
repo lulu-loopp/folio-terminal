@@ -693,7 +693,8 @@ impl Leave for OldLeave<'_> {
     }
 
     /// The rescue copy the journal names, with `--update-failed`: O's own
-    /// image, copied, whose own home holds no journal — the envelope's, when
+    /// image, copied, which finds the install's home from its own path and
+    /// shows that journal's card (T-RESCUE-COPY-CARD) — the envelope's, when
     /// this build cannot read the journal whole (0.4.8 E1).
     fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         let home = self.home?;

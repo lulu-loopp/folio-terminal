@@ -22,7 +22,8 @@
 #    (section 3.2; structural-debt D-15, repaid)
 # 6  bt-compose, the composition order and the math execution over bt-term, bt-viewport, bt-render
 #    and bt-math (layers 3-5): above every crate it orders and below the one host that lends it
-#    sessions and views
+#    sessions and views; bt-render-probe, the render probe's GPU submissions over bt-render and
+#    bt-viewport, a tool library no product crate depends on (thread-door note revision (l)4)
 # 7  bt-app; bt-corpus and bt-lint-probe, tools nothing depends on; bt-source, which only tests read
 crate	layer
 bt-unicode	0
@@ -40,6 +41,7 @@ bt-math	5
 bt-persist	5
 bt-pty	5
 bt-compose	6
+bt-render-probe	6
 bt-app	7
 bt-corpus	7
 bt-lint-probe	7

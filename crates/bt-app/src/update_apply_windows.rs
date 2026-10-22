@@ -133,9 +133,11 @@
 //! every new file installed at its digest starts it as a trial over `Stuck` —
 //! recorded (`RetrialBegan`), so its receipt commits forward (W8) — and waits
 //! for it under the lock ([`Txn::retry_as_trial`]). Where the install holds
-//! neither whole set, **the rescue copy** (O's own image, whose home holds no
-//! journal) opens with `--update-failed` — the fallback when even the
-//! recovery could not finish.
+//! neither whole set, **the rescue copy** (O's own image) opens with
+//! `--update-failed` — the fallback when even the recovery could not finish,
+//! started because the install's home holds a journal whose card it must
+//! show: it finds that home from its own path and only reads it
+//! (`update_startup::home_of_start`, T-RESCUE-COPY-CARD).
 //!
 //! **Recovery** ([`recover`], the rescue build as `--update-recover`, R): the
 //! same lock within 60 s, then every phase a dead applier can leave, by the
@@ -688,7 +690,9 @@ impl<W: World> Leave for WindowsLeave<'_, W> {
     }
 
     /// The rescue copy — O's own image, which has run — with
-    /// `--update-failed`: whose own home holds no journal.
+    /// `--update-failed`: started because the install's home holds a journal
+    /// whose card it must show, which it reads from its own path
+    /// (`update_startup::home_of_start`).
     fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         Some(self.started(&Opens::Rescue))
     }

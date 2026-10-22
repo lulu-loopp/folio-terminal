@@ -304,7 +304,7 @@ fn leaving_is_one_door_that_escape_the_ground_and_a_blur_reach_and_it_keeps_the_
     );
     folio
         .runtime()
-        .cancel_preview_text_drag()
+        .cancel_own_capture()
         .expect("the gesture is let go");
     assert!(on_the_page(&mut folio, surface).0, "and the page stays");
 
@@ -495,8 +495,8 @@ fn drawn_span(folio: &mut HeadlessFolio, surface: PreviewSurface) -> Option<Stri
 ///
 /// MUTATIONS: read the fresh span in `Runtime::rebuild_preview_document` without
 /// `preview_press::held_span` — the page changes shape mid-drag; drop
-/// `runtime.cancel_preview_text_drag()` from the blur in `FolioApp::on_window_event` — the
-/// gesture outlives the window's focus and the span with it.
+/// `self.end_capture(Ending::Cancel)` from the blur's door, `Runtime::window_blurred`
+/// (T-POINTER-CAPTURE cut 5) — the gesture outlives the window's focus and the span with it.
 #[test]
 fn the_window_holds_the_span_a_gesture_starts_on_and_frees_it_on_a_blur() {
     let (mut folio, surface) = drawn_page("headless-span");
@@ -762,7 +762,7 @@ fn the_source_blocks_band_is_drawn_from_the_drag_that_reaches_into_it() {
     );
     folio
         .runtime()
-        .cancel_preview_text_drag()
+        .cancel_own_capture()
         .expect("the gesture is let go");
 
     // A drag begun on a link spends no press, and still records where it reached.
@@ -780,7 +780,7 @@ fn the_source_blocks_band_is_drawn_from_the_drag_that_reaches_into_it() {
     );
     folio
         .runtime()
-        .cancel_preview_text_drag()
+        .cancel_own_capture()
         .expect("the gesture is let go");
 }
 
@@ -1968,5 +1968,39 @@ fn a_flyout_answer_landing_on_another_tab_is_shown_on_return() {
             .held(crate::computation_lane::Share::Scale),
         0,
         "and asks nothing again"
+    );
+}
+
+/// RED (T-NATIVE-LABELS-FROM-THE-CALLER) — **`Choose…` on the Background image row asks the
+/// system's chooser for pictures, with the filter's name from the interface table**: the words
+/// cross with the call, and `bt-platform` names the filter with what it was handed.
+///
+/// MUTATION: hand `image_picker.request` any other string in
+/// `Runtime::browse_for_background_image` and the name the chooser was asked with is not the
+/// table's.
+#[test]
+fn the_picture_chooser_is_asked_with_the_tables_name_for_its_filter() {
+    let mut folio = crate::headless::HeadlessFolio::with_tabs(
+        "native-labels-picture-chooser",
+        vec![crate::test_support::cross_tab(1, &["一 one"])],
+        0,
+    );
+    folio.ledger.take();
+    folio.runtime().browse_for_background_image();
+    let asked: Vec<(bt_platform::FilePickKind, String)> = folio
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            crate::headless::WindowEffect::FileAsked(kind, _, name) => Some((kind, name)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        asked,
+        vec![(
+            bt_platform::FilePickKind::Image,
+            crate::i18n::Text::ImageFileType.text().to_owned()
+        )],
     );
 }

@@ -1,6 +1,7 @@
 //! `tabs` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::{Ending, Gone, Leaving, OwnerGone};
 use crate::input::Keystroke;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -307,6 +308,17 @@ impl<B: Backend> Runtime<'_, B> {
         if index >= self.window.tabs.len() || (!force && index == self.window.active_tab) {
             return Ok(());
         }
+        // **The gesture the tab in front was holding leaves with it** (T-POINTER-CAPTURE R-9,
+        // off the glass), and first of all: a divider puts back the ratio it was moving, read off
+        // this tab's seats, and a press handed to a program is told its button came up while its
+        // pane is still the one on the glass. A drag in the hand is not this tab's — the spring
+        // that brought it here is the drag's own aim.
+        if index != self.window.active_tab {
+            self.end_capture(Ending::OffTheGlass(Leaving {
+                tab: self.id,
+                kept: None,
+            }))?;
+        }
         // **A formula's hover goes with the tab it was in** (audit 2026-09-15,
         // RB-3), and **before** the assignment below: `set_hovered_math` sweeps
         // the *active* tab's leaves, so a clear run after this line would sweep
@@ -338,8 +350,6 @@ impl<B: Backend> Runtime<'_, B> {
         let _ = self.window.pending_frames.take();
         self.window.last_presented_frame = None;
         self.window.preedit = None;
-        self.drop_mouse_route();
-        self.drop_divider_drag();
         self.window.seat_pointer = seats::ChromePointer::default();
         self.window.hyperlink_hover.clear();
         self.window.peek_hover.clear();
@@ -432,25 +442,10 @@ impl<B: Backend> Runtime<'_, B> {
         }) {
             self.finish_rename(RenameExit::Blur)?;
         }
-        if self.held_tab_press().copied().is_some_and(|press| {
-            self.window
-                .tabs
-                .get(index)
-                .is_some_and(|tab| tab.id == press.tab)
-        }) {
-            self.drop_tab_press();
-        }
-        if self.held_drag().is_some_and(|drag| {
-            self.window
-                .tabs
-                .get(index)
-                .is_some_and(|tab| drag.tab() == Some(tab.id))
-        }) {
-            self.drop_drag();
-            // F2: the payload stopped existing, so the application's pointer has
-            // nothing left to broker either.
-            self.app.drag_broker = None;
-        }
+        // And the gesture that was about it (T-POINTER-CAPTURE R-9, owner gone): its press, the
+        // tab itself in the hand, or anything held on one of its panes.
+        let closing = self.window.tabs[index].id;
+        self.end_capture(OwnerGone(Gone::Tab(closing)));
         match tab_close_action(self.window.tabs.len(), self.window.active_tab, index) {
             TabCloseAction::CloseWindow => {
                 self.request_window_close()

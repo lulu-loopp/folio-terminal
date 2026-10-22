@@ -11,7 +11,7 @@
 //! picture*, and the only way to ask it is to draw one frame both ways on one
 //! device and put the two sets of bytes beside each other.
 //!
-//! `crates/bt-render/tests/glyph_output.rs` is the other half and runs on
+//! `crates/bt-render-probe/tests/glyph_output.rs` is the other half and runs on
 //! either machine; both are handed the page by
 //! `bt_render::glyph_probe::GlyphFixture`, which is the whole reason a
 //! difference here can be attributed to the surface.
@@ -257,7 +257,8 @@ mod mac {
                 fixture.present(token, gpu, &mut offscreen)
             })
             .expect("the page draws into the texture");
-            let read_back = offscreen.read_back(gpu).expect("the texture reads back");
+            let read_back =
+                bt_render_probe::read_back(&offscreen, gpu).expect("the texture reads back");
             let metrics = offscreen.base_metrics();
 
             println!("macos_glyph_surface: format={format:?}");

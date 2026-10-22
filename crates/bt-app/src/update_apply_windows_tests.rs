@@ -33,7 +33,9 @@ use std::time::Duration;
 
 use bt_platform::logon_hook::{self, Registry};
 use bt_platform::trust::FileVersion;
-use bt_platform::trust_harness::{Behaviour, IDENTITY, TestCa};
+use bt_platform::trust_harness::{
+    Behaviour, IDENTITY, TestCa, done_once_let_go, moved_once_let_go, renamed_once_let_go,
+};
 use bt_winres::digest::sha256;
 
 use crate::update_apply::{LastTrialCommit, Left, Window, commit_last_trial_as};
@@ -345,8 +347,10 @@ impl World for Fake {
             // As the product's trial writes it (H.1).
             started: install_flip::started_of(pid),
         };
-        install_txn::durable_create(&self.home.receipt_path(txn, &nonce), &receipt.encode())
-            .unwrap();
+        let receipt_at = self.home.receipt_path(txn, &nonce);
+        done_once_let_go(&receipt_at, || {
+            install_txn::durable_create(&receipt_at, &receipt.encode())
+        });
         if self.trial == Trial::Answers {
             watch_receipt_decision(self.home.clone(), txn, nonce);
         }
@@ -545,7 +549,10 @@ impl Install {
                 layout: Layout::Members(self.inventories.clone()),
             },
         };
-        install_txn::durable_write(&self.home.journal(), &journal.encode()).unwrap();
+        let bytes = journal.encode();
+        done_once_let_go(&self.home.journal(), || {
+            install_txn::durable_write(&self.home.journal(), &bytes)
+        });
     }
 
     fn on_disk(&self) -> Journal {
@@ -677,7 +684,7 @@ impl Install {
             if step.to == Place::Backup {
                 std::fs::create_dir_all(self.folder(Place::Backup)).unwrap();
             }
-            install_txn::durable_move(&from, &to).unwrap();
+            moved_once_let_go(&from, &to);
         }
     }
 
@@ -691,8 +698,10 @@ impl Install {
             // As the product's trial writes it (H.1).
             started: install_flip::started_of(pid),
         };
-        install_txn::durable_create(&self.home.receipt_path(self.txn, &nonce), &receipt.encode())
-            .unwrap();
+        let receipt_at = self.home.receipt_path(self.txn, &nonce);
+        done_once_let_go(&receipt_at, || {
+            install_txn::durable_create(&receipt_at, &receipt.encode())
+        });
     }
 
     /// A trial process: the installed program started, and the journal's
@@ -2330,7 +2339,7 @@ fn a_rollback_over_a_held_session_notes_it_and_the_restored_build_says_so() {
     };
     flipped_at(&install, Phase::Moving);
     let aside = install.rescue.with_extension("aside");
-    std::fs::rename(&install.rescue, &aside).unwrap();
+    renamed_once_let_go(&install.rescue, &aside);
     let start = crate::update_startup::Start {
         own_exe: &install.installed,
         home: &install.home,
@@ -2346,7 +2355,7 @@ fn a_rollback_over_a_held_session_notes_it_and_the_restored_build_says_so() {
         panic!("the start continues: {:?}", held_start.said);
     };
     assert_eq!(held, Some(install.txn), "{:?}", held_start.said);
-    std::fs::rename(&aside, &install.rescue).unwrap();
+    renamed_once_let_go(&aside, &install.rescue);
 
     let (code, world) = recovered_at_logon(
         &install,
@@ -2960,6 +2969,8 @@ fn a_journal_write_refused_for_a_moment_is_asked_again_and_the_update_completes(
     let held =
         bt_platform::trust_harness::hold_without_delete_sharing(&install.home.journal()).unwrap();
     let journal = std::fs::read(install.home.journal()).unwrap();
+    // Bare, not through `done_once_let_go`: the refusal under this test's own
+    // hold is what the test asserts.
     let refused = install_txn::durable_write(&install.home.journal(), &journal)
         .expect_err("a replacing rename over the held journal is refused");
     assert!(refused.refused_while_open(), "{refused}");
@@ -3183,7 +3194,9 @@ mod held_writes {
     fn a_held_journal_write_flushes_one_temporary_and_lands_when_the_hold_lifts() {
         let folder = held_folder("journal");
         let journal = folder.join("journal.json");
-        install_txn::durable_write(&journal, br#"{"phase":"Armed"}"#).unwrap();
+        done_once_let_go(&journal, || {
+            install_txn::durable_write(&journal, br#"{"phase":"Armed"}"#)
+        });
         let next = r#"{"phase":"Moving","note":"移动中 moving"}"#;
         let (answer, rounds) = on_a_worker({
             let (folder, journal) = (folder.clone(), journal.clone());
@@ -3266,7 +3279,7 @@ mod held_writes {
     fn the_window_marks_writer_asked_again_over_a_held_mark_renames_one_temporary() {
         let folder = held_folder("mark");
         let mark = folder.join("owner");
-        install_txn::durable_write(&mark, b"1 1").unwrap();
+        done_once_let_go(&mark, || install_txn::durable_write(&mark, b"1 1"));
         let mine = "4242 7 窗口 owner".as_bytes();
         let mut ask = mark_writer(&mark, mine);
         let held = hold_without_delete_sharing(&mark).unwrap();
@@ -3308,7 +3321,9 @@ mod held_writes {
     fn a_given_up_journal_write_says_a_temporary_it_could_not_remove() {
         let folder = held_folder("kept");
         let journal = folder.join("journal.json");
-        install_txn::durable_write(&journal, br#"{"phase":"Armed"}"#).unwrap();
+        done_once_let_go(&journal, || {
+            install_txn::durable_write(&journal, br#"{"phase":"Armed"}"#)
+        });
         let (said, scanned) = on_a_worker({
             let (folder, journal) = (folder.clone(), journal.clone());
             move |worker| {
@@ -3974,7 +3989,8 @@ fn the_logon_run_starts_nothing_only_when_nobody_is_waiting() {
 
 /// RED (U-34) — **an exit whose start is refused tries the next program the
 /// disk names before it gives up**: the installed build will not start, and the
-/// rescue copy — O's own image, whose own home holds no journal — is started
+/// rescue copy — O's own image, which reads the install's journal for its
+/// card — is started
 /// with `--update-failed <journal>` instead.
 ///
 /// The verifier's table: "spawn of the owed opening fails → none (one line
@@ -4772,7 +4788,10 @@ fn u35_a_ready_last_trial_commits_itself_without_any_rescue_process() {
             version: "0.4.7".to_owned(),
             started,
         };
-        install_txn::durable_create(&home.receipt_path(txn, &nonce), &receipt.encode()).unwrap();
+        let receipt_at = home.receipt_path(txn, &nonce);
+        done_once_let_go(&receipt_at, || {
+            install_txn::durable_create(&receipt_at, &receipt.encode())
+        });
         let lock = install_txn::try_hold(&home.lock(), Hold::Exclusive)
             .unwrap()
             .expect("the test holds the transaction lock");
@@ -5142,11 +5161,10 @@ fn u35_the_guard_and_a_start_agree_on_the_reserved_trial() {
 
 /// A receipt at `nonce`'s name carrying exactly `receipt`'s fields.
 fn receipt_as(install: &Install, nonce: Nonce, receipt: &Receipt) {
-    install_txn::durable_create(
-        &install.home.receipt_path(install.txn, &nonce),
-        &receipt.encode(),
-    )
-    .unwrap();
+    let receipt_at = install.home.receipt_path(install.txn, &nonce);
+    done_once_let_go(&receipt_at, || {
+        install_txn::durable_create(&receipt_at, &receipt.encode())
+    });
 }
 
 /// The line the recovery says when it defers.
@@ -5383,10 +5401,10 @@ fn an_unlistable_transaction_folder_defers_the_recovery() {
     let candidate = install.start_trial();
     let folder = install.home.transaction(install.txn);
     let aside = folder.with_extension("aside");
-    std::fs::rename(&folder, &aside).unwrap();
+    renamed_once_let_go(&folder, &aside);
     let (_code, world) =
         recovered_at_logon(&install, limits(5_000, 5_000), install.world(Trial::Silent));
-    std::fs::rename(&aside, &folder).unwrap();
+    renamed_once_let_go(&aside, &folder);
     assert!(deferred(&world), "{:?}", world.said);
     assert!(
         said_at(&world, "cannot be read").is_some(),
@@ -5659,7 +5677,7 @@ struct Row {
 impl Drop for Row {
     fn drop(&mut self) {
         if let Some((folder, aside)) = self.aside.take() {
-            std::fs::rename(aside, folder).unwrap();
+            renamed_once_let_go(&aside, &folder);
         }
     }
 }
@@ -5672,7 +5690,7 @@ fn make_row(install: &Install, candidate: Candidate, claim: Claim) -> Row {
     let aside = matches!(candidate, Candidate::Unlistable).then(|| {
         let folder = install.home.transaction(install.txn);
         let aside = folder.with_extension("aside");
-        std::fs::rename(&folder, &aside).unwrap();
+        renamed_once_let_go(&folder, &aside);
         (folder, aside)
     });
     let (held, squat) = match claim {
@@ -5836,14 +5854,14 @@ fn a_deferral_before_a_fresh_stuck_retrial_is_the_roads_end() {
             let folder = install.home.transaction(install.txn);
             world.on_say = Some(Box::new(move |line| {
                 if line.contains("the update is incomplete") {
-                    let _ = std::fs::rename(&folder, folder.with_extension("aside"));
+                    renamed_once_let_go(&folder, &folder.with_extension("aside"));
                 }
             }));
         }
         let (_code, world) = recovered(&install, limits(5_000, 5_000), world);
         if unlistable {
             let folder = install.home.transaction(install.txn);
-            std::fs::rename(folder.with_extension("aside"), &folder).unwrap();
+            renamed_once_let_go(&folder.with_extension("aside"), &folder);
         }
         drop(row);
         let expected = match claim {
@@ -6111,8 +6129,10 @@ fn trial_part(root: &Path) {
             version: "0.4.7".to_owned(),
             started: Some(me.started),
         };
-        install_txn::durable_create(&home.receipt_path(plan.txn, &nonce), &receipt.encode())
-            .unwrap();
+        let receipt_at = home.receipt_path(plan.txn, &nonce);
+        done_once_let_go(&receipt_at, || {
+            install_txn::durable_create(&receipt_at, &receipt.encode())
+        });
     }
     struct Runner {
         runner: PathBuf,
@@ -6762,7 +6782,9 @@ fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
         return;
     };
     let named = install.on_disk().naming(Adapter::Scoop);
-    install_txn::durable_write(&install.home.journal(), &named.encode()).unwrap();
+    done_once_let_go(&install.home.journal(), || {
+        install_txn::durable_write(&install.home.journal(), &named.encode())
+    });
     let recorder = Recorder::default();
     let road = recorded_road(&install, &recorder, limits(2_000, 2_000));
     let (ended, world) = applied_on(&install, road, install.world(Trial::Answers));
@@ -6859,7 +6881,9 @@ fn the_windows_exit_opens_the_rescue_over_what_it_cannot_read_whole() {
     let known = std::fs::read(install.home.journal()).unwrap();
     let road = install.road(limits(600, 20_000));
     for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
-        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        done_once_let_go(&install.home.journal(), || {
+            install_txn::durable_write(&install.home.journal(), &bytes)
+        });
         assert_eq!(opens_now(&road), Opens::Rescue, "{what}");
         let (program, words) = road.opening(&opens_now(&road));
         assert_eq!(program, install.rescue.as_path(), "{what}");
@@ -6876,7 +6900,9 @@ fn the_windows_exit_opens_the_rescue_over_what_it_cannot_read_whole() {
     });
     let retired = std::fs::read(install.home.journal()).unwrap();
     let [_, (what, unknown_body), _] = crate::update_txn::beyond_inputs(&retired);
-    install_txn::durable_write(&install.home.journal(), &unknown_body).unwrap();
+    done_once_let_go(&install.home.journal(), || {
+        install_txn::durable_write(&install.home.journal(), &unknown_body)
+    });
     assert_eq!(
         opens_now(&road),
         Opens::Installed { failed: true },
@@ -6904,7 +6930,9 @@ fn the_windows_lock_holder_stands_aside_from_what_it_cannot_read_whole() {
     install.write(Phase::Moving);
     let known = std::fs::read(install.home.journal()).unwrap();
     for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
-        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        done_once_let_go(&install.home.journal(), || {
+            install_txn::durable_write(&install.home.journal(), &bytes)
+        });
         for start in [Some(handed()), None] {
             let road = install.road(limits(600, 20_000));
             let mut world = install.world(Trial::Answers);
@@ -6980,7 +7008,9 @@ fn a_trial_hands_back_what_it_cannot_read_whole_to_the_rescue_its_header_names()
         .into_iter()
         .enumerate()
     {
-        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        done_once_let_go(&install.home.journal(), || {
+            install_txn::durable_write(&install.home.journal(), &bytes)
+        });
         let (home, txn) = (install.home.clone(), install.txn);
         let recorded = on_a_worker(move |worker| {
             let mut recorded = Recorded(Vec::new());

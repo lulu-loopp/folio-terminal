@@ -1864,6 +1864,18 @@ text_entries! {
     /// seat, on the same profile, in the last folder it reported.
     TermMenuShellAgain,
 
+    // ── the system's own menus and dialogs (`bt_platform`) ─────────────────
+    //
+    // Words `bt-platform` puts on a surface the system draws, passed in with the
+    // call that shows it (T-NATIVE-LABELS-FROM-THE-CALLER): that crate has no
+    // table of its own. Two columns because each sits beside the system's own
+    // words, and a Mac and a Windows machine say Copy differently in Chinese.
+    /// The one row of the formula's right-click menu (`MathContextMenu`).
+    FormulaMenuCopyLatex,
+    /// The name beside the image filter in the Windows file chooser
+    /// (`ImagePicker`). The macOS panel filters by type and names no filter.
+    ImageFileType,
+
     // ── the pane's `⌄` menu (`crate::profiles`) ────────────────────────────
     /// The submenu head. The `▸` is drawn rather than written.
     PaneMenuSplitWith,
@@ -4789,6 +4801,21 @@ impl Text {
             Self::TermMenuClearScrollback => pick(lang, "Clear scrollback…", "清除回滚…"),
             Self::TermMenuShellAgain => pick(lang, "Restart shell…", "重启 shell…"),
 
+            // ── the system's own menus and dialogs ─────────────────────────
+            Self::FormulaMenuCopyLatex => pick_platform(
+                lang,
+                platform,
+                "Copy LaTeX",
+                "Copy LaTeX", // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER
+                "Copy LaTeX",
+                "Copy LaTeX", // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER
+            ),
+            Self::ImageFileType => pick_platform(
+                lang, platform, "Images",
+                "Images", // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER
+                "Images", "Images", // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER
+            ),
+
             // ── the pane's `⌄` menu ────────────────────────────────────────
             Self::PaneMenuSplitWith => pick(lang, "Split with", "拆分并运行"),
             Self::PaneMenuNewInFolder => {
@@ -6610,6 +6637,12 @@ impl Text {
         // held a member of the update open past the applier's window.
         (Self::UpdateFailedFileHeld, HostPlatform::Windows),
         (Self::UpdateFailedFileHeld, HostPlatform::MacOs),
+        // zh: pending T-NATIVE-LABELS-FROM-THE-CALLER — the formula's right-click row and the
+        // Windows file chooser's image filter name, now passed into the system's own surfaces.
+        (Self::FormulaMenuCopyLatex, HostPlatform::Windows),
+        (Self::FormulaMenuCopyLatex, HostPlatform::MacOs),
+        (Self::ImageFileType, HostPlatform::Windows),
+        (Self::ImageFileType, HostPlatform::MacOs),
         // zh: pending T-ENDSESSION-SAVES — the line the shutdown screen shows while the edits,
         // the owed documents and the layout are written.
         (Self::ShutdownSavingWork, HostPlatform::Windows),

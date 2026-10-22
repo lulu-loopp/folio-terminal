@@ -17,6 +17,9 @@ bt-math = { path = "../bt-math" }
 bt-platform = { path = "../bt-platform" }
 bt-pty = { path = "../bt-pty" }
 bt-render = { path = "../bt-render" }
+# The headless render probe `bt-replay` and `bt-zoom-perf` time frames through: a tool crate,
+# since its GPU submissions left the product library (thread-door note revision (l)4).
+bt-render-probe = { path = "../bt-render-probe" }
 bt-term = { path = "../bt-term" }
 bt-transcript = { path = "../bt-transcript" }
 bt-viewport = { path = "../bt-viewport" }
