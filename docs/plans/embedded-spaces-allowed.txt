@@ -44,8 +44,8 @@ crates/bt-app/src/hang_watch.rs:4974 the hang report's label column: every label
 crates/bt-app/src/hang_watch.rs:4968 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
 crates/bt-app/src/hang_watch.rs:5003 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
 crates/bt-app/src/hang_watch.rs:5006 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
-crates/bt-app/src/highlight.rs:721 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/highlight.rs:779 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/highlight.rs:723 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/highlight.rs:781 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/i18n.rs:8172 the command-line usage text: option descriptions aligned in one column
 crates/bt-app/src/i18n.rs:8189 the command-line usage text: option descriptions aligned in one column
 crates/bt-app/src/install_channel.rs:1442 a Scoop manifest sample: JSON indentation after an escaped line break
@@ -61,18 +61,18 @@ crates/bt-app/src/main.rs:64770 code sample: the indentation after an escaped li
 crates/bt-app/src/main.rs:79741 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/preview_live.rs:1686 table fixture: each cell padded to its column
 crates/bt-app/src/preview_select.rs:777 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:11700 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11704 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11701 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:11705 a diff line sample: the code's indentation after the `+`/`-` sign is the input
-crates/bt-app/src/preview.rs:13022 tab expansion's expected columns
-crates/bt-app/src/preview.rs:13019 tab expansion's expected columns
-crates/bt-app/src/preview.rs:18690 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/preview.rs:18717 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:11813 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11817 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11814 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:11818 a diff line sample: the code's indentation after the `+`/`-` sign is the input
+crates/bt-app/src/preview.rs:13135 tab expansion's expected columns
+crates/bt-app/src/preview.rs:13132 tab expansion's expected columns
+crates/bt-app/src/preview.rs:18803 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-app/src/preview.rs:18830 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/profiles.rs:27206 the spacing between the arguments is the input under test
 crates/bt-detect/src/frame.rs:1564 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-detect/src/lib.rs:4545 table fixture: each cell padded to its column
-crates/bt-detect/src/lib.rs:4550 table fixture: each cell padded to its column
+crates/bt-detect/src/lib.rs:4497 table fixture: each cell padded to its column
+crates/bt-detect/src/lib.rs:4502 table fixture: each cell padded to its column
 crates/bt-detect/src/table.rs:855 table fixture: each cell padded to its column
 crates/bt-detect/tests/framed_screen.rs:274 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-detect/tests/framed_screen.rs:299 terminal screen fixture: the columns are where the terminal draws them
@@ -130,10 +130,10 @@ crates/bt-source/tests/index.rs:487 code sample: the indentation after an escape
 crates/bt-source/tests/index.rs:1096 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/tripwire.rs:9035 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/tripwire.rs:9417 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-term/src/session.rs:22476 recorded terminal byte stream: the blank cells a repaint wrote
-crates/bt-term/src/session.rs:22593 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-term/src/session.rs:35728 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-term/src/session.rs:38567 terminal screen fixture: the columns are where the terminal draws them
+crates/bt-term/src/session.rs:22477 recorded terminal byte stream: the blank cells a repaint wrote
+crates/bt-term/src/session.rs:22594 terminal screen fixture: the columns are where the terminal draws them
+crates/bt-term/src/session.rs:35729 terminal screen fixture: the columns are where the terminal draws them
+crates/bt-term/src/session.rs:38568 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-term/src/session/pane_columns_tests.rs:135 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-term/src/session/pane_columns_tests.rs:137 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-term/src/session/pane_columns_tests.rs:144 terminal screen fixture: the columns are where the terminal draws them

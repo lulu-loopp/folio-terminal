@@ -2927,9 +2927,16 @@ crates/bt-app/src/preview.rs	bt-app crate::preview::display_math_block	Ambiguous
 crates/bt-app/src/preview.rs	bt-app crate::preview::environment_close	Ambiguous	len	3	
 crates/bt-app/src/preview.rs	bt-app crate::preview::environment_close	Ambiguous	starts_with	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::extension_of	Ambiguous	to_ascii_lowercase	1	
-crates/bt-app/src/preview.rs	bt-app crate::preview::fence_origins	Ambiguous	collect	1	
-crates/bt-app/src/preview.rs	bt-app crate::preview::fence_origins	Ambiguous	map	1	
-crates/bt-app/src/preview.rs	bt-app crate::preview::fence_origins	Ambiguous	zip	1	
+crates/bt-app/src/preview.rs	bt-app crate::preview::fence_at	Dynamic	fence_in	3	2026-10-21: T-FENCE-GRAMMAR-SHARED; the local closure that asks bt_detect::fence::fence_opening, a pure function over one line of text, which reaches no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::fence_line_origin	Ambiguous	count	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::fence_line_origin	Ambiguous	rev	2	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::fence_line_origin	Ambiguous	take_while	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::fence_line_origin	Ambiguous	zip	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::fenced_code	Ambiguous	collect	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::fenced_code	Ambiguous	join	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::fenced_code	Ambiguous	lines	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::fenced_code	Ambiguous	map	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::fenced_code	Ambiguous	zip	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/preview.rs	bt-app crate::preview::find_unescaped	Ambiguous	find	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::first_srcset_url	Ambiguous	is_empty	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::first_srcset_url	Ambiguous	next	2	
@@ -3002,6 +3009,8 @@ crates/bt-app/src/preview.rs	bt-app crate::preview::link_destination	Ambiguous	f
 crates/bt-app/src/preview.rs	bt-app crate::preview::link_destination	Ambiguous	strip_prefix	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::link_destination	Ambiguous	strip_suffix	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::link_destination	Ambiguous	trim_start	1	
+crates/bt-app/src/preview.rs	bt-app crate::preview::list_content_column	Ambiguous	is_empty	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::list_content_column	Ambiguous	len	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/preview.rs	bt-app crate::preview::markdown_metrics	Dynamic	em	14	
 crates/bt-app/src/preview.rs	bt-app crate::preview::math_block_body	Ambiguous	collect	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::math_block_body	Ambiguous	is_empty	2	
@@ -3037,11 +3046,11 @@ crates/bt-app/src/preview.rs	bt-app crate::preview::parse_list_row	Ambiguous	or_
 crates/bt-app/src/preview.rs	bt-app crate::preview::parse_list_row	Ambiguous	parse	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::parse_list_row	Ambiguous	strip_prefix	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::parse_markdown_mapped	Ambiguous	collect	1	
-crates/bt-app/src/preview.rs	bt-app crate::preview::parse_markdown_mapped	Ambiguous	is_empty	8	
+crates/bt-app/src/preview.rs	bt-app crate::preview::parse_markdown_mapped	Ambiguous	is_empty	7	
 crates/bt-app/src/preview.rs	bt-app crate::preview::parse_markdown_mapped	Ambiguous	len	3	
 crates/bt-app/src/preview.rs	bt-app crate::preview::parse_markdown_mapped	Ambiguous	push	1	
-crates/bt-app/src/preview.rs	bt-app crate::preview::parse_markdown_mapped	Ambiguous	then	1	
-crates/bt-app/src/preview.rs	bt-app crate::preview::parse_markdown_mapped	Ambiguous	to_owned	2	
+crates/bt-app/src/preview.rs	bt-app crate::preview::parse_markdown_mapped	Ambiguous	then_some	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/preview.rs	bt-app crate::preview::parse_markdown_mapped	Ambiguous	to_owned	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::parse_markdown_mapped	Dynamic	push_run	2	
 crates/bt-app/src/preview.rs	bt-app crate::preview::path_names_a_page	Ambiguous	eq_ignore_ascii_case	1	
 crates/bt-app/src/preview.rs	bt-app crate::preview::path_names_a_page	Ambiguous	is_some_and	1	
@@ -7049,6 +7058,21 @@ crates/bt-compose/src/typeset.rs	bt-compose crate::typeset::render_task_math	Amb
 crates/bt-compose/src/typeset.rs	bt-compose crate::typeset::render_task_math	Ambiguous	ok_or	1	
 crates/bt-compose/src/typeset.rs	bt-compose crate::typeset::render_task_math	Ambiguous	saturating_add	2	
 crates/bt-compose/src/typeset.rs	bt-compose crate::typeset::render_task_math	Ambiguous	saturating_sub	2	
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::FenceOpening::language	Ambiguous	contains	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::FenceOpening::language	Ambiguous	is_empty	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::FenceOpening::language	Ambiguous	next	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::fence_closes	Ambiguous	all	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::fence_closes	Ambiguous	chars	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::fence_opening	Ambiguous	chars	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::fence_opening	Ambiguous	contains	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::fence_opening	Ambiguous	len	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::fence_opening	Ambiguous	next	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::fence_opening	Ambiguous	trim_matches	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::run_length	Ambiguous	count	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::run_length	Ambiguous	take_while	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::spell_leading_tabs_from	Ambiguous	chars	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::spell_leading_tabs_from	Ambiguous	contains	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
+crates/bt-detect/src/fence.rs	bt-detect crate::fence::spell_leading_tabs_from	Ambiguous	len	1	2026-10-21: T-FENCE-GRAMMAR-SHARED; a standard-library method (str, Iterator, Option, Cow) on a receiver the grammar does not type, which reaches no door
 crates/bt-detect/src/frame.rs	bt-detect crate::frame::CaptureFrame::measure	Ambiguous	all	2	
 crates/bt-detect/src/frame.rs	bt-detect crate::frame::CaptureFrame::measure	Ambiguous	any	3	
 crates/bt-detect/src/frame.rs	bt-detect crate::frame::CaptureFrame::measure	Ambiguous	chars	1	
@@ -7150,14 +7174,6 @@ crates/bt-detect/src/lib.rs	bt-detect crate::closing_delimiter	Ambiguous	as_str	
 crates/bt-detect/src/lib.rs	bt-detect crate::closing_delimiter	Ambiguous	checked_sub	3	
 crates/bt-detect/src/lib.rs	bt-detect crate::closing_delimiter	Ambiguous	len	3	
 crates/bt-detect/src/lib.rs	bt-detect crate::closing_delimiter	Ambiguous	trim_end_matches	1	
-crates/bt-detect/src/lib.rs	bt-detect crate::commonmark_fence_closes	Ambiguous	all	1	
-crates/bt-detect/src/lib.rs	bt-detect crate::commonmark_fence_closes	Ambiguous	chars	2	
-crates/bt-detect/src/lib.rs	bt-detect crate::commonmark_fence_closes	Ambiguous	count	1	
-crates/bt-detect/src/lib.rs	bt-detect crate::commonmark_fence_closes	Ambiguous	get	1	
-crates/bt-detect/src/lib.rs	bt-detect crate::commonmark_fence_closes	Ambiguous	is_some_and	1	
-crates/bt-detect/src/lib.rs	bt-detect crate::commonmark_fence_closes	Ambiguous	take_while	1	
-crates/bt-detect/src/lib.rs	bt-detect crate::commonmark_fence_marker	Ambiguous	contains	1	
-crates/bt-detect/src/lib.rs	bt-detect crate::commonmark_fence_marker	Ambiguous	get	1	
 crates/bt-detect/src/lib.rs	bt-detect crate::complete_display_on_line	Ambiguous	checked_sub	3	
 crates/bt-detect/src/lib.rs	bt-detect crate::complete_display_on_line	Ambiguous	contains	2	
 crates/bt-detect/src/lib.rs	bt-detect crate::complete_display_on_line	Ambiguous	ends_with	3	
@@ -7190,9 +7206,6 @@ crates/bt-detect/src/lib.rs	bt-detect crate::dollar_census	Ambiguous	filter_map	
 crates/bt-detect/src/lib.rs	bt-detect crate::dollar_census	Ambiguous	next	2	
 crates/bt-detect/src/lib.rs	bt-detect crate::environment_token	Ambiguous	find	1	
 crates/bt-detect/src/lib.rs	bt-detect crate::environment_token	Ambiguous	to_owned	1	
-crates/bt-detect/src/lib.rs	bt-detect crate::fence_marker	Ambiguous	count	1	
-crates/bt-detect/src/lib.rs	bt-detect crate::fence_marker	Ambiguous	next	1	
-crates/bt-detect/src/lib.rs	bt-detect crate::fence_marker	Ambiguous	take_while	1	
 crates/bt-detect/src/lib.rs	bt-detect crate::inline_group	Ambiguous	join	2	
 crates/bt-detect/src/lib.rs	bt-detect crate::inline_line_is_code_like	Ambiguous	as_bytes	3	
 crates/bt-detect/src/lib.rs	bt-detect crate::inline_line_is_code_like	Ambiguous	get	3	
@@ -11366,7 +11379,6 @@ crates/bt-term/src/session.rs	bt-term crate::session::live_candidate_rows_in_pan
 crates/bt-term/src/session.rs	bt-term crate::session::live_candidate_rows_in_pane	Ambiguous	unwrap_or	1	
 crates/bt-term/src/session.rs	bt-term crate::session::live_candidate_rows_in_pane	Dynamic	stable	1	
 crates/bt-term/src/session.rs	bt-term crate::session::live_detection_context_signature	Ambiguous	hash	2	
-crates/bt-term/src/session.rs	bt-term crate::session::live_detection_context_signature	Ambiguous	starts_with	2	
 crates/bt-term/src/session.rs	bt-term crate::session::live_fragment_cells	Ambiguous	map	1	
 crates/bt-term/src/session.rs	bt-term crate::session::live_fragment_cells	Ambiguous	ok	2	
 crates/bt-term/src/session.rs	bt-term crate::session::live_inline_run_cells	Ambiguous	ok	2	

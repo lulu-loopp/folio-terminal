@@ -26,6 +26,7 @@
 //! The two that need bytes, a binary body and a file past the head limit, are the
 //! worker's to answer.
 
+use std::borrow::Cow;
 use std::io::Read;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -34,6 +35,7 @@ use std::time::SystemTime;
 
 use crate::window_seam::LoopProxy;
 use anyhow::{Context, Result};
+use bt_detect::fence;
 use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 use winit::window::WindowId;
 
@@ -975,6 +977,9 @@ pub enum MarkdownBlock {
         items: Vec<Vec<Span>>,
     },
     Code {
+        /// The fence's language: its info string's first word
+        /// (`bt_detect::fence::FenceOpening::language`), which is what the label
+        /// shows and the highlighter is asked for.
         lang: Option<String>,
         text: String,
     },
@@ -2338,6 +2343,9 @@ pub fn parse_markdown_mapped(
     let mut list_source: Vec<TextOrigin> = Vec::new();
     let mut list_lines: Option<(usize, usize)> = None;
     let mut ordered: Option<u64> = None;
+    // The columns the open item's content stands at (CommonMark §5.2), which is
+    // what a fence inside that item is indented by before it is a fence at all.
+    let mut list_column = 0usize;
     let mut paragraph: Vec<&str> = Vec::new();
     let mut paragraph_lines: Vec<usize> = Vec::new();
     let mut index = 0usize;
@@ -2350,7 +2358,13 @@ pub fn parse_markdown_mapped(
         let line = lines[at];
 
         // ── the fence, which swallows everything until it closes ────────────
-        if let Some(rest) = line.strip_prefix("```") {
+        //
+        // Read through `bt_detect::fence`, the grammar the terminal reads its
+        // fences with (T-FENCE-GRAMMAR-SHARED): a fence is the same fence in a
+        // pane and in a preview. A fence inside a list item is read off the item's
+        // content column, and the list is cut around it — an item holds one
+        // paragraph here, not blocks, so the code stands between two lists.
+        if let Some(open) = fence_at(line, (!list.is_empty()).then_some(list_column)) {
             flush_paragraph(&mut paragraph, &mut paragraph_lines, &mut out);
             flush_list(
                 &mut list,
@@ -2359,21 +2373,9 @@ pub fn parse_markdown_mapped(
                 &mut list_lines,
                 &mut out,
             );
-            let lang = rest.trim();
-            let lang = (!lang.is_empty()).then(|| lang.to_owned());
-            let mut body = Vec::new();
-            index += 1;
-            while index < lines.len() && !lines[index].starts_with("```") {
-                body.push(lines[index]);
-                index += 1;
-            }
-            // A fence nobody closed still draws, rather than swallowing the rest
-            // of the document in silence (mock-up 4939) — which is what the
-            // `index < len` bound above means when the loop runs off the end.
-            index += usize::from(index < lines.len());
-            let text = body.join("\n");
-            let origins = fence_origins(&text, &body, &out);
-            out.push_lines(MarkdownBlock::Code { lang, text }, at, index - 1, origins);
+            let (block, after, origins) = fenced_code(&lines, at, open, &out);
+            out.push_lines(block, at, after - 1, origins);
+            index = after;
             continue;
         }
 
@@ -2570,6 +2572,7 @@ pub fn parse_markdown_mapped(
             if list.is_empty() {
                 ordered = number;
             }
+            list_column = list_content_column(line, item);
             let text = item.trim();
             list.push(text.to_owned());
             list_source.push(TextOrigin::slice(out.offset_of(text), text.len()));
@@ -3229,34 +3232,145 @@ fn joined_origin(lines: &[&str], out: &RangedBlocks) -> TextOrigin {
     origin
 }
 
-/// **A fence's pieces**: one per body line, tabs expanded as the page expands
-/// them.
-fn fence_origins(text: &str, body: &[&str], out: &RangedBlocks) -> BlockOrigins {
-    // `text.lines()` is `body` again — that is what `join` and `lines` are to
+/// **A fence opened on this line**: its fence, its language, and the columns of
+/// the container it stands in (0 at the top level).
+struct OpenFence {
+    fence: fence::Fence,
+    language: Option<String>,
+    container: usize,
+}
+
+/// The fence `line` opens, if it opens one, read by `bt_detect::fence`.
+///
+/// `item` is the open list item's content column, when a list is open. A list
+/// row whose item begins with a fence opens it at the item's content column
+/// (CommonMark §5.2 ex. 318, 324); a line under an open item that is indented
+/// to its content column and is a fence there opens it inside the item (ex.
+/// 321). Anything else is asked at the top level, where a fence may stand
+/// indented up to three spaces (§4.5 ex. 131–133).
+fn fence_at(line: &str, item: Option<usize>) -> Option<OpenFence> {
+    let fence_in = |content: &str, container: usize| {
+        fence::fence_opening(content).map(|opening| OpenFence {
+            fence: opening.fence,
+            language: opening.language().map(str::to_owned),
+            container,
+        })
+    };
+    if let Some((_, text)) = parse_list_row(line) {
+        let column = list_content_column(line, text);
+        return fence_in(&line[column..], column);
+    }
+    if let Some(column) = item
+        && let Some(content) = fence::strip_container_indent(line, column)
+        && let Some(found) = fence_in(&content, column)
+    {
+        return Some(found);
+    }
+    fence_in(line, 0)
+}
+
+/// The column a list item's content stands at, CommonMark §5.2: the marker and
+/// the spaces after it, unless those spaces begin indented code (or there is no
+/// content), when the content is one space past the marker. A row's marker is
+/// ASCII, so its columns are its bytes.
+fn list_content_column(line: &str, item: &str) -> usize {
+    let marker = line.len() - item.len();
+    if item.trim().is_empty() || fence::is_indented_code(item) {
+        marker
+    } else {
+        marker + (item.len() - item.trim_start_matches(' ').len())
+    }
+}
+
+/// **A fence's block**, from its opening line `start` to its closer, the end of
+/// its container, or the end of the document — a fence nobody closed still
+/// draws, rather than swallowing the rest of the document in silence (mock-up
+/// 4939). Answers the block, the line after it, and its pieces.
+///
+/// Every body line loses its container's columns and then up to the opening's
+/// own indentation (`bt_detect::fence`'s two strips, in that order); a line
+/// indented short of the container ends the container and the fence with it.
+fn fenced_code(
+    lines: &[&str],
+    start: usize,
+    open: OpenFence,
+    out: &RangedBlocks,
+) -> (MarkdownBlock, usize, BlockOrigins) {
+    let mut body: Vec<(Cow<'_, str>, &str)> = Vec::new();
+    let mut index = start + 1;
+    while let Some(&line) = lines.get(index) {
+        let Some(content) = fence::strip_container_indent(line, open.container) else {
+            break;
+        };
+        if fence::fence_closes(&content, &open.fence) {
+            index += 1;
+            break;
+        }
+        let drawn = match content {
+            Cow::Borrowed(content) => fence::strip_fence_indent(content, &open.fence),
+            Cow::Owned(content) => {
+                Cow::Owned(fence::strip_fence_indent(&content, &open.fence).into_owned())
+            }
+        };
+        body.push((drawn, line));
+        index += 1;
+    }
+    let text = body
+        .iter()
+        .map(|(drawn, _)| drawn.as_ref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // `text.lines()` is the body again — that is what `join` and `lines` are to
     // each other — except that a body ending in a blank line loses it to the
     // break that joined it. Zipping walks the pieces the page will draw, which
     // is the numbering that has to agree.
-    BlockOrigins::new(
+    let origins = BlockOrigins::new(
         text.lines()
-            .zip(body)
-            .map(|(_, line)| tab_origin(line, out.offset_of(line)))
+            .zip(&body)
+            .map(|(_, (drawn, source))| fence_line_origin(drawn, source, out))
             .collect(),
-    )
+    );
+    let block = MarkdownBlock::Code {
+        lang: open.language,
+        text,
+    };
+    (block, index, origins)
 }
 
-/// **One fence line's map**, [`expand_tabs`]'s walk read for provenance rather
-/// than for text.
+/// **One fence line's map**: what the strips left of `source`, its tabs
+/// expanded as the page expands them.
+///
+/// `bt_detect::fence` answers a stripped line as a suffix of the source line,
+/// with spaces in front of it exactly where it split a tab. So the longest run
+/// the drawn line and its source end on together is the copied part, and
+/// whatever stands before it is those spaces — the page's own, like the spaces a
+/// tab expands to.
+fn fence_line_origin(drawn: &str, source: &str, out: &RangedBlocks) -> TextOrigin {
+    let copied = drawn
+        .bytes()
+        .rev()
+        .zip(source.bytes().rev())
+        .take_while(|(drawn, source)| drawn == source)
+        .count();
+    let split = drawn.len() - copied;
+    let rest = &source[source.len() - copied..];
+    let mut origin = TextOrigin::new();
+    origin.drawn(split);
+    tab_origin(rest, out.offset_of(rest), split, &mut origin);
+    origin
+}
+
+/// **One fence line's tabs**, [`expand_tabs`]'s walk read for provenance rather
+/// than for text, from `column` on.
 ///
 /// A tab is one source byte drawn as up to four spaces, and none of those spaces
 /// is a copy of it: they are the fence's own indentation, spelled by the
 /// renderer. The characters either side of it are copies like any other.
-fn tab_origin(line: &str, at: usize) -> TextOrigin {
-    let mut origin = TextOrigin::new();
+fn tab_origin(line: &str, at: usize, mut column: usize, origin: &mut TextOrigin) {
     if !line.contains('\t') {
         origin.copied(at, line.len());
-        return origin;
+        return;
     }
-    let mut column = 0usize;
     let mut byte = 0usize;
     for cluster in bt_unicode::graphemes(line) {
         if cluster == "\t" {
@@ -3269,7 +3383,6 @@ fn tab_origin(line: &str, at: usize) -> TextOrigin {
         }
         byte += cluster.len();
     }
-    origin
 }
 
 /// **A display formula's one piece**: `$$`, the body, `$$`.
@@ -19743,5 +19856,285 @@ mod tests {
             read(&utf16),
             ("中文 ok".to_owned(), HeadEncoding::Utf16Le, false)
         );
+    }
+
+    /// **What the page draws for one document**, one line a block, in the words a
+    /// person would use for it: what kind of block, then its text, a fence's
+    /// lines each quoted on a line of their own. A code span
+    /// and every other styled run carry their style, so a fence that became a
+    /// code span (or the other way round) is a different page.
+    fn page_of(src: &str) -> String {
+        fn spans(spans: &[Span]) -> String {
+            spans
+                .iter()
+                .map(|span| match span.style {
+                    SpanStyle::Plain => span.text.clone(),
+                    style => format!("[{style:?}:{}]", span.text),
+                })
+                .collect()
+        }
+        let mut page = String::new();
+        for block in parse_markdown(src) {
+            match block {
+                MarkdownBlock::Code { lang, text } => {
+                    page.push_str("code");
+                    if let Some(lang) = lang {
+                        page.push(' ');
+                        page.push_str(&lang);
+                    }
+                    page.push('\n');
+                    if !text.is_empty() {
+                        // Quoted, so a line's own blanks and tabs are visible.
+                        for line in text.split('\n') {
+                            page.push_str(&format!("| {line:?}\n"));
+                        }
+                    }
+                }
+                MarkdownBlock::Paragraph(runs) => {
+                    page.push_str(&format!("paragraph: {}\n", spans(&runs)));
+                }
+                MarkdownBlock::Heading { level, spans: runs } => {
+                    page.push_str(&format!("heading {level}: {}\n", spans(&runs)));
+                }
+                MarkdownBlock::List { ordered, items } => {
+                    page.push_str(&format!("list {ordered:?}\n"));
+                    for item in items {
+                        page.push_str(&format!("- {}\n", spans(&item)));
+                    }
+                }
+                MarkdownBlock::Quote(paragraphs) => {
+                    page.push_str("quote\n");
+                    for paragraph in paragraphs {
+                        page.push_str(&format!("> {}\n", spans(&paragraph)));
+                    }
+                }
+                MarkdownBlock::Rule => page.push_str("rule\n"),
+                other => page.push_str(&format!("{other:?}\n")),
+            }
+        }
+        page
+    }
+
+    /// RED (T-FENCE-GRAMMAR-SHARED, 2026-10-21) — **a fence is the same fence in a
+    /// pane and in a preview.** One fixture per CommonMark 0.31.2 example of a
+    /// fenced code block (§4.5, ex. 119–147) and per list or quote example that
+    /// holds one (ex. 237, 263, 278, 318, 321, 324), each beside the page it
+    /// draws (`tests/fixtures/preview-fences/<example>.page`). The preview reads
+    /// fences through `bt_detect::fence`, the grammar the terminal's detector
+    /// reads them with, so `~~~` fences, openers and closers indented up to three
+    /// spaces, closers that are too short or carry an info string, and a fence
+    /// inside a list item all draw as CommonMark draws them. `tab-split` is §2.2's
+    /// tab straddling the opener's indentation; `list-tab` is a tab in a list
+    /// item's line, counted from its real column (2 to 4), not from the item's.
+    ///
+    /// Where a page still differs from CommonMark it is the preview's block
+    /// grammar, not the fence's, and the page says so: a quote holds no code
+    /// (ex. 128, 237), there is no indented code (ex. 134, 263) and no setext
+    /// heading (ex. 141), and a list item holds one paragraph, so the list is cut
+    /// around a fence inside an item (ex. 318, 321, 324).
+    ///
+    /// MUTATION: put the private grammar back (`strip_prefix("```")` to open,
+    /// `starts_with("```")` to close) and the eighteen examples where it
+    /// disagreed with the terminal's (120, 123–125, 127, 131–133, 135, 136,
+    /// 138, 139, 141, 143–147) draw other pages, as do 278, 318, 321, 324 and
+    /// `tab-split`.
+    #[test]
+    fn every_commonmark_fence_example_draws_its_page() {
+        let fixtures = [
+            (
+                "ex119",
+                include_str!("../tests/fixtures/preview-fences/ex119.md"),
+                include_str!("../tests/fixtures/preview-fences/ex119.page"),
+            ),
+            (
+                "ex120",
+                include_str!("../tests/fixtures/preview-fences/ex120.md"),
+                include_str!("../tests/fixtures/preview-fences/ex120.page"),
+            ),
+            (
+                "ex121",
+                include_str!("../tests/fixtures/preview-fences/ex121.md"),
+                include_str!("../tests/fixtures/preview-fences/ex121.page"),
+            ),
+            (
+                "ex122",
+                include_str!("../tests/fixtures/preview-fences/ex122.md"),
+                include_str!("../tests/fixtures/preview-fences/ex122.page"),
+            ),
+            (
+                "ex123",
+                include_str!("../tests/fixtures/preview-fences/ex123.md"),
+                include_str!("../tests/fixtures/preview-fences/ex123.page"),
+            ),
+            (
+                "ex124",
+                include_str!("../tests/fixtures/preview-fences/ex124.md"),
+                include_str!("../tests/fixtures/preview-fences/ex124.page"),
+            ),
+            (
+                "ex125",
+                include_str!("../tests/fixtures/preview-fences/ex125.md"),
+                include_str!("../tests/fixtures/preview-fences/ex125.page"),
+            ),
+            (
+                "ex126",
+                include_str!("../tests/fixtures/preview-fences/ex126.md"),
+                include_str!("../tests/fixtures/preview-fences/ex126.page"),
+            ),
+            (
+                "ex127",
+                include_str!("../tests/fixtures/preview-fences/ex127.md"),
+                include_str!("../tests/fixtures/preview-fences/ex127.page"),
+            ),
+            (
+                "ex128",
+                include_str!("../tests/fixtures/preview-fences/ex128.md"),
+                include_str!("../tests/fixtures/preview-fences/ex128.page"),
+            ),
+            (
+                "ex129",
+                include_str!("../tests/fixtures/preview-fences/ex129.md"),
+                include_str!("../tests/fixtures/preview-fences/ex129.page"),
+            ),
+            (
+                "ex130",
+                include_str!("../tests/fixtures/preview-fences/ex130.md"),
+                include_str!("../tests/fixtures/preview-fences/ex130.page"),
+            ),
+            (
+                "ex131",
+                include_str!("../tests/fixtures/preview-fences/ex131.md"),
+                include_str!("../tests/fixtures/preview-fences/ex131.page"),
+            ),
+            (
+                "ex132",
+                include_str!("../tests/fixtures/preview-fences/ex132.md"),
+                include_str!("../tests/fixtures/preview-fences/ex132.page"),
+            ),
+            (
+                "ex133",
+                include_str!("../tests/fixtures/preview-fences/ex133.md"),
+                include_str!("../tests/fixtures/preview-fences/ex133.page"),
+            ),
+            (
+                "ex134",
+                include_str!("../tests/fixtures/preview-fences/ex134.md"),
+                include_str!("../tests/fixtures/preview-fences/ex134.page"),
+            ),
+            (
+                "ex135",
+                include_str!("../tests/fixtures/preview-fences/ex135.md"),
+                include_str!("../tests/fixtures/preview-fences/ex135.page"),
+            ),
+            (
+                "ex136",
+                include_str!("../tests/fixtures/preview-fences/ex136.md"),
+                include_str!("../tests/fixtures/preview-fences/ex136.page"),
+            ),
+            (
+                "ex137",
+                include_str!("../tests/fixtures/preview-fences/ex137.md"),
+                include_str!("../tests/fixtures/preview-fences/ex137.page"),
+            ),
+            (
+                "ex138",
+                include_str!("../tests/fixtures/preview-fences/ex138.md"),
+                include_str!("../tests/fixtures/preview-fences/ex138.page"),
+            ),
+            (
+                "ex139",
+                include_str!("../tests/fixtures/preview-fences/ex139.md"),
+                include_str!("../tests/fixtures/preview-fences/ex139.page"),
+            ),
+            (
+                "ex140",
+                include_str!("../tests/fixtures/preview-fences/ex140.md"),
+                include_str!("../tests/fixtures/preview-fences/ex140.page"),
+            ),
+            (
+                "ex141",
+                include_str!("../tests/fixtures/preview-fences/ex141.md"),
+                include_str!("../tests/fixtures/preview-fences/ex141.page"),
+            ),
+            (
+                "ex142",
+                include_str!("../tests/fixtures/preview-fences/ex142.md"),
+                include_str!("../tests/fixtures/preview-fences/ex142.page"),
+            ),
+            (
+                "ex143",
+                include_str!("../tests/fixtures/preview-fences/ex143.md"),
+                include_str!("../tests/fixtures/preview-fences/ex143.page"),
+            ),
+            (
+                "ex144",
+                include_str!("../tests/fixtures/preview-fences/ex144.md"),
+                include_str!("../tests/fixtures/preview-fences/ex144.page"),
+            ),
+            (
+                "ex145",
+                include_str!("../tests/fixtures/preview-fences/ex145.md"),
+                include_str!("../tests/fixtures/preview-fences/ex145.page"),
+            ),
+            (
+                "ex146",
+                include_str!("../tests/fixtures/preview-fences/ex146.md"),
+                include_str!("../tests/fixtures/preview-fences/ex146.page"),
+            ),
+            (
+                "ex147",
+                include_str!("../tests/fixtures/preview-fences/ex147.md"),
+                include_str!("../tests/fixtures/preview-fences/ex147.page"),
+            ),
+            (
+                "ex237",
+                include_str!("../tests/fixtures/preview-fences/ex237.md"),
+                include_str!("../tests/fixtures/preview-fences/ex237.page"),
+            ),
+            (
+                "ex263",
+                include_str!("../tests/fixtures/preview-fences/ex263.md"),
+                include_str!("../tests/fixtures/preview-fences/ex263.page"),
+            ),
+            (
+                "ex278",
+                include_str!("../tests/fixtures/preview-fences/ex278.md"),
+                include_str!("../tests/fixtures/preview-fences/ex278.page"),
+            ),
+            (
+                "ex318",
+                include_str!("../tests/fixtures/preview-fences/ex318.md"),
+                include_str!("../tests/fixtures/preview-fences/ex318.page"),
+            ),
+            (
+                "ex321",
+                include_str!("../tests/fixtures/preview-fences/ex321.md"),
+                include_str!("../tests/fixtures/preview-fences/ex321.page"),
+            ),
+            (
+                "ex324",
+                include_str!("../tests/fixtures/preview-fences/ex324.md"),
+                include_str!("../tests/fixtures/preview-fences/ex324.page"),
+            ),
+            (
+                "tab-split",
+                include_str!("../tests/fixtures/preview-fences/tab-split.md"),
+                include_str!("../tests/fixtures/preview-fences/tab-split.page"),
+            ),
+            (
+                "list-tab",
+                include_str!("../tests/fixtures/preview-fences/list-tab.md"),
+                include_str!("../tests/fixtures/preview-fences/list-tab.page"),
+            ),
+        ];
+        let wrong: Vec<String> = fixtures
+            .iter()
+            .filter_map(|(name, src, expected)| {
+                let drawn = page_of(src);
+                (drawn != *expected)
+                    .then(|| format!("{name}:\n{drawn}--- expected ---\n{expected}=== end ==="))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }
