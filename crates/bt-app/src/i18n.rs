@@ -3936,47 +3936,47 @@ impl Text {
             Self::PreviewSaveNotStarted => pick(
                 lang,
                 "the file could not be written",
-                "the file could not be written", // zh: pending S-6a
+                "文件无法写入",
             ),
             Self::PreviewSaveTooLarge => pick(
                 lang,
                 "it is larger than {limit}",
-                "it is larger than {limit}", // zh: pending S-6a
+                "文件超过 {limit}",
             ),
             Self::PreviewSaveLink => pick(
                 lang,
                 "the file is a link or has a second name",
-                "the file is a link or has a second name", // zh: pending S-6a
+                "文件是链接，或有第二个名称",
             ),
             Self::PreviewSaveNoExchange => pick(
                 lang,
                 "this drive cannot replace a file in one step",
-                "this drive cannot replace a file in one step", // zh: pending S-6a
+                "此磁盘不支持一步替换文件",
             ),
             Self::PreviewSaveNameTaken => pick(
                 lang,
                 "a file beside it is in the way",
-                "a file beside it is in the way", // zh: pending S-6a
+                "旁边有文件占用了所需的名称",
             ),
             Self::PreviewSaveUnread => pick(
                 lang,
                 "the file could not be read to check it",
-                "the file could not be read to check it", // zh: pending S-6a
+                "无法读取文件以作核对",
             ),
             Self::PreviewSaveOnItsWay => pick(
                 lang,
                 "a save of it was still on its way to the disk",
-                "a save of it was still on its way to the disk", // zh: pending S-6a
+                "上一次保存仍在写入磁盘",
             ),
             Self::PreviewSaveReloaded => pick(
                 lang,
                 "the file changed and you reloaded it",
-                "the file changed and you reloaded it", // zh: pending S-6a
+                "文件已改动，你重新加载了它",
             ),
             Self::PreviewSaveUnlanded => pick(
                 lang,
                 "a version you saved was not written to the disk",
-                "a version you saved was not written to the disk", // zh: pending S-6a
+                "你保存的某个版本没有写入磁盘",
             ),
             Self::PreviewSaveTooMany => pick(
                 lang,
@@ -6633,27 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending S-6a — the two clauses a preview save that never reached the disk is
-        // "not saved" for.
-        (Self::PreviewSaveNotStarted, HostPlatform::Windows),
-        (Self::PreviewSaveNotStarted, HostPlatform::MacOs),
-        (Self::PreviewSaveTooLarge, HostPlatform::Windows),
-        (Self::PreviewSaveTooLarge, HostPlatform::MacOs),
-        // zh: pending S-6a — the reasons a preview save's refusal names on the pane.
-        (Self::PreviewSaveLink, HostPlatform::Windows),
-        (Self::PreviewSaveLink, HostPlatform::MacOs),
-        (Self::PreviewSaveNoExchange, HostPlatform::Windows),
-        (Self::PreviewSaveNoExchange, HostPlatform::MacOs),
-        (Self::PreviewSaveNameTaken, HostPlatform::Windows),
-        (Self::PreviewSaveNameTaken, HostPlatform::MacOs),
-        (Self::PreviewSaveUnread, HostPlatform::Windows),
-        (Self::PreviewSaveUnread, HostPlatform::MacOs),
-        (Self::PreviewSaveOnItsWay, HostPlatform::Windows),
-        (Self::PreviewSaveOnItsWay, HostPlatform::MacOs),
-        (Self::PreviewSaveReloaded, HostPlatform::Windows),
-        (Self::PreviewSaveReloaded, HostPlatform::MacOs),
-        (Self::PreviewSaveUnlanded, HostPlatform::Windows),
-        (Self::PreviewSaveUnlanded, HostPlatform::MacOs),
         // zh: pending T-CLOSE-GATE-WAITS — the line a close's question adds when its wait for a
         // save on its way ran out.
         (Self::GateSaveStillOnItsWay, HostPlatform::Windows),
