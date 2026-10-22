@@ -168,7 +168,7 @@
 </picture>
 
 - **设置 > General > 资源管理器菜单**：打开时写入两个注册表键到 `HKEY_CURRENT_USER\Software\Classes`，加入「在 Folio 中打开」。在 Windows 11 上这项在「显示更多选项」页；在 Windows 10 上它在唯一的菜单中。如果 Windows 11 的文件夹里有 `folio.msix`，则同时注册该包到当前账户，使菜单项出现在第一页。无需管理员。关闭时移除已注册的项。正在运行的资源管理器只在启动时读取第一页的条目，如果「在 Folio 中打开」还没有出现，注销后重新登录。该菜单项在上次使用的窗口中将文件夹打开为标签页，并将窗口带到前台。从任务栏、快捷方式或 folio.exe 再次启动默认开新窗口，可在同页**再次启动 Folio** 行改为标签页。
-- Windows PowerShell 5.1 自带的 PSReadLine 2.0.0 在窗口缩放后会让输入行错位。Folio 的 Windows PowerShell 窗格改用 Folio 自带的一份微软 PSReadLine 2.4.5，只供 Folio 的窗格使用：不为你的账户安装任何东西，也不询问，任何执行策略下都是如此，其他窗口仍用原有的 PSReadLine。如果以前的 Folio 在「文档」中装过它的修补版，**设置 > 终端**会提供移除。
+- Windows PowerShell 5.1 自带的 PSReadLine 2.0.0 在窗口缩放后会让输入行错位。Folio 的 Windows PowerShell 窗格改用 Folio 自带的一份微软 PSReadLine 2.4.5，只供 Folio 的窗格使用：不为你的账户安装任何东西，也不询问，任何执行策略下都是如此，其他窗口仍用原有的 PSReadLine。如果旧版 Folio 在「文档」中装过它的修补版，**设置 > 终端**会提供移除。
 
 ## macOS 集成
 

@@ -460,7 +460,7 @@ rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio �
 - **更新进行中（macOS）**：一个 LaunchAgent 文件 `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`，更新结束时删除；应用旁边的隐藏文件夹 `.Folio.app.folio-update`，存放暂存的更新并在完成后保留两个小锁文件——见上文「更新（macOS）」一节。
 - PowerShell 整合被要求时，在 PowerShell 自己报出的 `$PROFILE` 末尾追加一行，追加前先
   在旁边留一份带日期的原件副本。删除该行可撤销。
-- **以上各项加上更新检查，就是初次设置卡可能问到的全部。** 它只列出本机能执行的行，
+- **以上各项加上更新检查，就是初次设置卡可能问到的全部。** 它只列出本机适用的行，
   所以没装 agent 的机器看到的更少。它在从未运行过 Folio 的机器上出现一次，自己什么也
   不写：按下**完成**按的就是上面列举的那几行设置，而**暂不**一行也不按。卡本身记下的
   只有一件事：它已经出现过。
