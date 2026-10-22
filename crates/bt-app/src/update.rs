@@ -704,7 +704,9 @@ pub enum Outcome {
 enum Schedule {
     Off,
     /// An update's trial holds the check's writes (`update_trial`, F-7);
-    /// [`release_trial`] starts the check when the trial is committed.
+    /// [`release_trial`] starts the check when the trial is committed. Or this
+    /// process is the rescue copy, whose check never asks
+    /// ([`check_entry_allowed`]): held for its life ([`schedule_held`]).
     Held,
     InFlight,
     Start,
@@ -933,14 +935,15 @@ impl OfferState {
     }
 
     /// The automatic schedule at `now_ms`, from the persisted answer and
-    /// attempt stamps and this process's bounded retry state; `trial_holds` is
-    /// whether an update's trial holds the check's writes. [`due`] remains the
-    /// one owner of the daily decision ([`owed`], [`wait_ms`]).
-    fn schedule(&self, now_ms: u64, trial_holds: bool) -> Schedule {
+    /// attempt stamps and this process's bounded retry state; `held` is
+    /// whether an update's trial holds the check's writes or this process is
+    /// the rescue copy ([`schedule_held`]). [`due`] remains the one owner of
+    /// the daily decision ([`owed`], [`wait_ms`]).
+    fn schedule(&self, now_ms: u64, held: bool) -> Schedule {
         if !self.enabled() {
             return Schedule::Off;
         }
-        if trial_holds {
+        if held {
             return Schedule::Held;
         }
         if self.checking.load(AtomicOrdering::Acquire) {
@@ -2188,7 +2191,7 @@ mod tests {
     /// asking and wakes the loop; a schedule still saying `Start` would be
     /// asked again on the turn that wake makes, for as long as the trial.
     ///
-    /// MUTATION: drop the `trial_holds` arm from `OfferState::schedule`; the
+    /// MUTATION: drop the `held` arm from `OfferState::schedule`; the
     /// held row answers `Start` and this goes red.
     #[test]
     fn a_trial_holds_the_schedule_until_it_is_committed() {
