@@ -6463,7 +6463,7 @@ impl Text {
             Self::ShellBirthDeath => pick(
                 lang,
                 "exited at birth",
-                "exited at birth", // zh: pending T-SHELL-BIRTH-DEATH
+                "启动即退出",
             ),
         }
     }
@@ -6633,9 +6633,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
-        (Self::ShellBirthDeath, HostPlatform::Windows),
-        (Self::ShellBirthDeath, HostPlatform::MacOs),
         // zh: pending T-RECOVERED-FOLDER — the start's toast for the edits a stop kept in the
         // recovered folder.
         (Self::RecoveredEditKept, HostPlatform::Windows),
