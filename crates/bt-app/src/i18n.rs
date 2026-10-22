@@ -4416,7 +4416,7 @@ impl Text {
             Self::ProfilesEnvPerPane => pick(
                 lang,
                 "Set per pane",
-                "Set per pane", // zh: pending H2-NITS
+                "每个窗格各自设定",
             ),
             Self::ProfilesAuto => pick(lang, "Auto", "自动"),
             Self::ProfilesOn => pick(lang, "On", "开"),
@@ -4578,8 +4578,6 @@ impl Text {
                 pick(lang, "Move the focus between panes", "在窗格之间移动焦点")
             }
             Self::ShortcutReservedResizePane => pick(lang, "Resize a pane", "调整窗格大小"),
-            // zh: pending H2-NITS — the existing translation with `{modifier}` where
-            // it said `Alt`; the writer checks the word order.
             Self::ShortcutReservedAltArrow => pick(
                 lang,
                 "Reserved: readline reads {modifier}+arrow as word movement",
@@ -6633,10 +6631,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending H2-NITS — a Profiles ghost row's value that each pane has
-        // its own of.
-        (Self::ProfilesEnvPerPane, HostPlatform::Windows),
-        (Self::ProfilesEnvPerPane, HostPlatform::MacOs),
         // zh: pending T-QUIT-DOCUMENTS — the cancelled quit's card and its choice, the
         // stopped process's native message, and the lists they name files in.
         (Self::QuitDocumentsNotSaved, HostPlatform::Windows),
