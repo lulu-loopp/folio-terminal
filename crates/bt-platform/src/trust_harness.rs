@@ -18,7 +18,9 @@
 
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
+use crate::install_txn;
 use crate::trust::{FileVersion, Policy};
 
 /// The test publisher's subject, in the order Windows prints a subject.
@@ -363,5 +365,295 @@ impl TestCa {
             let _ = (path, version, subject, identity, resources, behaviour);
             match self.0 {}
         }
+    }
+}
+
+/// **How many times a fixture's step over a file another program holds is
+/// made** — the resource update of a program this harness has just written
+/// (`world::resources_written`), and a test's rename of a file it has just
+/// written ([`done_once_let_go`]): with the pauses between them (the first
+/// [`HELD_FIRST_PAUSE`], each next one twice the last, at most
+/// [`HELD_LONGEST_PAUSE`]) about 10 s in all, which outlasts an on-access scan
+/// of a file just written (an antivirus, an indexer) the way the applier's own
+/// journal write does. A bound for a hold, never for a slow machine
+/// (`docs/CONVENTIONS.md`, "A red that only load produces is a test defect
+/// with a cause, and the cause is fixed where it lives").
+const HELD_ATTEMPTS: usize = 10;
+/// The pause after the first refused attempt.
+const HELD_FIRST_PAUSE: Duration = Duration::from_millis(25);
+/// The longest pause between two attempts.
+const HELD_LONGEST_PAUSE: Duration = Duration::from_secs(4);
+
+/// **`step` made, and made again while its rename is refused because another
+/// program holds the file** (0.4.8 T-TEST-RENAME-RETRY-WINDOWS): a fixture's
+/// rename of something its test has just written — a copied or signed
+/// program moved by hand as a dead applier left it, a journal or a receipt
+/// written through `install_txn`'s doors, the transaction folder they are in
+/// — which an on-access scan (an antivirus, an indexer) opens next and holds
+/// for a moment. The refused rename leaves both names as they were, so the
+/// step is made again whole.
+///
+/// The refusal is the one the product's own retries ask about,
+/// [`install_txn::Failure::refused_while_open`]: Windows only, so elsewhere
+/// the first failure is the answer. Any other failure panics at once; a hold
+/// that outlasts [`HELD_ATTEMPTS`] panics naming every refusal. A step that
+/// lands after a refusal says so in one line on standard error, so a pass a
+/// retry bought stays visible in a gate's log.
+///
+/// Not for a test whose subject is the refusal: that test makes its step
+/// bare and asserts what it answers.
+///
+/// # Panics
+/// On any failure other than a rename refused while the file is held, and
+/// on a hold past [`HELD_ATTEMPTS`] — naming `what`, the last failure and
+/// every refusal before it.
+pub fn done_once_let_go<T>(
+    what: &Path,
+    step: impl FnMut() -> Result<T, install_txn::Failure>,
+) -> T {
+    done_once_let_go_pausing(
+        "done_once_let_go",
+        "done",
+        &what.display().to_string(),
+        step,
+        &mut std::thread::sleep,
+    )
+}
+
+/// **`from` renamed to `to`** (`std::fs::rename`, a file or a folder), made
+/// again while another program holds what the rename needs — a file just
+/// written, or a file inside a folder just written, which Windows refuses to
+/// rename while any of it is open — as [`done_once_let_go`] makes a step.
+///
+/// # Panics
+/// As [`done_once_let_go`].
+pub fn renamed_once_let_go(from: &Path, to: &Path) {
+    renamed_once_let_go_pausing(from, to, &mut std::thread::sleep);
+}
+
+/// [`renamed_once_let_go`], `pause` called between attempts (the harness
+/// sleeps; a test hands in what lets its own hold go).
+fn renamed_once_let_go_pausing(from: &Path, to: &Path, pause: &mut impl FnMut(Duration)) {
+    done_once_let_go_pausing(
+        "renamed_once_let_go",
+        "moved",
+        &format!("{} -> {}", from.display(), to.display()),
+        || {
+            std::fs::rename(from, to).map_err(|error| install_txn::Failure {
+                stage: install_txn::Stage::Rename,
+                path: to.to_path_buf(),
+                error,
+            })
+        },
+        pause,
+    );
+}
+
+/// [`done_once_let_go`]'s attempts, `pause` called between them; `door` and
+/// `done` are the words of the line said after a retried success.
+fn done_once_let_go_pausing<T>(
+    door: &str,
+    done: &str,
+    what: &str,
+    mut step: impl FnMut() -> Result<T, install_txn::Failure>,
+    pause: &mut impl FnMut(Duration),
+) -> T {
+    let named = |error: &io::Error| {
+        error.raw_os_error().map_or_else(
+            || format!("{:?}", error.kind()),
+            |code| format!("os error {code}"),
+        )
+    };
+    let mut refused: Vec<String> = Vec::new();
+    let mut wait = HELD_FIRST_PAUSE;
+    loop {
+        match step() {
+            Ok(answer) => {
+                if !refused.is_empty() {
+                    eprintln!(
+                        "{door}: {what} refused {} times, then {done}",
+                        refused.len()
+                    );
+                }
+                return answer;
+            }
+            Err(failure) if failure.refused_while_open() && refused.len() + 1 < HELD_ATTEMPTS => {
+                refused.push(named(&failure.error));
+                pause(wait);
+                wait = (wait * 2).min(HELD_LONGEST_PAUSE);
+            }
+            Err(failure) => panic!(
+                "{door}: {what}: failed at attempt {} of {HELD_ATTEMPTS} ({}: {failure}); \
+                 refused {} times before it while the file was held: [{}]",
+                refused.len() + 1,
+                named(&failure.error),
+                refused.len(),
+                refused.join(", "),
+            ),
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    /// A rename refused because another program holds the file, as
+    /// `MoveFileExW` answers it: `ERROR_ACCESS_DENIED` at the rename.
+    fn held(path: &Path) -> install_txn::Failure {
+        install_txn::Failure {
+            stage: install_txn::Stage::Rename,
+            path: path.to_path_buf(),
+            error: io::Error::from_raw_os_error(5),
+        }
+    }
+
+    /// The panic `run` ends in, as text.
+    fn panic_of(run: impl FnOnce()) -> String {
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+            .expect_err("the step is given up");
+        failed
+            .downcast_ref::<String>()
+            .expect("a formatted panic")
+            .clone()
+    }
+
+    /// RED — **a step refused three times while the file is held lands on
+    /// the fourth attempt**, the pauses between them 25, 50 and 100 ms.
+    ///
+    /// MUTATION: in `done_once_let_go_pausing`, panic on the first failure
+    /// (the bare `.unwrap()` of every fixture before this ticket) — red with
+    /// the refusal named.
+    #[test]
+    fn a_step_refused_while_held_lands_once_the_hold_lets_go() {
+        let path = Path::new("held 文件.json");
+        let mut asked = 0;
+        let mut pauses = Vec::new();
+        let answer = done_once_let_go_pausing(
+            "done_once_let_go",
+            "done",
+            "held 文件.json",
+            || {
+                asked += 1;
+                if asked <= 3 {
+                    Err(held(path))
+                } else {
+                    Ok(asked)
+                }
+            },
+            &mut |pause| pauses.push(pause),
+        );
+        assert_eq!(answer, 4);
+        let ms = Duration::from_millis;
+        assert_eq!(pauses, [ms(25), ms(50), ms(100)]);
+    }
+
+    /// RED — **a hold that outlasts every attempt is a panic that names the
+    /// path, the last refusal and each refusal before it**, after exactly
+    /// [`HELD_ATTEMPTS`] attempts with the pauses doubling up to
+    /// [`HELD_LONGEST_PAUSE`].
+    ///
+    /// MUTATION: drop the `HELD_ATTEMPTS` bound from the retry's guard — red
+    /// at the tenth pause ("unbounded").
+    #[test]
+    fn a_hold_past_every_attempt_names_the_path_and_each_refusal() {
+        let path = Path::new("kept 文件.exe");
+        let mut pauses = Vec::new();
+        let said = panic_of(|| {
+            done_once_let_go_pausing(
+                "done_once_let_go",
+                "done",
+                "kept 文件.exe",
+                || Err::<(), _>(held(path)),
+                &mut |pause| {
+                    assert!(pauses.len() < HELD_ATTEMPTS, "unbounded: {pauses:?}");
+                    pauses.push(pause);
+                },
+            );
+        });
+        let ms = Duration::from_millis;
+        assert_eq!(
+            pauses,
+            [25, 50, 100, 200, 400, 800, 1600, 3200, 4000].map(ms),
+            "{said}"
+        );
+        let before = ["os error 5"; HELD_ATTEMPTS - 1].join(", ");
+        assert!(
+            said.starts_with("done_once_let_go: kept 文件.exe: ")
+                && said.contains(&format!(
+                    "attempt {HELD_ATTEMPTS} of {HELD_ATTEMPTS} (os error 5: "
+                ))
+                && said.contains(&format!(
+                    "refused {} times before it while the file was held: [{before}]",
+                    HELD_ATTEMPTS - 1
+                )),
+            "the path, the last refusal and every one before it: {said}"
+        );
+    }
+
+    /// RED — **a failure that is not a hold is the answer at once**: a
+    /// rename that finds nothing to move, and a refusal at another stage than
+    /// the rename, each panic at the first attempt with no pause.
+    ///
+    /// MUTATION: retry every failure (drop `failure.refused_while_open()`
+    /// from the retry's guard) — red at the first pause.
+    #[test]
+    fn a_failure_that_is_not_a_hold_is_given_up_at_once() {
+        let path = Path::new("missing 文件");
+        let failures = [
+            install_txn::Failure {
+                stage: install_txn::Stage::Rename,
+                path: path.to_path_buf(),
+                error: io::Error::from_raw_os_error(2),
+            },
+            install_txn::Failure {
+                stage: install_txn::Stage::FlushDirectory,
+                path: path.to_path_buf(),
+                error: io::Error::from_raw_os_error(5),
+            },
+        ];
+        for failure in failures {
+            let code = failure.error.raw_os_error().unwrap();
+            let mut failure = Some(failure);
+            let said = panic_of(|| {
+                done_once_let_go_pausing(
+                    "done_once_let_go",
+                    "done",
+                    "missing 文件",
+                    || Err::<(), _>(failure.take().expect("asked once")),
+                    &mut |pause| panic!("paused {pause:?} over a failure that is no hold"),
+                );
+            });
+            assert!(
+                said.contains(&format!("attempt 1 of {HELD_ATTEMPTS} (os error {code}: "))
+                    && said.contains("refused 0 times before it"),
+                "{said}"
+            );
+        }
+    }
+
+    /// RED — **a real rename refused while another program holds the file
+    /// lands once the hold lets go**: the file is held the way a scanner
+    /// holds one ([`hold_without_delete_sharing`]), `MoveFileExW` refuses
+    /// the move, and the pause lets the hold go, so the second attempt moves
+    /// it — no clock.
+    ///
+    /// MUTATION: in `renamed_once_let_go_pausing`, call `std::fs::rename`
+    /// once and panic on its error — red with the system's refusal.
+    #[test]
+    fn a_real_rename_refused_while_held_moves_once_the_hold_lets_go() {
+        let folder = world::Folder::new("held-rename 改名");
+        let from = folder.0.join("扫描 scanned.exe");
+        let to = folder.0.join("移走 moved.exe");
+        std::fs::write(&from, b"MZ just written").unwrap();
+        let mut hold = Some(hold_without_delete_sharing(&from).unwrap());
+        let mut pauses = Vec::new();
+        renamed_once_let_go_pausing(&from, &to, &mut |pause| {
+            pauses.push(pause);
+            hold = None;
+        });
+        assert_eq!(pauses, [HELD_FIRST_PAUSE], "refused once, while held");
+        assert!(!from.exists());
+        assert_eq!(std::fs::read(&to).unwrap(), b"MZ just written");
     }
 }

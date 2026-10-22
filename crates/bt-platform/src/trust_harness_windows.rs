@@ -7,7 +7,7 @@
 //! ephemeral (`NCryptCreatePersistedKey` with no name), every store is a memory
 //! store made by `trust`'s own `Store`, and nothing is installed.
 
-use crate::trust_harness::Behaviour;
+use crate::trust_harness::{Behaviour, HELD_ATTEMPTS, HELD_FIRST_PAUSE, HELD_LONGEST_PAUSE};
 use std::ffi::c_void;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -877,17 +877,6 @@ pub fn program_doing(
     );
 }
 
-/// **How many times a resource update of a file another program holds is
-/// made**: with the pauses between them (the first [`RESOURCE_FIRST_PAUSE`],
-/// each next one twice the last, at most [`RESOURCE_LONGEST_PAUSE`]) about
-/// 10 s in all, which outlasts an on-access scan of a file just written (an
-/// antivirus, an indexer) the way the applier's own journal write does.
-const RESOURCE_ATTEMPTS: usize = 10;
-/// The pause after the first refused attempt.
-const RESOURCE_FIRST_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
-/// The longest pause between two attempts.
-const RESOURCE_LONGEST_PAUSE: std::time::Duration = std::time::Duration::from_secs(4);
-
 /// The step of a resource update that failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpdateStep {
@@ -956,7 +945,7 @@ impl UpdateFailure {
 /// sleeps; a test hands in what lets its own hold go), and `before_end`
 /// just before each end (the harness does nothing there; a test takes its
 /// hold there, as a scanner that opens the file mid-update does). Any other
-/// failure, or a hold that outlasts [`RESOURCE_ATTEMPTS`], panics naming
+/// failure, or a hold that outlasts [`HELD_ATTEMPTS`], panics naming
 /// every refusal.
 fn resources_written(
     path: &Path,
@@ -972,17 +961,17 @@ fn resources_written(
         .map(|(name, _)| wide(std::ffi::OsStr::new(name)))
         .collect();
     let mut refused = Vec::new();
-    let mut wait = RESOURCE_FIRST_PAUSE;
+    let mut wait = HELD_FIRST_PAUSE;
     loop {
         match update_resources(&file, &block, resources, &names, before_end) {
             Ok(()) => return,
-            Err(failure) if failure.held() && refused.len() + 1 < RESOURCE_ATTEMPTS => {
+            Err(failure) if failure.held() && refused.len() + 1 < HELD_ATTEMPTS => {
                 refused.push(failure.named());
                 pause(wait);
-                wait = (wait * 2).min(RESOURCE_LONGEST_PAUSE);
+                wait = (wait * 2).min(HELD_LONGEST_PAUSE);
             }
             Err(failure) => panic!(
-                "{}: the resource update failed at attempt {} of {RESOURCE_ATTEMPTS} at {} ({}); \
+                "{}: the resource update failed at attempt {} of {HELD_ATTEMPTS} at {} ({}); \
                  refused {} times before it while the file was held: [{}]",
                 path.display(),
                 refused.len() + 1,
@@ -1361,7 +1350,7 @@ mod tests {
         );
         assert_eq!(
             (ends, pauses),
-            (2, vec![RESOURCE_FIRST_PAUSE]),
+            (2, vec![HELD_FIRST_PAUSE]),
             "the first end was refused, the update waited once, and the second end wrote"
         );
         assert_eq!(
@@ -1394,7 +1383,7 @@ mod tests {
             &mut || {},
         );
         assert!(held.is_none(), "the hold was let go by the pause");
-        assert_eq!(pauses, [RESOURCE_FIRST_PAUSE]);
+        assert_eq!(pauses, [HELD_FIRST_PAUSE]);
         assert_eq!(
             carried(&path),
             (Some(FileVersion([1, 2, 3, 4])), note.to_vec())
@@ -1402,11 +1391,11 @@ mod tests {
     }
 
     /// RED — **a hold that outlasts every attempt is a panic that names each
-    /// refusal**, after exactly [`RESOURCE_ATTEMPTS`] attempts with the pauses
-    /// doubling up to [`RESOURCE_LONGEST_PAUSE`].
+    /// refusal**, after exactly [`HELD_ATTEMPTS`] attempts with the pauses
+    /// doubling up to [`HELD_LONGEST_PAUSE`].
     ///
     /// MUTATION: list no refusal in the panic message — red at the message;
-    /// or drop the `RESOURCE_ATTEMPTS` bound — red at the tenth pause.
+    /// or drop the `HELD_ATTEMPTS` bound — red at the tenth pause.
     #[test]
     fn a_hold_that_outlasts_every_attempt_names_each_refusal() {
         let folder = Folder::new("资源 kept");
@@ -1419,7 +1408,7 @@ mod tests {
                 FileVersion([1, 0, 0, 0]),
                 &[],
                 &mut |pause| {
-                    assert!(pauses.len() < RESOURCE_ATTEMPTS, "unbounded: {pauses:?}");
+                    assert!(pauses.len() < HELD_ATTEMPTS, "unbounded: {pauses:?}");
                     pauses.push(pause);
                 },
                 &mut || {},
@@ -1437,13 +1426,13 @@ mod tests {
             [25, 50, 100, 200, 400, 800, 1600, 3200, 4000].map(ms),
             "{said}"
         );
-        let before = ["end 0x8007006e"; RESOURCE_ATTEMPTS - 1].join(", ");
+        let before = ["end 0x8007006e"; HELD_ATTEMPTS - 1].join(", ");
         assert!(
             said.contains(&format!(
-                "attempt {RESOURCE_ATTEMPTS} of {RESOURCE_ATTEMPTS} at end 0x8007006e"
+                "attempt {HELD_ATTEMPTS} of {HELD_ATTEMPTS} at end 0x8007006e"
             )) && said.contains(&format!(
                 "refused {} times before it while the file was held: [{before}]",
-                RESOURCE_ATTEMPTS - 1
+                HELD_ATTEMPTS - 1
             )),
             "every refusal is named, the last as the failure: {said}"
         );
