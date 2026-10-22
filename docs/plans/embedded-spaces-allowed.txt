@@ -46,8 +46,8 @@ crates/bt-app/src/hang_watch.rs:5003 the hang report's label column: every label
 crates/bt-app/src/hang_watch.rs:5006 the hang report's label column: every label padded to one width, as the report prints it and its tests read it
 crates/bt-app/src/highlight.rs:723 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-app/src/highlight.rs:781 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-app/src/i18n.rs:8200 the command-line usage text: option descriptions aligned in one column
-crates/bt-app/src/i18n.rs:8217 the command-line usage text: option descriptions aligned in one column
+crates/bt-app/src/i18n.rs:7885 the command-line usage text: option descriptions aligned in one column
+crates/bt-app/src/i18n.rs:7902 the command-line usage text: option descriptions aligned in one column
 crates/bt-app/src/install_channel.rs:1442 a Scoop manifest sample: JSON indentation after an escaped line break
 crates/bt-app/src/install_channel.rs:1898 the Homebrew cask's own key alignment, as the cask writes it
 crates/bt-app/src/main.rs:34719 the chrome dump's tag column: `quad` padded to the width of the other tags
