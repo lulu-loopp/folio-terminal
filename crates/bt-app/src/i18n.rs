@@ -8043,7 +8043,7 @@ impl CliText<'_> {
             },
             Self::UnpairedFlag { flag, needs } => match lang {
                 Lang::English => format!("{flag} was given without {needs}."),
-                Lang::Chinese => format!("给了 {flag}，却没有给 {needs}。"),
+                Lang::Chinese => format!("{flag} 需要搭配 {needs} 使用。"),
             },
             Self::ExtraPath(path) => match lang {
                 Lang::English => format!("One path at a time — {path} is the second."),
