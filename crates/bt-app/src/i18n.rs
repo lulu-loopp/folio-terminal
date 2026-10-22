@@ -4931,7 +4931,7 @@ impl Text {
             Self::QuitDocumentsNotSaved => pick(
                 lang,
                 "{files} could not be saved.",
-                "{files} could not be saved.", // zh: pending T-QUIT-DOCUMENTS
+                "无法保存 {files}。",
             ),
             Self::QuitSaveOnItsWay => pick(
                 lang,
@@ -4941,30 +4941,30 @@ impl Text {
             Self::QuitLeaveWithoutChange => pick(
                 lang,
                 "Leave without this change",
-                "Leave without this change", // zh: pending T-QUIT-DOCUMENTS
+                "放弃这项更改并退出",
             ),
             Self::StoppedChangeLost => pick(
                 lang,
                 "Folio stopped. A change to {file} could not be kept.",
-                "Folio stopped. A change to {file} could not be kept.", // zh: pending T-QUIT-DOCUMENTS
+                "Folio 已停止。对 {file} 的一项更改未能保留。",
             ),
             Self::StoppedChangesLost => pick(
                 lang,
                 "Folio stopped. Changes to {files} could not be kept.",
-                "Folio stopped. Changes to {files} could not be kept.", // zh: pending T-QUIT-DOCUMENTS
+                "Folio 已停止。对 {files} 的更改未能保留。",
             ),
             Self::ListSeparator => pick(
-                lang, ", ", ", ", // zh: pending T-QUIT-DOCUMENTS
+                lang, ", ", "、",
             ),
             Self::ListLast => pick(
                 lang,
                 "{names} and {last}",
-                "{names} and {last}", // zh: pending T-QUIT-DOCUMENTS
+                "{names} 和 {last}",
             ),
             Self::ListMore => pick(
                 lang,
                 "{names} and {count} more",
-                "{names} and {count} more", // zh: pending T-QUIT-DOCUMENTS
+                "{names} 以及另外 {count} 个",
             ),
             Self::MergeFileLine => pick(
                 lang,
@@ -6631,22 +6631,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-QUIT-DOCUMENTS — the cancelled quit's card and its choice, the
-        // stopped process's native message, and the lists they name files in.
-        (Self::QuitDocumentsNotSaved, HostPlatform::Windows),
-        (Self::QuitDocumentsNotSaved, HostPlatform::MacOs),
-        (Self::QuitLeaveWithoutChange, HostPlatform::Windows),
-        (Self::QuitLeaveWithoutChange, HostPlatform::MacOs),
-        (Self::StoppedChangeLost, HostPlatform::Windows),
-        (Self::StoppedChangeLost, HostPlatform::MacOs),
-        (Self::StoppedChangesLost, HostPlatform::Windows),
-        (Self::StoppedChangesLost, HostPlatform::MacOs),
-        (Self::ListSeparator, HostPlatform::Windows),
-        (Self::ListSeparator, HostPlatform::MacOs),
-        (Self::ListLast, HostPlatform::Windows),
-        (Self::ListLast, HostPlatform::MacOs),
-        (Self::ListMore, HostPlatform::Windows),
-        (Self::ListMore, HostPlatform::MacOs),
         // zh: pending T-VIDEO-ENGINE-NO-DURATION — a video that never finished loading, and the
         // bar of one that declares no length.
         (Self::VideoDidNotLoad, HostPlatform::Windows),
