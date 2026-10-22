@@ -63,7 +63,8 @@
 - A PDF previewed on a display scaled to 125 %, 150 % or 175 % no longer shows
   letters of uneven weight and words with gaps; there the PDF viewer's own
   controls are drawn larger, and its toolbar is shortened, or not shown, in
-  narrower panes. <!-- pending the refit check -->
+  narrower panes. A pane resized after a PDF is opened does not re-fit the page
+  to its new width until the PDF is opened again, as in earlier versions.
 - Unsaved preview edits survive Windows shutting down, restarting or signing
   out; what could not be written in time is kept in the recovered folder, which
   the next start offers.
