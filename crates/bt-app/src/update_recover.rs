@@ -771,7 +771,7 @@ impl<W: World> Hands for Logged<'_, W> {
 /// ordinary start's hand-over, made before its streams are redirected) has a
 /// standard error that is not the log, and the append is the line's only way
 /// into it.
-fn appended_to(log: &Path) -> Option<&Path> {
+pub(crate) fn appended_to(log: &Path) -> Option<&Path> {
     (!bt_platform::standard_error_is(log)).then_some(log)
 }
 
