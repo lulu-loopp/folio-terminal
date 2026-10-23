@@ -969,14 +969,25 @@ impl VideoSeat {
         self.acted(now);
     }
 
-    /// **The playhead to the end — `End`.** A playing recording goes on
-    /// playing into it, so the engine reaches its end and says `ended` itself,
-    /// as it does when the end is reached by watching; a paused one stands on
-    /// its last frame. A recording that declares no length has no end to go to.
+    /// **The playhead to the end — `End` — and the recording stopped there**,
+    /// playing or paused: it stands on its last frame, which
+    /// [`stands_at_end`] reads as the end, so the next play door starts it from
+    /// the beginning (row 43).
+    ///
+    /// **Paused by the seat, not left to run into the end** (Mac gate,
+    /// 2026-10-23). Media Foundation reports `ended` the moment a seek lands on
+    /// the end of a playing stream; AVFoundation says it only through the
+    /// did-play-to-end notification, on its own time — and not at all without
+    /// a run loop — so a playing recording sent to its end stood there
+    /// "playing" on one machine and ended on the other. The pause is the
+    /// engine's own verb and the position is the engine's own report; the seat
+    /// keeps no ended state of its own. A recording that declares no length has
+    /// no end to go to, and keeps playing.
     pub fn seek_end(&mut self, now: Instant) {
         if let Some(duration) = self.engine.state().duration_secs
             && duration.is_finite()
         {
+            self.engine.pause();
             self.engine.seek(duration);
         }
         self.acted(now);
@@ -2954,17 +2965,17 @@ mod tests {
             "and a paused one stands there: {end:?}"
         );
 
-        // Playing, `,` and `.` change nothing a hand would see as a step, and
-        // `End` lets it run out.
+        // Playing, `End` stops it on its last frame, the same on both
+        // machines: paused, and standing at the end.
         press(&mut seat, Key::Named(NamedKey::Home), KeyCode::Home);
         seat.toggle(Instant::now());
         let playing = seat.state_reaching(|state| state.playing && state.position_secs < 2.0);
         assert!(playing.playing, "{playing:?}");
         press(&mut seat, Key::Named(NamedKey::End), KeyCode::End);
-        let ended = seat.state_reaching(|state| state.ended);
+        let ended = seat.state_reaching(|state| !state.playing && stands_at_end(state));
         assert!(
-            ended.ended,
-            "End on a playing recording makes it end: {ended:?}"
+            !ended.playing && stands_at_end(&ended),
+            "End on a playing recording stops it at its end: {ended:?}"
         );
         seat.shutdown();
         crate::test_support::engines_settling_to(before);

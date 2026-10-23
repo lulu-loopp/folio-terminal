@@ -2494,8 +2494,15 @@ fn run_the_loop_for(folio: &mut HeadlessFolio, span: Duration) {
     }
 }
 
-/// Every label the window's overlay is drawing that stands wholly above `top`.
-fn labels_above(folio: &HeadlessFolio, top: f32) -> Vec<bt_render::ChromeLabel> {
+/// **The labels the window's overlay is drawing over a recording's bar** — inside the bar's
+/// width, standing on its top edge (a label's bottom is a few pixels clear of it, the bar's own
+/// gap) — and nothing else the overlay holds: a card or a dialog drawn over the window is not the
+/// bar's.
+fn labels_over_the_bar(
+    folio: &HeadlessFolio,
+    layout: &crate::video_seat::BarLayout,
+) -> Vec<bt_render::ChromeLabel> {
+    let [left, top, right, _] = layout.bar;
     folio
         .window
         .renderer
@@ -2503,7 +2510,12 @@ fn labels_above(folio: &HeadlessFolio, top: f32) -> Vec<bt_render::ChromeLabel> 
         .0
         .iter()
         .flat_map(|layer| layer.labels.iter())
-        .filter(|label| label.rect[3] <= top)
+        .filter(|label| {
+            label.rect[0] >= left
+                && label.rect[2] <= right
+                && label.rect[3] <= top
+                && label.rect[3] >= top - 12.0
+        })
         .cloned()
         .collect()
 }
@@ -2512,6 +2524,11 @@ fn labels_above(folio: &HeadlessFolio, top: f32) -> Vec<bt_render::ChromeLabel> 
 /// case — with the bar up and drawn. Returns the bar's layout.
 fn a_paused_recording(tag: &str) -> (HeadlessFolio, PreviewSurface, crate::video_seat::BarLayout) {
     let (mut folio, surface) = a_recording_beside_a_shell(tag);
+    // This window's launch has had its first-run card already. The loop the tests below run
+    // turns the application's clocks, and a headless window is a first launch: on a machine
+    // whose agent folders and install channel settle within the test, the card would come up
+    // over the pane and take the wheel's notch and the overlay's labels.
+    folio.app.first_run_attempted = true;
     let stage = stage_of(&mut folio, surface);
     click(&mut folio, on_the_picture(stage, 20.0));
     loaded(&folio, surface);
@@ -2595,7 +2612,7 @@ fn the_scrubbers_time_follows_the_hand_on_a_paused_recording() {
         PhysicalPosition::new(f64::from(track[0] + (track[2] - track[0]) * fraction), row)
     };
     let said = |folio: &HeadlessFolio| -> Vec<(String, f32)> {
-        labels_above(folio, layout.bar[1])
+        labels_over_the_bar(folio, &layout)
             .into_iter()
             .map(|label| (label.text, (label.rect[0] + label.rect[2]) / 2.0))
             .collect()
@@ -2651,7 +2668,7 @@ fn the_volumes_flash_goes_out_on_a_paused_recording() {
         runtime.flush_wheel().expect("and spent");
     }
     let flashed = |folio: &HeadlessFolio| {
-        labels_above(folio, layout.bar[1])
+        labels_over_the_bar(folio, &layout)
             .iter()
             .any(|label| label.text.ends_with('%'))
     };
@@ -2677,7 +2694,7 @@ fn the_volumes_flash_goes_out_on_a_paused_recording() {
     assert!(
         !flashed(&folio),
         "the flash is gone once its clock has run out: {:?}",
-        labels_above(&folio, layout.bar[1])
+        labels_over_the_bar(&folio, &layout)
     );
     folio.window.video.shutdown_all();
     crate::test_support::engines_settling_to(before);
