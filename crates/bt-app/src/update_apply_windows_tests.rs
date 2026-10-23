@@ -33,7 +33,9 @@ use std::time::Duration;
 
 use bt_platform::logon_hook::{self, Registry};
 use bt_platform::trust::FileVersion;
-use bt_platform::trust_harness::{Behaviour, IDENTITY, TestCa};
+use bt_platform::trust_harness::{
+    Behaviour, IDENTITY, TestCa, done_once_let_go, moved_once_let_go, renamed_once_let_go,
+};
 use bt_winres::digest::sha256;
 
 use crate::update_apply::{LastTrialCommit, Left, Window, commit_last_trial_as};
@@ -176,6 +178,8 @@ struct Fake {
     trial: Trial,
     home: Home,
     on_move: Option<MoveHook>,
+    /// Looks at each refused round of a held move (T-UPDATE-MOVE-HELD-RETRY).
+    on_move_held: Option<MoveHook>,
     on_disarm: Option<DisarmHook>,
     /// **Hold `journal.json` open without delete sharing from the trial's
     /// launch** (U-34), as a scanner might: every rename over it is refused
@@ -318,17 +322,22 @@ impl World for Fake {
             self.watchers.push(std::thread::spawn(move || {
                 crate::update_trial::watch(
                     gate,
-                    (&journal, &mark, &receipt),
+                    (
+                        &journal,
+                        crate::update_trial::Mark::on_disk(&mark),
+                        &receipt,
+                    ),
                     txn,
-                    Duration::from_millis(5),
-                    &|| {},
+                    crate::update_trial::Cadence::every(Duration::from_millis(5)),
+                    crate::update_trial::Told::to_the_log(&|| {}),
                     None,
                     &mut crate::update_trial::watchdog_asleep(),
                 );
             }));
-            while !self.home.unkept(txn).exists() {
-                std::thread::yield_now();
-            }
+            let mark = self.home.unkept(txn);
+            crate::lane::wait_until(&format!("the trial's mark {}", mark.display()), || {
+                mark.exists()
+            });
         }
         let receipt = Receipt {
             txn,
@@ -338,8 +347,10 @@ impl World for Fake {
             // As the product's trial writes it (H.1).
             started: install_flip::started_of(pid),
         };
-        install_txn::durable_create(&self.home.receipt_path(txn, &nonce), &receipt.encode())
-            .unwrap();
+        let receipt_at = self.home.receipt_path(txn, &nonce);
+        done_once_let_go(&receipt_at, || {
+            install_txn::durable_create(&receipt_at, &receipt.encode())
+        });
         if self.trial == Trial::Answers {
             watch_receipt_decision(self.home.clone(), txn, nonce);
         }
@@ -352,6 +363,12 @@ impl World for Fake {
     fn moved(&mut self, done: &Move) {
         if let Some(look) = &mut self.on_move {
             look(done);
+        }
+    }
+
+    fn move_held(&mut self, step: &Move) {
+        if let Some(look) = &mut self.on_move_held {
+            look(step);
         }
     }
 
@@ -395,10 +412,14 @@ fn watch_receipt_decision(home: Home, txn: TxnId, nonce: Nonce) {
             Box::leak(Box::new(crate::update_trial::Gate::new()));
         crate::update_trial::watch(
             gate,
-            (&journal, &mark, &receipt),
+            (
+                &journal,
+                crate::update_trial::Mark::on_disk(&mark),
+                &receipt,
+            ),
             txn,
-            Duration::from_millis(5),
-            &|| {},
+            crate::update_trial::Cadence::every(Duration::from_millis(5)),
+            crate::update_trial::Told::to_the_log(&|| {}),
             None,
             &mut crate::update_trial::watchdog_asleep(),
         );
@@ -528,7 +549,10 @@ impl Install {
                 layout: Layout::Members(self.inventories.clone()),
             },
         };
-        install_txn::durable_write(&self.home.journal(), &journal.encode()).unwrap();
+        let bytes = journal.encode();
+        done_once_let_go(&self.home.journal(), || {
+            install_txn::durable_write(&self.home.journal(), &bytes)
+        });
     }
 
     fn on_disk(&self) -> Journal {
@@ -569,6 +593,7 @@ impl Install {
             trial,
             home: self.home.clone(),
             on_move: None,
+            on_move_held: None,
             on_disarm: None,
             hold_at_launch: false,
             held: None,
@@ -659,7 +684,7 @@ impl Install {
             if step.to == Place::Backup {
                 std::fs::create_dir_all(self.folder(Place::Backup)).unwrap();
             }
-            install_txn::durable_move(&from, &to).unwrap();
+            moved_once_let_go(&from, &to);
         }
     }
 
@@ -673,8 +698,10 @@ impl Install {
             // As the product's trial writes it (H.1).
             started: install_flip::started_of(pid),
         };
-        install_txn::durable_create(&self.home.receipt_path(self.txn, &nonce), &receipt.encode())
-            .unwrap();
+        let receipt_at = self.home.receipt_path(self.txn, &nonce);
+        done_once_let_go(&receipt_at, || {
+            install_txn::durable_create(&receipt_at, &receipt.encode())
+        });
     }
 
     /// A trial process: the installed program started, and the journal's
@@ -2312,7 +2339,7 @@ fn a_rollback_over_a_held_session_notes_it_and_the_restored_build_says_so() {
     };
     flipped_at(&install, Phase::Moving);
     let aside = install.rescue.with_extension("aside");
-    std::fs::rename(&install.rescue, &aside).unwrap();
+    renamed_once_let_go(&install.rescue, &aside);
     let start = crate::update_startup::Start {
         own_exe: &install.installed,
         home: &install.home,
@@ -2328,7 +2355,7 @@ fn a_rollback_over_a_held_session_notes_it_and_the_restored_build_says_so() {
         panic!("the start continues: {:?}", held_start.said);
     };
     assert_eq!(held, Some(install.txn), "{:?}", held_start.said);
-    std::fs::rename(&aside, &install.rescue).unwrap();
+    renamed_once_let_go(&aside, &install.rescue);
 
     let (code, world) = recovered_at_logon(
         &install,
@@ -2607,13 +2634,18 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
                 }
                 if tag == "trial-answered" {
                     install.receipt(nonce, nonce, trial.pid);
-                    watch_receipt_decision(install.home.clone(), install.txn, nonce);
                 }
                 install.write(Phase::Trial {
                     nonce,
                     process: trial,
                     began_ms: now_ms(),
                 });
+                // The trial's watch starts on a journal that already says `Trial`: a watch
+                // reading `journal.json` while this fixture renames over it holds the file the
+                // rename replaces, and Windows refuses that rename (`PermissionDenied`).
+                if tag == "trial-answered" {
+                    watch_receipt_decision(install.home.clone(), install.txn, nonce);
+                }
             }
             "committed" => flipped_at(&install, Phase::Committed),
             "intent" => flipped_at(
@@ -2937,6 +2969,8 @@ fn a_journal_write_refused_for_a_moment_is_asked_again_and_the_update_completes(
     let held =
         bt_platform::trust_harness::hold_without_delete_sharing(&install.home.journal()).unwrap();
     let journal = std::fs::read(install.home.journal()).unwrap();
+    // Bare, not through `done_once_let_go`: the refusal under this test's own
+    // hold is what the test asserts.
     let refused = install_txn::durable_write(&install.home.journal(), &journal)
         .expect_err("a replacing rename over the held journal is refused");
     assert!(refused.refused_while_open(), "{refused}");
@@ -3104,6 +3138,242 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back() {
         "{:?}",
         world.said
     );
+}
+
+// ── a journal write held (T-JOURNAL-WRITE-UNDER-HOLD) ───────────────────────
+
+/// **A journal write, and the window's mark, over a file another program holds
+/// open** (T-JOURNAL-WRITE-UNDER-HOLD), with real files and a real hold
+/// (`trust_harness::hold_without_delete_sharing`, a scanner's open). The rounds
+/// are counted by what the write says on each: the hold is let go when a given
+/// round is said, so the round the write lands on is the test's, not a clock's.
+///
+/// **Windows only**: a hold that refuses a replacing rename is a Windows fact —
+/// on macOS `rename(2)` replaces an open file and `hold_without_delete_sharing`
+/// answers `Unsupported`, so there is no hold to make. What these pin that is
+/// platform-free is pinned beside the door on every platform:
+/// `bt_platform::install_txn::tests` (one file flush per hold, a removed
+/// temporary written again) and `update_apply::held_journal_tests` (the line
+/// a refused removal says).
+#[cfg(windows)]
+mod held_writes {
+    use super::*;
+    use bt_platform::trust_harness::hold_without_delete_sharing;
+
+    use crate::update_apply::{JOURNAL_HELD_WITHIN, mark_writer, write_journal};
+
+    /// A folder of this test's own, empty.
+    fn held_folder(tag: &str) -> PathBuf {
+        let folder = bt_testpath::temp_path(&format!("bt-journal-hold-{tag}"));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    /// The temporaries a durable write left in `folder`, by name.
+    fn temporaries_in(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.') && name.ends_with(".tmp"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// RED (T-JOURNAL-WRITE-UNDER-HOLD) — **a journal write another program
+    /// holds writes and flushes its temporary once: every refused round finds
+    /// the same one temporary beside the journal, the write lands on the round
+    /// after the hold is let go, and nothing is left beside the journal; a hold
+    /// past the window is given up as before, its temporary removed and the
+    /// journal byte for byte.**
+    ///
+    /// MUTATION: in `write_journal`, ask `install_txn::durable_write` each
+    /// round (the old whole write) — no temporary stands between rounds.
+    #[test]
+    fn a_held_journal_write_flushes_one_temporary_and_lands_when_the_hold_lifts() {
+        let folder = held_folder("journal");
+        let journal = folder.join("journal.json");
+        done_once_let_go(&journal, || {
+            install_txn::durable_write(&journal, br#"{"phase":"Armed"}"#)
+        });
+        let next = r#"{"phase":"Moving","note":"移动中 moving"}"#;
+        let (answer, rounds) = on_a_worker({
+            let (folder, journal) = (folder.clone(), journal.clone());
+            move |worker| {
+                let mut held = Some(hold_without_delete_sharing(&journal).unwrap());
+                let mut rounds: Vec<(String, Vec<String>)> = Vec::new();
+                let answer = write_journal(
+                    worker,
+                    &journal,
+                    next.as_bytes(),
+                    JOURNAL_HELD_WITHIN,
+                    &mut |line| {
+                        rounds.push((line.to_owned(), temporaries_in(&folder)));
+                        if rounds.len() == 3 {
+                            held = None;
+                        }
+                    },
+                );
+                drop(held);
+                (answer.map_err(|unwritten| unwritten.said), rounds)
+            }
+        });
+        assert_eq!(answer, Ok(()), "{rounds:?}");
+        assert_eq!(
+            rounds.len(),
+            3,
+            "landed on the round after the third: {rounds:?}"
+        );
+        let first = &rounds[0].1;
+        assert_eq!(first.len(), 1, "one temporary while held: {rounds:?}");
+        for (line, temporaries) in &rounds {
+            assert!(
+                line.starts_with("BT_UPDATE_JOURNAL held by another program for "),
+                "{line}"
+            );
+            assert_eq!(
+                temporaries, first,
+                "the same temporary each round: {rounds:?}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&journal).unwrap(), next);
+        assert_eq!(temporaries_in(&folder), Vec::<String>::new());
+
+        // Held for good, past a short window: given up, as before.
+        let (answer, rounds) = on_a_worker({
+            let (folder, journal) = (folder.clone(), journal.clone());
+            move |worker| {
+                let held = hold_without_delete_sharing(&journal).unwrap();
+                let mut rounds = Vec::new();
+                let answer = write_journal(
+                    worker,
+                    &journal,
+                    b"never landed",
+                    Duration::from_millis(100),
+                    &mut |_| rounds.push(temporaries_in(&folder)),
+                );
+                drop(held);
+                (answer.map_err(|unwritten| unwritten.held), rounds)
+            }
+        });
+        let held = answer.expect_err("a hold past the window is given up");
+        assert!(held.is_some(), "the hold is the refusal kept for the card");
+        assert!(!rounds.is_empty());
+        assert!(
+            rounds.iter().all(|temporaries| temporaries.len() == 1),
+            "{rounds:?}"
+        );
+        assert_eq!(temporaries_in(&folder), Vec::<String>::new(), "removed");
+        assert_eq!(std::fs::read_to_string(&journal).unwrap(), next);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// RED (T-JOURNAL-WRITE-UNDER-HOLD) — **the window's mark, asked again over
+    /// a held mark, renames the one temporary its first ask flushed and lands
+    /// it once the hold is let go; asks dropped unlanded remove their temporary.**
+    ///
+    /// MUTATION: in `mark_writer`, ask `install_txn::durable_write` each time
+    /// (the old whole write) — no temporary stands between the asks.
+    #[test]
+    fn the_window_marks_writer_asked_again_over_a_held_mark_renames_one_temporary() {
+        let folder = held_folder("mark");
+        let mark = folder.join("owner");
+        done_once_let_go(&mark, || install_txn::durable_write(&mark, b"1 1"));
+        let mine = "4242 7 窗口 owner".as_bytes();
+        let mut ask = mark_writer(&mark, mine);
+        let held = hold_without_delete_sharing(&mark).unwrap();
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            assert!(ask().is_err(), "a held mark is refused");
+            seen.push(temporaries_in(&folder));
+        }
+        assert_eq!(seen[0].len(), 1, "{seen:?}");
+        assert_eq!(seen[0], seen[1], "the same temporary: {seen:?}");
+        drop(held);
+        assert!(ask().is_ok());
+        assert_eq!(std::fs::read(&mark).unwrap(), mine);
+        assert_eq!(temporaries_in(&folder), Vec::<String>::new());
+
+        let held = hold_without_delete_sharing(&mark).unwrap();
+        let mut never = mark_writer(&mark, b"5 5");
+        assert!(never().is_err());
+        assert_eq!(temporaries_in(&folder).len(), 1);
+        drop(never);
+        assert_eq!(
+            temporaries_in(&folder),
+            Vec::<String>::new(),
+            "the dropped asks' temporary is removed"
+        );
+        drop(held);
+        assert_eq!(std::fs::read(&mark).unwrap(), mine, "byte for byte");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// RED (T-JOURNAL-WRITE-UNDER-HOLD, round 2) — **a journal write given up
+    /// whose temporary cannot be removed — another program holds the temporary
+    /// too — says so, after the give-up's line, naming the temporary**, and leaves
+    /// the journal byte for byte.
+    ///
+    /// MUTATION: in `write_journal`, drop the line said when `give_up` is
+    /// refused — the last line is the give-up's.
+    #[test]
+    fn a_given_up_journal_write_says_a_temporary_it_could_not_remove() {
+        let folder = held_folder("kept");
+        let journal = folder.join("journal.json");
+        done_once_let_go(&journal, || {
+            install_txn::durable_write(&journal, br#"{"phase":"Armed"}"#)
+        });
+        let (said, scanned) = on_a_worker({
+            let (folder, journal) = (folder.clone(), journal.clone());
+            move |worker| {
+                let held = hold_without_delete_sharing(&journal).unwrap();
+                let mut scanned = None;
+                let mut said = Vec::new();
+                let answer = write_journal(
+                    worker,
+                    &journal,
+                    "从未落地 never landed".as_bytes(),
+                    Duration::from_millis(100),
+                    &mut |line| {
+                        said.push(line.to_owned());
+                        if scanned.is_none()
+                            && let Some(name) = temporaries_in(&folder).first()
+                        {
+                            let temporary = folder.join(name);
+                            scanned =
+                                Some((hold_without_delete_sharing(&temporary).unwrap(), temporary));
+                        }
+                    },
+                );
+                assert!(answer.is_err(), "{said:?}");
+                drop(held);
+                (
+                    said,
+                    scanned.map(|(handle, temporary)| {
+                        drop(handle);
+                        temporary
+                    }),
+                )
+            }
+        });
+        let temporary = scanned.expect("a temporary stood while held");
+        let [.., given_up, kept] = said.as_slice() else {
+            panic!("{said:?}");
+        };
+        assert!(given_up.contains("the write is given up"), "{said:?}");
+        assert!(
+            kept.starts_with("BT_UPDATE_JOURNAL the given-up write's temporary was not removed: ")
+                && kept.contains(&temporary.display().to_string()),
+            "{said:?}"
+        );
+        assert!(temporary.exists(), "kept where the line says");
+        assert_eq!(
+            std::fs::read_to_string(&journal).unwrap(),
+            r#"{"phase":"Armed"}"#
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 }
 
 // ── the trial's gaps (U-37, U-38) ───────────────────────────────────────────
@@ -3719,7 +3989,8 @@ fn the_logon_run_starts_nothing_only_when_nobody_is_waiting() {
 
 /// RED (U-34) — **an exit whose start is refused tries the next program the
 /// disk names before it gives up**: the installed build will not start, and the
-/// rescue copy — O's own image, whose own home holds no journal — is started
+/// rescue copy — O's own image, which reads the install's journal for its
+/// card — is started
 /// with `--update-failed <journal>` instead.
 ///
 /// The verifier's table: "spawn of the owed opening fails → none (one line
@@ -4507,7 +4778,9 @@ fn u35_a_ready_last_trial_commits_itself_without_any_rescue_process() {
     let (home, txn) = (install.home.clone(), install.txn);
     let (me, started) = this_process();
     let (before, held, committed, again) = on_a_worker(move |worker| {
-        let before = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let before = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
         let receipt = Receipt {
             txn,
             nonce,
@@ -4515,14 +4788,23 @@ fn u35_a_ready_last_trial_commits_itself_without_any_rescue_process() {
             version: "0.4.7".to_owned(),
             started,
         };
-        install_txn::durable_create(&home.receipt_path(txn, &nonce), &receipt.encode()).unwrap();
+        let receipt_at = home.receipt_path(txn, &nonce);
+        done_once_let_go(&receipt_at, || {
+            install_txn::durable_create(&receipt_at, &receipt.encode())
+        });
         let lock = install_txn::try_hold(&home.lock(), Hold::Exclusive)
             .unwrap()
             .expect("the test holds the transaction lock");
-        let held = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let held = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
         drop(lock);
-        let committed = commit_last_trial_as(worker, &home, txn, nonce, me, started);
-        let again = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let committed = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
+        let again = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
         (before, held, committed, again)
     });
     assert_eq!(before, Ok(LastTrialCommit::Pending), "no receipt yet");
@@ -4574,6 +4856,7 @@ fn u35_an_unready_last_trial_commits_nothing_and_the_recovery_ends_it() {
             nonce,
             unready.pid,
             Some(unready.started),
+            &|line| eprintln!("{line}"),
         )
     });
     assert!(
@@ -4620,6 +4903,8 @@ fn own_receipt(install: &Install, nonce: Nonce) -> crate::update_trial::ReceiptJ
     let (me, started) = this_process();
     crate::update_trial::ReceiptJob {
         path: install.home.receipt_path(install.txn, &nonce),
+        journal: install.home.journal(),
+        txn: install.txn,
         bytes: Receipt {
             txn: install.txn,
             nonce,
@@ -4676,9 +4961,13 @@ fn u35_a_reserved_trial_that_died_ready_does_not_stop_the_next_from_committing()
     let (me, started) = this_process();
     let job = own_receipt(&install, nonce);
     let (before, written, committed) = on_a_worker(move |worker| {
-        let before = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let before = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
         let written = crate::update_trial::write_receipt(&job);
-        let committed = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let committed = commit_last_trial_as(worker, &home, txn, nonce, me, started, &|line| {
+            eprintln!("{line}")
+        });
         (before, written, committed)
     });
     assert_eq!(before, Ok(LastTrialCommit::Pending), "an earlier attempt's");
@@ -4707,8 +4996,11 @@ fn u35_a_trial_that_cannot_read_its_start_instant_is_unprovable() {
     let (me, _) = this_process();
     install.receipt(nonce, nonce, std::process::id());
     let (home, txn) = (install.home.clone(), install.txn);
-    let answer =
-        on_a_worker(move |worker| commit_last_trial_as(worker, &home, txn, nonce, me, None));
+    let answer = on_a_worker(move |worker| {
+        commit_last_trial_as(worker, &home, txn, nonce, me, None, &|line| {
+            eprintln!("{line}")
+        })
+    });
     assert_eq!(answer, Ok(LastTrialCommit::Unprovable));
     assert!(matches!(
         install.on_disk().body.phase,
@@ -4869,11 +5161,10 @@ fn u35_the_guard_and_a_start_agree_on_the_reserved_trial() {
 
 /// A receipt at `nonce`'s name carrying exactly `receipt`'s fields.
 fn receipt_as(install: &Install, nonce: Nonce, receipt: &Receipt) {
-    install_txn::durable_create(
-        &install.home.receipt_path(install.txn, &nonce),
-        &receipt.encode(),
-    )
-    .unwrap();
+    let receipt_at = install.home.receipt_path(install.txn, &nonce);
+    done_once_let_go(&receipt_at, || {
+        install_txn::durable_create(&receipt_at, &receipt.encode())
+    });
 }
 
 /// The line the recovery says when it defers.
@@ -5110,10 +5401,10 @@ fn an_unlistable_transaction_folder_defers_the_recovery() {
     let candidate = install.start_trial();
     let folder = install.home.transaction(install.txn);
     let aside = folder.with_extension("aside");
-    std::fs::rename(&folder, &aside).unwrap();
+    renamed_once_let_go(&folder, &aside);
     let (_code, world) =
         recovered_at_logon(&install, limits(5_000, 5_000), install.world(Trial::Silent));
-    std::fs::rename(&aside, &folder).unwrap();
+    renamed_once_let_go(&aside, &folder);
     assert!(deferred(&world), "{:?}", world.said);
     assert!(
         said_at(&world, "cannot be read").is_some(),
@@ -5386,7 +5677,7 @@ struct Row {
 impl Drop for Row {
     fn drop(&mut self) {
         if let Some((folder, aside)) = self.aside.take() {
-            std::fs::rename(aside, folder).unwrap();
+            renamed_once_let_go(&aside, &folder);
         }
     }
 }
@@ -5399,7 +5690,7 @@ fn make_row(install: &Install, candidate: Candidate, claim: Claim) -> Row {
     let aside = matches!(candidate, Candidate::Unlistable).then(|| {
         let folder = install.home.transaction(install.txn);
         let aside = folder.with_extension("aside");
-        std::fs::rename(&folder, &aside).unwrap();
+        renamed_once_let_go(&folder, &aside);
         (folder, aside)
     });
     let (held, squat) = match claim {
@@ -5563,14 +5854,14 @@ fn a_deferral_before_a_fresh_stuck_retrial_is_the_roads_end() {
             let folder = install.home.transaction(install.txn);
             world.on_say = Some(Box::new(move |line| {
                 if line.contains("the update is incomplete") {
-                    let _ = std::fs::rename(&folder, folder.with_extension("aside"));
+                    renamed_once_let_go(&folder, &folder.with_extension("aside"));
                 }
             }));
         }
         let (_code, world) = recovered(&install, limits(5_000, 5_000), world);
         if unlistable {
             let folder = install.home.transaction(install.txn);
-            std::fs::rename(folder.with_extension("aside"), &folder).unwrap();
+            renamed_once_let_go(&folder.with_extension("aside"), &folder);
         }
         drop(row);
         let expected = match claim {
@@ -5789,6 +6080,7 @@ fn bare_world(home: Home) -> Fake {
         trial: Trial::Silent,
         home,
         on_move: None,
+        on_move_held: None,
         on_disarm: None,
         hold_at_launch: false,
         held: None,
@@ -5837,8 +6129,10 @@ fn trial_part(root: &Path) {
             version: "0.4.7".to_owned(),
             started: Some(me.started),
         };
-        install_txn::durable_create(&home.receipt_path(plan.txn, &nonce), &receipt.encode())
-            .unwrap();
+        let receipt_at = home.receipt_path(plan.txn, &nonce);
+        done_once_let_go(&receipt_at, || {
+            install_txn::durable_create(&receipt_at, &receipt.encode())
+        });
     }
     struct Runner {
         runner: PathBuf,
@@ -5892,12 +6186,14 @@ fn trial_part(root: &Path) {
                 gate,
                 (
                     &journal,
-                    &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    crate::update_trial::Mark::on_disk(
+                        &journal.with_file_name(crate::update_txn::UNKEPT_FILE),
+                    ),
                     &home.receipt_path(plan.txn, &Nonce::new([0x7a; 32])),
                 ),
                 plan.txn,
-                Duration::from_millis(20),
-                &|| {},
+                crate::update_trial::Cadence::every(Duration::from_millis(20)),
+                crate::update_trial::Told::to_the_log(&|| {}),
                 None,
                 &mut watchdog,
             );
@@ -6486,7 +6782,9 @@ fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
         return;
     };
     let named = install.on_disk().naming(Adapter::Scoop);
-    install_txn::durable_write(&install.home.journal(), &named.encode()).unwrap();
+    done_once_let_go(&install.home.journal(), || {
+        install_txn::durable_write(&install.home.journal(), &named.encode())
+    });
     let recorder = Recorder::default();
     let road = recorded_road(&install, &recorder, limits(2_000, 2_000));
     let (ended, world) = applied_on(&install, road, install.world(Trial::Answers));
@@ -6583,7 +6881,9 @@ fn the_windows_exit_opens_the_rescue_over_what_it_cannot_read_whole() {
     let known = std::fs::read(install.home.journal()).unwrap();
     let road = install.road(limits(600, 20_000));
     for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
-        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        done_once_let_go(&install.home.journal(), || {
+            install_txn::durable_write(&install.home.journal(), &bytes)
+        });
         assert_eq!(opens_now(&road), Opens::Rescue, "{what}");
         let (program, words) = road.opening(&opens_now(&road));
         assert_eq!(program, install.rescue.as_path(), "{what}");
@@ -6600,7 +6900,9 @@ fn the_windows_exit_opens_the_rescue_over_what_it_cannot_read_whole() {
     });
     let retired = std::fs::read(install.home.journal()).unwrap();
     let [_, (what, unknown_body), _] = crate::update_txn::beyond_inputs(&retired);
-    install_txn::durable_write(&install.home.journal(), &unknown_body).unwrap();
+    done_once_let_go(&install.home.journal(), || {
+        install_txn::durable_write(&install.home.journal(), &unknown_body)
+    });
     assert_eq!(
         opens_now(&road),
         Opens::Installed { failed: true },
@@ -6628,7 +6930,9 @@ fn the_windows_lock_holder_stands_aside_from_what_it_cannot_read_whole() {
     install.write(Phase::Moving);
     let known = std::fs::read(install.home.journal()).unwrap();
     for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
-        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        done_once_let_go(&install.home.journal(), || {
+            install_txn::durable_write(&install.home.journal(), &bytes)
+        });
         for start in [Some(handed()), None] {
             let road = install.road(limits(600, 20_000));
             let mut world = install.world(Trial::Answers);
@@ -6704,7 +7008,9 @@ fn a_trial_hands_back_what_it_cannot_read_whole_to_the_rescue_its_header_names()
         .into_iter()
         .enumerate()
     {
-        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        done_once_let_go(&install.home.journal(), || {
+            install_txn::durable_write(&install.home.journal(), &bytes)
+        });
         let (home, txn) = (install.home.clone(), install.txn);
         let recorded = on_a_worker(move |worker| {
             let mut recorded = Recorded(Vec::new());
@@ -6754,4 +7060,358 @@ fn the_windows_exit_opens_the_rescue_over_a_journal_it_cannot_read() {
         Opens::Installed { failed: false },
         "no journal at all"
     );
+}
+
+// ── a member held at move time (T-UPDATE-MOVE-HELD-RETRY) ───────────────────
+//
+// The flip's and the rollback's moves, refused because another program holds
+// the member open — a scanner's hold, sharing reading and writing but not
+// deletion (`trust_harness::hold_without_delete_sharing`), so the staged
+// set's revalidation and the rollback's digests read through it as they do
+// through an on-access scan — are asked again within the window, each round
+// said; the hold is let go at a counted round through `World::move_held`, so
+// no verdict here is a measure of time.
+
+/// The hold this section's tests take, shared between the looks that take it
+/// and let it go.
+type SharedHold = Arc<Mutex<Option<std::fs::File>>>;
+
+/// The flip's first move into the install: how many moves come before it,
+/// and its member's name.
+fn first_move_in(install: &Install) -> (usize, String) {
+    let moves = install.inventories.forward_moves();
+    let at = moves
+        .iter()
+        .position(|step| step.to == Place::Install)
+        .expect("the flip moves a new file in");
+    (at, moves[at].name.clone())
+}
+
+/// **Let the hold go at the `let_go_at`-th refused round of `name`'s move**
+/// (never with `None`), counting that move's refused rounds.
+fn let_go_at_round(
+    world: &mut Fake,
+    hold: &SharedHold,
+    name: &str,
+    let_go_at: Option<usize>,
+) -> Arc<Mutex<usize>> {
+    let rounds = Arc::new(Mutex::new(0_usize));
+    let (counted, hold, name) = (Arc::clone(&rounds), Arc::clone(hold), name.to_owned());
+    world.on_move_held = Some(Box::new(move |step| {
+        if step.name != name {
+            return;
+        }
+        let mut rounds = counted.lock().unwrap();
+        *rounds += 1;
+        if Some(*rounds) == let_go_at {
+            hold.lock().unwrap().take();
+        }
+    }));
+    rounds
+}
+
+/// **`set\<name>` held from the instant the flip has made every move before
+/// the first one in** — after the staged set was verified, as a scan of the
+/// fresh set would — and let go at the `let_go_at`-th refused round of its
+/// move.
+fn held_in_set_at_the_flip(
+    install: &Install,
+    world: &mut Fake,
+    let_go_at: Option<usize>,
+) -> (SharedHold, Arc<Mutex<usize>>, String) {
+    let (before, name) = first_move_in(install);
+    let hold: SharedHold = Arc::new(Mutex::new(None));
+    let rounds = let_go_at_round(world, &hold, &name, let_go_at);
+    let (taken, held) = (Arc::clone(&hold), install.folder(Place::Set).join(&name));
+    let mut moves = 0;
+    world.on_move = Some(Box::new(move |_| {
+        moves += 1;
+        if moves == before {
+            *taken.lock().unwrap() = Some(
+                bt_platform::trust_harness::hold_without_delete_sharing(&held)
+                    .expect("the test holds the staged file"),
+            );
+        }
+    }));
+    (hold, rounds, name)
+}
+
+/// The lines that say a round of a move was refused and asked again, each
+/// beginning with `opening`.
+fn held_rounds_said(world: &Fake, opening: &str) -> usize {
+    world
+        .said
+        .iter()
+        .filter(|line| line.starts_with(opening) && line.contains("; asked again in "))
+        .count()
+}
+
+/// Whether `words` carry a hold of the member `name`: `--update-journal-held`
+/// with the system's refusal, then `--update-held-file <name>`.
+fn names_the_held_file(words: &[OsString], name: &str) -> bool {
+    words.windows(4).any(|four| {
+        four[0] == cli::UPDATE_JOURNAL_HELD_FLAG
+            && !four[1].is_empty()
+            && four[2] == cli::UPDATE_HELD_FILE_FLAG
+            && four[3] == name
+    })
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **a member of the staged set held for a
+/// moment at its move into the install is asked again, and the update goes
+/// on to its commit**: the move refused twice, each round one
+/// `` BT_UPDATE_APPLY `<name>` `` line, then let go and moved. Before, the
+/// first refusal cut the flip and a sound update was rolled back.
+///
+/// MUTATION: in `update_apply::move_held_within`, read no failure as a hold
+/// (`|_| None`) — the first refusal cuts, and the road rolls back.
+#[test]
+fn a_member_held_for_a_moment_at_the_flip_is_moved_once_let_go() {
+    let Some(install) = Install::new("held-flip") else {
+        return;
+    };
+    let mut world = install.world(Trial::Answers);
+    let (hold, rounds, name) = held_in_set_at_the_flip(&install, &mut world, Some(2));
+    let (ended, world) = applied(&install, limits(20_000, 20_000), world);
+    drop(hold);
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert_eq!(*rounds.lock().unwrap(), 2, "{:?}", world.said);
+    assert_eq!(
+        held_rounds_said(
+            &world,
+            &format!("BT_UPDATE_APPLY `{name}` held by another program for ")
+        ),
+        2,
+        "{:?}",
+        world.said
+    );
+    assert!(install.holds(Place::Install, &install.new));
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **a member held past the window cuts
+/// the flip with the member and the hold named, the rollback restores the
+/// old build, and the build started after it is told which file was held**
+/// (`--update-held-file <name>` after `--update-journal-held <refusal>`), so
+/// its card names the file — never the update record.
+///
+/// MUTATION: in `update_apply_windows::cut`, keep no file (`file: None`) —
+/// the start is told the journal was held.
+#[test]
+fn a_member_held_past_the_window_is_named_and_the_old_build_restored() {
+    let Some(install) = Install::new("held-flip-long") else {
+        return;
+    };
+    let mut world = install.world(Trial::Answers);
+    let (hold, rounds, name) = held_in_set_at_the_flip(&install, &mut world, None);
+    let (ended, world) = applied(&install, limits(20_000, 20_000), world);
+    drop(hold);
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(*rounds.lock().unwrap() > 1, "{:?}", world.said);
+    assert!(
+        said_at(
+            &world,
+            &format!(
+                "BT_UPDATE_APPLY the move of `{name}` failed: another program held it open past the window: "
+            )
+        )
+        .is_some(),
+        "{:?}",
+        world.said
+    );
+    assert!(
+        said_at(&world, "; the move is given up").is_some(),
+        "{:?}",
+        world.said
+    );
+    rolled_back_on_disk(&install);
+    let [(program, words)] = world.opened.as_slice() else {
+        panic!("one start: {:?} {:?}", world.opened, world.said);
+    };
+    assert_eq!(program, &install.installed, "the old build opens");
+    assert!(words.starts_with(&failed_words(&install.home)), "{words:?}");
+    assert!(names_the_held_file(words, &name), "{words:?}");
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **a move refused because its
+/// destination is already taken is no hold: the flip is cut at once**, no
+/// round asked or said (I1′: a move never replaces), and the rollback stops
+/// at the foreign file as before.
+///
+/// MUTATION: `update_apply::held_refusal` answers `Some` for every failure
+/// — the "already exists" refusal is asked again for the window, each round
+/// said.
+#[test]
+fn a_taken_destination_cuts_the_flip_without_asking_again() {
+    let Some(install) = Install::new("taken-dest") else {
+        return;
+    };
+    let mut world = install.world(Trial::Answers);
+    let (before, _) = first_move_in(&install);
+    let rounds = let_go_at_round(&mut world, &Arc::new(Mutex::new(None)), "folio.exe", None);
+    let obstacle = install.installed.clone();
+    let mut moves = 0;
+    world.on_move = Some(Box::new(move |_| {
+        moves += 1;
+        if moves == before {
+            std::fs::write(&obstacle, b"somebody else's file").unwrap();
+        }
+    }));
+    let (ended, world) = applied(&install, limits(20_000, 20_000), world);
+    assert!(
+        matches!(ended, Ended::Stuck(_)),
+        "{ended:?} {:?}",
+        world.said
+    );
+    assert_eq!(*rounds.lock().unwrap(), 0, "{:?}", world.said);
+    assert_eq!(
+        said_at(&world, "held by another program"),
+        None,
+        "{:?}",
+        world.said
+    );
+    assert!(
+        said_at(
+            &world,
+            "BT_UPDATE_APPLY the move of `folio.exe` failed: install_txn "
+        )
+        .is_some(),
+        "{:?}",
+        world.said
+    );
+}
+
+/// What [`held_in_backup_at_the_rollback`] sets up: the install, the world,
+/// the hold, its counted rounds and the held member's name.
+type HeldAtTheRollback = (Install, Fake, SharedHold, Arc<Mutex<usize>>, String);
+
+/// **A rollback's road with the old `name` held in `backup\`**: the flip
+/// done, the journal at `RollbackIntent` with no trial, and the hold let go
+/// at the `let_go_at`-th refused round of its move back.
+fn held_in_backup_at_the_rollback(
+    tag: &str,
+    let_go_at: Option<usize>,
+) -> Option<HeldAtTheRollback> {
+    let install = Install::new(tag)?;
+    flipped_at(
+        &install,
+        Phase::RollbackIntent {
+            trial: None,
+            trial_started: false,
+        },
+    );
+    let name = install.inventories.old_present[0].name.clone();
+    let hold: SharedHold = Arc::new(Mutex::new(Some(
+        bt_platform::trust_harness::hold_without_delete_sharing(
+            &install.folder(Place::Backup).join(&name),
+        )
+        .expect("the test holds the old file in the backup"),
+    )));
+    let mut world = install.world(Trial::Silent);
+    let rounds = let_go_at_round(&mut world, &hold, &name, let_go_at);
+    Some((install, world, hold, rounds, name))
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **the rollback's move back of an old
+/// file held for a moment is asked again, and the rollback finishes**: two
+/// refused rounds, each one `` BT_UPDATE_ROLLBACK `<name>` `` line, then
+/// `RolledBack` and the old build whole. Before, the first refusal left the
+/// rollback `Stuck`.
+///
+/// MUTATION: in `update_apply::move_held_within`, read no failure as a hold
+/// (`|_| None`) — `Stuck` at the first refusal.
+#[test]
+fn an_old_file_held_for_a_moment_at_the_rollback_is_moved_back_once_let_go() {
+    let Some((install, world, hold, rounds, name)) =
+        held_in_backup_at_the_rollback("held-back", Some(2))
+    else {
+        return;
+    };
+    let (code, world) = recovered(&install, limits(20_000, 20_000), world);
+    drop(hold);
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert_eq!(*rounds.lock().unwrap(), 2, "{:?}", world.said);
+    assert_eq!(
+        held_rounds_said(
+            &world,
+            &format!("BT_UPDATE_ROLLBACK `{name}` held by another program for ")
+        ),
+        2,
+        "{:?}",
+        world.said
+    );
+    assert_eq!(install.header().outcome, HeaderOutcome::RolledBack);
+    rolled_back_on_disk(&install);
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **an old file held past the window
+/// leaves the rollback `Stuck` with the member and the hold named, and the
+/// build started after it is told which file was held.**
+///
+/// MUTATION: in `update_apply_windows::cut`, keep no file (`file: None`) —
+/// the start is told the journal was held.
+#[test]
+fn an_old_file_held_past_the_window_leaves_the_rollback_stuck_and_named() {
+    let Some((install, world, hold, rounds, name)) =
+        held_in_backup_at_the_rollback("held-back-long", None)
+    else {
+        return;
+    };
+    let (code, world) = recovered(&install, limits(20_000, 20_000), world);
+    drop(hold);
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert!(*rounds.lock().unwrap() > 1, "{:?}", world.said);
+    let Phase::Stuck { last_error, .. } = install.on_disk().body.phase else {
+        panic!("{:?} {:?}", install.on_disk().body.phase, world.said);
+    };
+    assert!(
+        last_error.starts_with(&format!(
+            "the move of `{name}` to Install: another program held it open past the window: "
+        )),
+        "{last_error}"
+    );
+    let [(_, words)] = world.opened.as_slice() else {
+        panic!("one start: {:?} {:?}", world.opened, world.said);
+    };
+    assert!(names_the_held_file(words, &name), "{words:?}");
+}
+
+/// RED (T-UPDATE-MOVE-HELD-RETRY) — **the phase's right to a move is asked
+/// before its first attempt, never after**: under a journal whose phase does
+/// not allow the applier to move (`Handoff`), the flip refuses with the
+/// right named, nothing is moved and no round is asked. This pins
+/// "before"; "once per step" holds by structure — the call sits outside
+/// the retry (`update_apply::move_held_within`), which never asks it.
+///
+/// MUTATION: in `Ours::activate`, ask `journal.may` after the move — the
+/// first old file is moved before the refusal.
+#[test]
+fn the_right_to_a_move_is_asked_before_its_first_attempt() {
+    let Some(install) = Install::new("held-may") else {
+        return;
+    };
+    assert_eq!(install.on_disk().body.phase.kind(), PhaseKind::Handoff);
+    let (home, installed, txn, inventories, journal, world) = (
+        install.home.clone(),
+        install.installed.clone(),
+        install.txn,
+        install.inventories.clone(),
+        install.on_disk(),
+        install.world(Trial::Silent),
+    );
+    let (answer, said) = on_a_worker(move |worker| {
+        let mut world = world;
+        let journaled = Journaled::of(&home, worker, journal, Duration::from_secs(2));
+        let site = Site {
+            home: &home,
+            installed: &installed,
+            txn,
+            inventories: &inventories,
+        };
+        let answer = Ours.activate(&site, &journaled, &mut world);
+        (answer, world.said)
+    });
+    let refused = answer.expect_err("the phase does not allow a move");
+    assert!(refused.contains("may not"), "{refused}");
+    assert!(said.is_empty(), "{said:?}");
+    nothing_moved(&install);
 }

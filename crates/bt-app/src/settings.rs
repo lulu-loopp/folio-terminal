@@ -1552,15 +1552,15 @@ const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
 ///   [`begin_monospace_scan`] publishes so the button can read the family in
 ///   force from the very first frame — see there for why a seed and not an
 ///   empty list.
-/// - `offered` is where a finished walk leaves its answer, **with the number of
-///   the request it answers** (ticket 50), and `answered` is the number of the
-///   answer on screen. A request is numbered when it is made
-///   ([`ScanState::requested`]); the walk reads the number it is serving when it
-///   starts. [`Self::adopt`] takes an answer only if it is at least as new as the
-///   one on screen, so a list can never be replaced by an older one.
+/// - A finished walk's answer is the terminal of the request it answers, held
+///   by the lane's ledger (`FontLane`, on the completion seam), **with the
+///   identity the ledger minted for that request** (ticket 50; S-4), and
+///   `answered` is the identity of the answer on screen. [`Self::adopt`] takes
+///   an answer only if it is at least as new as the one on screen, so a list can
+///   never be replaced by an older one.
 ///
-/// **The rule is that only the window thread publishes.** The worker fills
-/// `offered` and asks for a wake; [`adopt_scanned_families`] moves it across,
+/// **The rule is that only the window thread publishes.** The worker publishes
+/// its terminal and asks for a wake; [`adopt_scanned_families`] moves it across,
 /// and its one caller is the `FontsScanned` arm of `user_event` — between two
 /// frames. That is not fastidiousness: `Runtime::settings_layout` is called
 /// several times within one frame (the hover, the hit test, the draw) and each
@@ -1578,50 +1578,16 @@ const FONT_SIZE_LABELS: [&str; FONT_SIZE_OPTIONS.len()] = [
 struct MonospaceFamilySlot {
     /// `(came from the machine, what a frame draws)`.
     published: std::sync::RwLock<(bool, &'static [bt_platform::MonospaceFamily])>,
-    /// What a finished walk is holding out to the window thread, and the
-    /// number of the request it answers.
-    offered: std::sync::Mutex<Option<(u64, Vec<bt_platform::MonospaceFamily>)>>,
-    /// The number of the answer on screen; `0` while the seed is. Written by
+    /// The identity of the answer on screen; `0` while the seed is. Written by
     /// [`Self::adopt`] alone, on the window thread.
     answered: std::sync::atomic::AtomicU64,
-    scan: std::sync::Mutex<ScanState>,
-}
-
-/// Whether a walk is out, and whether another was asked for while it was.
-///
-/// The second field is the whole of the coalescing: the dialog can be opened
-/// twice in the time one walk takes, and a second thread walking the same
-/// collection would answer the same question twice while the first answer was
-/// still in the post. A request made while a walk is out is not dropped either
-/// — a font may have been installed since that walk started, which is exactly
-/// the gesture `Install fonts…` invites — so it is remembered and the worker
-/// goes round once more.
-///
-/// **`requested` numbers the requests** (ticket 50; `ARCHITECTURE` §5.1's
-/// observation lane: *versioned requests … latest-result replacement only where
-/// the semantics permit*). Every ask bumps it, whether it starts a thread or
-/// rides on the one out; a walk serves the number standing when it starts, so
-/// an ask made during a walk is served by the next round with a larger number.
-/// The bounds are the ones this struct already had: one walk out, one answer
-/// held.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct ScanState {
-    running: bool,
-    again: bool,
-    requested: u64,
 }
 
 impl MonospaceFamilySlot {
     const fn new() -> Self {
         Self {
             published: std::sync::RwLock::new((false, &[])),
-            offered: std::sync::Mutex::new(None),
             answered: std::sync::atomic::AtomicU64::new(0),
-            scan: std::sync::Mutex::new(ScanState {
-                running: false,
-                again: false,
-                requested: 0,
-            }),
         }
     }
 
@@ -1721,80 +1687,19 @@ impl MonospaceFamilySlot {
         self.publish(bt_platform::order_monospace_families(named), false);
     }
 
-    /// Hold the answer to request `generation` out to the window thread.
-    /// **Worker thread.**
-    fn offer(&self, generation: u64, families: Vec<bt_platform::MonospaceFamily>) {
-        *self
-            .offered
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((generation, families));
-    }
-
-    fn take_offer(&self) -> Option<(u64, Vec<bt_platform::MonospaceFamily>)> {
-        self.offered
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-    }
-
-    /// **Take the answer a walk left, if it is not older than the one on
-    /// screen. Window thread only.**
+    /// **Put the answer to request `generation` on screen, if it is not older
+    /// than the one there. Window thread only** ([`FontLane::adopt`]).
     ///
     /// `true` when what the picker draws moved and a frame is owed. An answer
     /// older than the adopted one is dropped and changes nothing — not the
     /// list, not the number, and no frame (ticket 50).
-    fn adopt(&self) -> bool {
-        let Some((generation, families)) = self.take_offer() else {
-            return false;
-        };
+    fn adopt(&self, generation: u64, families: Vec<bt_platform::MonospaceFamily>) -> bool {
         let order = std::sync::atomic::Ordering::Relaxed;
         if generation < self.answered.load(order) {
             return false;
         }
         self.answered.store(generation, order);
         self.publish(families, true)
-    }
-
-    /// Ask for a walk, numbering the request. `true` when this call is the one
-    /// that has to start the thread; `false` when one is already out and has
-    /// been told to go round again.
-    fn claim_scan(&self) -> bool {
-        let mut held = self
-            .scan
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held.requested += 1;
-        if held.running {
-            held.again = true;
-            return false;
-        }
-        held.running = true;
-        held.again = false;
-        true
-    }
-
-    /// The number of the newest request, which is the one a walk starting now
-    /// serves. **Worker thread**, at the top of every round.
-    fn serving(&self) -> u64 {
-        self.scan
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .requested
-    }
-
-    /// A walk is done. `true` when it has to be walked once more, because a
-    /// rescan was asked for while it was out.
-    fn finish_scan(&self) -> bool {
-        let mut held = self
-            .scan
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if held.again {
-            held.again = false;
-            return true;
-        }
-        held.running = false;
-        false
     }
 }
 
@@ -1803,13 +1708,11 @@ static MONOSPACE_FAMILIES: MonospaceFamilySlot = MonospaceFamilySlot::new();
 // selects an already sorted list; it never opens a font collection.
 struct CjkFamilySlot {
     published: std::sync::RwLock<(bool, [&'static [bt_platform::CjkFamily]; 2])>,
-    offered: std::sync::Mutex<Option<Vec<bt_platform::CjkFamily>>>,
 }
 impl CjkFamilySlot {
     const fn new() -> Self {
         Self {
             published: std::sync::RwLock::new((false, [&[], &[]])),
-            offered: std::sync::Mutex::new(None),
         }
     }
     fn adopted(&self) -> &'static [bt_platform::CjkFamily] {
@@ -1843,18 +1746,6 @@ impl CjkFamilySlot {
             Box::leak(zh.into_boxed_slice()),
         ];
         true
-    }
-    fn offer(&self, families: Vec<bt_platform::CjkFamily>) {
-        *self
-            .offered
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(families);
-    }
-    fn take_offer(&self) -> Option<Vec<bt_platform::CjkFamily>> {
-        self.offered
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
     }
 }
 static CJK_FAMILIES: CjkFamilySlot = CjkFamilySlot::new();
@@ -1943,8 +1834,7 @@ fn count_walk() {
     MONOSPACE_SCANS.with(|walks| walks.set(walks.get() + 1));
 }
 
-/// How the worker's answer brings the event loop round — `psreadline::WAKE`'s
-/// shape, for its reason: the answer is published on a thread with no window,
+/// How the worker's answer brings the event loop round: the answer is published on a thread with no window,
 /// and the window that needs the repaint is very often sitting on a modal with
 /// nothing else coming to make it draw.
 static MONOSPACE_WAKE: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> =
@@ -1994,9 +1884,9 @@ pub fn monospace_scans() -> u64 {
 
 /// Teach the scan how to bring the event loop round when its answer lands.
 ///
-/// Called once, at startup, beside the four probes' own — see
-/// `psreadline::install_wake`, whose argument this is word for word: the wake
-/// belongs to the process's event loop and not to whichever call happens to
+/// Called once, at startup, beside the probes' own — see
+/// `shell_integration::install_wake`, whose argument this is word for word: the
+/// wake belongs to the process's event loop and not to whichever call happens to
 /// start the walk.
 pub fn install_font_scan_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = MONOSPACE_WAKE.set(Box::new(wake));
@@ -2046,100 +1936,216 @@ pub fn begin_monospace_scan(in_force: &str, cjk_in_force: &str) {
 /// ([`begin_monospace_scan`]) and a family named before any walk has landed
 /// ([`monospace_family_files`]).
 ///
-/// Coalesced by [`MonospaceFamilySlot::claim_scan`]: one walk out at a time,
-/// and one more round for every request made while it was.
+/// Coalesced by the lane ([`FontLane::request_walk`]): one walk out at a time, at
+/// most one waiting, and every request asked while one waits joined to it. A
+/// request the lane refuses at its door has that refusal as its outcome and is
+/// asked by nobody who waits. Past [`FONT_BOUND`], the walks already owed answer
+/// what it would have asked; after the worker's end, that end was said once, by
+/// the ledger; and when the thread door refused to start the worker, the ledger
+/// said so (once per streak), no walk stands, and the next request — the next
+/// opening of the dialog, or the next family named before a list lands — starts
+/// the worker again.
 fn request_font_walk() {
-    FONT_LANE.request();
+    let _ = FONT_LANE.request_walk();
 }
 
-/// **The font lane's parts**: the two slots a round fills, the round itself, and
-/// the wake.
+/// **How many requests the font lane's ledger owes at once**: the walk out, the
+/// one waiting and every request joined to it, and every answer the window
+/// thread has not taken yet. Far beyond a person — each request is an open of
+/// the dialog or a face applied; the bound makes a walk stuck inside the
+/// system's font collection an accounted-for set of requests, not an unbounded
+/// one. A request past it is refused at the door.
+const FONT_BOUND: usize = 16;
+
+/// The lane's name in the lines its ledger says.
+const FONT_LANE_NAME: &str = "the font lane";
+
+/// **One request for the machine's families**, its identity minted by the font
+/// lane's ledger and rising with every request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct FontId(u64);
+
+impl From<u64> for FontId {
+    fn from(minted: u64) -> Self {
+        Self(minted)
+    }
+}
+
+/// One walk's answer: the monospaced families and the CJK-capable ones.
+type FontAnswer = (
+    Vec<bt_platform::MonospaceFamily>,
+    Vec<bt_platform::CjkFamily>,
+);
+
+/// What a font request is owed: the application asked it and holds it.
+type FontOwed = crate::lane::ToTheApplication<FontAnswer, String>;
+
+/// How one font request ended.
+type FontTerminal = crate::lane::Terminal<FontId, FontAnswer, String>;
+
+/// One round of the font lane, for the newest request it answers: both lists,
+/// or the sentence that says why the machine's collection could not be read.
+type FontRound = dyn Fn(u64) -> Result<FontAnswer, String> + Send + Sync;
+
+/// **The font lane** — on the completion seam (`crate::lane`; the side-effects
+/// contract's C1–C7, S-4): the two slots a walk's answer is put into, the round
+/// itself, the worker's executor, the wake, and the requests.
+///
+/// - **Admission** ([`Self::request_walk`]): every request gets an identity minted by
+///   the lane's ledger, or is refused at the door with the ledger's refusal. The
+///   first request starts the one `font-families` worker through the executor
+///   (the thread door's in the product), which runs for the life of the lane.
+/// - **Coalescing**, kept: one walk out, at most one waiting. Every request is
+///   the same question — the machine's families now — so one asked while another
+///   waits **joins** it (`Joined { with }`, carrying its answer; revision (b)4):
+///   the walk that answers the waiting one answers both. Nothing is ever
+///   `Superseded`. A request asked while a walk is out waits for the next walk,
+///   because a font may have been installed since that walk read the collection
+///   — the gesture `Install fonts…` invites.
+/// - **Completion**: the walk runs inside its task (`lane::task`); its lists are
+///   the request's `Done`; a collection that cannot be read, or a panic in the
+///   walk, is its `Failed`, said once per streak of the same failure by the
+///   ledger (`diagnostics.log`), and the worker goes on; the worker's end ends
+///   every request still owed `WorkerGone`, faults the lane — every later
+///   request refused at the door — and wakes the loop.
+/// - **Acceptance** ([`Self::adopt`], the window thread's): the application
+///   takes every terminal in the order the ledger minted them and puts a walk's
+///   lists on screen only when they are not older than the list there.
 ///
 /// The product runs one, [`FONT_LANE`], over the process's statics. The lane
-/// contract's adapter (`settings::font_lane_adapter`, `crate::lane`) runs
-/// another over slots of its own and a round it can hold, through these same
-/// three functions — which is what lets the contract's suite speak about the
-/// product's admission ([`Self::request`]), publication ([`Self::serve`]) and
-/// acceptance ([`Self::adopt`]) rather than about a copy of them.
+/// contract's adapter (`settings::font_lane_adapter`, `crate::lane`) runs another
+/// over slots of its own, the suite's executor and a round it can hold, through
+/// these same functions — which is what lets the contract's suite speak about
+/// the product's admission, publication and acceptance rather than about a copy
+/// of them.
 struct FontLane {
     monospace: &'static MonospaceFamilySlot,
     cjk: &'static CjkFamilySlot,
-    /// One round: both lists, asked of the machine for request `generation`.
-    /// The product's is [`walk_the_machine`].
+    /// One round: both lists, asked of the machine for the newest request it
+    /// answers. The product's is [`walk_the_machine`].
     walk: &'static FontRound,
-    wake: &'static std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
+    executor: crate::lane::Executor,
+    /// The lane's wake, shared with its ledger: after a walk's terminal, and
+    /// after the worker's end.
+    wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+    requests: crate::lane::Coalescing<FontId, FontOwed, ()>,
 }
 
-/// One round of the font lane, for the request it is handed: the monospaced
-/// families and the CJK-capable ones.
-type FontRound = dyn Fn(
-        u64,
-    ) -> (
-        Vec<bt_platform::MonospaceFamily>,
-        Vec<bt_platform::CjkFamily>,
-    ) + Sync;
-
-/// The lane the product runs.
-static FONT_LANE: FontLane = FontLane {
-    monospace: &MONOSPACE_FAMILIES,
-    cjk: &CJK_FAMILIES,
-    walk: &walk_the_machine,
-    wake: &MONOSPACE_WAKE,
-};
-
-impl FontLane {
-    /// **Number a request and see that a walk serves it** — the lane's one
-    /// admission. Coalesced by [`MonospaceFamilySlot::claim_scan`].
-    fn request(&'static self) {
-        if !self.monospace.claim_scan() {
-            return;
-        }
-        if bt_platform::spawn_at_priority(
-            "font-families",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| self.serve(),
-        )
-        .is_err()
-        {
-            // A machine that will not give this process a thread keeps the seed and
-            // may be asked again at the next open. Releasing the claim is the whole
-            // of the handling: nothing in this file waits for an answer.
-            let _ = self.monospace.finish_scan();
-        }
-    }
-
-    /// The worker's whole body: walk, hold the answer out, wake, and go round again
-    /// if somebody asked while this one was out.
-    fn serve(&self) {
-        loop {
-            // The number is read before the walk, so a request made while it runs
-            // has a larger one and is served by the next round.
-            let generation = self.monospace.serving();
-            let (monospace, cjk) = (self.walk)(generation);
-            self.monospace.offer(generation, monospace);
-            self.cjk.offer(cjk);
-            // After the answer is in the mailbox and never before: a wake that
-            // raced the offer would send the loop to adopt nothing, and the frame
-            // the reader is waiting for would then be owed to a wake that is not
-            // coming.
-            if let Some(wake) = self.wake.get() {
+/// The lane the product runs: the machine's collection walked on the thread
+/// door's worker, its ledger's lines said in `diagnostics.log`, its wake the one
+/// [`install_font_scan_wake`] teaches it.
+static FONT_LANE: std::sync::LazyLock<FontLane> = std::sync::LazyLock::new(|| {
+    FontLane::new(
+        crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+        &MONOSPACE_FAMILIES,
+        &CJK_FAMILIES,
+        &walk_the_machine,
+        || {
+            if let Some(wake) = MONOSPACE_WAKE.get() {
                 wake();
             }
-            if !self.monospace.finish_scan() {
-                return;
-            }
+        },
+        crate::diagnostics::note,
+    )
+});
+
+impl FontLane {
+    /// A lane whose worker `executor` starts, putting its answers into
+    /// `monospace` and `cjk`, walking with `walk`, waking the loop with `wake`
+    /// and saying its ledger's lines through `say`.
+    fn new(
+        executor: crate::lane::Executor,
+        monospace: &'static MonospaceFamilySlot,
+        cjk: &'static CjkFamilySlot,
+        walk: &'static FontRound,
+        wake: impl Fn() + Send + Sync + 'static,
+        say: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(wake);
+        let heard = std::sync::Arc::clone(&wake);
+        let ledger = crate::lane::Ledger::new(
+            FONT_LANE_NAME,
+            Some(FONT_BOUND),
+            crate::lane::Saying::PerStreak,
+            say,
+            move || heard(),
+        );
+        Self {
+            monospace,
+            cjk,
+            walk,
+            executor,
+            wake,
+            requests: crate::lane::Coalescing::new(ledger),
         }
     }
 
-    /// **Take the answers a finished walk left** — the window thread's half of
-    /// [`MonospaceFamilySlot`]'s rule; see [`adopt_scanned_families`].
+    /// **Number a request and see that a walk serves it** — the lane's one
+    /// admission, returning at once with the request's identity or the ledger's
+    /// refusal. The first request starts the worker; a thread the door refuses
+    /// refuses that request at the door (`Refused::NotStarted`, said once per
+    /// streak) and leaves the lane as it was, so the next request starts the
+    /// worker again.
+    fn request_walk(&'static self) -> Result<FontId, crate::lane::Refused> {
+        self.requests
+            .ask(
+                (),
+                FontOwed::owed(),
+                |(), ()| true,
+                |(), ()| (),
+                |ran| {
+                    self.executor
+                        .start_worker("font-families", ran, move |ctx| run_font_lane(ctx, self))
+                },
+            )
+            .map(|admitted| admitted.id)
+    }
+
+    /// **Take every terminal the lane has ended, in the order its requests were
+    /// made, and put a walk's lists on screen** — the window thread's half of
+    /// [`MonospaceFamilySlot`]'s rule; see [`adopt_scanned_families`]. A request
+    /// that joined another carries that walk's lists; one that failed, or was
+    /// owed when the worker ended, changes nothing on screen (the ledger has said
+    /// it).
     fn adopt(&self) -> bool {
-        let monospace_changed = self.monospace.adopt();
-        let cjk_changed = self
-            .cjk
-            .take_offer()
-            .is_some_and(|families| self.cjk.publish(families, true));
-        monospace_changed || cjk_changed
+        self.requests
+            .ended()
+            .into_iter()
+            .fold(false, |changed, (id, terminal)| {
+                self.take(id, terminal) | changed
+            })
+    }
+
+    /// **One terminal, taken**: a walk's lists — its own, or the walk's it
+    /// joined — put on screen when they are not older than the list there.
+    /// `true` when what the picker draws moved.
+    fn take(&self, id: FontId, terminal: FontTerminal) -> bool {
+        let Some((monospace, cjk)) = crate::lane::answer_of(terminal) else {
+            return false;
+        };
+        let monospace = self.monospace.adopt(id.0, monospace);
+        let cjk = self.cjk.publish(cjk, true);
+        monospace || cjk
+    }
+}
+
+/// **The font lane's worker body**: the next walk standing, walked inside its
+/// task for the newest request it answers, its terminal published, then the
+/// wake — and round again, for the life of the lane.
+fn run_font_lane(ctx: &bt_platform::admission::WorkerCtx, lane: &FontLane) {
+    loop {
+        let crate::lane::Waiting {
+            operation, newest, ..
+        } = lane.requests.next(ctx);
+        let terminal = match crate::lane::task(ctx, |_| (lane.walk)(newest.0)) {
+            Ok(answer) => crate::lane::Terminal::Done(answer),
+            Err(failure) => crate::lane::Terminal::Failed(failure),
+        };
+        lane.requests.ledger().publish(operation, terminal);
+        // After the terminal is published and never before: a wake that raced
+        // the publication would send the loop to adopt nothing, and the frame the
+        // reader is waiting for would then be owed to a wake that is not coming.
+        (lane.wake)();
     }
 }
 
@@ -2150,18 +2156,20 @@ impl FontLane {
 /// never reached the Chinese-font list, however often the dialog was
 /// reopened; the platform walks now also ask the system collection for
 /// updates (`bt_platform`'s `collection_for_walk`). The round is the lane's,
-/// never the window thread's: its only product caller is [`FontLane::serve`],
+/// never the window thread's: its only product caller is [`run_font_lane`],
 /// on [`FONT_LANE`].
-fn walk_the_machine(
-    generation: u64,
-) -> (
-    Vec<bt_platform::MonospaceFamily>,
-    Vec<bt_platform::CjkFamily>,
-) {
-    let traced = std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty());
+///
+/// **A family the system cannot describe is left out and the round still
+/// answers**: the shorter list is the request's `Done`, because the system
+/// answered. **A collection that cannot be read at all fails the round**, in
+/// the platform's words: the request ends `Failed`, the ledger says it once per
+/// streak, and the list on screen stays what it was.
+fn walk_the_machine(generation: u64) -> Result<FontAnswer, String> {
+    let traced = crate::entry_doors::installed().perf;
     count_walk();
     let start = std::time::Instant::now();
-    let monospace = bt_platform::monospace_font_families();
+    let monospace = bt_platform::monospace_font_families()
+        .map_err(|error| format!("the monospaced families could not be listed: {error}"))?;
     if traced {
         crate::trace_sink::stderr_line(format!(
             "BT_PERF_TRACE monospace_enumeration_us={} families={} generation={generation}",
@@ -2171,7 +2179,8 @@ fn walk_the_machine(
     }
     count_walk();
     let start = std::time::Instant::now();
-    let cjk = bt_platform::cjk_font_families();
+    let cjk = bt_platform::cjk_font_families()
+        .map_err(|error| format!("the CJK families could not be listed: {error}"))?;
     if traced {
         crate::trace_sink::stderr_line(format!(
             "BT_PERF_TRACE cjk_enumeration_us={} families={}",
@@ -2179,7 +2188,7 @@ fn walk_the_machine(
             cjk.len()
         ));
     }
-    (monospace, cjk)
+    Ok((monospace, cjk))
 }
 
 /// **Take the answer a finished walk left** — the window thread's half of
@@ -3408,8 +3417,8 @@ pub enum SettingsRow {
     /// could press, and it now says what the press they *can* make will do.
     ///
     /// **The second row in this dialog whose answer is a fact about the machine
-    /// rather than a line in `settings.json`**, and it is filed beside
-    /// [`Self::PsReadLine`] in every respect but its page. What is being read is
+    /// rather than a line in `settings.json`**, and it was filed beside the retired
+    /// PSReadLine row in every respect but its page. What is being read is
     /// whether two keys exist under `HKCU\Software\Classes` and whether a package
     /// is registered for this user, and both are read back off the machine every
     /// time the dialog is drawn — see [`crate::context_menu`] and
@@ -3427,7 +3436,7 @@ pub enum SettingsRow {
     /// leaves no state this row can see and cannot clear.
     ///
     /// **Nothing on it is ever refused**, which retired the greyed-item
-    /// machinery it borrowed from [`Self::PsReadLine`] and
+    /// machinery it borrowed from the retired PSReadLine row and
     /// [`Self::DefaultProfile`] for one afternoon: a machine that cannot reach
     /// the first page can still hold the classic entry, so both of a switch's
     /// states are always honourable and the machine decides only how much `On`
@@ -3697,24 +3706,6 @@ pub enum SettingsRow {
     /// grid and tell every shell its new cell size, and a font size change is
     /// the same event arriving through another door.
     FontSize,
-    /// **The Terminal page's first row**, and therefore the row that puts that
-    /// page in the rail (§7.1.6c-3b).
-    ///
-    /// An On/Off picker and not a pair of buttons, and the choice is worth
-    /// stating because the ticket left it open. What the user is deciding is a
-    /// state — *is Folio's patched PSReadLine installed on this machine* — and a
-    /// state with two values is what every other picker in this dialog already
-    /// draws. A button row would have needed a tenth row function, a new hit
-    /// target, a new focus stop and a new drawing, to express the same two
-    /// answers less clearly.
-    ///
-    /// Both items can be unavailable, which is the second reason the combo fits:
-    /// `On` is dark under an execution policy that would refuse the module, and
-    /// `Off` is dark unless the copy on disk is byte for byte the one Folio
-    /// wrote. That is [`Self::DefaultProfile`]'s greyed-item machinery, already
-    /// spelled once for both the hit test and the draw, and the description
-    /// carries the reason.
-    PsReadLine,
     /// **How much of its own past one pane keeps** — the Terminal page's second
     /// row (P2-9 slice 2, 2026-08-19).
     ///
@@ -3824,15 +3815,22 @@ pub enum SettingsRow {
     /// been interrupted by their agent finishing is looking for the switch that
     /// stops it, and a switch behind a disclosure is a switch they do not find.
     TurnEndNotifications,
-    /// Whether new PowerShell panes receive Folio's process-scoped integration.
-    /// Directly under [`Self::PsReadLine`] because both controls describe the
-    /// PowerShell pane Folio is about to start. It is not an Advanced row: the
-    /// feature is on by default and its switch must be visible where its effect
-    /// is described.
+    /// Whether new PowerShell panes receive Folio's process-scoped integration — and, for a
+    /// Windows PowerShell pane, Folio's own PSReadLine with it (T-INTEGRATION-INJECT-2-BUILD:
+    /// the prefix and the loader are one decision, so this switch is also the road back to the
+    /// account's own editor). It is not an Advanced row: the feature is on by default and its
+    /// switch must be visible where its effect is described.
     ShellIntegration,
     /// Conditional cleanup door for a `$PROFILE` line written by an earlier
     /// Folio. It is absent when the startup worker found no such line.
     PowerShellProfileLine,
+    /// **Conditional cleanup door for the PSReadLine copy an earlier Folio wrote into Documents**
+    /// (T-INTEGRATION-INJECT-2-BUILD, owner ruling Q4), on [`Self::PowerShellProfileLine`]'s
+    /// precedent: the copy stays where it is, Windows Terminal and the account's other hosts keep
+    /// what they have, and this row offers its removal only while the remover would act
+    /// (`psreadline::legacy_copy_present`, observed on a worker). Folio's own panes no longer load
+    /// it. It replaces the Terminal page's install row and the invitation, which are retired.
+    LegacyPsReadLine,
     /// **Whether Claude Code tells this window when it is waiting for you**
     /// (`docs/plans/attention/plan.md` §3.3, ruled 2026-08-25).
     ///
@@ -3997,9 +3995,9 @@ impl SettingsRow {
             // And the row that is about the pane's other axis: how a line wider
             // than the pane is set is the same kind of question as how much of
             // the past the pane keeps, asked sideways.
-            Self::PsReadLine
-            | Self::ShellIntegration
+            Self::ShellIntegration
             | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine
             | Self::Scrollback
             | Self::LineWrapping
             | Self::CopyOnSelect
@@ -4150,7 +4148,7 @@ impl SettingsRow {
             Self::ContextMenu => Some(Capability::ExplorerMenu),
             Self::ShellIntegration => None,
             Self::PowerShellProfileLine => None,
-            Self::PsReadLine => Some(Capability::PsReadLineModule),
+            Self::LegacyPsReadLine => None,
             Self::Acrylic => Some(Capability::WindowBackdrop),
             Self::OptionSendsAlt => Some(Capability::OptionKey),
             _ => None,
@@ -4175,6 +4173,7 @@ impl SettingsRow {
             Self::TurnEndNotifications => Text::RowTurnEndNotifications.text(),
             Self::ShellIntegration => Text::RowShellIntegration.text(),
             Self::PowerShellProfileLine => Text::RowPowerShellProfileLine.text(),
+            Self::LegacyPsReadLine => Text::RowLegacyPsReadLine.text(),
             Self::ClaudeHooks => Text::RowClaudeHooks.text(),
             Self::CodexNotify => Text::RowCodexNotify.text(),
             Self::CopilotHooks => Text::RowCopilotHooks.text(),
@@ -4203,7 +4202,6 @@ impl SettingsRow {
             Self::FontSize => Text::RowFontSize.text(),
             Self::LightScheme => Text::RowLightScheme.text(),
             Self::DarkScheme => Text::RowDarkScheme.text(),
-            Self::PsReadLine => Text::RowPsReadLine.text(),
             Self::ProfileName => Text::ProfilesRowName.text(),
             Self::ProfileProgram => Text::ProfilesRowProgram.text(),
             Self::ProfileLogin => Text::ProfilesRowLogin.text(),
@@ -4350,6 +4348,7 @@ impl SettingsRow {
             // that is coming.
             Self::ShellIntegration => Text::DescShellIntegration.text(),
             Self::PowerShellProfileLine => Text::DescPowerShellProfileLine.text(),
+            Self::LegacyPsReadLine => Text::DescLegacyPsReadLine.text(),
             // Two facts and no opinion, `Explorer context menu`'s shape: what
             // is written, and where. The second is there because a reader who
             // does not know a terminal is about to edit a file belonging to
@@ -4447,15 +4446,9 @@ impl SettingsRow {
             // The folder is named on the dark half alone — see the two strings.
             Self::LightScheme => Text::DescLightScheme.text(),
             Self::DarkScheme => Text::DescDarkScheme.text(),
-            // The one description in the dialog that reports a fact about the
-            // machine rather than about the setting: which PSReadLine is
-            // installed, and what that costs today. It is also where the reason
-            // a greyed item is grey is written — see the variant.
-            Self::PsReadLine => crate::psreadline::row_description(values.psreadline),
             // **A refusal replaces the sentence**, which is this dialog's own
-            // idiom for a control that cannot act — the same line
-            // `psreadline::row_description` writes on its greyed row and the same
-            // line an unavailable profile carries. The field keeps what was typed
+            // idiom for a control that cannot act — the same line an unavailable
+            // profile carries. The field keeps what was typed
             // while it says so, because the refusal is a state the reader is
             // standing in and not an error they submitted.
             Self::ProfileName => values
@@ -4473,8 +4466,7 @@ impl SettingsRow {
             Self::ProfileStartAt => Text::ProfilesRowStartingDirDesc.text(),
             // **The row's sentence becomes the reason** on a built-in, which is
             // this dialog's own idiom for a control that is not the reader's to
-            // press — the same line `psreadline::row_description` writes and the
-            // same line an unavailable row carries. The five identity colours
+            // press — the same line an unavailable row carries. The five identity colours
             // are not this product's to repaint (S98/S31).
             Self::ProfileColour => values.editor.map_or_else(
                 || Text::ProfilesRowColourDesc.text(),
@@ -4498,8 +4490,8 @@ impl SettingsRow {
             Self::ImageFit => Text::DescImageFit.text(),
             Self::ImageOpacity => Text::DescImageOpacity.text(),
             // The two rows that can be greyed whole say *why* on this line
-            // instead of saying what they do — `psreadline::row_description`'s
-            // ruling, generalised: there is one muted line under a title, and a
+            // instead of saying what they do — the ruling the retired PSReadLine
+            // row was the first to follow (§7.47), generalised: there is one muted line under a title, and a
             // row that cannot act has exactly one thing worth putting on it. It
             // states the fact and does not apologise for it (user ruling
             // 2026-08-17: UI copy carries no editorial).
@@ -4639,7 +4631,8 @@ impl SettingsRow {
             Self::ExportSettings
             | Self::ImportSettings
             | Self::SettingsFolder
-            | Self::PowerShellProfileLine => SettingsControl::Link,
+            | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine => SettingsControl::Link,
             // The uninstaller's door is a door like them; on a copy a package
             // manager installed, the row states the fact instead (T-UNINSTALL-UX).
             Self::Uninstall => SettingsControl::Link,
@@ -4734,8 +4727,8 @@ impl SettingsRow {
             // thing, and the answer to "why does this key not do what it does
             // everywhere else" must not be behind a disclosure.
             | Self::OptionSendsAlt
-            // Not advanced, on `PsReadLine`'s own measure: it is a row that
-            // repairs something the reader has already gone looking for, and a
+            // Not advanced: it is a row that repairs something the reader has
+            // already gone looking for, and a
             // reader who wants Folio in their right-click menu has no reason to
             // guess that the answer is behind a disclosure.
             | Self::ContextMenu
@@ -4754,9 +4747,9 @@ impl SettingsRow {
             | Self::QuakeTopGap
             | Self::QuakeDismiss
             | Self::QuakeRestore
-            | Self::PsReadLine
             | Self::ShellIntegration
             | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine
             // On the row above's test, said again for the reader who has just watched an agent
             // wait for them with nothing on its tab: this is what they are looking for, and a
             // switch behind a disclosure is a switch they will not find.
@@ -4890,7 +4883,6 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::KeyHints
             | Self::OptionSendsAlt
-            | Self::PsReadLine
             | Self::CopyOnSelect
             | Self::MultilinePaste
             | Self::Notifications
@@ -4969,7 +4961,10 @@ impl SettingsRow {
             | Self::AboutIssues
             | Self::AboutLicences
             | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder
-            | Self::PowerShellProfileLine | Self::Uninstall | Self::UninstallBy => 0,
+            | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine
+            | Self::Uninstall
+            | Self::UninstallBy => 0,
         }
     }
 
@@ -4992,7 +4987,6 @@ impl SettingsRow {
             | Self::GitPanel
             | Self::KeyHints
             | Self::OptionSendsAlt
-            | Self::PsReadLine
             | Self::CopyOnSelect
             | Self::MultilinePaste
             | Self::Notifications
@@ -5124,6 +5118,7 @@ impl SettingsRow {
             | Self::ImportSettings
             | Self::SettingsFolder
             | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine
             | Self::Uninstall
             | Self::UninstallBy => None,
         }
@@ -5219,18 +5214,6 @@ impl SettingsRow {
     /// row is a copy of.
     #[must_use]
     pub fn value_text(self, values: &SettingsValues) -> Option<&'static str> {
-        // **Before the editor's own gate**, because this row is not the editor's
-        // and its answer is a fact about the machine rather than about a profile.
-        // `Update` is not one of the row's two items and never can be — `On` and
-        // `Off` are what a reader does to this row — but it is what the row's
-        // *value* is when an older Folio build is the module on disk, and the
-        // button is the one place on the row a reader looks for that
-        // (§7.1.6c-3b, user ruling 2026-08-18).
-        if self == Self::PsReadLine
-            && values.psreadline == crate::psreadline::RowState::UpdateAvailable
-        {
-            return Some(Text::PsReadLineUpdate.text());
-        }
         let editor = values.editor?;
         match self {
             Self::ProfileStartAt => editor.fixed_folder,
@@ -5375,19 +5358,9 @@ impl SettingsRow {
                     .copied()
                     .unwrap_or(false),
             },
-            // The second row whose items can be unavailable, and the only one
-            // where choosing an unavailable item would *do* something: `On`
-            // under a refusing execution policy writes files no shell will load,
-            // and `Off` on a module Folio did not write deletes somebody else's
-            // directory. Answered once, read by the hit test and the draw alike.
-            Self::PsReadLine => match FORMULA_OPTIONS.get(index).copied() {
-                Some(true) => values.psreadline_install_available,
-                Some(false) => values.psreadline_remove_available,
-                None => false,
-            },
             // **The three agent rows, when the file is one this build will not edit** (re-review
             // f): a link out of the agent's own folder, a file shared by hard links, a read-only
-            // one. `PsReadLine`'s rule above, for its reason — the row's line already says what
+            // one. The rule a row whose items can be unavailable keeps — the row's line already says what
             // the machine is, and a switch that stayed pressable would be offering an action the
             // line says will not happen. Neither `On` nor `Off`: there is no press that reaches
             // that file, in either direction.
@@ -5492,8 +5465,7 @@ impl SettingsRow {
             Self::CopilotHooks => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.copilot_hooks),
-            // **The state of the machine, read from two stores at once**, like
-            // `PsReadLine` below and for the same reason: what is ticked is
+            // **The state of the machine, read from two stores at once**: what is ticked is
             // whether Explorer's menu carries the verb at all, which only the
             // registry and the deployment database can answer. Never a stored
             // answer — a `settings.json` copy of either would be free to
@@ -5553,22 +5525,6 @@ impl SettingsRow {
             Self::FontSize => Some(values.font_size),
             Self::LightScheme => Some(values.light_scheme),
             Self::DarkScheme => Some(values.dark_scheme),
-            // The *state of the machine*, not a stored preference: what the row
-            // shows ticked is whether the module is on disk, which is what a
-            // reader is actually asking. `settings.json`'s own field records
-            // whether they were asked, which is a different question and has no
-            // picker.
-            Self::PsReadLine => FORMULA_OPTIONS.iter().position(|it| {
-                *it == matches!(
-                    values.psreadline,
-                    // An older Folio build's module is still a module that is
-                    // *there*, so the tick stands on `On` and the button says
-                    // `Update` beside it. A tick on `Off` would be the row
-                    // claiming the directory is empty while offering to empty it.
-                    crate::psreadline::RowState::InstalledByFolio
-                        | crate::psreadline::RowState::UpdateAvailable
-                )
-            }),
             // The *resolved* default, which is why the caller hands over an index
             // rather than the stored id. **Mock-up bug not copied** (2471): its
             // combo button is born with the literal text `PowerShell` and only
@@ -5627,6 +5583,7 @@ impl SettingsRow {
             | Self::ImportSettings
             | Self::SettingsFolder
             | Self::PowerShellProfileLine
+            | Self::LegacyPsReadLine
             | Self::Uninstall
             | Self::UninstallBy => None,
         }
@@ -5651,6 +5608,7 @@ impl SettingsRow {
             Self::SettingsFolder => Some(Text::AboutOpen.text()),
             Self::Uninstall => Some(Text::UninstallVerb.text()),
             Self::PowerShellProfileLine => Some(Text::RemovePowerShellProfileLine.text()),
+            Self::LegacyPsReadLine => Some(Text::RemoveLegacyPsReadLine.text()),
             // The manager's own name: a proper noun, in no column of the table.
             Self::UninstallBy => crate::uninstall::managed_uninstall()
                 .map(|(manager, _)| crate::uninstall::manager_name(manager)),
@@ -5692,6 +5650,7 @@ impl SettingsRow {
                 | Self::ImportSettings
                 | Self::Uninstall
                 | Self::PowerShellProfileLine
+                | Self::LegacyPsReadLine
         )
     }
 
@@ -5986,6 +5945,28 @@ pub fn retain_powershell_profile_remover(rows: &mut Vec<SettingsRow>, line_prese
     }
 }
 
+/// **Apply the worker-observed state of an earlier Folio's PSReadLine copy** (owner ruling Q4,
+/// T-INTEGRATION-INJECT-2-BUILD) — [`retain_powershell_profile_remover`]'s twin: the one-shot
+/// removal verb stands under the switch (and under the `$PROFILE` line's verb when that one
+/// stands) only while `copy_present`, which is the remover's own predicate
+/// (`psreadline::legacy_removable`), and is gone otherwise.
+pub fn retain_legacy_psreadline_remover(rows: &mut Vec<SettingsRow>, copy_present: bool) {
+    rows.retain(|row| *row != SettingsRow::LegacyPsReadLine);
+    if !copy_present {
+        return;
+    }
+    let after = rows
+        .iter()
+        .position(|row| *row == SettingsRow::PowerShellProfileLine)
+        .or_else(|| {
+            rows.iter()
+                .position(|row| *row == SettingsRow::ShellIntegration)
+        });
+    if let Some(after) = after {
+        rows.insert(after + 1, SettingsRow::LegacyPsReadLine);
+    }
+}
+
 /// The order, with no platform question asked of it.
 fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // ── Appearance, everyday ──
@@ -6040,8 +6021,8 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // card is, and this row is the only place in the dialog that sentence can be
     // read. It is *not* behind the disclosure — the reader it exists for is one
     // who has already looked at the column and found it showing the wrong
-    // thirteen rows, which is `PsReadLine`'s own measure for what does not
-    // belong under Advanced.
+    // thirteen rows, which is this dialog's measure for what does not belong
+    // under Advanced.
     rows.push(SettingsRow::FocusCardHeight);
     // ── Appearance, advanced ──
     //
@@ -6131,15 +6112,10 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::QuakeTopGap);
     rows.push(SettingsRow::QuakeDismiss);
     rows.push(SettingsRow::QuakeRestore);
-    rows.push(SettingsRow::PsReadLine);
-    // **Beside it**, because the two are this page's PowerShell controls: first
-    // the module this shell already loads, then what Folio loads into its own
-    // new panes. The conditional cleanup verb for an old profile line follows
-    // the switch it is about.
+    // This page's PowerShell control: what Folio loads into its own new panes (the integration,
+    // and Folio's PSReadLine in a Windows PowerShell pane). The conditional cleanup verbs for an
+    // earlier Folio's profile line and PSReadLine copy follow the switch they are about.
     rows.push(SettingsRow::ShellIntegration);
-    // **Under the PSReadLine row**, which is the mock-up's own order for this page
-    // (4838, then 4862): the row that reports a fact about the machine stands
-    // first and the row that changes what a pane does stands under it.
     rows.push(SettingsRow::Scrollback);
     // **Directly under it**, which is the mock-up's own order again (6000) and
     // the pairing the page is built on: the two rows are the pane's two axes.
@@ -6467,31 +6443,10 @@ impl SettingsContent<'_> {
         }
     }
 
-    /// **Whether showing this page has to ask the machine about PSReadLine**
-    /// (§7.1.6c-5).
-    ///
-    /// Derived from the page's own rows rather than named as a category, for the
-    /// reason every other answer in this file is derived that way: the row is
-    /// what needs the probe, so moving it to another page moves the trigger with
-    /// it and a page that loses it stops asking.
-    ///
-    /// The bug it closes is one a user reported by not reporting it: the probe
-    /// was started by the first `Windows PowerShell` pane and by nothing else,
-    /// so a reader who had never opened one — every WSL and `pwsh` user — found
-    /// this row reading "Checking this machine's PSReadLine" for as long as they
-    /// cared to look at it. The row is drawn from an answer nobody had asked
-    /// for.
-    #[must_use]
-    pub fn probes_psreadline(&self, category: SettingsCategory) -> bool {
-        self.rows
-            .iter()
-            .any(|row| *row == SettingsRow::PsReadLine && row.category() == category)
-    }
-
     /// **Whether showing this page has to ask the machine which copilot it has.**
     ///
-    /// [`Self::probes_psreadline`]'s twin, derived from the page's own rows for that one's reason:
-    /// the row is what needs the answer, so moving it moves the trigger and a build that has lost
+    /// Derived from the page's own rows rather than named as a category: the row is what needs
+    /// the answer, so moving it moves the trigger and a build that has lost
     /// the row stops starting a node process to answer a question nobody prints.
     #[must_use]
     pub fn probes_copilot(&self, category: SettingsCategory) -> bool {
@@ -6502,7 +6457,7 @@ impl SettingsContent<'_> {
 
     /// **Whether this page carries a row about an agent's own configuration file.**
     ///
-    /// [`Self::probes_psreadline`]'s shape and for its reason: the rows are what need the answer,
+    /// [`Self::probes_copilot`]'s shape and for its reason: the rows are what need the answer,
     /// so moving one moves the trigger and a build that has lost them re-reads nothing.
     #[must_use]
     pub fn shows_agents(&self, category: SettingsCategory) -> bool {
@@ -6616,8 +6571,8 @@ pub struct SettingsValues {
     /// Whether Explorer's right-click menu carries Folio's verb — **read off the
     /// registry, not out of `settings.json`**.
     ///
-    /// [`SettingsValues::psreadline`]'s ruling for a second row: what the tick
-    /// says is what the machine is, so a hand-edited registry, a copy of Folio
+    /// A fact about the machine, not a stored answer: what the tick says is what
+    /// the machine is, so a hand-edited registry, a copy of Folio
     /// uninstalled from another folder or a restored backup all move this row
     /// rather than leaving it claiming something that is no longer true.
     pub context_menu: bool,
@@ -6744,13 +6699,6 @@ pub struct SettingsValues {
     pub light_scheme: usize,
     /// The same for the dark picker.
     pub dark_scheme: usize,
-    /// What the PSReadLine row is describing, reconciled from the out-of-band
-    /// probe and the module actually on disk.
-    pub psreadline: crate::psreadline::RowState,
-    /// Whether the row's `On` item can be chosen on this machine.
-    pub psreadline_install_available: bool,
-    /// Whether its `Off` item can be — true only for a module Folio wrote.
-    pub psreadline_remove_available: bool,
     /// Which profiles this machine can start, in table order.
     ///
     /// A `Vec` rather than a borrowed `ProfilePrograms`, and a `Vec` rather than
@@ -6915,9 +6863,6 @@ impl SettingsValues {
             font_size: font_size_index(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
             light_scheme: scheme_index(bt_persist::DEFAULT_LIGHT_SCHEME, true),
             dark_scheme: scheme_index(bt_persist::DEFAULT_DARK_SCHEME, false),
-            psreadline: crate::psreadline::RowState::Outdated,
-            psreadline_install_available: true,
-            psreadline_remove_available: false,
             // A fully equipped machine, so a geometry test is not quietly also a
             // test of what is installed on the one running it.
             profile_available: vec![true; profiles::count()],
@@ -7060,11 +7005,9 @@ impl EditorSubject {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SettingsPanel {
     open: bool,
-    /// Whether this visit has consumed the PSReadLine row's disk-read edge.
-    /// Reset by the panel's own page/open/close transitions, even if no layout
-    /// was requested between closing and reopening.
-    psreadline_visit_read: bool,
-    /// The same latch for the three agent rows. Their switches are inert while the file they name
+    /// Whether this visit has consumed the three agent rows' disk-read edge, reset by the
+    /// panel's own page/open/close transitions, even if no layout was requested between closing
+    /// and reopening. Their switches are inert while the file they name
     /// is one this build will not edit, so a press cannot be what notices that the reader has
     /// unpicked the link or cleared the read-only bit — opening the page is (re-review, round 3).
     agents_visit_read: bool,
@@ -7394,18 +7337,9 @@ impl SettingsPanel {
         self.category
     }
 
-    /// Consume the first showing of the PSReadLine row on this page visit.
-    pub fn take_psreadline_open_edge(&mut self, showing: bool) -> bool {
-        if !self.open || !showing {
-            return false;
-        }
-        !std::mem::replace(&mut self.psreadline_visit_read, true)
-    }
-
     /// Consume the first showing of the agent rows on this page visit.
     ///
-    /// [`Self::take_psreadline_open_edge`]'s twin, and the same three properties: an edge and not
-    /// a state, reset by every road off the page (another category, a close, a reopen, a page the
+    /// An edge and not a state, reset by every road off the page (another category, a close, a reopen, a page the
     /// dialog fell back to), and false while the page is merely being redrawn.
     pub fn take_agents_open_edge(&mut self, showing: bool) -> bool {
         if !self.open || !showing {
@@ -7483,7 +7417,6 @@ impl SettingsPanel {
             return false;
         }
         self.category = category;
-        self.psreadline_visit_read = false;
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
         self.update_mark_carried = false;
@@ -7518,7 +7451,6 @@ impl SettingsPanel {
         self.open = !self.open;
         self.uninstall_remove_data = false;
         self.uninstall_card = None;
-        self.psreadline_visit_read = false;
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
         self.update_mark_carried = false;
@@ -7599,7 +7531,6 @@ impl SettingsPanel {
         self.open = false;
         self.uninstall_remove_data = false;
         self.uninstall_card = None;
-        self.psreadline_visit_read = false;
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
         self.update_mark_carried = false;
@@ -7934,7 +7865,6 @@ impl SettingsPanel {
         // existing under it.
         if !content.has_content(self.category) {
             self.category = content.first_category();
-            self.psreadline_visit_read = false;
             self.agents_visit_read = false;
             self.profiles_visit_read = false;
             self.update_mark_carried = false;
@@ -9812,7 +9742,8 @@ impl ProfileButton {
             | Fallback::Unreadable
             | Fallback::Undetermined
             | Fallback::Unsupported
-            | Fallback::Constrained => None,
+            | Fallback::Constrained
+            | Fallback::NotRun => None,
         }
     }
 
@@ -10726,26 +10657,6 @@ pub fn dark_scheme_requested(target: SettingsTarget) -> Option<&'static str> {
     match target {
         SettingsTarget::Choice(SettingsRow::DarkScheme, index) => {
             scheme_labels(false).get(index).copied()
-        }
-        _ => None,
-    }
-}
-
-/// Whether the patched PSReadLine was asked for or asked to go.
-///
-/// **A greyed item answers here too** (§7.47). The row's two items go dark on a
-/// machine that cannot honour them, and until 2026-08-29 a press on one was
-/// dropped by the hit test and never reached this function — so the product
-/// refused an install and said nothing, on any surface. The press now arrives,
-/// and the runtime hands it to the one door
-/// (`crate::psreadline::apply`), which either does the thing or returns the
-/// sentence that says why it did not.
-#[must_use]
-pub fn psreadline_requested(target: SettingsTarget) -> Option<bool> {
-    match target {
-        SettingsTarget::Choice(SettingsRow::PsReadLine, index)
-        | SettingsTarget::ChoiceRefused(SettingsRow::PsReadLine, index) => {
-            FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
     }
@@ -16983,47 +16894,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn psreadline_page_open_is_an_edge_even_without_a_closed_layout() {
-        let rows = [SettingsRow::PsReadLine];
-        let mut panel = SettingsPanel::default();
-        assert!(!panel.take_psreadline_open_edge(true));
-        panel.toggle(content(&rows, &[]));
-        assert!(panel.take_psreadline_open_edge(true));
-        for _ in 0..200 {
-            assert!(!panel.take_psreadline_open_edge(true));
-        }
-        assert!(!panel.select_category(SettingsCategory::Terminal));
-        assert!(!panel.take_psreadline_open_edge(true));
-        panel.select_category(SettingsCategory::General);
-        assert!(!panel.take_psreadline_open_edge(false));
-        panel.select_category(SettingsCategory::Terminal);
-        assert!(panel.take_psreadline_open_edge(true));
-        panel.close();
-        panel.toggle(content(&rows, &[]));
-        assert!(
-            panel.take_psreadline_open_edge(true),
-            "close/reopen needs no intervening layout"
-        );
-        panel.toggle(content(&rows, &[]));
-        assert!(!panel.take_psreadline_open_edge(true));
-        panel.toggle(content(&rows, &[]));
-        assert!(panel.take_psreadline_open_edge(true));
-        panel.select_category(SettingsCategory::General);
-        panel.keep_focus_reachable(content(&rows, &[]));
-        assert_eq!(panel.category(), SettingsCategory::Terminal);
-        assert!(
-            panel.take_psreadline_open_edge(true),
-            "fallback also opens a new visit"
-        );
-        assert!(panel.close_one_layer());
-        panel.toggle(content(&rows, &[]));
-        assert!(
-            panel.take_psreadline_open_edge(true),
-            "Escape also rearms the visit"
-        );
-    }
-
     /// RED (mutation: return `self.open` instead of consuming the visit latch)
     /// — profile and policy facts refresh once per Profiles-page visit, never
     /// once per frame.
@@ -17051,7 +16921,7 @@ mod tests {
     ///
     /// The switch takes no press while the file it names is one this build will not edit, so the
     /// press cannot be what notices that the reader has unpicked the link or cleared the read-only
-    /// bit. Opening the page is, on `PsReadLine`'s own latch: an edge per visit, rearmed by every
+    /// bit. Opening the page is, on the Profiles page's latch: an edge per visit, rearmed by every
     /// road off the page, and never a per-frame read — two hundred layouts on the open page ask
     /// the disk nothing.
     ///
@@ -17067,7 +16937,9 @@ mod tests {
         let page = content(&rows, &[]);
         assert!(page.shows_agents(SettingsCategory::Agents));
         assert!(!page.shows_agents(SettingsCategory::Terminal));
-        assert!(!content(&[SettingsRow::PsReadLine], &[]).shows_agents(SettingsCategory::Agents));
+        assert!(
+            !content(&[SettingsRow::ShellIntegration], &[]).shows_agents(SettingsCategory::Agents)
+        );
 
         let mut panel = SettingsPanel::default();
         assert!(
@@ -17402,7 +17274,7 @@ mod tests {
         assert!(
             !found_in(
                 bt_source::needle!(bt_source::Pattern::text(
-                    "impl settings::geometry::PointerHost for Runtime<'_>"
+                    "impl<B: Backend> settings::geometry::PointerHost for Runtime<'_, B>"
                 )),
                 bt_source::View::Raw,
                 bt_source::Scope::Module("crate".to_owned()),
@@ -17479,9 +17351,8 @@ mod tests {
             coverage: bt_platform::CjkCoverage::from_code_pages(1 << 17),
             ..Default::default()
         };
-        slot.offer(vec![chinese, japanese]);
         assert!(slot.adopted().is_empty());
-        assert!(slot.publish(slot.take_offer().unwrap(), true));
+        assert!(slot.publish(vec![chinese, japanese], true));
         assert!(slot.scanned());
         let held = slot.published.read().unwrap();
         assert_eq!(
@@ -17509,7 +17380,8 @@ mod tests {
     fn cjk_settings_layout_timing_probe() {
         let families = std::thread::spawn(bt_platform::cjk_font_families)
             .join()
-            .unwrap();
+            .unwrap()
+            .expect("the machine answers");
         CJK_FAMILIES.publish(families, true);
         let mut fonts = bt_render::preview_measure_font_system();
         let rows = every_row_of_the_dialog(TabLayoutMode::Horizontal);
@@ -17684,17 +17556,63 @@ mod tests {
         );
     }
 
+    /// What a font lane of a test's own has said, line by line, through its
+    /// ledger's `say`.
+    type Said = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// **A font lane of the test's own**: slots of its own, the suite's executor
+    /// over `gate`, the round `walk`, its wake heard on a channel and its
+    /// ledger's lines kept. Leaked, for the `'static` its worker needs.
+    fn font_lane(
+        gate: &std::sync::Arc<crate::lane::Gate>,
+        walk: impl Fn(u64) -> Result<FontAnswer, String> + Send + Sync + 'static,
+    ) -> (&'static FontLane, std::sync::mpsc::Receiver<()>, Said) {
+        let said: Said = std::sync::Arc::default();
+        let kept = std::sync::Arc::clone(&said);
+        let (wake, wakes) = crate::lane::wake_channel();
+        let walk: &'static FontRound = Box::leak(Box::new(walk));
+        let lane: &'static FontLane = Box::leak(Box::new(FontLane::new(
+            crate::lane::Executor::scripted(std::sync::Arc::clone(gate)),
+            Box::leak(Box::new(MonospaceFamilySlot::new())),
+            Box::leak(Box::new(CjkFamilySlot::new())),
+            walk,
+            wake,
+            move |line: &str| kept.lock().unwrap().push(line.to_owned()),
+        )));
+        (lane, wakes, said)
+    }
+
+    /// Every terminal the lane ends, taken through its acceptance's own take,
+    /// until `last` has ended — each wake waited for within the lane suite's
+    /// patience.
+    fn terminals_through(
+        lane: &FontLane,
+        wakes: &std::sync::mpsc::Receiver<()>,
+        last: FontId,
+    ) -> Vec<(FontId, crate::lane::Terminal<FontId, FontAnswer, String>)> {
+        let mut ended = Vec::new();
+        loop {
+            ended.extend(lane.requests.ended());
+            if ended.iter().any(|(id, _)| *id == last) {
+                return ended;
+            }
+            crate::lane::wait_for_a_wake(wakes, &format!("font request {last:?}'s terminal"));
+        }
+    }
+
     /// PIN (GitHub issue #3, and the 2026-08-19 ruling it inherits) — **the
     /// answer lands on the window thread, and a walk that finds nothing new
     /// costs nothing.**
     ///
     /// Three claims in one sitting because they are three readings of the same
-    /// handover:
+    /// handover, through the real lane (its worker started by the suite's
+    /// executor):
     ///
-    /// 1. A finished walk *offers*; it does not publish. Until the window thread
-    ///    takes the answer, every frame still reads the seed — which is what
-    ///    stops a swap landing between the hover, the hit test and the draw of
-    ///    one frame, all three of which build their own layout.
+    /// 1. A finished walk *publishes its terminal*; it does not put the list on
+    ///    screen. Until the window thread takes the answer, every frame still
+    ///    reads the seed — which is what stops a swap landing between the hover,
+    ///    the hit test and the draw of one frame, all three of which build their
+    ///    own layout.
     /// 2. Taking it replaces the seed, and the list is then the machine's.
     /// 3. **A second open reuses what is already there.** The walk after it
     ///    finds the families the machine already had, the slot keeps the slice
@@ -17702,29 +17620,38 @@ mod tests {
     ///    "a rescan that finds nothing new costs nothing" means now that the
     ///    rescan itself is free.
     ///
-    /// Red gate: publish from `offer` and the first assertion goes red; leak a
-    /// fresh slice on every adopt and the last pointer comparison does.
+    /// MUTATION: put the list on screen from the worker (`lane.adopt()` in
+    /// `run_font_lane` after the publication) — the first assertion goes red;
+    /// leak a fresh slice on every adopt and the last pointer comparison does.
     #[test]
     fn the_machines_answer_lands_on_the_window_thread_and_a_second_walk_costs_nothing() {
-        let slot = MonospaceFamilySlot::new();
-        slot.seed("Cascadia Mono");
-        let seeded = slot.published();
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, _) = font_lane(&gate, |_| {
+            Ok((
+                vec![family("Cascadia Mono"), family("Consolas")],
+                Vec::new(),
+            ))
+        });
+        lane.monospace.seed("Cascadia Mono");
+        let seeded = lane.monospace.published();
 
-        assert!(slot.claim_scan(), "the open asks for a walk");
-        let first = slot.serving();
-        slot.offer(first, vec![family("Cascadia Mono"), family("Consolas")]);
+        lane.request_walk().expect("the open asks for a walk");
+        crate::lane::wait_for_a_wake(&wakes, "the first walk's terminal");
         assert_eq!(
-            slot.published().as_ptr(),
+            lane.monospace.published().as_ptr(),
             seeded.as_ptr(),
-            "an offer nobody has taken changes no frame"
+            "a terminal nobody has taken changes no frame"
         );
 
         assert!(
-            slot.adopt(),
+            lane.adopt(),
             "the machine's list is not the seed, so a frame is owed"
         );
-        assert!(slot.scanned(), "and it is the machine's from here on");
-        let adopted = slot.published();
+        assert!(
+            lane.monospace.scanned(),
+            "and it is the machine's from here on"
+        );
+        let adopted = lane.monospace.published();
         assert_eq!(adopted.len(), 2, "both families are drawn");
         assert_eq!(
             adopted[0].files,
@@ -17733,22 +17660,18 @@ mod tests {
         );
 
         // The next open: another walk, the same machine.
-        assert!(!slot.finish_scan(), "the first walk is done");
-        assert!(slot.claim_scan(), "and the next open starts another");
-        slot.offer(
-            slot.serving(),
-            vec![family("Cascadia Mono"), family("Consolas")],
-        );
-        assert!(!slot.adopt(), "a walk that found nothing new owes no frame");
+        lane.request_walk().expect("the next open asks again");
+        crate::lane::wait_for_a_wake(&wakes, "the second walk's terminal");
+        assert!(!lane.adopt(), "a walk that found nothing new owes no frame");
         assert_eq!(
-            slot.published().as_ptr(),
+            lane.monospace.published().as_ptr(),
             adopted.as_ptr(),
             "and keeps the slice it already leaked, so the reopen costs a \
              comparison and no memory"
         );
         assert!(
-            slot.take_offer().is_none(),
-            "and the mailbox is empty, so the next wake adopts nothing twice"
+            lane.requests.ended().is_empty(),
+            "and every terminal is taken, so the next wake adopts nothing twice"
         );
     }
 
@@ -17759,63 +17682,284 @@ mod tests {
     /// list, and the ask is not droppable either: `Install fonts…` invites the
     /// reader to leave, install a family and come back, so a request made while
     /// a walk is out is about a machine that walk may not have seen. One walk at
-    /// a time, and one more round for everybody who asked during it.
+    /// a time, on the one worker, and one more walk for everybody who asked
+    /// during it.
     ///
-    /// Red gate: drop `again` and the fourth assertion goes red — the font a
-    /// reader just installed would not appear until the open after the one they
-    /// made; let `claim_scan` answer `true` while a walk is out and the second
-    /// does, which is a second thread on the same collection.
+    /// MUTATION: `run_font_lane` returning after its first walk (the shape that
+    /// walked once and stopped) — the two opens are never walked: they end
+    /// `WorkerGone`, and the walk count stays at one.
     #[test]
     fn two_opens_inside_one_walk_are_one_more_walk() {
-        let slot = MonospaceFamilySlot::new();
-        assert!(slot.claim_scan(), "the first ask starts the thread");
-        assert!(!slot.claim_scan(), "the second rides on it");
-        assert!(!slot.claim_scan(), "and so does the third");
-        assert!(
-            slot.finish_scan(),
-            "so the walk goes round once more, for the machine those two may \
-             have changed"
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, _) = font_lane(&gate, |_| Ok((vec![family("Consolas")], Vec::new())));
+        gate.hold();
+        let first = lane
+            .request_walk()
+            .expect("the first ask starts the worker");
+        assert!(gate.wait_entered(1), "and its walk");
+        let second = lane
+            .request_walk()
+            .expect("the second waits for the next walk");
+        let third = lane.request_walk().expect("and so does the third");
+        gate.release();
+        let ended = terminals_through(lane, &wakes, third);
+        assert_eq!(
+            ended.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [first, second, third],
+            "every ask ends, in the order asked"
         );
         assert!(
-            !slot.finish_scan(),
-            "and stops, because nobody asked during the second round"
+            ended
+                .iter()
+                .all(|(_, terminal)| crate::lane::answer_of(terminal.clone()).is_some()),
+            "and each is answered by a walk: {ended:?}"
+        );
+        assert_eq!(gate.entered(), 2, "two walks for three asks");
+
+        let fourth = lane.request_walk().expect("the next open asks again");
+        let ended = terminals_through(lane, &wakes, fourth);
+        assert!(matches!(ended[..], [(_, crate::lane::Terminal::Done(_))]));
+        assert_eq!(
+            gate.entered(),
+            3,
+            "the next open is walked by the same worker, rather than waiting for one that has gone"
+        );
+    }
+
+    /// RED (S-4) — **The requests made during a walk end `Joined` to the one the
+    /// next walk serves, which ends `Done`** (revision (b)4: every font request
+    /// is the same question — the machine's families now — so the requests
+    /// standing for the next walk are one operation, and nothing is ever
+    /// `Superseded`).
+    ///
+    /// A walk is held out; three opens are asked behind it. The walk out ends
+    /// `Done` with its own lists; the first open behind it is the next walk's
+    /// operation and ends `Done` with that walk's lists — walked for the newest
+    /// request standing when it started; the two after it end
+    /// `Joined { with: that open }`, carrying exactly its answer.
+    ///
+    /// MUTATION: the old silence — `Coalescing::ask` answering a request asked
+    /// while one waits with the waiting request's identity and minting none —
+    /// the third and fourth opens have no identity, and no terminal, of their
+    /// own.
+    #[test]
+    fn requests_made_during_a_walk_end_superseded_or_joined_and_the_served_one_done() {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, _) = font_lane(&gate, |generation| {
+            Ok((vec![family(&format!("等宽 Mono {generation}"))], Vec::new()))
+        });
+        gate.hold();
+        let out = lane.request_walk().expect("admitted");
+        assert!(gate.wait_entered(1), "the walk is out");
+        let asked: Vec<FontId> = (0..3)
+            .map(|_| lane.request_walk().expect("admitted behind the walk out"))
+            .collect();
+        gate.release();
+        let ended = terminals_through(lane, &wakes, asked[2]);
+        let names = |answer: &FontAnswer| -> Vec<String> {
+            answer.0.iter().map(|family| family.name.clone()).collect()
+        };
+        let [
+            (first, crate::lane::Terminal::Done(walked)),
+            (served, crate::lane::Terminal::Done(next)),
+            joined @ ..,
+        ] = &ended[..]
+        else {
+            panic!("the walk out and the next walk's operation end Done: {ended:?}");
+        };
+        assert_eq!(*first, out);
+        assert_eq!(names(walked), [format!("等宽 Mono {}", out.0)]);
+        assert_eq!(*served, asked[0]);
+        assert_eq!(
+            names(next),
+            [format!("等宽 Mono {}", asked[2].0)],
+            "the next walk is walked for the newest request standing when it starts"
+        );
+        assert_eq!(joined.len(), 2, "{ended:?}");
+        for ((id, terminal), expected) in joined.iter().zip(&asked[1..]) {
+            assert_eq!(id, expected);
+            assert_eq!(
+                terminal,
+                &crate::lane::Terminal::Joined {
+                    with: asked[0],
+                    outcome: Box::new(crate::lane::Terminal::Done(next.clone())),
+                },
+                "a request asked while one waited joined it and carries its answer"
+            );
+        }
+    }
+
+    /// RED (S-4; D-72) — **A worker that dies ends every request it owes
+    /// `WorkerGone`, wakes the loop, says so once, and the next request is
+    /// refused at the door.**
+    ///
+    /// Until S-4 a walk that died left `ScanState::running` set for ever: no
+    /// fault, no outcome, and no later walk. The suite's gate ends the worker
+    /// while it holds one walk out and two opens stand behind it.
+    ///
+    /// MUTATION: `Ledger::worker_ended` returning at once (the death leaves the
+    /// lane as it was, the old `running` left set) — no wake comes, and the
+    /// wait for it runs out of patience.
+    #[test]
+    fn a_dead_walk_ends_every_owed_request_worker_gone_and_the_next_request_is_refused() {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, said) = font_lane(&gate, |_| Ok((vec![family("Consolas")], Vec::new())));
+        gate.hold();
+        let out = lane.request_walk().expect("admitted");
+        assert!(gate.wait_entered(1), "the walk is out");
+        let waiting = lane.request_walk().expect("admitted behind it");
+        let joined = lane.request_walk().expect("and joined to that");
+        gate.kill();
+        gate.release();
+        crate::lane::wait_for_a_wake(&wakes, "the worker's end");
+        assert_eq!(
+            lane.requests.ended(),
+            [
+                (out, crate::lane::Terminal::WorkerGone),
+                (waiting, crate::lane::Terminal::WorkerGone),
+                (
+                    joined,
+                    crate::lane::Terminal::Joined {
+                        with: waiting,
+                        outcome: Box::new(crate::lane::Terminal::WorkerGone),
+                    }
+                ),
+            ]
         );
         assert!(
-            slot.claim_scan(),
-            "the next open starts a thread again, rather than waiting for one \
-             that has gone"
+            matches!(
+                lane.request_walk(),
+                Err(crate::lane::Refused::Faulted(
+                    crate::lane::WorkerEnd::Panicked(_)
+                ))
+            ),
+            "a request after the worker's end is refused at the door, minting nothing"
+        );
+        let said = said.lock().unwrap().clone();
+        assert_eq!(said.len(), 1, "the end is said once: {said:?}");
+        assert!(
+            said[0].contains("3 request(s) owed end as WorkerGone"),
+            "{said:?}"
+        );
+    }
+
+    /// RED (S-4 round 2) — **A start the thread door refuses refuses that request at the door,
+    /// says so once, and the next request starts the worker.**
+    ///
+    /// The worker is started by the first request that finds it not started. A machine that will
+    /// not give this process a thread refuses that request (`Refused::NotStarted`, no identity
+    /// minted, one line said); the lane is not in fault — its worker never ran — so the next
+    /// request, new input, starts it again and is walked (revision (b)5, rule 1). A door that
+    /// refuses twice in a row is one streak, said once (C3, round 3).
+    ///
+    /// MUTATION: fault the lane on a refused start (`lane::Ran::worker_ended` handing
+    /// `NotStarted` to the ledger) — the ledger says the worker's end beside the refusal (two
+    /// lines, observed red at "said once"), and the next request would be refused `Faulted`.
+    /// MUTATION: say every refused start (`Ledger::say_not_started` ignoring the streak) — the two
+    /// refusals are two lines.
+    #[test]
+    fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, said) =
+            font_lane(&gate, |_| Ok((vec![family("等宽 Consolas")], Vec::new())));
+        gate.refuse_next_start();
+        gate.refuse_next_start();
+        for _ in 0..2 {
+            assert!(
+                matches!(
+                    lane.request_walk(),
+                    Err(crate::lane::Refused::NotStarted(_))
+                ),
+                "the request whose start was refused is refused at the door"
+            );
+        }
+        assert_eq!(
+            lane.requests.ledger().earliest_owed(),
+            None,
+            "minting nothing"
+        );
+        let lines = said.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "said once: {lines:?}");
+        assert!(lines[0].contains(crate::lane::REFUSED_START), "{lines:?}");
+        let next = lane
+            .request_walk()
+            .expect("the next request starts the worker");
+        assert_eq!(next, FontId(1), "the refused requests took no identity");
+        let ended = terminals_through(lane, &wakes, next);
+        assert!(
+            matches!(ended[..], [(id, crate::lane::Terminal::Done(_))] if id == next),
+            "and the worker it started walks: {ended:?}"
+        );
+    }
+
+    /// RED (S-4; D-72) — **A walk that fails is a `Failed` terminal, said once
+    /// per streak, and the list on screen stays.**
+    ///
+    /// Until S-4 a failed walk was a shorter list: the machine's refusal reached
+    /// the picker as the one default row, adopted as if it were the machine's
+    /// answer, and nobody heard why. Two opens in a row meet a collection that
+    /// cannot be read: each ends `Failed`, the window thread's acceptance finds
+    /// nothing to put on screen, and `diagnostics.log` hears the failure once,
+    /// in the platform's words.
+    ///
+    /// MUTATION: a silent shorter list — `run_font_lane` answering a failed
+    /// round with `Done` of the default row
+    /// (`bt_platform::order_monospace_families(Vec::new())`) — the
+    /// acceptance puts that row on screen and nothing is said.
+    #[test]
+    fn a_failed_font_walk_is_a_failed_terminal_said_once() {
+        const REFUSED: &str = "字体集合打不开 — the system font collection could not be read";
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let (lane, wakes, said) = font_lane(&gate, |_| Err(REFUSED.to_owned()));
+        lane.monospace.seed("Cascadia Mono");
+        let seeded = lane.monospace.published();
+        for open in 1..=2 {
+            lane.request_walk().expect("admitted");
+            crate::lane::wait_for_a_wake(&wakes, &format!("open {open}'s failed walk"));
+            assert!(!lane.adopt(), "a failed walk puts nothing on screen");
+        }
+        assert_eq!(lane.monospace.published().as_ptr(), seeded.as_ptr());
+        assert!(
+            !lane.monospace.scanned(),
+            "the seed is not the machine's answer"
+        );
+        let said = said.lock().unwrap().clone();
+        assert_eq!(
+            said.len(),
+            1,
+            "one streak of one failure, said once: {said:?}"
+        );
+        assert!(said[0].contains("failed"), "{said:?}");
+        assert!(
+            said[0].contains(REFUSED),
+            "in the platform's words: {said:?}"
         );
     }
 
     /// RED (50) — **An answer older than the one on screen is never adopted.**
     ///
-    /// The lane numbers every request and every answer carries the number of
-    /// the request it was walked for (`ARCHITECTURE` §5.1: versioned requests,
-    /// latest-result replacement). One walk out at a time means the numbers
-    /// normally arrive in order; the number is what makes that a checked fact
-    /// rather than a property of today's scheduling, so a list the window
-    /// thread has put on screen is never replaced by one the machine gave
-    /// before it — and the arm that adopts reads "older" as "nothing changed",
-    /// asking for no frame.
+    /// The lane's ledger mints every request an identity that rises with every
+    /// request, and every answer carries the identity of the request it was
+    /// walked for (`ARCHITECTURE` §5.1: versioned requests, latest-result
+    /// replacement). The acceptance takes terminals in the order they were
+    /// minted, so the numbers normally arrive in order; the number is what makes
+    /// that a checked fact rather than a property of today's scheduling, so a
+    /// list the window thread has put on screen is never replaced by one the
+    /// machine gave before it — and the arm that adopts reads "older" as
+    /// "nothing changed", asking for no frame.
     ///
     /// MUTATION: drop the generation comparison in `MonospaceFamilySlot::adopt`
-    /// (the one `adopt_scanned_families` calls) and the older list is drawn.
+    /// (the one `FontLane::adopt` calls) and the older list is drawn.
     #[test]
     fn an_answer_older_than_the_one_on_screen_is_never_adopted() {
         let slot = MonospaceFamilySlot::new();
-        assert!(slot.claim_scan(), "the first request starts a walk");
-        let g1 = slot.serving();
-        assert!(!slot.claim_scan(), "the second rides on it");
-        let g2 = slot.serving();
-        assert!(g2 > g1, "and carries a larger number: {g1} then {g2}");
-
-        slot.offer(g2, vec![family("Newer Mono"), family("Consolas")]);
-        assert!(slot.adopt(), "the newer answer is put on screen");
-        let on_screen = slot.published();
-
-        slot.offer(g1, vec![family("Older Mono"), family("Consolas")]);
         assert!(
-            !slot.adopt(),
+            slot.adopt(2, vec![family("Newer Mono"), family("Consolas")]),
+            "the newer answer is put on screen"
+        );
+        let on_screen = slot.published();
+        assert!(
+            !slot.adopt(1, vec![family("Older Mono"), family("Consolas")]),
             "an older answer changes nothing, so it owes no frame"
         );
         assert_eq!(
@@ -17827,10 +17971,6 @@ mod tests {
             "the list on screen is still the newer answer's"
         );
         assert_eq!(slot.published().as_ptr(), on_screen.as_ptr());
-        assert!(
-            slot.take_offer().is_none(),
-            "and the older answer is gone, not waiting to be adopted later"
-        );
     }
 
     /// RED (50) — **Launching with a stored font family walks no font
@@ -17945,7 +18085,7 @@ mod tests {
         CJK_FAMILIES.publish(Vec::new(), true);
         assert!(CJK_FAMILIES.scanned(), "a CJK list has landed");
         let before = monospace_scans();
-        let (_, cjk) = walk_the_machine(0);
+        let (_, cjk) = walk_the_machine(0).expect("the machine answers");
         assert_eq!(
             monospace_scans() - before,
             2,
@@ -17953,7 +18093,7 @@ mod tests {
         );
         assert_eq!(
             cjk,
-            bt_platform::cjk_font_families(),
+            bt_platform::cjk_font_families().expect("the machine answers"),
             "and its CJK answer is the machine's, asked now"
         );
     }
@@ -18007,7 +18147,8 @@ mod tests {
                 SettingsRow::Uninstall,
                 SettingsRow::UninstallData,
             ],
-            "what this is, then where to go about it, then the configuration doors, then              the uninstaller and its switch"
+            "what this is, then where to go about it, then the configuration doors, then \
+             the uninstaller and its switch"
         );
 
         assert_eq!(
@@ -18588,8 +18729,8 @@ mod tests {
         visible_rows(TabLayoutMode::Horizontal)
     }
 
-    /// [`visible_rows`] asked of a named platform — the page a Windows row (`PsReadLine`,
-    /// `Acrylic`, the Explorer verb) stands on, read on every runner. On the platform this
+    /// [`visible_rows`] asked of a named platform — the page a Windows row (`Acrylic`, the
+    /// Explorer verb) stands on, read on every runner. On the platform this
     /// build is, it is [`visible_rows`] itself.
     fn rows_on(platform: bt_platform::HostPlatform, tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
         uninstall_rows_for(
@@ -19180,7 +19321,8 @@ mod tests {
         const {
             assert!(
                 CONTENT_PADDING_TOP_LOGICAL_PX >= 10.0,
-                "an inset of two pixels is not an inset a reader can see, which                  is the whole of the report"
+                "an inset of two pixels is not an inset a reader can see, which \
+                 is the whole of the report"
             );
         }
         // At rest nothing is lost to the inset: the first heading begins exactly
@@ -19204,7 +19346,8 @@ mod tests {
             .unwrap_or_else(|| end.rows.last().expect("the page has rows").band);
         assert!(
             (foot[3] - end.clip[3]).abs() < 0.5,
-            "scrolled to the end the page's foot sits on the fold: {foot:?} in              {:?}",
+            "scrolled to the end the page's foot sits on the fold: {foot:?} in \
+             {:?}",
             end.clip
         );
     }
@@ -19760,13 +19903,12 @@ mod tests {
     /// entry whose English is the string this row just said — cannot reach a
     /// string the row did not say.
     ///
-    /// **Two sentences are deliberately outside it**, and both for the same
-    /// reason the picker column is: `psreadline::row_description`'s four
-    /// composed lines and `update::row_description`'s carry a version string
-    /// read off this machine, so their length is a fact about the machine rather
-    /// than about the copy. What is held here instead is the entry each of them
+    /// **One sentence is deliberately outside it**, for the reason the picker
+    /// column is: `update::row_description`'s composed line carries a version
+    /// string read off this machine, so its length is a fact about the machine
+    /// rather than about the copy. What is held here instead is the entry it
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 25] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 22] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -19839,13 +19981,7 @@ mod tests {
                 Text::DescExplorerFirstPageAwaitingShell,
                 Windows,
             ),
-            // The three PSReadLine states that are an entry rather than a
-            // composed line. See this constant's own note for the four that are
-            // not.
-            (SettingsRow::PsReadLine, Text::PsReadLineProbing, Windows),
-            (SettingsRow::PsReadLine, Text::PsReadLineRowGone, Windows),
-            (SettingsRow::PsReadLine, Text::PsReadLineRowNotOurs, Windows),
-            // The sentence with no version in it, for the row above's reason.
+            // The sentence with no version in it, for this constant's own note.
             (SettingsRow::AutoCheck, Text::DescAutoCheck, Windows),
             // The Mac columns. `LaunchOpens`, `TurnEndNotifications`,
             // `QuakeHotkey` and `OptionSendsAlt` are the rows whose sentence has
@@ -20336,7 +20472,10 @@ mod tests {
         // nothing asks for.
         assert_eq!(
             ROW_DESC_MAX_LINES, needed,
-            "the tolerance is one line past the floor pins'              {SETTINGS_DESCRIPTION_FLOOR_MAX_LINES}, or the longest ruled              exception if that is longer: {needed} is needed and the constant              says {ROW_DESC_MAX_LINES}"
+            "the tolerance is one line past the floor pins' \
+             {SETTINGS_DESCRIPTION_FLOOR_MAX_LINES}, or the longest ruled \
+             exception if that is longer: {needed} is needed and the constant \
+             says {ROW_DESC_MAX_LINES}"
         );
     }
 
@@ -21086,7 +21225,8 @@ mod tests {
         let body = straddling.menu_body().expect("the picker is open");
         assert!(
             cut[1] < body[1] && cut[3] > body[1],
-            "this fixture depends on an item lying across the body's edge:              {cut:?} in {body:?}"
+            "this fixture depends on an item lying across the body's edge: \
+             {cut:?} in {body:?}"
         );
         let (x, y) = centre(cut);
         assert_eq!(
@@ -21520,7 +21660,8 @@ mod tests {
         let box_of = open.items[action];
         assert!(
             open.shows_item(box_of),
-            "and its last item is inside the body it is drawn in: {box_of:?} in              {:?}",
+            "and its last item is inside the body it is drawn in: {box_of:?} in \
+             {:?}",
             open.menu_body()
         );
         let (x, y) = centre(box_of);
@@ -21817,7 +21958,9 @@ mod tests {
         assert_eq!(
             moved[0].as_ptr(),
             first[0].as_ptr(),
-            "a name that was already there is the very same string: the interning              is what keeps a folder edited all afternoon from leaking a copy of              every unchanged name"
+            "a name that was already there is the very same string: the interning \
+             is what keeps a folder edited all afternoon from leaking a copy of \
+             every unchanged name"
         );
     }
 
@@ -21863,7 +22006,8 @@ mod tests {
                 // colours.
                 SettingsRow::WebPages
             ],
-            "the group the 2026-08-18 ruling leaves standing, plus the contrast floor and the              web pages' scheme"
+            "the group the 2026-08-18 ruling leaves standing, plus the contrast floor and the \
+             web pages' scheme"
         );
         // **`Sidebar` came back out** (user ruling 2026-08-18). It is an
         // everyday row again and it is back where it was born — directly under
@@ -21898,9 +22042,9 @@ mod tests {
              `Focus card height` under the row that turns the mode on"
         );
         assert!(
-            !SettingsRow::PsReadLine.advanced(),
-            "the PSReadLine row repairs something the reader has already watched \
-             go wrong, so it is the last row in the dialog that may be hidden"
+            !SettingsRow::LegacyPsReadLine.advanced(),
+            "the earlier PSReadLine copy's removal row is a door the reader has come \
+             looking for, so it is not one the dialog may hide"
         );
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let rows = visible_rows(layout);
@@ -23025,7 +23169,8 @@ mod tests {
             "the mock-up's own measurement of two rows under one heading — 211 \
              when `.content` had 2px of top padding, and eight more since \
              §7.1.6c-5 gave the scrollport an inset a scrolled row can \
-             disappear under, and two fewer since ticket 24 took the bottom \n             padding back to the spec's 16"
+             disappear under, and two fewer since ticket 24 took the bottom \
+             padding back to the spec's 16"
         );
         let placed = open(1.0, false);
         assert_eq!(width(placed.frame), 720.0, "min(720px, 92%) at 1280 wide");
@@ -25343,7 +25488,8 @@ mod tests {
         );
         assert!(
             group.band[0] < heading,
-            "which puts the band outside the heading column rather than on it:              band {:?}, heading {heading}",
+            "which puts the band outside the heading column rather than on it: \
+             band {:?}, heading {heading}",
             group.band
         );
         let title = placed
@@ -25353,7 +25499,8 @@ mod tests {
             .fold(f32::INFINITY, f32::min);
         assert!(
             heading < title,
-            "the heading column is the rows' own less `.row`'s padding:              heading {heading} against title {title}"
+            "the heading column is the rows' own less `.row`'s padding: \
+             heading {heading} against title {title}"
         );
         let control = placed
             .rows
@@ -25376,14 +25523,16 @@ mod tests {
         );
         assert!(
             group.label[2] <= group.mark[0],
-            "nothing is drawn between the word and the mark, and nothing at all              stands left of the word: label {:?}, mark {:?}",
+            "nothing is drawn between the word and the mark, and nothing at all \
+             stands left of the word: label {:?}, mark {:?}",
             group.label,
             group.mark
         );
         assert_eq!(
             height(group.band),
             2.0 * ROW_PADDING_Y_LOGICAL_PX + GROUP_LABEL_LINE_LOGICAL_PX,
-            "the band is the group label's line box between the row's own              paddings, which is what changed when the type did"
+            "the band is the group label's line box between the row's own \
+             paddings, which is what changed when the type did"
         );
         assert!(
             MOCKUP.contains(
@@ -25398,7 +25547,8 @@ mod tests {
         );
         assert!(
             !MOCKUP.contains("data-adv"),
-            "and the three-variant scaffolding is gone from it: one form is              chosen, so there is one form drawn"
+            "and the three-variant scaffolding is gone from it: one form is \
+             chosen, so there is one form drawn"
         );
     }
 
@@ -25468,7 +25618,9 @@ mod tests {
                 over[..hair]
                     .iter()
                     .any(|quad| quad.color == face && quad.alpha == 1.0),
-                "x = {x}: the panel's own ground goes down before its edge does,                  so the edge is composited over the panel and never over what                  the panel covers: {over:?}"
+                "x = {x}: the panel's own ground goes down before its edge does, \
+                 so the edge is composited over the panel and never over what \
+                 the panel covers: {over:?}"
             );
         }
         assert!(
@@ -25604,80 +25756,14 @@ mod tests {
                 };
                 assert!(
                     !thinner.nav_items().contains(&absent),
-                    "{absent:?} keeps its word in the rail with nothing on its                      page — a door onto an empty room"
+                    "{absent:?} keeps its word in the rail with nothing on its \
+                     page — a door onto an empty room"
                 );
             }
             assert_eq!(
                 content.first_category(),
                 SettingsCategory::General,
                 "the dialog opens on the first word of the rail"
-            );
-        }
-    }
-
-    /// PIN (§7.1.6c-5) — **the page that shows the answer is a page that asks
-    /// the question.**
-    ///
-    /// `Terminal` is the one page in this dialog drawn out of an out-of-band
-    /// reading, and until this slice the reading was started by the first
-    /// `Windows PowerShell` pane and by nothing else. Every user who opens WSL
-    /// or `pwsh` and never a 5.1 pane therefore read "Checking this machine's
-    /// PSReadLine" for as long as they cared to look — a row waiting on an
-    /// answer nobody had asked for.
-    ///
-    /// The trigger is derived from the row rather than named as a category,
-    /// which is what the second half pins: no other page asks, and the day the
-    /// row moves the asking moves with it.
-    ///
-    /// Red gate: return `false` unconditionally and the first assertion goes
-    /// red; return `true` for every page and the loop does.
-    #[test]
-    fn showing_the_page_the_probe_answers_on_is_what_starts_the_probe() {
-        // **The Windows page, named** (§13.32 ①): this claim is about rows a
-        // Mac is no longer offered, so it asks for the list by platform rather
-        // than for whatever list the runner happens to have.
-        let rows = visible_rows_for(
-            bt_platform::HostPlatform::Windows,
-            TabLayoutMode::Horizontal,
-        );
-        let lines = shortcut_lines();
-        let content = content(&rows, &lines);
-        assert!(
-            content.probes_psreadline(SettingsCategory::Terminal),
-            "the page holding the PSReadLine row is the page that starts the \
-             probe"
-        );
-        for category in SettingsCategory::ALL {
-            if category == SettingsCategory::Terminal {
-                continue;
-            }
-            assert!(
-                !content.probes_psreadline(category),
-                "{category:?} starts a process to answer a question it does not \
-                 draw"
-            );
-        }
-        // The derivation, not the name: a build whose row list has lost the row
-        // has no page that asks, whatever the categories are called.
-        let without: Vec<SettingsRow> = rows
-            .iter()
-            .copied()
-            .filter(|row| *row != SettingsRow::PsReadLine)
-            .collect();
-        let thinner = SettingsContent {
-            rows: &without,
-            shortcuts: &lines,
-            profiles: &[],
-            scheme_files: &[],
-            advanced: AdvancedOpen::default(),
-            advanced_reveal: None,
-            editor: None,
-            values: Box::leak(Box::new(SettingsValues::sample())),
-        };
-        for category in SettingsCategory::ALL {
-            assert!(
-                !thinner.probes_psreadline(category),
-                "{category:?} asks for an answer no row on it would print"
             );
         }
     }
@@ -26367,7 +26453,8 @@ mod tests {
                 sprite.mark,
                 ChromeMark::TabClose | ChromeMark::Chevron { .. }
             )),
-            "the overlay's marks are the close and the disclosure's chevron,              and nothing has quietly joined them: {:?}",
+            "the overlay's marks are the close and the disclosure's chevron, \
+             and nothing has quietly joined them: {:?}",
             sprites.iter().map(|sprite| sprite.mark).collect::<Vec<_>>()
         );
         let glyph = closes[0].rect;
@@ -26848,11 +26935,13 @@ mod tests {
         assert_eq!(SCROLLBACK_OPTIONS, [25_000, 50_000, 100_000, 200_000]);
         assert!(
             SCROLLBACK_OPTIONS.contains(&bt_persist::DEFAULT_SCROLLBACK_LINES),
-            "the capacity every reader arrives holding has to be one of the rungs,              or an untouched machine opens this picker with nothing ticked"
+            "the capacity every reader arrives holding has to be one of the rungs, \
+             or an untouched machine opens this picker with nothing ticked"
         );
         assert!(
             SCROLLBACK_OPTIONS.windows(2).all(|pair| pair[0] < pair[1]),
-            "ascending, which is how a list of quantities with no privileged              member reads — the font size picker's order, not the height cap's"
+            "ascending, which is how a list of quantities with no privileged \
+             member reads — the font size picker's order, not the height cap's"
         );
         assert_eq!(
             SettingsRow::Scrollback.category(),
@@ -26875,7 +26964,6 @@ mod tests {
             .filter(|row| row.category() == SettingsCategory::Terminal)
             .collect::<Vec<_>>(),
             vec![
-                SettingsRow::PsReadLine,
                 SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
@@ -26883,7 +26971,10 @@ mod tests {
                 SettingsRow::MultilinePaste,
                 SettingsRow::Notifications
             ],
-            "the Terminal page begins with the PSReadLine fact and process-scoped integration \n             switch, then the pane's two axes — what it keeps of what has gone past, and what it \n             does with a line wider than itself — and last the only row on this page whose answer \n             shows up outside this window; the legacy-line remover is inserted only when observed"
+            "the Terminal page begins with the process-scoped integration switch, then the pane's \
+             two axes — what it keeps of what has gone past, and what it does with a line wider \
+             than itself — and last the only row on this page whose answer shows up outside this \
+             window; the two cleanup verbs are inserted only when observed"
         );
     }
 
@@ -26918,7 +27009,7 @@ mod tests {
         );
         for target in [
             SettingsTarget::Choice(SettingsRow::BlockMaxHeight, 0),
-            SettingsTarget::Choice(SettingsRow::PsReadLine, 1),
+            SettingsTarget::Choice(SettingsRow::ShellIntegration, 1),
             SettingsTarget::Combo(SettingsRow::Scrollback),
             SettingsTarget::Scrim,
         ] {
@@ -26937,16 +27028,16 @@ mod tests {
         assert_eq!(
             SettingsRow::Scrollback.selected_index(&odd),
             None,
-            "a capacity this build's list does not offer ticks nothing rather              than the nearest thing to it"
+            "a capacity this build's list does not offer ticks nothing rather \
+             than the nearest thing to it"
         );
     }
 
     /// PIN — **the Line wrapping row stands on the Terminal page directly under
     /// `Scrollback`**, which is the mock-up's own order for it (6000).
     ///
-    /// The page reads downwards as one shell's story: what is wrong with the module
-    /// this shell loads, what this shell is not loading, what the pane keeps of what
-    /// has already gone past, how the pane sets a line too long for it, and last the
+    /// The page reads downwards as one shell's story: what Folio loads into this
+    /// shell, what the pane keeps of what has already gone past, how the pane sets a line too long for it, and last the
     /// only row here whose answer shows up outside this window. The adjacency to
     /// `Scrollback` is the load-bearing half: both rows answer what the pane does
     /// with output it has already been handed, and a row about the desktop standing
@@ -26969,7 +27060,6 @@ mod tests {
         assert_eq!(
             terminal,
             vec![
-                SettingsRow::PsReadLine,
                 SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
@@ -27025,6 +27115,74 @@ mod tests {
             SettingsRow::PowerShellProfileLine.stated_value(),
             Some("Remove the line from $PROFILE")
         );
+    }
+
+    /// RED (owner ruling Q4, T-INTEGRATION-INJECT-2-BUILD) — **the earlier PSReadLine copy's
+    /// removal row stands only while a copy is observed, once, under the switch and under the
+    /// `$PROFILE` line's verb when that one stands.** The copy stays in Documents until the reader
+    /// presses this; a row that stood with nothing to remove would be offering a press that does
+    /// nothing, and a row that went with a copy still there would leave the uninstaller as the only
+    /// way out.
+    ///
+    /// MUTATION: insert the row whatever `copy_present` says and the absent arm goes red; drop the
+    /// leading `retain` and a second observation stands it twice.
+    #[test]
+    fn the_earlier_psreadline_remover_exists_only_while_a_copy_is_observed() {
+        let base = visible_rows_for(
+            bt_platform::HostPlatform::Windows,
+            TabLayoutMode::Horizontal,
+        );
+        assert!(!base.contains(&SettingsRow::LegacyPsReadLine));
+
+        let mut absent = base.clone();
+        retain_legacy_psreadline_remover(&mut absent, false);
+        assert_eq!(absent, base, "no copy, no row, and nothing else moved");
+
+        let mut present = base.clone();
+        retain_legacy_psreadline_remover(&mut present, true);
+        retain_legacy_psreadline_remover(&mut present, true);
+        let at = |rows: &[SettingsRow], row| rows.iter().position(|it| *it == row);
+        assert_eq!(
+            present
+                .iter()
+                .filter(|row| **row == SettingsRow::LegacyPsReadLine)
+                .count(),
+            1,
+            "observed twice, stood once"
+        );
+        assert_eq!(
+            at(&present, SettingsRow::LegacyPsReadLine),
+            at(&present, SettingsRow::ShellIntegration).map(|it| it + 1),
+            "under the switch whose pane no longer loads it"
+        );
+
+        let mut both = base.clone();
+        retain_powershell_profile_remover(&mut both, true);
+        retain_legacy_psreadline_remover(&mut both, true);
+        assert_eq!(
+            at(&both, SettingsRow::LegacyPsReadLine),
+            at(&both, SettingsRow::PowerShellProfileLine).map(|it| it + 1),
+            "and under the profile line's verb when both stand"
+        );
+
+        retain_legacy_psreadline_remover(&mut present, false);
+        assert_eq!(
+            present, base,
+            "the press that removed it takes the row with it"
+        );
+
+        assert_eq!(
+            SettingsRow::LegacyPsReadLine.stated_value(),
+            Some("Remove it from Documents")
+        );
+        assert_eq!(
+            SettingsRow::LegacyPsReadLine.category(),
+            SettingsCategory::Terminal
+        );
+        assert!(matches!(
+            SettingsRow::LegacyPsReadLine.control(),
+            SettingsControl::Link
+        ));
     }
 
     /// PIN (user ruling 2026-08-25) — **the Agents page holds the rows about the
@@ -27387,124 +27545,45 @@ mod tests {
     /// arm and this fails on the first item.
     #[test]
     fn a_press_on_a_greyed_item_names_it_instead_of_being_swallowed() {
-        // The PSReadLine row is a Windows page's, read on every runner.
-        let placed = open_rows_measured_on(
-            bt_platform::HostPlatform::Windows,
+        // The Claude Code row over a configuration this build will not edit: neither item is
+        // available (re-review f), which is the shape the retired PSReadLine row first had.
+        let placed = open_rows_measured(
             1.0,
-            Some(SettingsRow::PsReadLine),
+            Some(SettingsRow::ClaudeHooks),
             TabLayoutMode::Horizontal,
             0.0,
         );
-        // What a `Restricted` machine draws: the module is old, and neither
-        // verb is available.
         let blocked = SettingsValues {
-            psreadline: crate::psreadline::RowState::Outdated,
-            psreadline_install_available: false,
-            psreadline_remove_available: false,
+            agent_config_refusals: [Some(Text::AgentConfigLink.text()), None, None],
             ..values()
         };
         assert_eq!(
-            SettingsRow::PsReadLine.option_count(),
+            SettingsRow::ClaudeHooks.option_count(),
             FORMULA_OPTIONS.len()
         );
-        for (index, wanted) in FORMULA_OPTIONS.into_iter().enumerate() {
+        for index in 0..FORMULA_OPTIONS.len() {
             assert!(
-                !SettingsRow::PsReadLine.option_enabled(index, &blocked),
+                !SettingsRow::ClaudeHooks.option_enabled(index, &blocked),
                 "item {index} must be dark on this machine"
             );
             let (x, y) = centre(placed.items[index]);
             let target = hit(&placed, &blocked, x, y);
             assert_eq!(
                 target,
-                SettingsTarget::ChoiceRefused(SettingsRow::PsReadLine, index),
+                SettingsTarget::ChoiceRefused(SettingsRow::ClaudeHooks, index),
                 "a press on the dark item must name it"
             );
             assert_eq!(
-                psreadline_requested(target),
-                Some(wanted),
-                "and reach the one door, which is what answers with a reason"
+                claude_hooks_requested(target),
+                None,
+                "and it asks for no write the row's line says will not happen"
             );
         }
         // And the lit item is untouched: it still chooses.
-        let free = SettingsValues {
-            psreadline_install_available: true,
-            ..blocked
-        };
         let (x, y) = centre(placed.items[0]);
         assert_eq!(
-            hit(&placed, &free, x, y),
-            SettingsTarget::Choice(SettingsRow::PsReadLine, 0)
-        );
-    }
-
-    /// PIN (user ruling 2026-08-18) — **the PSReadLine row reads `Update` when an
-    /// older Folio build's module is the one on disk, and its two items are
-    /// still `On` and `Off`.**
-    ///
-    /// The value and the items answer two different questions — what this row is
-    /// *at*, and what a reader may do to it — and only the first of them has a
-    /// third answer. A third item would have been a second way to say what `On`
-    /// already says, on the one row in the dialog whose `Off` deletes a directory
-    /// outside this product's own data folder.
-    ///
-    /// Red gate: drop the `value_text` arm and the button falls back to `On`,
-    /// which is the row saying nothing about the newer module it is holding.
-    #[test]
-    fn the_psreadline_row_says_update_over_an_older_folio_build() {
-        use crate::psreadline::RowState;
-
-        let updatable = SettingsValues {
-            psreadline: RowState::UpdateAvailable,
-            psreadline_install_available: true,
-            psreadline_remove_available: true,
-            ..values()
-        };
-        assert_eq!(
-            SettingsRow::PsReadLine.value_text(&updatable),
-            Some(Text::PsReadLineUpdate.text()),
-            "the button says what pressing it would do"
-        );
-        assert_eq!(
-            SettingsRow::PsReadLine.selected_index(&updatable),
-            Some(0),
-            "and the tick stays on On, because the module *is* there — a tick \
-             on Off would be the row claiming an empty directory it is \
-             offering to empty"
-        );
-        assert_eq!(
-            SettingsRow::PsReadLine.option_count(),
-            2,
-            "two items, not three: On and Off are what a reader does to this row"
-        );
-        assert!(SettingsRow::PsReadLine.option_enabled(0, &updatable));
-        assert!(SettingsRow::PsReadLine.option_enabled(1, &updatable));
-
-        // And the row that is simply installed says nothing extra.
-        let installed = SettingsValues {
-            psreadline: RowState::InstalledByFolio,
-            psreadline_install_available: false,
-            psreadline_remove_available: true,
-            ..values()
-        };
-        assert_eq!(SettingsRow::PsReadLine.value_text(&installed), None);
-        assert_eq!(SettingsRow::PsReadLine.selected_index(&installed), Some(0));
-
-        // The word is drawn where the button is, and not only computed — on the Windows
-        // page, which is the one that holds this row, read on every runner.
-        let placed = shaped_scrolled_on(
-            bt_platform::HostPlatform::Windows,
-            SettingsCategory::Terminal,
-            AdvancedOpen::default(),
-            None,
-            UNSCROLLED,
-        );
-        let labels = labels_of(&placed, None, &updatable);
-        assert!(
-            labels
-                .iter()
-                .any(|label| label.text == Text::PsReadLineUpdate.text()),
-            "drawn: {:?}",
-            labels.iter().map(|it| it.text.clone()).collect::<Vec<_>>()
+            hit(&placed, &values(), x, y),
+            SettingsTarget::Choice(SettingsRow::ClaudeHooks, 0)
         );
     }
 
@@ -28278,11 +28357,17 @@ mod tests {
         assert_eq!(
             page[start - 1],
             SettingsRow::FocusCardHeight,
-            "the ground opens the Advanced group, and the everyday row above it              is the last of the ones the ruling kept on top. It used to follow              `Dark scheme` directly; §7.1.6c-5 moved the two font rows up into              that gap and the whole ground down under the disclosure, §7.1.6b′              then added focus mode's own row to the end of that run, and              2026-08-21 added the card-height row directly under it"
+            "the ground opens the Advanced group, and the everyday row above it \
+             is the last of the ones the ruling kept on top. It used to follow \
+             `Dark scheme` directly; §7.1.6c-5 moved the two font rows up into \
+             that gap and the whole ground down under the disclosure, §7.1.6b′ \
+             then added focus mode's own row to the end of that run, and \
+             2026-08-21 added the card-height row directly under it"
         );
         assert!(
             ground.iter().all(|row| row.advanced()),
-            "every one of the six is inside the group, so the group is what a              reader opens to reach any of them"
+            "every one of the six is inside the group, so the group is what a \
+             reader opens to reach any of them"
         );
     }
 
@@ -28313,20 +28398,20 @@ mod tests {
     /// platform this build has no backdrop door for has nothing for a reason to
     /// be about. `Capability::WindowBackdrop` is where that is said once.
     ///
-    /// MUTATIONS: make any of the five facilities answer `true` everywhere and
+    /// **The PSReadLine row left the dialog** (T-INTEGRATION-INJECT-2-BUILD): what stands
+    /// in its place is the earlier copy's removal row, inserted only where a copy is
+    /// observed, which no Mac has.
+    ///
+    /// MUTATIONS: make `ExplorerMenu` or `WindowBackdrop` answer `true` everywhere and
     /// the first assertion names it; return `None` from `SettingsRow::needs` for
-    /// one of the four Windows rows and the same assertion names it; take
+    /// either Windows row and the same assertion names it; take
     /// `OptionKey` off `OptionSendsAlt` and the Windows half goes red, because
     /// that row would then be offered to a keyboard that has no Option key.
     #[test]
     fn a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got() {
         use bt_platform::HostPlatform::{MacOs, Windows};
 
-        const NOT_ON_A_MAC: [SettingsRow; 3] = [
-            SettingsRow::ContextMenu,
-            SettingsRow::PsReadLine,
-            SettingsRow::Acrylic,
-        ];
+        const NOT_ON_A_MAC: [SettingsRow; 2] = [SettingsRow::ContextMenu, SettingsRow::Acrylic];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let mac = visible_rows_for(MacOs, layout);
             let windows = visible_rows_for(Windows, layout);
@@ -28350,7 +28435,7 @@ mod tests {
                 "{layout:?}: a Windows keyboard has no Option key"
             );
             // Everything else is on both pages, in the same order, which is what
-            // says the filter took the five rows and nothing else.
+            // says the filter took the three rows and nothing else.
             let expected: Vec<SettingsRow> = windows
                 .iter()
                 .copied()
@@ -28363,7 +28448,7 @@ mod tests {
             sorted_expected.sort_by_key(|row| format!("{row:?}"));
             assert_eq!(
                 sorted_mac, sorted_expected,
-                "{layout:?}: the two pages differ by more than the five rows \
+                "{layout:?}: the two pages differ by more than the three rows \
                  that declare a facility"
             );
         }
@@ -28970,7 +29055,6 @@ mod tests {
                 SettingsRow::QuakeTopGap,
                 SettingsRow::QuakeDismiss,
                 SettingsRow::QuakeRestore,
-                SettingsRow::PsReadLine,
                 SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
@@ -29045,7 +29129,6 @@ mod tests {
                 SettingsRow::QuakeTopGap,
                 SettingsRow::QuakeDismiss,
                 SettingsRow::QuakeRestore,
-                SettingsRow::PsReadLine,
                 SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
@@ -29072,8 +29155,7 @@ mod tests {
              three block rows together as the whole of the Rendered blocks page, \
              and the Terminal rows last with the PSReadLine one above them and \
              the pane's two axes adjacent, which is the mock-up's own order for \
-             that page.
-
+             that page.\n\n\
              **Sidebar touches `Tab layout` again** (user ruling 2026-08-18, \
              reversing §7.1.6c-5's filing of it under `Advanced`): the condition \
              on its own is not legible — a row that appears only under a \
@@ -32856,7 +32938,8 @@ mod tests {
         assert_eq!(
             adopted.ghosts().next().and_then(EnvGhost::adoptable),
             Some("truecolor"),
-            "the adopted name leaves the list rather than standing beside its              own override"
+            "the adopted name leaves the list rather than standing beside its \
+             own override"
         );
         let mine = placed
             .env_rows
@@ -34065,7 +34148,8 @@ mod tests {
                     SettingsTarget::ProfileMore(index),
                 ])
                 .collect::<Vec<_>>()[..],
-            "the row, then up, down, Edit and the `⋯` — the run's own visual              order, row by row"
+            "the row, then up, down, Edit and the `⋯` — the run's own visual \
+             order, row by row"
         );
     }
 
@@ -34792,25 +34876,32 @@ mod tests {
 }
 
 /// **The lane contract's adapter** (`crate::lane`, `lane_contract_tests`): a [`FontLane`] of its
-/// own — slots of its own, the real [`FontLane::request`], [`FontLane::serve`] and
-/// [`FontLane::adopt`] — whose round the suite's [`crate::lane::Gate`] can hold and whose answer
-/// names the generation it was walked for.
+/// own — slots of its own, the real [`FontLane::request_walk`], worker body and [`FontLane::adopt`]'s
+/// take — its worker started by the suite's executor, its walk executing the question of the
+/// newest request it answers so the suite's [`crate::lane::Gate`] can hold it, count it and plant
+/// a panic in it, and its ledger's lines counted.
 #[cfg(test)]
 pub(crate) mod font_lane_adapter {
-    use std::sync::atomic::Ordering;
-    use std::sync::{Arc, OnceLock};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
 
-    use super::{CjkFamilySlot, FontLane, FontRound, MonospaceFamilySlot};
+    use super::{CjkFamilySlot, FontId, FontLane, FontRound, FontTerminal, MonospaceFamilySlot};
     use crate::lane::{
-        Admission, Contract, Delivered, FONT, Gate, LaneUnderTest, Outcome, WakeProbe,
+        Admission, Contract, Delivered, Executor, FONT, Gate, LaneUnderTest, Outcome, Terminal,
+        WakeProbe,
     };
 
     struct FontAdapter {
         lane: &'static FontLane,
         gate: Arc<Gate>,
         probe: Arc<WakeProbe>,
-        /// The generation on screen when the consumer last looked.
-        seen: u64,
+        /// The suite's own record of which question each identity carried, read by the walk.
+        questions: Arc<Mutex<HashMap<u64, u64>>>,
+        /// The lines the ledger said, counted through its `say`.
+        said: Arc<AtomicUsize>,
+        /// A late answer the acceptance took, raised at the next drain.
+        raised: Vec<Delivered>,
     }
 
     fn answer(name: String) -> Vec<bt_platform::MonospaceFamily> {
@@ -34820,33 +34911,63 @@ pub(crate) mod font_lane_adapter {
         }]
     }
 
+    fn outcome(terminal: FontTerminal) -> Outcome {
+        match terminal {
+            Terminal::Done(_) => Outcome::Answered,
+            Terminal::Failed(failure) => Outcome::Failed(failure.to_string()),
+            Terminal::Cancelled => Outcome::Cancelled,
+            Terminal::Superseded { by } => Outcome::Superseded { by: by.0 },
+            Terminal::Joined {
+                with,
+                outcome: carried,
+            } => Outcome::Joined {
+                with: with.0,
+                carried: Box::new(self::outcome(*carried)),
+            },
+            Terminal::WorkerGone => Outcome::WorkerGone,
+        }
+    }
+
     /// A fresh lane over leaked slots, for the `'static` its worker needs.
     pub(crate) fn make() -> Box<dyn LaneUnderTest> {
         let gate = Arc::new(Gate::default());
         let probe = Arc::new(WakeProbe::default());
-        let door = Arc::clone(&gate);
+        let questions: Arc<Mutex<HashMap<u64, u64>>> = Arc::default();
+        let said = Arc::new(AtomicUsize::new(0));
+        let (door, asked) = (Arc::clone(&gate), Arc::clone(&questions));
         let walk: Box<FontRound> = Box::new(move |generation: u64| {
-            door.pass(Some(generation));
-            (
+            let question = asked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&generation)
+                .copied();
+            // The suite's file, held while the walk runs.
+            let held = question.map(|question| door.execute(question));
+            let walked = Ok((
                 answer(format!("Lane Contract Mono {generation}")),
                 Vec::new(),
-            )
+            ));
+            drop(held);
+            walked
         });
-        let wake: &'static OnceLock<Box<dyn Fn() + Send + Sync>> =
-            Box::leak(Box::new(OnceLock::new()));
-        let heard = Arc::clone(&probe);
-        let _ = wake.set(Box::new(move || heard.woke()));
-        let lane: &'static FontLane = Box::leak(Box::new(FontLane {
-            monospace: Box::leak(Box::new(MonospaceFamilySlot::new())),
-            cjk: Box::leak(Box::new(CjkFamilySlot::new())),
-            walk: Box::leak(walk),
-            wake,
-        }));
+        let (heard, counted) = (Arc::clone(&probe), Arc::clone(&said));
+        let lane: &'static FontLane = Box::leak(Box::new(FontLane::new(
+            Executor::scripted(Arc::clone(&gate)),
+            Box::leak(Box::new(MonospaceFamilySlot::new())),
+            Box::leak(Box::new(CjkFamilySlot::new())),
+            Box::leak(walk),
+            move || heard.woke(),
+            move |_line: &str| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            },
+        )));
         Box::new(FontAdapter {
             lane,
             gate,
             probe,
-            seen: 0,
+            questions,
+            said,
+            raised: Vec::new(),
         })
     }
 
@@ -34863,12 +34984,38 @@ pub(crate) mod font_lane_adapter {
             &self.probe
         }
 
+        /// `request_font_walk`, on this lane: the lane's own admission, or its refusal at the
+        /// door as the request's terminal.
         fn submit(&mut self, _target: u32, question: u64) -> Admission {
-            self.lane.request();
-            Admission {
-                ticket: Some(self.lane.monospace.serving()),
-                question,
-                refused: None,
+            // The question is recorded under the identity the next admission mints, before the
+            // worker can read it: the lane mints identities in order, one per admission.
+            let mut questions = self
+                .questions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let next = questions.keys().max().map_or(1, |last| last + 1);
+            questions.insert(next, question);
+            drop(questions);
+            match self.lane.request_walk() {
+                Ok(id) => {
+                    assert_eq!(id.0, next, "the font lane mints its identities in order");
+                    Admission {
+                        ticket: Some(id.0),
+                        question,
+                        refused: None,
+                    }
+                }
+                Err(refused) => {
+                    self.questions
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&next);
+                    Admission {
+                        ticket: None,
+                        question,
+                        refused: Some(format!("{refused:?}")),
+                    }
+                }
             }
         }
 
@@ -34878,28 +35025,48 @@ pub(crate) mod font_lane_adapter {
             );
         }
 
-        /// `adopt_scanned_families`, on this lane: an answer is raised when the adopted
-        /// generation moves.
+        /// `adopt_scanned_families`, on this lane: the terminals taken in the order they were
+        /// minted, each a delivery, and a walk's lists put on screen as the product's acceptance
+        /// puts them.
         fn drain(&mut self) -> Vec<Delivered> {
-            self.lane.adopt();
-            let adopted = self.lane.monospace.answered.load(Ordering::Relaxed);
-            if adopted == self.seen {
-                return Vec::new();
+            let mut delivered = std::mem::take(&mut self.raised);
+            let questions = self
+                .questions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for (id, terminal) in self.lane.requests.ended() {
+                self.lane.take(id, terminal.clone());
+                delivered.push(Delivered {
+                    target: Some(0),
+                    ticket: Some(id.0),
+                    question: questions.get(&id.0).copied(),
+                    outcome: outcome(terminal),
+                });
             }
-            self.seen = adopted;
-            vec![Delivered {
-                target: Some(0),
-                ticket: Some(adopted),
-                question: None,
-                outcome: Outcome::Answered,
-            }]
+            delivered
         }
 
-        /// A late walk's answer, through the slot's own `offer`.
+        /// A late answer to the older request `ticket`, through the lane's own publication — which
+        /// refuses a second terminal — and through the acceptance's adoption, which refuses an
+        /// answer older than the one on screen. Either taking it is an answer raised.
         fn offer_stale(&mut self, ticket: u64) {
+            let late = answer(format!("Lane Contract Mono {ticket}, late"));
             self.lane
-                .monospace
-                .offer(ticket, answer(format!("Lane Contract Mono {ticket}, late")));
+                .requests
+                .ledger()
+                .publish(FontId(ticket), Terminal::Done((late.clone(), Vec::new())));
+            if self.lane.monospace.adopt(ticket, late) {
+                self.raised.push(Delivered {
+                    target: Some(0),
+                    ticket: Some(ticket),
+                    question: None,
+                    outcome: Outcome::Answered,
+                });
+            }
+        }
+
+        fn said(&self) -> Option<usize> {
+            Some(self.said.load(Ordering::SeqCst))
         }
     }
 }

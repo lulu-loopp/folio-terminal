@@ -151,6 +151,10 @@ pub enum LifecycleDirective {
     Notification(crate::session::TerminalNotification),
     /// One `OSC 1337;RequestAttention=`, as it arrived.
     AttentionRequest(crate::session::AttentionRequest),
+    /// The pane's PSReadLine after the profile is not Folio's copy (`OSC 777;folio-psreadline`).
+    ForeignLineEditor {
+        version: String,
+    },
     /// A kitty keyboard protocol request asked for flags this terminal drops.
     KeyboardFlagsRefused {
         requested: u16,
@@ -222,6 +226,9 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
         AdapterEvent::Progress(progress) => LifecycleDirective::Progress(progress),
         AdapterEvent::Notification(notification) => LifecycleDirective::Notification(notification),
         AdapterEvent::AttentionRequest(request) => LifecycleDirective::AttentionRequest(request),
+        AdapterEvent::ForeignLineEditor { version } => {
+            LifecycleDirective::ForeignLineEditor { version }
+        }
         AdapterEvent::KeyboardFlagsRefused {
             requested,
             in_force,

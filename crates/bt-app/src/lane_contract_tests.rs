@@ -1,31 +1,32 @@
 //! **The lane contract's suite, run on every lane** (D-33; `crate::lane`; `docs/plans/design/
 //! window-thread-budget-2026-09-25.md` §R-D).
 //!
-//! Five adapters — the OS hand-off lane (the reference), the font lane, the taskbar lane, the
-//! computation lane and the program-walk lane — each run every [`Claim`]; [`judge`] holds the
-//! verdicts to [`EXPECTED_FAILURES`]. The computation lane's adapter lives here because its lane
-//! lives in `main.rs`; the others live beside their lanes, where the lanes' private parts are.
+//! Ten adapters — the OS hand-off lane (the reference), the font lane, the taskbar lane, the
+//! computation lane's three shares, the program-walk lane, the git mutation lane, the storage
+//! worker and the clipboard lane — each run every [`Claim`]; [`judge`] holds the verdicts to
+//! [`EXPECTED_FAILURES`]. Each adapter lives beside its lane, where the lane's private
+//! parts are.
 //!
 //! The seam the lanes will be built on (`crate::lane`'s `Executor`, `Ledger` and hooks; S-3) is
 //! proven here too: the ledger alone over every interleaving of three identities, the executor's
 //! two ends (a task's panic, the worker's), and lanes the suite builds on the seam — each new
 //! claim passed by one and failed by one planted to break it.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, mpsc};
 
 use super::*;
 use crate::lane::{
-    Adapter, Admission, Bound, Bounds, COMPUTATION, Cancellation, Claim, Contract, Delivered,
-    Delivery, EXPECTED_FAILURES, Executor, ExpectedFailure, Failure, FailureKind, Gate, HANDOFF,
-    LaneName, LaneUnderTest, Ledger, Order, Outcome, Owed, PLANTED_PANIC, Refused, Replacement,
-    Request, Saying, TaskFailure, Terminal, Verdict, WakeProbe, WorkerEnd, check, judge, receive,
-    run_suite, task,
+    Adapter, Admission, Bound, Bounds, Cancellation, Claim, Contract, Delivered, Delivery,
+    EXPECTED_FAILURES, Executor, ExpectedFailure, Failure, FailureKind, Gate, HANDOFF, LaneName,
+    LaneUnderTest, Ledger, Order, Outcome, Owed, PLANTED_PANIC, Refused, Replacement, Request,
+    Saying, TaskFailure, Terminal, Verdict, WakeProbe, Withdrawal, WorkerEnd, check, judge,
+    receive, run_suite, task,
 };
 
 /// Every lane's adapter. A lane missing here is a lane [`judge`] reports as skipped.
-fn adapters() -> [Adapter; 5] {
+fn adapters() -> [Adapter; 10] {
     [
         Adapter {
             lane: LaneName::Handoff,
@@ -41,169 +42,33 @@ fn adapters() -> [Adapter; 5] {
         },
         Adapter {
             lane: LaneName::Computation,
-            make: computation_adapter,
+            make: crate::computation_lane::contract_adapter::make,
+        },
+        Adapter {
+            lane: LaneName::ComputationScale,
+            make: crate::computation_lane::contract_adapter::make_scale,
+        },
+        Adapter {
+            lane: LaneName::ComputationPath,
+            make: crate::computation_lane::contract_adapter::make_path,
         },
         Adapter {
             lane: LaneName::Programs,
             make: crate::programs_lane::contract_adapter::make,
         },
+        Adapter {
+            lane: LaneName::GitMutation,
+            make: crate::git_mutation_lane::contract_adapter::make,
+        },
+        Adapter {
+            lane: LaneName::Storage,
+            make: crate::persist::contract_adapter::make,
+        },
+        Adapter {
+            lane: LaneName::Clipboard,
+            make: crate::clipboard_lane::contract_adapter::make,
+        },
     ]
-}
-
-/// **The computation lane's adapter**: the real [`MathWorker`] — its three threads, the answer
-/// sender they share, and `bt-math-worker`'s queue — with the suite's probe and gate in the wake
-/// every thread calls after it publishes. The decoration thread's executor cannot be stood in for
-/// (it is `run_decoration_worker`'s own match), so the gate holds the worker **after** it has
-/// published, inside its wake: the requests behind it wait all the same.
-///
-/// A question is a pasted picture whose payload is empty, which the real decoder refuses at once
-/// without touching a disk; the answer is still the lane's answer to that question. Acceptance is
-/// the product's: `answers_for` with `claimed_by` over the open tabs, as `apply_math_results` asks
-/// through `Runtime::owns`, and `disable_math_worker_state` for a disconnected channel.
-struct ComputationAdapter {
-    worker: MathWorker,
-    gate: Arc<Gate>,
-    probe: Arc<WakeProbe>,
-    opened: BTreeSet<u32>,
-    closed: BTreeSet<u32>,
-    running: bool,
-    notice_pending: bool,
-}
-
-/// The one window the adapter's tabs stand in.
-fn adapter_window() -> WindowId {
-    WindowId::from(1_u64)
-}
-
-fn tab_of(target: u32) -> TabId {
-    TabId(u64::from(target) + 1)
-}
-
-fn computation_adapter() -> Box<dyn LaneUnderTest> {
-    let gate = Arc::new(Gate::default());
-    let probe = Arc::new(WakeProbe::default());
-    let door = Arc::clone(&gate);
-    let heard = Arc::clone(&probe);
-    let worker = MathWorker::spawn(move || {
-        heard.woke();
-        door.pass(None);
-    })
-    .expect("the computation lane starts");
-    Box::new(ComputationAdapter {
-        worker,
-        gate,
-        probe,
-        opened: BTreeSet::new(),
-        closed: BTreeSet::new(),
-        running: true,
-        notice_pending: false,
-    })
-}
-
-impl LaneUnderTest for ComputationAdapter {
-    fn contract(&self) -> &'static Contract {
-        &COMPUTATION
-    }
-
-    fn gate(&self) -> &Gate {
-        &self.gate
-    }
-
-    fn probe(&self) -> &WakeProbe {
-        &self.probe
-    }
-
-    fn submit(&mut self, target: u32, question: u64) -> Admission {
-        // The decode below reaches the host's SVG codec for any payload no raster container
-        // claims; install it as `main` does, so the lane's answer never depends on the payload.
-        crate::test_support::install_host_answers();
-        self.opened.insert(target);
-        let leaf = ShellAddress {
-            window: adapter_window(),
-            leaf: LeafId {
-                tab: tab_of(target),
-                seat: SeatId(1),
-            },
-        };
-        let request = MathWorkerRequest::InlineImage {
-            leaf,
-            task: bt_term::InlineImageTask {
-                occurrence_id: question,
-                source: bt_term::InlineImageSource::Osc1337(Vec::new()),
-            },
-        };
-        // `dispatch_decoration_task`'s admission: a send, which fails only when the thread is gone.
-        let refused = self
-            .worker
-            .tasks
-            .send(request)
-            .err()
-            .map(|_| "the decoration thread has stopped".to_owned());
-        Admission {
-            ticket: None,
-            question,
-            refused,
-        }
-    }
-
-    fn close_target(&mut self, target: u32) {
-        self.closed.insert(target);
-    }
-
-    fn drain(&mut self) -> Vec<Delivered> {
-        let mut batch = Vec::new();
-        let mut gone = false;
-        loop {
-            match self.worker.results.try_recv() {
-                Ok(result) => batch.push(result),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    gone = disable_math_worker_state(&mut self.running, &mut self.notice_pending);
-                    break;
-                }
-            }
-        }
-        let open: Vec<TabId> = self
-            .opened
-            .difference(&self.closed)
-            .map(|target| tab_of(*target))
-            .collect();
-        let taken = answers_for(&mut batch, |result| {
-            claimed_by(result.owner(), adapter_window(), open.iter().copied())
-        });
-        let question = |result: &MathWorkerResult| match &result.completion {
-            DecorationWorkerCompletion::InlineImage { task, .. } => Some(task.occurrence_id),
-            _ => None,
-        };
-        let mut found: Vec<Delivered> = taken
-            .iter()
-            .map(|result| Delivered {
-                target: u32::try_from(result.leaf.leaf.tab.0 - 1).ok(),
-                ticket: None,
-                question: question(result),
-                outcome: Outcome::Answered,
-            })
-            .chain(batch.iter().map(|result| Delivered {
-                target: None,
-                ticket: None,
-                question: question(result),
-                outcome: Outcome::Answered,
-            }))
-            .collect();
-        if gone {
-            found.push(Delivered {
-                target: None,
-                ticket: None,
-                question: None,
-                outcome: Outcome::Fault(math_worker_stopped_notice().to_owned()),
-            });
-        }
-        found
-    }
-
-    fn offer_stale(&mut self, _ticket: u64) {
-        unreachable!("the computation lane's target is the asking tab, not the application");
-    }
 }
 
 /// Run the suite on every adapter, one thread per lane.
@@ -237,16 +102,14 @@ fn report(verdicts: &[Verdict]) -> String {
 /// it does.**
 ///
 /// The lanes grew their policies one at a time, each stated in its own module doc. This runs one
-/// suite over all four through their real admission, publication and acceptance, and holds the
+/// suite over all five through their real admission, publication and acceptance, and holds the
 /// result to [`EXPECTED_FAILURES`]: a lane that fails a claim with no row, fails it differently
 /// from its row, passes a claim its row says it fails, is not run, or is run without a request is
-/// red. The rows name the ledger entries that repair them (D-70…D-76), so a repair that lands
-/// turns this red until its row is removed.
+/// red. Since S-8 every lane is on the seam and the list is empty: every lane keeps every claim.
 ///
 /// MUTATION: build the hand-off lane's ledger with no bound (`None` for `Some(BOUND)` in
 /// `HandoffLane::start`) — it admits the whole flood (`BoundBroken`, an undeclared failure). Or
-/// delete the computation lane's D-76 row from `EXPECTED_FAILURES` — its dead-worker failure is
-/// undeclared.
+/// let `Ledger::worker_ended` skip the owed set — every lane's dead worker is undeclared.
 #[test]
 fn every_lane_runs_every_claim_and_fails_only_where_the_ledger_says() {
     let verdicts = run_every_lane(&Claim::ALL);
@@ -263,8 +126,7 @@ fn every_lane_runs_every_claim_and_fails_only_where_the_ledger_says() {
 ///
 /// The two claims the window thread leans on hardest: a press on a busy lane never holds the
 /// thread that pressed, and an answer whose asker has gone — a closed window, a closed tab — or
-/// that is older than the one adopted is raised nowhere. The computation lane admits without a
-/// bound (D-74), which is declared; it still never makes the asker wait.
+/// that is older than the one adopted is raised nowhere.
 ///
 /// MUTATION: build the hand-off lane's ledger with no bound (`None` for `Some(BOUND)` in
 /// `HandoffLane::start`) — it admits the whole flood (`BoundBroken`). Or drop the generation
@@ -388,8 +250,18 @@ fn a_hand_off_pressed_after_the_worker_ended_is_refused_at_the_door() {
     );
 }
 
-/// A verdict for every lane and claim, failing exactly as [`EXPECTED_FAILURES`] declares.
-fn faithful_verdicts() -> Vec<Verdict> {
+/// **A declared failure for the judge's own tests.** The list of the tree is empty since S-8 —
+/// every lane keeps every claim — so the judge is shown green and red against this one.
+const PLANTED: &[ExpectedFailure] = &[ExpectedFailure {
+    lane: LaneName::Computation,
+    claim: Claim::AnswersHeldAreBounded,
+    failure: FailureKind::AnswersUnbounded,
+    repair: "D-74",
+    why: "planted for the judge: an answer channel with no bound",
+}];
+
+/// A verdict for every lane and claim, failing exactly as `expected` declares.
+fn faithful_verdicts(expected: &[ExpectedFailure]) -> Vec<Verdict> {
     LaneName::ALL
         .iter()
         .flat_map(|&lane| {
@@ -397,7 +269,7 @@ fn faithful_verdicts() -> Vec<Verdict> {
                 lane,
                 claim,
                 requests: 3,
-                result: match EXPECTED_FAILURES
+                result: match expected
                     .iter()
                     .find(|row| row.lane == lane && row.claim == claim)
                 {
@@ -413,20 +285,12 @@ fn faithful_verdicts() -> Vec<Verdict> {
 fn example(kind: FailureKind) -> Failure {
     match kind {
         FailureKind::AnswersUnbounded => Failure::AnswersUnbounded { held: 40 },
-        FailureKind::DeathUnobservable => Failure::DeathUnobservable { unanswered: 3 },
-        FailureKind::NoTerminal => Failure::NoTerminal { requests: 4 },
-        FailureKind::AdmissionUnbounded => Failure::AdmissionUnbounded { admitted: 64 },
-        FailureKind::IdentityAmbiguous => Failure::IdentityAmbiguous { answers: 2 },
-        FailureKind::SupersededInSilence => Failure::SupersededInSilence { requests: 3 },
-        FailureKind::JoinedInSilence => Failure::JoinedInSilence { requests: 1 },
-        FailureKind::NoFailedTerminal => Failure::NoFailedTerminal { key: 1 },
-        FailureKind::OrphanNotSunk => Failure::OrphanNotSunk { key: 0 },
         other => panic!("no example for {other:?}: add one when a row declares it"),
     }
 }
 
 fn judged(verdicts: &[Verdict]) -> Vec<String> {
-    judge(verdicts, EXPECTED_FAILURES, &LaneName::ALL, &Claim::ALL)
+    judge(verdicts, PLANTED, &LaneName::ALL, &Claim::ALL)
 }
 
 /// PIN (A5) — **The judge passes a run that fails exactly as declared, and nothing else.**
@@ -439,10 +303,10 @@ fn judged(verdicts: &[Verdict]) -> Vec<String> {
 /// row.failure` arm) — the different failure passes.
 #[test]
 fn the_judge_is_red_on_an_unexpected_pass_a_different_failure_a_skipped_lane_and_no_requests() {
-    let faithful = faithful_verdicts();
+    let faithful = faithful_verdicts(PLANTED);
     assert_eq!(judged(&faithful), Vec::<String>::new(), "the faithful run");
 
-    let row: &ExpectedFailure = &EXPECTED_FAILURES[0];
+    let row: &ExpectedFailure = &PLANTED[0];
     let planted = |change: &dyn Fn(&mut Verdict)| -> Vec<String> {
         let mut verdicts = faithful.clone();
         let verdict = verdicts
@@ -502,22 +366,23 @@ fn the_judge_is_red_on_an_unexpected_pass_a_different_failure_a_skipped_lane_and
 /// MUTATION: write `repair: "later"` on any row — red.
 #[test]
 fn every_declared_lane_failure_names_one_ledger_row() {
-    let doubled: Vec<ExpectedFailure> = EXPECTED_FAILURES
-        .iter()
-        .chain(&EXPECTED_FAILURES[..1])
-        .copied()
-        .collect();
+    let doubled: Vec<ExpectedFailure> = PLANTED.iter().chain(PLANTED).copied().collect();
     assert!(
-        judge(&faithful_verdicts(), &doubled, &LaneName::ALL, &Claim::ALL)
-            .iter()
-            .any(|problem| problem.contains("declared twice")),
+        judge(
+            &faithful_verdicts(PLANTED),
+            &doubled,
+            &LaneName::ALL,
+            &Claim::ALL
+        )
+        .iter()
+        .any(|problem| problem.contains("declared twice")),
         "a doubled row is refused"
     );
-    let mut unrepaired = EXPECTED_FAILURES.to_vec();
+    let mut unrepaired = PLANTED.to_vec();
     unrepaired[0].repair = "later";
     assert!(
         judge(
-            &faithful_verdicts(),
+            &faithful_verdicts(PLANTED),
             &unrepaired,
             &LaneName::ALL,
             &Claim::ALL
@@ -528,7 +393,7 @@ fn every_declared_lane_failure_names_one_ledger_row() {
     );
     assert!(
         judge(
-            &faithful_verdicts(),
+            &faithful_verdicts(EXPECTED_FAILURES),
             EXPECTED_FAILURES,
             &LaneName::ALL,
             &Claim::ALL
@@ -874,7 +739,13 @@ fn play(case: &Case, order: &[Step]) -> Option<String> {
         })
         .count();
     let lines = failed + usize::from(case.worker_ends);
-    if woke.load(Ordering::SeqCst) != usize::from(case.worker_ends) {
+    // A worker that ends wakes its consumer when it ended a request (one was still owed), and
+    // only then: a worker that ends owing nothing ends no request, and there is nothing to take.
+    let ended_owed = case.worker_ends
+        && want
+            .iter()
+            .any(|terminal| matches!(terminal, Some(Terminal::WorkerGone)));
+    if woke.load(Ordering::SeqCst) != usize::from(ended_owed) {
         return Some(format!(
             "{:?}: the worker {} and the consumer was woken {} time(s)",
             Failure::DeathUnannounced,
@@ -930,7 +801,8 @@ const INTERLEAVINGS: usize = 4_103_588;
 /// reference ([`expected`]) reads off the order; taking twice gives one; each failed identity — a
 /// joined one carrying a failure included — is said once and the worker's end once; a joined
 /// identity ends `Joined` carrying its original's terminal, the
-/// worker's end included; the consumer is woken once when the worker ends; the lane is in fault,
+/// worker's end included; the consumer is woken once when the worker ends with a request owed,
+/// and not at all when it ends owing nothing; the lane is in fault,
 /// and refuses at the door, exactly when the worker ended. No clock and no thread is in the proof:
 /// the order is the script. The cases are shared among scoped threads only to finish sooner; the
 /// count and the verdict do not depend on how.
@@ -1036,7 +908,8 @@ fn the_ledger_refuses_at_the_door_synchronously() {
                 outcome: Box::new(Terminal::WorkerGone),
             },
         ],
-        "the two owed when the worker ended went to their sink when their requesters went: the \n         request, and the one joined to it, carrying its outcome"
+        "the two owed when the worker ended went to their sink when their requesters went: the \
+         request, and the one joined to it, carrying its outcome"
     );
 }
 
@@ -1147,6 +1020,19 @@ enum Planted {
     AlsoSinks,
     /// The ledger is built with no wake: the worker's end is recorded and announced to nobody.
     DeathUnwoken,
+    /// The asker's withdrawal leaves the job in line, and the worker runs it, never asking
+    /// whether it is still owed.
+    WithdrawnStillRuns,
+    /// The asker's withdrawal leaves the job in line; the worker skips it when it gets there.
+    WithdrawnStaysInLine,
+    /// The asker lets a request go when it withdraws it, without ending it `Cancelled` or taking it
+    /// out of line: the worker runs it, and its answer goes to the sink.
+    WithdrawnInSilence,
+    /// The worker ends question 1 `Cancelled`, on a lane whose askers withdraw nothing.
+    CancelsUnasked,
+    /// The worker publishes a request's answer while its work still holds the file it took,
+    /// and lets the file go after.
+    PublishesBeforeLettingGo,
 }
 
 /// How many identities the FIFO scripted lane's ledger owes at most.
@@ -1165,7 +1051,14 @@ const SCRIPTED_FIFO: Contract = Contract {
         answers_held: Bound::At(SCRIPTED_BOUND),
     },
     cancellation: Cancellation::Abandon,
+    withdrawal: Withdrawal::Never,
     saying: Saying::PerRequest,
+};
+
+/// The same lane, its asker withdrawing a request it holds (`Cancelled`).
+const SCRIPTED_WITHDRAWING: Contract = Contract {
+    withdrawal: Withdrawal::ByTheAsker,
+    ..SCRIPTED_FIFO
 };
 
 /// The same lane, declaring that a streak of the same failure is said once.
@@ -1186,6 +1079,7 @@ const SCRIPTED_LATEST: Contract = Contract {
         answers_held: Bound::Unbounded,
     },
     cancellation: Cancellation::Abandon,
+    withdrawal: Withdrawal::Never,
     saying: Saying::PerRequest,
 };
 
@@ -1282,9 +1176,25 @@ fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) 
     Executor::scripted(Arc::clone(&gate))
         .start_worker("lane-contract-scripted", Arc::clone(&ledger), move |ctx| {
             while let Some((id, question)) = jobs.next() {
+                // A request its asker withdrew is dropped before its work.
+                if planted != Planted::WithdrawnStillRuns && !publish.owes(id) {
+                    continue;
+                }
+                if planted == Planted::CancelsUnasked && question == 1 {
+                    publish.publish(id, Terminal::Cancelled);
+                    wake.woke();
+                    continue;
+                }
+                // What a planted lane keeps of the suite's file past its answer.
+                let past = Mutex::new(None);
                 let attempt = || {
                     task(ctx, |_ctx| {
-                        door.execute(question);
+                        let held = door.execute(question);
+                        if planted == Planted::PublishesBeforeLettingGo {
+                            *locked(&past) = Some(held);
+                        } else {
+                            drop(held);
+                        }
                         Ok::<u64, String>(question)
                     })
                 };
@@ -1313,6 +1223,12 @@ fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) 
                 }
                 publish.publish(id, terminal);
                 wake.woke();
+                // The plant lets the file go only after the answer is out — and after the
+                // suite has looked, so the order it breaks is seen, not raced.
+                if let Some(held) = locked(&past).take() {
+                    door.wait_looked();
+                    drop(held);
+                }
             }
         })
         .expect("the scripted worker starts");
@@ -1467,6 +1383,33 @@ impl LaneUnderTest for ScriptedLane {
         unreachable!("a scripted lane's target is the asking target, not the application");
     }
 
+    fn withdraw(&mut self, target: u32, ticket: u64) {
+        let at = self
+            .asked
+            .iter()
+            .position(|asked| asked.target == target && asked.request.id() == ticket)
+            .expect("the suite withdraws a request the lane holds");
+        let asked = self.asked.remove(at);
+        if !matches!(
+            self.planted,
+            Planted::WithdrawnStillRuns
+                | Planted::WithdrawnStaysInLine
+                | Planted::WithdrawnInSilence
+        ) {
+            locked(&self.queue.jobs)
+                .waiting
+                .retain(|(waiting, _)| *waiting != ticket);
+        }
+        if self.planted != Planted::WithdrawnInSilence {
+            self.ledger.publish(ticket, Terminal::Cancelled);
+        }
+        drop(asked);
+    }
+
+    fn in_line(&self) -> Option<usize> {
+        Some(locked(&self.queue.jobs).waiting.len())
+    }
+
     fn sunk(&mut self) -> Vec<Delivered> {
         std::mem::take(&mut *locked(&self.kept.sunk))
     }
@@ -1511,6 +1454,16 @@ fn a_lane_built_on_the_seam_keeps_every_claim() {
     for (contract, policy, claim) in [
         (&SCRIPTED_STREAKS, Policy::Fifo, Claim::AFailureIsSaidOnce),
         (
+            &SCRIPTED_WITHDRAWING,
+            Policy::Fifo,
+            Claim::AWithdrawnRequestEndsCancelledOnce,
+        ),
+        (
+            &SCRIPTED_WITHDRAWING,
+            Policy::Fifo,
+            Claim::AWithdrawnRequestLeavesTheLine,
+        ),
+        (
             &SCRIPTED_LATEST,
             Policy::Latest,
             Claim::ASupersededRequestSaysSo,
@@ -1527,6 +1480,74 @@ fn a_lane_built_on_the_seam_keeps_every_claim() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// RED (T-CLIPBOARD-LANE) — **A withdrawn request ends `Cancelled` once**: the FIFO lane on the
+/// seam whose asker withdraws a waiting request ends it `Cancelled` in its sink, never in a
+/// target, and its worker never runs it; the same lane planted to run what was withdrawn, or to
+/// let it go without a terminal of its own, is red, and so is a lane that declares no withdrawal
+/// and says `Cancelled`.
+///
+/// MUTATION: make `Ledger::owes` answer `true` for every identity — the clean withdrawing lane
+/// runs what was withdrawn (`CancelledButRun`), and the test is red.
+#[test]
+fn a_withdrawn_request_ends_cancelled_once_and_a_run_or_silent_one_is_red() {
+    let claim = Claim::AWithdrawnRequestEndsCancelledOnce;
+    assert_eq!(
+        on_scripted(&SCRIPTED_WITHDRAWING, Policy::Fifo, Planted::Nothing, claim),
+        Ok(())
+    );
+    assert_eq!(
+        on_scripted(&SCRIPTED_FIFO, Policy::Fifo, Planted::Nothing, claim),
+        Ok(())
+    );
+    let kinds = [
+        (&SCRIPTED_WITHDRAWING, Planted::WithdrawnStillRuns),
+        (&SCRIPTED_WITHDRAWING, Planted::WithdrawnInSilence),
+        (&SCRIPTED_FIFO, Planted::CancelsUnasked),
+    ]
+    .map(|(contract, planted)| {
+        on_scripted(contract, Policy::Fifo, planted, claim).map_err(|failure| failure.kind())
+    });
+    assert_eq!(
+        kinds,
+        [
+            Err(FailureKind::CancelledButRun),
+            Err(FailureKind::CancelledInSilence),
+            Err(FailureKind::CancelledUndeclared),
+        ]
+    );
+}
+
+/// RED (T-CLIPBOARD-LANE round 2) — **A withdrawn request leaves the line**: the FIFO lane on the
+/// seam whose asker withdraws, one after another and past the bound, requests the held worker has
+/// not reached leaves nothing waiting; the same lane planted to leave a withdrawn job in line is
+/// red, though its worker skips the job, and a lane that declares no withdrawal is asked one
+/// request.
+///
+/// MUTATION: make `Queue::withdraw` leave the job in line (drop its `remove`) — the clipboard lane
+/// fails this claim with `WithdrawnStaysInLine` in the lane suite.
+#[test]
+fn a_withdrawn_request_leaves_the_line_and_a_lane_keeping_it_is_red() {
+    let claim = Claim::AWithdrawnRequestLeavesTheLine;
+    assert_eq!(
+        on_scripted(&SCRIPTED_WITHDRAWING, Policy::Fifo, Planted::Nothing, claim),
+        Ok(())
+    );
+    assert_eq!(
+        on_scripted(&SCRIPTED_FIFO, Policy::Fifo, Planted::Nothing, claim),
+        Ok(())
+    );
+    assert_eq!(
+        on_scripted(
+            &SCRIPTED_WITHDRAWING,
+            Policy::Fifo,
+            Planted::WithdrawnStaysInLine,
+            claim
+        )
+        .map_err(|failure| failure.kind()),
+        Err(FailureKind::WithdrawnStaysInLine)
+    );
 }
 
 /// RED (S-3) — **A superseded request says so**: the latest-value lane on the seam ends each
@@ -1649,6 +1670,40 @@ fn an_orphaned_answer_reaches_its_sink_and_a_dropping_sink_is_red() {
     assert_eq!(
         dropped.map_err(|failure| failure.kind()),
         Err(FailureKind::OrphanNotSunk)
+    );
+}
+
+/// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **An answer is published after its resources are
+/// released**: on the seam, a worker's terminal is observable only once its work has let go of
+/// the file it took, so the moment the consumer finds the answer nobody holds that file; a worker
+/// that publishes while it still holds the file — as a decode thread walked away from, or a
+/// platform's late release, would — is red, naming the request.
+///
+/// MUTATION: plant `Planted::Nothing` in the second run — it passes, and the test is red. On a
+/// product lane: hand the decoration share adapter's held file to a thread that outlives its door
+/// (the walked-away decode's shape) — `every_lane_runs_every_claim_and_fails_only_where_the_ledger_says`
+/// is red with "Computation × AnAnswerIsPublishedAfterItsResourcesAreReleased failed with
+/// HeldPastTheAnswer { key: 1 }".
+#[test]
+fn an_answer_is_published_after_its_resources_are_released_and_one_published_first_is_red() {
+    assert_eq!(
+        on_scripted(
+            &SCRIPTED_FIFO,
+            Policy::Fifo,
+            Planted::Nothing,
+            Claim::AnAnswerIsPublishedAfterItsResourcesAreReleased
+        ),
+        Ok(())
+    );
+    let first = on_scripted(
+        &SCRIPTED_FIFO,
+        Policy::Fifo,
+        Planted::PublishesBeforeLettingGo,
+        Claim::AnAnswerIsPublishedAfterItsResourcesAreReleased,
+    );
+    assert_eq!(
+        first.map_err(|failure| failure.kind()),
+        Err(FailureKind::HeldPastTheAnswer)
     );
 }
 

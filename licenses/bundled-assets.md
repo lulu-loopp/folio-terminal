@@ -153,17 +153,18 @@ upstream copyright notice declares **no** Reserved Font Name.
 
 ---
 
-### PSReadLine 2.4.6
+### PSReadLine 2.4.5
 
 <https://github.com/PowerShell/PSReadLine> — BSD 2-Clause,
 Copyright (c) 2013, Jason Shirk.
 
-Nine files, including two `.dll`s, are embedded in the executable and written to
-`Documents\WindowsPowerShell\Modules\PSReadLine` when the user asks for the
-PowerShell integration. `License.txt` is one of the nine — the module is
-installed with its licence beside it, not without.
+Microsoft's signed PSReadLine 2.4.5, as the PowerShell Gallery publishes it
+(`vendor/psreadline/PSReadLine.2.4.5.nupkg`, pinned by SHA-256 and unmodified).
+Its four assemblies and `License.txt` are embedded in the Windows executable and
+written to Folio's local data folder for Windows PowerShell panes; the module is
+written with its licence beside it, not without.
 
-<!-- verbatim: assets/psreadline/2.4.6/License.txt -->
+<!-- verbatim: vendor/psreadline/LICENSE-PSREADLINE.txt -->
 
 ---
 
@@ -279,9 +280,11 @@ text that does not exist upstream.
 
 ### Assets embedded by `typst-assets` 0.15.1
 
-The `typst-as-lib` dependency is taken with `typst-kit-fonts` and
-`typst-kit-embed-fonts`, which compiles `typst-assets`' fonts and data tables
-into the executable. The crate itself is Apache-2.0 and appears in the crate
+On the desktop the `typst-as-lib` dependency is taken with `typst-kit-fonts`
+and `typst-kit-embed-fonts`, which compiles `typst-assets`' fonts and data tables
+into the executable. A `wasm32` build of `bt-math` takes neither and compiles no
+`typst-assets` face in: a browser host supplies its own faces, and the notices
+for them travel with that host. The crate itself is Apache-2.0 and appears in the crate
 listing below; the *assets* are not, and travel under six further sets of terms.
 
 Upstream states them in one `NOTICE` file, and that file is reproduced here

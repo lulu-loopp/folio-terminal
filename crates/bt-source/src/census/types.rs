@@ -58,6 +58,17 @@ pub(crate) enum Ty {
     Fn(Vec<Ty>),
     /// A generic parameter no substitution reached.
     Param(String),
+    /// **An associated type of a generic parameter** — `B::Glass` where `B` is in scope: what
+    /// is known of it is the trait its declaration bounds it by, and a method called on it is
+    /// that trait's.
+    Assoc {
+        param: String,
+        name: String,
+    },
+    /// **A value known only by the traits it is written to have**: `dyn A + B` and `impl A`, each
+    /// bound as the path it is written as. Only a [`Written`] asked for it
+    /// ([`Written::traits`]) reads one — the call graph's; the census reads these as unknown.
+    Traits(Vec<Named>),
     Unknown(String),
 }
 
@@ -96,7 +107,12 @@ impl Ty {
             Self::Iter(item) => item.carries_reference(),
             Self::Tuple(items) => items.iter().any(Self::carries_reference),
             Self::Named(named) => named.args.iter().any(Self::carries_reference),
-            Self::Slice(_) | Self::Fn(_) | Self::Param(_) | Self::Unknown(_) => false,
+            Self::Slice(_)
+            | Self::Fn(_)
+            | Self::Param(_)
+            | Self::Assoc { .. }
+            | Self::Traits(_)
+            | Self::Unknown(_) => false,
         }
     }
 
@@ -112,7 +128,7 @@ impl Ty {
             | Self::Iter(inner)
             | Self::Entry(inner) => inner.mentions(names),
             Self::Tuple(items) | Self::Fn(items) => items.iter().any(|item| item.mentions(names)),
-            Self::Param(_) | Self::Unknown(_) => false,
+            Self::Param(_) | Self::Assoc { .. } | Self::Traits(_) | Self::Unknown(_) => false,
         }
     }
 
@@ -130,21 +146,27 @@ impl Ty {
             Self::Slice(inner) => Self::Slice(Box::new(inner.substitute(map))),
             Self::Iter(inner) => Self::Iter(Box::new(inner.substitute(map))),
             Self::Entry(inner) => Self::Entry(Box::new(inner.substitute(map))),
-            Self::Unknown(_) => self.clone(),
+            Self::Assoc { .. } | Self::Traits(_) | Self::Unknown(_) => self.clone(),
         }
     }
 
-    /// Whether any generic parameter is left in it.
-    pub(crate) fn is_open(&self) -> bool {
+    /// **Whether what this names is itself a generic parameter no substitution reached** — `T`,
+    /// `&mut T` — rather than a type whose arguments still name one. `Runtime<'_, B>` is a
+    /// `Runtime`, and its fields are its own whatever `B` is; an argument that is still a
+    /// parameter is answered as one when something is asked of it.
+    pub(crate) fn is_a_parameter(&self) -> bool {
         match self {
             Self::Param(_) => true,
-            Self::Named(named) => named.args.iter().any(Self::is_open),
-            Self::Ref { inner, .. }
-            | Self::Slice(inner)
-            | Self::Iter(inner)
-            | Self::Entry(inner) => inner.is_open(),
-            Self::Tuple(items) | Self::Fn(items) => items.iter().any(Self::is_open),
-            Self::Unknown(_) => false,
+            Self::Ref { inner, .. } => inner.is_a_parameter(),
+            Self::Named(_)
+            | Self::Tuple(_)
+            | Self::Slice(_)
+            | Self::Iter(_)
+            | Self::Entry(_)
+            | Self::Fn(_)
+            | Self::Assoc { .. }
+            | Self::Traits(_)
+            | Self::Unknown(_) => false,
         }
     }
 
@@ -180,6 +202,15 @@ impl Ty {
             Self::Iter(inner) => format!("impl Iterator<Item = {}>", inner.spelling()),
             Self::Entry(inner) => format!("Entry<{}>", inner.spelling()),
             Self::Param(name) => name.clone(),
+            Self::Assoc { param, name } => format!("{param}::{name}"),
+            Self::Traits(bounds) => format!(
+                "dyn {}",
+                bounds
+                    .iter()
+                    .map(|bound| bound.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            ),
             Self::Unknown(_) => "_".to_owned(),
         }
     }
@@ -199,6 +230,13 @@ pub(crate) struct Written {
     /// Crate names of the workspace, so a path's first segment can be told as
     /// a crate or a module.
     pub(crate) crates: BTreeSet<String>,
+    /// **Read trait bounds** (the call graph's reading, never the census's): `dyn A + B` and
+    /// `impl A` become [`Ty::Traits`], and every generic parameter's trait bounds are kept in
+    /// [`Written::trait_bounds`]. Off, they are unknown as before.
+    pub(crate) traits: bool,
+    /// Each generic parameter in scope, with the trait bounds written on it (inline and in a
+    /// `where` clause), when [`Written::traits`] is on.
+    pub(crate) trait_bounds: BTreeMap<String, Vec<Named>>,
 }
 
 impl Written {
@@ -228,6 +266,51 @@ impl Written {
                 }
             }
         }
+        if !self.traits {
+            return;
+        }
+        for param in &generics.params {
+            if let syn::GenericParam::Type(ty) = param {
+                let named = self.trait_paths(ty.bounds.iter());
+                self.trait_bounds.insert(ty.ident.to_string(), named);
+            }
+        }
+        if let Some(clause) = &generics.where_clause {
+            for predicate in &clause.predicates {
+                if let syn::WherePredicate::Type(typed) = predicate
+                    && let syn::Type::Path(path) = &typed.bounded_ty
+                    && let Some(name) = path.path.get_ident()
+                {
+                    let named = self.trait_paths(typed.bounds.iter());
+                    self.trait_bounds
+                        .entry(name.to_string())
+                        .or_default()
+                        .extend(named);
+                }
+            }
+        }
+    }
+
+    /// The trait bounds of a bound list, each as the path it is written as (its arguments read
+    /// as types); a lifetime, a relaxed `?Sized` and a closure trait written with parentheses
+    /// name none.
+    pub(crate) fn trait_paths<'b>(
+        &self,
+        bounds: impl Iterator<Item = &'b syn::TypeParamBound>,
+    ) -> Vec<Named> {
+        bounds
+            .filter_map(|bound| match bound {
+                syn::TypeParamBound::Trait(bound)
+                    if matches!(bound.modifier, syn::TraitBoundModifier::None) =>
+                {
+                    match self.path(&bound.path) {
+                        Ty::Named(named) => Some(named),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn bound_of<'b>(&self, bounds: impl Iterator<Item = &'b syn::TypeParamBound>) -> Option<Ty> {
@@ -280,12 +363,24 @@ impl Written {
             syn::Type::Array(array) => Ty::Slice(Box::new(self.ty(&array.elem))),
             syn::Type::Path(path) if path.qself.is_none() => self.path(&path.path),
             syn::Type::Path(_) => Ty::unknown("a qualified associated type"),
-            syn::Type::ImplTrait(bounds) => self
-                .bound_of(bounds.bounds.iter())
-                .unwrap_or_else(|| Ty::unknown("an `impl Trait` type")),
-            syn::Type::TraitObject(bounds) => self
-                .bound_of(bounds.bounds.iter())
-                .unwrap_or_else(|| Ty::unknown("a trait object")),
+            syn::Type::ImplTrait(bounds) => {
+                self.bound_of(bounds.bounds.iter()).unwrap_or_else(|| {
+                    if self.traits {
+                        Ty::Traits(self.trait_paths(bounds.bounds.iter()))
+                    } else {
+                        Ty::unknown("an `impl Trait` type")
+                    }
+                })
+            }
+            syn::Type::TraitObject(bounds) => {
+                self.bound_of(bounds.bounds.iter()).unwrap_or_else(|| {
+                    if self.traits {
+                        Ty::Traits(self.trait_paths(bounds.bounds.iter()))
+                    } else {
+                        Ty::unknown("a trait object")
+                    }
+                })
+            }
             syn::Type::BareFn(function) => Ty::Fn(
                 function
                     .inputs
@@ -321,6 +416,12 @@ impl Written {
         }
         if segments.len() > 1 && segments[segments.len() - 2].ident == "Self" {
             return Ty::unknown("an associated type of `Self`");
+        }
+        if segments.len() == 2 && self.params.contains(&segments[0].ident.to_string()) {
+            return Ty::Assoc {
+                param: segments[0].ident.to_string(),
+                name,
+            };
         }
         let mut leading: Vec<String> = segments[..segments.len() - 1]
             .iter()
@@ -479,6 +580,19 @@ pub(crate) struct Declarations {
     /// Every method name a workspace trait declares — the reason a prelude
     /// trait's signature is not trusted for that name.
     pub(crate) trait_methods: BTreeSet<String>,
+    /// A workspace trait's own method declarations, by trait and method name: what a call on a
+    /// [`Ty::Assoc`] bounded by that trait answers.
+    pub(crate) trait_declarations: BTreeMap<(String, String), Vec<MethodDecl>>,
+    /// The traits each associated type name is bounded by, over every workspace trait that
+    /// declares one (`type Glass: Glass<..>;` gives `Glass` → `{Glass}`).
+    ///
+    /// **A limit, by bare name** (T-HEADLESS-RUNTIME-SEAM round 2): both the associated type and
+    /// its bounds are keyed by their names alone, not by the trait that declares them or the
+    /// trait identity a bound resolves to. Two traits declaring an associated type of one name are
+    /// one entry, and a bound named like another trait is that trait's methods; a call is then
+    /// resolved to every candidate's declaration, and only agreeing ones answer. `bt-app` declares
+    /// each name once (the window seam's `Backend`), so nothing is merged there today.
+    pub(crate) associated_bounds: BTreeMap<String, BTreeSet<String>>,
     /// Crate (library target) names, mapped to their packages.
     pub(crate) crates: BTreeMap<String, String>,
     /// Every module's `use` items, by package and module path.
@@ -578,6 +692,7 @@ impl Declarations {
     }
 
     fn read_one(&mut self, index: &Index, crates: &BTreeSet<String>) {
+        self.read_associated_bounds(index);
         self.read_derefs(index, crates);
         self.read_aliases(index, crates);
         self.read_imports(index);
@@ -596,6 +711,32 @@ impl Declarations {
                 }
                 ItemKind::Function => self.read_function(index, item, package, module, crates),
                 ItemKind::Field | ItemKind::Variant => {}
+            }
+        }
+    }
+
+    /// Every workspace trait's associated types and the traits their declarations bound them by.
+    fn read_associated_bounds(&mut self, index: &Index) {
+        for declaration in index.traits() {
+            let Ok(parsed) = syn::parse_str::<syn::ItemTrait>(index.text(declaration.whole()))
+            else {
+                self.unparsed.push(format!("trait {}", declaration.name()));
+                continue;
+            };
+            for member in &parsed.items {
+                let syn::TraitItem::Type(associated) = member else {
+                    continue;
+                };
+                for bound in &associated.bounds {
+                    if let syn::TypeParamBound::Trait(bound) = bound
+                        && let Some(last) = bound.path.segments.last()
+                    {
+                        self.associated_bounds
+                            .entry(associated.ident.to_string())
+                            .or_default()
+                            .insert(last.ident.to_string());
+                    }
+                }
             }
         }
     }
@@ -788,8 +929,29 @@ impl Declarations {
         };
         let Some(owner) = item.type_owner() else {
             // A trait's own declaration: its name is what the prelude fallback
-            // must not answer for.
+            // must not answer for, and its signature is what a call on an
+            // associated type bounded by the trait answers.
             self.trait_methods.insert(item.name().to_owned());
+            if let Some(trait_name) = item.trait_name() {
+                let written = self.written(package.clone(), module, crates);
+                let ret = match &signature.output {
+                    syn::ReturnType::Default => Ty::Tuple(Vec::new()),
+                    syn::ReturnType::Type(_, ty) => written.ty(ty),
+                };
+                let params = typed_inputs(&written, &signature);
+                self.trait_declarations
+                    .entry((trait_name.to_owned(), item.name().to_owned()))
+                    .or_default()
+                    .push(MethodDecl {
+                        package,
+                        receiver: Receiver::of(&signature),
+                        ret,
+                        impl_params: Vec::new(),
+                        self_args: Vec::new(),
+                        params,
+                        callable: None,
+                    });
+            }
             return;
         };
         let mut written = self.written(package.clone(), module, crates);

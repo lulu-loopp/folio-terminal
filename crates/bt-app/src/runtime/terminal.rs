@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::PtyTarget;
+use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
     FlashBand, FormulaSwitches, LeafId, LeafSession, LocalImageActivation, MouseRoute, PasteTarget,
@@ -26,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Scroll one pane so that a command's own row stands at the top of it**,
     /// and flash that row so the eye can find it.
     ///
@@ -640,10 +641,11 @@ impl Runtime<'_> {
     /// the leaf that is leaving*: its `profile` (the seat's own, decided when it
     /// was created — never "the current default", so a seat restarted twice
     /// starts the same program both times), and
-    /// [`LeafSession::place_for_a_new_shell`], which is the **last trusted OSC 7
-    /// report**, else the folder the shell was put down in, and is explicitly not
-    /// a reading of the live process. The manual name is kept by not being touched: it is the
-    /// tab's (`TabSeed::manual_name`), and nothing here goes near a tab.
+    /// [`LeafSession::seed_place_for_a_new_shell`]: the **last trusted OSC 7 report**,
+    /// else the live shell process's folder (T-CWD-FROM-PROCESS, superseding the
+    /// contract's "not a reading of the live process" for this verb), else the folder
+    /// the shell was put down in. The manual name is kept by not being touched: it is
+    /// the tab's (`TabSeed::manual_name`), and nothing here goes near a tab.
     ///
     /// **The tree is not rebuilt** (§1.1, last row): this replaces the runtime
     /// state behind one leaf and moves no rectangle, so pin, tab and position all
@@ -707,6 +709,7 @@ impl Runtime<'_> {
             formulas,
             scrollback,
             self.app.settings_store.loaded().line_wrapping,
+            &bt_pty::SystemShellEnvironment,
         )?;
         // **A replacement still being born waits beside the shell it replaces** (T-BIRTH-OFF-WINDOW):
         // the old shell goes on being the one typed into until the new one lands
@@ -841,14 +844,17 @@ impl Runtime<'_> {
             birth,
             session,
             projection,
+            paste_hold,
             ..
         } = self.window.tabs[active].shell_mut();
+        // The person's own gesture, so it waits behind a paste the shell is still owed, in order
+        // (`clipboard_lane`), as a keystroke does.
+        let target = match paste_hold {
+            Some(hold) => PtyTarget::BehindAPaste(hold),
+            None => PtyTarget::of(pty.as_ref(), birth.as_ref()),
+        };
         paste_text(session, projection, &text, |bytes| {
-            write_pty_input(
-                PtyTarget::of(pty.as_ref(), birth.as_ref()),
-                bytes,
-                "write an inserted files row path to PTY",
-            )
+            write_pty_input(target, bytes, "write an inserted files row path to PTY")
         })?;
         // One user gesture, landing in one named seat — so it answers what that seat was asking
         // (`attention` plan §10.3.2 row 4). The seat is the shell the path went into, which is the
@@ -1551,8 +1557,8 @@ impl Runtime<'_> {
     /// so the two are one origin here and only one of them stays right if that
     /// ever stops being true.
     fn client_origin_on_screen(&self) -> Option<(f64, f64)> {
-        let origin = self.window.window.inner_position().ok()?;
-        Some((f64::from(origin.x), f64::from(origin.y)))
+        let (x, y) = self.window.window.client_origin()?;
+        Some((f64::from(x), f64::from(y)))
     }
 
     /// A pointer of this window's, in screen physical pixels.
@@ -1652,7 +1658,7 @@ impl Runtime<'_> {
             self.clear_pane_selection(seat);
             self.publish_interaction_frame()?;
         } else if copy_on_select {
-            self.copy_selection_on_release(seat);
+            self.copy_selection_on_release(seat)?;
         }
         if let Some(hyperlink) = hyperlink_to_open {
             self.activate_hyperlink(seat, hyperlink, hyperlink_control)?;

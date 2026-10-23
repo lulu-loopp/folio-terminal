@@ -110,6 +110,11 @@
 //!   inverts the guard, because four other modules spell the same register
 //!   names for registers of their own.
 //!
+//! * [`TraitResolver`] — **which trait a path names** ([`TraitId`]: package,
+//!   module path, name), read from the index's [`TraitRecord`]s, [`UseRecord`]s
+//!   and the trait path an [`ImplRecord`] writes — so two traits of one name in
+//!   two modules stay two (T-DOOR-REACH-TRAIT-OBJECTS).
+//!
 //! What census-1 adds (0.4.6, `docs/plans/design/ownership-census-2026-09-25.md`
 //! revision (b)2):
 //!
@@ -128,6 +133,16 @@
 //!   never as a spelling: what `crates/bt-source/tests/contained_panic.rs` asks of each call that
 //!   is handed a closure.
 //!
+//! What T-BT-SOURCE-CALL-GRAPH adds (S-2a of the side-effects contract, revision (c)2):
+//!
+//! * [`call_graph`] — **a resolved call graph over a program's packages**: every call site of a
+//!   body turned into its edges ([`call_graph::Resolver::resolve_callees`]) — to the items it can
+//!   run, placed through the module tree by identity and with receivers typed by the census's
+//!   steps; to a foreign callee as a boundary; or to an unresolved edge with its kind and site —
+//!   and a walk ([`call_graph::CallGraph::walk`]) that stops at declared boundary items and
+//!   carries every unresolved edge with the path that reached it. Its module doc is the grammar
+//!   and the kinds. [`AliasRecord`] joins the index for it: type aliases are items, not tokens.
+//!
 //! **The reading is `cfg`-blind on purpose.** Every declaration is followed
 //! whatever stands on it, and the host platform never selects: a file reached
 //! only under `cfg(windows)` is enumerated on macOS too, because a guard that
@@ -136,6 +151,7 @@
 //! three-valued, and it decides [`Compilation`] and nothing else.
 
 mod cache;
+pub mod call_graph;
 mod census;
 mod declarations;
 mod dep_map;
@@ -147,6 +163,7 @@ mod paths;
 mod query;
 mod reject;
 mod scope;
+mod traits;
 mod universe;
 pub mod universes;
 
@@ -158,10 +175,10 @@ pub use declarations::{Compilation, DeclarationStep, ModuleBody, ReachedModule};
 pub use dep_map::{DependencyMap, Door, FieldUse, MEASURED_AT, TopicEdge, Unclassified};
 pub use enumerate::{Enumeration, FileFacts, FileOwner, FileSetDiff, Unreached, enumerate};
 pub use index::{
-    Certainty, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord,
-    ImplRecord, Index, ItemIdentity, ItemKind, ItemRecord, LiteralRecord, LiteralValue, Location,
-    MacroKind, MacroRecord, MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord,
-    UnsupportedMacroShape,
+    AliasRecord, Certainty, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath,
+    FileRecord, ImplRecord, Index, ItemIdentity, ItemKind, ItemRecord, LiteralRecord, LiteralValue,
+    Location, MacroKind, MacroRecord, MacroShape, ModuleRecord, ModuleShape, Span, TokenKind,
+    TokenRecord, TraitRecord, UnsupportedMacroShape, UseRecord, ValueKind, ValueRecord,
 };
 pub use manifest::{Package, TargetId, TargetKind, TargetRoot, Workspace};
 pub use paths::{is_inside, normalized};
@@ -171,4 +188,5 @@ pub use query::{
 };
 pub use reject::{Position, Rejection, report};
 pub use scope::FileScoped;
+pub use traits::{ResolveCutoff, TraitId, TraitResolver};
 pub use universe::{DiskScope, Universe, Vendor, is_vendored, targets_of};

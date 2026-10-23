@@ -59,6 +59,14 @@ const DEFAULT_DISTRIBUTION_VALUE: &str = "DefaultDistribution";
 /// distribution is not one.
 const DISTRIBUTION_NAME_VALUE: &str = "DistributionName";
 
+/// The value under a distribution's own key holding the **family name of the Store package** it
+/// was installed from (`CanonicalGroupLimited.Ubuntu22.04LTS_79rhkp1fndgsc`).
+///
+/// A distribution installed from the Store has one, and that package's launcher (`ubuntu2204.exe`)
+/// starts this distribution; one imported, or installed from a `.wsl` file, has none and has no
+/// launcher of its own.
+const PACKAGE_FAMILY_VALUE: &str = "PackageFamilyName";
+
 /// The part of the registry this module reads, as a thing that can be stood in
 /// for.
 ///
@@ -119,6 +127,9 @@ pub struct WslFacts {
     distributions: Vec<String>,
     /// The one `wsl.exe` starts when nothing names another.
     default: Option<DefaultDistribution>,
+    /// `(package family name, distribution name)` for every distribution installed from a Store
+    /// package, ordered by family name for [`Self::distributions`]' reason.
+    packages: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,6 +169,23 @@ impl WslFacts {
     pub fn default_distribution(&self) -> Option<&str> {
         self.default.as_ref().map(|default| default.name.as_str())
     }
+
+    /// The family names of the Store packages the installed distributions came from — the
+    /// packages whose launchers start one of them (`profiles::shell_program_of`).
+    pub fn package_families(&self) -> impl Iterator<Item = &str> {
+        self.packages.iter().map(|(family, _)| family.as_str())
+    }
+
+    /// The distribution the Store package of this family installed, or `None` for a package no
+    /// installed distribution came from. Package family names compare without case, as Windows
+    /// compares them.
+    #[must_use]
+    pub fn distribution_of_package(&self, family: &str) -> Option<&str> {
+        self.packages
+            .iter()
+            .find(|(held, _)| held.eq_ignore_ascii_case(family))
+            .map(|(_, name)| name.as_str())
+    }
 }
 
 /// The installation, read out of the registry.
@@ -189,9 +217,14 @@ fn read_installation(registry: &dyn Registry) -> WslFacts {
         {
             facts.default = Some(DefaultDistribution { name: name.clone() });
         }
+        if let Some(family) = registry.string(&format!("{LXSS_KEY}\\{guid}"), PACKAGE_FAMILY_VALUE)
+        {
+            facts.packages.push((family, name.clone()));
+        }
         facts.distributions.push(name);
     }
     facts.distributions.sort();
+    facts.packages.sort();
     facts
 }
 
@@ -218,7 +251,8 @@ fn read_installation(registry: &dyn Registry) -> WslFacts {
 static INSTALLATION: Mutex<Option<WslFacts>> = Mutex::new(None);
 
 /// **Read what Windows knows** — the program walk's WSL question, asked on its
-/// worker (`crate::programs_lane`) once the walk has found `wsl.exe`.
+/// worker (`crate::programs_lane`) at most once a walk: once the walk has found `wsl.exe`, or for
+/// the first row whose program is among the Store aliases (`profiles::shell_program_of`).
 ///
 /// Three registry reads and no processes (§7.40 ②): a machine that merely has
 /// WSL installed boots no virtual machine for Folio.
@@ -265,6 +299,17 @@ pub(crate) fn facts_of(distributions: &[&str], default: &str) -> WslFacts {
         default: Some(DefaultDistribution {
             name: default.to_owned(),
         }),
+        packages: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+impl WslFacts {
+    /// The same installation, with `name` installed from the Store package of this family.
+    pub(crate) fn with_package(mut self, name: &str, family: &str) -> Self {
+        self.packages.push((family.to_owned(), name.to_owned()));
+        self.packages.sort();
+        self
     }
 }
 
@@ -423,6 +468,44 @@ mod tests {
         assert_eq!(dangling.title_qualifier(), None);
     }
 
+    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **a distribution installed from the Store
+    /// names the package it came from**, and that is how its launcher is known to start it.
+    ///
+    /// MUTATION: skip the `PackageFamilyName` read and Ubuntu's package names no distribution —
+    /// RED.
+    #[test]
+    fn a_distribution_installed_from_the_store_names_its_package() {
+        let mut registry = FakeRegistry::machine(
+            Some("{aaa}"),
+            &[
+                ("{aaa}", Some("Ubuntu-22.04")),
+                ("{bbb}", Some("中文-distro")),
+            ],
+        );
+        registry.strings.insert(
+            (
+                format!("{LXSS_KEY}\\{{aaa}}").to_ascii_lowercase(),
+                PACKAGE_FAMILY_VALUE.to_owned(),
+            ),
+            "CanonicalGroupLimited.Ubuntu22.04LTS_79rhkp1fndgsc".to_owned(),
+        );
+        let facts = read_installation(&registry);
+        assert_eq!(
+            facts.distribution_of_package("canonicalgrouplimited.ubuntu22.04lts_79rhkp1fndgsc"),
+            Some("Ubuntu-22.04"),
+            "a package family name is compared as Windows compares it, without case"
+        );
+        assert_eq!(
+            facts.package_families().collect::<Vec<_>>(),
+            ["CanonicalGroupLimited.Ubuntu22.04LTS_79rhkp1fndgsc"],
+            "a distribution imported rather than installed from the Store has no package"
+        );
+        assert_eq!(
+            facts.distribution_of_package("Microsoft.WindowsTerminal_8wekyb3d8bbwe"),
+            None
+        );
+    }
+
     /// RED — **this module boots no distribution, on any path.**
     ///
     /// The structural half of the 2026-09-07 fix, and the reason it is a source
@@ -498,6 +581,7 @@ mod tests {
             let _ = crate::profiles::title(0);
             let command = crate::shell_integration::shell_command(
                 &crate::profiles::row_of("wsl").expect("the shipped WSL row"),
+                &crate::profiles::ShellProgram::WslExe,
                 &[std::ffi::OsString::from("--cd"), "~".into()],
                 crate::shell_integration::Scripts {
                     bash: Some(std::path::Path::new(r"C:\Folio\folio.bash")),

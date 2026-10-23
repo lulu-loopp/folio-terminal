@@ -31,6 +31,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use bt_platform::trust_harness::done_once_let_go;
+
 use crate::update_prepare_macos::tests::fixture::{
     HOMEBREW_MARKER, Scratch, fake_brew, homebrew_install, on_macos, run, sign, version_of,
 };
@@ -416,7 +418,10 @@ impl Install {
 
     /// The journal, durably at `phase`, with both identities.
     fn write(&self, phase: Phase) {
-        install_txn::durable_write(&self.home.journal(), &self.journal_at(phase).encode()).unwrap();
+        let bytes = self.journal_at(phase).encode();
+        done_once_let_go(&self.home.journal(), || {
+            install_txn::durable_write(&self.home.journal(), &bytes)
+        });
     }
 
     /// This installation's journal at `phase`, with both identities.
@@ -686,10 +691,14 @@ fn watch_receipt_decision(home: Home, txn: TxnId, nonce: Nonce) {
             Box::leak(Box::new(crate::update_trial::Gate::new()));
         crate::update_trial::watch(
             gate,
-            (&journal, &mark, &receipt),
+            (
+                &journal,
+                crate::update_trial::Mark::on_disk(&mark),
+                &receipt,
+            ),
             txn,
-            Duration::from_millis(5),
-            &|| {},
+            crate::update_trial::Cadence::every(Duration::from_millis(5)),
+            crate::update_trial::Told::to_the_log(&|| {}),
             None,
             &mut crate::update_trial::watchdog_asleep(),
         );
@@ -1078,18 +1087,23 @@ fn a_live_trial_that_takes_its_mark_back_leaves_no_not_kept_card() {
         let handle = std::thread::spawn(move || {
             crate::update_trial::watch(
                 gate,
-                (&journal, &mark, &receipt_path),
+                (
+                    &journal,
+                    crate::update_trial::Mark::on_disk(&mark),
+                    &receipt_path,
+                ),
                 txn,
-                Duration::from_millis(5),
-                &|| {},
+                crate::update_trial::Cadence::every(Duration::from_millis(5)),
+                crate::update_trial::Told::to_the_log(&|| {}),
                 None,
                 &mut crate::update_trial::watchdog_asleep(),
             );
         });
         *launched_watcher.lock().unwrap() = Some(handle);
-        while !home.unkept(txn).exists() {
-            std::thread::yield_now();
-        }
+        let unkept = home.unkept(txn);
+        crate::lane::wait_until(&format!("the trial's mark {}", unkept.display()), || {
+            unkept.exists()
+        });
         let receipt = Receipt {
             txn,
             nonce,
@@ -2080,7 +2094,7 @@ fn a_failed_swap_back_is_stuck_with_everything_kept() {
     let header = journal.header();
     assert_eq!(header.class, Class::Destructive);
     let sent = crate::update_txn::StartView {
-        journal: crate::update_txn::JournalRead::Read(header),
+        header,
         lock_free: true,
         own_image: None,
         rescue_image: None,
@@ -2495,7 +2509,7 @@ fn rolled_back_leaves_only_what_the_old_build_reads() {
         (Class::Terminal, HeaderOutcome::RolledBack)
     );
     let view = crate::update_txn::StartView {
-        journal: crate::update_txn::JournalRead::Read(header),
+        header,
         lock_free: true,
         own_image: None,
         rescue_image: None,
@@ -5170,7 +5184,9 @@ fn the_macos_exit_never_opens_the_installed_build_plainly_over_what_it_cannot_re
         .into_iter()
         .enumerate()
     {
-        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        done_once_let_go(&install.home.journal(), || {
+            install_txn::durable_write(&install.home.journal(), &bytes)
+        });
         let home = install.home.clone();
         let opens = on_a_worker(move |worker| opens_now_with(Some(worker), &home, &own_layouts()));
         let expected = if index < 2 {
@@ -5209,7 +5225,9 @@ fn the_macos_lock_holder_stands_aside_from_what_it_cannot_read_whole() {
         .into_iter()
         .enumerate()
     {
-        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        done_once_let_go(&install.home.journal(), || {
+            install_txn::durable_write(&install.home.journal(), &bytes)
+        });
         for start in [Some(handed.clone()), None] {
             let road = install.recovery(limits(500, 5_000));
             let waits = start.is_some();
@@ -5322,7 +5340,9 @@ fn the_macos_applier_stands_aside_from_what_it_cannot_read_whole() {
     let install = shape_install("beyond-applier");
     let known = std::fs::read(install.home.journal()).unwrap();
     for (what, bytes) in crate::update_txn::beyond_inputs(&known) {
-        install_txn::durable_write(&install.home.journal(), &bytes).unwrap();
+        done_once_let_go(&install.home.journal(), || {
+            install_txn::durable_write(&install.home.journal(), &bytes)
+        });
         let (ended, world) = applied(install.road(limits(500, 5_000)), Fake::default());
         assert!(matches!(ended, Ended::StoodAside(_)), "{what}: {ended:?}");
         assert_eq!(ended.code(), 1, "{what}");

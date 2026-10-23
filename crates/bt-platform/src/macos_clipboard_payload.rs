@@ -115,12 +115,17 @@ impl PictureSource for MacClipboard {
     }
 }
 
-pub fn clipboard_payload() -> Result<ClipboardPayload, String> {
-    if objc2::MainThreadMarker::new().is_none() {
-        return Err("clipboard read requires the event-loop thread".into());
-    }
-    read_payload(&mut MacClipboard {
-        pasteboard: NSPasteboard::generalPasteboard(),
-        before: 0,
+/// **Whatever the pasteboard holds, as a paste reads it** — asked from the clipboard lane's
+/// worker (`worker`) and read on the main thread (`crate::macos_clipboard::on_the_main_queue`, the
+/// owner's ruling of 2026-10-11, Q2).
+pub fn clipboard_payload(worker: &crate::admission::WorkerCtx) -> Result<ClipboardPayload, String> {
+    crate::macos_clipboard::on_the_main_queue(worker, || {
+        if objc2::MainThreadMarker::new().is_none() {
+            return Err("clipboard read requires the event-loop thread".into());
+        }
+        read_payload(&mut MacClipboard {
+            pasteboard: NSPasteboard::generalPasteboard(),
+            before: 0,
+        })
     })
 }

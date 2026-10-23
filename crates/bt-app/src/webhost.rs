@@ -39,6 +39,7 @@
 //!   is yours now" under a closing one, and the model that rebuilt on both
 //!   brought back panes the person had shut.
 
+use crate::window_seam::CompositorDoor;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -1015,9 +1016,10 @@ pub(crate) fn placement_owed(
 /// **The rasterization scale a page is owed**, or `None` when the engine is
 /// already holding it.
 ///
-/// `wanted` is the window's device scale factor and `told` is what this seat's
-/// controller has been told, `None` meaning nothing yet — which is the state a
-/// controller is born in and the state a rebuilt one comes back in. So a page
+/// `wanted` is what this seat's engine should hold — the window's device scale
+/// factor, or for a PDF the whole number above it ([`raster_scale`]) — and
+/// `told` is what this seat's controller has been told, `None` meaning
+/// nothing yet — which is the state a controller is born in and the state a rebuilt one comes back in. So a page
 /// born on a 1.5 display is owed 1.5 at birth rather than left on whatever the
 /// engine defaults to, and a window carried to a 2.0 display owes every page it
 /// holds the new number exactly once.
@@ -1030,6 +1032,78 @@ pub(crate) fn rasterization_owed(wanted: f64, told: Option<f64>) -> Option<f64> 
     match told {
         Some(told) if (told - wanted).abs() <= f64::EPSILON => None,
         _ => Some(wanted),
+    }
+}
+
+/// **What kind of document a seat's page is**, as far as what the engine is
+/// told about pixels is concerned (T-PDF-TEXT-RENDERING, 2026-10-21).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WebDocument {
+    /// Anything the engine lays out itself: HTML, an image, a text file, the
+    /// seat's own blank page.
+    Page,
+    /// A PDF, drawn by the engine's own PDF viewer.
+    Pdf,
+}
+
+/// **The document an address commits to**: a PDF when the file it names ends in
+/// `.pdf` (any case), a page otherwise.
+///
+/// The address and not the response's media type, because the address is what
+/// the engine hands this seat at commit ([`WebEvent::SourceChanged`]) and the
+/// one road that opens PDFs in a pane — a local `.pdf` previewed — always names
+/// its file. A local address is read through [`crate::webnav::LocalFileUrl`],
+/// the one parser of those, so a percent-escaped name is judged by the name it
+/// decodes to; any other address by the last segment of its path, with its
+/// query and fragment cut away. A web server that answers `application/pdf` at
+/// an address with no `.pdf` in it is read as a page, and is drawn at the
+/// window's own scale exactly as before this existed.
+pub(crate) fn web_document(uri: &str) -> WebDocument {
+    let pdf = |extension: &str| extension.eq_ignore_ascii_case("pdf");
+    let is_pdf = match crate::webnav::LocalFileUrl::parse(uri) {
+        Some(local) => local
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(pdf),
+        None => {
+            let path = &uri[..uri.find(['?', '#']).unwrap_or(uri.len())];
+            let name = path.rsplit('/').next().unwrap_or(path);
+            name.rsplit_once('.')
+                .is_some_and(|(stem, extension)| !stem.is_empty() && pdf(extension))
+        }
+    };
+    if is_pdf {
+        WebDocument::Pdf
+    } else {
+        WebDocument::Page
+    }
+}
+
+/// **The rasterization scale a seat's engine is told**: the window's device
+/// scale, except that a PDF on a fractional display is told the whole number
+/// above it (T-PDF-TEXT-RENDERING, 2026-10-21).
+///
+/// Measured on the owner's machines: WebView2's PDF viewer — the same one Edge
+/// uses — draws its page stretched sideways by about 200:199 with
+/// nearest-neighbour sampling whenever the device scale is fractional. Two
+/// neighbouring columns of the page come out identical every 200 device pixels,
+/// which reads as letters of uneven weight and words with gaps in them. Folio's
+/// pane at 150 % showed it, standalone Edge moved to the same 150 % display
+/// showed it, the same Edge window at 200 % did not, and an HTML page in the
+/// same pane at 150 % did not. So a PDF seat is handed an integer scale and the
+/// viewer lays itself out as it does at 200 %: in a CSS viewport narrower by the
+/// ratio of the two scales (a quarter at 150 %), its controls drawn that much
+/// larger. How large the page is drawn in that viewport is the viewer's own
+/// choice.
+///
+/// Every other document keeps the window's number: an HTML page laid out at
+/// 2.0 on a 1.5 display would be a page drawn a third larger than its author
+/// and the person's own zoom asked for.
+pub(crate) fn raster_scale(window_scale: f64, document: WebDocument) -> f64 {
+    match document {
+        WebDocument::Pdf => window_scale.ceil(),
+        WebDocument::Page => window_scale,
     }
 }
 
@@ -2034,10 +2108,20 @@ enum BrowserWait {
 /// window, and the four operations above would then be *guaranteed* to disagree
 /// rather than merely able to. The tab travels with it for that reason and no
 /// other: nothing here reads it, and everything here is filed under it.
+///
+/// **The window is sealed in it**: the window's handle is the native backend's own, handed over by
+/// its `WindowHost::page_address` door, and only the engine here reads it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SeatAddress {
     pub(crate) page: bt_platform::PageVisual,
-    pub(crate) window: bt_platform::NativeWindow,
+    window: bt_platform::NativeWindow,
+}
+
+impl SeatAddress {
+    /// A page's place in the window the platform names by `window`.
+    pub(crate) fn new(page: bt_platform::PageVisual, window: bt_platform::NativeWindow) -> Self {
+        Self { page, window }
+    }
 }
 
 /// How one [`WebSeat::rehost`] ended, in the caller's own vocabulary.
@@ -2187,11 +2271,18 @@ pub(crate) struct WebSeat {
     /// and what it can watch instead, the parent this host lends it, it watches
     /// late (`bt_platform::WebHost::set_rasterization_scale`).
     scale: f64,
-    /// And what the engine has actually been told about that.
+    /// And what the engine has actually been told about that — which, for a
+    /// PDF on a fractional display, is not [`Self::scale`] but the whole number
+    /// above it ([`raster_scale`]).
     ///
     /// Forgotten wherever the controller is, because this records what a
     /// *controller* was told and a new one has been told nothing.
     rastered: Option<f64>,
+    /// **What kind of document this seat's page committed to** — read off the
+    /// address each time a navigation commits ([`WebEvent::SourceChanged`]), and
+    /// the one fact besides the window's scale that decides what the engine is
+    /// told about pixels ([`raster_scale`]). A page, until a PDF commits.
+    document: WebDocument,
     /// **What the compositor was last told about this page's pair** — its floor
     /// and, once there is one, its visual.
     ///
@@ -2220,6 +2311,10 @@ pub(crate) struct WebSeat {
     /// account of the same presses, and the two would part company the first
     /// time a button came up over another window.
     buttons: u32,
+    /// Every mouse event this seat was handed to forward, for a test to read which page heard
+    /// what (T-POINTER-CAPTURE cut 6: which page hears the wheel under a held gesture).
+    #[cfg(test)]
+    pub(crate) heard: Vec<bt_platform::WebMouseEvent>,
     /// The last left press, for the double click the engine cannot infer.
     ///
     /// `SendMouseInput` has a `LEFT_BUTTON_DOUBLE_CLICK` kind and no way to
@@ -2341,8 +2436,7 @@ impl WebSeat {
     /// does is lay a page out, and a page laid out at 2.0 on a 1.5 display is
     /// wrong from its first frame — see [`Self::scale`].
     pub(crate) fn open(
-        page: bt_platform::PageVisual,
-        window: bt_platform::NativeWindow,
+        address: SeatAddress,
         url: &str,
         minted: Mint,
         scale: f64,
@@ -2357,7 +2451,7 @@ impl WebSeat {
         let request_gate = Rc::clone(&mint);
         let refusal = Rc::new(RefCell::new(None));
         let refusal_sink = Rc::clone(&refusal);
-        let label = Rc::new(std::cell::Cell::new(page));
+        let label = Rc::new(std::cell::Cell::new(address.page));
         let (gate_label, request_label) = (Rc::clone(&label), Rc::clone(&label));
         let host = WebHost::new(
             Box::new(move |candidate| {
@@ -2428,7 +2522,7 @@ impl WebSeat {
             wake,
         );
         let mut web = Self {
-            address: SeatAddress { page, window },
+            address,
             folder,
             machine: WebMachine::new(),
             host,
@@ -2447,8 +2541,11 @@ impl WebSeat {
             bounded: None,
             scale,
             rastered: None,
+            document: WebDocument::Page,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
+            #[cfg(test)]
+            heard: Vec::new(),
             last_left_press: None,
             minted,
             page: PageFacts::default(),
@@ -2511,13 +2608,19 @@ impl WebSeat {
     /// pane's, so a page that adopts it adopts nothing a pane would not have had.
     pub(crate) fn open_parked(
         page: bt_platform::PageVisual,
-        window: bt_platform::NativeWindow,
+        parent: &bt_platform::SpareParent,
         scale: f64,
         scheme: WebColorScheme,
         wake: Box<dyn Fn() + Send + Sync>,
     ) -> Result<(Self, Vec<WebOutcome>), String> {
-        let (mut seat, outcomes) =
-            Self::open(page, window, BLANK_PAGE, Mint::Blank, scale, scheme, wake)?;
+        let (mut seat, outcomes) = Self::open(
+            SeatAddress::new(page, parent.window()),
+            BLANK_PAGE,
+            Mint::Blank,
+            scale,
+            scheme,
+            wake,
+        )?;
         seat.policy = RecoveryPolicy::Parked;
         Ok((seat, outcomes))
     }
@@ -2565,7 +2668,7 @@ impl WebSeat {
     /// the fact that keeps the parked page out of system hit testing.
     pub(crate) fn stand_parked(
         &mut self,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
         bounds: WebBounds,
     ) -> Result<(), String> {
         self.place(compositor, WebPresence::Hidden, Some(bounds), &[])?;
@@ -2579,7 +2682,7 @@ impl WebSeat {
     /// `presence = None` deliberately makes this a fresh `SetIsVisible(false)` even when the
     /// cache already says hidden. Parking is a lifecycle boundary, and the controller's readback
     /// — not that cache — is the fact the owner records and reports.
-    pub(crate) fn park(&mut self, compositor: &bt_platform::Compositor) -> Result<bool, String> {
+    pub(crate) fn park(&mut self, compositor: &impl CompositorDoor) -> Result<bool, String> {
         self.presence = None;
         self.place(compositor, WebPresence::Hidden, None, &[])?;
         admitted::<doors::CompositorCommit, _>(|token| compositor.commit(token))
@@ -2624,7 +2727,7 @@ impl WebSeat {
         &mut self,
         url: &str,
         minted: Mint,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
     ) -> Vec<WebOutcome> {
         self.minted = minted;
         let effect = self.machine.adopt(url, self.bounded.is_some());
@@ -2652,7 +2755,7 @@ impl WebSeat {
         &mut self,
         url: &str,
         minted: Mint,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
     ) -> Vec<WebOutcome> {
         self.minted = minted;
         let effect = self.machine.request(url);
@@ -2673,10 +2776,7 @@ impl WebSeat {
     /// flashed the seat back to ground colour and then to the same card; the
     /// card leaves where every other fact about this engine is decided — the
     /// controller callback in [`Self::digest`].
-    pub(crate) fn restart_engine(
-        &mut self,
-        compositor: &bt_platform::Compositor,
-    ) -> Vec<WebOutcome> {
+    pub(crate) fn restart_engine(&mut self, compositor: &impl CompositorDoor) -> Vec<WebOutcome> {
         let effect = self.machine.restart();
         let mut outcomes = Vec::new();
         self.apply(effect, compositor, &mut outcomes);
@@ -2687,7 +2787,7 @@ impl WebSeat {
     ///
     /// [`WebMachine::reload`] is the sentence; this is that plus the compositor
     /// the effect needs, exactly as [`Self::go`] is `request` plus it.
-    pub(crate) fn reload(&mut self, compositor: &bt_platform::Compositor) -> Vec<WebOutcome> {
+    pub(crate) fn reload(&mut self, compositor: &impl CompositorDoor) -> Vec<WebOutcome> {
         let effect = self.machine.reload();
         let mut outcomes = Vec::new();
         self.apply(effect, compositor, &mut outcomes);
@@ -2753,7 +2853,7 @@ impl WebSeat {
     }
 
     /// Read everything the engine has said and act on it.
-    pub(crate) fn drive(&mut self, compositor: &bt_platform::Compositor) -> Vec<WebOutcome> {
+    pub(crate) fn drive(&mut self, compositor: &impl CompositorDoor) -> Vec<WebOutcome> {
         let mut outcomes = std::mem::take(&mut self.owed);
         for event in self.host.drain() {
             let failed_before = self.machine.state() == WebState::Failed;
@@ -2775,7 +2875,7 @@ impl WebSeat {
     fn retire_parked(
         &mut self,
         why: &'static str,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
         outcomes: &mut Vec<WebOutcome>,
     ) {
         if self.machine.state() == WebState::Closing {
@@ -3003,6 +3103,13 @@ impl WebSeat {
                 } else {
                     self.page.url.clone_from(uri);
                 }
+                // **The commit is when the document's kind is known**, and the
+                // engine has not drawn it yet: a PDF arriving on a fractional
+                // display is told its integer scale here, before its first
+                // page is rastered (T-PDF-TEXT-RENDERING).
+                if let Err(error) = self.document_committed(uri) {
+                    outcomes.push(WebOutcome::Fault(error));
+                }
                 WebEffect::Ignore
             }
             WebEvent::StatusBarTextChanged { text } => {
@@ -3225,7 +3332,7 @@ impl WebSeat {
     fn apply(
         &mut self,
         first: WebEffect,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
         outcomes: &mut Vec<WebOutcome>,
     ) {
         let mut effect = first;
@@ -3247,7 +3354,7 @@ impl WebSeat {
     fn step(
         &mut self,
         effect: &WebEffect,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
         outcomes: &mut Vec<WebOutcome>,
     ) -> Result<Option<WebEffect>, String> {
         match effect {
@@ -3292,7 +3399,9 @@ impl WebSeat {
                 // [`WebSeat::issue`].
                 let generation = self.machine.generation();
                 let report = hang_watch::during(hang_watch::Station::WebInstall, || {
-                    self.host.install(compositor, page, generation)
+                    compositor
+                        .page_tree()
+                        .and_then(|tree| tree.install(&mut self.host, page, generation))
                 })?;
                 self.guards = report.guards;
                 if !report.unapplied.is_empty() {
@@ -3639,7 +3748,7 @@ impl WebSeat {
     pub(crate) fn tick(
         &mut self,
         now: Instant,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
     ) -> Vec<WebOutcome> {
         let mut silent = self.engine_that_said_nothing(now);
         if !silent.is_empty() {
@@ -3722,7 +3831,7 @@ impl WebSeat {
     /// rectangle has ground under it right now. See [`Self::stand_on_the_floor`].
     pub(crate) fn place(
         &mut self,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
         presence: WebPresence,
         bounds: Option<WebBounds>,
         cover: &[[f32; 4]],
@@ -3790,7 +3899,7 @@ impl WebSeat {
     /// side of a pane, or the whole pane, depending on how the two rectangles
     /// lie. So both arms go through [`placement_owed`] and both arms tell the
     /// compositor.
-    fn stand_on_the_floor(&mut self, compositor: &bt_platform::Compositor) -> Result<bool, String> {
+    fn stand_on_the_floor(&mut self, compositor: &impl CompositorDoor) -> Result<bool, String> {
         if let Some(placement) = placement_owed(self.wanted, self.placed) {
             match placement {
                 // A hidden page has no rectangle to stand anything on, the
@@ -3846,7 +3955,7 @@ impl WebSeat {
         if !self.host.has_controller() {
             return Ok(());
         }
-        let Some(scale) = rasterization_owed(self.scale, self.rastered) else {
+        let Some(scale) = self.rasterization_owed() else {
             return Ok(());
         };
         self.host.set_rasterization_scale(scale)?;
@@ -3854,6 +3963,27 @@ impl WebSeat {
         // says "the engine was told this", and a refusal told it nothing.
         self.rastered = Some(scale);
         Ok(())
+    }
+
+    /// **What this seat's engine is owed about pixels now** — [`raster_scale`]
+    /// of the window's scale and the committed document, against what the
+    /// engine was last told. The one reading [`Self::apply_rasterization`] acts
+    /// on.
+    fn rasterization_owed(&self) -> Option<f64> {
+        rasterization_owed(raster_scale(self.scale, self.document), self.rastered)
+    }
+
+    /// **The page committed to an address**: if that changed what kind of
+    /// document this seat holds, the engine is owed a new scale, said at once —
+    /// the same sentence a display change says ([`Self::set_device_scale`]),
+    /// because to the engine it is the same fact.
+    fn document_committed(&mut self, uri: &str) -> Result<(), String> {
+        let document = web_document(uri);
+        if document == self.document {
+            return Ok(());
+        }
+        self.document = document;
+        self.apply_rasterization()
     }
 
     /// What the window last asked of this page — read by the placement's own
@@ -4020,8 +4150,8 @@ impl WebSeat {
     /// looking.
     pub(crate) fn rehost(
         &mut self,
-        from: &bt_platform::Compositor,
-        to: &bt_platform::Compositor,
+        from: &impl CompositorDoor,
+        to: &impl CompositorDoor,
         address: SeatAddress,
         take_focus: bool,
         outcomes: &mut Vec<WebOutcome>,
@@ -4053,28 +4183,31 @@ impl WebSeat {
         // An owner-thread door (`doors::WebRehost`): the walk and its commits are one admission.
         // A refusal is the shape `rehost` answers before its first step — nothing moved, nothing
         // to compensate — so the page stays where it was.
-        let outcome = admitted::<doors::WebRehost, _>(|token| {
-            self.host.rehost(
-                token,
-                &bt_platform::RehostSide {
-                    compositor: from,
-                    page: self.address.page,
-                    window: self.address.window,
-                },
-                &bt_platform::RehostSide {
-                    compositor: to,
-                    page: address.page,
-                    window: address.window,
-                },
-                rect,
-                visible,
-            )
-        })
-        .unwrap_or_else(|refused| bt_platform::RehostOutcome::KeptSource {
+        // Both trees are the platform's or the page cannot be walked between them: a tree that is
+        // not (the test suite's headless window) keeps the page where it is, as a refusal does.
+        let kept = |error: String| bt_platform::RehostOutcome::KeptSource {
             failed_at: bt_platform::RehostStep::Hide,
-            error: refused.to_string(),
+            error,
             compensation: bt_platform::RehostCompensation::default(),
-        });
+        };
+        let outcome = match from
+            .page_tree()
+            .and_then(|from| Ok((from, to.page_tree()?)))
+        {
+            Ok((from_tree, to_tree)) => admitted::<doors::WebRehost, _>(|token| {
+                from_tree.rehost(
+                    &to_tree,
+                    token,
+                    &mut self.host,
+                    (self.address.page, self.address.window),
+                    (address.page, address.window),
+                    rect,
+                    visible,
+                )
+            })
+            .unwrap_or_else(|refused| kept(refused.to_string())),
+            Err(error) => kept(error),
+        };
         match outcome {
             bt_platform::RehostOutcome::Moved => {
                 self.adopt(from, address);
@@ -4113,7 +4246,7 @@ impl WebSeat {
     /// The detach is best-effort and deliberately last: an empty visual left in
     /// a tree costs nothing on screen, and a page that has already arrived
     /// somewhere else must not be reported as not having moved.
-    fn adopt(&mut self, from: &bt_platform::Compositor, address: SeatAddress) {
+    fn adopt(&mut self, from: &impl CompositorDoor, address: SeatAddress) {
         let _ = from.detach_web_visual(self.address.page);
         let _ = admitted::<doors::CompositorCommit, _>(|token| from.commit(token));
         self.take_address(address);
@@ -4207,6 +4340,18 @@ impl WebSeat {
         }
     }
 
+    /// **A seat standing shown at `bounds` with no engine behind it**, for a test that needs the
+    /// page layer under the pointer and nothing a page does.
+    #[cfg(test)]
+    pub(crate) fn shown_without_an_engine(bounds: WebBounds) -> Self {
+        let mut seat = rehost_address_tests::detached(SeatAddress {
+            page: rehost_address_tests::page(1, 99),
+            window: rehost_address_tests::window(0x77),
+        });
+        seat.presence = Some(WebPresence::Shown(bounds));
+        seat
+    }
+
     /// Forward one mouse event. `window_point` is in the window's client area,
     /// in physical pixels; the translation into the page's own space happens
     /// here and nowhere else.
@@ -4228,6 +4373,8 @@ impl WebSeat {
         };
         let point = (window_point.0 - bounds.x, window_point.1 - bounds.y);
         let event = self.upgrade_to_double_click(event, window_point, now);
+        #[cfg(test)]
+        self.heard.push(event);
         // The mask the engine is handed describes the state **including** this
         // event, which is what a Win32 mouse message carries: a press arrives
         // with its own bit set and a release arrives with it already clear.
@@ -4379,7 +4526,7 @@ impl WebSeat {
         input_ref: &str,
         engine: SearchEngineV1,
         frame: LocalFrame<'_>,
-        compositor: &bt_platform::Compositor,
+        compositor: &impl CompositorDoor,
     ) -> AddressCommit {
         let (path, page) = match judge_address(input_ref, engine, frame) {
             AddressVerdict::Draft | AddressVerdict::Refuse => return AddressCommit::Refused(None),
@@ -4627,7 +4774,7 @@ impl WebSeat {
     }
 
     /// The seat is going away: close the controller and start the wait.
-    pub(crate) fn close(&mut self, compositor: &bt_platform::Compositor) -> Vec<WebOutcome> {
+    pub(crate) fn close(&mut self, compositor: &impl CompositorDoor) -> Vec<WebOutcome> {
         if self.machine.state() == WebState::Closing {
             return Vec::new();
         }
@@ -5129,8 +5276,11 @@ mod rehost_address_tests {
             bounded: None,
             scale: 1.0,
             rastered: None,
+            document: WebDocument::Page,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
+            #[cfg(test)]
+            heard: Vec::new(),
             last_left_press: None,
             minted: Mint::Nothing,
             page: PageFacts::default(),
@@ -5647,6 +5797,161 @@ mod rasterization_tests {
             Some(rectangle),
             "what the window wants is untouched; only what was said is forgotten"
         );
+    }
+
+    /// **A seat in a window at `scale`, its page committed to `uri`** — the
+    /// commit is the engine's own event, digested the way a live seat digests
+    /// it, so the document's kind is decided where the product decides it.
+    fn committed(seat: &mut WebSeat, uri: &str) {
+        let mut outcomes = Vec::new();
+        seat.digest(
+            &bt_platform::WebEvent::SourceChanged {
+                uri: uri.to_owned(),
+            },
+            &mut outcomes,
+        );
+        assert!(
+            !outcomes
+                .iter()
+                .any(|outcome| matches!(outcome, WebOutcome::Fault(_))),
+            "a seat with no controller tells nothing and fails at nothing: {outcomes:?}"
+        );
+    }
+
+    const PDF: &str = "file:///D:/reports/report.pdf";
+    const HTML: &str = "file:///D:/reports/index.html";
+
+    /// RED — **a PDF on a 150 % display is told 2.0** (T-PDF-TEXT-RENDERING).
+    ///
+    /// The engine's PDF viewer draws its page stretched 200:199 at a fractional
+    /// device scale and clean at a whole one — measured in this pane and in
+    /// standalone Edge, on the owner's 150 % monitor.
+    ///
+    /// MUTATION: send the window's scale to every seat, and the PDF is owed 1.5
+    /// — the page the owner photographed.
+    #[test]
+    fn a_pdf_on_a_fractional_display_is_owed_the_whole_scale_above_it() {
+        let mut seat = seat_at(1.5);
+        committed(&mut seat, PDF);
+        assert_eq!(seat.document, WebDocument::Pdf);
+        assert_eq!(seat.rasterization_owed(), Some(2.0));
+    }
+
+    /// RED — **an HTML page in the same window keeps the window's scale.**
+    ///
+    /// An HTML page lays itself out in CSS pixels, and one told 2.0 on a 1.5
+    /// display would be a page drawn a third too large; only the PDF
+    /// viewer is handed the whole number.
+    ///
+    /// MUTATION: hand every seat the whole number above the window's scale, and
+    /// this page is owed 2.0.
+    #[test]
+    fn a_page_on_a_fractional_display_keeps_the_windows_scale() {
+        let mut seat = seat_at(1.5);
+        committed(&mut seat, HTML);
+        assert_eq!(seat.document, WebDocument::Page);
+        assert_eq!(seat.rasterization_owed(), Some(1.5));
+    }
+
+    /// RED — **a display change re-derives the PDF's number**: 1.25 is owed
+    /// 2.0, and a whole-number display is owed itself.
+    ///
+    /// MUTATION: send the window's scale to every seat, and the PDF carried to
+    /// the 125 % display is owed 1.25.
+    #[test]
+    fn a_pdf_carried_to_another_display_is_owed_that_displays_whole_scale() {
+        let mut seat = seat_at(1.5);
+        committed(&mut seat, PDF);
+        for (display, owed) in [(1.25, 2.0), (1.75, 2.0), (2.0, 2.0), (1.0, 1.0), (3.0, 3.0)] {
+            seat.set_device_scale(display)
+                .expect("a seat with no controller says nothing and fails at nothing");
+            assert_eq!(
+                seat.rasterization_owed(),
+                Some(owed),
+                "a PDF on a {display} display"
+            );
+        }
+    }
+
+    /// RED — **a spare adopted into a PDF seat is told the PDF's number.**
+    ///
+    /// The spare was parked on its own blank page and told the window's scale;
+    /// adoption forgets everything its controller was told
+    /// ([`WebSeat::take_address`]), re-says the target window's scale (as
+    /// `Runtime::adopt_spare_web_page` does), and the PDF it then navigates to
+    /// commits.
+    ///
+    /// MUTATION: send the window's scale to every seat, and the adopted PDF is
+    /// owed 1.5.
+    #[test]
+    fn a_spare_adopted_into_a_pdf_is_owed_the_pdfs_scale() {
+        let mut seat = seat_at(1.5);
+        committed(&mut seat, BLANK_PAGE);
+        seat.rastered = Some(1.5);
+        assert_eq!(seat.rasterization_owed(), None, "the parked spare is told");
+
+        seat.take_address(SeatAddress {
+            page: page(2, 1),
+            window: window(0x2222),
+        });
+        seat.set_device_scale(1.5)
+            .expect("a seat with no controller says nothing and fails at nothing");
+        assert_eq!(seat.rasterization_owed(), Some(1.5));
+        committed(&mut seat, PDF);
+        assert_eq!(seat.rasterization_owed(), Some(2.0));
+    }
+
+    /// RED — **a seat that moves between a PDF and a page is re-told each way**,
+    /// on the commit, like a display change.
+    ///
+    /// MUTATION: send the window's scale to every seat, and the PDF legs are
+    /// owed 1.5 — and with the engine already holding 1.5, nothing at all.
+    #[test]
+    fn a_seat_moving_between_a_pdf_and_a_page_is_retold_on_each_commit() {
+        let mut seat = seat_at(1.5);
+        let mut told = Vec::new();
+        for uri in [PDF, HTML, PDF] {
+            committed(&mut seat, uri);
+            let owed = seat.rasterization_owed();
+            if let Some(scale) = owed {
+                seat.rastered = Some(scale);
+            }
+            told.push(owed);
+        }
+        assert_eq!(told, [Some(2.0), Some(1.5), Some(2.0)]);
+        committed(&mut seat, PDF);
+        assert_eq!(
+            seat.rasterization_owed(),
+            None,
+            "a second commit of the same kind owes nothing"
+        );
+    }
+
+    /// **Which addresses are a PDF**: the file's own extension in any case,
+    /// decoded for a local file, cut from the query and fragment for any other.
+    #[test]
+    fn a_pdf_is_an_address_whose_file_ends_in_pdf() {
+        for pdf in [
+            "file:///D:/reports/report.pdf",
+            "file:///D:/reports/REPORT.PDF",
+            "file:///D:/My%20Reports/r%2Epdf",
+            "file:///D:/reports/report.pdf#page=3",
+            "https://example.com/papers/a.pdf",
+            "https://example.com/papers/a.pdf?download=1#page=2",
+        ] {
+            assert_eq!(web_document(pdf), WebDocument::Pdf, "{pdf}");
+        }
+        for page in [
+            BLANK_PAGE,
+            "file:///D:/reports/index.html",
+            "file:///D:/reports/report.pdf.html",
+            "file:///D:/pdf/index.html",
+            "https://example.com/pdf",
+            "https://example.com/a.html?file=b.pdf",
+            "https://example.com/.pdf",
+        ] {
+            assert_eq!(web_document(page), WebDocument::Page, "{page}");
+        }
     }
 }
 

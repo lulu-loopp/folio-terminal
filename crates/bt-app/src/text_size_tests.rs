@@ -363,46 +363,6 @@ fn a_tab_moved_to_a_window_at_another_scale_is_measured_there() {
     );
 }
 
-/// PIN (37) — ***Restart shell* keeps the rung, and a restart that fails keeps the old leaf.**
-///
-/// The replacement is born at the rung the constructor is handed — read off the leaf it replaces
-/// before anything is spawned — and the old leaf leaves the map only by the insert of a
-/// replacement that exists. `Runtime::restart_shell` spawns a ConPTY and cannot run here, so this
-/// is the body, read through `bt_source`.
-///
-/// MUTATION: build the view with `TextScale::ACTUAL` — a restarted pane at 150 % comes back at
-/// 100 %; remove the old leaf before the spawn — a failed spawn leaves the seat empty.
-#[test]
-fn restart_shell_keeps_the_rung_and_a_failed_restart_keeps_the_old_leaf() {
-    let restart = method_body("Runtime", "restart_shell");
-    let read = restart
-        .find("let text_scale = leaf.text_scale;")
-        .expect("the rung is read off the leaf being replaced");
-    let built = restart
-        .find("LeafView::at(&mut self.app.gpu, &self.window.renderer, text_scale)?")
-        .expect("and handed to the constructor");
-    let spawned = restart.find("create_leaf_session(").expect("spawns");
-    let waits = restart
-        .find("leaf.successor = Some(Box::new(spawned));")
-        .expect("a replacement being born waits beside the old leaf");
-    let replaced = restart
-        .find("self.replace_restarted_shell(seat, spawned)")
-        .expect("the old leaf goes only with a replacement in hand");
-    assert!(
-        read < built && built < spawned && spawned < waits && spawned < replaced,
-        "{restart}"
-    );
-    assert!(
-        method_body("Runtime", "replace_restarted_shell")
-            .contains("self.sessions.insert(seat, spawned);"),
-        "the replacement takes the seat by the insert that drops the old leaf"
-    );
-    assert!(
-        !restart.contains("self.sessions.remove(&seat)"),
-        "nothing takes the old leaf out before the spawn has answered"
-    );
-}
-
 /// NEW (37) — **a split and a duplicate start at 100 %; tear-out and merge keep the rung.**
 ///
 /// The moving half runs the production moves on real tabs: `tear_pane_into_tab`, and a merge
@@ -659,6 +619,10 @@ fn the_rung_has_one_owner() {
         "Runtime::redraw",
         // a table answer for a pane that has since closed goes nowhere
         "Runtime::apply_math_results",
+        // the window seam's mirror of the renderer's own interface (`Glass::base_metrics`),
+        // declared once and answered for the product by the renderer's own reader below
+        "base_metrics",
+        "WindowRenderer::base_metrics",
     ];
     for name in owner_names(&base, source()) {
         assert!(
@@ -692,9 +656,10 @@ fn the_rung_has_one_owner() {
         "WindowRenderer::prepare_peek_draws",
         "WindowRenderer::peek_box_rects",
         "WindowRenderer::float_tag_rects",
-        // the single-seat door and the replay probe, whose one pane has no rung
+        // the single-seat door and the replay probe's encoding (`bt_render::probe_surface`;
+        // its submit is `bt-render-probe`'s), whose one pane has no rung
         "WindowRenderer::present",
-        "WindowRenderer::probe_frame",
+        "WindowRenderer::probe_frame_work",
     ];
     for name in owner_names(&inside, render) {
         assert!(

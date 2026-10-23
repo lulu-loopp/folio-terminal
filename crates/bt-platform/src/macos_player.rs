@@ -192,10 +192,11 @@ use objc2_foundation::{NSDictionary, NSNotification, NSNotificationCenter, NSNum
 
 use super::engine::{
     EngineError, EngineState, FRAME_POLL_INTERVAL, Frame, FrameCost, IDLE_POLL_INTERVAL,
-    LedgerEntry, OPEN_BUDGET, SHUTDOWN_BUDGET, note_engine_shut_down,
+    LedgerEntry, OPEN_BUDGET, note_engine_shut_down,
 };
 use super::macos_video::displayed_size;
 use crate::macos_files::file_url;
+use crate::video_load::{Load, LoadDeadline};
 
 /// **The timescale an arbitrary number of seconds is asked for in.**
 ///
@@ -261,6 +262,9 @@ impl Engine {
     /// the item, the player and the video output are all on the far side of that
     /// thread's first instruction.
     pub fn open(path: &Path) -> Result<Self, EngineError> {
+        // The open request: what `OPEN_BUDGET` is read against here, and what
+        // `LOAD_BUDGET` is measured from on the engine thread.
+        let asked_at = Instant::now();
         let shared = Arc::new(Shared::default());
         let (commands, inbox) = mpsc::channel();
         let source = path.to_path_buf();
@@ -272,10 +276,13 @@ impl Engine {
                 "folio-video-engine",
                 crate::ThreadPriority::Normal,
                 move |_ctx| {
-                    run(&url, &shared, &commands, &inbox);
-                    // Last of all, and read by `Engine::shutdown` to know
-                    // whether joining this thread will return — see there.
-                    shared.stopped.store(true, Ordering::Release);
+                    run(
+                        &url,
+                        LoadDeadline::from_open(asked_at),
+                        &shared,
+                        &commands,
+                        &inbox,
+                    );
                 },
             )
             // The one thing that can still fail here, and it fails without
@@ -288,7 +295,7 @@ impl Engine {
             thread: Some(thread),
             source,
             seen_generation: 0,
-            opened_at: Instant::now(),
+            opened_at: asked_at,
         })
     }
 
@@ -457,46 +464,35 @@ impl Engine {
         }
     }
 
-    /// **Stop, release the player and join its thread**, now rather than at
-    /// drop.
+    /// **The door: tell the player's thread to stop, and let it go**
+    /// (T-DROP-DOORS, D-80): *a video engine is shut down through an explicit
+    /// door, not by its drop.*
     ///
-    /// The verb a pane calls when it closes or is handed a different file. It is
-    /// idempotent and [`Drop`] calls it, so a caller that forgets is not a
-    /// caller that leaks.
-    ///
-    /// # The join is bounded
-    ///
-    /// The Windows arm's review row R2-19, and the reason is the same on this
-    /// platform: a pane closes on the window's own thread, and the thread it is
-    /// closing may be inside a decoder. So the thread is asked to stop and this
-    /// waits [`SHUTDOWN_BUDGET`] for it to say it has — the flag it sets as its
-    /// very last act, which is what makes the `join` after it a formality that
-    /// returns at once. A thread that has not said so by then is let go rather
-    /// than waited on, and its engine is still on the ledger, which is the
-    /// truth.
+    /// The verb a pane calls when it closes or is handed a different file, on
+    /// the window's own thread — so it waits for nothing, the Windows arm's rule
+    /// for the Windows arm's reason (review row R2-19): the thread it is closing
+    /// may be inside a decoder. The `Shutdown` command is the whole of the
+    /// request; the thread releases its player, moves the ledger and leaves on
+    /// its own time. Idempotent.
     pub fn shutdown(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
-        let Some(thread) = self.thread.take() else {
-            return;
-        };
-        let deadline = Instant::now() + SHUTDOWN_BUDGET;
-        while !self.shared.stopped.load(Ordering::Acquire) {
-            if Instant::now() >= deadline {
-                eprintln!(
-                    "video: an engine thread was still running {SHUTDOWN_BUDGET:?} \
-                     after it was told to stop; leaving it to finish"
-                );
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        let _ = thread.join();
+        self.thread.take();
     }
 }
 
 impl Drop for Engine {
+    /// Waits for nothing. After [`Engine::shutdown`] there is nothing left;
+    /// without it, the player's thread is told to stop and let go of — the
+    /// door's own request, which needs no wait — and the drop says so once.
     fn drop(&mut self) {
-        self.shutdown();
+        if self.thread.is_some() {
+            self.shutdown();
+            crate::door_skipped::say(
+                "a video engine (`macos_player::Engine`)",
+                "its shutdown door",
+                "its thread was told to stop and let go of",
+            );
+        }
     }
 }
 
@@ -521,9 +517,6 @@ struct Shared {
     /// immediately before the pump starts; [`Engine::state`] reads it to decide
     /// whether [`OPEN_BUDGET`] has been missed.
     built: std::sync::atomic::AtomicBool,
-    /// **Whether the engine thread has left.** Set once, as the thread's last
-    /// act, and read by [`Engine::shutdown`] so that its join is a bounded wait.
-    stopped: std::sync::atomic::AtomicBool,
 }
 
 /// One thing for the engine thread to do. The twin of the Windows arm's, with
@@ -560,11 +553,12 @@ enum Command {
 /// everything playback made.
 fn run(
     path: &Path,
+    deadline: LoadDeadline,
     shared: &Arc<Shared>,
     commands: &mpsc::Sender<Command>,
     inbox: &mpsc::Receiver<Command>,
 ) {
-    autoreleasepool(|_pool| match Machinery::build(path, commands) {
+    autoreleasepool(|_pool| match Machinery::build(path, deadline, commands) {
         Ok(mut machinery) => {
             // Before the pump and after the player: this is what stops
             // `Engine::state` charging a working engine with having missed
@@ -619,6 +613,10 @@ struct Machinery {
     ended: bool,
     generation: u64,
     error: Option<EngineError>,
+    /// When the load is over without having said anything: `LOAD_BUDGET`
+    /// after the open request. Past it, a player that is still not ready is
+    /// refused by this module itself — see [`Self::publish_state`].
+    deadline: LoadDeadline,
 }
 
 impl Machinery {
@@ -627,7 +625,11 @@ impl Machinery {
         reason = "the synchronous track accessor is what a thread of one's own wants; see \
                   `macos_video.rs`'s note, which this file inherits"
     )]
-    fn build(path: &Path, commands: &mpsc::Sender<Command>) -> Result<Self, EngineError> {
+    fn build(
+        path: &Path,
+        deadline: LoadDeadline,
+        commands: &mpsc::Sender<Command>,
+    ) -> Result<Self, EngineError> {
         let url = file_url(path, false).map_err(|_| EngineError::Other("the path has no URL"))?;
         // SAFETY: every call below is an Objective-C message to an object this
         // function created and holds, on the thread that created it. The statics
@@ -709,6 +711,7 @@ impl Machinery {
                 ended: false,
                 generation: 0,
                 error: None,
+                deadline,
             })
         }
     }
@@ -759,7 +762,9 @@ impl Machinery {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             // Every handle has gone without saying so — a panic between the
-            // `Engine` being made and being dropped. Same ending.
+            // `Engine` being made and being dropped, which under the resident
+            // panic hook ends the process first: this arm runs only where no
+            // fatal hook is installed. Same ending.
             Err(mpsc::RecvTimeoutError::Disconnected) => return false,
         }
         self.take_frame(shared);
@@ -858,37 +863,59 @@ impl Machinery {
             let presentation = self.item.presentationSize();
             let natural_size = size_of(presentation).or(self.native_size);
             let rate = self.player.rate();
+            // **The size, not a status** — the Windows arm's spelling, and on
+            // this platform it is the only one that is true.
+            //
+            // `ready` means "the metadata has arrived": the moment
+            // `natural_size` and `duration_secs` are answerable and a layout can
+            // be solved. Both are answered off the **asset**, which
+            // `macos_video.rs` already reads synchronously, so both are true
+            // from this engine's first published state for every file whose
+            // track says its size. A length is not part of it: a source that
+            // declares none has still loaded.
+            //
+            // `AVPlayerItem.status` was the first spelling of this and it is
+            // wrong here, measured on the venue machine 2026-09-12: in a process
+            // whose main queue nobody drains it stays
+            // `AVPlayerItemStatusUnknown` for ever, because that property is one
+            // of the "changes that occur dynamically during playback" the
+            // class's own header says are serialized onto a dispatch queue that
+            // is the main queue by default. Spelling `ready` as the status would
+            // make this flag a statement about the caller's run loop rather than
+            // about the file — see §13.35 ⑤.
+            let ready = natural_size.is_some() || self.has_audio;
+            // **The load's deadline**, decided by `LoadDeadline::judge` for both
+            // arms. A video track whose size the asset does not say is answered
+            // only by the item's presentation size, which arrives on that same
+            // main queue — so a player can stand not ready for ever here too.
+            // A refusal is `NotLoaded`, not ready, with no length or size, and
+            // it is the terminal: what the item says afterwards is not
+            // published.
+            let refused = match self.deadline.judge(
+                Instant::now(),
+                ready,
+                self.error.is_some(),
+                self.error == Some(EngineError::NotLoaded),
+            ) {
+                Load::AsSaid => false,
+                Load::Refused => {
+                    self.error.get_or_insert(EngineError::NotLoaded);
+                    true
+                }
+            };
             EngineState {
-                duration_secs,
+                duration_secs: duration_secs.filter(|_| !refused),
                 position_secs: seconds_or_zero(self.player.currentTime()),
                 // **Not "a frame changed recently".** A video paused on its last
                 // picture is `false` here and still has a picture on the glass.
                 playing: rate != 0.0 && !self.ended,
-                natural_size,
+                natural_size: natural_size.filter(|_| !refused),
                 ended: self.ended,
                 error: self.error,
                 muted: self.player.isMuted(),
                 volume: f64::from(self.player.volume()),
                 rate: self.wanted_rate,
-                // **The size, not a status** — the Windows arm's spelling, and
-                // on this platform it is the only one that is true.
-                //
-                // `ready` means "the metadata has arrived": the moment
-                // `natural_size` and `duration_secs` are answerable and a layout
-                // can be solved. Both are answered off the **asset**, which
-                // `macos_video.rs` already reads synchronously, so both are true
-                // from this engine's first published state.
-                //
-                // `AVPlayerItem.status` was the first spelling of this and it is
-                // wrong here, measured on the venue machine 2026-09-12: in a
-                // process whose main queue nobody drains it stays
-                // `AVPlayerItemStatusUnknown` for ever, because that property is
-                // one of the "changes that occur dynamically during playback"
-                // the class's own header says are serialized onto a dispatch
-                // queue that is the main queue by default. Spelling `ready` as
-                // the status would make this flag a statement about the caller's
-                // run loop rather than about the file — see §13.35 ⑤.
-                ready: natural_size.is_some() || self.has_audio,
+                ready: ready && !refused,
                 has_video: self.has_video,
                 has_audio: self.has_audio,
             }

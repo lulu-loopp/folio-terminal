@@ -24,6 +24,8 @@ fifty-one rows, plus two cross-cutting rows (doors, threads and lanes) that are
 not a subsystem but are a rule. Row 54, the look of the window, was added on
 2026-09-22 with the written UI spec. Row 55, tickets, was added on 2026-09-23:
 it is not a subsystem either, but a ruling about how every change is drafted.
+Row 56, the preview's load, watch and formulas, was added on 2026-10-17
+(T-CHAINS-72): the contract of a cross-crate chain that no row held.
 
 ---
 
@@ -66,6 +68,38 @@ The rule is spread across four places and that is itself the finding.
 Also: trailing entry 2026-09-23 *Decoration never covers text* — a pane's first
 shell-integration mark causes at most one extra grid change in its lifetime (the
 rail's reserve); the alternate screen and later marks cause none.
+**The order a resize runs in** (T-CHAINS-72, 2026-10-17; read off the code and its
+doc comments, and the contract of `docs/ARCHITECTURE.md` §7.2.2 — the entries above
+are still unfolded). This is the ordering `Runtime::flush_pending_pty_resize`
+represents, and a ticket that moves a hop keeps it:
+1. **The solve comes before the carry.** A new rectangle is solved into seat
+   rectangles, the rectangles into each pane's columns and rows, and only then
+   does a pane's grid or its shell hear anything; the solver takes no part in the
+   debounce (`Runtime::resize`; red line L10).
+2. **The picture follows the hand; the shell hears once per gesture** (owner's
+   ruling 2026-08-06). A shown pane's actor reflows in the solve's own turn
+   (`schedule_leaf_grid_change`); what waits is only the notification to the
+   pseudoconsole, until the pane's 200 ms quiet window has passed *and* no hand is
+   on the geometry (a held divider, the OS's size-move loop): one gesture, one
+   `ResizePseudoConsole`. A pane behind another tab defers its reflow to the same
+   release, and a tab brought forward re-solves.
+3. **At the release, four steps in this order, for every pane**
+   (`commit_leaf_resize`): the actor reflows if it is still behind the released
+   grid; the input-region phase is sampled; the pseudoconsole is told, only if the
+   grid is one the child has not got; and the request is reconciled
+   (`mark_pty_resize_requested_at`), or, when the child was told nothing, the
+   transaction is settled unchanged. The reconcile is not optional: without it the
+   resize epoch never quiesces, the PSReadLine repair is never paid and the pane's
+   decorations stay withheld.
+4. **A queued release always carries the last grid the pane was solved to.** A
+   solve that moved either grid queues a release and never cancels one, because
+   only a release closes the transaction `resize_at` opened; a solve that moved
+   neither schedules nothing. A shell still being born is owed the size it missed
+   and is told it when it lands (`apply_owed_shell_resize`).
+The release runs once per window turn, after every other task that can change a
+session (`Runtime::turn`), and the transaction closes in a later turn
+(`Runtime::finish_resize_if_quiescent`). All of it is on the window thread today
+(`docs/ARCHITECTURE.md` §5.3 row 12); the move to a session lane must keep it.
 
 ### 3. PTY and ConPTY — `not yet folded`
 Entries: §1.3 *the thread and resource model*; the `bt-pty` crate doc. Owner:
@@ -350,8 +384,9 @@ carry the paste rules.
 (owner's rulings 2026-09-22 and 2026-09-23; `DESIGN.md` trailing entry
 2026-09-23 *A multi-line paste into a shell that would run it line by line waits
 on a card in the middle of the window*). One rule, `paste_road`, asked once per
-paste by `stage_paste` from `Runtime::deliver_paste`, where all four paste doors
-converge: the card is raised when the `multiline_paste_ask` setting is on, the
+paste by `stage_paste` from `Runtime::deliver_paste`, where every paste gesture
+converges — the clipboard's road and the road of paths in hand (`docs/ARCHITECTURE.md`
+§7.2.3): the card is raised when the `multiline_paste_ask` setting is on, the
 payload was the clipboard's own text, the pane has not set `?2004`, and
 `input::pasted_line_count` is more than one (a single trailing separator does not
 count). **PowerShell asks nothing** (ruling 2026-09-22; `DESIGN.md` trailing
@@ -470,9 +505,11 @@ owned by the tab's preview pool, holds the content, the revision, the
 incarnation, the encoding and line-ending facts, the undo log, and the disk
 baseline; the dirty dot is simply the undo log's position at the last save. The
 caret (`preview_edit::EditCaret`, seated by `preview_live::CaretSeat`) belongs to
-the **view**. `PreviewBuffer::save` compares the recorded modified time against
-the file and, on disagreement, **writes nothing** and answers a conflict — the
-edits survive and the foot says so. A rename moves the buffer's identity onto the
+the **view**. A save is a request on the storage worker
+(`PreviewBuffer::request_save`, S-6a), conditional on the file's exact bytes as
+the buffer last read or wrote them; when the file holds others it **writes
+nothing** — or, when they crossed the save itself, puts them back — and answers
+a conflict: the edits survive and the foot says so. A rename moves the buffer's identity onto the
 new path; the new suffix changes the view but cannot take back the content sniff.
 On a rendered page **every block the selection touches is drawn as source, as one
 unbroken run with the caret's own block** (`preview_live::source_span`), each in
@@ -589,30 +626,45 @@ bounded time*.
 Entries: §13.22 *glyphs on the Metal road are measured*; §7.1.3l and §7.1.3m.
 There is no font charter; the rules are per-decision.
 
-**The font list and the stored face, folded 2026-09-24 (0.4.5 ticket 50).**
+**The font list and the stored face, folded 2026-09-24 (0.4.5 ticket 50); the
+lane's half reworded 2026-10-12 (S-4), on the completion seam.**
 Entries read: §7.1.6c-8 ruling four (2026-08-19), *the picker ends in
 `Install fonts…`* and the list rescans when the dialog reopens; §13.18 *the real list in the font picker*;
 §13.52 *the gear asked the machine for its fonts* (GitHub issue #3); DESIGN
 2026-09-24 *The font list is walked only on its lane*.
 
 - **The machine's font collection is walked only on the font lane**
-  (`settings::FontLane::serve` on `FONT_LANE`, a `BelowNormal` thread named
-  `font-families`, started through `spawn_at_priority`), never on the window
-  thread. `bt_platform::monospace_font_families` and `cjk_font_families` have no
-  other product caller.
+  (`settings::FONT_LANE`, its one `BelowNormal` worker `font-families`, started
+  by the lane's first request through `lane::Executor::start_worker` and run in
+  `run_font_lane`), never on the window thread.
+  `bt_platform::monospace_font_families` and `cjk_font_families` have no other
+  product caller. A start the thread door refuses refuses the request that
+  asked for it, at the door, said once per streak; the lane is not in fault,
+  and the next request starts the worker again (S-4, 2026-10-12).
 - **The list rescans when the dialog opens, not while it is up** (2026-08-19):
-  `Runtime::toggle_settings_panel` calls `settings::begin_monospace_scan`. A
-  request made while a walk is out is served by one more round; one walk is out
-  at a time and one answer is held.
-- **Requests and answers are numbered.** Every request bumps
-  `ScanState::requested`; a walk serves the number standing when it starts; the
-  answer carries it. `adopt_scanned_families`, called only by the `FontsScanned`
-  arm between two frames, puts an answer on screen only if it is at least as new
-  as the one there. An older answer is dropped and asks for no frame.
-- **Only the window thread publishes**; the lane offers. Every reader of the
-  list in a frame (`monospace_families`, `family_index`) reads what was last
-  adopted and cannot walk or block. Before an answer lands the list is a seed:
-  the family in force and `DEFAULT_MONOSPACE_FAMILY` beside it, never empty.
+  `Runtime::toggle_settings_panel` calls `settings::begin_monospace_scan`. One
+  walk is out at a time and at most one waits. A request made while a walk is
+  out waits for the next walk; a request made while one waits is the same
+  question and is `Joined` to it, ending with that walk's answer.
+- **Every request is numbered, and ends once** (S-4, 2026-10-12). Each request
+  (`FontLane::request_walk`) is minted an identity by the lane's
+  `lane::Ledger`, which owes at most 16 at once — the walk out, the one waiting
+  with its joins, and the answers the window thread has not taken — and refuses
+  a request past that at the door. A request ends `Done` with its walk's lists,
+  `Joined` to the request it repeated, `Failed` — a font collection the platform cannot
+  read, or a panic in the walk — said once per streak in `diagnostics.log`, or
+  `WorkerGone` when the worker ends, which faults the lane and refuses every
+  later request. A family the platform cannot describe is left out, and that
+  shorter list is still the walk's answer. `adopt_scanned_families`, called
+  only by the `FontsScanned` arm between two frames, takes the answers in the
+  order the requests were made and puts a list on screen only if it is at
+  least as new as the one there; a failed walk leaves the list on screen as it
+  was. An older answer is dropped and asks for no frame.
+- **Only the window thread publishes the adopted list**; the lane holds the
+  answers. Every reader of the list in a frame (`monospace_families`,
+  `family_index`) reads what was last adopted and cannot walk or block. Before
+  an answer lands the list is a seed: the family in force and
+  `DEFAULT_MONOSPACE_FAMILY` beside it, never empty.
 - **The face `settings.json` names is loaded from the first frame, found by its
   name.** `apply_stored_terminal_font` asks `settings::monospace_family_files`,
   which answers from the adopted list when there is one and otherwise from
@@ -710,7 +762,8 @@ design-note T5, not this ticket.
 Entry added 2026-09-23 (0.4.4 ticket 02; owner's ruling 2026-09-23: "the card
 is modal and answers only Enter, the Join key and Esc"): **the multi-line paste
 card is a modal rung.** In `Runtime::keyboard_input` it stands directly under the
-PSReadLine invitation and above the settings dialog, and it returns for every
+first-run card (under the PSReadLine invitation until that card retired on
+2026-10-17) and above the settings dialog, and it returns for every
 key; `paste_card_key` is the whole of what it answers. In `KeyboardOwner` it is
 part of `menu_or_dialog`, so `is_modal` is true while it is up and a composition
 resolves to `ImeOwner::Modal`.
@@ -773,6 +826,12 @@ before, and the pane says why in `diagnostics.log`. A dead key is never a record
 Windows, the chords VT cannot express reach console programs as win32-input-mode key
 records…*, *On Windows, Ctrl+Alt on a text key is a key record too…* and *Key records are
 written only to the ConPTY Folio ships, and never for a dead key*.
+
+Added 2026-10-14 (issue #42): bytes ConPTY holds once it has read a record — a lone
+ESC, or ESC with ESC/O/P/X/^/_/[/]/DEL — are written as the press's record on every
+road but kitty's; byte readers read the same bytes; Escape with Ctrl or Alt keeps its
+ESC. This widens the sentence above, "Folio does not adopt the mode for any other
+key". Entry: DESIGN 2026-10-14.
 
 ### 28. Mouse routing — `not yet folded` (the wheel half is folded, 2026-09-24)
 Entries: §7.1.5f, §7.1.5g, §7.1.5i; §7.21 and §7.22 *gesture disclosure*; §7.60
@@ -883,8 +942,10 @@ the login-session named pipe with a per-user socket on macOS.
 
 ### 30. Notifications and the asking/telling surfaces — `folded`, and the family rule is `nowhere written`
 **Rule.** The one written rule in this family is the attention lane's reach rule
-(row 29): at most one of the in-window marks, a taskbar flash — once per turn
-however many panes spoke, and **absent entirely on a desktop whose taskbar
+(row 29): at most one of the in-window marks, a taskbar flash — once per raise
+(`Runtime::raise_attention`, which the drain, the animation tick, the endpoint's
+wake and a contradicted flash's replacement each call) however many panes spoke in
+it (corrected 2026-10-17, T-CHAINS-72: it read "once per turn"), and **absent entirely on a desktop whose taskbar
 auto-hides** — or a desktop message, with the notification setting gating only
 the desktop arm. **Nothing maps a message kind to a surface kind.** Fifteen
 surface types exist before menus and inline fields, eighteen to twenty-one with
@@ -920,6 +981,9 @@ gesture raises **no surface at all**; a question is put only where no road
 lands the block unexecuted.
 
 ### 31. Settings and migrations — `not yet folded`
+The settings chain (`docs/ARCHITECTURE.md` §7.2.6: a press, its store, its receipt,
+the watch and the merge) is ruled in row 33; this row is the schema and its
+migrations.
 Entries: the M2 schema document §2; the `migrate.rs` module doc; §7.19 *the words
 on the settings page are written for the reader: a copy standard, a forbidden-word
 table, and a punctuation gate* (the second §7.19); 2026-09-23 *settings travel as
@@ -989,7 +1053,14 @@ preferences; persists under the data directory; versioned through
 `persist::SettingsStore` / `SettingsV1` and a forward-only migration list;
 applied in process at its own door, and **re-read from disk when the storage watch
 hears it** (`docs/plans/design/settings-reread-2026-10-11.md`; owner ruling Q3,
-2026-10-11).
+2026-10-11). **A press is in force in memory at the press and is handed to the
+storage worker at once, with no debounce, and the file follows by receipt**
+(T-STORAGE-WORKER-REQUEST; until 2026-10-17 written only in `SettingsStore`'s doc
+comment): the write is made only if the file still holds the bytes Folio last read
+or wrote there, one write is in flight per document with the newest change waiting
+behind it, and only the worker's answer moves the store's revision. A settings
+write is a person's click, so there is nothing to coalesce, and a quiet window
+would only be a window in which the choice can be lost.
 *CLI* — audience: the outside world (a shell, Explorer, another Folio); carries
 per-launch placement and the seven argv doors; never persists; `cli::parse` is pure
 and total over the raw arguments, producing a request or a fault, and `resolve`
@@ -1032,9 +1103,10 @@ with the carried overrides over it.
 **One reload discipline**: `settings.json`, `keybindings.json`, `profiles.json` and
 the pins are followed live by the named storage watch, each re-read compared with
 the revision Folio last read or wrote, every write conditional on it, and a file
-that changed merged against it, the file winning a conflict (`settings.json` merges
-now; until their merges, `keybindings.json` is held and `profiles.json` and the pins
-are taken), with an unparseable mid-run file leaving what is in force untouched.
+that changed merged against it, the file winning a conflict — `settings.json` by
+field, `keybindings.json` by action and then by chord (the file's action keeping a
+chord both sides claim), `profiles.json` by row and field and the pins by pin — with
+an unparseable mid-run file leaving what is in force untouched.
 **From.** The M2 persistence schema document (two files, unknown-field and
 failure policy); §7.2 *the command-line front door* and the `cli.rs` module doc;
 `docs/BT-ENVIRONMENT.md`, held complete in both directions by
@@ -1057,7 +1129,15 @@ migrated, a future part refused whole — and then **each changed value through 
 function a press on its row calls, never by writing `settings.json` and waiting**,
 with the store's writes held so the batch lands as one write. A hand edit enters by
 the same doors: the storage pass's merge puts each value the file gave through its
-row's function, with the writes held the same way. A part the file does
+row's function, with the writes held the same way, and a merged `keybindings.json`
+rebuilds the one table from this build's defaults and the merged departures through
+`Shortcuts::apply_overrides`. A shortcut document has one reading rule — at launch, on
+an import and in the merge each line is read in the dialect its file records and carried
+to this one (`shortcuts::read_chord_in`), and what that refuses is refused by all three;
+the last line about an action that reads is the one in force, and an earlier line about it,
+readable or not, is neither dealt nor reported (`settings_bundle::read_lines`, the one
+selection of all three, of the merge's sides and of a press, which removes an action's
+shadowed lines with the line it takes away). A part the file does
 not carry is left alone. Three keys are receipts about this machine and are not
 imported (`first_run_card`, `cards_gesture_hint_offer`, `web_pages_used`);
 `Focus mode` and `Shell integration` are
@@ -1494,49 +1574,75 @@ registration is always rewritten". The 2026-09-26 entry replaces "the first-run
 card's Explorer row arrives off".
 
 ### 38. PSReadLine — `folded`
-**Rule.** Folio ships and installs its own patched copy of the module, because
-the stock version on Windows PowerShell 5.1 anchors the edit line to the
-pre-resize width, which makes Folio's own resize-anchor chord a no-op. The probe
-(`psreadline::run_probe`, its result in `PROBE`) reads the highest installed
-version and the effective execution policy **out of process**; the module is
-written only into the Documents modules directory that the system names; and
-`install_checked` is the one writer — a leaf is Folio's by bytes or by its
-version stamp, anything else is foreign and both verbs go dark. **Every switch
-outcome must be spoken** — installed, or a refusal with its reason — never
-silence.
-**From.** §7.1.6c-3b *the PSReadLine invitation: the probe, the trigger table,
-byte-identical removal, and the patched version pinned to the integration
-script*; §7.47 *a switch that will not move must say why: a new machine's
-execution policy is restricted, and that window said nothing from beginning to
-end*; trailing entry 2026-09-20 *Folio installs its module only where the place
-is empty or its own*; trailing entry 2026-09-21 *Folio's own writers wait their
-turn for the marks record*.
-**Overrides.** §7.47 replaces the silently refusing switch. The 2026-09-20
-occupancy entry replaces row-level checks with `install_checked`.
-**The debt this rule carries, from the entry's own admission.**
-`Runtime::apply_psreadline` and the three agent-hook rows — four press handlers — still take the marks lock **on
-the window thread**, deliberately, because each already reads and writes those
-files synchronously there. Moving them onto workers is named as a 0.4.4 ticket
-and **no ticket id has been issued**. See `docs/ARCHITECTURE.md` §5.3 rows 2–4.
-Since 2026-09-23 such a press waits behind one of our own workers' I/O for as
-long as that I/O takes, instead of failing after two seconds; that wait is
-bounded by our own finite writes and is paid off by the same move.
-**Upgrade (ruled 2026-09-21, implemented 2026-09-24 by ticket 56).** Owner's
-verbal ruling of 2026-09-21, written down on 2026-09-22 (multi-line paste design
-note, "Owner rulings" 6): **option A.** Folio's own older copy of the module is
-replaced on upgrade **without asking** — at launch, before the first window, by
-`psreadline::upgrade_recorded` on the first install's road (`install_recorded`),
-with one `diagnostics.log` line and no card; a failed write keeps the older
-stamp (the stamp DLL is written last) and the next launch tries again. "Folio's
-own" is decided by `psreadline::upgrade_decision`: the DLL carries Folio's `-bt.`
-stamp, the stamp is older than `PATCHED_BUILD` (`psreadline::Build::predates`),
-and Folio recorded the install (the marks record's root, or `settings.json`'s
-invitation at `Installed`). **A copy Folio did not install is never touched**
-(no Folio stamp, or no record), nor is a newer or equal Folio build. **A first
-install is always invited**, never performed silently. The launch's lock on the
-marks record sits beside the debt above (`docs/plans/structural-debt.md` D-34).
-The same ruling's other two parts ("strips become notifications", the
-multi-line paste question's rules) are not this row's and are not folded here.
+**Rule.** A Windows PowerShell 5.1 pane runs **Folio's own copy of Microsoft's
+signed PSReadLine 2.4.5**, because the 2.0.0 that Windows ships anchors the edit
+line to the pre-resize width, which makes Folio's resize-anchor chord a no-op.
+The copy is the PowerShell Gallery's package, vendored unmodified and pinned by
+SHA-256 (`vendor/psreadline/`, held by `scripts/ci/check-psreadline-artefact.ps1`);
+the build takes its four assemblies and its licence, beside Folio's own
+binary-only manifest (`assets/psreadline/PSReadLine.psd1`, which is what lets it
+load under every execution policy), into the Windows executable. **The pane's
+birth worker writes it**, to `%LOCALAPPDATA%\Folio\psmodules\<artefact>\PSReadLine\2.4.5\`
+(the artefact is the package hash's first twelve hex), only where the files are
+not already there byte for byte; a failed write is said once in
+`diagnostics.log` and the next birth tries again; a launch prunes other builds'
+artefacts and keeps whole one a running shell still holds. **The module path is
+the pane's alone**: `PSModulePath` is composed with Folio's folder first, then
+what 5.1 would have had (Documents only where the account's value is unset or the
+machine's), and declared on that pane for its lifetime — only where the
+integration loader is composed, the program is not `pwsh`, and **the edition
+answered `FullLanguage`**. The prefix is composed from a known answer and from
+nothing else (ruling B′, 2026-10-18): the edition is asked its language mode
+(`-NoProfile -NonInteractive`, `$ExecutionContext.SessionState.LanguageMode`)
+at launch, before the window; a 5.1 birth that arrives before the answer waits
+for it on its birth worker, never the window thread, within the question's own
+patience. Timing changes how long a pane takes, never which editor it gets.
+Three rows: **`FullLanguage`** — prefix and loader, as above; **a constrained
+machine** (any other mode, an application-control lockdown) — no prefix and no
+loader, the pane is exactly the Shell-integration-off pane, and
+`diagnostics.log` says once per launch that Folio's PSReadLine is not offered
+(each birth that waited for the answer also says how long it waited — a
+different fact, kept per birth);
+**an account whose own profile switches the session to `ConstrainedLanguage`**
+— the edition answered `FullLanguage`, so the host imported Folio's copy, and
+the constrained profile leaves the pane on the host's legacy line editor: the
+account's own choice, recorded and not repaired, beside the version-demand row
+below. A question that fails or runs out of patience — or answers with anything
+but a language mode — gives that birth no prefix, one line, and the next 5.1
+birth asks again. The launch asks only with the Shell integration switch on. No
+answer is kept across launches. A `pwsh` started inside it keeps its own. **Folio's copy always wins in
+Folio's 5.1 panes** (owner ruling Q2): the host imports it through the pane's
+`PSModulePath`, before any profile runs, and a profile that imports PSReadLine
+by name gets the one already loaded. A profile that demands another version by
+number gets that version (measured 2026-10-17: the prompt and commands work, and
+the pane loses OSC 133 `C`/`D`) — the profile's choice, not repaired; the
+integration says it once in `diagnostics.log`, naming the version, and never on
+a card. The fork an earlier Folio left in Documents, loaded where Folio's copy
+is not on a pane's path, keeps the resize chord's no-op, as it always had: it is
+told by its `-bt.` build stamp. **Nothing is
+written to Documents, `$PROFILE`, the account's environment or the marks
+record, and nothing asks**: there is no Settings row, no probe and no invitation
+(Q3). **The copy an earlier Folio wrote into Documents** (the fork,
+`2.4.6-bt.*`) stays where it is (Q4); it is Folio's by its nine SHA-256 hashes
+or an older `-bt.` stamp and by nothing weaker. While one is there the Terminal
+page offers its removal, observed once per launch on a worker and removed on
+another, each press answered to the window that pressed; the uninstall removes
+it (row 41).
+**From.** trailing entry 2026-10-17 *Folio's own PSReadLine in every Windows
+PowerShell pane* (T-INTEGRATION-INJECT-2-BUILD; design note
+`docs/plans/design/integration-inject-2-2026-10-15.md`, owner rulings Q1–Q4 of
+2026-10-15). What the fork's rulings said about recognising Folio's own copy —
+§7.1.6c-3b's byte-identical removal, the trailing entry 2026-09-20 *Folio
+installs its module only where the place is empty or its own* — survives in the
+legacy copy's identity rule.
+**Overrides.** The 2026-10-17 entry replaces the row's former rule whole: the
+patched fork and its Documents installer (`install_checked`), the
+out-of-process probe, the Terminal page's switch and the invitation (§7.1.6c-3b),
+§7.47's spoken refusals for that switch, which has nothing left to refuse, and
+the launch-time upgrade (ruled 2026-09-21, ticket 56, option A). The debt this
+row carried — `Runtime::apply_psreadline` holding the marks lock on the window
+thread (`docs/ARCHITECTURE.md` §5.3 rows 3 and 4) — is repaid by the removal;
+row 2 keeps the agent-hook presses.
 
 ### 39. Single instance and the launch pipe — `not yet folded`
 Entries: §7.59 *a second launch is no longer a second process: it hands its one
@@ -1557,7 +1663,8 @@ Entries: the attention plan's endpoint section; §7.51; §13.37.
 
 ### 41. The uninstall doors — `folded`
 **Rule.** Folio must undo classes of thing outside its own folder — edits to
-other programs' files (agent hooks and the patched module), the `$PROFILE` line
+other programs' files (agent hooks and the patched module an earlier Folio wrote
+into Documents), the `$PROFILE` line
 (written again since T-INTEGRATION-INJECT-4 by the one-click fallback, §4) with the
 file, folders and one copy its write recorded,
 system registrations (the Explorer verb, the sparse package, the toast identity),
@@ -1611,7 +1718,8 @@ marker with `uninstall_hook: true`, and its `pre_uninstall` runs the door on
 the door's exit 2; the cask's `postflight` writes it with `uninstall_hook:
 false`, since Homebrew runs uninstall steps on every upgrade, and the door runs
 from `zap` only (ticket U-2). **And every such mark keeps a
-format the previous version also reads** — the PSReadLine module install, the
+format the previous version also reads** — the PSReadLine copy an earlier Folio
+installed (read and removed, never written, since 2026-10-17), the
 Explorer registration, the toast identity, the PowerShell profile line and the
 agent hooks — so an update's rollback leaves nothing the old build cannot repair
 on its next start; presses that write them during an update's trial are neither
@@ -1831,6 +1939,56 @@ the row, as every browser shows a 404 or a 500. The "Cannot open" / did-not-load
 a load that reached nothing (a name that did not resolve, a connection refused or cut before a
 response).
 
+**The host's thread and its wake** (T-CHAINS-72, 2026-10-17; read off the code — the
+`webview` and `macos_webview` module headers in `bt-platform` and the doc of
+`AppEvent::WebPageSpoke` — and the contract of `docs/ARCHITECTURE.md` §7.2.5; the
+entries above are still unfolded):
+1. **The engine calls back on the window thread.** WebView2 delivers every callback
+   on the thread that created its environment and refuses an environment used from
+   any other (`0x802A000C`); the environment and the controller are asked for only
+   through window-thread doors (`doors::WebEnvironment`, `doors::WebController`),
+   inside the message pump winit turns. WKWebView's delegates are main-thread only.
+   So the host's event queue is a single-thread queue, not a channel, and nothing
+   about a callback is cross-thread.
+2. **A callback answers the engine only what cannot be answered later, and queues
+   the rest.** WebView2's arguments (`SetCancel`, `SetResponse`, `SetState`,
+   `SetHandled`, a dialog's accept) and WebKit's decision and completion handlers must
+   be settled before the callback returns, so these are decided inside it, from the
+   policy the caller handed the host at `WebHost::new` (the navigation gate and the
+   request gate) or from a fixed answer. The list is closed as of 2026-10-17 (every
+   `add_` registration of the Windows host and every WebKit delegate method of the
+   macOS host read):
+   - Windows: `NavigationStarting` asks the navigation gate and proceeds, cancels, or
+     cancels and navigates to the rewritten target; `FrameNavigationStarting` asks the
+     request gate and cancels a refused subframe; `WebResourceRequested` asks the
+     request gate, returns with nothing queued when allowed and answers an empty 403
+     when refused; `ScriptDialogOpening` returns without accepting or deferring, so the
+     page's alert, confirm or prompt is dismissed; `NewWindowRequested` is marked
+     handled, so the engine opens no window of its own; `DownloadStarting` is
+     cancelled; `PermissionRequested` is denied and `LaunchingExternalUriScheme`
+     cancelled, both with nothing queued; `AcceleratorKeyPressed` takes back a chord
+     this window owns, before the page sees the key; `MoveFocusRequested` is marked
+     handled. Every other registration only queues.
+   - macOS: `decidePolicyForNavigationAction:` asks the navigation gate for the main
+     frame and the request gate for a subframe, and answers before a rewrite is
+     started; `decidePolicyForNavigationResponse:` cancels a response that would be a
+     download; `didReceiveAuthenticationChallenge:` performs the default handling for a
+     server-trust challenge and rejects every other protection space;
+     `createWebViewWithConfiguration:` returns no view, so WebKit opens no window; the
+     three JavaScript panels (alert, confirm, prompt) complete at once as dismissed;
+     the media-capture and device-motion permission handlers answer `Deny`. Every other
+     delegate method only queues.
+   **Every event that is queued ends in `Shared::push`**, which pushes a `WebEvent` and
+   wakes the loop with `AppEvent::WebPageSpoke`, which carries nothing; what it means
+   for the pane — the refused request's notice, the new pane, the download's hand-off,
+   the dismissed dialog's notice — is decided on the next turn by `WebSeat::drive`,
+   which drives every window's seats, a closing window's included.
+3. **Nothing in the host blocks, and a callback may arrive for a pane that has
+   gone.** Creation is asynchronous — the pump is winit's and a nested one would run
+   the application re-entrantly — and a callback cannot be cancelled, so the
+   generation token of the seat's machine (`webhost::WebMachine`) decides whether
+   an answer is still anyone's.
+
 ### 50. The video engine — `not yet folded`
 Entries: §7.23 *video has a face: the first frame comes from the platform decoder,
 and the set that can be drawn is not the set that can be played*; §7.42 *video no
@@ -2032,12 +2190,54 @@ the site moved, not a row added; `scripts/ci/check-dead-code.ps1` is the gate.
 and the `DESIGN.md` entry of 2026-09-29 on it.
 **Overrides.** none found.
 
+### 56. The preview's load, watch and formulas — `folded`
+**Rule.** One sequence carries a file into a preview buffer and keeps it current
+(`docs/ARCHITECTURE.md` §7.2.4); four facts hold it:
+1. **A read is answered against the body it was issued for.** Every request the
+   preview worker (`bt-preview-worker`) receives carries a base minted only by
+   `PreviewBuffer::claim_head_read` — the buffer's incarnation and revision — and
+   the worker keeps only the newest request per target (the window, the tab, the
+   file and the kind of read; a replaced request ends with no outcome).
+   `PreviewBuffer::land_read` refuses an answer whose base the buffer has moved
+   past and keeps the body, the undo log, the caret and the selection; a buffer
+   evicted and opened again has a new incarnation, so a late answer for the old
+   one never lands in the new one.
+2. **A watch event is a question, never a load.** The kernel's news, heard on
+   `bt-dir-watch`, only wakes the window; the window's clock reads the file's stamp
+   after a quiet window, and a stamp the buffer already holds is no news.
+   `PreviewBuffer::note_disk_moved` then decides, in this order: a file that is gone
+   keeps the buffer, says so, and reads nothing; a file moved under unsaved edits is
+   read to compare and never overwritten, and the disagreement is said when the
+   bytes differ; a file moved under a clean body is re-read quietly, and a file that
+   still holds the body's bytes keeps the body and its history. The watch set is
+   every tab's pool, not only the panes on screen.
+3. **A formula's picture is the window's, keyed by its content.** A preview formula
+   is asked on the computation lane's decoration share (`bt-math-worker`) with a
+   `PreviewMathKey` — content, mode, size and ink, and no path, pane or tab — and
+   its answer lands in that window's `PreviewMathCache` under the key it travelled
+   with, so it serves whichever pane shows the same formula, and a late one lands
+   under its own key without touching a newer picture.
+4. **The application drains each worker's channel once.**
+   `FolioApp::drain_preview_answers` and `FolioApp::drain_math_answers` take every
+   answer once per process and offer the batch to each window in turn, which takes
+   only what is addressed to it (`answers_for`); what no window takes was addressed
+   to one that has closed, and is dropped.
+**From.** The rule is `nowhere written` in `DESIGN.md` as one sequence (ARCHITECTURE
+§7.2's first pass, 2026-09-23, said so); it is written here from the code's doc
+comments — `PreviewBase` and `PreviewBuffer::land_read` (§7.1.3v *a buffer knows
+which disk state it is holding, and a read is answered against the body it was
+issued for*, `T-EDIT-DISK`, folded in row 19), `PreviewBuffer::note_disk_moved` (user
+ruling 2026-08-29), the `preview_watch` module header, `PreviewMathKey`, and
+`FolioApp::drain_preview_answers` (the 2026-08-23 incident `docs/CONVENTIONS.md`
+records about addresses on a shared answer queue). T-CHAINS-72, 2026-10-17.
+**Overrides.** none found.
+
 ---
 
 ## What is folded, and what is not
 
-**Folded (22 rows):** 4, 5, 6, 8, 9, 18, 19, 22, 23, 29, 30, 33, 35, 37, 38, 41,
-42, 43, 52, 53, 54, 55. Row 46 is folded for the layering rule only.
+**Folded (23 rows):** 4, 5, 6, 8, 9, 18, 19, 22, 23, 29, 30, 33, 35, 37, 38, 41,
+42, 43, 52, 53, 54, 55, 56. Row 46 is folded for the layering rule only.
 
 **Not yet folded (33 rows):** everything else. For those rows the entries listed
 are still the authority, and a ticket that depends on one of them folds it — into

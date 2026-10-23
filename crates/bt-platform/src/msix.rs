@@ -349,9 +349,10 @@ mod deployment {
         let operation = manager
             .AddPackageByUriAsync(&file_uri(msix)?, &options)
             .map_err(|error| error.message())?;
-        let result = operation.join().map_err(|error| error.message())?;
+        let result = windows_future::IAsyncOperationWithProgress::join(&operation)
+            .map_err(|error| error.message())?;
         // **The deployment result carries its own failure**, and it is not the
-        // one the call returned: `join` answers the HRESULT of *running the
+        // one the call returned: the WinRT operation's `join` answers the HRESULT of *running the
         // operation*, while a package that was refused comes back as a completed
         // operation holding an error. Reading only the first is how a refusal
         // becomes a switch that says it worked.
@@ -390,7 +391,8 @@ mod deployment {
         let operation = manager
             .RemovePackageAsync(&HSTRING::from(full_name))
             .map_err(|error| error.message())?;
-        let result = operation.join().map_err(|error| error.message())?;
+        let result = windows_future::IAsyncOperationWithProgress::join(&operation)
+            .map_err(|error| error.message())?;
         let error = result
             .ExtendedErrorCode()
             .map_err(|error| error.message())?;

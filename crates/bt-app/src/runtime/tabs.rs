@@ -1,6 +1,9 @@
 //! `tabs` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::{Ending, Gone, Leaving, OwnerGone};
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     BlankPage, BlankPageReturn, Drag, DragCarry, DragHandover, DragSource, DropLanding, Fading,
     FolderPick, FormulaSwitches, HandoverInto, LeafId, MathHoverExit, MenuPaint, NewWindowPlan,
@@ -24,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
-use winit::event::{KeyEvent, MouseScrollDelta};
+use winit::event::MouseScrollDelta;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowId;
 
@@ -171,7 +174,7 @@ pub(super) fn land_birth_death_fallback(
     }
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// The `+`'s verb: a tab on the default profile, which is what the button's
     /// own tooltip promises in the mock-up (`New tab (${defaultProfile().title})`).
     ///
@@ -305,6 +308,17 @@ impl Runtime<'_> {
         if index >= self.window.tabs.len() || (!force && index == self.window.active_tab) {
             return Ok(());
         }
+        // **The gesture the tab in front was holding leaves with it** (T-POINTER-CAPTURE R-9,
+        // off the glass), and first of all: a divider puts back the ratio it was moving, read off
+        // this tab's seats, and a press handed to a program is told its button came up while its
+        // pane is still the one on the glass. A drag in the hand is not this tab's — the spring
+        // that brought it here is the drag's own aim.
+        if index != self.window.active_tab {
+            self.end_capture(Ending::OffTheGlass(Leaving {
+                tab: self.id,
+                kept: None,
+            }))?;
+        }
         // **A formula's hover goes with the tab it was in** (audit 2026-09-15,
         // RB-3), and **before** the assignment below: `set_hovered_math` sweeps
         // the *active* tab's leaves, so a clear run after this line would sweep
@@ -336,8 +350,6 @@ impl Runtime<'_> {
         let _ = self.window.pending_frames.take();
         self.window.last_presented_frame = None;
         self.window.preedit = None;
-        self.drop_mouse_route();
-        self.drop_divider_drag();
         self.window.seat_pointer = seats::ChromePointer::default();
         self.window.hyperlink_hover.clear();
         self.window.peek_hover.clear();
@@ -430,25 +442,10 @@ impl Runtime<'_> {
         }) {
             self.finish_rename(RenameExit::Blur)?;
         }
-        if self.held_tab_press().copied().is_some_and(|press| {
-            self.window
-                .tabs
-                .get(index)
-                .is_some_and(|tab| tab.id == press.tab)
-        }) {
-            self.drop_tab_press();
-        }
-        if self.held_drag().is_some_and(|drag| {
-            self.window
-                .tabs
-                .get(index)
-                .is_some_and(|tab| drag.tab() == Some(tab.id))
-        }) {
-            self.drop_drag();
-            // F2: the payload stopped existing, so the application's pointer has
-            // nothing left to broker either.
-            self.app.drag_broker = None;
-        }
+        // And the gesture that was about it (T-POINTER-CAPTURE R-9, owner gone): its press, the
+        // tab itself in the hand, or anything held on one of its panes.
+        let closing = self.window.tabs[index].id;
+        self.end_capture(OwnerGone(Gone::Tab(closing)));
         match tab_close_action(self.window.tabs.len(), self.window.active_tab, index) {
             TabCloseAction::CloseWindow => {
                 self.request_window_close()
@@ -1268,7 +1265,7 @@ impl Runtime<'_> {
     /// twin, and two clocks in one slot for its reason: a menu cannot be both
     /// waiting to open its child and holding it open against the rows.
     pub(in crate::runtime) fn advance_tab_menu(&mut self, now: Instant) -> Result<()> {
-        let Some(menu) = self.window.tab_menu.as_ref() else {
+        let Some(menu) = self.window.tab_menu.as_mut() else {
             return Ok(());
         };
         let Some(due) = menu.submenu_hold_until else {
@@ -1277,6 +1274,13 @@ impl Runtime<'_> {
         if now < due {
             return Ok(());
         }
+        // **A matured hold is spent on the turn it comes due, whatever follows**
+        // (T-WINDOW-THREAD-UNDER-LOAD). Left standing by a road below that cannot act — a rest
+        // whose pointer has left the window, a heading that has no child to open — it was an
+        // instant in the past that the wake fold handed `ControlFlow::WaitUntil` on every turn,
+        // and the loop spun until the next pointer move. Whatever the roads below arm again
+        // (the hover they drive) is a new hold of its own.
+        menu.submenu_hold_until = None;
         if menu.submenu_open {
             // The cap ran out with the hand still short of the child. The
             // highlight is then owed to whatever the pointer is actually over,
@@ -1425,8 +1429,8 @@ impl Runtime<'_> {
             return Ok(());
         };
         let profile = leaf.profile.clone();
-        // §7.1.4's ladder, the one `Restart shell` reads: a shell that never reported is in the
-        // folder it was put down in.
+        // Where the pane stands, the one `Restart shell` reads: its report, else its shell
+        // process's folder (T-CWD-FROM-PROCESS), else the folder it was put down in.
         let cwd = leaf.seed_place_for_a_new_shell();
         // The source profile *is* the target profile, so `cwd_for_spawn` has no
         // namespace to cross and the folder arrives exactly as the shell reported
@@ -1520,7 +1524,7 @@ impl Runtime<'_> {
     /// any particular one, and a menu that could not be walked would be the one
     /// list in this window reachable only by a pointer. Which would be a poor
     /// joke on a menu that exists because a *gesture* was unreachable.
-    pub(in crate::runtime) fn tab_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
+    pub(in crate::runtime) fn tab_menu_key(&mut self, event: &Keystroke) -> Result<()> {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
                 // One press, one layer — §7.1.5's ladder read inside a single
@@ -1617,8 +1621,9 @@ impl Runtime<'_> {
     /// a popup nothing can dismiss.
     ///
     /// Where the chooser opens is the same courtesy every other door shows: the
-    /// folder the pane you are looking at is standing in (`standing_folder`: its
-    /// last OSC 7 report, else the folder it was opened in), and failing
+    /// folder the pane you are looking at is standing in (`LeafSession::folder`:
+    /// its last OSC 7 report, else its shell process's folder, else the folder it
+    /// was opened in), and failing
     /// that the place a tab of the default profile would have started in anyway.
     /// The second half is asked of the profile rather than of this process,
     /// because "wherever Folio happens to be running from" is
@@ -1627,7 +1632,10 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn browse_for_new_tab_root(&mut self) {
         let start = self
             .focused()
-            .and_then(|leaf| leaf.session.standing_folder().map(Path::to_path_buf))
+            .and_then(|leaf| {
+                leaf.folder(&crate::pane_folder::SystemProcessFolders)
+                    .into_folder()
+            })
             .or_else(|| {
                 // `working_directory` and not the whole place: this is a Windows
                 // dialog, and that field is by construction the half of a
@@ -3018,7 +3026,9 @@ impl Runtime<'_> {
                 // about ([`Runtime::row_adopt_fits`]) — so it is reported the way
                 // every refusal between a survey and a release is, by the gesture
                 // having done nothing.
-                self.seat_a_files_column(payload.path.display().to_string())?;
+                self.seat_a_files_column(crate::FilesRoot::known(
+                    payload.path.display().to_string(),
+                ))?;
             }
         }
         Ok(true)
@@ -3566,9 +3576,11 @@ impl Runtime<'_> {
     /// only when a tab has no live shell left has the tab itself ended. That is
     /// the same rule §7.1.4 already gives closing — the last pane closing is the
     /// tab closing — read from the other direction.
-    pub(in crate::runtime) fn reap_exited_tabs(&mut self) -> Result<()> {
+    ///
+    /// `now` is the instant the reaper looks, read by the turn as it calls this: an exited
+    /// shell's age and an ended tab's wait for its saves (S-6b) are judged against it.
+    pub(in crate::runtime) fn reap_exited_tabs(&mut self, now: Instant) -> Result<()> {
         let active = self.window.active_tab;
-        let now = Instant::now();
         let mut exits = Vec::new();
         let mut active_exited_panes = Vec::new();
         let mut exited = Vec::new();
@@ -3701,12 +3713,30 @@ impl Runtime<'_> {
         // Only the ones whose close is nothing to ask: a tab that still holds an
         // unsaved preview waits for the reader, and the question is never put
         // from here (ticket 58).
+        let ended = exited.clone();
         let exited = crate::exited_tabs_the_loop_may_close(
             &self.window.dirty_gate,
             &self.window.tabs,
             self.window.active_tab,
             exited,
         );
+        // **And the ones whose wait for saves on their way ran out** (S-6b): no
+        // question can be asked of a tab that closes itself, so each closes with
+        // its pool let go, and its late answers reach the sink.
+        let ran_out = self.window.exited_tab_waits.ran_out(
+            &self.window.dirty_gate,
+            &self.window.tabs,
+            self.window.active_tab,
+            &ended,
+            &exited,
+            now,
+        );
+        for &index in &ran_out {
+            self.window.tabs[index].preview_pool.clear();
+        }
+        let mut exited = exited;
+        exited.extend(ran_out);
+        exited.sort_unstable();
         let retired_tabs: BTreeSet<_> = exited.iter().copied().collect();
         settle_exit_dispositions(&mut exits, &retired_tabs, active, active_retires_panes);
         exit_diagnostics::say_shell_exits(exits.iter().map(|(_, exit)| exit), |line| {
@@ -3927,6 +3957,9 @@ mod birth_death_tests {
     /// drop the record from `BirthFallback::spawn` and the landing writes no banner and keeps the
     /// asked-for program; drop `|| leaf.birth_death_kept` from the reaper's liveness rule, or let
     /// the birth-death arm fall through to the retirement road, and the wiring pin fails.
+    /// MUTATION (T-WINDOWS-SHELL-NAMESPACES, observed RED): drop `finish_leaf_birth`'s reset of the
+    /// program kind on `bt-pty`'s fallback and the PowerShell that landed keeps the Cygwin kind
+    /// and spelling of the program that died.
     #[test]
     fn a_silent_birth_death_falls_back_in_place_and_keeps_every_restored_tab() {
         test_support::on_the_window_thread();
@@ -3944,6 +3977,8 @@ mod birth_death_tests {
         assert!(banner.contains("failed to start"), "{banner:?}");
         let mut leaf = test_support::leaf_saying("");
         leaf.program = Some(PathBuf::from("preferred-shell"));
+        // The program that died was a Cygwin bash; the one that lands is Windows PowerShell.
+        leaf.program_kind = profiles::ShellProgram::Cygwin;
         let born_grid = leaf.conpty_grid;
         let (wake, heard) = waking();
         let worker_wake = Arc::clone(&wake);
@@ -4016,6 +4051,15 @@ mod birth_death_tests {
             leaf.program.as_deref(),
             Some(Path::new(bt_pty::LAST_RESORT_SHELL))
         );
+        // And the spelling it reads is the one the shell that landed prints.
+        assert_eq!(leaf.program_kind, profiles::ShellProgram::Native);
+        let landed_spelling = profiles::printed_path_namespace(
+            profiles::index_of_id(profiles::fallback_profile_id()),
+            &profiles::ShellProgram::Native,
+            &bt_pty::SystemShellEnvironment,
+        );
+        assert_eq!(leaf.session.printed_path_namespace(), landed_spelling);
+        assert_eq!(leaf.paste_recipient.namespace, landed_spelling);
         let squeeze = |text: &str| -> String {
             text.chars()
                 .filter(|character| !character.is_whitespace())
@@ -4059,6 +4103,7 @@ mod birth_death_tests {
             at_shell_home: false,
             named: false,
             program: Some(PathBuf::from("fresh-shell")),
+            program_kind: crate::profiles::ShellProgram::Native,
             unless_gone: None,
         };
         let seed = crate::LeafSeed {

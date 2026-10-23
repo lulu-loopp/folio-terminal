@@ -19,6 +19,7 @@ members = [
     "crates/bt-persist",
     "crates/bt-unicode",
     "crates/bt-render",
+    "crates/bt-render-probe",
     "crates/bt-source",
     "crates/bt-testpath",
     "crates/bt-winres",
@@ -40,7 +41,7 @@ members = [
 # that into the PE resource, and `bt_app::version` is the one module the other
 # three read. `a_release_is_one_version_in_four_places` in that module is the
 # gate; a second literal anywhere fails it.
-version = "0.4.7"
+version = "0.4.8"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.89"
@@ -224,7 +225,12 @@ syntect = { version = "5.3", default-features = false, features = [
 # `syntect-fancy` backend, so naming it here costs no new package. Its
 # `default-features = false` is the same refusal of onig as syntect's own line.
 two-face = { version = "0.4", default-features = false, features = ["syntect-fancy"] }
-typst-as-lib = { version = "=0.16.0", features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }
+# **No features here: the fonts are a per-target decision, made in `crates/bt-math/Cargo.toml`.**
+# A desktop build takes `typst-kit-fonts` (the machine's own faces) and `typst-kit-embed-fonts`
+# (typst-assets' seventeen faces, 9,683,068 bytes); a wasm32 build takes neither, compiles no
+# face in, and is handed its faces by the host (`bt_math::MathEngine::with_faces`). Resolver 3
+# does not unify a target-specific feature across targets, so the split holds.
+typst-as-lib = "=0.16.0"
 typst-layout = "=0.15.0"
 typst-library = "=0.15.0"
 typst-svg = "=0.15.0"

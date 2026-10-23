@@ -80,6 +80,8 @@ pub fn project(pane: Pane<'_>) -> Result<Projected, FrameProjectionError> {
     session.refresh_projection(view);
     let frame = session.viewport_frame(view)?;
     let path_work_filed = session.absorb_printed_path_probes(view) != 0;
+    // A scroll is new input to the pane's held decoration work, as a resize is.
+    session.observe_view(view);
     Ok(Projected {
         frame,
         hold_requested: view.presentation_hold(),

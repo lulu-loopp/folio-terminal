@@ -1,21 +1,22 @@
 //! `web` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     AppEvent, LeafId, PageKeepsake, PreviewSurface, RenameExit, Runtime, TabRename, WebHeadVerb,
     WebPlacement, a_page_is_off_the_glass, a_page_still_has_a_pane, a_page_was_replaced,
-    a_retirement_happens_on_this_turn, hang_watch, hole_for, input, marks, native_window, preview,
+    a_retirement_happens_on_this_turn, hang_watch, hole_for, input, marks, preview,
     preview_image_placement, restore, revived_page_of, seats, shown_address, web_mouse_button,
     web_trace, web_warmup, webhost, webnav, websheet,
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use bt_layout::SeatId;
 use std::collections::BTreeSet;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton};
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **The web engine, asked for on an idle turn after startup** (0.4.5 ticket 54,
     /// D-64; `docs/ARCHITECTURE.md` §5.3 row 21).
     ///
@@ -137,7 +138,7 @@ impl Runtime<'_> {
                 tab: crate::web_spare::SPARE_TAB,
                 seat: 1,
             },
-            parent.window(),
+            &parent,
             self.window.renderer.scale_factor(),
             self.web_color_scheme_in_force(),
             Box::new(move || {
@@ -568,9 +569,7 @@ impl Runtime<'_> {
             return;
         }
         self.window.web_keyboard = None;
-        if let Ok(native) = native_window(&self.window.window)
-            && let Err(error) = bt_platform::take_keyboard_focus(native)
-        {
+        if let Err(error) = self.window.window.take_keyboard_focus() {
             eprintln!("BT_WEB focus return failed: {error}");
         }
     }
@@ -634,8 +633,7 @@ impl Runtime<'_> {
                 // next `Tab` is Folio's, which is what "handed back" has to mean
                 // before there is a pane order to hand it into.
                 webhost::WebOutcome::FocusLeftThePage { .. } => {
-                    let native = native_window(&self.window.window)?;
-                    if let Err(error) = bt_platform::take_keyboard_focus(native) {
+                    if let Err(error) = self.window.window.take_keyboard_focus() {
                         eprintln!("BT_WEB focus return failed: {error}");
                     }
                 }
@@ -1046,14 +1044,17 @@ impl Runtime<'_> {
         if self.adopt_spare_web_page(leaf, index, url, &minted)? {
             return Ok(());
         }
-        let native = native_window(&self.window.window)?;
-        let proxy = self.app.event_proxy.clone();
-        match webhost::WebSeat::open(
-            bt_platform::PageVisual {
+        let address = self
+            .window
+            .window
+            .page_address(bt_platform::PageVisual {
                 tab: leaf.tab.0,
                 seat: seat.0,
-            },
-            native,
+            })
+            .map_err(|error| anyhow!(error))?;
+        let proxy = self.app.event_proxy.clone();
+        match webhost::WebSeat::open(
+            address,
             url,
             minted,
             // **This window's scale factor, at birth** (§7.8 ⑨). Every number a
@@ -1164,17 +1165,18 @@ impl Runtime<'_> {
         }
         let leaving = hang_watch::enter(hang_watch::Station::WebAdopt);
         let began = Instant::now();
-        let native = native_window(&self.window.window)?;
         let page = bt_platform::PageVisual {
             tab: leaf.tab.0,
             seat: leaf.seat.0,
         };
+        let address = self
+            .window
+            .window
+            .page_address(page)
+            .map_err(|error| anyhow!(error))?;
         let mut door = WindowHandoff {
             to: &self.window.compositor,
-            address: webhost::SeatAddress {
-                page,
-                window: native,
-            },
+            address,
             outcomes: Vec::new(),
             answered: None,
         };
@@ -1388,9 +1390,7 @@ impl Runtime<'_> {
         // The same sentence the download sheet and a modal already make, said at
         // the third surface this window stands over a page with: whatever is
         // asking for keys takes them.
-        if let Ok(native) = native_window(&self.window.window) {
-            let _ = bt_platform::take_keyboard_focus(native);
-        }
+        let _ = self.window.window.take_keyboard_focus();
         self.window.rename = Some(TabRename::open_address(leaf, &url));
         self.window
             .rename_blink
@@ -1701,13 +1701,13 @@ impl Runtime<'_> {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<LeafId> {
-        let (x, y) = (position.x as f32, position.y as f32);
         // **And a hand that is already carrying something is not a hand the page
         // can have** (user report, 0.2.2: a pane dragged over a page could not be
         // let go of).
         //
         // First of the subtractions, because it does not depend on where the
-        // pointer is at all. A gesture of this window's is a press that has not
+        // pointer is at all. A held gesture — in any window, the slot being the
+        // application's (T-POINTER-CAPTURE cut 6) — is a press that has not
         // finished: the release that ends it is owed to whatever the press began
         // on, and every one of those endings — the drop, the divider, the
         // scrubber, the thumb, the selection — is answered *below* the ladder's
@@ -1725,26 +1725,7 @@ impl Runtime<'_> {
         if self.a_gesture_holds_the_pointer() {
             return None;
         }
-        if self.tab_list_target_at(position).is_some() {
-            return None;
-        }
-        if self
-            .window
-            .web_sheet_layouts
-            .iter()
-            .any(|(_, layout)| websheet::covers(layout, x, y))
-        {
-            return None;
-        }
-        let inside = |box_: [f32; 4]| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3];
-        if self
-            .window
-            .search_layout
-            .is_some_and(|capsule| self.window.search.is_open() && inside(capsule.frame))
-        {
-            return None;
-        }
-        self.web_page_shown_at(position)
+        self.page_under_the_hand(position)
     }
 
     /// **The page whose shown bounds hold this point**, asking nothing about
@@ -2002,15 +1983,17 @@ impl Runtime<'_> {
 /// **The page's window, as the adoption transaction's handoff door** (ticket 60, SW-3): park the
 /// spare's seat, then walk `WebSeat::rehost` from the spare's parent into this window, with
 /// `take_focus = false`.
-struct WindowHandoff<'a> {
-    to: &'a bt_platform::Compositor,
+struct WindowHandoff<'a, C: CompositorDoor> {
+    to: &'a C,
     address: webhost::SeatAddress,
     outcomes: Vec<webhost::WebOutcome>,
     /// The handoff's own word for the trace: `Moved`, `KeptSource` or `Lost`.
     answered: Option<&'static str>,
 }
 
-impl crate::web_spare::Handoff<webhost::WebSeat, bt_platform::SpareParent> for WindowHandoff<'_> {
+impl<C: CompositorDoor> crate::web_spare::Handoff<webhost::WebSeat, bt_platform::SpareParent>
+    for WindowHandoff<'_, C>
+{
     fn park(&mut self, seat: &mut webhost::WebSeat) -> Result<(), String> {
         match seat.park_for_handoff() {
             Ok(visible) => {

@@ -431,8 +431,9 @@ order for a login shell: `/etc/profile`, then the first of `~/.bash_profile`, `~
 `~/.profile`, and never `~/.bashrc`. `interactive` is bash's order for a shell that is not one:
 `~/.bashrc` and nothing else. Which is which is a fact about the profile's own arguments, and only
 the Windows side can read them. This is not cosmetic on Git for Windows:
-`/etc/profile` is what puts `/mingw64/bin` on the path, so a shell that skipped it is a Git Bash
-that cannot find git. The chain is a pinned test (`crates/bt-pty/tests/shell_integration_bash.rs`),
+Git Bash's launcher already sets `MSYSTEM` and puts git on the path, but `/etc/profile` is what
+sets the environment's prefix variables (`MSYSTEM_PREFIX`, `MINGW_PREFIX`, …) and the MSYS2
+`PATH` order, so a shell that skipped it runs without them. The chain is a pinned test (`crates/bt-pty/tests/shell_integration_bash.rs`),
 and `PATH`, `MSYSTEM` and `command -v git` were verified byte-identical to a plain `--login` shell.
 
 Everything the script finds, it keeps: your `PROMPT_COMMAND` is called rather than replaced — as a
@@ -505,8 +506,29 @@ fallback path described under **Authority and fallback** rather than on a guess.
 | **`sh` or `dash`** | no | no | no | no | no | — | yes | that shell's own |
 | **Command Prompt** | **yes** | **no** | no | **yes, no code** | **yes** | refused — see below | yes | not promised |
 | **a profile of the reader's own**, no door | no | no | no | no | no | — | yes | not promised |
+| **`bash.exe`** (`System32\bash.exe` or WSL's Store alias) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
+| **a distribution's own launcher** (`ubuntu2204.exe`) | no | no | no | no | no | — | yes, via `WSLENV` | that shell's own |
 
 Several rows need their reasons stated, because each looks like an omission and is not.
+
+**The door follows the program kind; a bash inside WSL is given WSL-spelled paths or no door**
+(T-WSL-LEGACY-BASH-DOOR, 2026-10-12). `wsl.exe -e` executes its program argv for argv, so the
+script crosses as one argument in the distribution's spelling. `System32\bash.exe` and WSL's Store
+`bash.exe` alias have no `-e`: what follows their name is re-read by a shell inside the
+distribution, and the bash it then starts is the one that runs `-c`'s text. So they are handed
+`-c` and one line — `[ -r '<script>' ] && BT_SHELL_INTEGRATION=<mode> exec bash --init-file
+'<script>' …; exec bash …` — with the script in WSL's spelling, single-quoted, inside the double
+quotes the Windows command line wraps it in. A path or a word of the row's that either quoting
+would read differently (`$`, a backtick, `\`, `"`, `'`) opens no door, and a script the
+distribution cannot read starts the bash the row asked for. A distribution's own launcher reads
+only its own verbs (`run`, `config`) and is handed no door. Measured on Ubuntu-24.04: a
+single-quoted path with a space crossed whole; `$HOME` and a backtick inside it were expanded by
+the outer shell; a path carried in a variable listed `/p` in `WSLENV` arrived exactly; the `-c`
+shell's parent is `/init`.
+
+**`WSLENV` lists the terminal's declarations for every pane whose program enters WSL** (owner
+ruling 2026-10-12): `wsl.exe` or another launcher, handed a script or not, together with the
+profile's own variables.
 
 **The two PowerShells are two profiles** (user ruling 2026-08-11), which is Windows Terminal's own
 arrangement and what a machine with both installed makes necessary: 7 and 5.1 are different
@@ -690,10 +712,11 @@ be copied; the status line was drawn on one frame of the focused pane and discar
 fell back while you were looking at another tab announced it to nobody.
 
 If you are on Windows PowerShell 5.1 by choice (`BT_SHELL=powershell.exe`, or no PowerShell 7
-install at all) and see stray/duplicated characters on a wrapped, unsubmitted input line right
-after narrowing the window, that is the PSReadLine 2.0.0 defect above — `Install-Module
-PSReadLine` (from the PowerShell Gallery) resolves it without changing anything else about your
-profile.
+install at all), a Folio pane does not show the PSReadLine 2.0.0 defect above: since 2026-10-17 a
+Windows PowerShell pane runs Folio's own copy of Microsoft's PSReadLine 2.4.5, for that pane only
+(see *Folio's PSReadLine in a Windows PowerShell pane* below). Another terminal still runs the 2.0.0
+that Windows ships; what you install for your own account there is yours to decide, and Folio
+neither installs anything for it nor asks.
 
 ## zsh
 
@@ -735,6 +758,32 @@ requires PSReadLine. PowerShell 7 may revive only its already-loaded in-box PSRe
 execution policy prevented module registration; Windows PowerShell does not take that path. A
 missing PSReadLine installation, non-FullLanguage session, refused argv, failed preparation or
 unreadable owned script emits no marks and uses fallback behavior. No execution policy is changed.
+
+### Folio's PSReadLine in a Windows PowerShell pane
+
+Windows PowerShell 5.1 ships PSReadLine 2.0.0, which keeps the edit line anchored to the width the
+pane had before a resize; Folio's resize repair needs 2.4. So a Windows PowerShell pane that Folio
+integrates runs **Microsoft's signed PSReadLine 2.4.5**, the PowerShell Gallery's own package,
+carried inside `folio.exe` unmodified (its hash is pinned) and written, the first time a pane needs
+it, to `%LOCALAPPDATA%\Folio\psmodules\<build>\PSReadLine\2.4.5\`. The module is binary-only, so it
+loads under every execution policy, `Restricted` included.
+
+- **Only Folio's panes.** The pane's own `PSModulePath` starts with that folder, followed by what
+  Windows PowerShell would have had. Nothing is written to `Documents`, to your `$PROFILE` or to
+  your account's environment, so Windows Terminal and every other window keep the PSReadLine they
+  have. A `pwsh` you start inside the pane finds its own PSReadLine first.
+- **Folio's copy wins in Folio's panes.** Your profile's `Set-PSReadLineOption` and key handlers
+  configure it; `Import-Module PSReadLine` by name changes nothing, because that module is already
+  loaded. A profile that asks for another version by number (`Import-Module PSReadLine
+  -RequiredVersion 2.0.0`, say) gets that version, and the pane then loses the marks that end a
+  command (`C` and `D`) — the prompt and the commands still work.
+- **The switch.** Settings ▸ Terminal ▸ *Shell integration* off starts Windows PowerShell panes with
+  nothing of Folio's, PSReadLine included. A session in Constrained Language Mode is left as it is.
+- **An earlier Folio's copy.** Folio 0.1.0–0.4.7 could install a patched PSReadLine (`2.4.6-bt.*`)
+  into `Documents\WindowsPowerShell\Modules\PSReadLine`, where every Windows PowerShell of your
+  account loads it. Folio no longer uses or updates it. While it is there, Settings ▸ Terminal
+  shows *Earlier PSReadLine copy* with *Remove it from Documents*; uninstalling Folio removes it
+  too. A PSReadLine that Folio did not write is never touched.
 
 ### The old names still work
 

@@ -66,9 +66,10 @@ use winit::keyboard::ModifiersState;
 
 use super::{
     AnimationCache, AnimationEntry, MAX_ANIMATION_CACHE_BYTES, Motion, PaneMotion, PasteTarget,
-    PeekClock, RevealTween, SeatId, TabId, advance_drawn_animations, present_drawn_animations,
+    PeekClock, RevealTween, SeatId, TabId,
 };
 use crate::pace::{FrameClock, Lanes};
+use crate::test_support::shown_and_opened;
 use crate::{
     animation, cardhint, cmdrail, float, formula_tools, keyhint, seats, termscroll, toast, tooltip,
 };
@@ -1175,17 +1176,14 @@ fn method(name: &str) -> &'static str {
 
 /// One playback of `frames` frames, each standing a tenth of a second — the
 /// shape of every `.gif` this window draws, with no decoder behind it.
-fn a_playback_of(frames: usize, started: Instant) -> AnimationEntry {
+fn a_playback_of(frames: usize, started: Instant) -> animation::Animation {
     let ring = (0..frames)
         .map(|index| animation::AnimationFrame {
             bgra: Arc::from(vec![index as u8; 4]),
             delay: Duration::from_millis(100),
         })
         .collect();
-    AnimationEntry::Ready {
-        serial: 1,
-        animation: Box::new(animation::Animation::of(ring, 1, 1, started)),
-    }
+    animation::Animation::of(ring, 1, 1, started)
 }
 
 /// Which frame of one cached animation is standing.
@@ -1253,8 +1251,14 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
 
     // ── ① the flood, and a decoded animation serviced on every turn ──────────
     let mut cache = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    cache.insert("on the glass".to_owned(), a_playback_of(64, start));
-    present_drawn_animations(&mut cache, &BTreeMap::new(), &drawn, start);
+    shown_and_opened(
+        &mut cache,
+        1,
+        "on the glass",
+        1,
+        Ok(a_playback_of(64, start)),
+    );
+    cache.present_drawn(&BTreeMap::new(), &drawn, start);
 
     let mut refusals = 0_u32;
     let mut turn = start;
@@ -1266,7 +1270,7 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
         refusals += 1;
         // The service, ungated, at the head of the turn — and then the compose,
         // which is what the flood's own present draws.
-        advance_drawn_animations(&mut cache, &drawn, turn);
+        cache.advance_drawn(&drawn, turn);
         let shown = standing_frame(&cache, "on the glass");
         let due = turn.saturating_duration_since(start).as_millis() as u64 / 100;
         assert_eq!(
@@ -1287,15 +1291,21 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
 
     // ── ② the same host on the gated schedule, which is the defect ───────────
     let mut gated = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    gated.insert("on the glass".to_owned(), a_playback_of(64, start));
-    present_drawn_animations(&mut gated, &BTreeMap::new(), &drawn, start);
+    shown_and_opened(
+        &mut gated,
+        1,
+        "on the glass",
+        1,
+        Ok(a_playback_of(64, start)),
+    );
+    gated.present_drawn(&BTreeMap::new(), &drawn, start);
     let mut turn = start;
     let mut presented = Some(start - FLOOD);
     while turn <= start + FLOOD_SPAN {
         let mut gate = clock;
         gate.open(presented, turn);
         if gate.admits() {
-            advance_drawn_animations(&mut gated, &drawn, turn);
+            gated.advance_drawn(&drawn, turn);
         }
         presented = Some(turn);
         turn += FLOOD;
@@ -1309,12 +1319,18 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
 
     // ── ③ and it costs nothing when nothing is live ──────────────────────────
     let mut idle = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    idle.insert("in another tab".to_owned(), a_playback_of(64, start));
+    shown_and_opened(
+        &mut idle,
+        2,
+        "in another tab",
+        1,
+        Ok(a_playback_of(64, start)),
+    );
     let nothing_drawn = BTreeMap::new();
     let mut turn = start;
     while turn <= start + FLOOD_SPAN {
         assert!(
-            !advance_drawn_animations(&mut idle, &nothing_drawn, turn),
+            !idle.advance_drawn(&nothing_drawn, turn),
             "a window drawing no animation has no clock to run"
         );
         turn += FLOOD;
@@ -1653,13 +1669,19 @@ fn a_service_that_finds_nothing_changed_hands_nothing_over() {
     let start = Instant::now();
     let drawn: BTreeMap<String, u64> = [("on the glass".to_owned(), 1)].into();
     let mut cache = AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES);
-    cache.insert("on the glass".to_owned(), a_playback_of(64, start));
-    present_drawn_animations(&mut cache, &BTreeMap::new(), &drawn, start);
+    shown_and_opened(
+        &mut cache,
+        1,
+        "on the glass",
+        1,
+        Ok(a_playback_of(64, start)),
+    );
+    cache.present_drawn(&BTreeMap::new(), &drawn, start);
     let mut services = 0_u32;
     let mut rebuilds = 0_u32;
     let mut turn = start;
     while turn <= start + FLOOD_SPAN {
-        let frames_arrived = advance_drawn_animations(&mut cache, &drawn, turn);
+        let frames_arrived = cache.advance_drawn(&drawn, turn);
         services += 1;
         if crate::pictures_need_handing_over(frames_arrived, false, false, false) {
             rebuilds += 1;

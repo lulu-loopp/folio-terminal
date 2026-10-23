@@ -1,6 +1,7 @@
 //! `profiles` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     FilesFocusArrival, LeafSession, MachineNews, Popup, ProgramNews, Runtime, ShownProgramRows,
     cli, i18n, launch_wire, persist, profile_menu_anchor, profiles, programs_lane, seats, settings,
@@ -12,7 +13,7 @@ use bt_render::{FrameSource, FrameTrigger};
 use std::path::PathBuf;
 use std::time::Instant;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Which profile a second launch's tab starts as, and what could not be
     /// honoured** (§7.59).
     ///
@@ -44,6 +45,7 @@ impl Runtime<'_> {
                 update_failed: None,
                 update_feed: None,
                 update_journal_held: None,
+                update_held_file: None,
             },
             self.default_profile(),
             cli::machine_path_kind,
@@ -440,6 +442,39 @@ impl Runtime<'_> {
         shell_integration::begin_profile_install_undo(program, edit, self.window_id());
     }
 
+    /// **One answer to this window's Enable or Undo**, as the window shows it: a written line is
+    /// an `Info` card carrying the Undo; a refusal — the writer's own, or a worker that did not run
+    /// to its end (T-PROFILE-INSTALL-REFUSED-START) — an `Error` card with the reason; a line
+    /// already there, or an Undo that landed, nothing (the row redraws from the observation).
+    pub(crate) fn deliver_profile_install(
+        &mut self,
+        outcome: shell_integration::ProfileInstallOutcome,
+    ) -> Result<()> {
+        match outcome {
+            shell_integration::ProfileInstallOutcome::Installed { program, edit } => {
+                let id = self.toast_with_verb(
+                    toast::ToastKind::Info,
+                    toast::ToastAnchor::Window,
+                    i18n::Text::ShellProfileAddedToast.text(),
+                    i18n::Text::ProfilesUndo.text(),
+                )?;
+                self.window.powershell_profile_undo = Some((id, program, edit));
+            }
+            shell_integration::ProfileInstallOutcome::Refused(reason)
+            | shell_integration::ProfileInstallOutcome::UndoRefused(reason) => {
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    Some(i18n::Text::ShellProfileRefused.text().to_owned()),
+                    reason,
+                )?;
+            }
+            shell_integration::ProfileInstallOutcome::Present
+            | shell_integration::ProfileInstallOutcome::Undone => {}
+        }
+        Ok(())
+    }
+
     /// Write the table to `profiles.json` and re-probe what it can start.
     ///
     /// **Three things move together and are moved in one place**: the file, the
@@ -456,7 +491,7 @@ impl Runtime<'_> {
     /// from both.
     pub(crate) fn store_profiles(&mut self) -> Result<()> {
         self.app.profiles_store.store(profiles::to_file());
-        self.adopt_profile_table()
+        self.adopt_profile_table(TablePresentation::Now)
     }
 
     /// The two of those three that a table which arrived **from** the file owes
@@ -470,11 +505,14 @@ impl Runtime<'_> {
     /// **The programs are asked for, not probed here** (T-PROGRAMS-REFRESH): every row that is
     /// still there and still names the same program keeps its answer, a new or re-pointed row is
     /// unknown until the program walk answers it, and the walk is asked now.
-    fn adopt_profile_table(&mut self) -> Result<()> {
+    fn adopt_profile_table(&mut self, presentation: TablePresentation) -> Result<()> {
         self.app.profile_programs = self.app.profile_programs.carried_into_live_table();
         self.ask_the_program_walk(programs_lane::Trigger::TableChanged);
         shell_integration::begin_powershell_preparation_for(&self.app.profile_programs);
         self.app.first_run_attempted = false;
+        if presentation == TablePresentation::OwedToTheTurn {
+            return Ok(());
+        }
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -654,10 +692,12 @@ impl Runtime<'_> {
         Ok(true)
     }
 
-    /// Put in force whatever a re-read of the file changed — the storage
-    /// worker's answer, taken on `AppEvent::DocumentsAnswered`.
+    /// **What a re-read of the file says**, taken on `AppEvent::DocumentsAnswered`:
+    /// a file that will not parse leaves the table in force and raises one card
+    /// (a file that changed is the storage pass's merge, whose door is
+    /// [`Self::install_merged_profile_table`]).
     ///
-    /// **What follows the change, and what deliberately does not.**
+    /// **What follows a change, and what deliberately does not.**
     ///
     /// * **The lists follow, because they are never held.** The Profiles page's
     ///   rows and the `Default profile` picker's options are derived in
@@ -713,13 +753,24 @@ impl Runtime<'_> {
             Some(false) => self.app.profiles_file_broken = false,
             None => {}
         }
-        if !news.taken {
-            return Ok(());
-        }
-        // One card per refused entry, `report_skipped_schemes`' shape: a file
-        // with two bad rows is two things to fix. They are the same sentences
-        // startup prints, because it is the same reader reading the same file.
-        for fault in self.take_profile_table()? {
+        Ok(())
+    }
+
+    /// **The table the store's readers read, installed, and one card per entry
+    /// the installer refused** — `report_skipped_schemes`' shape: a file with two
+    /// bad rows is two things to fix. They are the same sentences startup
+    /// prints, because it is the same reader reading the same file. The door of
+    /// a storage pass's merge (`table_merge`), whose presentation — the dialog
+    /// re-derived, the frame — is owed to the merge turn and made once after
+    /// every pass.
+    ///
+    /// Answers whether the table in force moved (`profiles::profile_revision`
+    /// advances only then): only a table that moved owes the turn a frame.
+    pub(crate) fn install_merged_profile_table(&mut self) -> Result<bool> {
+        let revision = profiles::profile_revision();
+        let faults = self.install_profile_table(TablePresentation::OwedToTheTurn)?;
+        let moved = profiles::profile_revision() != revision;
+        for fault in faults {
             let sentence = i18n::profile_entry_fault(&fault);
             eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
             self.toast(
@@ -729,7 +780,7 @@ impl Runtime<'_> {
                 sentence,
             )?;
         }
-        Ok(())
+        Ok(moved)
     }
 
     /// **Put the table the store now holds in force**, and answer the entries it
@@ -738,6 +789,15 @@ impl Runtime<'_> {
     /// through (0.4.4 ticket 05), so a table arriving in an exported file and a
     /// table arriving by a hand edit are put in force by one function.
     pub(crate) fn take_profile_table(&mut self) -> Result<Vec<profiles::ProfileFault>> {
+        self.install_profile_table(TablePresentation::Now)
+    }
+
+    /// [`Self::take_profile_table`], with its presentation made `now` or owed to
+    /// a merge turn that presents once after every pass.
+    fn install_profile_table(
+        &mut self,
+        presentation: TablePresentation,
+    ) -> Result<Vec<profiles::ProfileFault>> {
         // Taken by id *before* the table moves, because after it has moved
         // there is nothing left to ask: an index means whatever the new table
         // says it means.
@@ -773,15 +833,18 @@ impl Runtime<'_> {
         // it; there is no id to follow it by, because it is not a place — it is
         // a gesture, and the gesture was made against a list that is gone.
         self.window.settings.close_row_menu();
-        // The dialog may be standing on a page, a row or a picker that the new
-        // table does not have. Same call the verbs of this dialog make after
-        // they move the list, for the same reason — and **before** the frame
-        // below, because the frame is what draws the ring.
-        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
-        let content =
-            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
-        self.window.settings.keep_focus_reachable(content);
-        self.adopt_profile_table()?;
+        if presentation == TablePresentation::Now {
+            // The dialog may be standing on a page, a row or a picker that the
+            // new table does not have. Same call the verbs of this dialog make
+            // after they move the list, for the same reason — and **before** the
+            // frame below, because the frame is what draws the ring. A merge
+            // turn makes the same call once, after every pass.
+            let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+            let content =
+                self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+            self.window.settings.keep_focus_reachable(content);
+        }
+        self.adopt_profile_table(presentation)?;
         Ok(faults)
     }
 
@@ -860,6 +923,13 @@ impl Runtime<'_> {
         // press from travelling.
         self.close_popups_except(Popup::Root);
         self.window.root_menu.toggle(seat);
+        // **The shells' folders are asked once per look too** (T-CWD-FROM-PROCESS): the rows
+        // naming where a terminal stands are taken here, as the menu opens, and the frames that
+        // lay it out read what was taken.
+        if self.window.root_menu.seat().is_some() {
+            self.window.root_menu_shell_folders =
+                self.shell_folders_for_the_root_menu(&crate::pane_folder::SystemProcessFolders);
+        }
         // **The disk is asked once per look** (user ruling 2026-09-05). The
         // remembered folders are the only rows on this list that can name
         // somewhere that has gone, and "has it gone" is a question about the
@@ -890,4 +960,12 @@ impl Runtime<'_> {
         }
         Ok(true)
     }
+}
+
+/// **When a new profile table is presented**: at once, or owed to a merge turn
+/// that presents once after every pass (`Runtime::merge_documents`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TablePresentation {
+    Now,
+    OwedToTheTurn,
 }

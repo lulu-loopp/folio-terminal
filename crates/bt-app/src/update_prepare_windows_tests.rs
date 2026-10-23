@@ -484,6 +484,7 @@ fn offered(txn: u8) -> Job<u32> {
             capable: true,
             recorded: false,
             trial: false,
+            rescue_copy: false,
             platform: HostPlatform::Windows,
         },
         &Presenters {
@@ -1533,6 +1534,7 @@ fn at_launch_gathered(knows_the_release: bool) -> Gathered {
         capable: true,
         recorded: false,
         trial: false,
+        rescue_copy: false,
         platform: HostPlatform::Windows,
     }
 }

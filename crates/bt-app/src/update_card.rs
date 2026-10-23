@@ -453,7 +453,14 @@ fn reason(failure: &Failure) -> String {
         Failure::Stopped(Stop::TooOld) => Text::UpdateFailedTooOld,
         Failure::RolledBack | Failure::Incomplete { untried: false, .. } => Text::UpdateFailedTrial,
         Failure::Incomplete { untried: true, .. } => Text::UpdateFailedUntried,
-        Failure::JournalHeld { error, .. } => return i18n::update_failed_journal_held(error),
+        Failure::JournalHeld {
+            error, file: None, ..
+        } => return i18n::update_failed_journal_held(error),
+        Failure::JournalHeld {
+            error,
+            file: Some(file),
+            ..
+        } => return i18n::update_failed_file_held(file, error),
         // Never a failed card: the job raises it as `State::Updated`.
         Failure::ChangesNotKept { version } => return format!("Folio {version}"),
         Failure::TrialIncomplete { .. } | Failure::BesideTheTrial { .. } => {
@@ -918,7 +925,7 @@ pub(crate) fn version_row<W: Copy + Eq>(
                 now_ms,
             )),
             control: VersionControl::Check {
-                enabled: !check.checking,
+                enabled: !check.checking && job.may_check(),
             },
             link: None,
         };
@@ -926,7 +933,7 @@ pub(crate) fn version_row<W: Copy + Eq>(
     VersionRow {
         value: line(Text::VersionUpToDate.in_lang(lang).to_owned()),
         control: VersionControl::Check {
-            enabled: !check.checking,
+            enabled: !check.checking && job.may_check(),
         },
         link: None,
     }
@@ -1134,6 +1141,7 @@ mod tests {
             capable: true,
             recorded: false,
             trial: false,
+            rescue_copy: false,
             platform: HostPlatform::Windows,
         }
     }

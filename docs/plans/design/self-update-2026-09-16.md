@@ -3264,3 +3264,182 @@ not-kept card. The finalized road is:
 No journal grammar or parse site changes. The receipt is no longer evidence after `Committed`; its
 removal is solely the live watch's acknowledgement to the holder already settling that committed
 transaction.
+
+## Revision 2026-10-13 (m) — a refused receipt is asked again on the watch's own turn (T-TRIAL-RECEIPT-RETRY)
+
+A correction to H.2 step 1 and to H.2's stated bound; H.2 as written above stays the record of what
+0.4.7 built. The side-effects contract (`side-effects-contract-2026-10-11.md`, C5 as revision (b)5
+replaced it) refuses a failed effect retried on a clock of its own; the receipt's doubling pause was one
+(`structural-debt.md` D-89, its trial half).
+
+- **Step 1, amended.** Take the storage worker's answer. While a refused receipt is owed and the
+  watchdog is not spent, ask it again — create-new, by the one rule for what is at its name — **once at
+  each turn of the watch**, the turn the journal read and the watchdog already need, with no pause of
+  its own. Once the watchdog is spent (its fourth due time, 8 × `WATCHDOG`), an owed receipt is given up
+  and said once. The pause of 250 ms doubling to 30 s, `RECEIPT_RETRY_FIRST` and `RECEIPT_RETRY_CAP`, is
+  withdrawn.
+- **Why the turn, not a terminal refusal.** A receipt is handed over only by a ready trial, and a ready
+  trial handed back with no receipt is a candidate the recovery defers beside (H.3 steps 2 and 3): a
+  terminal refusal would not hand the decision to anybody, it would leave the transaction undecided
+  until the trial ends and then roll it back. A live holder rolls back at its deadline (90 s from the
+  launch) with no receipt; the doubling pause asked at 61.75 s and then 91.75 s after a refusal, so a
+  refusal that cleared at 62 s cost the update. Asked at each turn, a refusal that clears costs at most
+  one turn (250 ms). A journal read error is not an answer either (`Unreadable`, step 2).
+- **Why the watchdog's life is the bound.** A landed receipt pays off through a holder that adopts or
+  commits the trial — the live holder, or the recovery each hand-back starts (H.1's adoption). Past the
+  last due time the trial hands nothing back and the next start or logon decides; the repetition then
+  stops. It is C5 rule 3's one declared, bounded repetition inside the trial's one admitted request, on
+  the watch worker, declared in the `# completions` row `the trial's receipt`.
+- **The bound, restated** (replacing "about 127 receipt write attempts" an hour): while a receipt is
+  owed, one more journal read (the rights check) and one create-new attempt per 250 ms turn, for at most
+  880 s — at most 3,520 asks — and none after; one refusal line, then one line at the streak's end:
+  landed, with the number of asks, or given up, with the number and the last refusal.
+- **Accepted, stated.** A home that refuses for longer than 880 s and then takes writes no longer gets
+  the receipt: the next start or logon defers beside the live trial (no receipt names it) and decides
+  once it has ended — a rollback on Windows, a recorded retrial on macOS. The doubling pause would have
+  landed it at its next 30 s ask; an unbounded repetition is what C5 forbids.
+
+Pinned by `update_trial::tests::{a_refused_receipt_is_asked_again_only_on_the_watchs_own_turn,
+a_transient_receipt_refusal_does_not_roll_the_trial_back, a_permanent_receipt_refusal_ends_in_the_hand_back,
+an_unreadable_journal_still_retries_the_receipt_and_is_never_handed_back}`, each counted in the watch's
+own turns through `update_trial::Cadence`, the pause the watch is handed.
+
+### Amendment to revision (m), 2026-10-13 (round 2) — the reserved trial's bound
+
+Revision (m)'s bound — the watchdog's life — is the ordinary trial's. **U-35's reserved trial** is
+the one trial no holder can adopt: every holder runs the rescue copy the operating system refused,
+so its hand-backs cannot pay off, no live holder has a deadline over it, and its one road to a commit
+is its own (`update_apply::commit_last_trial`, asked at each turn of the watch until the journal no
+longer waits for it). Its refused receipt is therefore asked again **for as long as it asks to commit
+itself** — the receipt's re-ask shares `commit_itself`'s life — and is not given up at the fourth due
+time; a home that takes writes again later still lets it commit, and the person's changes are kept.
+Both bounds are declared in the `# completions` row `the trial's receipt` (C5 rule 3).
+
+**The cost of one ask, stated.** A journal read (the rights check) and a create-new write; when the
+refusal comes at the rename or a flush rather than at the create, each ask is a full durable write
+with its flushes — on macOS `F_FULLFSYNC`, which flushes the drive's cache.
+
+Pinned by `update_trial::tests::the_reserved_trial_asks_its_receipt_again_for_as_long_as_it_asks_to_commit_itself`.
+
+### Amendment to revision (m), 2026-10-13 (T-TRIAL-WATCH-REPEATS-BOUND) — the watch's two other repetitions
+
+H.2's loop asks two more things again on its turn, besides the receipt; both are bounded by the
+transaction's decision in this process — and when no decision comes while the process lives, by the
+process's life — not by a count or a clock, and both are declared in the `# completions` row
+`trial watch` (C5 rule 3).
+
+- **The `unkept` mark** (E4) is asked once a turn while a person's change is held, until it is durable or
+  the transaction is decided. It is not given up at the watchdog's end: its readers — the holder that
+  retires a rollback, a commit writer when the trial is gone, the holder that re-reads it after the
+  acknowledgement (revision (l)) — all act at or after the decision, and without it the not-kept card is
+  lost. Writing it once at the
+  decision is impossible: the trial neither makes nor first sees the decision. **The cost of an ask:** the
+  whole durable write — a failing create when the home takes no new file, a write with its file flush when
+  refused at that flush or the rename — or, once a write's rename put the bytes at the mark's name and only
+  the folder's open or flush was refused, that folder flush alone (`install_txn::flush_directory_of`). A
+  mark at its name, flushed or not, is what every reader sees, so the commit takes it back. A `metadata`
+  probe of the folder before each write is not built: it passes for every refusal that costs a flush and
+  catches only the refusals that already fail at the create, for the same price.
+- **U-35's reserved trial's own commit** is asked once a turn after a refusal until it commits, the journal
+  no longer waits for it, or the decision — its one road to a commit. **The cost of an ask:** a
+  non-blocking take of `H\lock`, a journal read asked again for up to 2 s (`JOURNAL_WRITE_WITHIN`) while it
+  fails, a receipt read, and a journal write whose hold is asked again within `JOURNAL_HELD_WITHIN` (10 s)
+  through the wait door, with `H\lock` held all the while — so held asks come at most once per 10 s.
+- **Said once per streak.** Each streak's first refusal is said — for the commit, with the rounds its first
+  ask said on its way; later asks of the streak are quiet (the watch hands the ask its own `say`), except the
+  ask that ends the streak, whose rounds are said before the end — and so is the mark's ask whose rename left
+  its bytes at its name, because what is asked changes then. Any other change of refusal within a streak is
+  summarised by the streak's end, said once with the number of refused asks and the last refusal.
+
+Pinned by `update_trial::tests::{a_refused_unkept_mark_is_asked_again_each_turn_until_the_decision_and_said_once,
+a_refusing_home_costs_one_folder_flush_per_turn_not_a_full_write,
+a_mark_at_its_name_is_taken_back_by_the_commit_though_its_folder_never_flushed,
+a_reserved_trials_self_commit_is_asked_until_the_decision_and_said_once_per_streak}`.
+
+### Amendment to revision (e), 2026-10-13 (T-JOURNAL-WRITE-UNDER-HOLD) — a held journal write pays its flush once
+
+**Who holds, and for how long.** The transaction lock `H\lock` is a byte-range lock on its own file,
+taken by every holder before it writes the journal and kept for its road; two Folio holders therefore
+meet at `H\lock` (`try_hold` answers `Pending`, `hold_within` waits), never at `journal.json`, and
+Folio's own reads of the journal share deletion. The hold that refuses a journal write
+(`install_txn::Failure::refused_while_open`: Windows' `ERROR_ACCESS_DENIED` or
+`ERROR_SHARING_VIOLATION` at the rename) is a foreign program's — a scanner, an indexer, a backup or
+sync tool — and its length is that program's. `JOURNAL_HELD_WITHIN` (10 s, 0.4.8 E4) is derived from
+that program (an on-access scan, Defender's default cloud wait), not from the lock protocol.
+
+**What a held round cost.** Each round was the whole durable write: a new temporary, the bytes, its
+file flush, the refused rename, the temporary removed — about 25 file flushes per 10 s window, and a
+fresh file for a scanner to open each round.
+
+**What it costs now.** `update_apply::write_journal` asks one `install_txn::DurableWrite`: its first
+round is `durable_write`'s order; when the rename is refused the flushed temporary stays, and every
+later round is that temporary's rename alone — one `MoveFileExW`, no flush — followed by the directory
+flush on the round it lands. The window, its rounds, its lines and its answer at the end
+(`Unwritten { held }`) are unchanged; a write given up removes its temporary. Durability is
+unchanged: the bytes are flushed before the first rename and never written after it; the rename that
+lands them is the same write-through rename. A probe of the hold before each round (an open of
+`journal.json` asking delete access) is not built: it costs what the rename costs, is itself an open a
+scanner intercepts, cannot see a hold on the temporary, and still leaves the rename to decide. macOS
+has no held round (`rename(2)` replaces an open file). The window election's mark (`H\<txn>\owner`,
+asked again within `JOURNAL_WRITE_WITHIN`) is written through the same `DurableWrite`
+(`update_apply::mark_writer`).
+
+Pinned by `bt_platform::install_txn::tests::{a_write_asked_again_after_a_refused_rename_flushes_its_file_once,
+a_write_over_a_held_target_lands_when_let_go_and_a_dropped_one_leaves_nothing}` and
+`update_apply_windows::tests::{a_held_journal_write_flushes_one_temporary_and_lands_when_the_hold_lifts,
+the_window_marks_writer_asked_again_over_a_held_mark_renames_one_temporary}`.
+
+**Round 2 (2026-10-13, the review's nits).** A temporary another program removes between two rounds (a
+scanner's quarantine, a cleaner) makes the next rename answer "not found": that round writes the temporary
+again, once, and renames it — never the write given up at once with no hold to name, as it would have been.
+A write given up removes its temporary through `DurableWrite::give_up`, and a removal refused (another
+program holds the temporary too) is said in a second line after the give-up's, naming the temporary; every
+step of a `DurableWrite`, its removal included, goes through the one surface it was made on. The window's mark
+is written by the asks of one `DurableWrite` made for that election's mark and bytes
+(`update_apply::mark_writer(mark, bytes)`), so no ask can write other bytes. A temporary that a killed process
+leaves in `H\` is swept by nothing in the update code — as before this ticket, only for longer (up to the
+10 s window rather than the moment between a create and its rename) — and goes with the home when the
+uninstall removes it whole.
+
+Pinned by `bt_platform::install_txn::tests::a_temporary_removed_between_asks_is_written_again_and_lands` and
+`update_apply_windows::tests::a_given_up_journal_write_says_a_temporary_it_could_not_remove`.
+
+**Round 3 (2026-10-14).** The tests that make a real hold are Windows-only,
+`update_apply_windows::tests::held_writes` (`#[cfg(windows)]`: on macOS a rename replaces an open file, so no
+hold can be made); the line a refused removal says is pinned on every platform by
+`update_apply::held_journal_tests::a_refused_removal_of_the_given_up_temporary_is_said`, and the door's own facts
+by `bt_platform::install_txn::tests` as above.
+
+### Amendment to the T-TRIAL-WATCH-REPEATS-BOUND amendment, 2026-10-15 (T-UNKEPT-MARK-ONE-DURABLE-WRITE) — a held `unkept` mark pays its flush once
+
+The T-TRIAL-WATCH-REPEATS-BOUND amendment to revision (m) states the cost of one ask of the `unkept` mark
+as the whole durable write. That
+was so while each turn called `install_txn::durable_write`: a mark whose rename was refused (another
+program holding the name, or anything at it the rename cannot replace) cost a new temporary, its file
+flush — on macOS `F_FULLFSYNC` — the refused rename and the temporary's removal, every 250 ms turn until
+the decision.
+
+**What it costs now.** The watch's `Mark` keeps one `install_txn::DurableWrite` (revision (e)'s
+amendment, T-JOURNAL-WRITE-UNDER-HOLD) from its first ask until its rename lands or the transaction is
+decided: the first held turn writes and flushes the temporary; each later held turn is one rename; the
+folder is flushed when it lands. A home that takes no new file still costs one failing create a turn,
+and a write refused at its file flush is written whole again at the next turn (nothing was kept). The
+mark's three states are unchanged — nothing at its name, its bytes at its name with the folder flush
+refused (then that flush alone is asked, as before), durable — because a temporary beside the mark is
+seen by no reader: every reader reads the mark's name, and the one listing of `H\<txn>` takes only
+receipts. The staged write is the watch's own, not the gate's.
+
+**At the decision** — the trial's own commit, a commit read, an end read — the mark is asked no more and
+a write whose rename never landed is dropped, its temporary removed with it, before the commit's
+take-back and the receipt's acknowledgement run. The removal is said by nothing: the temporary is in
+`H\<txn>\`, which the retirement of that decision removes whole. **A process that ends while its mark
+is held and its transaction undecided leaves the temporary** (`.unkept.<pid>.<n>.tmp`) in the
+transaction folder — a killed process, and an orderly exit too: the watch is a detached thread
+(`bt_platform::spawn_at_priority`), which the process's exit does not join, so the watch's `Mark`
+is never dropped and its write's `Drop` never runs. The temporary stays there, read by nobody, until
+the retirement removes the folder whole (or the uninstall, the home). The repetition, its bound, its lines and the
+`# completions` row `trial watch` (its cost cell restated) are otherwise unchanged.
+
+Pinned by `update_trial::tests::{a_held_unkept_mark_flushes_its_temporary_once_and_renames_each_turn,
+a_decided_transaction_drops_the_marks_staged_write_and_leaves_no_temporary}`, which hold the mark's
+rename with a directory at its name — refused on Windows and on macOS alike — through the product's write.

@@ -272,7 +272,11 @@ A test that matches the program's own text to claim it *does* something (an orde
 worker nobody joins, a value) goes green on a rename and red on a refactor that changes nothing,
 and says nothing about what runs. Drive the behaviour through the door the product uses, with the
 machine effects handed in as stand-ins where they would touch the machine (the shell-integration
-preparation worker's `PreparationEffects` is the shape). Reading source is allowed only for a
+preparation worker's `PreparationEffects` is the shape). **A window is no reason to read source**
+(T-HEADLESS-RUNTIME-SEAM): a `Runtime` method, `FolioApp`'s event doors and the quit run on the
+test-only headless window (`crate::headless` — `HeadlessFolio` builds a `Runtime` from tab fixtures,
+`HeadlessApplication` drives `FolioApp`), and what they did to the window is read back as typed
+`WindowEffect`s and the renderer's recorded inputs. Reading source is allowed only for a
 **guard**, whose subject is how the code is written — a door census, "no X outside door Y", the
 window-waits registry, the test-shell and ownership censuses — and its doc header says it is a
 guard. Readers still bound to a file are on `docs/plans/MIGRATION-DEBT.tsv`.
@@ -283,6 +287,13 @@ A test never prints an environment map, and never prints the value of a secret-s
 whose name holds `KEY`, `TOKEN`, `SECRET` or `PASS`); a give-up message may quote one named, non-secret
 variable it depends on (`PATH`, `ComSpec`, `PSModulePath`, `WSLENV`, `HOME`), and a test that compares
 environments names the differing keys only, a secret-shaped key as `<redacted>`.
+
+### A test the suite runs never reaches the network (D-60)
+
+A test the suite runs never reaches the network: what it needs from a socket it serves itself, on
+a loopback listener it opened (`macos_http`'s tests ask `ask_this_machine` of the listener
+`answering` starts, since `64bcebdb`). A probe that must reach the network is `#[ignore]`d, run by
+hand, and listed with its reason and expiry in `scripts/ci/ignored-tests.txt`.
 
 ### Where a test lives (K1)
 
@@ -297,10 +308,11 @@ names as `tests::<name>`; a new test does not go there.
 
 ### A test that is not limited to one platform asserts a fact of every platform (H1)
 
-Every test runs on Windows and on macOS (CI's `core-macos` runs `bt-term`, `bt-pty` and the portable
-crates). A test whose fixture is spelled the Windows way — a drive letter, a `\`, a shipped `pwsh` row,
-`Ctrl` as the command modifier — is red on the Mac for a reason that is not a defect, and a suite with
-reds nobody reads hides the one that is. Each test is exactly one of three things:
+Every test runs on Windows and on macOS (CI's `core-macos` runs the whole `bt-app` suite, `bt-term`,
+`bt-pty` and the portable crates). A test whose fixture is spelled the Windows way — a drive letter,
+a `\`, a shipped `pwsh` row, `Ctrl` as the command modifier — is red on the Mac for a reason that is
+not a defect, and a suite with reds nobody reads hides the one that is. Each test is exactly one of
+three things:
 
 1. **Platform-neutral.** The fact holds everywhere once the fixture is spelled through the platform's
    own paths, shells and modifiers. Either the product's door takes the platform as a value
@@ -318,7 +330,14 @@ reds nobody reads hides the one that is. Each test is exactly one of three thing
    values and the ticket. The ignored-tests gate (`scripts/ci/check-ignored-tests.ps1`) asks the
    harness on Windows only, so a `#[cfg_attr(target_os = "macos", ignore = "T-<NAME>: …")]` cannot
    stand on its list today; until the gate learns a platform column such a test stays red on
-   macOS, which is why `bt-app`'s suite is not yet a `core-macos` step.
+   macOS — and since H7 `core-macos` runs `bt-app`'s whole suite, so that red is CI's red until its
+   ticket lands.
+
+What `core-macos` leaves out of `bt-app`'s suite is said by `#[cfg]` on the tests (rule 2 above), not
+by a filter on the CI line. The one exception is named in the step and checked to match exactly one
+test: `update_apply_macos::tests::the_trial_is_launched_through_launch_services_and_found_by_its_image`
+launches a real bundle through `/usr/bin/open`, so CI runs its fake-launch siblings and the real launch
+is run on the owner's Mac.
 
 A test whose subject refuses links among a path's ancestors (the uninstall door, the profile writer)
 stands under `bt_testpath::link_free_temp_dir()`: on macOS the temporary directory itself is reached
@@ -387,6 +406,10 @@ vendor 里曾有 `// IL/DL … deliberately never emit`——**与实际行为�
 **规格承载型的公共 API** 链到 DESIGN.md 对应小节。工具型 API 不强求（之前写"每个公共 API 都要链"，过度了）。
 
 现状：约 162 个公开声明 vs 23 行 `///`。`missing_docs` 见 §8 阶梯。
+
+### A message literal is one sentence (T-EMBEDDED-SPACES-LITERALS)
+
+A string literal that wraps continues with `\` at the end of the line, so the break and the next line's indentation are not in the string — a run of three or more spaces inside a literal is refused by `scripts/ci/check-embedded-spaces.ps1` unless its row on `docs/plans/embedded-spaces-allowed.txt`, a list that only shrinks, says why the columns are deliberate; a fixture that keeps its own line breaks and indentation is a raw string.
 
 ## 六、【事故】偏离申请
 

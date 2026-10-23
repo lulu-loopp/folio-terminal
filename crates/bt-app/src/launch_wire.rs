@@ -106,6 +106,17 @@ const REPORT_UNTRIED_KEY: &str = "failed_untried";
 /// earlier build ignores it.
 const REPORT_HELD_KEY: &str = "failed_journal_held";
 
+/// The key the member another program held open crosses as, beside [`REPORT_HELD_KEY`] and only
+/// with it, when the held file was a member the flip or its rollback moves rather than the journal
+/// ([`Report::JournalHeld`]'s `file`, T-UPDATE-MOVE-HELD-RETRY). An earlier build ignores the key;
+/// the pair here is one build's (a start the applier or the rescue copy sent, landing in a Folio of
+/// the same install), so no receiver that ignores it is ever told.
+const REPORT_HELD_FILE_KEY: &str = "failed_held_file";
+
+/// **The most bytes a held member's name may cross as** — one file name: Windows bounds a name at
+/// 255 UTF-16 units, at most three bytes each in UTF-8.
+const MAX_HELD_FILE_BYTES: usize = 765;
+
 /// The key the version whose changes a rollback did not keep crosses as, beside [`REPORT_KEY`]
 /// and only with the rolled-back word ([`Report::Undone`], 0.4.8 E5); an earlier build ignores it
 /// and says the previous version was restored, as it always did.
@@ -150,8 +161,13 @@ pub(crate) enum Report {
     },
     /// **Another program held the journal open past its holder's window**
     /// (`Failure::JournalHeld`, 0.4.8 E4): `error`, the system's refusal, over the report the
-    /// journal itself makes ([`REPORT_HELD_KEY`]).
-    JournalHeld { error: String, then: Box<Report> },
+    /// journal itself makes ([`REPORT_HELD_KEY`]); `file`, the member it was a move of, `None`
+    /// for the journal ([`REPORT_HELD_FILE_KEY`], T-UPDATE-MOVE-HELD-RETRY).
+    JournalHeld {
+        error: String,
+        file: Option<String>,
+        then: Box<Report>,
+    },
     /// **The previous version was put back, and what was changed in `version`, which ran over the
     /// transaction, was not kept** (`Failure::Undone`, 0.4.8 E5): the rolled-back word, with the
     /// version beside it ([`REPORT_UNDONE_KEY`]).
@@ -168,8 +184,9 @@ impl Report {
             Failure::Undone { version } => Some(Self::Undone {
                 version: version.clone(),
             }),
-            Failure::JournalHeld { error, then } => Some(Self::JournalHeld {
+            Failure::JournalHeld { error, file, then } => Some(Self::JournalHeld {
                 error: error.clone(),
+                file: file.clone(),
                 then: Box::new(Self::of(then)?),
             }),
             // A later Folio's unfinished update crosses as *Update
@@ -215,8 +232,9 @@ impl Report {
                 held: false,
                 untried: *untried,
             },
-            Self::JournalHeld { error, then } => Failure::JournalHeld {
+            Self::JournalHeld { error, file, then } => Failure::JournalHeld {
                 error: error.clone(),
+                file: file.clone(),
                 then: Box::new(then.failure()),
             },
         }
@@ -238,10 +256,11 @@ impl Report {
         }
     }
 
-    /// The refusal of a held journal over this report, if there is one.
-    fn held(&self) -> Option<&str> {
+    /// The refusal of a held journal over this report, if there is one, and the member it was a
+    /// move of, if it was one.
+    fn held(&self) -> Option<(&str, Option<&str>)> {
         match self {
-            Self::JournalHeld { error, .. } => Some(error),
+            Self::JournalHeld { error, file, .. } => Some((error, file.as_deref())),
             _ => None,
         }
     }
@@ -255,16 +274,18 @@ impl Report {
         }
     }
 
-    /// A token, its folder, whether no trial began, the version a rollback did not keep and the
-    /// hold's refusal, read back: the folder and `untried` come with `incomplete` and with nothing
-    /// else, the version with `rolled-back` and with nothing else, a hold with any word, and
-    /// anything else is not a report this build knows.
+    /// A token, its folder, whether no trial began, the version a rollback did not keep, the
+    /// hold's refusal and the member held, read back: the folder and `untried` come with
+    /// `incomplete` and with nothing else, the version with `rolled-back` and with nothing else, a
+    /// hold with any word, the member only with a hold, and anything else is not a report this
+    /// build knows.
     fn from_token(
         token: &str,
         folder: Option<String>,
         untried: bool,
         undone: Option<String>,
         held: Option<String>,
+        held_file: Option<String>,
     ) -> Option<Self> {
         let report = match (token, folder, untried, undone) {
             ("rolled-back", None, false, None) => Self::RolledBack,
@@ -276,12 +297,14 @@ impl Report {
             },
             _ => return None,
         };
-        Some(match held {
-            Some(error) => Self::JournalHeld {
+        Some(match (held, held_file) {
+            (Some(error), file) => Self::JournalHeld {
                 error,
+                file,
                 then: Box::new(report),
             },
-            None => report,
+            (None, None) => report,
+            (None, Some(_)) => return None,
         })
     }
 }
@@ -534,8 +557,11 @@ impl LaunchRequest {
             if let Report::Undone { version } = report.beneath() {
                 value.insert(REPORT_UNDONE_KEY.to_owned(), version.clone().into());
             }
-            if let Some(error) = report.held() {
+            if let Some((error, file)) = report.held() {
                 value.insert(REPORT_HELD_KEY.to_owned(), error.into());
+                if let Some(file) = file {
+                    value.insert(REPORT_HELD_FILE_KEY.to_owned(), file.into());
+                }
             }
         }
         // **Only when one was carried**, for the report's reason. A name or value that is not
@@ -604,19 +630,23 @@ impl LaunchRequest {
                 object.get(REPORT_UNTRIED_KEY),
                 bounded(REPORT_UNDONE_KEY, MAX_VERSION_BYTES)?,
                 bounded(REPORT_HELD_KEY, MAX_REFUSAL_BYTES)?,
+                bounded(REPORT_HELD_FILE_KEY, MAX_HELD_FILE_BYTES)?,
             ) {
-                (None, None, None, None, None) => None,
+                (None, None, None, None, None, None) => None,
                 (None, ..) => return None,
-                (Some(token), folder, untried, undone, held) => Some(Report::from_token(
-                    token.as_str()?,
-                    folder,
-                    match untried {
-                        None => false,
-                        Some(untried) => untried.as_bool()?,
-                    },
-                    undone,
-                    held,
-                )?),
+                (Some(token), folder, untried, undone, held, held_file) => {
+                    Some(Report::from_token(
+                        token.as_str()?,
+                        folder,
+                        match untried {
+                            None => false,
+                            Some(untried) => untried.as_bool()?,
+                        },
+                        undone,
+                        held,
+                        held_file,
+                    )?)
+                }
             },
             // **Optional, and every pair a variable a process could hold** when present: a name
             // that is not empty and holds no `=` past its first character (Windows keeps its
@@ -1786,7 +1816,7 @@ mod tests {
             |_| panic!("a launch that was taken says nothing"),
             |why| panic!("the hand-over gave up: {why}"),
         );
-        drop(endpoint);
+        let _ = endpoint.retire_within(crate::lane::PATIENCE);
         assert_eq!(left, Some(0), "the running Folio took the launch");
         let request = landed
             .try_recv()
@@ -1930,6 +1960,7 @@ mod tests {
             },
             Failure::JournalHeld {
                 error: "拒绝访问。 (os error 5)".to_owned(),
+                file: None,
                 then: Box::new(Failure::RolledBack),
             },
         ]
@@ -2420,7 +2451,9 @@ mod tests {
     /// holds the version's frozen reader to these frames too).
     ///
     /// MUTATIONS: leave `REPORT_UNTRIED_KEY` out of `encode` — the untried report comes back
-    /// tried; leave `REPORT_HELD_KEY` out — the held report comes back without its hold.
+    /// tried; leave `REPORT_HELD_KEY` out — the held report comes back without its hold; leave
+    /// `REPORT_HELD_FILE_KEY` out — the held member comes back as the journal
+    /// (T-UPDATE-MOVE-HELD-RETRY).
     #[test]
     fn a_reports_cause_crosses_in_keys_of_its_own() {
         let refusal = "拒绝访问。 (os error 5)".to_owned();
@@ -2433,10 +2466,18 @@ mod tests {
             untried.clone(),
             Failure::JournalHeld {
                 error: refusal.clone(),
+                file: None,
                 then: Box::new(untried.clone()),
             },
             Failure::JournalHeld {
                 error: refusal.clone(),
+                file: None,
+                then: Box::new(Failure::Interrupted),
+            },
+            // T-UPDATE-MOVE-HELD-RETRY: a member held, named beside the refusal.
+            Failure::JournalHeld {
+                error: refusal.clone(),
+                file: Some("folio.exe".to_owned()),
                 then: Box::new(Failure::Interrupted),
             },
         ] {
@@ -2466,6 +2507,10 @@ mod tests {
             format!(r#"{{{base},"failed_journal_held":"拒绝访问。"}}"#),
             format!(r#"{{{base},"failed":"interrupted","failed_journal_held":""}}"#),
             format!(r#"{{{base},"failed":"interrupted","failed_journal_held":"a\nb"}}"#),
+            format!(r#"{{{base},"failed":"interrupted","failed_held_file":"folio.exe"}}"#),
+            format!(
+                r#"{{{base},"failed":"interrupted","failed_journal_held":"x","failed_held_file":""}}"#
+            ),
         ] {
             assert_eq!(
                 LaunchRequest::decode(&line),
@@ -2493,6 +2538,7 @@ mod tests {
             undone.clone(),
             Failure::JournalHeld {
                 error: "拒绝访问。 (os error 5)".to_owned(),
+                file: None,
                 then: Box::new(undone.clone()),
             },
         ] {
@@ -2833,12 +2879,24 @@ mod tests {
         match role {
             "serve" => {
                 let _claim = crate::persist::try_claim(&data).expect("the first copy holds it");
-                let endpoint = LaunchPipe::start(&data, |line| decide(line, || true), park)
-                    .expect("the first copy listens on the data directory's endpoint");
+                let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let hearing = std::sync::Arc::clone(&heard);
+                let endpoint = LaunchPipe::start(
+                    &data,
+                    move |line| {
+                        hearing.lock().unwrap().push(line.to_owned());
+                        decide(line, || true)
+                    },
+                    park,
+                )
+                .expect("the first copy listens on the data directory's endpoint");
                 writeln!(out, "D3 SERVING").unwrap();
                 out.flush().unwrap();
                 let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new());
-                drop(endpoint);
+                let _ = endpoint.retire_within(crate::lane::PATIENCE);
+                for line in heard.lock().unwrap().iter() {
+                    writeln!(out, "D3 HEARD {line}").unwrap();
+                }
                 for request in take() {
                     writeln!(out, "D3 LANDED {}", request.encode()).unwrap();
                 }
@@ -2879,9 +2937,11 @@ mod tests {
     }
 
     /// What one [`two_copies`] run came to: the second start's own words (`D3 LEFT 0`, or
-    /// `D3 OPENS <why>`) and every launch the first copy was handed.
+    /// `D3 OPENS <why>`), every request line the first copy's wire heard, and every launch the
+    /// first copy was handed.
     struct TwoCopies {
         second: String,
+        heard: Vec<String>,
         landed: Vec<LaunchRequest>,
     }
 
@@ -2959,13 +3019,23 @@ mod tests {
                 )
             })
             .to_owned();
+        let heard = rest
+            .lines()
+            .filter_map(marked)
+            .filter_map(|line| line.strip_prefix("D3 HEARD "))
+            .map(str::to_owned)
+            .collect();
         let landed = rest
             .lines()
             .filter_map(marked)
             .filter_map(|line| line.strip_prefix("D3 LANDED "))
             .map(|line| LaunchRequest::decode(line).expect("a landed launch is a request"))
             .collect();
-        Some(TwoCopies { second, landed })
+        Some(TwoCopies {
+            second,
+            heard,
+            landed,
+        })
     }
 
     /// **A copy of this binary at `place` under `copies`, named as this one is** — another
@@ -3132,9 +3202,10 @@ mod tests {
         );
     }
 
-    /// **RED (0.4.8 D3) — a launch endpoint held by a program that is not a Folio is a true
-    /// refusal: nothing is written to it, the start opens its own window, and the log line says
-    /// why.**
+    /// **RED (0.4.8 D3; T-LAUNCH-WIRE-PEER-READ) — a launch endpoint held by a program that is
+    /// not a Folio is a true refusal, heard as one even where that program refuses first and
+    /// closes: nothing is said to it, the start opens its own window, and the log line says why,
+    /// naming what held the door.**
     ///
     /// The other side of the narrowed identity: a Folio is this program's name, and a program
     /// of another name holding the door — here a copy of this binary under another name,
@@ -3143,12 +3214,21 @@ mod tests {
     /// the OS's refusal. A copy and not a hard link: macOS names a hard-linked image by
     /// whichever of its links it cached, so the program's name would not be the one it ran as.
     ///
+    /// On Unix both ends ask, so the impostor refuses this start at the same moment this start
+    /// refuses it; the impostor's refusal must not close the connection before this start's own
+    /// question is answered, or Darwin answers that question `NotConnected` (the one macOS CI
+    /// sighting, 2026-10-12). The line names the impostor's program, which this start can only
+    /// know by having asked the kernel who answered.
+    ///
     /// MUTATION (accept any peer): `bt_platform`'s Unix `vet_executable` answers `Ok` whatever
     /// the peer, or Windows' `vetted_server` its pid whatever the image — the start leaves with
-    /// 0 and the folder lands in the impostor.
+    /// 0 and the folder lands in the impostor. MUTATION (ask after the verdict):
+    /// `launch_conversation::hand_over_on` asks `vetted_peer` after `hear` — on Unix the
+    /// refusing impostor closes on the request and the line names an end of file or a reset, not
+    /// the refusal; on Windows the impostor hears the request.
     #[test]
-    fn a_door_held_by_a_program_that_is_not_a_folio_is_refused_and_the_log_says_why() {
-        const SELECTOR: &str = "launch_wire::tests::a_door_held_by_a_program_that_is_not_a_folio_is_refused_and_the_log_says_why";
+    fn a_server_that_refuses_is_heard_as_a_refusal_even_if_it_closes_first() {
+        const SELECTOR: &str = "launch_wire::tests::a_server_that_refuses_is_heard_as_a_refusal_even_if_it_closes_first";
         if copy_half(SELECTOR) {
             return;
         }
@@ -3176,6 +3256,18 @@ mod tests {
                     .contains("did not take this launch (PermissionDenied: "),
             "the start opens its own window and its log line names the refusal: {}",
             run.second
+        );
+        let impostor_name = impostor.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            run.second
+                .contains(&format!("{impostor_name}, which is not a Folio")),
+            "the refusal names the image the kernel said is at the other end: {}",
+            run.second
+        );
+        assert_eq!(
+            run.heard,
+            Vec::<String>::new(),
+            "nothing was said to a program that is not a Folio"
         );
         assert_eq!(
             run.landed,

@@ -96,19 +96,32 @@ fn every_owner_door_takes_its_own_token_by_value() {
         u32,
         f64,
     ) -> Result<(GpuContext, WindowRenderer), RenderError> = gpu_door::open_first_window;
-    let _: fn(WaitToken<'_, doors::TitleFlush>, &Window, &bt_platform::CustomWindowFrame, &str) =
-        owner_door::set_title;
-    let _: fn(WaitToken<'_, doors::ImeCaretArea>, &Window, winit::dpi::Position, winit::dpi::Size) =
-        owner_door::set_ime_cursor_area;
-    let _: fn(WaitToken<'_, doors::FocusWindow>, &Window) = owner_door::focus_window;
-    let _: fn(WaitToken<'_, doors::SetVisible>, &Window, bool) = owner_door::set_visible;
-    let _: fn(WaitToken<'_, doors::SetCursor>, &Window, winit::window::Cursor) =
+    let _: fn(
+        WaitToken<'_, doors::TitleFlush>,
+        &std::sync::Arc<Window>,
+        &bt_platform::CustomWindowFrame,
+        &str,
+    ) = owner_door::set_title;
+    let _: fn(
+        WaitToken<'_, doors::ImeCaretArea>,
+        &std::sync::Arc<Window>,
+        winit::dpi::Position,
+        winit::dpi::Size,
+    ) = owner_door::set_ime_cursor_area;
+    let _: fn(WaitToken<'_, doors::FocusWindow>, &std::sync::Arc<Window>) =
+        owner_door::focus_window;
+    let _: fn(WaitToken<'_, doors::SetVisible>, &std::sync::Arc<Window>, bool) =
+        owner_door::set_visible;
+    let _: fn(WaitToken<'_, doors::SetCursor>, &std::sync::Arc<Window>, winit::window::Cursor) =
         owner_door::set_cursor;
-    let _: fn(WaitToken<'_, doors::PlaceHidden>, &Window) -> bool = window_is_hidden;
-    let _: fn(WaitToken<'_, doors::PlaceExposure>, &Window) -> bool = window_is_exposed;
+    let _: fn(WaitToken<'_, doors::PlaceHidden>, &std::sync::Arc<Window>) -> bool =
+        window_is_hidden;
+    let _: fn(WaitToken<'_, doors::PlaceExposure>, &std::sync::Arc<Window>) -> bool =
+        window_is_exposed;
     let _: fn(WaitToken<'_, doors::TraceFlush>) = trace_sink::flush;
     let _: fn(WaitToken<'_, doors::UpdateLeave>) -> Option<crate::update_apply::Left> =
         crate::update_handoff::leave_armed;
+    let _: fn(WaitToken<'_, doors::MediaQuiet>) = bt_platform::video::shutdown_media_session;
     let _: fn(&Compositor, WaitToken<'_, doors::CompositorCommit>) -> Result<(), String> =
         Compositor::commit;
     let _: fn(WaitToken<'_, doors::CompositorBirth>, NativeWindow) -> Result<Compositor, String> =

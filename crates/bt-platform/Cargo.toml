@@ -357,6 +357,12 @@ path = "examples/hotkey_probe.rs"
 # long standing, and it is what `-[NSApplication dockTile]` answers with.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# **`dispatch2` 0.3.1, and not a package**: it is in `Cargo.lock` already (the
+# `objc2-core-*` crates carry it), and its features here pull nothing the lock
+# does not list. T-CLIPBOARD-LANE hands the pasteboard's calls from the
+# clipboard lane's worker to the main dispatch queue (`exec_sync`), because the
+# owner's ruling of 2026-10-11 (Q2) keeps `NSPasteboard` on the main thread.
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
 # The completion handlers this crate passes to AppKit and to Foundation:
 # `-[NSSavePanel beginSheetModalForWindow:completionHandler:]`, which is how a
 # panel is a sheet on a window rather than a nested modal loop inside a winit
@@ -964,6 +970,12 @@ webview2-com = "0.39.1"
 # names `::windows_core` directly, so the crate has to be in the dependency list
 # even though every path this crate writes goes through `windows::core`.
 windows-core = "0.62.2"
+# The deployment calls' WinRT operations (`src/msix.rs`) are `windows_future` types, and they are
+# waited on by naming the type in full — `windows_future::IAsyncOperationWithProgress::join` — so
+# that every `.join()` the product writes is a thread's (`crates/bt-source/tests/contained_panic.rs`
+# reads the two kinds apart by that). Already in the graph at this version as a dependency of
+# `windows`: no new package.
+windows-future = "0.3.2"
 windows = { version = "0.62.2", features = [
     # `Package.Id.FullName` and `Package.EffectiveExternalPath`: what a
     # registration of `packaging/msix/AppxManifest.xml` is called, and which
@@ -1082,6 +1094,9 @@ windows = { version = "0.62.2", features = [
     # (`Win32_System_IO`), and the events the watcher thread waits on and the
     # caller stops it with (`Win32_System_Threading`). See `DirWatch`.
     "Win32_System_IO",
+    # `FSCTL_GET_REPARSE_POINT`: an app execution alias's own data, read without following it,
+    # for the package it names (`src/packaged_program.rs`). A **feature**, not a package.
+    "Win32_System_Ioctl",
     # Per-probe kill-on-close jobs: a probe's descendants end with the probe,
     # including when Folio itself exits (T-PROBE-CHILD).
     "Win32_System_JobObjects",
@@ -1110,6 +1125,9 @@ windows = { version = "0.62.2", features = [
     # system's shutdown screen shows for a window while the layout is being
     # written (`src/session_end.rs`, B-ENDSESSION).
     "Win32_System_Shutdown",
+    # `IO_REPARSE_TAG_APPEXECLINK`, the tag of that alias (`src/packaged_program.rs`). A
+    # **feature**, not a package.
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
     # `OSVERSIONINFOW`, which is the only thing `RtlGetVersion` below writes
     # into.

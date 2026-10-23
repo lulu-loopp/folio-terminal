@@ -158,6 +158,7 @@ use windows::core::{BSTR, Interface, implement};
 
 use crate::engine_ledger;
 use crate::engine_ledger::LedgerEntry;
+use crate::video_load::{Load, LoadDeadline};
 
 /// **How often the engine thread asks whether a new picture has arrived, while
 /// one is expected.**
@@ -200,17 +201,24 @@ pub const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 ///
 /// It bounds the *creation*, not the *load*: metadata arrives later and
 /// asynchronously, which is what [`EngineState::natural_size`] being an
-/// [`Option`] means.
+/// [`Option`] means. [`LOAD_BUDGET`] bounds the load.
 pub const OPEN_BUDGET: Duration = Duration::from_secs(5);
 
-/// **How long [`Engine::shutdown`] waits for the engine thread to say it has
-/// left** (review row R2-19).
+/// The load's budget and the length's readings are one owner's for both arms.
+#[cfg(any(test, feature = "trust-harness"))]
+#[doc(hidden)]
+pub use crate::video_load::LOAD_ANSWER_PATIENCE;
+pub use crate::video_load::{LOAD_BUDGET, Length};
+
+/// **How long the way out waits for every engine thread a shutdown let go of to
+/// say it has left** (review row R2-19; T-DROP-DOORS, D-80).
 ///
-/// The thread's ending is a `Shutdown` command it is already waiting on, the
+/// A thread's ending is a `Shutdown` command it is already waiting on, the
 /// engine's own `Shutdown` call and an apartment being left — microseconds, on
 /// every ordinary close. Two seconds is therefore never reached except by a
-/// thread that is inside the platform and not coming back soon, and reaching it
-/// costs the window nothing: the thread is left to finish rather than waited on.
+/// thread that is inside the platform and not coming back soon. It is spent
+/// once, by the process, in [`super::shutdown_media_session`] before
+/// `MFShutdown` — never by a close: [`Engine::shutdown`] waits for nothing.
 pub const SHUTDOWN_BUDGET: Duration = Duration::from_secs(2);
 
 /// **Which Direct3D device the frames are decoded onto.**
@@ -265,6 +273,9 @@ pub enum EngineError {
     NoEngine,
     /// The engine thread did not answer inside [`OPEN_BUDGET`], or has gone.
     Unresponsive,
+    /// **The engine's own refusal**: the source said neither what it is nor why
+    /// it could not be opened within [`LOAD_BUDGET`] of the open.
+    NotLoaded,
 }
 
 impl EngineError {
@@ -292,7 +303,8 @@ impl EngineError {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EngineState {
     /// How long the video is, or `None` before the metadata has arrived and for
-    /// a source that declares no length.
+    /// a source that declares no length. The two `None`s are told apart by
+    /// [`Self::ready`], and [`Self::length`] is that reading.
     pub duration_secs: Option<f64>,
     /// Where the playhead is, in seconds from the start.
     pub position_secs: f64,
@@ -322,6 +334,14 @@ pub struct EngineState {
     /// something other than a black rectangle.
     pub has_video: bool,
     pub has_audio: bool,
+}
+
+impl EngineState {
+    /// **What this state says about the source's length** — see [`Length`].
+    #[must_use]
+    pub fn length(&self) -> Length {
+        Length::of(self.duration_secs, self.ready)
+    }
 }
 
 /// **One decoded picture, in the byte order the swapchain wants.**
@@ -439,6 +459,9 @@ impl Engine {
 
     /// The same, with the choice of device forced — see [`Adapter`].
     pub fn open_on(path: &Path, adapter: Adapter) -> Result<Self, EngineError> {
+        // The open request: what `OPEN_BUDGET` is read against here, and what
+        // `LOAD_BUDGET` is measured from on the engine thread.
+        let asked_at = Instant::now();
         let shared = Arc::new(Shared::default());
         let (commands, inbox) = mpsc::channel();
         let source = path.to_path_buf();
@@ -456,10 +479,14 @@ impl Engine {
                 "folio-video-engine",
                 crate::ThreadPriority::Normal,
                 move |_ctx| {
-                    run(&BSTR::from_wide(&url), adapter, &shared, &commands, &inbox);
-                    // Last of all, and read by `Engine::shutdown` to know
-                    // whether joining this thread will return — see there.
-                    shared.stopped.store(true, Ordering::Release);
+                    run(
+                        &BSTR::from_wide(&url),
+                        adapter,
+                        LoadDeadline::from_open(asked_at),
+                        &shared,
+                        &commands,
+                        &inbox,
+                    );
                 },
             )
             // The one thing that can still fail here, and it fails without
@@ -472,8 +499,39 @@ impl Engine {
             thread: Some(thread),
             source,
             seen_generation: 0,
-            opened_at: Instant::now(),
+            opened_at: asked_at,
         })
+    }
+
+    /// **An engine whose thread pumps `media` instead of Media Foundation** —
+    /// the scripted seam this module's load tests drive, so that "a source that
+    /// never answers" and "a source with no length" are states a test can put
+    /// the pump in rather than files it has to find. `deadline` is read on
+    /// `media`'s own clock.
+    #[cfg(test)]
+    fn scripted<M: Media + Send + 'static>(media: M, deadline: LoadDeadline) -> Self {
+        let shared = Arc::new(Shared::default());
+        let (commands, inbox) = mpsc::channel();
+        let thread = {
+            let shared = Arc::clone(&shared);
+            crate::spawn_at_priority(
+                "folio-video-engine",
+                crate::ThreadPriority::Normal,
+                move |_ctx| {
+                    shared.built.store(true, Ordering::Release);
+                    Pump::new(media, deadline).run(&shared, &inbox);
+                },
+            )
+            .expect("a thread for the scripted engine")
+        };
+        Self {
+            commands,
+            shared,
+            thread: Some(thread),
+            source: PathBuf::from("scripted"),
+            seen_generation: 0,
+            opened_at: Instant::now(),
+        }
     }
 
     /// The file this engine was opened on — the spelling the caller gave, not
@@ -653,51 +711,40 @@ impl Engine {
         }
     }
 
-    /// **Stop, release the engine and join its thread**, now rather than at drop.
+    /// **The door: tell the engine thread to stop, and let it go** (T-DROP-DOORS,
+    /// D-80): *a video engine is shut down through an explicit door, not by its
+    /// drop.*
     ///
-    /// The verb a pane calls when it closes or is handed a different file. It is
-    /// idempotent and [`Drop`] calls it, so a caller that forgets is not a caller
-    /// that leaks — see [`engines_shut_down`].
-    ///
-    /// # The join is bounded (review row R2-19)
-    ///
-    /// A pane closes on the window's own thread, and the thread it is closing is
-    /// inside somebody else's decoder: one `IMFMediaEngine` call on a broken
-    /// stream or a wedged driver is a wait with no ending, and an unbounded
-    /// `join` here would hand the window that wait. So the thread is asked to
-    /// stop, and this waits [`SHUTDOWN_BUDGET`] for it to say it has — the flag
-    /// it sets as its very last act, which is what makes the `join` after it a
-    /// formality that returns at once.
-    ///
-    /// A thread that has not said so by then is **let go rather than waited on**.
-    /// It is still inside the platform, so it is left to finish and unwind on
-    /// its own, exactly as the first-frame reader that overran its budget is
-    /// (`super::within_budget`); its engine is still on the ledger, which is the
-    /// truth — [`engines_outstanding`] is not zero, because an engine is still
-    /// standing.
+    /// The verb a pane calls when it closes or is handed a different file, on the
+    /// window's own thread — so it waits for nothing. The thread it is closing may
+    /// be inside somebody else's decoder: one `IMFMediaEngine` call on a broken
+    /// stream or a wedged driver is a wait with no ending (review row R2-19), and
+    /// the two-second poll and join this used to be put up to that much of it on
+    /// the window for every engine a sweep closed. The `Shutdown` command is the
+    /// whole of the request: the thread releases its engine, moves the ledger
+    /// ([`engines_shut_down`]) and leaves on its own time, and the one wait for
+    /// it is the process's, once, at exit ([`super::shutdown_media_session`],
+    /// bounded by [`SHUTDOWN_BUDGET`]), before the platform it decodes on is
+    /// taken down. Idempotent.
     pub fn shutdown(&mut self) {
         let _ = self.commands.send(Command::Shutdown);
-        let Some(thread) = self.thread.take() else {
-            return;
-        };
-        let deadline = Instant::now() + SHUTDOWN_BUDGET;
-        while !self.shared.stopped.load(Ordering::Acquire) {
-            if Instant::now() >= deadline {
-                eprintln!(
-                    "video: an engine thread was still running {SHUTDOWN_BUDGET:?} \
-                     after it was told to stop; leaving it to finish"
-                );
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        let _ = thread.join();
+        self.thread.take();
     }
 }
 
 impl Drop for Engine {
+    /// Waits for nothing. After [`Engine::shutdown`] there is nothing left; without
+    /// it, the engine thread is told to stop and let go of — the door's own
+    /// request, which needs no wait — and the drop says so once.
     fn drop(&mut self) {
-        self.shutdown();
+        if self.thread.is_some() {
+            self.shutdown();
+            crate::door_skipped::say(
+                "a video engine (`video::engine::Engine`)",
+                "its shutdown door",
+                "its thread was told to stop and let go of",
+            );
+        }
     }
 }
 
@@ -726,10 +773,6 @@ struct Shared {
     /// [`Engine::state`] reads it to decide whether [`OPEN_BUDGET`] has been
     /// missed — a question that only has an answer while this is `false`.
     built: AtomicBool,
-    /// **Whether the engine thread has left.** Set once, as the thread's last
-    /// act, and read by [`Engine::shutdown`] so that its join is a bounded wait
-    /// rather than an unbounded one — see there.
-    stopped: AtomicBool,
 }
 
 enum Command {
@@ -749,8 +792,8 @@ enum Command {
 
 /// How many media engines this process has created, and how many it has shut
 /// down. Equal at every moment no engine is alive, which is what the structural
-/// gate reads: an [`Engine`] that is dropped, forgotten, or unwound past by a
-/// panic goes through the same [`Engine::shutdown`]. The counts are
+/// gate reads: an [`Engine`] that is dropped without its door makes the same
+/// request [`Engine::shutdown`] does. The counts are
 /// `crate::engine_ledger`'s, the one ledger both platform arms move.
 #[must_use]
 pub fn engines_started() -> u64 {
@@ -765,7 +808,7 @@ pub fn engines_shut_down() -> u64 {
 
 /// How many engines are alive right now. **Zero is the only value this may have
 /// when the process leaves**, which is what [`super::shutdown_media_session`]
-/// asserts on a debug build.
+/// waits for, within [`SHUTDOWN_BUDGET`], before `MFShutdown`.
 #[must_use]
 pub fn engines_outstanding() -> u64 {
     engine_ledger::outstanding()
@@ -776,7 +819,7 @@ pub fn engines_outstanding() -> u64 {
 /// ended on — `target`, or what stood when `patience` ran out.
 ///
 /// An engine is counted on its own thread after [`Engine::open`] has returned,
-/// and taken off on that thread after [`Engine::shutdown`] may have returned,
+/// and taken off on that thread after [`Engine::shutdown`] has returned,
 /// so a test that concludes something from the count waits for the movement
 /// rather than for a clock. Tests only (this crate's, and a crate's that names
 /// the `trust-harness` feature on its dev-dependency).
@@ -897,7 +940,10 @@ pub fn can_play_types(types: &[&str]) -> Vec<CanPlay> {
     ) else {
         return none();
     };
-    let answers = thread.join().unwrap_or_default();
+    // The probe's panic is not "plays nothing": under the resident panic hook it ends the
+    // process before this join (the thread is not contained), and where no fatal hook is
+    // installed the join carries it on.
+    let answers = thread.join().expect("the video type probe panicked");
     if answers.len() == types.len() {
         answers
     } else {
@@ -921,6 +967,7 @@ pub fn can_play_types(types: &[&str]) -> Vec<CanPlay> {
 fn run(
     url: &BSTR,
     adapter: Adapter,
+    deadline: LoadDeadline,
     shared: &Arc<Shared>,
     commands: &mpsc::Sender<Command>,
     inbox: &mpsc::Receiver<Command>,
@@ -938,13 +985,14 @@ fn run(
         return;
     }
     match Machinery::build(Some(url), adapter, shared, commands) {
-        Ok(mut machinery) => {
+        Ok(machinery) => {
             // Before the pump and after the engine: this is what stops
             // `Engine::state` charging a working engine with having missed
             // `OPEN_BUDGET`.
             shared.built.store(true, Ordering::Release);
-            machinery.pump(shared, inbox);
-            machinery.stop();
+            let mut pump = Pump::new(machinery, deadline);
+            pump.run(shared, inbox);
+            pump.media.stop();
             engine_ledger::note_engine_shut_down();
         }
         Err(error) => publish_failure(shared, error),
@@ -964,6 +1012,172 @@ fn publish_failure(shared: &Arc<Shared>, error: EngineError) {
     shared.published.notify_all();
 }
 
+/// **One look at the media**: the numbers an [`EngineState`] is read from, as
+/// the media says them and before this module has decided anything about them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Look {
+    /// The picture's size, once it is answerable.
+    size: Option<(u32, u32)>,
+    /// `GetDuration`'s answer: `NaN` while there is none, `+∞` for a source
+    /// with no end.
+    duration: f64,
+    position: f64,
+    paused: bool,
+    ended: bool,
+    muted: bool,
+    volume: f64,
+    rate: f64,
+    has_video: bool,
+    has_audio: bool,
+}
+
+impl Look {
+    /// **The state this look is**, with the one fact the media does not hold —
+    /// the error the pump has been told, or has said itself.
+    fn state(&self, error: Option<EngineError>) -> EngineState {
+        EngineState {
+            // A length is a finite, positive number of seconds. `NaN` (none yet,
+            // or none declared) and `+∞` (no end) are both `None`, and
+            // `EngineState::length` reads which of the two it is off `ready`.
+            duration_secs: (self.duration.is_finite() && self.duration > 0.0)
+                .then_some(self.duration),
+            position_secs: self.position,
+            playing: !self.paused && !self.ended,
+            natural_size: self.size,
+            ended: self.ended,
+            error,
+            muted: self.muted,
+            volume: self.volume,
+            rate: self.rate,
+            // **The size, not an event.** `HAVE_METADATA` is `readyState` ≥ 1,
+            // and the one thing every caller wants out of it is the size — so
+            // "ready" is spelled as the size being answerable, which cannot be
+            // true and useless. A length is not part of it: a source that
+            // declares none has still loaded.
+            ready: self.size.is_some() || self.has_audio,
+            has_video: self.has_video,
+            has_audio: self.has_audio,
+        }
+    }
+}
+
+/// **The seam between the pump and what it pumps.** [`Machinery`] — Media
+/// Foundation — in the product, and a scripted source in this module's tests,
+/// so that the pump's own decisions (the load's deadline above all) are tested
+/// on the pump that ships rather than on a copy of it.
+trait Media {
+    /// One look at the media, now.
+    fn look(&mut self) -> Look;
+    /// Carry out one command, and answer the error it reported, if it was an
+    /// event that reported one.
+    fn apply(&mut self, command: Command) -> Option<EngineError>;
+    /// Bring back a new picture, if there is one.
+    fn take_frame(&mut self, shared: &Arc<Shared>);
+    /// The clock [`LOAD_BUDGET`] is measured on — the real one for Media
+    /// Foundation.
+    fn load_clock(&self) -> Instant;
+}
+
+/// **The engine thread's loop, and the two facts it keeps that the media does
+/// not**: the error, and when the load runs out.
+struct Pump<M> {
+    media: M,
+    /// Sticky, and the first one said is the one kept: a later event is about
+    /// an engine that has already stopped being a player.
+    error: Option<EngineError>,
+    /// When the load is over without having said anything ([`LOAD_BUDGET`]
+    /// after the open request), read on [`Media::load_clock`].
+    deadline: LoadDeadline,
+}
+
+impl<M: Media> Pump<M> {
+    fn new(media: M, deadline: LoadDeadline) -> Self {
+        Self {
+            media,
+            error: None,
+            deadline,
+        }
+    }
+
+    /// The loop: answer commands, publish state, and take a picture when there
+    /// is one.
+    fn run(&mut self, shared: &Arc<Shared>, inbox: &mpsc::Receiver<Command>) {
+        loop {
+            let state = self.publish_state(shared);
+            // A picture is due while the clock is running, and once more after
+            // anything else — a seek while paused draws a new frame, and so does
+            // the load that first produces one.
+            let wait = if state.playing {
+                FRAME_POLL_INTERVAL
+            } else {
+                IDLE_POLL_INTERVAL
+            };
+            match inbox.recv_timeout(wait) {
+                Ok(Command::Shutdown) => return,
+                Ok(command) => {
+                    self.apply(command);
+                    // Drain whatever else is already waiting before spending a
+                    // poll on it: a burst of events during a load is one look at
+                    // the engine, not eight.
+                    while let Ok(next) = inbox.try_recv() {
+                        if matches!(next, Command::Shutdown) {
+                            return;
+                        }
+                        self.apply(next);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                // Every handle has gone without saying so — a panic between the
+                // `Engine` being made and being dropped, which under the resident
+                // panic hook ends the process first: this arm runs only where no
+                // fatal hook is installed. Same ending.
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            self.media.take_frame(shared);
+        }
+    }
+
+    fn apply(&mut self, command: Command) {
+        if let Some(error) = self.media.apply(command) {
+            self.error.get_or_insert(error);
+        }
+    }
+
+    /// Read the media, decide the one thing it cannot — whether the load has
+    /// run out — and publish the state.
+    ///
+    /// **The load's deadline is read here**, every turn, which is every
+    /// [`IDLE_POLL_INTERVAL`] at the latest while nothing is playing. The
+    /// decision is [`LoadDeadline::judge`]'s, the macOS arm's too; this maps it:
+    /// a refusal is [`EngineError::NotLoaded`], not ready, with no length or
+    /// size — and it is the terminal, so what the source says afterwards is not
+    /// published.
+    fn publish_state(&mut self, shared: &Arc<Shared>) -> EngineState {
+        let said = self.media.look().state(self.error);
+        let state = match self.deadline.judge(
+            self.media.load_clock(),
+            said.ready,
+            said.error.is_some(),
+            said.error == Some(EngineError::NotLoaded),
+        ) {
+            Load::AsSaid => said,
+            Load::Refused => {
+                let error = *self.error.get_or_insert(EngineError::NotLoaded);
+                EngineState {
+                    duration_secs: None,
+                    natural_size: None,
+                    ready: false,
+                    error: Some(error),
+                    ..said
+                }
+            }
+        };
+        *shared.state.lock().unwrap_or_else(|held| held.into_inner()) = state;
+        shared.published.notify_all();
+        state
+    }
+}
+
 /// Everything the engine thread owns. It never leaves that thread — the type is
 /// deliberately not `Send`, because the COM interfaces in it are not.
 struct Machinery {
@@ -978,7 +1192,24 @@ struct Machinery {
     /// first time the size is known.
     target: Option<(ID3D11Texture2D, ID3D11Texture2D, u32, u32)>,
     generation: u64,
-    error: Option<EngineError>,
+}
+
+impl Media for Machinery {
+    fn look(&mut self) -> Look {
+        self.look()
+    }
+
+    fn apply(&mut self, command: Command) -> Option<EngineError> {
+        self.apply(command)
+    }
+
+    fn take_frame(&mut self, shared: &Arc<Shared>) {
+        self.take_frame(shared);
+    }
+
+    fn load_clock(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 impl Machinery {
@@ -1099,48 +1330,13 @@ impl Machinery {
                 context,
                 target: None,
                 generation: 0,
-                error: None,
             })
         }
     }
 
-    /// The loop: answer commands, publish state, and take a picture when there
-    /// is one.
-    fn pump(&mut self, shared: &Arc<Shared>, inbox: &mpsc::Receiver<Command>) {
-        loop {
-            let state = self.publish_state(shared);
-            // A picture is due while the clock is running, and once more after
-            // anything else — a seek while paused draws a new frame, and so does
-            // the load that first produces one.
-            let wait = if state.playing {
-                FRAME_POLL_INTERVAL
-            } else {
-                IDLE_POLL_INTERVAL
-            };
-            match inbox.recv_timeout(wait) {
-                Ok(Command::Shutdown) => return,
-                Ok(command) => {
-                    self.apply(command);
-                    // Drain whatever else is already waiting before spending a
-                    // poll on it: a burst of events during a load is one look at
-                    // the engine, not eight.
-                    while let Ok(next) = inbox.try_recv() {
-                        if matches!(next, Command::Shutdown) {
-                            return;
-                        }
-                        self.apply(next);
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                // Every handle has gone without saying so — a panic between the
-                // `Engine` being made and being dropped. Same ending.
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            }
-            self.take_frame(shared);
-        }
-    }
-
-    fn apply(&mut self, command: Command) {
+    /// One verb carried to the engine, or one event read; answers the error an
+    /// event reported.
+    fn apply(&mut self, command: Command) -> Option<EngineError> {
         // SAFETY: COM methods on this thread's own engine, inside its apartment.
         unsafe {
             match command {
@@ -1162,39 +1358,42 @@ impl Machinery {
                 Command::Volume(volume) => {
                     let _ = self.engine.SetVolume(volume.clamp(0.0, 1.0));
                 }
-                Command::Event(event) => self.observe(event),
+                Command::Event(event) => return self.observe(event),
                 Command::Shutdown => {}
             }
         }
+        None
     }
 
     /// What one notification means here. Almost nothing: the state is read off
     /// the engine every turn of the loop anyway, so an event's only job is to
     /// wake that loop up. The exception is the error, whose code lives on an
     /// `IMFMediaError` that is gone by the time anybody asks again.
-    fn observe(&mut self, event: u32) {
-        if event == MF_MEDIA_ENGINE_EVENT_ERROR.0 as u32 {
-            // SAFETY: on the engine's own thread and apartment.
-            let code = unsafe {
-                self.engine
-                    .GetError()
-                    .ok()
-                    .map(|error| error.GetErrorCode())
-            };
-            self.error = Some(code.map_or(EngineError::Decode, |code| {
-                EngineError::of_code(MF_MEDIA_ENGINE_ERR(i32::from(code)))
-            }));
-        }
+    fn observe(&mut self, event: u32) -> Option<EngineError> {
         // Every other event — `LOADEDMETADATA`, `CANPLAY`, `ENDED`,
         // `TIMEUPDATE`, `VOLUMECHANGE` — reaches the loop as a *wake* and is
         // then read back off the engine, which is what keeps one authority for
         // every number on [`EngineState`]. An event carries no payload this
         // module trusts over the object that raised it.
+        if event != MF_MEDIA_ENGINE_EVENT_ERROR.0 as u32 {
+            return None;
+        }
+        // SAFETY: on the engine's own thread and apartment.
+        let code = unsafe {
+            self.engine
+                .GetError()
+                .ok()
+                .map(|error| error.GetErrorCode())
+        };
+        Some(code.map_or(EngineError::Decode, |code| {
+            EngineError::of_code(MF_MEDIA_ENGINE_ERR(i32::from(code)))
+        }))
     }
 
-    fn publish_state(&mut self, shared: &Arc<Shared>) -> EngineState {
+    /// One look at the engine — every number the state is read from.
+    fn look(&mut self) -> Look {
         // SAFETY: COM methods on this thread's own engine, inside its apartment.
-        let state = unsafe {
+        unsafe {
             let mut width = 0_u32;
             let mut height = 0_u32;
             let sized = self
@@ -1203,32 +1402,19 @@ impl Machinery {
                 .is_ok()
                 && width > 0
                 && height > 0;
-            let duration = self.engine.GetDuration();
-            EngineState {
-                duration_secs: duration
-                    .is_finite()
-                    .then_some(duration)
-                    .filter(|d| *d > 0.0),
-                position_secs: self.engine.GetCurrentTime(),
-                playing: !self.engine.IsPaused().as_bool() && !self.engine.IsEnded().as_bool(),
-                natural_size: sized.then_some((width, height)),
+            Look {
+                size: sized.then_some((width, height)),
+                duration: self.engine.GetDuration(),
+                position: self.engine.GetCurrentTime(),
+                paused: self.engine.IsPaused().as_bool(),
                 ended: self.engine.IsEnded().as_bool(),
-                error: self.error,
                 muted: self.engine.GetMuted().as_bool(),
                 volume: self.engine.GetVolume(),
                 rate: self.engine.GetPlaybackRate(),
-                // **The size, not an event.** `HAVE_METADATA` is `readyState`
-                // ≥ 1, and the one thing every caller wants out of it is the
-                // size — so "ready" is spelled as the size being answerable,
-                // which cannot be true and useless.
-                ready: sized || self.engine.HasAudio().as_bool(),
                 has_video: self.engine.HasVideo().as_bool(),
                 has_audio: self.engine.HasAudio().as_bool(),
             }
-        };
-        *shared.state.lock().unwrap_or_else(|held| held.into_inner()) = state;
-        shared.published.notify_all();
-        state
+        }
     }
 
     /// Ask whether there is a new picture and, if there is, bring it back.
@@ -1603,11 +1789,10 @@ mod tests {
     ///
     /// **The lock alone is not enough, because it only stops the next test
     /// starting an engine — not the last test's engine leaving.** A count is
-    /// taken off by the engine's own thread, and [`Engine::shutdown`] is allowed
-    /// to return before that thread has got there: a thread that has not said it
-    /// stopped within [`SHUTDOWN_BUDGET`] is let go rather than waited on, and
-    /// takes its count off some milliseconds later — under whoever holds this by
-    /// then. So the gate waits for the ledger to come back to quiet before it
+    /// taken off by the engine's own thread, and [`Engine::shutdown`] returns
+    /// before that thread has got there — it waits for nothing (T-DROP-DOORS) —
+    /// so the count comes off some milliseconds later, under whoever holds this
+    /// by then. So the gate waits for the ledger to come back to quiet before it
     /// hands over, and quiet is zero: between the tests that make engines, no
     /// engine of this process is alive. A wait that runs out leaves its caller no
     /// worse off than it would have been, since it reads its own baseline either
@@ -1659,7 +1844,8 @@ mod tests {
         let reached = engines_outstanding_reaching(target, PATIENCE);
         assert_eq!(
             reached, target,
-            "the engine ledger did not reach {target} within this module's patience              ({PATIENCE:?}); {reached} engines stood"
+            "the engine ledger did not reach {target} within this module's patience \
+             ({PATIENCE:?}); {reached} engines stood"
         );
         reached
     }
@@ -1731,7 +1917,7 @@ mod tests {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
         assert!(
-            engine.wait_for_metadata(Duration::from_secs(10)),
+            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
             "metadata: {:?}",
             engine.state()
         );
@@ -1778,7 +1964,7 @@ mod tests {
     fn a_frame_arrives_after_play_and_position_advances() {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
-        assert!(engine.wait_for_metadata(Duration::from_secs(10)));
+        assert!(engine.wait_for_metadata(LOAD_ANSWER_PATIENCE));
         engine.set_muted(true);
         engine.play();
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -1852,7 +2038,7 @@ mod tests {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mov")).expect("an engine opens");
         assert!(
-            engine.wait_for_metadata(Duration::from_secs(10)),
+            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
             "metadata: {:?}",
             engine.state()
         );
@@ -1890,7 +2076,7 @@ mod tests {
         let mut engine = Engine::open_on(&fixture("folio-video-test.mp4"), Adapter::Software)
             .expect("a WARP engine opens");
         assert!(
-            engine.wait_for_metadata(Duration::from_secs(10)),
+            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
             "metadata: {:?}",
             engine.state()
         );
@@ -1934,6 +2120,10 @@ mod tests {
     ///
     /// MUTATION: remove `impl Drop for Engine` and the second and third arms go
     /// red while the first stays green.
+    ///
+    /// Since T-DROP-DOORS the door waits for nothing (D-80): the fall is the
+    /// engine thread's own, after `shutdown` has returned, and a drop without the
+    /// door makes the same request — which is why every arm still settles.
     #[test]
     fn every_engine_is_shut_down_before_the_process_leaves() {
         let _ledger = ledger_gate();
@@ -2056,7 +2246,7 @@ mod tests {
         let mut engine = Engine::open(&fixture("folio-video-test.mov"))
             .expect("the same platform opens the file the table refused");
         assert!(
-            engine.wait_for_metadata(Duration::from_secs(10)),
+            engine.wait_for_metadata(LOAD_ANSWER_PATIENCE),
             "a type answered `No` still loaded: {:?}",
             engine.state()
         );
@@ -2088,15 +2278,20 @@ mod tests {
                 Ok(mut engine) => {
                     // Loading is asynchronous, so an engine may exist for a file
                     // that cannot be loaded; what may not happen is a picture.
-                    let deadline = Instant::now() + Duration::from_secs(5);
-                    while Instant::now() < deadline && engine.state().error.is_none() {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
+                    // "No length and no error" is the state before Media
+                    // Foundation has answered, so the wait is for one of its two
+                    // answers — refused or loaded — on the engine's own
+                    // publications, within `LOAD_ANSWER_PATIENCE`: past it the
+                    // engine has refused the load itself, so running out is a
+                    // defect and never a race with the refusal.
+                    let answered = engine.state_reaching(
+                        |state| state.error.is_some() || state.ready,
+                        LOAD_ANSWER_PATIENCE,
+                    );
                     assert!(
-                        engine.state().error.is_some(),
-                        "{} loaded: {:?}",
-                        path.display(),
-                        engine.state()
+                        answered.error.is_some(),
+                        "{} loaded, or was never answered: {answered:?}",
+                        path.display()
                     );
                     assert!(
                         engine.frame().is_none(),
@@ -2123,7 +2318,7 @@ mod tests {
     fn the_verbs_reach_the_engine() {
         let _ledger = ledger_gate();
         let mut engine = Engine::open(&fixture("folio-video-test.mp4")).expect("an engine opens");
-        assert!(engine.wait_for_metadata(Duration::from_secs(10)));
+        assert!(engine.wait_for_metadata(LOAD_ANSWER_PATIENCE));
         engine.set_muted(true);
         engine.set_volume(0.25);
         engine.set_rate(1.5);
@@ -2155,5 +2350,226 @@ mod tests {
         }
         assert!(!engine.state().playing, "{:?}", engine.state());
         engine.shutdown();
+    }
+
+    /// **A source that says what the test tells it to, on a clock the test
+    /// moves** — the scripted side of the [`Media`] seam.
+    ///
+    /// Clones share one script, so the test keeps a handle on the same look,
+    /// clock and count the engine thread reads.
+    #[derive(Clone)]
+    struct Script {
+        look: Arc<Mutex<Look>>,
+        clock: Arc<Mutex<Instant>>,
+        looks: Arc<AtomicU64>,
+    }
+
+    impl Script {
+        fn new(look: Look, at: Instant) -> Self {
+            Self {
+                look: Arc::new(Mutex::new(look)),
+                clock: Arc::new(Mutex::new(at)),
+                looks: Arc::new(AtomicU64::new(0)),
+            }
+        }
+
+        fn says(&self, look: Look) {
+            *self.look.lock().expect("the script's look") = look;
+        }
+
+        fn reads(&self, at: Instant) {
+            *self.clock.lock().expect("the script's clock") = at;
+        }
+
+        /// How many times the pump has looked so far.
+        fn looked(&self) -> u64 {
+            self.looks.load(Ordering::Acquire)
+        }
+
+        /// **Wait for the pump to look `turns` more times**, on its own
+        /// publications, and answer the state the wait ended on. A pump that
+        /// stops looking is a red here, by this helper.
+        fn turns(&self, engine: &Engine, turns: u64) -> EngineState {
+            let target = self.looked() + turns;
+            let state = engine.state_reaching(|_| self.looked() > target, PATIENCE);
+            assert!(
+                self.looked() > target,
+                "the pump stopped looking at its source within {PATIENCE:?}: {state:?}"
+            );
+            state
+        }
+    }
+
+    impl Media for Script {
+        fn look(&mut self) -> Look {
+            self.looks.fetch_add(1, Ordering::AcqRel);
+            *self.look.lock().expect("the script's look")
+        }
+
+        fn apply(&mut self, _command: Command) -> Option<EngineError> {
+            None
+        }
+
+        fn take_frame(&mut self, _shared: &Arc<Shared>) {}
+
+        fn load_clock(&self) -> Instant {
+            *self.clock.lock().expect("the script's clock")
+        }
+    }
+
+    /// What Media Foundation says of a source it has not finished opening: no
+    /// size, no sound, no length, and paused.
+    fn still_loading() -> Look {
+        Look {
+            duration: f64::NAN,
+            paused: true,
+            volume: 1.0,
+            rate: 1.0,
+            ..Look::default()
+        }
+    }
+
+    /// RED — **a load that never answers ends as the engine's own refusal,
+    /// within its budget** (T-VIDEO-ENGINE-NO-DURATION).
+    ///
+    /// Three CI runs in one day saw an engine stand at "no length, no error, not
+    /// ready" past a test's wait: once an engine is built nothing else bounded
+    /// Media Foundation's load, and a surface showing that state is a player at
+    /// `0:00` that never starts. The source here never answers, on a clock the
+    /// test moves: the engine says nothing before [`LOAD_BUDGET`] has passed on
+    /// that clock, says [`EngineError::NotLoaded`] once it has, and keeps
+    /// saying it — a source that loads after it was refused is still refused,
+    /// and is not published as ready beside the refusal. The decision itself is
+    /// `video_load`'s (`a_load_is_refused_only_past_its_budget_and_for_good`);
+    /// this is the pump that ships reading it.
+    ///
+    /// MUTATION: map `Load::Refused` as `Load::AsSaid` in `Pump::publish_state`
+    /// and the wait for the refusal runs out of `PATIENCE` on a state with no
+    /// error.
+    #[test]
+    fn a_load_that_never_answers_ends_as_the_engines_refusal_within_its_budget() {
+        let opened = Instant::now();
+        let due = opened + LOAD_BUDGET;
+        let script = Script::new(still_loading(), opened);
+        let mut engine = Engine::scripted(script.clone(), LoadDeadline::from_open(opened));
+
+        let waiting = script.turns(&engine, 3);
+        assert_eq!(waiting.error, None, "refused at the open: {waiting:?}");
+        assert!(!waiting.ready, "{waiting:?}");
+        assert_eq!(waiting.length(), Length::Unanswered, "{waiting:?}");
+
+        // A breath before the budget is still a load in progress.
+        script.reads(due - Duration::from_millis(1));
+        let nearly = script.turns(&engine, 2);
+        assert_eq!(
+            nearly.error, None,
+            "refused before its budget ran out: {nearly:?}"
+        );
+
+        script.reads(due);
+        let refused = engine.state_reaching(|state| state.error.is_some(), PATIENCE);
+        assert_eq!(
+            refused.error,
+            Some(EngineError::NotLoaded),
+            "a load past its budget with nothing said is the engine's refusal: {refused:?}"
+        );
+        assert!(!refused.ready, "{refused:?}");
+
+        // Said once and kept: the source answering afterwards un-refuses
+        // nothing, and no second error replaces the first.
+        script.says(Look {
+            size: Some((160, 120)),
+            duration: 5.0,
+            has_video: true,
+            ..still_loading()
+        });
+        let after = script.turns(&engine, 2);
+        assert_eq!(after.error, Some(EngineError::NotLoaded), "{after:?}");
+        assert!(
+            !after.ready && after.duration_secs.is_none() && after.natural_size.is_none(),
+            "the refusal is the terminal; a late answer is not published beside it: {after:?}"
+        );
+        engine.shutdown();
+    }
+
+    /// RED — **a ready source with no length is said as having no length**
+    /// (T-VIDEO-ENGINE-NO-DURATION).
+    ///
+    /// Media Foundation answers `NaN` for a source that declares no duration
+    /// and `+∞` for one with no end. Either way the source has loaded — it has a
+    /// size — and that is an end state, not a load still running: the state is
+    /// `ready` with no `duration_secs`, [`EngineState::length`] reads it as
+    /// [`Length::Unknown`], and the load's deadline, long past here, does not
+    /// refuse it.
+    ///
+    /// MUTATION: make `Look::state`'s `ready` wait for a finite length — a
+    /// source with no length treated as still loading — and the deadline
+    /// refuses it, so the first assertion goes red.
+    #[test]
+    fn a_ready_source_with_no_length_is_said_as_no_length() {
+        let opened = Instant::now();
+        for duration in [f64::NAN, f64::INFINITY] {
+            let script = Script::new(
+                Look {
+                    size: Some((160, 120)),
+                    duration,
+                    has_video: true,
+                    ..still_loading()
+                },
+                opened + LOAD_BUDGET,
+            );
+            // The clock already at the deadline: a source that were not ready
+            // would be refused on the pump's first look.
+            let mut engine = Engine::scripted(script.clone(), LoadDeadline::from_open(opened));
+            let loaded = script.turns(&engine, 3);
+            assert_eq!(loaded.error, None, "{duration}: {loaded:?}");
+            assert!(loaded.ready, "{duration}: {loaded:?}");
+            assert_eq!(loaded.duration_secs, None, "{duration}: {loaded:?}");
+            assert_eq!(loaded.length(), Length::Unknown, "{duration}: {loaded:?}");
+            engine.shutdown();
+        }
+        // And a source that declares one is what it declares.
+        let script = Script::new(
+            Look {
+                size: Some((160, 120)),
+                duration: 5.0,
+                has_video: true,
+                ..still_loading()
+            },
+            opened,
+        );
+        let mut engine = Engine::scripted(script.clone(), LoadDeadline::from_open(opened));
+        let known = script.turns(&engine, 2);
+        assert_eq!(known.length(), Length::Known(5.0), "{known:?}");
+        engine.shutdown();
+    }
+
+    /// RED (T-DROP-DOORS, D-80) — **an engine dropped without its door says so
+    /// once, and one shut down through it says nothing at its drop.**
+    ///
+    /// Both on a thread of their own, within the suite's patience: the drop's
+    /// count is that thread's. The engine is a scripted one, so nothing here
+    /// touches Media Foundation; that the door and the drop both still end the
+    /// engine is [`every_engine_is_shut_down_before_the_process_leaves`]'s.
+    ///
+    /// MUTATION: take the saying out of `Drop` and the first count is zero; drop
+    /// the `self.thread.take()` from `shutdown` and the second is one.
+    #[test]
+    fn an_engine_dropped_without_its_door_says_so_once() {
+        let opened = Instant::now();
+        let script = Script::new(still_loading(), opened);
+        let dropped = Engine::scripted(script.clone(), LoadDeadline::from_open(opened));
+        assert_eq!(
+            crate::door_skipped::dropped_alone(dropped, "an engine's drop"),
+            1,
+            "a drop without the door says so once"
+        );
+        let mut closed = Engine::scripted(script, LoadDeadline::from_open(opened));
+        closed.shutdown();
+        assert_eq!(
+            crate::door_skipped::dropped_alone(closed, "a shut-down engine's drop"),
+            0,
+            "a drop after the door says nothing"
+        );
     }
 }

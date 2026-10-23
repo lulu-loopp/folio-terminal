@@ -444,6 +444,122 @@ pub struct MathBandFace {
     pub display: MathBlockDisplay,
 }
 
+/// [`WindowRenderer::math_band_trace`] without a renderer: the arithmetic is the frame's, the
+/// pane's metrics and its seat.
+pub fn math_band_trace_for(
+    metrics: CellMetrics,
+    seat: SeatViewport,
+    frame: &ViewportFrame,
+    named: &MathBlockAnchor,
+) -> Option<MathBandTrace> {
+    let placement = frame.math_blocks.iter().find(|placement| {
+        placement.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+            && placement.toolbar_visible
+            && placement.anchor.same_block(named)
+    })?;
+    let geometry = math_block_geometry_px(metrics, seat, frame, placement)?;
+    Some(MathBandTrace {
+        seat: MathToolBoxes {
+            anchor: placement.anchor.clone(),
+            display: placement.display,
+            block: geometry.block,
+            source: geometry.eye?,
+            copy: geometry.copy?,
+        },
+        ink_right: geometry.ink[2],
+        height_subpixels: placement.clip_height_subpixels,
+        picture_opacity_milli: placement.picture_opacity_milli,
+    })
+}
+
+/// [`WindowRenderer::math_hit_test`] without a renderer: which band, and which of its marks, a
+/// point in a pane's body stands on.
+pub fn math_hit_test_for(
+    metrics: CellMetrics,
+    seat: SeatViewport,
+    frame: &ViewportFrame,
+    x: f64,
+    y: f64,
+) -> Option<MathHit> {
+    let point = [x as f32, y as f32];
+    if let Some(failure) = frame.math_failures.iter().rev().find(|failure| {
+        math_failure_geometry_px(metrics, seat, frame, failure)
+            .is_some_and(|(_, hit)| point_in_rect(point, hit))
+    }) {
+        return Some(MathHit {
+            anchor: failure.anchor.clone(),
+            target: MathHitTarget::Failure,
+        });
+    }
+    frame.math_blocks.iter().rev().find_map(|placement| {
+        if placement.artifact.kind != bt_viewport::RgbaArtifactKind::Math {
+            return None;
+        }
+        let geometry = math_block_geometry_px(metrics, seat, frame, placement)?;
+        let target = if geometry.eye.is_some_and(|rect| point_in_rect(point, rect)) {
+            MathHitTarget::ToggleSource
+        } else if geometry.copy.is_some_and(|rect| point_in_rect(point, rect)) {
+            MathHitTarget::CopyLatex
+        } else if point_in_rect(point, geometry.block) {
+            MathHitTarget::Block
+        } else {
+            return None;
+        };
+        Some(MathHit {
+            // The composite's own origin, which is its ink's left edge and never the region's:
+            // a band keeps ground around its picture and an offset measured from that ground
+            // would name the wrong run.
+            anchor: placement
+                .anchor
+                .with_run(inline_run_at(placement, geometry.ink, point[0])),
+            target,
+        })
+    })
+}
+
+/// The seat is a parameter for [`math_block_geometry_px`]'s reason (RC-2):
+/// the failure marker is a hit target too, and a hit target clamped against
+/// the focused pane is a press that lands somewhere else.
+fn math_failure_geometry_px(
+    metrics: CellMetrics,
+    seat: SeatViewport,
+    frame: &ViewportFrame,
+    placement: &bt_viewport::MathFailurePlacement,
+) -> Option<([f32; 4], [f32; 4])> {
+    if !frame.drawable_interval_overlaps(placement.top_subpixels, placement.height_subpixels) {
+        return None;
+    }
+    let pane_left = metrics.padding_px;
+    // The failed block's own pane's right edge (T-PANE-COLUMNS, R10), the grid's otherwise.
+    let pane_right = math_block_right_px(
+        metrics,
+        seat.width,
+        frame.columns,
+        placement.right_limit_columns,
+    );
+    let pane_top = metrics.padding_px;
+    let pane_bottom = seat.height as f32;
+    let raw_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+    let raw_bottom = raw_top + placement.height_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+    let top = raw_top.max(pane_top);
+    let bottom = raw_bottom.min(pane_bottom);
+    if bottom <= top || pane_right <= pane_left {
+        return None;
+    }
+    let scale = metrics.scale_factor as f32;
+    let marker_right = pane_right - scale;
+    let marker_left = (marker_right - 2.0 * scale).max(pane_left);
+    let inset = (4.0 * scale).min((bottom - top) / 3.0);
+    let marker = [marker_left, top + inset, marker_right, bottom - inset];
+    let hit = [
+        (pane_right - 14.0 * scale).max(pane_left),
+        top,
+        pane_right,
+        bottom,
+    ];
+    Some((marker, hit))
+}
+
 /// [`WindowRenderer::math_band_face`]'s arithmetic, free of the renderer for the
 /// reason [`math_block_geometry_px`] is.
 ///
@@ -453,7 +569,7 @@ pub struct MathBandFace {
 /// is a gesture that has already happened and goes on happening if the hand
 /// moves away from it. Naming the band is still the whole of the lookup, by the
 /// identity `bt_term`'s own hover sweep keys on.
-fn math_band_face_for(
+pub fn math_band_face_for(
     metrics: CellMetrics,
     seat: SeatViewport,
     frame: &ViewportFrame,
@@ -1285,6 +1401,14 @@ pub struct ComposedFrame {
 /// *drawn* is then the window's business, and a cluster that lands outside the window is simply not
 /// drawn. Advancing in viewport columns would put the wrap at a place the grid has no line break
 /// at, and the caret would jump the moment the text committed.
+///
+/// # Where it is drawn
+///
+/// At the terminal cursor whenever the frame draws the cursor's cell (`cursor_in_view`), whether
+/// or not the program shows the cursor: a full-screen program that hides it and draws its own
+/// caret keeps the hidden one at its input position so an IME can find it. The cursor's glyph is
+/// still drawn only when the program shows it. A cursor whose cell the frame does not draw
+/// composes nothing, and `ime_caret` is the frame's cursor.
 pub fn compose_preedit(
     frame: &ViewportFrame,
     preedit: Option<&Preedit>,
@@ -1305,7 +1429,10 @@ fn compose_preedit_inner<const TRACE: bool>(
     preedit: Option<&Preedit>,
 ) -> Result<(ComposedFrame, bool), FrameShapeError> {
     frame.validate_shape()?;
-    let Some(preedit) = preedit.filter(|preedit| !preedit.text.is_empty() && frame.cursor.visible)
+    // `cursor_in_view`, not `cursor.visible`: a program that hid the terminal cursor (DECTCEM)
+    // leaves it at its input caret for exactly this, and Windows Terminal composes there too
+    // (`Renderer::_prepareNewComposition` reads the cursor's position and never its visibility).
+    let Some(preedit) = preedit.filter(|preedit| !preedit.text.is_empty() && frame.cursor_in_view)
     else {
         return Ok((
             ComposedFrame {
@@ -1336,7 +1463,13 @@ fn compose_preedit_inner<const TRACE: bool>(
         visible: drawn.is_some(),
     };
     let written = overlay_preedit_cells::<TRACE>(&mut composed, preedit);
-    composed.cursor = ime_caret;
+    // The caret glyph moves to the composition's caret and is drawn only when the program shows
+    // the cursor; a hidden cursor stays hidden under a composition, as its caret is the IME's.
+    composed.cursor = bt_viewport::GridCursor {
+        visible: ime_caret.visible && frame.cursor.visible,
+        ..ime_caret
+    };
+    composed.cursor_in_view = ime_caret.visible;
     Ok((
         ComposedFrame {
             frame: composed,
@@ -6406,56 +6539,124 @@ pub struct RenderProbeSample {
     pub wide_glyphs: u64,
 }
 
-/// Headless render-path instrumentation used by `bt-replay`.
-///
-/// Two layers and nothing else: the process's [`GpuContext`], and one
-/// [`WindowRenderer`] whose target is a texture instead of a swapchain. The
-/// multiwindow spike called this shape the template for the split — "the device
-/// layer without a surface" — and folding it back onto the real types is what
-/// keeps the claim honest: the probe measures the production shaping, atlas and
-/// encoding paths because it *is* a window renderer, not because a second copy
-/// of one was kept in step by hand.
+/// **What a tool needs from the product library to probe a frame or read one back, and no
+/// more** (the thread-door note's revision (l)4, A2p). Every function here prepares, encodes or
+/// reads; **none submits and none presents** — the submit and the present are
+/// `bt_render_probe`'s, a tool crate outside `folio.exe`, so the product library holds no probe
+/// effect (`window_waits_tests::the_product_library_holds_no_probe_effect`).
 #[doc(hidden)]
-pub struct HeadlessRenderProbe {
-    gpu: GpuContext,
-    window: WindowRenderer,
-    adapter_name: String,
+pub mod probe_surface {
+    use super::{
+        GpuContext, Instant, RenderError, RenderProbeSample, TextPreparationStats, ViewportFrame,
+        WindowRenderer,
+    };
+
+    /// A read-back's buffer and its geometry, between the encoded copy and the mapped rows.
+    pub struct ReadBack {
+        pub(super) buffer: wgpu::Buffer,
+        pub(super) padded: u32,
+        pub(super) width: u32,
+        pub(super) height: u32,
+    }
+
+    /// What a probe frame encoded and did not submit: its commands, the swapchain frame it
+    /// must present after them (none for a texture), and the instants it has measured so far.
+    pub struct ProbeWork {
+        pub commands: wgpu::CommandBuffer,
+        pub swapchain: Option<wgpu::SurfaceTexture>,
+        pub timings: ProbeTimings,
+    }
+
+    /// The probe frame's measurements before its submit.
+    pub struct ProbeTimings {
+        pub(super) started: Instant,
+        pub(super) text_stats: TextPreparationStats,
+        pub(super) rows_prepared_at: Instant,
+        pub(super) atlas_prepared_at: Instant,
+        pub(super) math_prepared_at: Instant,
+        pub(super) math_evictions_before: u64,
+        pub(super) math_texture_uploads: u64,
+        pub(super) math_texture_upload_bytes: usize,
+    }
+
+    /// Encode `window`'s read-back ([`WindowRenderer::read_back_work`]): the copy, unsubmitted.
+    ///
+    /// # Errors
+    ///
+    /// [`RenderError::DeviceLost`] when the device is gone before or after the buffer is minted.
+    pub fn read_back_work(
+        window: &WindowRenderer,
+        gpu: &GpuContext,
+    ) -> Result<(wgpu::CommandBuffer, ReadBack), RenderError> {
+        window.read_back_work(gpu)
+    }
+
+    /// The rows of a read-back whose copy was submitted.
+    ///
+    /// # Errors
+    ///
+    /// The mapping's or the device's failure.
+    pub fn read_back_pixels(gpu: &GpuContext, back: ReadBack) -> Result<Vec<[u8; 4]>, RenderError> {
+        WindowRenderer::read_back_pixels(gpu, back)
+    }
+
+    /// Prepare and encode one probe frame ([`WindowRenderer::probe_frame_work`]), unsubmitted.
+    ///
+    /// # Errors
+    ///
+    /// The frame's shape, the glyph prepares, or the acquire.
+    pub fn probe_frame_work(
+        window: &mut WindowRenderer,
+        gpu: &mut GpuContext,
+        frame: &ViewportFrame,
+    ) -> Result<ProbeWork, RenderError> {
+        window.probe_frame_work(gpu, frame)
+    }
+
+    /// Close a probe frame whose work was submitted at `submitted_at`.
+    pub fn probe_frame_finish(
+        window: &mut WindowRenderer,
+        gpu: &mut GpuContext,
+        timings: ProbeTimings,
+        submitted_at: Instant,
+    ) -> RenderProbeSample {
+        window.probe_frame_finish(gpu, timings, submitted_at)
+    }
+
+    /// The device's queue, for the tool that submits what this module encoded.
+    #[must_use]
+    pub fn queue(gpu: &GpuContext) -> &wgpu::Queue {
+        &gpu.queue
+    }
 }
 
-impl HeadlessRenderProbe {
-    pub async fn new(width: u32, height: u32, scale_factor: f64) -> Result<Self, RenderError> {
-        // Named outright rather than asked of a swapchain, which is the whole of
-        // what "headless" means here. It is the format the window path picks on
-        // every machine this ships to, so the atlas and pipelines the probe
-        // measures are the ones a window would have built.
-        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
-        let mut gpu = GpuContext::headless(format).await?;
-        let adapter_name = gpu.adapter_name();
-        let window = WindowRenderer::offscreen(&mut gpu, width, height, scale_factor, format)?;
-        Ok(Self {
-            gpu,
-            window,
-            adapter_name,
-        })
+/// The two compositions this crate's own tests read frames through. Test code is outside the
+/// product (its root's `cfg_attr(test, …)` form); the shipped compositions are
+/// `bt_render_probe`'s, and these are the same statements in the same order.
+#[cfg(test)]
+impl WindowRenderer {
+    fn read_back(&self, gpu: &GpuContext) -> Result<Vec<[u8; 4]>, RenderError> {
+        let (commands, back) = self.read_back_work(gpu)?;
+        gpu.queue.submit([commands]);
+        Self::read_back_pixels(gpu, back)
     }
 
-    pub fn adapter_name(&self) -> &str {
-        &self.adapter_name
-    }
-
-    pub fn max_texture_dimension_2d(&self) -> u32 {
-        self.gpu.max_texture_dimension_2d()
-    }
-
-    pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
-        self.window.update_scale_factor(&mut self.gpu, scale_factor)
-    }
-
-    pub fn prepare_frame(
+    fn probe_frame(
         &mut self,
+        gpu: &mut GpuContext,
         frame: &ViewportFrame,
     ) -> Result<RenderProbeSample, RenderError> {
-        self.window.probe_frame(&mut self.gpu, frame)
+        let probe_surface::ProbeWork {
+            commands,
+            swapchain,
+            timings,
+        } = self.probe_frame_work(gpu, frame)?;
+        gpu.queue.submit([commands]);
+        let submitted_at = Instant::now();
+        if let Some(texture) = swapchain {
+            gpu.queue.present(texture);
+        }
+        Ok(self.probe_frame_finish(gpu, timings, submitted_at))
     }
 }
 
@@ -8310,12 +8511,11 @@ impl WindowRenderer {
             wgpu::MultisampleState::default(),
             None,
         );
-        // Set-but-empty is off: a shell that wrote `BT_PERF_TRACE=` said "not
-        // this run", and every reader of this family in this program says the
-        // same word back.
-        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty());
+        // `BT_PERF_TRACE` as the program's entry switched it, never read here
+        // (`bt_viewport::trace::perf`).
+        let trace_perf = bt_viewport::trace::perf();
         // A window that draws into a texture is an instrument by construction —
-        // `HeadlessRenderProbe` is the only thing that builds one — so its
+        // `bt_render_probe::HeadlessRenderProbe` and the read-back tests build them — so its
         // shaping caches count hits, misses and evictions whether or not the
         // trace is on, which is what `bt-replay` reports. A window on a
         // swapchain pays for that counting only when someone asked for it.
@@ -8386,24 +8586,7 @@ impl WindowRenderer {
         frame: &ViewportFrame,
         named: &MathBlockAnchor,
     ) -> Option<MathBandTrace> {
-        let placement = frame.math_blocks.iter().find(|placement| {
-            placement.artifact.kind == bt_viewport::RgbaArtifactKind::Math
-                && placement.toolbar_visible
-                && placement.anchor.same_block(named)
-        })?;
-        let geometry = math_block_geometry_px(metrics, seat, frame, placement)?;
-        Some(MathBandTrace {
-            seat: MathToolBoxes {
-                anchor: placement.anchor.clone(),
-                display: placement.display,
-                block: geometry.block,
-                source: geometry.eye?,
-                copy: geometry.copy?,
-            },
-            ink_right: geometry.ink[2],
-            height_subpixels: placement.clip_height_subpixels,
-            picture_opacity_milli: placement.picture_opacity_milli,
-        })
+        math_band_trace_for(metrics, seat, frame, named)
     }
 
     /// **The window's base metrics** — the Settings face size at this window's display scale
@@ -8515,40 +8698,7 @@ impl WindowRenderer {
         x: f64,
         y: f64,
     ) -> Option<MathHit> {
-        let point = [x as f32, y as f32];
-        if let Some(failure) = frame.math_failures.iter().rev().find(|failure| {
-            self.math_failure_geometry(metrics, seat, frame, failure)
-                .is_some_and(|(_, hit)| point_in_rect(point, hit))
-        }) {
-            return Some(MathHit {
-                anchor: failure.anchor.clone(),
-                target: MathHitTarget::Failure,
-            });
-        }
-        frame.math_blocks.iter().rev().find_map(|placement| {
-            if placement.artifact.kind != bt_viewport::RgbaArtifactKind::Math {
-                return None;
-            }
-            let geometry = self.math_block_geometry(metrics, seat, frame, placement)?;
-            let target = if geometry.eye.is_some_and(|rect| point_in_rect(point, rect)) {
-                MathHitTarget::ToggleSource
-            } else if geometry.copy.is_some_and(|rect| point_in_rect(point, rect)) {
-                MathHitTarget::CopyLatex
-            } else if point_in_rect(point, geometry.block) {
-                MathHitTarget::Block
-            } else {
-                return None;
-            };
-            Some(MathHit {
-                // The composite's own origin, which is its ink's left edge and never the region's:
-                // a band keeps ground around its picture and an offset measured from that ground
-                // would name the wrong run.
-                anchor: placement
-                    .anchor
-                    .with_run(inline_run_at(placement, geometry.ink, point[0])),
-                target,
-            })
-        })
+        math_hit_test_for(metrics, seat, frame, x, y)
     }
 
     /// What the adapter offered this window's surface and what it was
@@ -9016,27 +9166,7 @@ impl WindowRenderer {
     /// hundred columns wide would end up three hundred roundings away from where
     /// its own scroller thinks it ends.
     pub fn preview_mono_advance(&mut self, gpu: &mut GpuContext, font_size_px: f32) -> f32 {
-        const CELLS: usize = 32;
-        let sample = "M".repeat(CELLS);
-        let line_height = font_size_px * 1.4;
-        let mut buffer = Buffer::new(
-            &mut gpu.font_system,
-            Metrics::new(font_size_px, line_height),
-        );
-        buffer.set_wrap(Wrap::None);
-        buffer.set_size(None, Some(line_height));
-        buffer.set_text(
-            &sample,
-            &Attrs::new().family(Family::Monospace),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut gpu.font_system, false);
-        let width = buffer
-            .layout_runs()
-            .map(|run| run.line_w)
-            .fold(0.0_f32, f32::max);
-        width / CELLS as f32
+        preview_mono_advance(&mut gpu.font_system, font_size_px)
     }
 
     /// **U8 — move the preview seat's picture to where its pane is drawn this
@@ -9112,8 +9242,11 @@ impl WindowRenderer {
         self.seat
     }
 
-    /// **Read this window's last frame back**, as `[b, g, r, a]` rows of
-    /// `config.width` pixels — an offscreen target only.
+    /// **Encode the read-back of this window's last frame** — an offscreen target only — and
+    /// hand the work back unsubmitted: [`probe_surface::read_back_work`], whose submit is
+    /// `bt_render_probe::read_back`'s (the thread-door note (l)4: the probe's GPU submissions
+    /// are a tool's, not the product library's). The rows come back as `[b, g, r, a]`, of
+    /// `config.width` pixels, from [`probe_surface::read_back_pixels`].
     ///
     /// The one way a test can ask *where a glyph landed* rather than where it
     /// was told to land, which is the whole difference §7.36 turns on: the
@@ -9121,9 +9254,9 @@ impl WindowRenderer {
     /// wrong (`BT_CHROME_DUMP` said `[42, 6, 180, 40]` while the picture put the
     /// same title at 84).
     ///
-    /// # Why it is public
+    /// # Why it is reachable from outside
     ///
-    /// It was a test's door until 2026-08-28 and is now anybody's, because an
+    /// It was a test's door until 2026-08-28 and is now any tool's, because an
     /// offscreen window has no other purpose: it is created with `COPY_SRC` for
     /// exactly this, and a target nothing can read is a target that has drawn
     /// nothing anyone can check. The video probe (§7.42) takes its evidence
@@ -9143,7 +9276,10 @@ impl WindowRenderer {
     /// earlier and somewhere else entirely. That is the panic the 2026-08-31
     /// investigation started from. Asking after the buffer is minted is what
     /// makes the answer name the machine instead of the messenger.
-    pub fn read_back(&self, gpu: &GpuContext) -> Result<Vec<[u8; 4]>, RenderError> {
+    fn read_back_work(
+        &self,
+        gpu: &GpuContext,
+    ) -> Result<(wgpu::CommandBuffer, probe_surface::ReadBack), RenderError> {
         let FrameTarget::Offscreen(texture) = &self.target else {
             panic!("only an offscreen window can be read back");
         };
@@ -9186,7 +9322,29 @@ impl WindowRenderer {
                 depth_or_array_layers: 1,
             },
         );
-        gpu.queue.submit([encoder.finish()]);
+        Ok((
+            encoder.finish(),
+            probe_surface::ReadBack {
+                buffer,
+                padded,
+                width,
+                height,
+            },
+        ))
+    }
+
+    /// **The read-back's second half**, after its work was submitted: wait for the mapping,
+    /// ask after the device once more, and unpad the rows.
+    fn read_back_pixels(
+        gpu: &GpuContext,
+        back: probe_surface::ReadBack,
+    ) -> Result<Vec<[u8; 4]>, RenderError> {
+        let probe_surface::ReadBack {
+            buffer,
+            padded,
+            width,
+            height,
+        } = back;
         buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         gpu.device
             .poll(wgpu::PollType::Wait {
@@ -9645,9 +9803,8 @@ impl WindowRenderer {
         trigger: FrameTrigger,
         mut phase: impl FnMut(PresentPhase),
     ) -> Result<PresentOutcome, RenderError> {
-        let _ = token;
         phase(PresentPhase::ComposeEncode);
-        let outcome = self.compose_frame(gpu, seats, trigger, &mut phase);
+        let outcome = self.compose_frame(&token, gpu, seats, trigger, &mut phase);
         // **The one place the shared atlas is told the frame is over, and it is
         // outside every way the frame can end.**
         //
@@ -9691,8 +9848,12 @@ impl WindowRenderer {
     /// Split from [`Self::present_frame`] for one reason: this function may
     /// return early and that one may not, because the atlas trim it owes has to
     /// outlive every exit here. Nothing else moved.
+    ///
+    /// Under the `PresentFrame` door: it borrows the admission's token, so its
+    /// submit and present are the door's effects (thread-door note (l)1, R2).
     fn compose_frame(
         &mut self,
+        token: &WaitToken<'_, doors::PresentFrame>,
         gpu: &mut GpuContext,
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
@@ -10495,7 +10656,7 @@ impl WindowRenderer {
                 (AcquiredFrame::Swapchain(texture), view)
             }
             SurfaceAcquisition::Failed(failure) => {
-                return self.handle_surface_failure(gpu, failure, phase);
+                return self.handle_surface_failure(token, gpu, failure, phase);
             }
             SurfaceAcquisition::Offscreen(view) => (AcquiredFrame::Offscreen, view),
         };
@@ -11826,50 +11987,6 @@ impl WindowRenderer {
             .collect()
     }
 
-    /// The seat is a parameter for [`Self::math_block_geometry`]'s reason (RC-2):
-    /// the failure marker is a hit target too, and a hit target clamped against
-    /// the focused pane is a press that lands somewhere else.
-    fn math_failure_geometry(
-        &self,
-        metrics: CellMetrics,
-        seat: SeatViewport,
-        frame: &ViewportFrame,
-        placement: &bt_viewport::MathFailurePlacement,
-    ) -> Option<([f32; 4], [f32; 4])> {
-        if !frame.drawable_interval_overlaps(placement.top_subpixels, placement.height_subpixels) {
-            return None;
-        }
-        let pane_left = metrics.padding_px;
-        // The failed block's own pane's right edge (T-PANE-COLUMNS, R10), the grid's otherwise.
-        let pane_right = math_block_right_px(
-            metrics,
-            seat.width,
-            frame.columns,
-            placement.right_limit_columns,
-        );
-        let pane_top = metrics.padding_px;
-        let pane_bottom = seat.height as f32;
-        let raw_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
-        let raw_bottom = raw_top + placement.height_subpixels as f32 / SUBPIXELS_PER_PX as f32;
-        let top = raw_top.max(pane_top);
-        let bottom = raw_bottom.min(pane_bottom);
-        if bottom <= top || pane_right <= pane_left {
-            return None;
-        }
-        let scale = metrics.scale_factor as f32;
-        let marker_right = pane_right - scale;
-        let marker_left = (marker_right - 2.0 * scale).max(pane_left);
-        let inset = (4.0 * scale).min((bottom - top) / 3.0);
-        let marker = [marker_left, top + inset, marker_right, bottom - inset];
-        let hit = [
-            (pane_right - 14.0 * scale).max(pane_left),
-            top,
-            pane_right,
-            bottom,
-        ];
-        Some((marker, hit))
-    }
-
     /// The one way a frame ends without a back buffer — and the one place that
     /// pays what such a frame still owes.
     ///
@@ -11931,8 +12048,12 @@ impl WindowRenderer {
     /// [`WindowRenderer::compose_frame`] reaches here has passed
     /// `still_has_its_device` and has just staged a whole frame against that
     /// device.
+    ///
+    /// Under the `PresentFrame` door, beside [`Self::compose_frame`]: its empty
+    /// submit is the door's effect.
     fn handle_surface_failure(
         &mut self,
+        _token: &WaitToken<'_, doors::PresentFrame>,
         gpu: &GpuContext,
         failure: SurfaceFailure,
         phase: &mut dyn FnMut(PresentPhase),
@@ -12448,8 +12569,7 @@ impl WindowRenderer {
             }
         }
         for failure in &frame.math_failures {
-            if let Some((marker, _)) =
-                self.math_failure_geometry(metrics, self.seat, frame, failure)
+            if let Some((marker, _)) = math_failure_geometry_px(metrics, self.seat, frame, failure)
             {
                 rects.push(self.pixel_rect_with_coverage(
                     marker[0],
@@ -12766,8 +12886,10 @@ impl WindowRenderer {
         }
     }
 
-    /// Draw one frame's grid text into this window's attachment and report what
-    /// the CPU spent doing it — the `bt-replay` instrumentation path.
+    /// Prepare and encode one frame's grid text into this window's attachment, and hand
+    /// the work back unsubmitted — the `bt-replay` instrumentation path, whose submit and
+    /// present are `bt_render_probe::HeadlessRenderProbe::prepare_frame`'s (the thread-door
+    /// note (l)4). [`Self::probe_frame_finish`] reports what the CPU spent.
     ///
     /// Every phase here is the production path: the same [`prepare_text_rows`]
     /// against the same composed-row and shaping caches, the same glyphon
@@ -12783,12 +12905,13 @@ impl WindowRenderer {
     ///
     /// The pair invariant of [`Self::present_frame`] holds here for the same
     /// reason and by the same construction: the prepares and the render are
-    /// inside one call.
-    fn probe_frame(
+    /// inside one call, and the probe submits what that call encoded before it
+    /// prepares anything else.
+    fn probe_frame_work(
         &mut self,
         gpu: &mut GpuContext,
         frame: &ViewportFrame,
-    ) -> Result<RenderProbeSample, RenderError> {
+    ) -> Result<probe_surface::ProbeWork, RenderError> {
         let started = Instant::now();
         frame.validate_shape()?;
         let (width, height) = (self.config.width, self.config.height);
@@ -12893,14 +13016,46 @@ impl WindowRenderer {
                     .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
             }
         }
-        gpu.queue.submit([encoder.finish()]);
-        let submitted_at = Instant::now();
-        match acquired {
-            AcquiredFrame::Swapchain(texture) => gpu.queue.present(texture),
-            AcquiredFrame::Offscreen => {}
-        }
+        Ok(probe_surface::ProbeWork {
+            commands: encoder.finish(),
+            swapchain: match acquired {
+                AcquiredFrame::Swapchain(texture) => Some(texture),
+                AcquiredFrame::Offscreen => None,
+            },
+            timings: probe_surface::ProbeTimings {
+                started,
+                text_stats,
+                rows_prepared_at,
+                atlas_prepared_at,
+                math_prepared_at,
+                math_evictions_before,
+                math_texture_uploads,
+                math_texture_upload_bytes,
+            },
+        })
+    }
+
+    /// **The probe frame's last half**, after its work was submitted (and a swapchain's
+    /// frame presented) at `submitted_at`: the atlas is told the frame is over, and the sample
+    /// is what the frame cost.
+    fn probe_frame_finish(
+        &mut self,
+        gpu: &mut GpuContext,
+        timings: probe_surface::ProbeTimings,
+        submitted_at: Instant,
+    ) -> RenderProbeSample {
+        let probe_surface::ProbeTimings {
+            started,
+            text_stats,
+            rows_prepared_at,
+            atlas_prepared_at,
+            math_prepared_at,
+            math_evictions_before,
+            math_texture_uploads,
+            math_texture_upload_bytes,
+        } = timings;
         gpu.atlas.trim();
-        Ok(RenderProbeSample {
+        RenderProbeSample {
             total: started.elapsed(),
             row_compose: text_stats.elapsed,
             shape_cache_miss: text_stats.narrow.miss_time + text_stats.wide.miss_time,
@@ -12941,7 +13096,7 @@ impl WindowRenderer {
                 .iter()
                 .map(|row| row.wide_glyphs.len() as u64)
                 .sum(),
-        })
+        }
     }
 
     /// Upload every math raster this frame would draw, and count what that cost.
@@ -13945,11 +14100,10 @@ fn shape_chrome_labels_with_cjk(
 /// on screen. The fact worth a line is the *decision* — this face, for this
 /// requested weight, at this size — and a session makes a few dozen of those.
 fn trace_chrome_cjk_glyphs(font_system: &FontSystem, buffer: &Buffer, label: &ChromeLabel) {
-    static TRACE: OnceLock<bool> = OnceLock::new();
     static SEEN: OnceLock<
         std::sync::Mutex<std::collections::HashSet<(glyphon::fontdb::ID, u16, u32)>>,
     > = OnceLock::new();
-    if !*TRACE.get_or_init(|| std::env::var_os("BT_PERF_TRACE").is_some_and(|v| !v.is_empty())) {
+    if !bt_viewport::trace::perf() {
         return;
     }
     let requested = label.weight.shaping_weight().0;
@@ -15381,7 +15535,13 @@ fn selection_span_bounds_px(
     ]
 }
 
-fn ime_cursor_area_for_metrics(metrics: CellMetrics, frame: &ViewportFrame) -> ImeCursorArea {
+/// The rectangle an input method is told for the terminal's caret: the frame's cursor cell, in the
+/// pane's own pixels at `metrics`, clamped into the pane.
+///
+/// It measures the cell `frame.cursor` names whether or not that cell is drawn. A cursor whose row
+/// the pane does not show names the row at the pane's edge nearest it (`ViewportFrame::cursor`), so
+/// a scrolled-away caret's candidate window opens at that edge, in the caret's column.
+pub fn ime_cursor_area_for_metrics(metrics: CellMetrics, frame: &ViewportFrame) -> ImeCursorArea {
     let [left, raw_top, right, raw_bottom] = frame_cell_bounds_px(
         metrics,
         frame,
@@ -18497,6 +18657,171 @@ pub fn preview_measure_font_system() -> FontSystem {
     terminal_font_system()
 }
 
+/// [`WindowRenderer::preview_mono_advance`]'s measurement over any font system.
+fn preview_mono_advance(font_system: &mut FontSystem, font_size_px: f32) -> f32 {
+    const CELLS: usize = 32;
+    let sample = "M".repeat(CELLS);
+    let line_height = font_size_px * 1.4;
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
+    buffer.set_wrap(Wrap::None);
+    buffer.set_size(None, Some(line_height));
+    buffer.set_text(
+        &sample,
+        &Attrs::new().family(Family::Monospace),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(font_system, false);
+    let width = buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max);
+    width / CELLS as f32
+}
+
+/// **A window's measuring without a device, a surface or a window** — the shaping a
+/// [`WindowRenderer`] measures chrome labels, preview paragraphs and terminal cells with, the same
+/// functions over the production font environment ([`preview_measure_font_system`]) and the
+/// default CJK chain, for a stand-in window that has no swapchain to measure for.
+///
+/// **Its one caller is `bt-app`'s test-only headless backend** (T-HEADLESS-RUNTIME-SEAM), and it
+/// is compiled into the product all the same, for a reason rather than by accident: the suite that
+/// uses it is another crate's, which a `#[cfg(test)]` here does not reach, and the alternative — a
+/// cargo feature `bt-app`'s dev-dependency turns on — compiles a second `bt-render` for every
+/// test build of the workspace. What it holds is the product's own measuring, so a product build
+/// carries no logic of its own in it: a font system and the shaping functions the renderer calls.
+pub struct DeviceFreeMeasure {
+    font_system: FontSystem,
+    terminal_cjk_families: TerminalCjkFamilies,
+}
+
+impl Default for DeviceFreeMeasure {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeviceFreeMeasure {
+    #[must_use]
+    pub fn new() -> Self {
+        let mut font_system = preview_measure_font_system();
+        let terminal_cjk_families = resolve_terminal_cjk_families("", &mut font_system);
+        Self {
+            font_system,
+            terminal_cjk_families,
+        }
+    }
+
+    /// [`WindowRenderer::measure_chrome_label`], or its monospace twin when `mono`.
+    pub fn chrome_label(
+        &mut self,
+        text: &str,
+        font_size_px: f32,
+        weight: ChromeLabelWeight,
+        letter_spacing_em: f32,
+        tabular_numerals: bool,
+        mono: bool,
+    ) -> f32 {
+        measure_chrome_label_with_cjk(
+            &mut self.font_system,
+            text,
+            font_size_px,
+            weight,
+            letter_spacing_em,
+            tabular_numerals,
+            mono,
+            &self.terminal_cjk_families,
+        )
+    }
+
+    /// [`WindowRenderer::chrome_label_advances`].
+    pub fn chrome_label_advances(
+        &mut self,
+        text: &str,
+        font_size_px: f32,
+        weight: ChromeLabelWeight,
+        letter_spacing_em: f32,
+        tabular_numerals: bool,
+    ) -> ChromeTextAdvances {
+        chrome_label_advances_with_cjk(
+            &mut self.font_system,
+            text,
+            font_size_px,
+            weight,
+            letter_spacing_em,
+            tabular_numerals,
+            false,
+            &self.terminal_cjk_families,
+        )
+    }
+
+    /// [`WindowRenderer::measure_preview_paragraph`].
+    pub fn preview_paragraph(
+        &mut self,
+        runs: &[PreviewRun],
+        width_px: f32,
+        font_size_px: f32,
+        line_height_px: f32,
+    ) -> f32 {
+        measure_preview_paragraph(
+            &mut self.font_system,
+            runs,
+            width_px,
+            font_size_px,
+            line_height_px,
+        )
+    }
+
+    /// [`WindowRenderer::measure_preview_paragraph_width`].
+    pub fn preview_paragraph_width(
+        &mut self,
+        runs: &[PreviewRun],
+        font_size_px: f32,
+        line_height_px: f32,
+    ) -> f32 {
+        measure_preview_paragraph_width(&mut self.font_system, runs, font_size_px, line_height_px)
+    }
+
+    /// [`WindowRenderer::measure_preview_run_boxes`].
+    pub fn preview_run_boxes(&mut self, paragraph: &PreviewParagraph) -> Vec<PreviewRunBox> {
+        preview_run_boxes(&mut self.font_system, paragraph)
+    }
+
+    /// [`WindowRenderer::measure_preview_hit`].
+    pub fn preview_hit(&mut self, paragraph: &PreviewParagraph, x: f32, y: f32) -> usize {
+        preview_hit(&mut self.font_system, paragraph, x, y)
+    }
+
+    /// [`WindowRenderer::measure_preview_rows`].
+    pub fn preview_rows(&mut self, paragraph: &PreviewParagraph) -> Vec<PreviewTextRow> {
+        preview_text_rows(&mut self.font_system, paragraph)
+    }
+
+    /// [`WindowRenderer::measure_preview_highlight`].
+    pub fn preview_highlight(
+        &mut self,
+        paragraph: &PreviewParagraph,
+        range: Range<usize>,
+    ) -> Vec<[f32; 4]> {
+        preview_highlight(&mut self.font_system, paragraph, range)
+    }
+
+    /// [`WindowRenderer::preview_mono_advance`].
+    pub fn preview_mono_advance(&mut self, font_size_px: f32) -> f32 {
+        preview_mono_advance(&mut self.font_system, font_size_px)
+    }
+
+    /// [`CellMetrics::measure_at`] over this font system: a terminal cell at a face size and a
+    /// display scale.
+    pub fn cell_metrics(
+        &mut self,
+        scale_factor: f64,
+        font_size_logical_px: f32,
+    ) -> Result<CellMetrics, RenderError> {
+        CellMetrics::measure_at(&mut self.font_system, scale_factor, font_size_logical_px)
+    }
+}
+
 /// CPU measurement shared by the renderer and non-GUI document probes.
 pub fn measure_preview_paragraph(
     font_system: &mut FontSystem,
@@ -19584,6 +19909,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(columns * rows),
             row_map: test_row_map(rows as u32),
             selection_spans: Vec::new(),
@@ -19837,6 +20163,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(columns * rows),
             row_map: test_row_map(rows as u32),
             selection_spans: Vec::new(),
@@ -20859,6 +21186,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(columns * rows),
             row_map: test_row_map(rows as u32),
             selection_spans: Vec::new(),
@@ -20967,7 +21295,8 @@ mod tests {
                     * LINE_HEIGHT_TO_FONT_SIZE_RATIO
                     * scale_factor as f32)
                     .ceil(),
-                "the row height is a ratio of the face size now, and at the                  default size it must still be the 22 logical pixels it always was"
+                "the row height is a ratio of the face size now, and at the \
+                 default size it must still be the 22 logical pixels it always was"
             );
             assert_eq!(
                 DEFAULT_TERMINAL_FONT_SIZE_LOGICAL_PX * LINE_HEIGHT_TO_FONT_SIZE_RATIO,
@@ -20987,6 +21316,7 @@ mod tests {
                 presentation_offset_subpixels: 0,
                 cells: vec![CapturedCell::default(); 12],
                 cursor,
+                cursor_in_view: true,
                 cell_anchors: test_cell_anchors(12),
                 row_map: test_row_map_for_metrics(3, metrics),
                 selection_spans: Vec::new(),
@@ -21035,6 +21365,7 @@ mod tests {
                 column: 1,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(8),
             row_map: vec![
                 bt_viewport::FrameVisualRow {
@@ -21142,6 +21473,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(6),
             row_map: test_row_map_for_metrics(2, metrics),
             selection_spans: Vec::new(),
@@ -21227,6 +21559,7 @@ mod tests {
                 column: 1,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(6),
             row_map: vec![
                 bt_viewport::FrameVisualRow {
@@ -21446,6 +21779,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(1),
             row_map: test_row_map(1),
             selection_spans: Vec::new(),
@@ -21489,6 +21823,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             selection_spans: Vec::new(),
             search_spans: Vec::new(),
             current_search_spans: Vec::new(),
@@ -21925,7 +22260,7 @@ mod tests {
     /// wrong in every split window.
     #[test]
     fn the_band_accessors_are_given_a_seat_and_never_take_one() {
-        // The last of the six is the one that does the arithmetic: it takes the
+        // The last of the five is the one that does the arithmetic: it takes the
         // seat too, so nothing below the other five can quietly reach for the
         // field again.
         for name in [
@@ -21933,7 +22268,6 @@ mod tests {
             "math_band_face",
             "math_band_trace",
             "math_hit_test",
-            "math_failure_geometry",
             "math_block_geometry",
         ] {
             // The item, not a slice of a file (P8), and a refusal rather than
@@ -21964,6 +22298,18 @@ mod tests {
                 reaches.report(source())
             );
         }
+        // The failure marker's geometry is a free function since the window seam
+        // (T-HEADLESS-RUNTIME-SEAM), so it has no field to reach for: it is handed
+        // the seat or it has none.
+        let failure = found_in(
+            needle!(Pattern::text("seat: SeatViewport")),
+            View::CodeKeepingLiterals,
+            Scope::Item(ItemQuery::function("math_failure_geometry_px")),
+        );
+        assert!(
+            !failure.is_empty(),
+            "math_failure_geometry_px does not take the band's own pane"
+        );
     }
 
     /// PIN (owner's report 2026-09-14, re-ruled 2026-09-20 by
@@ -22105,6 +22451,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             selection_spans: Vec::new(),
             search_spans: Vec::new(),
             current_search_spans: Vec::new(),
@@ -22191,6 +22538,7 @@ mod tests {
                 column: 1,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(columns * grid_rows),
             row_map: test_row_map(grid_rows as u32),
             selection_spans: vec![SelectionSpan {
@@ -22304,6 +22652,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(4),
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
@@ -22705,6 +23054,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(6),
             row_map: test_row_map(3),
             selection_spans: Vec::new(),
@@ -23574,6 +23924,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(1),
             row_map: test_row_map(1),
             selection_spans: Vec::new(),
@@ -23686,6 +24037,7 @@ mod tests {
                 column: 2,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(16),
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
@@ -23699,13 +24051,17 @@ mod tests {
             layout_key: bt_doc_layout_key(8),
             view_generation: bt_doc::ViewGeneration(1),
         };
-        for (text, visible, expected) in [
-            ("synthetic", true, true),
-            ("synthetic", false, false),
-            ("", true, false),
-            ("\u{0301}", true, false),
+        // A cursor the program hid composes where it stands (issue #42); one whose cell the frame
+        // does not draw composes nothing, shown or not.
+        for (text, visible, in_view, expected) in [
+            ("synthetic", true, true, true),
+            ("synthetic", false, true, true),
+            ("synthetic", false, false, false),
+            ("", true, true, false),
+            ("\u{0301}", true, true, false),
         ] {
             frame.cursor.visible = visible;
+            frame.cursor_in_view = in_view;
             let preedit = Preedit {
                 text: text.to_owned(),
                 cursor_byte: None,
@@ -23720,6 +24076,7 @@ mod tests {
         // A wide cluster at the final grid cell wraps outside the grid and writes nothing.
         frame.cursor.row = 1;
         frame.cursor.column = 7;
+        frame.cursor_in_view = true;
         let wide = Preedit {
             text: "\u{1f600}".to_owned(),
             cursor_byte: None,
@@ -23741,6 +24098,7 @@ mod tests {
                 column: 2,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(16),
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
@@ -23778,6 +24136,288 @@ mod tests {
         );
     }
 
+    /// A pane the way `pi` leaves it while its input box has the focus: a prompt, its own
+    /// reverse-video caret drawn as a cell, and the terminal cursor moved onto that cell and hidden
+    /// (`CSI ?25l`) — or shown, for the twin. Twelve columns, three rows, the cursor at row 1,
+    /// column 2.
+    fn input_box_frame(cursor_shown: bool) -> ViewportFrame {
+        let mut cells = vec![CapturedCell::plain(""); 36];
+        cells[12] = CapturedCell::plain(">");
+        cells[13] = CapturedCell::plain(" ");
+        let mut drawn_caret = CapturedCell::plain(" ");
+        drawn_caret.style.flags.insert(CellFlags::INVERSE);
+        cells[14] = drawn_caret;
+        ViewportFrame {
+            columns: NonZeroU32::new(12).unwrap(),
+            horizontal: HorizontalProjection::unscrolled(12),
+            grid_rows: NonZeroU32::new(3).unwrap(),
+            rows: NonZeroU32::new(3).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells,
+            cursor: bt_viewport::GridCursor {
+                row: 1,
+                column: 2,
+                visible: cursor_shown,
+            },
+            cursor_in_view: true,
+            cell_anchors: test_cell_anchors(36),
+            row_map: test_row_map(3),
+            selection_spans: Vec::new(),
+            search_spans: Vec::new(),
+            current_search_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(12),
+            view_generation: bt_doc::ViewGeneration(1),
+        }
+    }
+
+    fn input_box_metrics() -> CellMetrics {
+        CellMetrics {
+            cell_width_px: 8.0,
+            cell_height_px: 20.0,
+            font_size_px: 16.0,
+            padding_px: 4.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 0.0,
+            primary_advance_px: 8.0,
+            primary_cap_height_px: 10.0,
+            primary_cap_center_y_px: 5.0,
+        }
+    }
+
+    /// PIN — the reader scrolled into history while the prompt is below the pane, and starts
+    /// typing pinyin: nothing is composed (the cursor's cell is not drawn), and the candidate
+    /// window is told the cell at the pane's bottom edge in the cursor's column — the edge the
+    /// prompt is beyond — never the presentation row that shares the cursor's grid row index,
+    /// which is a history line the reader is looking at. Byte-driven: the session's frame, the
+    /// compositor, and the measurement the IME road makes, in the order `runtime/frame.rs` makes
+    /// them.
+    ///
+    /// MUTATION: the frame's cursor row back to `projected_cursor_row.unwrap_or(cursor.row)` in
+    /// `bt_viewport`'s `continuous_frame` — red: the rectangle stands on presentation row 1.
+    #[test]
+    fn an_ime_caret_for_a_scrolled_away_cursor_is_not_an_unrelated_row() {
+        // One geometry: the metrics' cell is exactly as tall as the session's rows, so the
+        // pane's bottom (what the measurement clamps to) is the bottom of the frame's last row.
+        let metrics = CellMetrics {
+            cell_height_px: (bt_term::SPIKE_CELL_HEIGHT_SUBPIXELS.get() / SUBPIXELS_PER_PX) as f32,
+            ..input_box_metrics()
+        };
+        let started = std::time::Instant::now();
+        let mut session = bt_term::DualPlaneSession::new(
+            NonZeroU32::new(20).unwrap(),
+            NonZeroU32::new(4).unwrap(),
+        );
+        let mut bytes = String::new();
+        for line in 0..12 {
+            bytes.push_str(&format!("历史-{line} history\r\n"));
+        }
+        // The prompt on grid row 1, the cursor after `> 你好` (columns 0..6).
+        bytes.push_str("\x1b[2;1H\x1b[2K> 你好");
+        session.feed_at(bytes.as_bytes(), started).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let resting = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            (
+                resting.cursor.row,
+                resting.cursor.column,
+                resting.cursor_in_view
+            ),
+            (1, 6, true),
+            "fixture: at rest the cursor is drawn on row 1"
+        );
+        let preedit = Preedit {
+            text: "ni'hao你".to_owned(),
+            cursor_byte: None,
+        };
+        let last_pane_row = resting.grid_rows.get() as usize - 1;
+        for offset in [3, 6] {
+            projection.scroll_by_rows(offset);
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            assert!(
+                !frame.cursor_in_view,
+                "offset={offset}: fixture: the prompt is below the pane"
+            );
+            let composed = compose_preedit(&frame, Some(&preedit)).unwrap();
+            assert_eq!(
+                composed.frame, frame,
+                "offset={offset}: nothing is composed"
+            );
+            assert_eq!(composed.ime_caret, frame.cursor);
+            let area = ime_cursor_area_for_metrics(metrics, &composed.frame);
+            let edge = frame.row_map[last_pane_row];
+            let edge_top = metrics.padding_px + edge.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+            assert_eq!(
+                (area.x, area.y),
+                (
+                    (metrics.padding_px + 6.0 * metrics.cell_width_px) as i32,
+                    edge_top as i32
+                ),
+                "offset={offset}: the candidate window stands at the pane's bottom edge, in the \
+                 cursor's column",
+            );
+            assert_eq!(
+                area.y + area.height as i32,
+                (metrics.padding_px + resting.grid_rows.get() as f32 * metrics.cell_height_px)
+                    as i32,
+                "offset={offset}: the edge cell ends where the pane does",
+            );
+            assert_ne!(edge.live_grid_row, Some(1));
+            projection.scroll_by_rows(-offset);
+        }
+    }
+
+    /// PIN (issue #42) — a composition is drawn at the terminal cursor when the program hid it,
+    /// and the candidate window is told the composition's caret, exactly as for a shown cursor.
+    ///
+    /// `pi` hides the terminal cursor, draws its own, and parks the hidden one at its input caret
+    /// so an IME can find it; Microsoft Pinyin's `ni'hao` then showed nothing in its box while the
+    /// candidate window sat at the box's left edge. Windows Terminal composes at the cursor's
+    /// position and never asks whether it is visible (`Renderer::_prepareNewComposition`).
+    ///
+    /// MUTATION: filter the preedit on `frame.cursor.visible` again in `compose_preedit_inner` —
+    /// red at the first assertion: the hidden frame comes back without a letter of `ni'hao`.
+    #[test]
+    fn a_composition_is_drawn_at_a_hidden_cursor() {
+        let metrics = input_box_metrics();
+        let hidden = input_box_frame(false);
+        let shown = input_box_frame(true);
+        // The reading a Chinese method shows mid-word, and a mixed one with its caret inside.
+        for (text, cursor_byte, drawn, caret_column) in [
+            ("ni'hao", None, vec!["n", "i", "'", "h", "a", "o"], 8),
+            (
+                "你好hao",
+                Some("你好".len()),
+                vec!["你", "", "好", "", "h", "a", "o"],
+                6,
+            ),
+        ] {
+            let preedit = Preedit {
+                text: text.to_owned(),
+                cursor_byte,
+            };
+            let composed = compose_preedit(&hidden, Some(&preedit)).unwrap();
+            let row = &composed.frame.cells[12..24];
+            assert_eq!(
+                row[2..2 + drawn.len()]
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<Vec<_>>(),
+                drawn,
+                "{text}: the composition stands at the hidden cursor, over the program's own caret",
+            );
+            assert!(
+                row[2..2 + drawn.len()]
+                    .iter()
+                    .all(|cell| cell.style.flags.contains(CellFlags::UNDERLINE)),
+                "{text}: underlined as every composition is",
+            );
+            assert_eq!(
+                (row[0].text.as_str(), row[1].text.as_str()),
+                (">", " "),
+                "{text}: the prompt in front of it is the program's",
+            );
+            assert_eq!(
+                composed.ime_caret,
+                bt_viewport::GridCursor {
+                    row: 1,
+                    column: caret_column,
+                    visible: true,
+                },
+                "{text}: the IME caret is where the method put it inside the composition",
+            );
+
+            let twin = compose_preedit(&shown, Some(&preedit)).unwrap();
+            assert_eq!(
+                composed.frame.cells, twin.frame.cells,
+                "{text}: the letters are the same whether the program shows the cursor or not",
+            );
+            assert_eq!(composed.ime_caret, twin.ime_caret);
+            assert_eq!(
+                ime_cursor_area_for_metrics(metrics, &composed.frame),
+                ime_cursor_area_for_metrics(metrics, &twin.frame),
+                "{text}: and the candidate window hangs off the same caret",
+            );
+            assert_ne!(
+                ime_cursor_area_for_metrics(metrics, &composed.frame),
+                ime_cursor_area_for_metrics(metrics, &hidden),
+                "{text}: which is the composition's caret, not the box's left edge",
+            );
+
+            let (traced, written) = compose_preedit_traced(&hidden, Some(&preedit)).unwrap();
+            assert!(written, "{text}: the trace sees the letters written");
+            assert_eq!(traced, composed);
+        }
+        assert_eq!(
+            hidden.cells[14].text, " ",
+            "the terminal's own frame is untouched"
+        );
+    }
+
+    /// PIN (issue #42) — the composition moves the cursor to its own caret, and a cursor the
+    /// program hid stays hidden there: the caret inside a composition is the IME's, and a program
+    /// that hid the terminal cursor draws its own.
+    ///
+    /// MUTATION: `visible: ime_caret.visible` (the program's bit dropped) for the composed cursor
+    /// in `compose_preedit_inner` — red: a caret appears at column 7 of a pane whose program hid
+    /// it.
+    #[test]
+    fn a_hidden_cursor_glyph_stays_hidden_under_a_composition() {
+        let metrics = input_box_metrics();
+        let preedit = Preedit {
+            text: "ni'好".to_owned(),
+            cursor_byte: None,
+        };
+        let hidden = compose_preedit(&input_box_frame(false), Some(&preedit)).unwrap();
+        let shown = compose_preedit(&input_box_frame(true), Some(&preedit)).unwrap();
+        assert_eq!(
+            (hidden.frame.cursor.row, hidden.frame.cursor.column),
+            (1, 7),
+            "the cursor stands at the composition's caret",
+        );
+        assert!(!hidden.frame.cursor.visible, "and it is still hidden");
+        assert!(hidden.frame.cursor_in_view);
+        assert_eq!(shown.frame.cursor, shown.ime_caret);
+        for style in [CursorStyle::Bar, CursorStyle::Block, CursorStyle::Underline] {
+            assert!(
+                seat_caret(metrics, &hidden.frame, true, true, style).is_none(),
+                "no caret glyph under a hidden cursor's composition ({style:?})",
+            );
+            assert!(
+                seat_caret(metrics, &shown.frame, true, true, style).is_some(),
+                "while a shown cursor's composition draws one at its caret ({style:?})",
+            );
+        }
+    }
+
+    /// A cursor whose cell the frame does not draw — its row scrolled out, its column outside the
+    /// window — composes nothing, shown or hidden, and the IME is told the frame's own cursor: the
+    /// frame's `row` and `column` then name no drawn cell, and letters written there would land
+    /// in somebody else's row.
+    ///
+    /// MUTATION: drop the in-view half of the filter in `compose_preedit_inner` — red: the letters
+    /// are written into row 1 of a frame whose cursor is not on it.
+    #[test]
+    fn a_cursor_the_frame_does_not_draw_composes_nothing() {
+        let preedit = Preedit {
+            text: "ni'hao你".to_owned(),
+            cursor_byte: None,
+        };
+        for shown in [true, false] {
+            let mut frame = input_box_frame(shown);
+            frame.cursor_in_view = false;
+            frame.cursor.visible = false;
+            let composed = compose_preedit(&frame, Some(&preedit)).unwrap();
+            assert_eq!(composed.frame, frame, "shown={shown}: nothing is composed");
+            assert_eq!(composed.ime_caret, frame.cursor);
+            assert!(!compose_preedit_traced(&frame, Some(&preedit)).unwrap().1);
+        }
+    }
+
     #[test]
     fn preedit_uses_the_same_cluster_oracle_as_committed_cells() {
         let frame = ViewportFrame {
@@ -23792,6 +24432,7 @@ mod tests {
                 column: 1,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(16),
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
@@ -24135,6 +24776,7 @@ mod tests {
                     column: 0,
                     visible: true,
                 },
+                cursor_in_view: true,
                 cell_anchors: test_cell_anchors(1),
                 row_map: test_row_map_for_metrics(1, metrics),
                 selection_spans: Vec::new(),
@@ -24204,6 +24846,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(3),
             row_map: test_row_map(1),
             selection_spans: Vec::new(),
@@ -24261,6 +24904,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(1),
             row_map: test_row_map_for_metrics(1, metrics),
             selection_spans: Vec::new(),
@@ -25922,6 +26566,7 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors((columns * rows) as usize),
             row_map: test_row_map_for_metrics(rows, metrics),
             selection_spans: Vec::new(),
@@ -26796,7 +27441,8 @@ mod tests {
                 "Folio glyph atlas was repacked after a textless frame (refit #2)".to_owned(),
                 "Folio glyph atlas was repacked after a textless frame (refit #3)".to_owned(),
             ],
-            "a re-pack that leaves no line, or leaves one without its number, is a re-pack              nobody on the machine it happened on can count"
+            "a re-pack that leaves no line, or leaves one without its number, is a re-pack \
+             nobody on the machine it happened on can count"
         );
         // The family the refusal line already belongs to, so that one `grep` over
         // `diagnostics.log` finds both halves of the story.
@@ -27144,6 +27790,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors((columns * rows) as usize),
             row_map: test_row_map_for_metrics(rows, metrics),
             selection_spans: Vec::new(),
@@ -27357,7 +28004,8 @@ mod tests {
                     .count();
                 assert!(
                     inked > (seat.width * seat.height / 200) as usize,
-                    "window {which}, seat at x={}: {inked} inked pixels — its text did not come                      back",
+                    "window {which}, seat at x={}: {inked} inked pixels — its text did not come \
+                     back",
                     seat.x
                 );
             }
@@ -28071,7 +28719,8 @@ mod tests {
         // moved with it. Equality here would mean the request was dropped.
         assert!(
             semibold.iter().sum::<f32>() > regular.iter().sum::<f32>(),
-            "semibold {semibold:?} must outrun regular {regular:?} —              an unmoved axis is a badge still drawn at 400"
+            "semibold {semibold:?} must outrun regular {regular:?} — \
+             an unmoved axis is a badge still drawn at 400"
         );
         // `Regular` is what a label that says nothing gets, so every call site
         // that predates this field is untouched by it.
@@ -28145,7 +28794,9 @@ mod tests {
             let proportional = figure_advance_spread(&mut font_system, weight, false);
             assert!(
                 proportional > 1.0,
-                "{weight:?}: figures spread {proportional}px without `tnum` —                  if this face ever ships tabular defaults, this pin is the                  place that says the feature request became redundant"
+                "{weight:?}: figures spread {proportional}px without `tnum` — \
+                 if this face ever ships tabular defaults, this pin is the \
+                 place that says the feature request became redundant"
             );
             let tabular = figure_advance_spread(&mut font_system, weight, true);
             // A quarter pixel at the badge's 10px. Segoe UI Variable's tabular
@@ -28574,14 +29225,16 @@ mod tests {
             .collect();
         assert!(
             broken.is_empty(),
-            "these faces have no scalable em, and every advance they report is \n             `inf`: {broken:#?}"
+            "these faces have no scalable em, and every advance they report is \
+             `inf`: {broken:#?}"
         );
         assert!(
             db.faces().any(|face| face
                 .families
                 .iter()
                 .any(|(name, _)| name == COLOR_EMOJI_FONT_FAMILY)),
-            "the embedded emoji face draws bitmaps and must survive a rule that is \n             about the em rather than about outlines"
+            "the embedded emoji face draws bitmaps and must survive a rule that is \
+             about the em rather than about outlines"
         );
     }
 
@@ -28707,7 +29360,8 @@ mod tests {
             let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
             assert!(
                 (cap_centre - rect_centre).abs() <= 0.5,
-                "tab title cap band off the tab's axis at {dpi_milli} milli-DPI:                  cap centre {cap_centre}, tab centre {rect_centre}"
+                "tab title cap band off the tab's axis at {dpi_milli} milli-DPI: \
+                 cap centre {cap_centre}, tab centre {rect_centre}"
             );
         }
     }
@@ -28745,7 +29399,8 @@ mod tests {
             let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
             assert!(
                 (cap_centre - rect_centre).abs() <= 0.5,
-                "pane head title cap band off the head's axis at {dpi_milli} milli-DPI:                  cap centre {cap_centre}, head centre {rect_centre}"
+                "pane head title cap band off the head's axis at {dpi_milli} milli-DPI: \
+                 cap centre {cap_centre}, head centre {rect_centre}"
             );
         }
     }
@@ -29680,6 +30335,7 @@ mod tests {
                 column: 0,
                 visible: false,
             },
+            cursor_in_view: true,
             cell_anchors: test_cell_anchors(cells),
             row_map: test_row_map_for_metrics(rows, metrics),
             selection_spans: Vec::new(),
@@ -31702,6 +32358,7 @@ mod tests {
                     column: 0,
                     visible: false,
                 },
+                cursor_in_view: true,
                 cell_anchors: test_cell_anchors(columns * rows),
                 row_map: test_row_map(rows as u32),
                 selection_spans: vec![bt_viewport::SelectionSpan {
@@ -32179,7 +32836,8 @@ mod tests {
 
             assert!(
                 after.cell_height_px > before.cell_height_px,
-                "24 logical pixels of face wants a taller row than 16 did                  ({} vs {})",
+                "24 logical pixels of face wants a taller row than 16 did \
+                 ({} vs {})",
                 after.cell_height_px,
                 before.cell_height_px
             );
@@ -32237,23 +32895,6 @@ mod tests {
                 DEFAULT_PRIMARY_FONT_FAMILY,
                 "an unnamed family is the settings file's way of saying `the default`"
             );
-        }
-
-        /// The replay probe is the two layers and nothing else.
-        #[test]
-        fn the_replay_probe_is_a_context_and_an_offscreen_window() {
-            let mut probe = pollster::block_on(HeadlessRenderProbe::new(400, 300, 1.0))
-                .expect("a headless probe");
-            assert!(!probe.adapter_name().is_empty());
-            assert!(probe.max_texture_dimension_2d() > 0);
-            let frame = single_cell_cursor_frame(probe.window.base_metrics());
-            let sample = probe.prepare_frame(&frame).expect("one replayed frame");
-            assert!(sample.narrow_glyphs > 0);
-            assert_eq!(sample.row_cache_misses, 1);
-            let metrics = probe
-                .update_scale_factor(2.0)
-                .expect("the probe re-measures like any window");
-            assert_eq!(metrics.scale_factor, 2.0);
         }
 
         /// PIN (§7.36) — **on the device a machine with no graphics driver
@@ -32350,7 +32991,8 @@ mod tests {
             }
             assert!(
                 !inked.is_empty(),
-                "the label drew nothing at all — a gate that cannot see the ink                  cannot see it in the wrong place either"
+                "the label drew nothing at all — a gate that cannot see the ink \
+                 cannot see it in the wrong place either"
             );
             let left = inked.iter().map(|(x, _)| *x).min().expect("ink");
             let right = inked.iter().map(|(x, _)| *x).max().expect("ink");
@@ -33991,6 +34633,7 @@ mod tests {
                     column: 0,
                     visible: false,
                 },
+                cursor_in_view: true,
                 cell_anchors: test_cell_anchors(columns as usize),
                 row_map: test_row_map_for_metrics(1, metrics),
                 selection_spans: Vec::new(),

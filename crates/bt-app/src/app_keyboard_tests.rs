@@ -1358,15 +1358,19 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
         .unwrap_or_else(|| {
             panic!("the clipboard door does not ask who holds the keyboard:\n{door}")
         });
+    // The read is a request on the clipboard lane (T-CLIPBOARD-LANE); its answer is applied
+    // where the paste is spent.
     let read = door
-        .find("bt_platform::clipboard_payload()")
-        .expect("the door reads the clipboard");
-    let applied = door
-        .find("self.apply_clipboard_payload(target,payload)")
-        .expect("the door applies its clipboard payload");
+        .find("self.ask_for_a_paste(PasteInto::Terminal(target),Ask::Payload)")
+        .expect("the door asks the clipboard lane for the payload");
     assert!(
-        asked < read && read < applied,
-        "the question is asked before the read and the apply follows the read"
+        asked < read,
+        "the question is asked before the clipboard is"
+    );
+    assert!(
+        squeezed_body("Runtime", "spend_paste")
+            .contains("self.apply_clipboard_payload(target,payload)"),
+        "the lane's answer is applied where the paste is spent"
     );
     let apply = squeezed_body("Runtime", "apply_clipboard_payload");
     let recipient = apply

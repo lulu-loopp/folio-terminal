@@ -30,8 +30,8 @@ pub use diagnostics::{
 };
 pub use host::{
     HOST_NAMES_READ_BEFORE_INSTALL, SVG_RASTERIZER_READ_BEFORE_INSTALL, SvgRasterizer,
-    TEST_HOST_NAMES, TEST_SVG_DOCUMENT, TEST_SVG_PIXEL, install_host_names,
-    install_pool_thread_start, install_svg_rasterizer, install_test_host_names,
+    TEST_HOST_NAMES, TEST_SVG_DOCUMENT, TEST_SVG_PIXEL, TermDiagnostics, install_diagnostics,
+    install_host_names, install_pool_thread_start, install_svg_rasterizer, install_test_host_names,
     install_test_svg_rasterizer, local_host_names, test_svg_rasterizer,
 };
 pub use inline_image::{
@@ -55,10 +55,11 @@ pub use lifecycle::{
 };
 pub use scheduling::{PARSE_QUANTUM, RESIZE_REQUEST_QUIET, WORKER_QUEUE_CAP};
 pub use session::{
-    AttentionRequest, BellSource, DualPlaneSession, FrameImageReference, HeldUnbackedRecord,
-    HostScreen, InlineImageRecordView, LIVE_MATH_READABLE_SCALE_MILLI, LIVE_MATH_STABLE_INTERVAL,
-    LIVE_MIN_VISIBLE_TEXT_ROWS, MathLayoutOptions, MathToggleFaces, MathTogglePresentation,
-    NotificationSource, PathVerdict, ProgressState, ResizeTraceEvent, ResizeTraceKind,
+    AttentionRequest, BellSource, DECODE_TASKS_HELD, DECORATION_TASKS_HELD, DualPlaneSession,
+    FrameImageReference, HeldUnbackedRecord, HostScreen, InlineImageRecordView,
+    LIVE_MATH_READABLE_SCALE_MILLI, LIVE_MATH_STABLE_INTERVAL, LIVE_MIN_VISIBLE_TEXT_ROWS,
+    MathLayoutOptions, MathToggleFaces, MathTogglePresentation, NotificationSource,
+    PATH_TASKS_HELD, PathVerdict, ProgressState, ResizeTraceEvent, ResizeTraceKind,
     ResizeTraceRowOrigin, SPIKE_CELL_HEIGHT_SUBPIXELS, SessionDecorationTask, SessionError,
     SessionMathTask, SessionStatus, TerminalNotification, decoration_state_label,
     extend_live_task_band, live_snapshot_logical_line_text, path_exists, verify_path,

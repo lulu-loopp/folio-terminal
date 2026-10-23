@@ -5,7 +5,8 @@
 ## `lane_contract_tests::the_expected_failures_are_this_list` holds both equal to the code, and
 ## `scripts/ci/check-expected-failures.ps1` holds `# rows` to the merge base: no lane gains a row
 ## for a claim the merge base's `# claims` already has. A claim new to the suite brings the rows of
-## the lanes that do not keep it yet. Repairing a lane removes its row here and in the code.
+## the lanes that do not keep it yet. Repairing a lane removes its row here and in the code. Since
+## S-8 (2026-10-12) every lane keeps every claim, and `# rows` holds its header and nothing else.
 
 # claims
 claim
@@ -21,26 +22,9 @@ ASupersededRequestSaysSo
 AJoinedRequestCarriesItsTwin
 AFailureIsSaidOnce
 AnOrphanedAnswerReachesItsSink
+AWithdrawnRequestEndsCancelledOnce
+AWithdrawnRequestLeavesTheLine
+AnAnswerIsPublishedAfterItsResourcesAreReleased
 
 # rows
 lane	claim	failure	repair
-Font	EveryRequestEndsExactlyOnce	NoTerminal	D-72
-Font	ADeadWorkerIsObservable	DeathUnobservable	D-72
-Taskbar	EveryRequestEndsExactlyOnce	NoTerminal	D-73
-Taskbar	ADeadWorkerIsObservable	DeathUnobservable	D-73
-Programs	EveryRequestEndsExactlyOnce	NoTerminal	D-85
-Computation	FullLaneAnswersWithoutWaiting	AdmissionUnbounded	D-74
-Computation	AnswersHeldAreBounded	AnswersUnbounded	D-74
-Computation	EveryRequestHasItsOwnIdentity	IdentityAmbiguous	D-75
-Computation	ADeadWorkerIsObservable	DeathUnobservable	D-76
-Font	ASupersededRequestSaysSo	SupersededInSilence	D-72
-Font	AJoinedRequestCarriesItsTwin	JoinedInSilence	D-72
-Font	AFailureIsSaidOnce	NoFailedTerminal	D-72
-Taskbar	ASupersededRequestSaysSo	SupersededInSilence	D-73
-Taskbar	AJoinedRequestCarriesItsTwin	JoinedInSilence	D-73
-Taskbar	AFailureIsSaidOnce	NoFailedTerminal	D-73
-Programs	ASupersededRequestSaysSo	SupersededInSilence	D-85
-Programs	AJoinedRequestCarriesItsTwin	JoinedInSilence	D-85
-Programs	AFailureIsSaidOnce	NoFailedTerminal	D-85
-Computation	AFailureIsSaidOnce	NoFailedTerminal	D-76
-Computation	AnOrphanedAnswerReachesItsSink	OrphanNotSunk	D-75

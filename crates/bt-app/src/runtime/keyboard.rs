@@ -3,14 +3,16 @@
 
 use crate::PtyTarget;
 use crate::TextStep;
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     ImeCaretSource, ImeOwner, KeyboardOwner, LeafId, NewWindowPlan, NoticeHost, PreviewSurface,
     RenameClipboard, RenameExit, RenameVerdict, Runtime, Step, UserInputKind, composing_event_of,
-    composition_ruling, diagnostics, file_menu_powers, git_graph, goto_tab_index, hang_watch,
-    ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
-    input, keyboard_owner_is_a_shell, keyhint, marks, menubar, native_window, paste_card_key,
-    popup_takes_the_key, preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore,
-    settings, settings_key_of, shortcuts, toast, window_ime_cursor_area, write_pty_input,
+    composition_ruling, file_menu_powers, git_graph, goto_tab_index, hang_watch, ime_caret_source,
+    ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report, input,
+    keyboard_owner_is_a_shell, keyhint, marks, menubar, paste_card_key, popup_takes_the_key,
+    preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore, settings,
+    settings_key_of, shortcuts, terminal_ime_cursor_area, toast, write_pty_input,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
@@ -18,11 +20,10 @@ use bt_render::{FrameSource, FrameTrigger, ImeCursorArea, Preedit};
 use bt_viewport::ViewportFrame;
 use std::time::Instant;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{Ime, KeyEvent};
+use winit::event::Ime;
 use winit::keyboard::{Key, ModifiersState, NamedKey, NativeKey};
-use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **The hint card's own layer**, or nothing when no hold is being answered
     /// (§7.1.5e′).
     ///
@@ -213,6 +214,22 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **The window lost the keyboard** — the keyboard's door for the blur, the
+    /// one place outside this module's own events that its two window facts are
+    /// written.
+    ///
+    /// The key-hint card is hidden and not spent: nothing was pressed, so a hand
+    /// that comes back still holding `Ctrl` is answered again. Nothing is drawn
+    /// here; the blur's own frame carries the card's going.
+    ///
+    /// The input method's context is no longer this window's. Nothing is
+    /// cancelled or synthesized: IMM32 may synchronously deliver a partial
+    /// commit during this transition, and the product decision is to accept it.
+    pub(crate) fn blurred(&mut self) {
+        self.window.key_hint.hide();
+        self.window.ime_active = false;
     }
 
     /// **Everything a shortcut verb does to the process**, whichever door it
@@ -664,7 +681,6 @@ impl Runtime<'_> {
             menu_or_dialog: self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
                 || self.window.dirty_gate.is_open()
                 || self.window.first_run.is_open()
-                || self.window.psreadline_invite.is_open()
                 // The multi-line paste card (0.4.4 ticket 02): modal by the owner's ruling of
                 // 2026-09-23, so a drop is refused under it and a composition goes nowhere.
                 || self.paste_card_seat().is_some()
@@ -791,10 +807,7 @@ impl Runtime<'_> {
             ImeCaretSource::TerminalCursor => grid
                 .zip(self.focused().map(|leaf| leaf.metrics))
                 .map(|(frame, metrics)| {
-                    window_ime_cursor_area(
-                        self.window.renderer.seat_viewport(),
-                        self.window.renderer.ime_cursor_area(metrics, frame),
-                    )
+                    terminal_ime_cursor_area(&self.window.renderer, metrics, frame)
                 }),
         };
         let Some(area) = area else {
@@ -817,7 +830,7 @@ impl Runtime<'_> {
     /// `→` on a heading opens its child, `←` inside one shuts it, and Esc unwinds
     /// one layer at a time rather than dismissing the whole menu from inside the
     /// child.
-    fn term_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
+    fn term_menu_key(&mut self, event: &Keystroke) -> Result<()> {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
                 if !event.repeat && !self.set_term_submenu(false)? {
@@ -902,7 +915,7 @@ impl Runtime<'_> {
     /// A seat-origin one does — and it belongs to the *caller* now that there is
     /// more than one caller. The terminal's caret is computed by the frame
     /// machinery in the seat's own coordinates and is translated by
-    /// [`window_ime_cursor_area`] where it is read (§4.1, one translation); the
+    /// [`crate::window_ime_cursor_area`] where it is read (§4.1, one translation); the
     /// preview's is measured off the pane rectangle and is already the window's.
     /// Translating here would have applied the seat's origin to a rectangle that
     /// never had one.
@@ -1032,8 +1045,8 @@ impl Runtime<'_> {
     /// line — the hint card, the dialogs, the menus, the shortcut table and the
     /// child — is written for a key a hand pressed *at this window*, and a
     /// report of a key that was already down when the window arrived is not one.
-    pub(crate) fn keyboard_input(&mut self, event: &KeyEvent, is_synthetic: bool) -> Result<()> {
-        if !input::is_a_keystroke(event.state, is_synthetic) {
+    pub(crate) fn keyboard_input(&mut self, event: &Keystroke, is_synthetic: bool) -> Result<()> {
+        if !input::is_a_keystroke(event.pressed, is_synthetic) {
             return Ok(());
         }
         // **A program that types for you is still typing** (T-REMOTE-INPUT-PACKET,
@@ -1176,19 +1189,6 @@ impl Runtime<'_> {
             }
             return Ok(());
         }
-        // **The invitation owns the keyboard too**, in the order it is drawn.
-        // Esc declines, which is the answer that changes nothing on the machine
-        // — and every other key is swallowed rather than typed into a shell
-        // behind a scrim. Enter presses nothing on purpose: the affirmative here
-        // writes files, and a dialog that appeared while somebody was typing
-        // must not be able to install a module with the return key they were
-        // already reaching for.
-        if self.window.psreadline_invite.is_open() {
-            if !event.repeat && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                self.answer_psreadline_invite(restore::InviteTarget::Decline)?;
-            }
-            return Ok(());
-        }
         // **The multi-line paste card owns the keyboard** (owner's ruling 2026-09-23: "While the
         // paste card is up, keys do not reach the shell: the card is modal and answers only
         // Enter, the Join key and Esc"). `Enter` runs the lines as today — the reader has just
@@ -1306,6 +1306,7 @@ impl Runtime<'_> {
                     self.apply_slider(row, value)?;
                 }
                 settings::SettingsKeyVerdict::Closed => {
+                    self.settings_closed();
                     if let Some(position) = self.window.pointer_position {
                         self.update_chrome_hover(position)?;
                     }
@@ -1381,20 +1382,16 @@ impl Runtime<'_> {
         // is exactly what that layering says: Esc reaches the child only when
         // the owner is the terminal.
         if self.window.rename.is_some() {
-            // The clipboard is read **before** the editor is taken and only when
-            // the chord is the one that needs it — `settings_field_key`'s own
-            // borrow order, for its own reason: the read is a call into another
-            // process and a field that made it every keystroke would be paying
-            // for a paste nobody asked for.
-            let pasted = if rename_pastes(&event.logical_key, self.window.modifiers) {
-                self.clipboard_line()
-            } else {
-                String::new()
-            };
-            let mut clipboard = RenameClipboard {
-                paste: &pasted,
-                copied: None,
-            };
+            // **A paste is asked of the clipboard lane, and only for the chord
+            // that is one** (`clipboard_lane`): the read is a call into another
+            // process, and a field that made it every keystroke would be paying
+            // for a paste nobody asked for. The editor is not touched by the
+            // chord itself; the line lands through the field's own insert door
+            // on the turn the clipboard answers, if the editor is still open.
+            if rename_pastes(&event.logical_key, self.window.modifiers) {
+                return self.paste_into_field(crate::TextFieldSeat::TabName);
+            }
+            let mut clipboard = RenameClipboard { copied: None };
             let mut editor = self.window.rename.take().expect("the editor is open");
             let verdict = rename_key(
                 &mut editor,
@@ -2123,7 +2120,6 @@ impl Runtime<'_> {
         self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
-            || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
             || self.settings_layout().is_some()
@@ -2137,13 +2133,6 @@ impl Runtime<'_> {
             || self.window.palette.is_some()
     }
 
-    fn ime_native_facts(&self) -> ime_report::NativeFacts {
-        native_window(&self.window.window)
-            .ok()
-            .map(bt_platform::ime_observation::snapshot)
-            .unwrap_or_default()
-    }
-
     fn emit_ime_observation(&self, reason: &str, facts: ime_report::NativeFacts) {
         let line = self.window.ime_report.line(
             reason,
@@ -2153,15 +2142,15 @@ impl Runtime<'_> {
             facts,
         );
         let line = format!("{line} window={:?}", self.window.window.id());
-        diagnostics::note(&line);
+        self.window.window.note(&line);
         ime_report::TRACE.line(|| line);
     }
 
     pub(crate) fn write_ime_observation(&self, reason: &str) {
-        self.emit_ime_observation(reason, self.ime_native_facts());
+        self.emit_ime_observation(reason, ime_native_facts(&self.window.window));
     }
 
-    pub(crate) fn observe_ime_key(&mut self, event: &KeyEvent, is_synthetic: bool) {
+    pub(crate) fn observe_ime_key(&mut self, event: &Keystroke, is_synthetic: bool) {
         if !self.window.ime_report.has_first_key() {
             self.window.ime_report.first_key(ime_report::now_ms());
             self.window
@@ -2170,7 +2159,7 @@ impl Runtime<'_> {
         }
         // Releases do not break a run of presses. No native read, clock read,
         // allocation, or logging on ordinary keys after the first one.
-        if !input::is_a_keystroke(event.state, is_synthetic)
+        if !input::is_a_keystroke(event.pressed, is_synthetic)
             || !self.window.ime_report.watching_keys()
         {
             return;
@@ -2187,11 +2176,29 @@ impl Runtime<'_> {
             // Only the threshold candidate refreshes native facts, and no
             // oftener than the report's own interval. In particular an
             // English-mode reading at focus is not reused.
-            let facts = self.ime_native_facts();
+            let facts = ime_native_facts(&self.window.window);
             if self.window.ime_report.confirm(facts) {
                 self.emit_ime_observation("plain-text", facts);
             }
         }
+    }
+
+    /// **The "composition bracket is broken" line this event writes**, or none:
+    /// [`ime_report::Report::pairing`]'s line with the window it was seen on.
+    /// The window's native facts are read through [`ime_native_facts`] only when
+    /// a line will be written, at most [`ime_report::PAIRING_LINES_MAX`] times
+    /// in the life of the window.
+    fn ime_bracket_line(
+        &mut self,
+        kind: ime_report::ImeKind,
+        preedit_bytes: usize,
+    ) -> Option<String> {
+        let window = &self.window.window;
+        let line = self
+            .window
+            .ime_report
+            .pairing(kind, preedit_bytes, || ime_native_facts(window))?;
+        Some(format!("{line} window={:?}", window.id()))
     }
 
     /// A composition event, routed by [`ime_owner`].
@@ -2213,9 +2220,8 @@ impl Runtime<'_> {
             Ime::Preedit(text, _) => text.len(),
             _ => 0,
         };
-        if let Some(line) = self.window.ime_report.pairing(kind, preedit_bytes) {
-            let line = format!("{line} window={:?}", self.window.window.id());
-            diagnostics::note(&line);
+        if let Some(line) = self.ime_bracket_line(kind, preedit_bytes) {
+            self.window.window.note(&line);
             ime_report::TRACE.line(|| line);
         }
         if matches!(event, Ime::Enabled) {
@@ -2379,7 +2385,7 @@ impl Runtime<'_> {
                 // deliberately accepts it exactly like Windows Terminal: every commit reaches PTY.
                 write_pty_input(
                     self.focused()
-                        .map_or(PtyTarget::Nowhere, |leaf| leaf.input_target()),
+                        .map_or(PtyTarget::Nowhere, |leaf| leaf.person_input_target()),
                     &ime_commit_bytes(&text),
                     "write IME UTF-8 commit to PTY",
                 )?;
@@ -2419,3 +2425,21 @@ impl Runtime<'_> {
         }
     }
 }
+
+/// **The window's input-method facts, as the platform reads them now** — through
+/// the window seam's facts door ([`WindowHost::ime_facts`]), so a headless window
+/// answers what its test scripted and a native one reads the system.
+///
+/// **One named reading for every caller** — the bracket line (`ime_bracket_line`),
+/// the `IME observation` line (`write_ime_observation`) and the plain-text probe
+/// (`observe_ime_key`) — kept as a function of its own because it is the mutation
+/// point `runtime::keyboard::tests::a_restart_inside_a_live_composition_writes_the_windows_native_facts`
+/// names: a reading that goes round the door here answers default facts on a
+/// headless window, and that test goes red.
+fn ime_native_facts(window: &impl WindowHost) -> ime_report::NativeFacts {
+    window.ime_facts()
+}
+
+#[cfg(test)]
+#[path = "keyboard_tests.rs"]
+mod tests;

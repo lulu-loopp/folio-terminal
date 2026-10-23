@@ -86,9 +86,7 @@ fn still_holds_the_edit(tab: &TabState, path: &Path) -> bool {
 /// The window's own event handler, the door every OS close (Alt+F4, the
 /// taskbar's Close window, `performClose:`) comes through, squeezed.
 fn window_event_squeezed() -> String {
-    squeezed(item_body(
-        &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
-    ))
+    squeezed(item_body(&ItemQuery::method("FolioApp", "on_window_event")))
 }
 
 /// RED (58) — **A window close requested while the unsaved-changes gate is up
@@ -238,9 +236,9 @@ fn two_os_close_requests_in_a_row_ask_once_and_close_nothing_until_answered() {
 /// question — for each answer: Cancel leaves the edit and the tab, and the
 /// dropped close is not replayed; Discard empties the tab's pool (the
 /// `CloseTab` arm's `clear`) and the replayed close is nothing to ask; Save
-/// writes through the pool's own `save_dirty` (`quit_save`'s door, the shut's
-/// `Save`) and the replayed shut is nothing to ask, with the typed words on
-/// the disk.
+/// hands every save to the storage worker (the pool's `save_for_a_shut`, the
+/// shut's and the quit's door) and the replayed shut is nothing to ask, with
+/// the typed words on the disk.
 ///
 /// MUTATION: treat `Busy` as proceeding (`proceeds` answering
 /// `self != Self::Raised`) — the Cancel block's first assertion goes red; move
@@ -298,9 +296,9 @@ fn cancel_keeps_the_buffer_and_save_and_discard_replay_the_accepted_request() {
     );
     let accepted = gate.take().expect("the answer takes its request");
     assert_eq!(
-        tabs[0].preview_pool.save_dirty(),
-        vec![("notes.md".to_owned(), preview::SaveOutcome::Saved)],
-        "every dirty buffer written back"
+        crate::test_support::the_saves_of(&mut tabs[0].preview_pool),
+        vec![("notes.md".to_owned(), preview::AtTheClose::Saved)],
+        "every dirty buffer's save handed over, and landed"
     );
     assert_eq!(
         raise_dirty_gate_over(&mut gate, &tabs, 0, accepted),
@@ -796,12 +794,13 @@ fn cancel_on_the_summoned_terminals_question_keeps_the_edit_and_the_run() {
 /// ordinary window, and the run ends as before.**
 ///
 /// The confirmed answer is spent in the summoned terminal, but the close it
-/// re-runs is the ordinary window's (`WindowRuntime::window_close_requested`, spent by
-/// the event loop through `FolioApp::close`); that close asks the summoned
+/// re-runs is the ordinary window's (`WindowRuntime::window_close_requested`,
+/// taken by the event loop through `Runtime::take_close_request` and spent
+/// through `FolioApp::close`); that close asks the summoned
 /// terminal again, finds nothing, and ends the run, retiring the summoned
 /// terminal with it. Discard drops the dirty buffer and only that; Save all
-/// writes it (the pool's `save_dirty`, `quit_save`'s door) and closes only when
-/// every write landed.
+/// hands its save to the storage worker (the pool's `save_for_a_shut`) and
+/// closes only when every save landed.
 ///
 /// MUTATION: in `answer_an_exit_over`, answer Discard with `None` — the Discard
 /// block's first assertion goes red; answer Save with `Some(closes)` whatever
@@ -851,9 +850,9 @@ fn save_and_discard_on_the_summoned_terminals_question_close_the_last_ordinary_w
         "a save that did not all land closes nothing"
     );
     assert_eq!(
-        summoned[0].preview_pool.save_dirty(),
-        vec![("notes.md".to_owned(), preview::SaveOutcome::Saved)],
-        "every dirty buffer written back"
+        crate::test_support::the_saves_of(&mut summoned[0].preview_pool),
+        vec![("notes.md".to_owned(), preview::AtTheClose::Saved)],
+        "every dirty buffer's save handed over, and landed"
     );
     assert_eq!(
         answer_an_exit_over(&mut summoned, closing, restore::GateAnswer::Save, true),
@@ -877,7 +876,7 @@ fn save_and_discard_on_the_summoned_terminals_question_close_the_last_ordinary_w
     let event = window_event_squeezed();
     assert!(
         event.contains(
-            "letrequested=std::mem::take(&mutruntime.window.window_close_requested);shutting|=requested==Some(window_id);"
+            "letrequested=runtime.take_close_request();shutting|=requested==Some(window_id);"
         ) && event.contains(
             "matchrequested.filter(|closing|*closing!=window_id){Some(closing)=>result.and(hang_watch::during(hang_watch::Station::EventShut,||{self.close(closing)})),"
         ),
@@ -918,26 +917,37 @@ fn a_summoned_terminal_with_nothing_unsaved_lets_the_run_end_without_a_card() {
 
 // ── D-4, 0.4.8 G7: a stop that cannot ask keeps what it would lose ──────────
 
-/// RED (D-4, 0.4.8 G7; ledger #28) — **a dirty preview buffer and a controlled failure: the file
-/// carries the edit.** The failure road keeps each window's unsaved edits through
-/// `keep_unsaved_edits_over` before it closes the window, and a file that can still be written
-/// takes the edit through the quit's own judged write — `PreviewBuffer::save`, the conflict check
-/// and the atomic write — so it is no longer dirty, and the diagnostics line names the file.
-/// A second tab's buffer is kept as well: every tab, not the active one.
+/// RED (D-4, 0.4.8 G7; ledger #28; S-6c) — **a dirty preview buffer and a controlled failure: the
+/// file carries the edit.** The failure road hands each window's unsaved edits to the storage
+/// worker as a press hands them (`Runtime::keep_unsaved_edits`), and a file that can still be
+/// written takes the edit through the worker's own request — the byte precondition and the
+/// exchange — served before the worker ends; it is kept as `Saved`, and the diagnostics line names
+/// the file. A second tab's buffer is kept as well: every tab, not the active one.
 ///
-/// MUTATION: in `PreviewPool::keep_dirty`, skip the write (`let outcome =
-/// SaveOutcome::Failed(String::new());` in place of `buffer.save()`) — the file still says
-/// `one`.
+/// MUTATION: in `PreviewPool::save_for_a_shut`, hand nothing over (an empty loop) — the file still
+/// says `one`, and the edit is copied instead.
 #[test]
 fn a_controlled_failure_writes_a_dirty_preview_back_to_its_file() {
     let (path, buffer) = a_file_being_edited("g7-saved");
     let (second, other) = a_file_being_edited("g7-saved-第二");
     let (tab, _) = tab_with_a_preview(1, vec![buffer]);
     let (other_tab, _) = tab_with_a_preview(2, vec![other]);
-    let mut tabs = vec![tab, other_tab];
+    let tabs = [tab, other_tab];
     let recovery = disk_scratch("g7-recovered-unused").join(preview::RECOVERED_FOLDER);
 
-    let kept = keep_unsaved_edits_over(&mut tabs, &recovery, SystemTime::now());
+    let (kept, held): (Vec<preview::Kept>, Vec<preview::PreviewPool>) = tabs
+        .iter()
+        .map(|tab| {
+            let (mut kept, pool) = crate::test_support::the_stops_keep_and_its_pool(
+                &tab.preview_pool,
+                &recovery,
+                SystemTime::now(),
+                &[None],
+            );
+            assert_eq!(kept.len(), 1, "one buffer per tab: {kept:?}");
+            (kept.remove(0), pool)
+        })
+        .unzip();
 
     for (at, file) in [&path, &second].into_iter().enumerate() {
         assert!(
@@ -958,7 +968,12 @@ fn a_controlled_failure_writes_a_dirty_preview_back_to_its_file() {
             "{}",
             kept[at].line()
         );
-        assert!(!still_holds_the_edit(&tabs[at], file), "and it is clean");
+        assert!(
+            held[at]
+                .get(&preview::PreviewSource::file(file))
+                .is_some_and(|buffer| !buffer.dirty()),
+            "and it is clean"
+        );
     }
     assert!(!recovery.exists(), "nothing needed a copy");
     for file in [path, second] {
@@ -973,15 +988,15 @@ fn a_controlled_failure_writes_a_dirty_preview_back_to_its_file() {
 /// recovery folder, under the instant and the file's name. A file that changed on disk since it
 /// was read (the conflict) is the same: the copy is made and the other writer's bytes stay.
 ///
-/// MUTATION: in `PreviewPool::keep_dirty`, drop the copy (answer `Kept::Lost` without calling
-/// `recovery_copy`) — no copy, and the line says the edits are lost.
+/// MUTATION: in `PreviewPool::kept_after_the_stop`, drop the copy (answer `Kept::Lost` without
+/// calling `recovery_copy`) — no copy, and the line says the edits are lost.
 #[test]
 fn an_unwritable_target_keeps_the_edit_in_a_recovery_copy_and_says_where() {
     let (path, buffer) = a_file_being_edited("g7-refused");
     let (moved, other) = a_file_being_edited("g7-conflict-改");
     let (tab, _) = tab_with_a_preview(1, vec![buffer]);
     let (other_tab, _) = tab_with_a_preview(2, vec![other]);
-    let mut tabs = vec![tab, other_tab];
+    let tabs = [tab, other_tab];
     let recovery = disk_scratch("g7-recovered-数据").join(preview::RECOVERED_FOLDER);
     // The file read-only refuses the write on Windows; its folder read-only refuses it on Unix,
     // where a rename replaces a read-only file. Both are set everywhere, and each is put back.
@@ -1003,7 +1018,17 @@ fn an_unwritable_target_keeps_the_edit_in_a_recovery_copy_and_says_where() {
     std::fs::write(&moved, "another writer — 别人\n").expect("the other writer");
     crate::test_support::move_the_disk_forward(&moved);
 
-    let kept = keep_unsaved_edits_over(&mut tabs, &recovery, SystemTime::UNIX_EPOCH);
+    let kept: Vec<preview::Kept> = tabs
+        .iter()
+        .flat_map(|tab| {
+            crate::test_support::the_stops_keep(
+                &tab.preview_pool,
+                &recovery,
+                SystemTime::UNIX_EPOCH,
+                &[None],
+            )
+        })
+        .collect();
     refuse(false);
 
     assert_eq!(
@@ -1117,7 +1142,7 @@ mod failure_road {
             "an application event's handler",
         ),
         row(
-            "crate::FolioApp::window_event",
+            "crate::FolioApp::on_window_event",
             4,
             "the capture pre-dispatch, the wheel's flush, the drop's flush, the handler's result",
         ),
@@ -1136,9 +1161,9 @@ mod failure_road {
     /// Every closing of a window, and why it needs no road of its own.
     pub(super) const CLOSES: &[Row] = &[
         row(
-            "crate::FolioApp::stop_every_window",
+            "crate::FolioApp::stop_every_window_keeping_in",
             1,
-            "the road itself, after every window kept its unsaved edits",
+            "the road itself, before every window keeps its unsaved edits",
         ),
         row(
             "crate::FolioApp::close",

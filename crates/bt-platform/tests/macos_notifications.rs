@@ -281,7 +281,7 @@ mod mac {
             return;
         }
         let before = delivered(&center).len();
-        let mut notifier = match bt_platform::Notifier::new(Box::new(|| {})) {
+        let mut notifier = match bt_platform::Notifier::new("Folio", Box::new(|| {})) {
             Ok(notifier) => notifier,
             Err(why) => {
                 report.check("notifier", false, &format!("Notifier::new refused: {why}"));

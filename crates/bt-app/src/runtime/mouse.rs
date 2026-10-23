@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::PtyTarget;
+use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragRelease,
     DragSource, DropBatch, DropLanding, Fading, FloatDrag, FloatDragKind, FloatHeadPress,
@@ -13,14 +14,13 @@ use crate::{
     a_right_press_is_on_the_pane_menus_head, answered_once, button_router_position, crumb_segments,
     drain_whole_units, files, files_row_activation, first_run, float, float_grasp, float_sizing_of,
     formula_tools, glass_allows_a_drop, hang_watch, image_zoom_notch, input, landing_for_aim,
-    live_viewport_mouse_hit, marks, mouse_trace, native_window, over_home_ground, palette,
-    platform_pointer_of, pointer_cursor, press_after_blur, press_files_node, press_pins_a_peek,
-    press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity, profiles,
-    protocol_mouse_button, recoverable_wheel_scroll_amount, release_verdict, restore,
-    right_press_raises_terminal_menu, risen_frame, route_forwarded_mouse_button,
-    route_forwarded_mouse_motion, seats, settings, settling, toast, tooltip, update, upright_wheel,
-    web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
-    write_pty_input,
+    live_viewport_mouse_hit, marks, mouse_trace, over_home_ground, palette, pointer_cursor,
+    press_after_blur, press_files_node, press_pins_a_peek, press_reaches_no_grid,
+    press_spends_itself_closing, pressed_row_identity, profiles, protocol_mouse_button,
+    recoverable_wheel_scroll_amount, release_verdict, restore, right_press_raises_terminal_menu,
+    risen_frame, route_forwarded_mouse_button, route_forwarded_mouse_motion, seats, settings,
+    settling, toast, tooltip, update, upright_wheel, web_page_cursor, websheet, wheel_axis,
+    wheel_points_sideways, wheel_route, wheel_zoom_notches, write_pty_input,
 };
 use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
@@ -32,7 +32,7 @@ use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// The ghost's own layer, or nothing when nothing is in the hand (J114-J116).
     ///
     /// Nothing is built for a drag whose landing is already showing itself
@@ -346,16 +346,20 @@ impl Runtime<'_> {
             return Ok(());
         };
         self.observe_chevrons(Some(position), now);
-        let trigger = self
-            .hover_float_free(HoverFloat::Flyout)
+        // The flyout's and the glance's intents, asked again on the move's own terms: neither is
+        // armed under a held gesture (T-POINTER-CAPTURE R-7, cut 6).
+        let held = self.a_gesture_holds_the_pointer();
+        let trigger = (self.hover_float_free(HoverFloat::Flyout) && !held)
             .then(|| self.float_trigger_at(position))
             .flatten();
         self.window.float.observe(trigger, now);
-        let row = self.glancing_row_at(position);
-        // And the foot's hover on whatever card is left (0.4.4 ticket 41).
-        let owed = self.observe_file_peek(row, now) | self.relight_file_peek_foot();
-        if owed && self.refresh_overlay() {
-            self.present_chrome_change()?;
+        if !held {
+            let row = self.glancing_row_at(position);
+            // And the foot's hover on whatever card is left (0.4.4 ticket 41).
+            let owed = self.observe_file_peek(row, now) | self.relight_file_peek_foot();
+            if owed && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
         }
         let tab = self
             .hover_float_free(HoverFloat::LayoutPeek)
@@ -1554,7 +1558,7 @@ impl Runtime<'_> {
         let pty = self.window.tabs[active]
             .sessions
             .get(&seat)
-            .map_or(PtyTarget::Nowhere, |leaf| leaf.input_target());
+            .map_or(PtyTarget::Nowhere, |leaf| leaf.person_input_target());
         write_pty_input(pty, bytes, context)
     }
 
@@ -1721,15 +1725,6 @@ impl Runtime<'_> {
             // and that sentence lives in the window's own `.tip`.
             let anchor = self.tooltip_anchor_at(position);
             self.note_tooltip(anchor)?;
-            self.update_chrome_hover_target(None)?;
-            return Ok(());
-        }
-        if let Some(layout) = self.psreadline_invite_layout() {
-            let over = restore::invite_hit(&layout, position.x, position.y);
-            if self.window.psreadline_invite.set_hover(Some(over)) && self.refresh_overlay() {
-                self.present_chrome_change()?;
-            }
-            self.note_tooltip(None)?;
             self.update_chrome_hover_target(None)?;
             return Ok(());
         }
@@ -2074,10 +2069,15 @@ impl Runtime<'_> {
         // this host is told the pointer has left a trigger, and a call skipped
         // instead would leave an intent armed at whatever the hand was over
         // before the menu came up.
-        let trigger = self
-            .hover_float_free(HoverFloat::Flyout)
-            .then(|| self.float_trigger_at(position))
-            .flatten();
+        //
+        // **And not under a held gesture** (T-POINTER-CAPTURE R-7, cut 6): a press
+        // that has not yet travelled — on a tab, a pane head, a row — and a
+        // selection reach this line, and a flyout that opened under one would be a
+        // panel nobody asked for, standing over the place the gesture is aimed at.
+        let trigger = (self.hover_float_free(HoverFloat::Flyout)
+            && !self.a_gesture_holds_the_pointer())
+        .then(|| self.float_trigger_at(position))
+        .flatten();
         self.window.float.observe(trigger, Instant::now());
         self.drive_float_hover(position)?;
         // P146/P150 — the glance's intent, armed by the row under the pointer
@@ -2091,19 +2091,25 @@ impl Runtime<'_> {
         // which is the one difference from the flyout's line above: a row of the
         // folder card may raise a glance while that card is on the glass, because
         // the two are one region rather than two panels — see [`glance_may_arm`].
-        let row = self.glancing_row_at(position);
-        // The card is taken down **here**, on the move that left the row, and the
-        // frame it owes is paid here too: the chrome hover above has already
-        // presented by the time this runs, so a card retired without its own
-        // repaint would stay on the glass until some unrelated event redrew it —
-        // which under a hand that has come to rest is never (real-machine
-        // capture, 2026-08-13: the glance survived the move onto a folder row).
-        // And the foot's hover on whatever card is left, on the same frame
-        // (0.4.4 ticket 41): the address lights or goes dark as the hand
-        // crosses its edge.
-        let owed = self.observe_file_peek(row, Instant::now()) | self.relight_file_peek_foot();
-        if owed && self.refresh_overlay() {
-            self.present_chrome_change()?;
+        //
+        // **Frozen under a held gesture** (T-POINTER-CAPTURE R-7, cut 6): neither
+        // armed nor lit nor taken down — the card the press began on, its head
+        // held, stays the card it is until the button comes up.
+        if !self.a_gesture_holds_the_pointer() {
+            let row = self.glancing_row_at(position);
+            // The card is taken down **here**, on the move that left the row, and the
+            // frame it owes is paid here too: the chrome hover above has already
+            // presented by the time this runs, so a card retired without its own
+            // repaint would stay on the glass until some unrelated event redrew it —
+            // which under a hand that has come to rest is never (real-machine
+            // capture, 2026-08-13: the glance survived the move onto a folder row).
+            // And the foot's hover on whatever card is left, on the same frame
+            // (0.4.4 ticket 41): the address lights or goes dark as the hand
+            // crosses its edge.
+            let owed = self.observe_file_peek(row, Instant::now()) | self.relight_file_peek_foot();
+            if owed && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
         }
         // Below every gesture that owns the pointer and beside the hover it
         // follows: the anchors under a drag or a divider were never reached, and
@@ -2158,19 +2164,28 @@ impl Runtime<'_> {
         // for the reason the rail takes the pointer at all: it is the surface on
         // top. `command_tick_anchor` answers only while a rail is hot, so
         // everywhere else this is the tip list exactly as it was.
-        let anchor = self
-            .command_tick_anchor()
-            // The colour card, on the glance card's own terms and for its own
-            // reason: its anchor is a token that `note_preview_hex_hover` settled
-            // a few lines ago, and the list below still holds the *previous*
-            // frame's. Asking the list first would mean a card that never
-            // arrives while the hand is still, because a hand that has stopped
-            // moving produces no second pointer event to find it with.
-            .or_else(|| self.preview_hex_anchor())
-            .or_else(|| {
-                self.owned_tooltip_anchor_at(position)
-                    .filter(|(anchor, _)| !self.layout_peek_suppresses(*anchor))
-            });
+        //
+        // **And no tip under a held gesture** (T-POINTER-CAPTURE R-7, cut 6): a
+        // press that has not travelled yet and a selection being drawn reach this
+        // line, and a tip that settled under either would be a sentence about a
+        // control the hand is not reaching for. The intent is disarmed, not left
+        // standing to mature the moment the button comes up.
+        let anchor = if self.a_gesture_holds_the_pointer() {
+            None
+        } else {
+            self.command_tick_anchor()
+                // The colour card, on the glance card's own terms and for its own
+                // reason: its anchor is a token that `note_preview_hex_hover` settled
+                // a few lines ago, and the list below still holds the *previous*
+                // frame's. Asking the list first would mean a card that never
+                // arrives while the hand is still, because a hand that has stopped
+                // moving produces no second pointer event to find it with.
+                .or_else(|| self.preview_hex_anchor())
+                .or_else(|| {
+                    self.owned_tooltip_anchor_at(position)
+                        .filter(|(anchor, _)| !self.layout_peek_suppresses(*anchor))
+                })
+        };
         self.note_tooltip(anchor)?;
         // Which pane the pointer is in, settled before anything asks a question of it. Everything
         // below — the formula hover, the link's underline, the reference's underline, the flyout —
@@ -3110,8 +3125,15 @@ impl Runtime<'_> {
         self.drop_tab_press();
         self.drop_pane_press();
         self.drop_row_press();
+        self.send_the_drag_home(&drag)
+    }
+
+    /// **A drag already let go of, sent home** — the cancel's own business, for a drag that is no
+    /// longer in the slot: [`Self::cancel_drag`]'s, and a capture's ending's
+    /// ([`Self::end_capture`]).
+    pub(crate) fn send_the_drag_home(&mut self, drag: &Drag) -> Result<bool> {
         self.window.tab_clicks.interrupt();
-        self.settle_home(&drag);
+        self.settle_home(drag);
         self.finish_drag()
     }
 
@@ -3573,7 +3595,6 @@ impl Runtime<'_> {
                     split,
                     dir: slot.dir,
                     grip,
-                    capture: bt_platform::thread_mouse_capture(),
                 });
                 self.window.seat_pointer.dragging = Some(split);
                 self.apply_pointer_cursor();
@@ -4123,7 +4144,9 @@ impl Runtime<'_> {
             self.window.modifiers,
         );
         self.answer_attention(seat, UserInputKind::MouseMotion);
-        self.send_mouse_input_to(seat, &bytes, "forward SGR mouse motion to PTY")
+        self.send_mouse_input_to(seat, &bytes, "forward SGR mouse motion to PTY")?;
+        self.note_the_last_report_sent(hit, self.window.modifiers);
+        Ok(())
     }
 
     pub(crate) fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {
@@ -4226,22 +4249,18 @@ impl Runtime<'_> {
                 self.after_search_change()?;
             }
         }
-        // **A gesture in progress owns its release** (T-STRIP-HOVER-THROUGH,
-        // confirmation review 2026-10-04). A route latched by a press on a cell —
-        // a formula's mark, a selection, a press handed to the program — is
-        // ended by the button coming up wherever the pointer is, and ahead of
-        // every surface drawn there: the claims below decide where a gesture
-        // *starts*, and a release over the search capsule, a notice strip or any
-        // other surface is not a new gesture there but the end of the one the
-        // pane already owns.
-        if state == ElementState::Released && self.release_capture(button, router_at)? {
+        // **The slot answers every button before any surface does**
+        // (T-POINTER-CAPTURE R-5, R-6, R-8), below only the press's window-wide
+        // answers above (the tip, the hint card, the peek, the capsule's caret),
+        // which any press at all gives. A gesture in progress owns its release,
+        // wherever the pointer is and ahead of every surface drawn there — the
+        // claims below decide where a gesture *starts* — and while it is held
+        // another button goes nowhere, its press and its release, so no menu
+        // opens under the hand. A press of the held button proves its release
+        // was lost: the stale capture is cancelled first, then this press is
+        // routed.
+        if self.button_meets_the_slot(state, button, router_at)? {
             return Ok(());
-        }
-        // **And a press of the held capture's own button proves its release was
-        // lost** (T-POINTER-CAPTURE R-5): the stale capture is cancelled first,
-        // then this press is routed.
-        if state == ElementState::Pressed {
-            self.press_against_the_capture(button)?;
         }
         // The quit card first, in the order it is drawn: every press is
         // swallowed, its own scrim included, and the answer is the application's
@@ -4281,19 +4300,6 @@ impl Runtime<'_> {
             if state == ElementState::Pressed && button == MouseButton::Left {
                 let target = first_run::hit(&layout, position.x, position.y);
                 self.answer_first_run(target)?;
-            }
-            return Ok(());
-        }
-        // The invitation, in the order it is drawn. Every press is swallowed,
-        // its own scrim included, and a press on a disabled Install lands on
-        // `Panel` and answers nothing.
-        if let (Some(layout), Some(position)) = (
-            self.psreadline_invite_layout(),
-            self.window.pointer_position,
-        ) {
-            if state == ElementState::Pressed && button == MouseButton::Left {
-                let target = restore::invite_hit(&layout, position.x, position.y);
-                self.answer_psreadline_invite(target)?;
             }
             return Ok(());
         }
@@ -5097,13 +5103,17 @@ impl Runtime<'_> {
                     self.press_math_toggle(target, &math_hit.anchor)?;
                 }
                 (MouseButton::Left, MathHitTarget::CopyLatex) => {
-                    self.copy_math_latex(target, &math_hit.anchor);
-                    // The tick has to reach the glass: nothing else in this
-                    // gesture asks for a frame, so without this the
-                    // acknowledgement would wait for the next thing to twitch.
+                    self.copy_math_latex(target, &math_hit.anchor)?;
+                    // The press's own frame: nothing else in this gesture asks
+                    // for one. The tick itself reaches the glass on the turn the
+                    // copy lands (`ClipboardWriteEffect::MathCopied`).
                     self.repaint_hovered_pane()?;
                 }
-                (MouseButton::Right, _) => match self.window.math_context_menu.request() {
+                (MouseButton::Right, _) => match self
+                    .window
+                    .math_context_menu
+                    .request(crate::i18n::Text::FormulaMenuCopyLatex.text())
+                {
                     Ok(true) => {
                         self.window.pending_math_context_anchor =
                             Some((target, math_hit.anchor.clone()));
@@ -5229,7 +5239,11 @@ impl Runtime<'_> {
         );
         if answered.is_some() {
             match route {
-                Some(route) => self.latch_mouse_route(route, button),
+                Some(route) => {
+                    self.latch_mouse_route(route, button);
+                    // What the program was told, in case the gesture ends without its release.
+                    self.note_the_last_report_sent(forwarded_hit, self.window.modifiers);
+                }
                 None => self.drop_mouse_route(),
             }
         }
@@ -5250,12 +5264,6 @@ impl Runtime<'_> {
                 "forward mouse button event to PTY",
                 UserInputKind::MouseButton,
             );
-        }
-        // **A gesture already handed to the program keeps the pane**: another
-        // button pressed over a cell while it is held is not forwarded and does
-        // not begin a selection that would take the route from it.
-        if matches!(self.held_mouse_route(), Some(MouseRoute::Forward { .. })) {
-            return Ok(());
         }
         match state {
             ElementState::Pressed if button == MouseButton::Left => {
@@ -5454,43 +5462,6 @@ impl Runtime<'_> {
         DropBatch::collect(&mut self.window.dropped_files, path, point, target);
     }
 
-    /// **Where the cursor is, this instant, in this window's own pixels**
-    /// (GitHub issue #1 ②, owner's ruling 2026-09-16: a drop lands in the pane
-    /// under the cursor).
-    ///
-    /// **Two readers, and they are the two gestures that put a path on a command
-    /// line.** [`Self::collect_dropped_file`] asks it as an external drop
-    /// arrives, and [`Self::keep_the_paste_offer`] asks it as an internal drag is
-    /// let go of (review 2026-09-17). Both for one reason: there is only one
-    /// instant at which "where is the cursor" and "where was this let go of" are
-    /// the same question, and it is the one this process is standing in while
-    /// the platform delivers the release. Nothing else in this window reads it,
-    /// and the name is the platform's rather than either gesture's so that
-    /// neither road can grow a second door.
-    ///
-    /// **The units are `CursorMoved`'s and no conversion happens here**, which
-    /// was checked rather than assumed. On Windows a pointer event is
-    /// `WM_MOUSEMOVE`'s `lParam` — physical pixels from the client area's
-    /// top-left — which is precisely what `GetCursorPos` put through
-    /// `ScreenToClient` answers. On macOS winit takes its view's point and
-    /// multiplies by the window's backing scale, which is precisely what the
-    /// AppKit arm does with `NSEvent.mouseLocation` after the same two
-    /// conversions. So the platform's answer is already in the window's physical
-    /// pixels and is used as it stands; scaling it again here would square the
-    /// factor on every Retina and every 150% display.
-    ///
-    /// Neither `pointer_position` nor [`WindowRuntime::pointer_last_seen`] is
-    /// read: both say where the hand was *before* the drag, which is not where
-    /// this drop landed, and a routing built on either would be a guess wearing
-    /// a measurement's clothes.
-    pub(in crate::runtime) fn platform_pointer_now(&self) -> Option<PhysicalPosition<f64>> {
-        platform_pointer_of(
-            native_window(&self.window.window)
-                .ok()
-                .and_then(bt_platform::pointer_position_in_window),
-        )
-    }
-
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
         // **The text-size carry leaves the window on every notch** (ticket 37) and goes back only
         // if the text-size rung below spends this one: a notch taken by any other route — another
@@ -5664,9 +5635,18 @@ impl Runtime<'_> {
         // every pane, because the pane a page sits in has no document of its own
         // to move and both axes are the page's exactly as they are in any other
         // browser.
+        //
+        // **And under a held gesture no page hears the wheel** (T-POINTER-CAPTURE
+        // R-10, cut 6): the page is still the layer under the hand, so the notch is
+        // its to swallow and nothing beneath it scrolls — the page itself is not
+        // the gesture's, and a pane under the page is not where the hand is.
         if let Some(position) = self.window.pointer_position
-            && self.point_is_on_the_web_page(position)
+            && self.page_under_the_hand(position).is_some()
         {
+            if self.a_gesture_holds_the_pointer() {
+                self.mouse_trace(|| "wheel_route taken=page swallowed=held".to_owned());
+                return Ok(());
+            }
             let (x, y) = match delta {
                 MouseScrollDelta::LineDelta(x, y) => (x, y),
                 // A trackpad already speaks pixels, and a notch is 120 of them.
@@ -6247,8 +6227,9 @@ impl Runtime<'_> {
         Some(i32::try_from(take).unwrap_or(0))
     }
 
-    /// **Whether a gesture of this window's is holding the pointer** — the one
-    /// fact [`Self::web_page_at`] subtracts before it looks at any rectangle.
+    /// **Whether a gesture is holding the pointer** — the one fact
+    /// [`Self::web_page_at`] subtracts before it looks at any rectangle, and the
+    /// one every hover intent asks before it arms (T-POINTER-CAPTURE R-7, cut 6).
     ///
     /// "A gesture in flight is not a hover" is already this window's rule for
     /// the chevron clocks, the tooltip and the layout peek; this is the same
@@ -6257,11 +6238,14 @@ impl Runtime<'_> {
     /// the pointer is *over* it — but a pointer with a press still open on it
     /// belongs to whatever that press began on, wherever it has since travelled.
     ///
-    /// **Every gesture in the slot** (T-POINTER-CAPTURE cut 3): a capture of this
-    /// window, of any owner, holds the pointer until its release reaches it, and
-    /// its release always does (`Self::release_capture` is asked before every
-    /// layer), so the predicate is the slot and cannot stick.
+    /// **Every gesture in the slot** (T-POINTER-CAPTURE cut 3): a capture, of any
+    /// owner, holds the pointer until its release reaches it, and its release
+    /// always does (`Self::release_capture` is asked before every layer), so the
+    /// predicate is the slot and cannot stick. **In whichever window it was
+    /// latched** (cut 6, R-7): the slot is the application's, so a gesture held in
+    /// one window freezes the hover of another — which on macOS, where the other
+    /// window can still hear the pointer, is the difference.
     pub(in crate::runtime) fn a_gesture_holds_the_pointer(&self) -> bool {
-        self.a_capture_holds_the_pointer()
+        self.app.pointer_capture.is_some()
     }
 }

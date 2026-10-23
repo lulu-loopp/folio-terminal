@@ -4553,7 +4553,8 @@ fn tab_body_inset_path(width: u32, height: u32, radius: u32, inset: f32) -> Opti
         return None;
     }
     Some(format!(
-        "M{l},{h} L{l},{top_r} A{r},{r} 0 0 1 {left_r},{t}          L{right},{t} A{r},{r} 0 0 1 {w},{top_r} L{w},{h}",
+        "M{l},{h} L{l},{top_r} A{r},{r} 0 0 1 {left_r},{t} \
+         L{right},{t} A{r},{r} 0 0 1 {w},{top_r} L{w},{h}",
         top_r = t + r,
         left_r = l + r,
         right = w - r,

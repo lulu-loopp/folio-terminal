@@ -244,6 +244,20 @@ impl Entry {
     }
 }
 
+/// **Where the body on its way to the disk stands in a history** (S-6a).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Sent {
+    /// No body of this history is on its way: none was sent, its answer was
+    /// heard, or the history was forgotten since.
+    Not,
+    /// The body sent is the one at this position.
+    At(usize),
+    /// The body sent was in this history and has been discarded from it (a
+    /// redo tail thrown away, the front trimmed): its landing leaves no saved
+    /// state.
+    Discarded,
+}
+
 /// **A body's changes, in the order they were made.**
 ///
 /// `entries[..cursor]` have been applied to the body and `entries[cursor..]` are
@@ -260,6 +274,12 @@ pub struct UndoLog {
     /// or by the oldest entries falling off the front — and a body whose saved
     /// state cannot be returned to is dirty whatever else is true of it.
     saved: Option<usize>,
+    /// **The position the body on its way to the disk was taken at** (S-6a): a
+    /// save handed to the storage worker carries the body as it stood here, and
+    /// its landing makes *this* position the saved one, wherever the cursor has
+    /// moved since. Discarded exactly as [`Self::saved`] is, and with it the
+    /// saved state the landing would have made.
+    sent: Sent,
     /// Whether the newest entry may still take another keystroke. A save, a disk
     /// copy, an undo and a redo all close it, which is three of the ruled
     /// breakers spelled in one bit.
@@ -274,6 +294,7 @@ impl Default for UndoLog {
             entries: Vec::new(),
             cursor: 0,
             saved: Some(0),
+            sent: Sent::Not,
             open: false,
         }
     }
@@ -302,6 +323,11 @@ impl UndoLog {
             self.entries.truncate(self.cursor);
             if self.saved.is_some_and(|at| at > self.cursor) {
                 self.saved = None;
+            }
+            if let Sent::At(at) = self.sent
+                && at > self.cursor
+            {
+                self.sent = Sent::Discarded;
             }
             self.open = false;
         }
@@ -355,9 +381,63 @@ impl UndoLog {
     /// log*, so undoing back to it is being clean again and editing away from it
     /// is being dirty again — where before a save was the only thing that could
     /// clean a buffer, because there was no history to compare against.
+    ///
+    /// The log's own tests set the position this way; the product moves it only by a
+    /// landing ([`Self::sent_landed`]) since the window thread's writer went (S-6c).
+    #[cfg(test)]
     pub fn mark_saved(&mut self) {
         self.saved = Some(self.cursor);
         self.open = false;
+    }
+
+    /// **The body as it stands here is on its way to the disk** (S-6a): the
+    /// position is kept for [`Self::sent_landed`], and the run is closed, so a
+    /// keystroke after the press is an entry of its own and the position keeps
+    /// naming the body that was sent.
+    pub fn mark_sent(&mut self) {
+        self.sent = Sent::At(self.cursor);
+        self.open = false;
+    }
+
+    /// Whether this history knows the body on its way — at a position, or
+    /// discarded from it: `false` once it was forgotten (a Reload) or when no
+    /// body was sent — see [`Self::sent_landed`].
+    #[must_use]
+    pub fn knows_the_body_sent(&self) -> bool {
+        self.sent != Sent::Not
+    }
+
+    /// **The body sent landed**: its position is the saved one now — the place
+    /// the file stands in this history, whatever was typed or undone since.
+    /// A position the log has since discarded leaves no saved state: the bytes
+    /// the disk holds are nowhere in this log.
+    ///
+    /// Answers whether this history knew the body sent at all: `false` when the
+    /// log was forgotten since the press — the body was replaced by the disk's
+    /// copy (a *Reload* while the save was out) — and then nothing here moves:
+    /// the body is a reading older than the landing, owed the file again.
+    pub fn sent_landed(&mut self) -> bool {
+        match std::mem::replace(&mut self.sent, Sent::Not) {
+            Sent::At(at) => self.saved = Some(at),
+            Sent::Discarded => self.saved = None,
+            Sent::Not => return false,
+        }
+        true
+    }
+
+    /// **Whether the body a save sent lives only behind the cursor** (S-6a
+    /// round 7, the coordinator's ruling): its position is ahead — the person
+    /// undid past it, so only the redo history holds it — or it was discarded
+    /// from the history. A body at the position, or typed on past it, is simply
+    /// the body or its descendant. The position stays after an answer that did
+    /// not land, until the next press moves it or a landing takes it.
+    #[must_use]
+    pub fn the_body_sent_is_behind(&self) -> bool {
+        match self.sent {
+            Sent::At(at) => self.cursor < at,
+            Sent::Discarded => true,
+            Sent::Not => false,
+        }
     }
 
     /// **Forget everything** — the body under this log has been replaced.
@@ -391,6 +471,9 @@ impl UndoLog {
         // alternative is a buffer that reports itself clean at a place the file
         // was never in.
         self.saved = self.saved.and_then(|at| at.checked_sub(over));
+        if let Sent::At(at) = self.sent {
+            self.sent = at.checked_sub(over).map_or(Sent::Discarded, Sent::At);
+        }
     }
 }
 

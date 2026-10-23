@@ -1,17 +1,19 @@
 //! `math` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
-    AnimationEntry, AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath,
-    Layered, MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
+    AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath, Layered,
+    MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
     PasteTarget, Popup, PreviewDocument, PreviewMathArtifact, PreviewMathKey, PreviewMathPicture,
-    PreviewSurface, PreviewTextCommand, Runtime, TabState, adopt_animation_fill,
-    answer_one_formula, answers_for, dispatch_tab_decoration_tasks, document_formulas,
-    dump_overlay_frame, first_run, float_trigger_tip, foreground_program, formula_tools,
-    ground_overlay_layers, hang_watch, i18n, leaf_session_mut, marks, math_copy_window,
-    math_em_milli, new_tab_tip, nonzero_u32, preview, preview_select, preview_text_command,
-    preview_trace, profiles, quit, rail_overlay_layer, restore, retire_spent_math_copy, search,
-    seats, settings, tooltip, trace_sink, window_layout_key,
+    PreviewSurface, PreviewTextCommand, Runtime, Settled, TabState, answer_one_formula,
+    answers_for, dispatch_tab_decoration_tasks, document_formulas, dump_overlay_frame, first_run,
+    float_trigger_tip, foreground_program, formula_tools, ground_overlay_layers, hang_watch,
+    hold_failed_in_tabs, i18n, leaf_session_mut, marks, math_copy_window, math_em_milli,
+    new_tab_tip, nonzero_u32, preview, preview_select, preview_text_command, preview_trace,
+    profiles, quit, rail_overlay_layer, restore, retire_spent_math_copy, search, seats, settings,
+    tooltip, trace_sink, window_layout_key,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -22,9 +24,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
-use winit::event::KeyEvent;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// What one of those boxes says.
     ///
     /// Split from the boxes because the *geometry* of the tab surface is a pure
@@ -267,24 +268,8 @@ impl Runtime<'_> {
                 ),
                 ModalBand::Fixed,
             )
-        } else if let Some(layout) = self.psreadline_invite_layout() {
-            // **Under the gate and over the settings dialog.** The gate stands in
-            // front of an action already under way and nothing may cover it; this
-            // stands in front of a shell that has just started, which outranks a
-            // dialog the user opened on purpose — and the dialog is where the
-            // same question keeps a row, so nothing is lost by being covered.
-            let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-            (
-                restore::invite_build(
-                    &layout,
-                    (width as f32, height as f32),
-                    self.window.psreadline_invite.hover(),
-                ),
-                ModalBand::Fixed,
-            )
         } else if let Some(layout) = self.paste_card_layout() {
-            // **The multi-line paste card** (0.4.4 ticket 02), under the invitation and over the
-            // settings dialog. It is raised by the reader's own `Ctrl+V` into a shell, which no
+            // **The multi-line paste card** (0.4.4 ticket 02), over the settings dialog. It is raised by the reader's own `Ctrl+V` into a shell, which no
             // dialog above it lets through, so the order below it is a formality; what can rise
             // over it is only a surface raised by something other than a key.
             let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
@@ -522,9 +507,9 @@ impl Runtime<'_> {
         // the frame a departure begins on.
         let holding = band.holding();
         let live = match band {
-            // Nothing this slice animates: the quit card, the dirty gate, the
-            // PowerShell invite and the restore prompt are drawn exactly as they
-            // were, and an empty band is empty.
+            // Nothing this slice animates: the quit card, the dirty gate and the
+            // restore prompt are drawn exactly as they were, and an empty band is
+            // empty.
             ModalBand::Fixed => modal.into(),
             ModalBand::Menu(popup, travel) => {
                 self.stage(Layered::Popup(popup), modal.into(), Some(travel), now)
@@ -730,7 +715,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn preview_text_key(
         &mut self,
         surface: PreviewSurface,
-        event: &KeyEvent,
+        event: &Keystroke,
     ) -> Result<bool> {
         if !matches!(
             self.preview_pane(surface).map(|pane| pane.doc()),
@@ -743,7 +728,7 @@ impl Runtime<'_> {
         };
         match command {
             PreviewTextCommand::Copy => {
-                self.copy_preview_text_selection(surface);
+                self.copy_preview_text_selection(surface)?;
             }
             PreviewTextCommand::SelectAll => {
                 let selection = match &self.preview_pane(surface).map(|pane| pane.doc()) {
@@ -869,17 +854,22 @@ impl Runtime<'_> {
             return;
         }
         let leaf = self.focused_shell_address();
-        if self
+        match self
             .app
             .math_worker
-            .tasks
-            .send(MathWorkerRequest::PreviewMath {
+            .decorate(MathWorkerRequest::PreviewMath {
                 leaf,
                 key: Box::new(key.clone()),
-            })
-            .is_ok()
-        {
-            self.window.preview_math.mark_pending(key);
+            }) {
+            Ok(_) => self.window.preview_math.mark_pending(key),
+            // Its thread not started: refused, as the engine's own refusal is — the block stands
+            // on its source text, and new content (a different formula) is asked anew.
+            Err((crate::lane::Refused::NotStarted(_), _)) => {
+                self.window
+                    .preview_math
+                    .land(key, PreviewMathArtifact::Refused);
+            }
+            Err(_) => {}
         }
     }
 
@@ -935,9 +925,29 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// **Settle this window's failed requests that its error answers do not settle**
+    /// (`computation_lane`; the side-effects contract, revision (b)5 rule 1): a pane's task is held
+    /// by its session until new input that could change its answer, and an animation's fill
+    /// releases its reservation and stands on its last frame. (A window surface's failed request
+    /// arrives among the answers, as its own error answer: [`crate::settle_failure`].) Nothing on
+    /// screen changes; the ledger has said each failure once.
+    pub(crate) fn settle_failed_requests(&mut self, failed: &mut Vec<(AnswerOwner, Settled)>) {
+        for (_, settled) in answers_for(failed, |(owner, _)| self.owns(*owner)) {
+            match settled {
+                Settled::Hold { leaf, task } => {
+                    hold_failed_in_tabs(&mut self.window.tabs, leaf, task);
+                }
+                settled @ (Settled::FillLost { .. } | Settled::AnimationUnanswered { .. }) => {
+                    self.window.animations.settle(settled);
+                }
+                Settled::Answer(_) | Settled::Nothing => {}
+            }
+        }
+    }
+
     pub(crate) fn apply_math_results(
         &mut self,
-        batch: &mut Vec<MathWorkerResult>,
+        batch: &mut Vec<(crate::computation_lane::ComputationId, MathWorkerResult)>,
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
@@ -958,7 +968,7 @@ impl Runtime<'_> {
         // completion: a page of forty formulas answers forty times, and forty
         // rebuilds of every layer in the window would be the cost of one card.
         let mut picture_landed = false;
-        for completion in answers_for(batch, |result| self.owns(result.owner())) {
+        for (asked, completion) in answers_for(batch, |(_, result)| self.owns(result.owner())) {
             let leaf = completion.leaf.leaf;
             let target_index = self.window.tabs.iter().position(|tab| tab.id == leaf.tab);
             let target_active = target_index == Some(self.window.active_tab);
@@ -1047,7 +1057,7 @@ impl Runtime<'_> {
                 // is permanently outstanding is a picture that never
                 // arrives.
                 DecorationWorkerCompletion::PeekImage { path, result } => {
-                    self.complete_peek_image(path, result)?;
+                    self.complete_peek_image(asked, path, result)?;
                     // Peek state never enters frames, so no republish is needed.
                     false
                 }
@@ -1062,25 +1072,22 @@ impl Runtime<'_> {
                     // the first time this window looked inside it, or a surface
                     // that has just begun showing it — so every arrival is a new
                     // playback and gets a number no other playback in this
-                    // process has.
+                    // process has; an answer that is not filed leaves its number unused.
                     let serial = self.app.next_animation_serial();
-                    self.window.animations.insert(
-                        key,
-                        match frames {
-                            Ok(animation) => AnimationEntry::Ready {
-                                serial,
-                                animation: Box::new(animation),
-                            },
-                            // **Said where a reader is standing**, and not only
-                            // to a console nobody has open: the refusal is filed
-                            // with its reason and the foot of the pane prints
-                            // the two that are worth printing — see
-                            // [`AnimationEntry::Refused`].
-                            Err(refusal) => AnimationEntry::Refused(refusal),
-                        },
-                    );
-                    self.refresh_video_layers();
-                    self.present_chrome_change()?;
+                    // A refusal is **said where a reader is standing**, and
+                    // not only to a console nobody has open: it is filed with
+                    // its reason and the foot of the pane prints the two that
+                    // are worth printing — see [`AnimationEntry::Refused`].
+                    //
+                    // **And filed only for the open the window awaits**
+                    // (T-ANIMATION-ANSWER-IDENTITY): the answer to an open the
+                    // window has let go of — its file changed under the decode,
+                    // and the walk asked about the bytes there now — is
+                    // superseded, and the glass is not touched for it.
+                    if self.window.animations.opened(key, asked, serial, frames) {
+                        self.refresh_video_layers();
+                        self.present_chrome_change()?;
+                    }
                     false
                 }
                 // **An animation's next frames, and its decoder** (user report
@@ -1115,13 +1122,11 @@ impl Runtime<'_> {
                     frames,
                 } => {
                     let key = normalized_local_image_path_key(&path);
-                    if adopt_animation_fill(
-                        &mut self.window.animations,
-                        key,
-                        serial,
-                        cursor,
-                        frames,
-                    ) == AnimationFillOutcome::FileChanged
+                    if self
+                        .window
+                        .animations
+                        .adopt_fill(key, serial, cursor, frames)
+                        == AnimationFillOutcome::FileChanged
                     {
                         // **The file was rewritten under the loop.** The
                         // playback is gone and nothing else would notice: the
@@ -1138,7 +1143,7 @@ impl Runtime<'_> {
                 // claimed by the same file rather than by the same asker, and moves no frame of
                 // its own — see [`Self::complete_peek_video_frame`].
                 DecorationWorkerCompletion::PeekVideoFrame { path, glance } => {
-                    self.complete_peek_video_frame(path, glance)?;
+                    self.complete_peek_video_frame(asked, path, glance)?;
                     false
                 }
                 // **The glance card's page**, on the same reasoning and with one difference: unlike
@@ -1194,14 +1199,17 @@ impl Runtime<'_> {
                     self.window.preview_math.land(*key, artifact);
                     true
                 }
-                DecorationWorkerCompletion::PeekScaledImage { scaled } => {
-                    if target_active {
-                        self.complete_peek_scale(scaled)?;
-                    }
+                // **Not gated on the tab being on screen** (T-SCALE-ADDRESS-PER-ASKER). A glance
+                // is the window's, and its pending slot waits for this answer whichever tab is in
+                // front: dropped because a tab switch came first, the slot stayed set, and the
+                // next hover over the same picture found its question "already asked" and showed
+                // nothing. What it shows, it shows over the hover in front now.
+                DecorationWorkerCompletion::PeekScaledImage { surface, scaled } => {
+                    self.complete_peek_scale(surface, scaled)?;
                     false
                 }
-                DecorationWorkerCompletion::PreviewScaledImage { scaled } => {
-                    self.complete_preview_scale(scaled)?;
+                DecorationWorkerCompletion::PreviewScaledImage { asker, scaled } => {
+                    self.complete_preview_scale(asker, scaled)?;
                     false
                 }
                 // A page's picture just got sharp. Nothing about the document
@@ -2550,14 +2558,14 @@ impl Runtime<'_> {
         }]
     }
 
-    pub(in crate::runtime) fn apply_math_context_menu_result(&mut self) {
+    pub(in crate::runtime) fn apply_math_context_menu_result(&mut self) -> Result<()> {
         let Some(result) = self.window.math_context_menu.take_result() else {
-            return;
+            return Ok(());
         };
         let anchor = self.window.pending_math_context_anchor.take();
         self.drop_mouse_route();
         match (result, anchor) {
-            (Ok(true), Some((target, anchor))) => self.copy_math_latex(target, &anchor),
+            (Ok(true), Some((target, anchor))) => self.copy_math_latex(target, &anchor)?,
             (Ok(true), None) => {
                 eprintln!("recoverable formula context-menu result had no pending anchor");
             }
@@ -2566,6 +2574,7 @@ impl Runtime<'_> {
                 eprintln!("recoverable formula context-menu failure: {error}");
             }
         }
+        Ok(())
     }
 
     /// **Re-key every pane of every tab** (review row R5-5).
@@ -2612,3 +2621,7 @@ impl Runtime<'_> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "math_tests.rs"]
+mod tests;

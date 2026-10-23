@@ -49,13 +49,13 @@ use std::collections::BTreeMap;
 
 use bt_persist::{
     BackgroundFitV1, KeybindingsPlatformV1, KeybindingsV1, LanguageV1, LaunchOpensV1,
-    MinimumContrastV1, PsReadLineInviteV1, QuakeRestoreV1, SearchEngineV1, SettingsV1,
-    SplitDirectionV1, ThemeModeV1, WebColorSchemeV1,
+    MinimumContrastV1, QuakeRestoreV1, SearchEngineV1, SettingsV1, SplitDirectionV1, ThemeModeV1,
+    WebColorSchemeV1,
 };
 use serde_json::Value;
 
 use crate::settings::SettingsRow;
-use crate::shortcuts::{Override, Shortcuts, translate_command_modifier};
+use crate::shortcuts::{Chord, Override, OverrideFault, Shortcuts, format_chord_on, read_chord_in};
 
 /// Something an import could not put in force, named the way the reader would
 /// look for it — a shortcut's id, a scheme's file, a settings row.
@@ -89,7 +89,6 @@ pub(crate) enum SettingChange {
         cjk_family: String,
         size: u8,
     },
-    PsReadLineInvite(PsReadLineInviteV1),
     LightScheme(String),
     DarkScheme(String),
     BackgroundImage(String),
@@ -171,9 +170,9 @@ impl SettingChange {
             Self::OptionSendsAlt(_) => SettingsRow::OptionSendsAlt,
             Self::MultilinePaste(_) => SettingsRow::MultilinePaste,
             Self::WebPages(_) => SettingsRow::WebPages,
-            // The two with no row: an answer the PSReadLine card was given, and
-            // which pages' Advanced groups are open. Each is read where it is used.
-            Self::PsReadLineInvite(_) | Self::AdvancedOpen(_) => {
+            // The one with no row: which pages' Advanced groups are open. It is read where it is
+            // used.
+            Self::AdvancedOpen(_) => {
                 return None;
             }
         })
@@ -204,7 +203,6 @@ impl SettingChange {
                 settings.terminal_cjk_font_family = cjk_family;
                 settings.terminal_font_size = size;
             }
-            Self::PsReadLineInvite(value) => settings.psreadline_invite = value,
             Self::LightScheme(value) => settings.light_scheme = value,
             Self::DarkScheme(value) => settings.dark_scheme = value,
             Self::BackgroundImage(value) => settings.background_image = value,
@@ -280,7 +278,6 @@ pub(crate) fn plan_settings(
         terminal_font_family,
         terminal_cjk_font_family,
         terminal_font_size,
-        psreadline_invite,
         light_scheme,
         dark_scheme,
         background_image,
@@ -374,10 +371,6 @@ pub(crate) fn plan_settings(
             cjk_family: terminal_cjk_font_family,
             size: terminal_font_size,
         },
-    );
-    offer(
-        current.psreadline_invite != psreadline_invite,
-        SettingChange::PsReadLineInvite(psreadline_invite),
     );
     offer(
         current.light_scheme != light_scheme,
@@ -509,58 +502,147 @@ pub(crate) fn plan_settings(
     SettingsPlan { apply, elsewhere }
 }
 
-/// **A shortcut part, read the way `keybindings.json` is read at launch**:
-/// this build's table, then the file's lines laid over it by
-/// `Shortcuts::apply_overrides`, every refused line named by its id.
-pub(crate) fn import_shortcuts(
-    file: &KeybindingsV1,
-    platform: bt_platform::HostPlatform,
-) -> (Shortcuts, Vec<ImportFault>) {
-    let source = match file.writing_platform {
+/// **The keyboard dialect a shortcut document was written in**: `None` for a
+/// v1 file, whose origin was not recorded and whose chords are read as they
+/// are spelled.
+pub(crate) fn dialect_of(platform: KeybindingsPlatformV1) -> Option<bt_platform::HostPlatform> {
+    match platform {
         KeybindingsPlatformV1::Unknown => None,
         KeybindingsPlatformV1::Windows => Some(bt_platform::HostPlatform::Windows),
         KeybindingsPlatformV1::MacOs => Some(bt_platform::HostPlatform::MacOs),
         KeybindingsPlatformV1::OtherUnix => Some(bt_platform::HostPlatform::OtherUnix),
-    };
-    let mut translation_faults = Vec::new();
-    let overrides: Vec<Override> = file
-        .bindings
-        .iter()
-        .filter_map(|entry| {
-            let chord = match entry.chord.as_deref() {
-                Some(chord) => match translate_command_modifier(chord, source, platform) {
-                    Ok(chord) => Some(chord),
-                    Err(reason) => {
-                        translation_faults.push(ImportFault {
-                            what: format!(
-                                "{}: {}",
-                                crate::persist::KEYBINDINGS_FILE_NAME,
-                                entry.action
-                            ),
-                            reason: reason.to_owned(),
-                        });
-                        return None;
-                    }
-                },
-                None => None,
-            };
-            Some(Override {
+    }
+}
+
+/// **A shortcut document, read** — the one reader of a `keybindings.json`
+/// document: at launch, on an import, and for the keybindings merge's door
+/// (T-STORE-MERGE-KEYBINDINGS rounds 2 and 3, coordinator rulings 2026-10-12:
+/// one document, one reading rule). This build's table for `platform`, then
+/// each line read in the document's own dialect and carried to this one
+/// ([`crate::shortcuts::read_chord_in`], the rule the merge reads its sides
+/// with too). **The last line about an action that reads is the one in force:
+/// an earlier line about it is neither dealt nor reported** — it is the file's
+/// words, kept, and inert on every road. The lines in force are then laid over
+/// the table by the two-pass reader (`Shortcuts::apply_overrides`). Every
+/// refused line, by its id.
+pub(crate) fn read_keybindings(
+    file: &KeybindingsV1,
+    platform: bt_platform::HostPlatform,
+) -> (Shortcuts, Vec<OverrideFault>) {
+    let mut faults = Vec::new();
+    let mut overrides: Vec<Override> = Vec::new();
+    for (entry, line) in
+        file.bindings
+            .iter()
+            .zip(read_lines(&file.bindings, file.writing_platform, platform))
+    {
+        match line {
+            LineRead::Shadowed => {}
+            LineRead::Reads(chord) => overrides.push(Override {
                 id: entry.action.clone(),
-                chord,
-            })
+                chord: chord.map(|chord| format_chord_on(&chord, platform)),
+            }),
+            LineRead::Refused(reason) => faults.push(OverrideFault {
+                id: entry.action.clone(),
+                reason: reason.to_owned(),
+            }),
+        }
+    }
+    let mut table = Shortcuts::defaults_for(platform);
+    faults.extend(table.apply_overrides(&overrides));
+    (table, faults)
+}
+
+/// **What one line of a shortcut document comes to** ([`read_lines`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LineRead {
+    /// A later line about the same action reads: this one is neither dealt nor
+    /// reported, whether it reads or not.
+    Shadowed,
+    /// The line reads: its chord in this platform's dialect (`None`: `null`).
+    Reads(Option<Chord>),
+    /// The line does not read, and no later line about its action does.
+    Refused(&'static str),
+}
+
+/// **Each line of a shortcut document, as every reader takes it** — the one
+/// selection rule `read_keybindings` and the keybindings merge both read with:
+/// each line read in the document's own dialect and carried to `platform`
+/// ([`read_chord_in`]); **a line with a later line about the same action that
+/// reads is shadowed**, whether it reads itself or not. "Reads" means the chord
+/// parses here — a later line the table then refuses (a chord another row
+/// holds) still shadows the earlier one, and leaves its action at its default —
+/// or with no chord, when another row already holds that default. A press finds
+/// an action's line in force through this too (`KeybindingsV1::apply_press`).
+pub(crate) fn read_lines(
+    bindings: &[bt_persist::BindingOverrideV1],
+    writing_platform: KeybindingsPlatformV1,
+    platform: bt_platform::HostPlatform,
+) -> Vec<LineRead> {
+    let source = dialect_of(writing_platform);
+    let read: Vec<Result<Option<Chord>, &'static str>> = bindings
+        .iter()
+        .map(|entry| match entry.chord.as_deref() {
+            Some(chord) => read_chord_in(chord, source, platform).map(Some),
+            None => Ok(None),
         })
         .collect();
-    let mut table = Shortcuts::defaults_for(platform);
-    let mut faults = table
-        .apply_overrides(&overrides)
+    bindings
+        .iter()
+        .zip(&read)
+        .enumerate()
+        .map(|(index, (entry, line))| {
+            let shadowed = bindings[index + 1..]
+                .iter()
+                .zip(&read[index + 1..])
+                .any(|(later, read)| later.action == entry.action && read.is_ok());
+            match (shadowed, line) {
+                (true, _) => LineRead::Shadowed,
+                (false, Ok(chord)) => LineRead::Reads(chord.clone()),
+                (false, Err(reason)) => LineRead::Refused(reason),
+            }
+        })
+        .collect()
+}
+
+/// **The shortcut table a launch starts with**: the store's document read by
+/// [`read_keybindings`], and the departures the table put in force told to the
+/// store — what a press is measured against; the lines the table refused stay
+/// in the document and out of the projection.
+pub(crate) fn shortcuts_at_start(
+    store: &mut crate::persist::KeybindingsStore,
+    platform: bt_platform::HostPlatform,
+) -> (Shortcuts, Vec<OverrideFault>) {
+    let (table, faults) = read_keybindings(store.file_document(), platform);
+    store.project_on(
+        table
+            .overrides()
+            .into_iter()
+            .map(|entry| bt_persist::BindingOverrideV1 {
+                action: entry.id,
+                chord: entry.chord,
+            })
+            .collect(),
+        crate::persist::keybindings_platform_on(platform),
+    );
+    (table, faults)
+}
+
+/// **A shortcut part, read the way `keybindings.json` is read at launch**
+/// ([`read_keybindings`]), every refused line named by its file and id.
+pub(crate) fn import_shortcuts(
+    file: &KeybindingsV1,
+    platform: bt_platform::HostPlatform,
+) -> (Shortcuts, Vec<ImportFault>) {
+    let (table, faults) = read_keybindings(file, platform);
+    let faults = faults
         .into_iter()
         .map(|fault| ImportFault {
             what: format!("{}: {}", crate::persist::KEYBINDINGS_FILE_NAME, fault.id),
             reason: fault.reason,
         })
-        .collect::<Vec<_>>();
-    translation_faults.append(&mut faults);
-    (table, translation_faults)
+        .collect();
+    (table, faults)
 }
 
 /// What an imported `schemes` part writes into the folder, and what it names.
@@ -663,7 +745,6 @@ mod tests {
             terminal_font_family: "Test Mono".to_owned(),
             terminal_cjk_font_family: "Test Han".to_owned(),
             terminal_font_size: base.terminal_font_size + 3,
-            psreadline_invite: PsReadLineInviteV1::Declined,
             light_scheme: "Pale (custom)".to_owned(),
             dark_scheme: "Deep (custom)".to_owned(),
             background_image: "ground.png".to_owned(),

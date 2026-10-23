@@ -805,7 +805,23 @@ pub struct ViewportFrame {
     /// would index somebody else's cell the moment a window moved. A caret whose grid column the
     /// window does not show is not `visible`, exactly as a caret on a row the frame does not draw
     /// is not (plan §5.5).
+    ///
+    /// Both numbers always name a cell inside the rectangle. A caret whose grid column the window
+    /// does not show stands in column 0 of its row; a caret whose row the pane does not show
+    /// stands in the presentation row at the pane's edge nearest it — the first row the pane shows
+    /// when the caret's row lies above the pane, the last when it lies below — and never on the
+    /// presentation row that happens to share its grid row's index. [`Self::cursor_in_view`] is
+    /// false for both, so neither is drawn or composed at; the input method is told that cell,
+    /// which puts its candidate window at the edge of the pane the caret is beyond.
     pub cursor: GridCursor,
+    /// Whether [`Self::cursor`] names a cell this frame draws, whatever the program says about
+    /// showing it: its row is a presentation row, its column is in the window, and no rendered
+    /// formula stands over it.
+    ///
+    /// `cursor.visible` is this **and** the program's own DECTCEM bit. An IME composition needs
+    /// only this one: a full-screen program that hides the terminal cursor and draws its own still
+    /// leaves the hidden one at its input caret, and the composition belongs there (issue #42).
+    pub cursor_in_view: bool,
     pub cell_anchors: Vec<CellAnchor>,
     pub row_map: Vec<FrameVisualRow>,
     pub selection_spans: Vec<SelectionSpan>,
@@ -2668,6 +2684,7 @@ impl ViewportProjection {
                 visible: cursor.visible && drawn_cursor_column.is_some(),
                 ..cursor
             },
+            cursor_in_view: drawn_cursor_column.is_some(),
             cell_anchors,
             row_map,
             selection_spans: Vec::new(),
@@ -3724,15 +3741,46 @@ impl ViewportProjection {
                 )
             },
         );
-        let projected_cursor_row = row_map
+        let presented_cursor_row = row_map
             .iter()
-            .position(|row| row.live_grid_row == Some(cursor.row))
+            .position(|row| row.live_grid_row == Some(cursor.row));
+        let projected_cursor_row = presented_cursor_row
             .filter(|row| {
                 let mapped = row_map[*row];
                 mapped.top_subpixels < pane_height
                     && mapped.top_subpixels.saturating_add(mapped.height_subpixels) > 0
             })
             .and_then(|row| u32::try_from(row).ok());
+        // A cursor whose row the pane does not show names the row the pane shows nearest it, never
+        // its grid row: a grid row read as a presentation row is a cell of somebody else's line, and
+        // the IME's candidate window was being opened on it. The row is above the pane when the
+        // frame presents it and it ends at or above the pane's top (a live band pushed it up);
+        // otherwise it is below — a live row the frame does not present at all is always below,
+        // because the live plane follows history and staging in the presented sequence and a
+        // window that does not start inside the live plane presents the plane from its first row.
+        // The row map is one list in top order, so the edge rows are counted off its two ends:
+        // the first row that reaches below the pane's top, and the last row that starts above the
+        // pane's bottom.
+        let cursor_row = projected_cursor_row.unwrap_or_else(|| {
+            let above = presented_cursor_row.is_some_and(|row| {
+                let mapped = row_map[row];
+                mapped.top_subpixels.saturating_add(mapped.height_subpixels) <= 0
+            });
+            let edge = if above {
+                row_map
+                    .iter()
+                    .take_while(|row| row.top_subpixels.saturating_add(row.height_subpixels) <= 0)
+                    .count()
+                    .min(row_map.len().saturating_sub(1))
+            } else {
+                row_map
+                    .iter()
+                    .take_while(|row| row.top_subpixels < pane_height)
+                    .count()
+                    .saturating_sub(1)
+            };
+            u32::try_from(edge).expect("a presentation row index fits the frame's u32 row count")
+        });
         let cursor_hidden_by_math = math_blocks.iter().any(|placement| {
             matches!(
                 placement.anchor,
@@ -3752,6 +3800,9 @@ impl ViewportProjection {
         // column the window does not show is exactly as undrawable as one standing on a row the
         // frame does not carry, and says so the same way (plan §5.5).
         let projected_cursor_column = axis.to_viewport(ContentColumn(cursor.column));
+        let cursor_in_view = projected_cursor_row.is_some()
+            && projected_cursor_column.is_some()
+            && !cursor_hidden_by_math;
         debug_assert_eq!(
             cells.len(),
             cell_anchors.len(),
@@ -3765,16 +3816,14 @@ impl ViewportProjection {
             presentation_offset_subpixels,
             cells,
             cursor: GridCursor {
-                row: projected_cursor_row.unwrap_or(cursor.row),
+                row: cursor_row,
                 // Zero and not the grid column it could not be converted from: an invisible caret
                 // still has to name a cell inside the rectangle, and a content column in a viewport
                 // field is the confusion this whole axis exists to end.
                 column: projected_cursor_column.map_or(0, |column| column.0),
-                visible: cursor.visible
-                    && projected_cursor_row.is_some()
-                    && projected_cursor_column.is_some()
-                    && !cursor_hidden_by_math,
+                visible: cursor.visible && cursor_in_view,
             },
+            cursor_in_view,
             cell_anchors,
             row_map,
             selection_spans,
@@ -4382,7 +4431,7 @@ impl ViewportProjection {
                 if !artifact.pane_narrower_than_marks {
                     return true;
                 }
-                if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
+                if crate::trace::perf() {
                     crate::trace::line(format!(
                         "BT_PERF_TRACE live_math_event=source-fallback row={} left={:?} right={:?} reason=pane-narrower-than-marks",
                         artifact.start.row, artifact.left_limit_columns, artifact.right_limit_columns,
@@ -4438,7 +4487,7 @@ impl ViewportProjection {
                 // unproven block gets — and it is refused *here*, so that nothing downstream ever
                 // sees a bridge whose rows above the grid were guessed at.
                 let Some(box_height) = share.map(|share| share.max(1)) else {
-                    if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
+                    if crate::trace::perf() {
                         crate::trace::line(format!(
                             "BT_PERF_TRACE live_math_event=source-fallback row={} frozen_prefix={} staging_prefix={} reason=bridge-prefix-not-measurable",
                             artifact.start.row,
@@ -4455,7 +4504,7 @@ impl ViewportProjection {
                 let accepted = box_height <= per_block_limit;
                 // Set-but-empty is off, as everywhere else this family is read.
                 if !accepted
-                    && std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty())
+                    && crate::trace::perf()
                 {
                     crate::trace::line(format!(
                         "BT_PERF_TRACE live_math_event=source-fallback row={} box_subpixels={} per_block_limit_subpixels={} min_text_rows={} reason=block-exceeds-visible-text-floor",
@@ -13461,6 +13510,305 @@ mod tests {
             !frame.cursor.visible,
             "grid column three is nine columns left of the window"
         );
+    }
+
+    /// A cursor the program hid (DECTCEM) is in view exactly where a shown one would be drawn,
+    /// and is never drawn itself; a cursor scrolled off the frame's rows or out of its window is
+    /// out of view whether shown or not (issue #42: the IME composition goes where it is in view).
+    ///
+    /// MUTATIONS: `cursor_in_view = cursor.visible && …` in `continuous_frame`, or
+    /// `cursor_in_view: cursor.visible && …` in `live_frame` — the hidden rows go red, and the
+    /// composition of a program that hides the cursor is dropped again.
+    #[test]
+    fn a_hidden_cursor_is_in_view_wherever_a_shown_one_would_be_drawn() {
+        const COLUMNS: u32 = 10;
+        let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+        let mut document = HistoryDocument::default();
+        for row in ["历史-0      ", "history-1 ", "历史-2      "] {
+            let finalized = store.capture(fixture_row(row, false)).finalized;
+            document.finalize_transaction(finalized.into_iter().next().unwrap());
+        }
+        let live = || {
+            vec![
+                fixture_row("> 你好      ", false),
+                fixture_row("          ", false),
+                fixture_row("          ", false),
+            ]
+        };
+        for shown in [true, false] {
+            for offset in 0..=3u32 {
+                let mut projection = ViewportProjection::new(
+                    key(COLUMNS),
+                    DetectionRevision(1),
+                    nz32(3),
+                    cell_height(),
+                    store.source_generation(),
+                    GridGeneration(1),
+                );
+                projection.project(&document);
+                let cursor = GridCursor {
+                    row: 1,
+                    column: 2,
+                    visible: shown,
+                };
+                projection
+                    .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+                    .unwrap();
+                projection.scroll_by_rows(offset as i32);
+                let frame = projection
+                    .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+                    .unwrap();
+                let in_view = 1 + offset < 3;
+                assert_eq!(
+                    frame.cursor_in_view, in_view,
+                    "shown={shown} offset={offset}: in view is where the row is, not what DECTCEM says"
+                );
+                assert_eq!(frame.cursor.visible, shown && in_view);
+                if in_view {
+                    assert_eq!((frame.cursor.row, frame.cursor.column), (1 + offset, 2));
+                }
+            }
+        }
+
+        let (mut projection, document) = axis_pane(flattened_key(8), 2, &["0123456789abcdefghij"]);
+        let hidden_at = |column| GridCursor {
+            visible: false,
+            ..cursor_at(column)
+        };
+        let live = || vec![grid_row("提示符ROW1", 8); 2];
+        projection.set_horizontal_origin(ContentColumn(4));
+        let frame = axis_frame(&mut projection, &document, &[], live(), hidden_at(6));
+        assert!(frame.cursor_in_view && !frame.cursor.visible);
+        assert_eq!(frame.cursor.column, 2);
+        projection.set_horizontal_origin(ContentColumn(9));
+        let frame = axis_frame(&mut projection, &document, &[], live(), hidden_at(3));
+        assert!(
+            !frame.cursor_in_view,
+            "a column left of the window is out of view, hidden or not"
+        );
+
+        // The bare live frame answers the same way.
+        let mut projection = ViewportProjection::new(
+            key(4),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let frame = projection
+            .live_frame(
+                nz32(4),
+                vec![fixture_row("> 你 ", false), fixture_row("    ", false)],
+                GridCursor {
+                    row: 0,
+                    column: 2,
+                    visible: false,
+                },
+            )
+            .unwrap();
+        assert!(frame.cursor_in_view && !frame.cursor.visible);
+        assert_eq!((frame.cursor.row, frame.cursor.column), (0, 2));
+    }
+
+    /// A cursor whose row the pane does not show names the presentation row at the pane's edge
+    /// nearest it — never the presentation row that shares its grid row's index, which is a line
+    /// of somebody else's (the input method opened its candidate window there). Below: the reader
+    /// scrolled into history, the cursor's row cut off under the pane (in the overscan row, then
+    /// not presented at all). Above: a tall live formula pushed the cursor's row over the pane's
+    /// top. A cursor whose column is outside the window stays in column 0 of its own row.
+    ///
+    /// MUTATIONS: the frame's cursor row back to `projected_cursor_row.unwrap_or(cursor.row)` in
+    /// `continuous_frame` — red at the first scrolled offset; `above` made `false` — red in the
+    /// formula half (the bottom edge is named for a cursor above the pane).
+    #[test]
+    fn an_ime_caret_for_a_scrolled_away_cursor_is_not_an_unrelated_row() {
+        const COLUMNS: u32 = 10;
+        const PANE_ROWS: u32 = 4;
+        let pane_height = i64::from(PANE_ROWS) * cell_height().get();
+        let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+        let mut document = HistoryDocument::default();
+        for row in [
+            "历史-0      ",
+            "history-1 ",
+            "历史-2      ",
+            "history-3 ",
+            "历史-4      ",
+            "history-5 ",
+        ] {
+            let finalized = store.capture(fixture_row(row, false)).finalized;
+            document.finalize_transaction(finalized.into_iter().next().unwrap());
+        }
+        let live = || {
+            vec![
+                fixture_row("状态 ready  ", false),
+                fixture_row("> 你好      ", false),
+                fixture_row("          ", false),
+                fixture_row("          ", false),
+            ]
+        };
+        for shown in [true, false] {
+            for offset in 0..=6u32 {
+                let mut projection = ViewportProjection::new(
+                    key(COLUMNS),
+                    DetectionRevision(1),
+                    nz32(PANE_ROWS),
+                    cell_height(),
+                    store.source_generation(),
+                    GridGeneration(1),
+                );
+                projection.project(&document);
+                let cursor = GridCursor {
+                    row: 1,
+                    column: 4,
+                    visible: shown,
+                };
+                projection
+                    .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+                    .unwrap();
+                projection.scroll_by_rows(offset as i32);
+                let frame = projection
+                    .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+                    .unwrap();
+                let in_view = 1 + offset < PANE_ROWS;
+                assert_eq!(
+                    frame.cursor_in_view, in_view,
+                    "shown={shown} offset={offset}"
+                );
+                assert_eq!(frame.cursor.visible, shown && in_view);
+                assert_eq!(frame.cursor.column, 4, "the column is the caret's own");
+                if in_view {
+                    assert_eq!(frame.cursor.row, 1 + offset);
+                    continue;
+                }
+                assert_eq!(
+                    frame.cursor.row,
+                    PANE_ROWS - 1,
+                    "shown={shown} offset={offset}: a cursor below the pane names the pane's \
+                     last row"
+                );
+                let edge = frame.row_map[frame.cursor.row as usize];
+                assert_eq!(
+                    edge.top_subpixels + edge.height_subpixels,
+                    pane_height,
+                    "and that row ends at the pane's bottom edge"
+                );
+                assert_ne!(edge.live_grid_row, Some(cursor.row));
+            }
+        }
+
+        // Above: on the alternate screen (expand-only, as a full-screen program's formula is) a
+        // six-row formula on live row 2 overflows the four-row pane by five rows, and the full last
+        // row leaves no blank tail to relieve it, so live rows 0 and 1 are cut off over the pane's
+        // top. The cursor stands on row 0.
+        let art_cells: u32 = 6;
+        let art_height = i64::from(art_cells) * cell_height().get();
+        let mut projection = ViewportProjection::new(
+            key(COLUMNS),
+            DetectionRevision(1),
+            nz32(PANE_ROWS),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.sync_live_math_artifacts(
+            ScreenId::Alternate,
+            [ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(1),
+                screen: ScreenId::Alternate,
+                start: GridPoint { row: 2, column: 0 },
+                end: GridPoint { row: 2, column: 4 },
+                band_start_row: 2,
+                band_end_row: 2,
+                left_limit_columns: None,
+                right_limit_columns: None,
+                pane_narrower_than_marks: false,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
+                transition_stale: false,
+                frozen_prefix: Vec::new(),
+                staging_prefix: Vec::new(),
+                generation: GridGeneration(1),
+                artifact: ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
+                    key: "display-x".to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; (art_cells * 18) as usize * 4]),
+                    width_px: 1,
+                    height_px: art_cells * 18,
+                    height_subpixels: art_height,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: "x".to_owned(),
+                },
+            }],
+        );
+        let frame = projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &[],
+                vec![
+                    fixture_row("> 你好      ", false),
+                    fixture_row("history-1 ", false),
+                    fixture_row("$$x$$     ", false),
+                    fixture_row("状态 ready  ", false),
+                ],
+                GridCursor {
+                    row: 0,
+                    column: 3,
+                    visible: true,
+                },
+                ScreenId::Alternate,
+            )
+            .unwrap();
+        frame.validate_shape().unwrap();
+        let cut_row = frame
+            .row_map
+            .iter()
+            .position(|row| row.live_grid_row == Some(0))
+            .expect("the live plane is presented whole");
+        let cut = frame.row_map[cut_row];
+        assert!(
+            cut.top_subpixels + cut.height_subpixels <= 0,
+            "fixture: the cursor's row is wholly over the pane's top ({cut:?})"
+        );
+        assert!(!frame.cursor_in_view && !frame.cursor.visible);
+        let edge = frame.row_map[frame.cursor.row as usize];
+        assert!(
+            edge.top_subpixels <= 0 && edge.top_subpixels + edge.height_subpixels > 0,
+            "a cursor above the pane names the row at the pane's top edge ({edge:?}, row {})",
+            frame.cursor.row
+        );
+        assert_ne!(frame.cursor.row as usize, cut_row);
+        assert_eq!(frame.cursor.column, 3);
+
+        // The horizontal case, unchanged: a column the window does not show is column 0 of the
+        // caret's own row.
+        let (mut projection, document) = axis_pane(flattened_key(8), 2, &["0123456789abcdefghij"]);
+        let live = || vec![grid_row("提示符ROW1", 8); 2];
+        projection.set_horizontal_origin(ContentColumn(9));
+        let frame = axis_frame(
+            &mut projection,
+            &document,
+            &[],
+            live(),
+            GridCursor {
+                row: 1,
+                column: 3,
+                visible: true,
+            },
+        );
+        assert!(!frame.cursor_in_view);
+        assert_eq!(
+            frame.row_map[frame.cursor.row as usize].live_grid_row,
+            Some(1)
+        );
+        assert_eq!(frame.cursor.column, 0);
     }
 
     /// Plan §5.5 — **a word is a word in the content, not in the window**, and a line selection

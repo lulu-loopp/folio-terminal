@@ -100,8 +100,7 @@ mod tests {
     /// too: an item is taken whole, and a comment about a word is not the word.
     #[test]
     fn one_item_is_taken_whole_and_its_comments_are_not_its_code() {
-        let source = "\
-fn before() { 1 }
+        let source = r"fn before() { 1 }
 /// A doc comment naming forbidden.
 fn subject(a: u8) -> u8 {
     // a line comment naming forbidden

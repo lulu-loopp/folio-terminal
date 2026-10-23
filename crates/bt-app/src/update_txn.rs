@@ -47,16 +47,11 @@
 //! older rescue build would misread raises the release manifest's
 //! `min_updater` to its first version.
 //!
-//! **Nothing in this file is called from the product yet, and that is the
-//! ticket boundary**: U-11 gives it its door, U-12 its startup caller and
-//! U-20…U-29 its drivers.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the protocol lands before its drivers: U-11, U-12 and U-20…U-29 call it ((b).5)"
-    )
-)]
+//! **Its product callers** are the drivers: the ordinary start
+//! (`update_startup`), the trial (`update_trial`), the recovery
+//! (`update_recover`), the Prepares (`update_prepare_windows`,
+//! `update_prepare_macos`), the hand-off (`update_handoff`) and the lock
+//! holders (`update_apply`, `update_apply_windows`, `update_apply_macos`).
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -465,6 +460,7 @@ impl Header {
     }
 
     /// The header alone, as v1 bytes.
+    #[cfg(test)]
     pub(crate) fn encode(&self) -> Vec<u8> {
         serde_json::to_vec(&self.wire()).expect("a header always serialises")
     }
@@ -604,6 +600,7 @@ pub(crate) struct Move {
 impl Inventories {
     /// Present names the running build did not ship: pre-existing files at
     /// names the new set will occupy.
+    #[cfg(test)]
     pub(crate) fn collisions(&self) -> impl Iterator<Item = &Member> {
         self.old_present
             .iter()
@@ -828,6 +825,7 @@ pub(crate) enum PhaseKind {
 }
 
 impl PhaseKind {
+    #[cfg(test)]
     pub(crate) const ALL: [PhaseKind; 13] = [
         PhaseKind::Allocated,
         PhaseKind::Prepared,
@@ -918,7 +916,7 @@ impl Phase {
     /// reserved nonce, or `None` in every other phase. The single owner of
     /// what is started at `TrialStarting` — the exit guards name it
     /// (`update_apply_windows::opens_now`), a start admits only it
-    /// (`update_startup::run`), and only it commits itself
+    /// (`update_startup::run_by`), and only it commits itself
     /// (`update_apply::commit_last_trial`).
     pub(crate) fn reserved_trial(&self) -> Option<Nonce> {
         match self {
@@ -1432,7 +1430,7 @@ impl ReceiptSight {
 /// 2026-10-08), each with its row of [`Role::beyond`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Role {
-    /// The ordinary start (`update_startup::run`) and its decisions.
+    /// The ordinary start (`update_startup::run_by`) and its decisions.
     Start,
     /// The trial's watch ([`trial_sight`]).
     TrialWatch,
@@ -1778,6 +1776,7 @@ pub(crate) enum EventKind {
 }
 
 impl EventKind {
+    #[cfg(test)]
     pub(crate) const ALL: [EventKind; 22] = [
         EventKind::Prepared,
         EventKind::PrepareFailed,
@@ -1886,6 +1885,7 @@ pub(crate) enum Refusal {
 
 /// **Every transition**, as `(from, event, to)`. [`next`] realises exactly
 /// these; any other pair is [`Refusal::Illegal`] or one of [`NAMED_REFUSALS`].
+#[cfg(test)]
 pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
     (
         PhaseKind::Allocated,
@@ -2020,6 +2020,7 @@ pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
 /// The refusals that are not merely [`Refusal::Illegal`], by `(from, event)`.
 /// A mismatched receipt in `Trial` or in a `Stuck` with a retrial, and any
 /// receipt in a `Stuck` without one, are refused by value and are not listed.
+#[cfg(test)]
 pub(crate) const NAMED_REFUSALS: &[(PhaseKind, EventKind, Refusal)] = &[(
     PhaseKind::RollbackIntent,
     EventKind::ReceiptAccepted,
@@ -2348,6 +2349,14 @@ const START_DELETES: &[PhaseKind] = &[
     PhaseKind::Retired,
 ];
 
+/// Where a trial of the new build runs and may write its receipt.
+const RECEIPT_PHASES: &[PhaseKind] = &[
+    PhaseKind::Moving,
+    PhaseKind::TrialStarting,
+    PhaseKind::Trial,
+    PhaseKind::Stuck,
+];
+
 /// The rights table. Anything it does not list, nobody may do.
 pub(crate) const EFFECT_RIGHTS: &[Right] = &[
     // O, as the job owner, sweeps what a dead preparation left (W1, M1), and
@@ -2505,13 +2514,20 @@ pub(crate) const EFFECT_RIGHTS: &[Right] = &[
         effect: Effect::DeleteJournal,
         during: TERMINAL,
     },
-    // N's receipt, in its recorded `Trial` and in U-35's `TrialStarting`,
-    // which records no process yet. N's one journal write, U-35's
-    // `LastTrialReady`, is in `JOURNAL_WRITERS` and `EventKind::authors`.
+    // N's receipt, wherever a trial of the new build runs: in its recorded
+    // `Trial`; in U-35's `TrialStarting`, which records no process yet; in
+    // `Moving`, where a lock holder launches the trial before it records
+    // `TrialBegan` — and where a holder that did not launch it adopts it by
+    // this very receipt (U-37, `update_apply::survey`); and in `Stuck`, where
+    // U-29b's retrial over a live new set commits forward on it (`next`'s one
+    // road to `Committed` besides `Trial`'s). Enforced at the write
+    // (`update_trial::write_receipt`, 0.4.8 E6). N's one journal write,
+    // U-35's `LastTrialReady`, is in `JOURNAL_WRITERS` and
+    // `EventKind::authors`.
     Right {
         actor: Actor::Trial,
         effect: Effect::WriteReceipt,
-        during: &[PhaseKind::TrialStarting, PhaseKind::Trial],
+        during: RECEIPT_PHASES,
     },
     // An ordinary start retires a terminal transaction, and discards one whose
     // install was replaced by hand while it was preparing or deferred.
@@ -2751,6 +2767,7 @@ pub(crate) enum Restore {
 
 impl Action {
     /// **The effects this action performs**, for [`EFFECT_RIGHTS`].
+    #[cfg(test)]
     pub(crate) fn effects(&self) -> Vec<Effect> {
         match self {
             Action::Leave
@@ -2797,6 +2814,7 @@ impl Action {
     }
 }
 
+#[cfg(test)]
 fn entrance_removal(remove: bool) -> impl Iterator<Item = Effect> {
     remove.then_some(Effect::RemoveEntrance).into_iter()
 }
@@ -3107,6 +3125,32 @@ impl Home {
         ))
     }
 
+    /// **The installation home of the rescue copy whose executable is
+    /// `exe`**, found from its own path (T-RESCUE-COPY-CARD): on Windows
+    /// [`Home::of_rescue`]'s; on macOS the rescue clone's — `exe` inside a
+    /// bundle `<parent>/.<Bundle>.folio-update/<txn>/rescue/<Bundle>`, the
+    /// clone of the installed `<parent>/<Bundle>` ([`Home::rescue_bundle`]),
+    /// whose home is that bundle's locator. `None` for every other executable.
+    /// The `<txn>` folder's name is not checked (as in [`Home::of_rescue`]):
+    /// the start this home is found for only reads.
+    pub(crate) fn of_rescue_copy(platform: HostPlatform, exe: &Path) -> Option<Self> {
+        match platform {
+            HostPlatform::Windows => Self::of_rescue(platform, exe).map(|(home, _)| home),
+            HostPlatform::MacOs => {
+                let (bundle, _) = bundle_of(exe)?;
+                let rescue = bundle.parent()?;
+                let root = rescue.parent()?.parent()?;
+                if rescue.file_name()? != "rescue" {
+                    return None;
+                }
+                let (home, _) = Self::of_rescue_named(platform, exe, root)?;
+                let installed = home.installed_bundle()?;
+                (installed.file_name()? == bundle.file_name()?).then_some(home)
+            }
+            HostPlatform::OtherUnix => None,
+        }
+    }
+
     /// **The home the entrance named, and the installed program the rescue
     /// build at `exe` starts again** — `--update-recover <home>` (F-3).
     ///
@@ -3389,16 +3433,9 @@ pub(crate) fn trial_sight(journal: Option<&[u8]>, txn: &TxnId) -> TrialSight {
 
 // ───────────────────────────── the ordinary start ─────────────────────────────
 
-/// What an ordinary start found at `H\journal.json`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum JournalRead {
-    Absent,
-    Unreadable(ParseRefusal),
-    Read(Header),
-}
-
 /// **A description of what an ordinary start sees**, built by the caller:
-/// the header, whether the transaction lock was free, the digest of its own
+/// the header it read (a start that reads none, or reads nothing of the
+/// journal, acts on [`Sight`] before it asks this rule), whether the transaction lock was free, the digest of its own
 /// image and of the rescue build the header names, the transaction its own
 /// `--update-trial` names, if it was started as a trial, and whether it
 /// carries `--update-failed`.
@@ -3407,7 +3444,7 @@ pub(crate) enum JournalRead {
 /// it then cannot tell a replaced install from its own, and replaces nothing.
 #[derive(Clone, Debug)]
 pub(crate) struct StartView {
-    pub(crate) journal: JournalRead,
+    pub(crate) header: Header,
     pub(crate) lock_free: bool,
     pub(crate) own_image: Option<Digest>,
     pub(crate) rescue_image: Option<Digest>,
@@ -3464,6 +3501,7 @@ pub(crate) enum Removal {
 
 impl Clearing {
     /// The effect of [`EFFECT_RIGHTS`] this step is.
+    #[cfg(test)]
     pub(crate) const fn effect(self) -> Effect {
         match self {
             Clearing::DetachMount => Effect::DetachMount,
@@ -3514,6 +3552,7 @@ impl StartAction {
 
     /// The effects this action performs, for [`EFFECT_RIGHTS`]: its
     /// [`steps`](Self::steps), each as its effect.
+    #[cfg(test)]
     pub(crate) fn effects(self) -> Vec<Effect> {
         let steps = self.steps();
         steps
@@ -3525,13 +3564,9 @@ impl StartAction {
     }
 }
 
-/// **The ordinary start's rule, from the header alone** ((b).2). A journal
-/// this build cannot read is left exactly as it is: nothing is deleted on the
-/// strength of bytes nobody understood.
+/// **The ordinary start's rule, from the header alone** ((b).2).
 pub(crate) fn at_start(view: &StartView) -> StartAction {
-    let JournalRead::Read(header) = &view.journal else {
-        return StartAction::Continue;
-    };
+    let header = &view.header;
     match header.class {
         Class::Terminal if view.lock_free => StartAction::Retire,
         Class::Terminal => StartAction::Continue,
@@ -3624,6 +3659,34 @@ mod tests {
 
     fn txn() -> TxnId {
         TxnId::new([0x7a; 16])
+    }
+
+    /// **The clean-VM watcher's journal line names the file the build
+    /// writes**: a cross-language contract between two committed texts. Its
+    /// subject is one line of `scripts/release/cleanvm/updater/guest/watch.ps1`,
+    /// `$journalPath = Join-Path $H '<name>'`, held to the file name
+    /// [`Home::journal`] joins onto a home when it runs (taken from the code
+    /// running, never from this file's text). It claims nothing about what the
+    /// watcher does with that path; the clean-VM rows run the watcher.
+    ///
+    /// MUTATION: `Home::journal` joining `journal-2.json` (or `watch.ps1`
+    /// joining another name) goes red here.
+    #[test]
+    fn the_watcher_reads_the_journal_where_the_build_writes_it() {
+        let watch = include_str!("../../../scripts/release/cleanvm/updater/guest/watch.ps1");
+        let home = Home::at(PathBuf::from("家目录"));
+        let journal = home.journal();
+        assert_eq!(journal.parent(), Some(home.root()));
+        let name = journal
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the journal is a file name joined onto the home");
+        let line = format!("$journalPath = Join-Path $H '{name}'");
+        assert!(
+            watch.lines().any(|written| written.trim() == line),
+            "watch.ps1 has no `{line}` line, so the watcher reads a journal the build does not \
+             write"
+        );
     }
 
     /// **A registry in memory**, for the entrance's proof: the proof is made
@@ -4224,9 +4287,9 @@ mod tests {
         Located::Bundle { live, stage }
     }
 
-    fn start(journal: JournalRead, lock_free: bool) -> StartView {
+    fn start(header: Header, lock_free: bool) -> StartView {
         StartView {
-            journal,
+            header,
             lock_free,
             own_image: Some(digest(0x01)),
             rescue_image: Some(digest(0x01)),
@@ -4236,10 +4299,7 @@ mod tests {
     }
 
     fn start_on(phase: Phase) -> StartView {
-        start(
-            JournalRead::Read(journal(phase, members_layout()).header()),
-            true,
-        )
+        start(journal(phase, members_layout()).header(), true)
     }
 
     /// **The rescue build driving a Windows rollback to its end**, the way
@@ -4829,7 +4889,12 @@ mod tests {
     /// exact reserved trial writing `Committed` from its own readiness
     /// receipt. R writes `Trial` since U-29b: it starts N over an exchange a
     /// dead applier left with the new bundle live (the coordinator's ruling
-    /// 1).
+    /// 1). N's one effect, its receipt, is granted wherever a trial of the
+    /// new build runs (0.4.8 E6, the release read's F4: the row named only
+    /// `TrialStarting` and `Trial`, though a retrial over `Stuck` and a trial
+    /// launched over `Moving` write one too).
+    ///
+    /// MUTATION: drop `Stuck` (or `Moving`) from `RECEIPT_PHASES`.
     #[test]
     fn every_phase_is_recorded_only_by_the_writers_the_table_names() {
         // The one phase no transition writes is the first: O creates the
@@ -4873,9 +4938,15 @@ mod tests {
             trial_rights,
             vec![(
                 Effect::WriteReceipt,
-                &[PhaseKind::TrialStarting, PhaseKind::Trial][..]
+                &[
+                    PhaseKind::Moving,
+                    PhaseKind::TrialStarting,
+                    PhaseKind::Trial,
+                    PhaseKind::Stuck
+                ][..]
             )],
-            "N writes its receipt in the reserved or recorded trial phase"
+            "N writes its receipt wherever a trial of the new build runs: launched \
+             before it is recorded, reserved, recorded, or retried over Stuck"
         );
     }
 
@@ -4929,6 +5000,58 @@ mod tests {
         );
     }
 
+    /// RED (0.4.8 E6, the release read's F4) — **the rights table is held at
+    /// the receipt's write**: over a journal of every phase, the trial's
+    /// receipt is written exactly where `Actor::Trial` may `WriteReceipt`, and
+    /// anywhere else it is refused with nothing at its name.
+    ///
+    /// MUTATION: in `update_trial::write_receipt`, drop the `receipt_granted`
+    /// check — a receipt is written over `Allocated`, `Committed`,
+    /// `RollbackIntent` and the rest.
+    #[test]
+    fn the_receipt_is_written_only_where_the_rights_table_grants_it() {
+        let root = bt_testpath::temp_path("e6-receipt-rights");
+        let _ = std::fs::remove_dir_all(&root);
+        let mut granted = BTreeSet::new();
+        for (at, phase) in phase_samples().into_iter().enumerate() {
+            let kind = phase.kind();
+            let home = Home::at(root.join(at.to_string()));
+            std::fs::create_dir_all(home.transaction(txn())).expect("the transaction's folder");
+            std::fs::write(home.journal(), journal(phase, members_layout()).encode())
+                .expect("the journal");
+            let trial = nonce(TRIAL_NONCE);
+            let job = crate::update_trial::ReceiptJob {
+                path: home.receipt_path(txn(), &trial),
+                bytes: Receipt {
+                    txn: txn(),
+                    nonce: trial,
+                    pid: std::process::id(),
+                    version: "0.4.8".to_owned(),
+                    started: None,
+                }
+                .encode(),
+                journal: home.journal(),
+                txn: txn(),
+            };
+            let written = crate::update_trial::write_receipt(&job);
+            let allowed = may(Actor::Trial, Effect::WriteReceipt, kind);
+            assert_eq!(written.is_ok(), allowed, "{kind:?}: {written:?}");
+            assert_eq!(job.path.exists(), allowed, "{kind:?}: the receipt on disk");
+            if allowed {
+                granted.insert(format!("{kind:?}"));
+            }
+        }
+        assert_eq!(
+            granted,
+            ["Moving", "Stuck", "Trial", "TrialStarting"]
+                .map(str::to_owned)
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            "every granted phase is met"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// RED (U-10) — **every action `decide` hands out, and every action a
     /// start takes, is within its actor's rights in that phase.**
     ///
@@ -4954,7 +5077,7 @@ mod tests {
                         let view = StartView {
                             rescue_image,
                             trial_of,
-                            ..start(JournalRead::Read(journal.header()), lock_free)
+                            ..start(journal.header(), lock_free)
                         };
                         for effect in at_start(&view).effects() {
                             assert!(
@@ -5119,7 +5242,7 @@ mod tests {
                     assert!(!forbidden.contains(&effect), "{action:?} in Stuck");
                 }
             }
-            let view = start(JournalRead::Read(journal.header()), true);
+            let view = start(journal.header(), true);
             assert_eq!(at_start(&view), StartAction::HandToRescue);
         }
         let stuck = journal(
@@ -5172,7 +5295,7 @@ mod tests {
                     disk.asker
                 );
             }
-            let view = start(JournalRead::Read(journal.header()), true);
+            let view = start(journal.header(), true);
             assert_eq!(at_start(&view), StartAction::HandToRescue);
         }
     }
@@ -5947,7 +6070,7 @@ mod tests {
             }
         );
         assert_eq!(at_start(&start_on(Phase::Abandoned)), StartAction::Retire);
-        let held = start(JournalRead::Read(journal.header()), false);
+        let held = start(journal.header(), false);
         assert_eq!(at_start(&held), StartAction::Continue);
     }
 
@@ -6333,7 +6456,7 @@ mod tests {
             decide(&holder(&journal, swapped)),
             Action::RollBack(Restore::SwapBack)
         );
-        let view = start(JournalRead::Read(journal.header()), true);
+        let view = start(journal.header(), true);
         assert_eq!(at_start(&view), StartAction::HandToRescue);
     }
 
@@ -6388,7 +6511,7 @@ mod tests {
             ..holder(&living, swapped)
         };
         assert_eq!(decide(&alive), Action::StopTrial(TRIAL));
-        let view = start(JournalRead::Read(journal.header()), true);
+        let view = start(journal.header(), true);
         assert_eq!(at_start(&view), StartAction::HandToRescue);
     }
 
@@ -6525,7 +6648,7 @@ mod tests {
     #[test]
     fn a_destructive_journal_hands_every_start_but_its_trial_to_the_rescue() {
         let header = journal(trial_phase(), members_layout()).header();
-        let mut view = start(JournalRead::Read(header), false);
+        let mut view = start(header, false);
         assert_eq!(at_start(&view), StartAction::HandToRescue);
         view.trial_of = Some(TxnId::new([0x01; 16]));
         assert_eq!(at_start(&view), StartAction::HandToRescue);
@@ -6533,17 +6656,12 @@ mod tests {
         assert_eq!(at_start(&view), StartAction::RunAsTrial);
     }
 
-    /// RED (U-10) — **a journal a start cannot read is left exactly as it is**,
-    /// and so is a terminal one whose lock another process holds.
+    /// RED (U-10) — **a terminal journal whose lock another process holds is
+    /// left alone.** (A journal a start cannot read whole never reaches this
+    /// rule: the start acts on its [`Sight`], held by
+    /// `update_startup::tests::on_disk::the_start_acts_on_the_header_of_what_it_cannot_read_whole`.)
     #[test]
-    fn an_unreadable_or_locked_journal_is_left_alone() {
-        for read in [
-            JournalRead::Absent,
-            JournalRead::Unreadable(ParseRefusal::Truncated),
-            JournalRead::Unreadable(ParseRefusal::UnknownVersion(2)),
-        ] {
-            assert_eq!(at_start(&start(read, true)), StartAction::Continue);
-        }
+    fn a_terminal_journal_whose_lock_is_held_is_left_alone() {
         let header = journal(
             Phase::Retired {
                 outcome: Outcome::Committed,
@@ -6552,10 +6670,7 @@ mod tests {
             members_layout(),
         )
         .header();
-        assert_eq!(
-            at_start(&start(JournalRead::Read(header), false)),
-            StartAction::Continue
-        );
+        assert_eq!(at_start(&start(header, false)), StartAction::Continue);
     }
 
     /// RED (U-10) — **a start whose own image is not the rescue copy of O,
@@ -7926,7 +8041,7 @@ mod parse_sites {
     pub(super) const SITES: &[Site] = &[
         site(
             "H1+J1+J2",
-            "crate::update_startup::run",
+            "crate::update_startup::run_by",
             Reads::SightOfRead,
             1,
             Is::Reader(Role::Start),
@@ -8078,6 +8193,14 @@ mod parse_sites {
             1,
             Is::OwnBytes,
             "crate::update_trial::tests::a_receipt_this_build_cannot_read_is_never_written_over",
+        ),
+        site(
+            "receipt_granted",
+            "crate::update_trial::receipt_granted",
+            Reads::SightOfRead,
+            1,
+            Is::Reader(Role::ReceiptWrite),
+            "crate::update_trial::tests::no_receipt_is_written_over_a_journal_the_writer_cannot_read_whole",
         ),
         site(
             "sight",

@@ -1,10 +1,62 @@
 use bt_platform::HostPlatform;
 use bt_pty::ConPtyKind;
 use bt_term::{KeyboardProtocol, ModifyOtherKeys, SUPPORTED_KITTY_FLAGS};
-use winit::event::{ElementState, MouseButton};
+use winit::event::{ElementState, KeyEvent, MouseButton};
 use winit::keyboard::{
-    Key, KeyCode, KeyLocation, ModifiersState, NamedKey, NativeKey, PhysicalKey,
+    Key, KeyCode, KeyLocation, ModifiersState, NamedKey, NativeKey, PhysicalKey, SmolStr,
 };
+// Windows reports what a key means with Shift and what it means without, and a shortcut table
+// needs the second: `Ctrl+Shift+1` produces `!` on a US keyboard and `1` on layouts that put the
+// digit behind Shift, and the binding is meant to be the digit either way.
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+
+/// **One key event, as the window's handlers read it** (T-HEADLESS-RUNTIME-SEAM).
+///
+/// winit's `KeyEvent` can be built by winit alone — its `platform_specific` field is
+/// `pub(crate)` — so the dispatch takes from it, once, every field the handlers read and both of
+/// the answers its platform extension adds, under the names the handlers already read them by. A
+/// test hands a handler one directly; nothing is decided here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Keystroke {
+    pub(crate) physical_key: PhysicalKey,
+    pub(crate) logical_key: Key,
+    pub(crate) text: Option<SmolStr>,
+    pub(crate) location: KeyLocation,
+    /// `KeyEvent::state`, as the one question every handler asks of it: down, or up.
+    pub(crate) pressed: bool,
+    pub(crate) repeat: bool,
+    /// `KeyEventExtModifierSupplement::key_without_modifiers`.
+    pub(crate) unmodified_key: Key,
+    /// `KeyEventExtModifierSupplement::text_with_all_modifiers`.
+    pub(crate) modified_text: Option<SmolStr>,
+}
+
+impl Keystroke {
+    /// The key with no modifier applied, as winit's extension answers it.
+    pub(crate) fn key_without_modifiers(&self) -> Key {
+        self.unmodified_key.clone()
+    }
+
+    /// The text with every modifier applied, as winit's extension answers it.
+    pub(crate) fn text_with_all_modifiers(&self) -> Option<&str> {
+        self.modified_text.as_deref()
+    }
+}
+
+impl From<&KeyEvent> for Keystroke {
+    fn from(event: &KeyEvent) -> Self {
+        Self {
+            physical_key: event.physical_key,
+            logical_key: event.logical_key.clone(),
+            text: event.text.clone(),
+            location: event.location,
+            pressed: event.state.is_pressed(),
+            repeat: event.repeat,
+            unmodified_key: event.key_without_modifiers(),
+            modified_text: event.text_with_all_modifiers().map(SmolStr::new),
+        }
+    }
+}
 
 // ── The routing rule, and the one sentence it is (M1-7, probe X-3 §4) ───────
 //
@@ -726,8 +778,8 @@ pub(crate) fn is_ime_owned_key(key: &Key, modifiers: ModifiersState) -> bool {
 /// machine. What is wrong with the event is not when it arrived; it is that it
 /// was never a keystroke.
 #[must_use]
-pub(crate) fn is_a_keystroke(state: ElementState, is_synthetic: bool) -> bool {
-    state == ElementState::Pressed && !is_synthetic
+pub(crate) fn is_a_keystroke(pressed: bool, is_synthetic: bool) -> bool {
+    pressed && !is_synthetic
 }
 
 /// **The key a program that types for you meant**, for an event that carries
@@ -853,7 +905,44 @@ pub(crate) fn injected_logical_key(
 /// `origin` says about the press (T-KEYBOARD-RECORDS, design note §7.3). A program that asked for
 /// kitty or modifyOtherKeys gets its protocol instead (§4.3), and every chord outside the set
 /// keeps its legacy bytes.
+///
+/// **Whatever road produced them, bytes ConPTY would hold go as the press's record** while the
+/// transport parses records ([`held_by_conpty`], T-ESC-UNDER-KITTY-ON-CONPTY, design note
+/// revision (l)): once ConPTY has parsed one record it keeps a lone ESC, and ESC with one of a
+/// few bytes, as the start of a sequence and never delivers it, so plain Esc, Ctrl+[ and the Alt
+/// chords that write those bytes would be lost to every program. The record reaches a key-record
+/// reader as the key and a program that reads bytes as exactly these bytes, at once. No form of
+/// the kitty protocol is held, so a program that asked for flag 1 gets its bytes unchanged.
 pub(crate) fn keyboard_bytes(
+    key: &Key,
+    key_without_modifiers: &Key,
+    location: KeyLocation,
+    modifiers: ModifiersState,
+    application_cursor_mode: bool,
+    keyboard: KeyboardProtocol,
+    origin: KeyOrigin<'_>,
+) -> Option<Vec<u8>> {
+    let bytes = protocol_bytes(
+        key,
+        key_without_modifiers,
+        location,
+        modifiers,
+        application_cursor_mode,
+        keyboard,
+        origin,
+    );
+    if keyboard.win32_input_mode
+        && bytes.as_deref().is_some_and(held_by_conpty)
+        && let Some(records) = press_records(key, key_without_modifiers, modifiers, origin)
+    {
+        return Some(records);
+    }
+    bytes
+}
+
+/// The bytes of the road the program's request picks: kitty's flag 1, modifyOtherKeys, or —
+/// with neither — the records of the chords VT cannot express and the legacy bytes of the rest.
+fn protocol_bytes(
     key: &Key,
     key_without_modifiers: &Key,
     location: KeyLocation,
@@ -1261,11 +1350,13 @@ const ENHANCED_KEY: u16 = 0x0100;
 ///
 /// A chord holding Super, a composing key and a paste chord are never in it
 /// ([`withheld_from_every_protocol`]). A Ctrl chord that has a C0 code (`Ctrl+I`, `Ctrl+M`,
-/// `Ctrl+[`, `Ctrl+Shift+A`) keeps it: ConPTY already turns the code into a key event, and the
-/// set is only what VT cannot say. **Escape with Ctrl or Alt keeps its ESC too**: ConPTY
-/// swallows that record and no reader gets anything (measured through the vendored ConPTY,
-/// `bt-pty`'s `keyboard_protocol_through_conpty`), while the ESC reaches it as Escape. Windows
-/// takes those chords for itself anyway (Ctrl+Esc, Alt+Esc, Ctrl+Shift+Esc).
+/// `Ctrl+Shift+A`) keeps it: ConPTY already turns the code into a key event, and the set is only
+/// what VT cannot say. `Ctrl+[`, whose code is a lone ESC, and plain Escape are records for
+/// another reason, the bytes ConPTY holds ([`held_by_conpty`], asked by [`keyboard_bytes`]).
+/// **Escape with Ctrl or Alt keeps its ESC**: ConPTY swallows that record and no reader gets
+/// anything (measured through the vendored ConPTY, `bt-pty`'s `keyboard_protocol_through_conpty`),
+/// while the ESC reaches it as Escape until ConPTY has parsed a record. Windows takes those chords
+/// for itself anyway (Ctrl+Esc, Alt+Esc, Ctrl+Shift+Esc).
 ///
 /// **The record** is the form `SHIFT_ENTER_RECORDS` already writes, microsoft/terminal's
 /// win32-input-mode (`doc/specs/#4999 - Improved keyboard handling in Conpty.md`):
@@ -1293,6 +1384,37 @@ fn key_records(
     modifiers: ModifiersState,
     origin: KeyOrigin<'_>,
 ) -> Option<Vec<u8>> {
+    let modified = modifiers.shift_key() || modifiers.alt_key() || modifiers.control_key();
+    let beyond_vt = match key {
+        Key::Named(
+            NamedKey::Enter
+            | NamedKey::Tab
+            | NamedKey::Backspace
+            | NamedKey::Escape
+            | NamedKey::Space,
+        ) => modified,
+        Key::Character(text) => modifiers.control_key() && control_byte(text).is_none(),
+        // Ctrl+Alt on a text key the layout types nothing for ([`unidentified_text_key`]).
+        Key::Unidentified(_) => true,
+        _ => false,
+    };
+    if !beyond_vt {
+        return None;
+    }
+    press_records(key, key_without_modifiers, modifiers, origin)
+}
+
+/// **The win32-input-mode down/up record pair for this press**, whatever chord it is — or `None`
+/// where a press has no record: off Windows, on a ConPTY Folio does not ship, for a key withheld
+/// from every protocol, for a key other than the five named keys of [`key_records`] and a text
+/// key, and for Escape with Ctrl or Alt, whose record ConPTY swallows. [`key_records`] asks it for
+/// the chords VT cannot express; [`keyboard_bytes`] for the bytes ConPTY would hold.
+fn press_records(
+    key: &Key,
+    key_without_modifiers: &Key,
+    modifiers: ModifiersState,
+    origin: KeyOrigin<'_>,
+) -> Option<Vec<u8>> {
     if origin.platform != HostPlatform::Windows
         || origin.conpty != ConPtyKind::Shipped
         || withheld_from_every_protocol(key, modifiers)
@@ -1306,7 +1428,7 @@ fn key_records(
     );
     let scan = scan_code(origin.physical_key);
     let virtual_key: u16 = match key {
-        Key::Named(named) if shift || alt || control => match named {
+        Key::Named(named) => match named {
             NamedKey::Enter => 0x0D,
             NamedKey::Tab => 0x09,
             NamedKey::Backspace => 0x08,
@@ -1314,9 +1436,7 @@ fn key_records(
             NamedKey::Space => 0x20,
             _ => return None,
         },
-        Key::Character(text)
-            if control && control_byte(text).is_none() && !text.chars().any(char::is_control) =>
-        {
+        Key::Character(text) if !text.chars().any(char::is_control) => {
             match numpad_text_virtual_key(origin.physical_key) {
                 Some(virtual_key) => virtual_key,
                 None => (origin.virtual_key_of_scan_code)(scan?)?,
@@ -1357,6 +1477,34 @@ fn key_records(
     let scan = scan & 0x00FF;
     let record = |down: u8| format!("\x1b[{virtual_key};{scan};{character};{down};{state};1_");
     Some(format!("{}{}", record(1), record(0)).into_bytes())
+}
+
+/// The bytes that, after a lone ESC, leave ConPTY's input parser waiting for more: ESC again,
+/// `O` (SS3), `P` (DCS), `X`, `^`, `_` (SOS, PM, APC), `[` (CSI), `]` (OSC) and DEL, which the
+/// parser ignores in its escape state. Measured through the ConPTY Folio ships, for ESC with
+/// every byte 0x00–0x7F: these and no others (`bt-pty`'s
+/// `conpty_holds_exactly_these_escapes_once_it_has_seen_a_record`).
+const HELD_AFTER_ESC: [u8; 9] = [0x1B, b'O', b'P', b'X', b'^', b'_', b'[', b']', 0x7F];
+
+/// **Whether ConPTY would hold these bytes instead of passing them on** — a lone ESC, or ESC and
+/// one byte of [`HELD_AFTER_ESC`] (T-ESC-UNDER-KITTY-ON-CONPTY, design note revision (l)).
+///
+/// ConPTY's input parser ends every read by deciding what to do with a sequence the read left
+/// unfinished. Until it has parsed one win32-input-mode record it flushes a trailing ESC, or ESC
+/// and one byte, as Escape or that key with Alt; from the first record on it keeps them as the
+/// start of a sequence split across reads, because a terminal that writes records never writes
+/// them (microsoft/terminal `src/terminal/parser/stateMachine.cpp`, the end of `ProcessString`:
+/// "we never emit \x1b{some char} once it's enabled"). The kept bytes reach no program: a
+/// following character is read as that character with Alt, a following record drops them. Every
+/// pane on the ConPTY Folio ships parses records from the first chord of the set
+/// ([`key_records`]) on, so in such a pane these bytes are written as the press's record instead
+/// ([`keyboard_bytes`]).
+fn held_by_conpty(bytes: &[u8]) -> bool {
+    match bytes {
+        [0x1B] => true,
+        [0x1B, second] => HELD_AFTER_ESC.contains(second),
+        _ => false,
+    }
 }
 
 /// **Whether a key that arrived with no character is an ordinary text key** — and if so, the
@@ -3012,7 +3160,7 @@ mod tests {
     fn typed_into_the_child(events: &[Event]) -> Vec<u8> {
         let mut written = Vec::new();
         for (state, is_synthetic, key, modifiers) in events {
-            if !is_a_keystroke(*state, *is_synthetic) {
+            if !is_a_keystroke(state.is_pressed(), *is_synthetic) {
                 continue;
             }
             if let Some(bytes) = legacy_bytes(key, *modifiers, false) {
@@ -4134,8 +4282,11 @@ mod tests {
              whose legacy bytes cannot tell them apart — a modified Enter, Tab, Backspace or \
              Space, Shift+Escape, and Ctrl with a key that has no control code or with Ctrl+Alt — go as the key records \
              `CSI Vk;Sc;Uc;Kd;Cs;Rc _` (down, then up), which ConPTY turns into those exact key \
-             events. Every other chord sends its legacy bytes. A program that asks for kitty or \
-             modifyOtherKeys gets that protocol instead.\n\
+             events. So do plain Escape, Ctrl+[ and the Alt chords that send ESC with `[`, `]`, \
+             `O`, `P`, `X`, `^` or `_`: once ConPTY has read one key record it holds those bytes \
+             and never passes them on. Every other chord sends its legacy bytes. A program that \
+             asks for kitty or modifyOtherKeys gets that protocol instead; with modifyOtherKeys, \
+             the bytes ConPTY would hold are still written as records on Windows.\n\
              \n\
              `CSI` is `ESC [`. `—` sends nothing. *(table)* is a chord Folio's shortcut table \
              claims on Windows, so no program receives it. *(system)* is taken by Windows first; \
@@ -4247,7 +4398,7 @@ mod tests {
                 records.replace('\x1b', "\\e")
             ));
         };
-        const MODIFIER_SETS: [&str; 7] = ["S", "A", "SA", "C", "SC", "AC", "SAC"];
+        const MODIFIER_SETS: [&str; 8] = ["-", "S", "A", "SA", "C", "SC", "AC", "SAC"];
         for key in keys {
             for mods in MODIFIER_SETS {
                 row(key, KeyLocation::Standard, mods, None);
@@ -4294,9 +4445,9 @@ mod tests {
         );
         let rows = wanted.lines().filter(|line| !line.starts_with('#')).count();
         assert_eq!(
-            rows, 155,
-            "158 chords of the sweep and 7 of Numpad Enter, less the 10 the shortcut table claims \
-             (Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+comma, Ctrl+Shift+1, 3, 4, 5, 7, 8 and 9)"
+            rows, 163,
+            "167 chords of the sweep and 7 of Numpad Enter, less the 11 the shortcut table claims \
+             (Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+comma, Ctrl+Shift+1, 3, 4, 5, 7, 8 and 9, Alt+Shift+-)"
         );
     }
 
@@ -4671,6 +4822,140 @@ mod tests {
         )
     }
 
+    /// RED (T-ESC-UNDER-KITTY-ON-CONPTY) — **in a pane on the ConPTY Folio ships with
+    /// win32-input-mode on, a press whose bytes ConPTY holds once it has read a record is that
+    /// press's record on every road a program can pick; kitty's flag 1 is untouched, and a pane
+    /// without records is unchanged.**
+    ///
+    /// Issue #42: "codex sometimes does not receive the Esc I press". Codex on Windows asks for no
+    /// protocol, so its Esc was the lone ESC of the legacy row, which ConPTY holds — and then
+    /// drops or glues to the next key as Alt — from the first record of the pane's session on
+    /// (`bt-pty`'s `conpty_holds_exactly_these_escapes_once_it_has_seen_a_record`). The same
+    /// holds for a program that asked for modifyOtherKeys, whose Esc is a lone ESC too. Under
+    /// kitty's flag 1 Esc is `CSI 27u`, which ConPTY passes on, and which a program that asked
+    /// for it must keep getting. Escape with Ctrl or Alt keeps its ESC, because ConPTY swallows
+    /// its record. Bytes ConPTY passes on — Alt+a, Alt+Shift+[, Alt with a Chinese character —
+    /// keep their bytes.
+    ///
+    /// MUTATION: drop the `held_by_conpty` rung of `keyboard_bytes` (Esc with records on reads
+    /// `\e`), or put it inside the no-protocol road only (Esc under modifyOtherKeys 2 reads `\e`),
+    /// or let `press_records` write Escape with Ctrl (Ctrl+Esc reads a record pair).
+    #[test]
+    fn the_bytes_conpty_would_hold_are_the_press_record_on_every_road() {
+        let none = ModifiersState::empty();
+        let windows = HostPlatform::Windows;
+        let on = |protocol: KeyboardProtocol| KeyboardProtocol {
+            win32_input_mode: true,
+            ..protocol
+        };
+        let sent = |name: &str, modifiers: ModifiersState, protocol, origin: KeyOrigin<'_>| {
+            let (logical, base) = windows_us_event(name, modifiers);
+            keyboard_bytes(
+                &logical,
+                &base,
+                KeyLocation::Standard,
+                modifiers,
+                false,
+                protocol,
+                origin,
+            )
+        };
+        let record = |virtual_key: u16, scan: u16, character: u16, state: u16| {
+            Some(
+                format!(
+                    "\x1b[{virtual_key};{scan};{character};1;{state};1_\
+                     \x1b[{virtual_key};{scan};{character};0;{state};1_"
+                )
+                .into_bytes(),
+            )
+        };
+
+        let escape = UsPress::new("Escape", none);
+        for protocol in [RECORDS, on(MOK1), on(MOK2)] {
+            assert_eq!(
+                sent("Escape", none, protocol, escape.on(windows)),
+                record(27, 1, 27, 0),
+                "Esc is its record with win32-input-mode on: {protocol:?}"
+            );
+        }
+        assert_eq!(
+            sent("Escape", none, on(KITTY), escape.on(windows)),
+            Some(b"\x1b[27u".to_vec()),
+            "under flag 1 Esc is the protocol's, which ConPTY passes on"
+        );
+        assert_eq!(
+            sent("Escape", none, UNASKED, escape.on(windows)),
+            Some(b"\x1b".to_vec()),
+            "with win32-input-mode off no record is written"
+        );
+        assert_eq!(
+            sent("Escape", none, RECORDS, escape.on_the_inbox_conpty()),
+            Some(b"\x1b".to_vec()),
+            "nor on the inbox ConPTY"
+        );
+        assert_eq!(
+            sent("Escape", none, RECORDS, escape.on(HostPlatform::MacOs)),
+            Some(b"\x1b".to_vec()),
+            "nor off Windows"
+        );
+        for modifiers in [
+            ModifiersState::CONTROL,
+            ModifiersState::ALT,
+            ModifiersState::SHIFT | ModifiersState::ALT,
+        ] {
+            let press = UsPress::new("Escape", modifiers);
+            assert_eq!(
+                sent("Escape", modifiers, RECORDS, press.on(windows)),
+                Some(b"\x1b".to_vec()),
+                "Escape with {modifiers:?} keeps its ESC: ConPTY swallows the record"
+            );
+        }
+
+        let control = ModifiersState::CONTROL;
+        let alt = ModifiersState::ALT;
+        let shift_alt = ModifiersState::SHIFT | ModifiersState::ALT;
+        for (name, modifiers, protocol, wanted) in [
+            ("[", control, RECORDS, record(219, 26, 27, 8)),
+            ("[", control, on(MOK1), record(219, 26, 27, 8)),
+            ("[", alt, RECORDS, record(219, 26, 91, 2)),
+            ("]", alt, RECORDS, record(221, 27, 93, 2)),
+            ("o", shift_alt, RECORDS, record(79, 24, 79, 18)),
+            ("p", shift_alt, RECORDS, record(80, 25, 80, 18)),
+            ("x", shift_alt, RECORDS, record(88, 45, 88, 18)),
+            ("6", shift_alt, RECORDS, record(54, 7, 94, 18)),
+            ("-", shift_alt, RECORDS, record(189, 12, 95, 18)),
+            ("a", alt, RECORDS, Some(b"\x1ba".to_vec())),
+            ("[", shift_alt, RECORDS, Some(b"\x1b{".to_vec())),
+            ("[", alt, on(KITTY), Some(b"\x1b[91;3u".to_vec())),
+        ] {
+            let press = UsPress::new(name, modifiers);
+            assert_eq!(
+                sent(name, modifiers, protocol, press.on(windows)),
+                wanted,
+                "{name} with {modifiers:?} under {protocol:?}"
+            );
+        }
+
+        let chinese = Key::Character("中".into());
+        let origin = KeyOrigin {
+            text_with_all_modifiers: Some("中"),
+            ..NOWHERE
+        };
+        assert_eq!(
+            keyboard_bytes(
+                &chinese,
+                &chinese,
+                KeyLocation::Standard,
+                alt,
+                false,
+                RECORDS,
+                origin
+            ),
+            Some("\x1b中".as_bytes().to_vec()),
+            "ESC and a Chinese character pass ConPTY, so Alt+中 keeps its bytes"
+        );
+    }
+
     /// RED (T-KEYBOARD-RECORDS) — **the second run of the captured sweep, with win32-input-mode
     /// set: on Windows the only chords that change are the ones VT cannot express, each now its
     /// key record pair; on any other platform no row changes.**
@@ -4684,9 +4969,12 @@ mod tests {
     /// off on the same press, and ties the mode-off bytes to the capture wherever the press is the
     /// capture's own (every chord but Ctrl+Alt on a text key). What changes: a modified Enter,
     /// Tab, Backspace or Space, Shift+Escape, Ctrl or Ctrl+Shift with a text key whose character
-    /// has no C0 code, and Ctrl+Alt (with or without Shift) on every text key — never with Super.
-    /// That is 158 chords of the sweep (29 named, 18 Ctrl, 17 Ctrl+Shift, 47 Ctrl+Alt, 47
-    /// Ctrl+Shift+Alt), each with DECCKM off and on. The set and the record's fields are written
+    /// has no C0 code, and Ctrl+Alt (with or without Shift) on every text key — never with Super;
+    /// and every chord whose bytes ConPTY holds once it has parsed a record (plain Escape, Ctrl+[,
+    /// Alt+[, Alt+], Alt+Shift+O, P, X, 6 and -; T-ESC-UNDER-KITTY-ON-CONPTY), which Escape with Ctrl
+    /// or Alt is not, because ConPTY swallows its record. That is 167 chords of the sweep (30
+    /// named, 19 Ctrl, 17 Ctrl+Shift, 2 Alt, 5 Shift+Alt, 47 Ctrl+Alt, 47 Ctrl+Shift+Alt), each with
+    /// DECCKM off and on. The set and the record's fields are written
     /// here from the win32-input-mode spec and the US layout's measured answers, not read from
     /// `key_records`. The same run with the press said to come from a Mac changes nothing:
     /// macOS is unchanged byte for byte. And the same Windows run in a pane on the inbox ConPTY
@@ -4695,7 +4983,9 @@ mod tests {
     /// (coordinator's ruling, 2026-09-29: records only on the ConPTY Folio ships).
     ///
     /// MUTATION: let `key_records` write for a Ctrl chord that has a C0 code (Ctrl+E reads a record
-    /// pair), or drop its `Key::Unidentified` arm (Ctrl+Alt+1 reads nothing), or drop its
+    /// pair), or drop the `held_by_conpty` rung of `keyboard_bytes` (plain Escape reads `\e`), or
+    /// drop `press_records`' `!control && !alt` on Escape (Ctrl+Escape reads a record pair the
+    /// ConPTY swallows), or drop its `Key::Unidentified` arm (Ctrl+Alt+1 reads nothing), or drop its
     /// `origin.platform != HostPlatform::Windows` refusal (the macOS run differs), or its
     /// `origin.conpty != ConPtyKind::Shipped` refusal (the inbox run differs).
     #[test]
@@ -4775,12 +5065,24 @@ mod tests {
                 scan_code(press.physical_key)
                     .unwrap_or_else(|| panic!("{where_}: the US keyboard has this key"))
             };
+            // The bytes ConPTY holds once it has parsed a record — a lone ESC, or ESC and one of
+            // these — as measured through it (`bt-pty`'s
+            // `conpty_holds_exactly_these_escapes_once_it_has_seen_a_record`).
+            let held = [
+                "1b", "1b1b", "1b4f", "1b50", "1b58", "1b5e", "1b5f", "1b5b", "1b5d", "1b7f",
+            ]
+            .contains(&before.as_str());
             let expected = if modifiers.super_key() {
                 None
             } else if let Some((virtual_key, scan)) = named_key {
                 // Escape with Ctrl or Alt keeps its ESC: ConPTY swallows that record.
                 let escape_swallowed = key == "Escape" && (control || alt);
-                ((shift || alt || control) && !escape_swallowed).then_some((virtual_key, scan))
+                ((shift || alt || control || held) && !escape_swallowed)
+                    .then_some((virtual_key, scan))
+            } else if typed_character.is_some() && held {
+                // Ctrl+[ (a lone ESC) and the Alt chords whose ESC and character ConPTY holds.
+                let scan = text_key_scan();
+                Some((us_virtual_key(scan).expect("a US virtual key"), scan))
             } else if typed_character.is_some() && control && alt {
                 // winit hands Ctrl+Alt on a text key over with no character on the US layout.
                 let scan = text_key_scan();
@@ -4819,8 +5121,8 @@ mod tests {
         }
         assert_eq!(sweep.len(), 2368, "the whole captured sweep");
         assert_eq!(
-            changed, 316,
-            "158 chords of the sweep, each with DECCKM off and on"
+            changed, 334,
+            "167 chords of the sweep, each with DECCKM off and on"
         );
     }
 

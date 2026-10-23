@@ -11,6 +11,17 @@ for Folio you must already be able to run programs as this user, and a program
 that can do that can read the same content directly. What they are is a way for
 this build to put screen contents on disk, and a public build owes a list of them.
 
+**Read once, at the program's entry.** Every recording and trace switch below
+(`BT_PTY_DUMP`, `BT_PTY_INPUT_DUMP`, every `BT_*_TRACE`, `BT_CHROME_DUMP`,
+`BT_FOCUS_THUMB_DUMP`, `BT_GLYPH_CENSUS`, `BT_LAYOUT_EVENTS`) is read once, by
+`folio.exe`'s entry (`bt_app::entry_doors`, before anything can reach the code
+that writes it), and handed to that code; no library reads one at the moment of
+use. A test binary runs the same libraries but not that entry, so it honours
+none of them unless it hands one in itself. The behaviour doors that are still
+read where they are used are each a row of `docs/plans/ENV-DOORS.tsv` with the
+ticket that moves it to the entry, and `crates/bt-source/tests/env_doors.rs`
+holds the source to that list. What each switch does is unchanged.
+
 `docs/BT-ENVIRONMENT.md` is checked against the source by a test —
 `bt_app::diagnostics::bt_environment_doc_tests` — which scans every non-binary,
 non-integration-test `.rs` file under `crates/` and `vendor/` for `BT_` string
@@ -55,9 +66,8 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 | `BT_PROBE_INPUT` | file path, used verbatim | **Reads** the named file and feeds its bytes to the terminal instead of starting a shell. Writes nothing. | — | off; a shell is started |
 | `BT_WEB_DEV` | URL | Opens a preview seat at startup and navigates it to this URL. | The page is loaded, so its cache and cookies land in the WebView2 profile under `%LOCALAPPDATA%\Folio\WebView2` like any other previewed page. | off; no page is opened |
 | `BT_POWERSHELL_PROFILE` | file path, used verbatim | Redirects the shell-integration installer: the `$PROFILE` it reads and writes becomes this file instead of the real one. | The file you name is created and edited by the installer. | the real `$PROFILE`, asked of a running PowerShell |
-| `BT_PSREADLINE_DOCUMENTS` | directory path, used as a base | Redirects the bundled PSReadLine installer's Documents root. The module goes to `<dir>\WindowsPowerShell\Modules\PSReadLine\<version>\`. | Nine files are written under, and deleted from, the directory you name. | the real Documents folder |
+| `BT_PSREADLINE_DOCUMENTS` | directory path, used as a base | Redirects the Documents root in which the PSReadLine copy an earlier Folio wrote is looked for, offered for removal on the Terminal page, and removed by that row and by the uninstall. The copy is looked for at `<dir>\WindowsPowerShell\Modules\PSReadLine\`. Folio's own PSReadLine is never written there (it goes to Folio's local data folder). It also changes the Documents entry a Windows PowerShell pane's composed `PSModulePath` carries, because that entry is the same Documents root. | A copy under the directory you name that is the earlier Folio's, by its bytes or its build stamp, is deleted when its removal is pressed or the uninstall runs. | the real Documents folder |
 | `BT_UNINSTALL_ROOT` | absolute sandbox directory; empty/relative refuses | **Read only by a debug or test build; a shipped `folio.exe` ignores it entirely** (`uninstall.rs: SANDBOX_DOOR`). Isolates `--uninstall-cleanup` and `--purge`: data, profiles, modules, agents, temp files and instance claims resolve below this directory. Registry/MSIX/toast operations are replaced with absent sandbox readings. | Deletes only resolved sandbox data paths when `--purge` is present; never the application folder. Recorded directories outside the sandbox refuse; a recorded `$PROFILE` is held to its kind (absolute, no `..`, a `.ps1`) and is not contained by the sandbox, so a fixture must never record a real one. | real account roots and system registrations |
-| `BT_PSREADLINE_PROBE` | `<version>[,<policy>]` | Makes the machine read as if it had that PSReadLine version and execution policy, so the upgrade invitation can be photographed. Redirects no write. | — | the real probe, which runs `powershell -NoProfile`. **Set-but-empty is not off here**: `=` engages the override at version `0.0.0`. |
 | `BT_FIRST_RUN_CARD` | switch | Raises the first-run card on a machine that has already answered it, so it can be photographed in a second language or looked at again. Overrides the appearance gate and nothing else: which rows are offered, what `Done` does and what is written down are exactly what they would be on a real first run. | — | off; the card appears only on a machine with no `settings.json` that has never shown it |
 | `BT_SHELL` | program path or bare name, used verbatim | Overrides the default shell program, and is what the `PowerShell` profile row resolves to. Never checked for existence; a bare name is resolved by `CreateProcess` against `PATH`, and a spawn failure falls back to `powershell.exe`. | — | `pwsh.exe` if found, else `powershell.exe` |
 | `BT_BG` | `#RRGGBB` | Overrides the terminal background colour and locks the theme for the run. An unreadable value is reported on the diagnostics channel and ignored. | — | `#1B1B1B`, unlocked. **Set-but-empty is not silently off**: it is reported as invalid and ignored. |
@@ -86,7 +96,7 @@ examining diagnostic state or reading the clock. No native queries are added.
 | `IME_OUT_NATIVE_CARET` | Windows only: `action=update/create/position/destroy`, `x,y,width=1,height=1`, prior `active`, `result=call/layout_not_chinese/inactive/ok/error`. Destroy has no position; its `x,y` are zero placeholders. Includes internal layout-change and Drop destruction. Error text is never included. |
 | `IME_OWNER` | Previous `old=Option<owner>` and `new`, `previous_cause`, `cause`. Emitted at the authoritative keyboard-owner reading when its kind changes (and once initially). Causes identify rename, git prompt, palette, quit dialog, dirty gate, first-run card, PSReadLine invitation, settings, popup, files tree, graph search, preview, search or shell. |
 | `IME_RULING` | Text-free inbound metadata, `origin=Option<owner>`, `destination`, `same_origin`, `deliver`, `next`, and `reason=origin_mismatch/owner_swallows/field_route/shell_route`. Recorded before applying the existing ruling; `same_origin` distinguishes different instances of the same kind without exposing names or paths. `deliver=true` passes the composition-origin barrier; Modal/FilesTree can still swallow it. |
-| `IME_DRAW` | `surface=terminal`, `drawn`, `reason`, `bytes`, `cursor_visible`, grid `row,column`, `alt`, and client-pixel `x,y,width,height`. One line when the terminal pre-edit outcome changes; clearing/committing/ending resets the latch for the next composition. Reasons: `drawn`, `owner_mismatch`, `cursor_invisible`, `zero_size_rectangle`, `no_visible_cells`. |
+| `IME_DRAW` | `surface=terminal`, `drawn`, `reason`, `bytes`, `cursor_visible`, grid `row,column`, `alt`, and client-pixel `x,y,width,height`. One line when the terminal pre-edit outcome changes; clearing/committing/ending resets the latch for the next composition. Reasons: `drawn`, `owner_mismatch`, `cursor_out_of_view` (the cursor's cell is not drawn — a cursor the program hid still composes), `zero_size_rectangle`, `no_visible_cells`. |
 
 `IME_DRAW` observes actual writes by the terminal pre-edit compositor, before
 unchanged-frame suppression; it does not claim swapchain presentation or field
@@ -121,6 +131,25 @@ on macOS, land its new `CAMetalLayer` on a view the old one was cleared off
 (`docs/DESIGN.md` §13.14) — is invisible in every other run of the program.
 Compiled out of release builds.
 
+### Read by the shipped `folio.ps1`, set only by tests
+
+Folio's PowerShell integration script ships in every release and reads eight names, each the
+switch of a development probe in its resize-chord handlers: `BT_PSREADLINE_NOOP_PROBE`,
+`BT_PSREADLINE_REANCHOR_PROBE`, `BT_PSREADLINE_REANCHOR_FORCE_FALLBACK_PROBE`,
+`BT_PSREADLINE_REANCHOR_EXACT_EDGE_PROBE`, `BT_PSREADLINE_REANCHOR_WHOLE_SCREEN_PROBE`,
+`BT_PSREADLINE_REANCHOR_EMPTY_BASELINE_PROBE`, `BT_PSREADLINE_HISTORY_PROBE` and
+`BT_PSREADLINE_HISTORY_TRANSPARENCY_RED_PROBE`. This section is checked against the script
+itself: `bt-app`'s `diagnostics::bt_environment_doc_tests` reads `folio.ps1` and holds the names it
+reads (`$env:BT_…`) equal to the names here, both ways. The check's Rust half reads only whole
+string literals of the shipped program, and `bt-pty`'s probes name most of these inside format
+strings, which that half does not count. Each is acted on only when it is exactly `1`, and
+then makes the handler write an `OSC 777;BT_PSREADLINE_…` report (or, for the fallback and red
+probes, take the arm under test) so a test can tell which handler took the chord and what it did.
+Only tests set them — `bt-pty`'s real-shell probes and `bt-app`'s
+`shell_integration::psreadline_tests::real_shell::the_fork_an_earlier_folio_left_keeps_the_resize_chords_no_op`
+— on the one pane they start. **Unset, which is every product session, they change nothing**: the
+handlers run their product road, and the terminal ignores an `OSC 777` it does not own.
+
 ## 2. Read only when the tests are compiled
 
 Never present in a release binary. `BT_PSREADLINE_MODULE_PATH`, `BT_BURST_EMIT`,
@@ -132,6 +161,13 @@ and `BT_INSTALL_TXN_CHILD_GO` — the three paths `bt-platform`'s
 second copy of its own test binary: the admission file the child holds shared, the
 file the child creates once it holds it, and the file whose appearance tells it to
 let go. Only that test's child half reads them; no product code does.
+`BT_PTY_RECORDING_TEST_CHILD` names the private folder `bt-pty`'s two real-pane
+recording tests (`tests::a_real_pane_nobody_asked_to_record_records_nothing_whatever_the_environment_says`
+and `tests::a_real_pane_asked_to_record_records_to_its_own_files_and_the_second_takes_dot_two`)
+set on the copy of their own test binary that starts the panes, with `BT_PTY_DUMP` and
+`BT_PTY_INPUT_DUMP` set to files of that folder; `BT_ENTRY_DOORS_TEST_CHILD` does the same
+for `bt-app`'s two `entry_doors::tests` that run with every diagnostic door set. Only those
+tests' child halves read them, and they write only into the test's own temporary folder.
 `BT_STANDALONE_ENTRY_TEST_CHILD` carries the name of the one test `bt-app`'s
 `tests::alone_in_a_process` runs again in a process of its own — the three
 standalone-entry cases of `attention_wire` and `explorer_menu`, whose claim holds
@@ -205,6 +241,16 @@ and the `folio.exe` the `launch` row starts, for `bt-platform`'s ignored
 | --- | --- | --- | --- | --- |
 | `BT_PASTE_CRT_CONSUMER` | absolute path to the separately compiled `paste_paths_crt.exe` fixture | Set by the developer or acceptance coordinator when explicitly running the ignored Windows direct-CRT test. Names the consumer that receives the encoder's literal through the quiet process door; the test checks its captured argument count and UTF-16 units. | No file is written by this switch; consumer output is captured through pipes. | not set; the test is ignored by default and fails if explicitly run without this value |
 
+**Folio's local-data root for its PSReadLine has no variable.** The pane's module is
+written under `%LOCALAPPDATA%\Folio\psmodules\` (`shell_integration::local_data_root`),
+and no `BT_` name moves that root, in a test build or any other (it follows
+`LOCALAPPDATA`, which the `update_trial` child tests above point inside their own folder): the
+writer, the prune and the module-path composer take the root as an argument
+(`shell_integration::install_psreadline_module_at`, `prune_psreadline_artefacts`,
+`compose_module_path`), and their tests hand in a folder of their own. The real-shell
+tests in `shell_integration_psreadline_tests.rs` write into their test shell's own scratch root the same way.
+The earlier Folio's copy in Documents is moved by `BT_PSREADLINE_DOCUMENTS` (§1).
+
 ## 3. `BT_` names in the source that are not environment variables
 
 Listed so that the check described at the top of this file can tell them apart
@@ -234,7 +280,12 @@ matched back out: `BT_APP_INPUT_OK`, `BT_FILL_080_XXXXXXXXXXXXXXXXXXXXXXXX`,
 `bt-repaint-oracle`, `bt-zoom-perf`, `bt-replay`, `bt-record` and the ConPTY
 probes read a further set of `BT_PROBE_*`, `BT_ZOOM_PERF_*` and `BT_CONPTY_*`
 names. Those binaries are not part of a release archive and are not covered by the
-check above; their switches are documented where they are read.
+check above; their switches are documented where they are read. They read their own
+switches in their own code, as a program's entry does; the libraries under them
+read none (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY). So `bt-replay` hands `BT_PERF_TRACE`
+to the renderer and the session itself, and `bt-conpty-width-probe`, which hands
+its pane no recording request, no longer honours `BT_PTY_DUMP`: its pane is not
+recorded whatever the shell that started it has set.
 
 The macOS sheet probe (`crates/bt-platform/tests/macos_sheet.rs`) is outside the
 check for the same reason — the walk excludes `tests/` — and reads two of its

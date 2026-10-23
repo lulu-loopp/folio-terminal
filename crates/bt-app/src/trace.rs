@@ -11,6 +11,14 @@
 //!
 //! Nothing in this file knows what it is tracing. It is handed a path and hands
 //! back timestamped lines.
+//!
+//! **And nothing in it reads the environment** (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY).
+//! The program's entry reads every `BT_` trace-file door once
+//! (`entry_doors`) and [`install`]s the answer as a [`TraceFiles`]; a [`Gate`]
+//! or a [`Dump`] opens the file its door names there, and a process whose entry
+//! installed nothing — every test binary — opens none. When these read the
+//! variables at the first station, a shell left with `BT_CARD_TRACE` set made
+//! every test that walked a card write into that file.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -39,6 +47,49 @@ static ORIGIN: OnceLock<Instant> = OnceLock::new();
 /// [`ORIGIN`], set by whichever trace opens first.
 fn origin() -> Instant {
     *ORIGIN.get_or_init(Instant::now)
+}
+
+/// **The trace files this run's entry was asked for**, one per `BT_` file door
+/// this module's gates and dumps write — `None` for a door that names nothing.
+/// The entry has already applied set-but-empty-is-off; a path here is a file
+/// asked for.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TraceFiles {
+    /// `BT_MOUSE_TRACE`.
+    pub mouse: Option<PathBuf>,
+    /// `BT_CARD_TRACE`.
+    pub card: Option<PathBuf>,
+    /// `BT_ATTENTION_TRACE`.
+    pub attention: Option<PathBuf>,
+    /// `BT_PREVIEW_TRACE`.
+    pub preview: Option<PathBuf>,
+    /// `BT_WEB_TRACE`.
+    pub web: Option<PathBuf>,
+    /// `BT_GLYPH_CENSUS`.
+    pub glyph_census: Option<PathBuf>,
+    /// `BT_IME_TRACE`.
+    pub ime: Option<PathBuf>,
+    /// `BT_FOCUS_THUMB_DUMP`.
+    pub focus_thumb: Option<PathBuf>,
+}
+
+/// Which of [`TraceFiles`]' doors a [`Gate`] or a [`Dump`] writes.
+pub type Door = fn(&TraceFiles) -> Option<&Path>;
+
+/// [`install`]'s answer: unset until the entry installs one, and for ever in a
+/// process whose entry never does.
+static INSTALLED: OnceLock<TraceFiles> = OnceLock::new();
+
+/// **Say which trace files this run writes.** Called once, by the program's
+/// entry, before the first station any road can reach; a second call is
+/// ignored, as the process has one answer.
+pub fn install(files: TraceFiles) {
+    let _ = INSTALLED.set(files);
+}
+
+/// The file `door` names in what the entry installed, or `None`.
+fn installed(door: Door) -> Option<&'static Path> {
+    INSTALLED.get().and_then(door)
 }
 
 /// A destination resolved by the producer, opened and written only by the sink.
@@ -144,12 +195,6 @@ impl Trace {
         }
     }
 
-    /// Resolve the path without opening it on the calling thread.
-    fn from_environment(env: &str, header: &str) -> Option<Self> {
-        let path = std::env::var_os(env).filter(|value| !value.is_empty())?;
-        Some(Self::create(&PathBuf::from(path), header))
-    }
-
     /// One line, timestamped here and written by [`trace_sink`]'s thread.
     ///
     /// **The stamp is taken on this thread and not on the writer's**, which is
@@ -163,31 +208,32 @@ impl Trace {
     }
 }
 
-/// **One environment variable, opened at most once.**
+/// **One trace door, opened at most once.**
 ///
-/// A `static` of this type is the whole of what a named trace is: the variable
-/// is read at the first station any code path reaches, and the answer is an
-/// `Option` from then on. Off therefore costs one atomic load, which is what
-/// makes it honest to leave these calls on a per-frame path.
+/// A `static` of this type is the whole of what a named trace is: the door's
+/// file is looked up in what the entry [`install`]ed at the first station any
+/// code path reaches, and the answer is an `Option` from then on. Off therefore
+/// costs one atomic load, which is what makes it honest to leave these calls on
+/// a per-frame path.
 pub struct Gate {
-    env: &'static str,
+    door: Door,
     header: &'static str,
     trace: OnceLock<Option<Trace>>,
 }
 
 impl Gate {
-    pub const fn new(env: &'static str, header: &'static str) -> Self {
+    pub const fn new(door: Door, header: &'static str) -> Self {
         Self {
-            env,
+            door,
             header,
             trace: OnceLock::new(),
         }
     }
 
-    /// This process's trace for this variable, resolving its path on first ask.
+    /// This process's trace for this door, resolving its path on first ask.
     pub fn get(&'static self) -> Option<&'static Trace> {
         self.trace
-            .get_or_init(|| Trace::from_environment(self.env, self.header))
+            .get_or_init(|| installed(self.door).map(|path| Trace::create(path, self.header)))
             .as_ref()
     }
 }
@@ -206,35 +252,29 @@ impl Gate {
 /// The bytes are unchanged. Whatever the caller formats is the whole of the
 /// line, so a reader's existing tooling reads exactly what it read before.
 pub struct Dump {
-    env: &'static str,
+    door: Door,
     file: OnceLock<Option<Arc<TraceFile>>>,
 }
 
 impl Dump {
-    pub const fn new(env: &'static str) -> Self {
+    pub const fn new(door: Door) -> Self {
         Self {
-            env,
+            door,
             file: OnceLock::new(),
         }
     }
 
-    /// One line, formatting nothing at all when the variable names no file.
+    /// One line, formatting nothing at all when the door names no file.
     pub fn line(&self, message: impl FnOnce() -> String) {
-        let Some(file) = self.file.get_or_init(|| open_dump(self.env)).as_ref() else {
+        let Some(file) = self
+            .file
+            .get_or_init(|| installed(self.door).map(|path| Arc::new(TraceFile::new(path, None))))
+            .as_ref()
+        else {
             return;
         };
         trace_sink::file_line(Arc::clone(file), message());
     }
-}
-
-/// The file `env` names, or `None` when it names nothing.
-///
-/// Set-but-empty is off, on [`Trace::from_environment`]'s rule and for its
-/// reason.
-fn open_dump(env: &'static str) -> Option<Arc<TraceFile>> {
-    let path = std::env::var_os(env).filter(|value| !value.is_empty())?;
-    let path = PathBuf::from(path);
-    Some(Arc::new(TraceFile::new(&path, None)))
 }
 
 /// Write one line to a named trace, formatting nothing when there is none.

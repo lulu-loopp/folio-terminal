@@ -79,7 +79,7 @@ use std::{
     time::Instant,
 };
 
-use winit::event_loop::EventLoopProxy;
+use crate::window_seam::LoopProxy;
 
 use crate::{
     AppEvent,
@@ -152,7 +152,7 @@ impl FilesWatch {
     /// schedule the next turn and the turn after that, for ever, over a window
     /// nobody is looking at. The clone belongs in [`listener`], once per window,
     /// and nowhere on this path.
-    pub fn sync(&mut self, wanted: &BTreeSet<PathBuf>, proxy: &EventLoopProxy<AppEvent>) -> Synced {
+    pub fn sync(&mut self, wanted: &BTreeSet<PathBuf>, proxy: &LoopProxy) -> Synced {
         self.sync_with(wanted, |news| {
             crate::watch_steward::open_ear(Depth::Shallow, listener(news, proxy))
         })
@@ -311,10 +311,7 @@ impl FilesWatch {
 /// A free function for `git_watch::subscribe`'s reason, and **the only place in
 /// this file the proxy is cloned** — once per window, when its ear opens, for
 /// the reason [`FilesWatch::sync`] states.
-fn listener(
-    news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
-    proxy: &EventLoopProxy<AppEvent>,
-) -> Listener {
+fn listener(news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>, proxy: &LoopProxy) -> Listener {
     let mailbox = Arc::clone(news);
     let proxy = proxy.clone();
     Arc::new(move |directory: &Path, _| {
@@ -339,7 +336,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// variable for the same class of question would be one more thing to know
 /// before you can ask it. Set-but-empty is off, on `BT_PERF_TRACE`'s own rule.
 fn trace(message: &str) {
-    if std::env::var_os("BT_GIT_TRACE").is_some_and(|value| !value.is_empty()) {
+    if crate::entry_doors::installed().git {
         eprintln!("files watch: {message}");
     }
 }
@@ -634,6 +631,45 @@ mod tests {
         let synced = rig.sync_after_the_wake(&wanted, "the end");
         assert_eq!(synced.unheard, vec![folder], "the end is a re-read owed");
         assert_eq!(rig.watch.counts(), (1, 0), "and the folder is not heard");
+    }
+
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a
+    /// folder no longer wanted is let go before the steward's next answer**: two folders are
+    /// watched through the real kernel door; the reader stops wanting one, and by the wake that
+    /// brings the round's reports nobody holds it — its watch was retired, its directory handle
+    /// closed, on the worker before the publication.
+    ///
+    /// MUTATION: `std::mem::forget` a departed member in the steward's `serve_ear` instead of
+    /// retiring it — the wake comes while the folder is still held.
+    #[test]
+    fn a_folder_no_longer_wanted_is_let_go_before_the_stewards_answer() {
+        let mut rig = Rig::over(crate::watch_steward::Kernel);
+        let root = bt_testpath::temp_path("folio-files-watch-let-go");
+        let (gone, kept) = (root.join("走 gone"), root.join("留 kept"));
+        std::fs::create_dir_all(&gone).expect("make the first watched folder");
+        std::fs::create_dir_all(&kept).expect("make the second watched folder");
+        let both = BTreeSet::from([gone.clone(), kept.clone()]);
+        rig.sync(&both);
+        let armed = rig.sync_after_the_wake(&both, "both folders armed").armed;
+        assert_eq!(armed.len(), 2, "both folders are heard: {armed:?}");
+        let held_while_wanted = !bt_testpath::nobody_holds(&gone);
+        let one = BTreeSet::from([kept.clone()]);
+        rig.sync(&one);
+        rig.sync_after_the_wake(&one, "the round after the folder went");
+        let free = bt_testpath::nobody_holds(&gone);
+        drop(rig);
+        let _ = std::fs::remove_dir_all(&root);
+        // A watch's handle is seen only where an open handle is (Windows' directory handle; a Mac's
+        // FSEvents stream holds no descriptor at all).
+        assert!(
+            held_while_wanted || !bt_testpath::OPEN_HANDLES_ARE_SEEN,
+            "the fixture's own precondition: a watched folder is held by its watch"
+        );
+        assert!(
+            free,
+            "a folder no longer wanted is let go before the answer"
+        );
     }
 
     /// PIN (B5 design note (c)2, the first of its pair) — **an unheard folder is

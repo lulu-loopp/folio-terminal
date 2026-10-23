@@ -2596,7 +2596,8 @@ mod tests {
         for word in ["search", "srch", "query", "whole_word", "case_sensitive"] {
             assert!(
                 !document.contains(word),
-                "the session schema mentions `{word}`: a search is a thing you are doing,                  not a thing this window is"
+                "the session schema mentions `{word}`: a search is a thing you are doing, \
+                 not a thing this window is"
             );
         }
     }

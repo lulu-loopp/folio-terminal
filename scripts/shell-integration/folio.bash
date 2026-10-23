@@ -56,8 +56,10 @@ __bt_integration=1
 # `wsl.exe` and the Git Bash shortcut start — and `interactive` for one that did
 # not. An older spelling of the flag is read as `login`, which is what it always
 # meant. Getting the login chain wrong is not cosmetic on Git for Windows:
-# `/etc/profile` is what puts `/mingw64/bin` on the path, so a bash that skipped
-# it is a Git Bash that cannot find git; and getting the interactive one wrong
+# Git Bash's launcher already sets `MSYSTEM` and puts git on the path, but
+# `/etc/profile` is what sets the environment's prefix variables
+# (`MSYSTEM_PREFIX`, `MINGW_PREFIX`, …) and the MSYS2 `PATH` order, so a bash
+# that skipped it runs without them; and getting the interactive one wrong
 # costs the reader every alias, function and prompt they keep in `~/.bashrc`.
 #
 # The login flag itself cannot simply be passed alongside `--init-file`, and

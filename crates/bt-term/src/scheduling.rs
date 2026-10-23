@@ -148,6 +148,11 @@ impl WorkerScheduler {
         self.pending.pop_front()
     }
 
+    /// A task [`Self::take`] handed out that its host could not send, back at the head.
+    pub(crate) fn give_back(&mut self, task: DetectionTask) {
+        self.pending.push_front(task);
+    }
+
     pub(crate) fn enqueue(&mut self, task: DetectionTask) -> EnqueueOutcome {
         if let Some(index) = self
             .pending

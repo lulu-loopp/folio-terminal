@@ -553,19 +553,20 @@ pub struct Notifier {
 #[cfg(not(any(windows, target_os = "macos")))]
 impl Notifier {
     /// Refused. Notifications are M4-6.
-    pub fn new(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
-        let _ = wake;
+    pub fn new(display_name: &str, wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
+        let _ = (display_name, wake);
         Err(not_here("desktop notifications"))
     }
 
     /// Nothing to write: this arm registers no identity.
-    pub fn register_identity() -> Result<(), String> {
+    pub fn register_identity(display_name: &str) -> Result<(), String> {
+        let _ = display_name;
         Ok(())
     }
 
     /// [`Self::new`]: this arm writes no identity to defer.
     pub fn without_registration(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
-        Self::new(wake)
+        Self::new("", wake)
     }
 
     /// Unreachable: there is no value of this type.
@@ -635,7 +636,8 @@ impl MathContextMenu {
     }
 
     /// Ask for the menu. Refused, with the reason a toast can carry.
-    pub fn request(&self) -> Result<bool, String> {
+    pub fn request(&self, copy_latex: &str) -> Result<bool, String> {
+        let _ = copy_latex;
         Err(not_here("the formula menu"))
     }
 
@@ -706,8 +708,13 @@ impl ImagePicker {
     }
 
     /// Ask for the chooser. Refused.
-    pub fn request(&self, kind: ShellPickKind, start: Option<&Path>) -> Result<bool, String> {
-        let _ = (kind, start);
+    pub fn request(
+        &self,
+        kind: ShellPickKind,
+        start: Option<&Path>,
+        image_types: &str,
+    ) -> Result<bool, String> {
+        let _ = (kind, start, image_types);
         Err(not_here("the file chooser"))
     }
 
@@ -854,6 +861,16 @@ impl DirWatch {
 
     /// Take a subscription failure, if the platform reports failures asynchronously.
     pub fn take_failure(&mut self) -> Option<std::io::Error> {
+        match self._never {}
+    }
+
+    /// The door the real arms retire a watch through (T-DROP-DOORS). Unreachable.
+    pub fn retire_within(
+        self,
+        ctx: &crate::admission::WorkerCtx,
+        bound: std::time::Duration,
+    ) -> bool {
+        let _ = (ctx, bound);
         match self._never {}
     }
 
@@ -1342,17 +1359,17 @@ pub fn recycle(path: &Path) -> Result<bool, String> {
 /// **The monospaced families this machine has**, on a platform with no font
 /// enumeration written (M2-4).
 ///
-/// A `Vec` and not a refusal, because the type has no empty answer and the
-/// caller is a picker that has to draw something: what comes back is
-/// [`crate::order_monospace_families`]'s guarantee and nothing else — one row,
-/// the family the renderer is already drawing. That is exactly what
+/// Always an answer and never a refusal, because nothing is asked of a machine
+/// here and the caller is a picker that has to draw something: what comes back
+/// is [`crate::order_monospace_families`]'s guarantee and nothing else — one
+/// row, the family the renderer is already drawing. That is exactly what
 /// `bt-app`'s settings page did behind its own `#[cfg(not(windows))]` until
-/// M2-4; the arm moved here so that the application names one function on every
-/// platform and asks no question about the machine it is on.
+/// M2-4; the arm moved here so that the application names one function, with
+/// one signature, on every platform and asks no question about the machine it
+/// is on.
 #[cfg(not(target_os = "macos"))]
-#[must_use]
-pub fn monospace_font_families() -> Vec<crate::MonospaceFamily> {
-    crate::order_monospace_families(Vec::new())
+pub fn monospace_font_families() -> Result<Vec<crate::MonospaceFamily>, String> {
+    Ok(crate::order_monospace_families(Vec::new()))
 }
 
 /// **One family by name**, on a platform with no font system written (ticket
@@ -1369,11 +1386,11 @@ pub fn monospace_family_named(
     None
 }
 
-/// No portable font-database enumeration is available on this target.
+/// No portable font-database enumeration is available on this target: the
+/// answer is no CJK family, never a refusal.
 #[cfg(not(target_os = "macos"))]
-#[must_use]
-pub fn cjk_font_families() -> Vec<crate::CjkFamily> {
-    Vec::new()
+pub fn cjk_font_families() -> Result<Vec<crate::CjkFamily>, String> {
+    Ok(Vec::new())
 }
 
 /// **Whether this volume treats two spellings of one name as one file.**
@@ -1922,7 +1939,9 @@ mod refusal_tests {
         #[cfg(not(any(windows, target_os = "macos")))]
         {
             let menu = MathContextMenu::new(window()).expect("built above");
-            let refusal = menu.request().expect_err("there is no menu to pop");
+            let refusal = menu
+                .request("Copy LaTeX")
+                .expect_err("there is no menu to pop");
             assert!(
                 refusal.contains("not on this platform"),
                 "a refusal says which platform it is about: {refusal}"
@@ -1937,7 +1956,9 @@ mod refusal_tests {
 
             let picture = ImagePicker::new(window()).expect("built above");
             assert!(
-                picture.request(ShellPickKind::Image, None).is_err(),
+                picture
+                    .request(ShellPickKind::Image, None, "Images")
+                    .is_err(),
                 "there is no panel to sheet"
             );
 

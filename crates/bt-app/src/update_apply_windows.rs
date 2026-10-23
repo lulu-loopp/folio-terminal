@@ -48,8 +48,13 @@
 //!    install folder (`update_txn::Inventories::forward_moves`). A rename is
 //!    atomic, so after every prefix of that list each old file is in exactly
 //!    one of install and `backup\`, and each new file in exactly one of `set\`
-//!    and install. A move that fails leaves exactly such a prefix: →
-//!    `RollbackIntent`, and the rollback (step 8).
+//!    and install. A move refused because another program holds its file
+//!    open — a scan of the freshly staged set — is asked again, the same
+//!    move, within the journal's window for a held file
+//!    (`update_apply::move_held_within`, T-UPDATE-MOVE-HELD-RETRY), each
+//!    refused round one line. A move that fails leaves exactly such a prefix: →
+//!    `RollbackIntent`, and the rollback (step 8); a hold past the window is
+//!    named to the build started after it (`--update-held-file`).
 //! 6. **Trial** (W6 → W7): the exclusive admission let go (the trial takes its
 //!    shared hold at its start); `<install>\folio.exe --update-trial <txn>
 //!    <nonce>` with a fresh nonce, detached, through `quiet_command`; its pid
@@ -87,7 +92,8 @@
 //!      `rolledout\` made; every install file whose digest is a **new**
 //!      member's → `rolledout\<name>`, then every old file in `backup\` →
 //!      the install (`update_txn::rollback_moves`), each one
-//!      `install_txn::durable_move`. New files go out first because a rename
+//!      `install_txn::durable_move`, asked again while held as in step 5.
+//!      New files go out first because a rename
 //!      never replaces: after every prefix each old file is in exactly one of
 //!      install and `backup\`, each new file in exactly one of `set\`, install
 //!      and `rolledout\` (I1′);
@@ -127,9 +133,11 @@
 //! every new file installed at its digest starts it as a trial over `Stuck` —
 //! recorded (`RetrialBegan`), so its receipt commits forward (W8) — and waits
 //! for it under the lock ([`Txn::retry_as_trial`]). Where the install holds
-//! neither whole set, **the rescue copy** (O's own image, whose home holds no
-//! journal) opens with `--update-failed` — the fallback when even the
-//! recovery could not finish.
+//! neither whole set, **the rescue copy** (O's own image) opens with
+//! `--update-failed` — the fallback when even the recovery could not finish,
+//! started because the install's home holds a journal whose card it must
+//! show: it finds that home from its own path and only reads it
+//! (`update_startup::home_of_start`, T-RESCUE-COPY-CARD).
 //!
 //! **Recovery** ([`recover`], the rescue build as `--update-recover`, R): the
 //! same lock within 60 s, then every phase a dead applier can leave, by the
@@ -234,6 +242,10 @@ pub(crate) trait World {
     /// One move of the flip, or of its rollback, is done — the instant
     /// between two moves.
     fn moved(&mut self, _done: &Move) {}
+    /// **One round of a move another program's hold refused is said** —
+    /// the instant before the pause after which the same move is asked
+    /// again (T-UPDATE-MOVE-HELD-RETRY; `update_apply::move_held_within`).
+    fn move_held(&mut self, _step: &Move) {}
     /// **Whether a start just made was acknowledged**: a Folio holds the data
     /// directory `data` within `update_apply::ACKNOWLEDGED_WITHIN`, asked
     /// through `worker`'s wait door (`update_apply::claimed_within`).
@@ -295,6 +307,13 @@ pub(crate) enum Activated {
     /// A step failed, leaving what every prefix of the steps leaves (I1′);
     /// why, as a sentence. The road decides what follows from the disk.
     Cut(String),
+    /// **A step another program's hold refused past the window**
+    /// (T-UPDATE-MOVE-HELD-RETRY): a [`Activated::Cut`], `why` as a sentence,
+    /// and the member and the system's refusal, for the card.
+    HeldPast {
+        why: String,
+        held: crate::update_apply::HeldPast,
+    },
 }
 
 /// **A layout's `Activate` and `Prove / Recover` on the Windows road** (0.4.7
@@ -372,11 +391,19 @@ impl ApplyPoints for Ours {
             journal.may(Actor::Applier, effect)?;
             let from = site.folder(step.from)?.join(&step.name);
             let to = site.folder(step.to)?.join(&step.name);
-            if let Err(failure) = install_txn::durable_move(&from, &to) {
-                return Ok(Activated::Cut(format!(
-                    "the move of `{}` failed: {failure}",
-                    step.name
-                )));
+            if let Err(unmoved) = held_move(
+                journal,
+                &format!("BT_UPDATE_APPLY `{}` held by another program", step.name),
+                &step,
+                &from,
+                &to,
+                world,
+            ) {
+                return Ok(cut(
+                    &format!("the move of `{}` failed", step.name),
+                    &step,
+                    unmoved,
+                ));
             }
             world.moved(&step);
         }
@@ -401,11 +428,19 @@ impl ApplyPoints for Ours {
             journal.may(actor, effect)?;
             let from = site.folder(step.from)?.join(&step.name);
             let to = site.folder(step.to)?.join(&step.name);
-            if let Err(failure) = install_txn::durable_move(&from, &to) {
-                return Ok(Activated::Cut(format!(
-                    "the move of `{}` to {:?}: {failure}",
-                    step.name, step.to
-                )));
+            if let Err(unmoved) = held_move(
+                journal,
+                &format!("BT_UPDATE_ROLLBACK `{}` held by another program", step.name),
+                step,
+                &from,
+                &to,
+                world,
+            ) {
+                return Ok(cut(
+                    &format!("the move of `{}` to {:?}", step.name, step.to),
+                    step,
+                    unmoved,
+                ));
             }
             world.moved(step);
         }
@@ -457,6 +492,52 @@ impl ApplyPoints for Ours {
     fn live(&self, site: &Site<'_>) -> Option<Live> {
         let install = site.folder(Place::Install).ok()?;
         live_set(site.inventories, &install)
+    }
+}
+
+/// **One move of the flip or of its rollback**, asked again while another
+/// program's hold refuses it (`update_apply::move_held_within`): through the
+/// journal holder's wait door and within its window, each refused round said
+/// after `opening` and looked at by `world`.
+fn held_move(
+    journal: &Journaled<'_>,
+    opening: &str,
+    step: &Move,
+    from: &Path,
+    to: &Path,
+    world: &mut dyn World,
+) -> Result<(), crate::update_apply::Unwritten> {
+    let (worker, within) = journal.held_door();
+    // One world behind two seams, each round's line said as it happens and
+    // the round looked at after it; never both at once.
+    let world = std::cell::RefCell::new(world);
+    crate::update_apply::move_held_within(
+        worker,
+        from,
+        to,
+        within,
+        opening,
+        &mut |line| world.borrow_mut().say(line),
+        &mut || world.borrow_mut().move_held(step),
+    )
+}
+
+/// **A cut, from a move that did not land**: `what` and the failure, and,
+/// when another program's hold outlasted the window, the member and the
+/// refusal the card names.
+fn cut(what: &str, step: &Move, unmoved: crate::update_apply::Unwritten) -> Activated {
+    match unmoved.held {
+        Some(error) => Activated::HeldPast {
+            why: format!(
+                "{what}: another program held it open past the window: {}",
+                unmoved.said
+            ),
+            held: crate::update_apply::HeldPast {
+                file: Some(step.name.clone()),
+                error,
+            },
+        },
+        None => Activated::Cut(format!("{what}: {}", unmoved.said)),
     }
 }
 
@@ -545,9 +626,10 @@ pub(crate) struct Recovered {
     /// Whether anybody waits for a window: a person's start always; the run
     /// at logon only after a revert or a rollback it finished.
     pub(crate) waiting: bool,
-    /// The refusal of a journal write another program's hold outlasted the
-    /// window for ([`Journaled::held`], 0.4.8 E4).
-    pub(crate) journal_held: Option<String>,
+    /// The refusal of a journal write — or of a member's move — another
+    /// program's hold outlasted the window for ([`Txn::held_past`], 0.4.8
+    /// E4, T-UPDATE-MOVE-HELD-RETRY).
+    pub(crate) journal_held: Option<crate::update_apply::HeldPast>,
     /// **Whom a person's start was deferred to** (0.4.8 E3): the party that
     /// opens the window while this recovery starts nothing — the applier the
     /// mark names, an election in flight, the lock holder that kept the
@@ -571,11 +653,12 @@ pub(crate) struct WindowsLeave<'a, W: World> {
     /// writers): the applier, or the recovery. `None` where the road never
     /// became a holder — a refused line — so no reservation is made.
     pub(crate) actor: Option<Actor>,
-    /// **The refusal of a journal write another program's hold outlasted
-    /// the window for** (0.4.8 E4, [`Journaled::held`]), set once the road
-    /// has ended: a start sent to report carries it
-    /// (`update_apply::journal_held_words`), so its card names the hold.
-    pub(crate) journal_held: Option<String>,
+    /// **The refusal of a journal write — or of a member's move — another
+    /// program's hold outlasted the window for** (0.4.8 E4, T-UPDATE-MOVE-
+    /// HELD-RETRY; [`Txn::held_past`]), set once the road has ended: a start
+    /// sent to report carries it (`update_apply::HeldPast::words`), so its
+    /// card names the hold and the file.
+    pub(crate) journal_held: Option<crate::update_apply::HeldPast>,
 }
 
 impl<W: World> WindowsLeave<'_, W> {
@@ -583,10 +666,10 @@ impl<W: World> WindowsLeave<'_, W> {
     /// the start reports and there was one, then the handed command line.
     fn started(&self, opens: &Opens) -> (PathBuf, Vec<OsString>) {
         let (program, mut words) = self.road.opening(opens);
-        if let Some(error) = self.journal_held.as_deref()
+        if let Some(held) = &self.journal_held
             && opens.reports()
         {
-            words.extend(crate::update_apply::journal_held_words(error));
+            words.extend(held.words());
         }
         words.extend_from_slice(self.handed);
         (program.to_path_buf(), words)
@@ -607,7 +690,9 @@ impl<W: World> Leave for WindowsLeave<'_, W> {
     }
 
     /// The rescue copy — O's own image, which has run — with
-    /// `--update-failed`: whose own home holds no journal.
+    /// `--update-failed`: started because the install's home holds a journal
+    /// whose card it must show, which it reads from its own path
+    /// (`update_startup::home_of_start`).
     fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         Some(self.started(&Opens::Rescue))
     }
@@ -835,7 +920,11 @@ fn apply_under_the_lock(
     nonce: Nonce,
     window: Instant,
     world: &mut impl World,
-) -> (Ended, Option<Running>, Option<String>) {
+) -> (
+    Ended,
+    Option<Running>,
+    Option<crate::update_apply::HeldPast>,
+) {
     apply_under_the_lock_with(worker, road, txn, nonce, window, world, |path, within| {
         install_txn::hold_within(path, Hold::Exclusive, within)
     })
@@ -849,7 +938,11 @@ fn apply_under_the_lock_with(
     window: Instant,
     world: &mut impl World,
     hold: impl FnOnce(&Path, Duration) -> Result<Option<install_txn::Held>, install_txn::Failure>,
-) -> (Ended, Option<Running>, Option<String>) {
+) -> (
+    Ended,
+    Option<Running>,
+    Option<crate::update_apply::HeldPast>,
+) {
     let lock = match hold(
         &road.home.lock(),
         window.saturating_duration_since(Instant::now()),
@@ -872,7 +965,11 @@ fn under_the_lock(
     window: Instant,
     world: &mut impl World,
     lock: install_txn::Held,
-) -> (Ended, Option<Running>, Option<String>) {
+) -> (
+    Ended,
+    Option<Running>,
+    Option<crate::update_apply::HeldPast>,
+) {
     let journal = match read_journal(&road.home) {
         Some(Sight::Known(journal)) => journal,
         Some(beyond) => {
@@ -907,7 +1004,8 @@ fn under_the_lock(
                     held.j.written
                 ),
             );
-            (ended, held.successor, held.j.held)
+            let held_past = held.held_past();
+            (ended, held.successor, held_past)
         }
         Err(ended) => (ended, None, None),
     }
@@ -978,7 +1076,8 @@ pub(crate) fn recover(
                         (Ended::Deferred(Deferral::Held), None) => Some(Ahead::DataHolder),
                         _ => None,
                     };
-                    (ended, held.successor, deferred_to, held.j.held)
+                    let held_past = held.held_past();
+                    (ended, held.successor, deferred_to, held_past)
                 }
                 Err(ended) => (ended, None, None, None),
             }
@@ -1148,6 +1247,10 @@ struct Txn<'a> {
     /// handed** (the retrial over `Stuck`, [`Txn::begin_retrial`]): that start
     /// is delivered with it and nothing is carried (0.4.8 E3).
     successor_has_the_start: bool,
+    /// **The member another program held open past the window for a move of
+    /// the flip or of its rollback** (T-UPDATE-MOVE-HELD-RETRY), and the
+    /// system's refusal: what the card of the build left behind names.
+    member_held: Option<crate::update_apply::HeldPast>,
 }
 
 impl<'a> Txn<'a> {
@@ -1176,7 +1279,19 @@ impl<'a> Txn<'a> {
             layout,
             successor: None,
             successor_has_the_start: false,
+            member_held: None,
         })
+    }
+
+    /// **What another program held open past its window on this road**, for
+    /// the card: the journal when a write of it was given up — the hold that
+    /// ended the road — else the member a move was cut for.
+    fn held_past(&self) -> Option<crate::update_apply::HeldPast> {
+        self.j
+            .held
+            .clone()
+            .map(crate::update_apply::HeldPast::journal)
+            .or_else(|| self.member_held.clone())
     }
 
     fn txn(&self) -> TxnId {
@@ -1334,7 +1449,7 @@ impl<'a> Txn<'a> {
         // Activate, forward: the layout's (managed-update R1).
         let layout = Arc::clone(&self.layout);
         let activated = layout.activate(&self.site(), &self.j, world)?;
-        if let Activated::Cut(why) = activated {
+        if let Some(why) = self.cut_by(activated) {
             world.say(&format!("BT_UPDATE_APPLY {why}"));
             drop(admission);
             return self.declare_rollback(worker, Actor::Applier, world);
@@ -1395,6 +1510,19 @@ impl<'a> Txn<'a> {
             },
             &mut |pause| bt_platform::wait::sleep_within(worker, pause),
         )
+    }
+
+    /// **Why `activated` cut the steps short**, or `None` when every step is
+    /// done; a hold past the window is kept for the card.
+    fn cut_by(&mut self, activated: Activated) -> Option<String> {
+        match activated {
+            Activated::Done => None,
+            Activated::Cut(why) => Some(why),
+            Activated::HeldPast { why, held } => {
+                self.member_held = Some(held);
+                Some(why)
+            }
+        }
     }
 
     /// W6 → W7 → W8, or the rollback.
@@ -1809,7 +1937,7 @@ impl<'a> Txn<'a> {
         // Activate, back: the layout's (managed-update R1).
         let layout = Arc::clone(&self.layout);
         let activated = layout.activate_back(&self.site(), &self.j, actor, moves, world)?;
-        if let Activated::Cut(why) = activated {
+        if let Some(why) = self.cut_by(activated) {
             drop(admission);
             return self.stuck(actor, why, world).map(Some);
         }

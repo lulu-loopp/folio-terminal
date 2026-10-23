@@ -11,4 +11,3 @@ Runtime::hand_off	bt-app crate::handoff_lane::HandoffLane::start	the hand-off la
 foreground_program::request	bt-app crate::foreground_program::Worker::spawn	the foreground-program worker is started once, with the application; the door sends to its channel
 GitWorker::request	bt-app crate::git::GitWorker::spawn	the git worker is started once, with the application; the door sends to its channel
 LayoutTables::shifted_character	bt-app crate::layout_tables::LayoutTables::spawn	the layout-table worker is started once, with the application; the door sends to its bounded queue
-dispatch_decoration_task	bt-app crate::MathWorker::spawn	the computation lane's three threads are started once, with the application; the door sends on their channels

@@ -8,8 +8,11 @@
 # The comparison is against the pull request's merge base, not against the
 # previous commit, so a branch is judged on what it did rather than on what main
 # did underneath it. The six original identity fields are compared with
-# multiplicity: a duplicated identity is an added row. Explanatory columns may
-# follow them without making every retained identity look newly added.
+# multiplicity: a duplicated identity is an added row. The six are found by
+# their names in the column header, so a column added or moved beside them (the
+# `category` the tripwire reads, the explanatory columns) does not make every
+# retained identity look newly added. `check-migration-debt-tests.ps1` holds
+# that, and the growth and duplicate refusals, on a scratch repository.
 #
 # It passes, loudly, when the base has no list — that is how the commit that
 # introduces the list passes. It does not pass when there is no base at all: no
@@ -21,13 +24,17 @@
 # Prove it fires before trusting it: add a row to the list and this must go red.
 # `.github/workflows/ci.yml` does exactly that, in `gates-can-fail`.
 
+param(
+    [string]$Repo = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+)
+
 $ErrorActionPreference = "Stop"
 
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-$repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$repo = $Repo
 $relative = "docs/plans/MIGRATION-DEBT.tsv"
 $list = Join-Path $repo $relative
 
@@ -35,21 +42,32 @@ if (-not (Test-Path -LiteralPath $list)) {
     throw "$relative is not in the tree - the debt list is what the tripwire allows readers against"
 }
 
-# A row is keyed by the six legacy identity fields. Later columns explain its
-# ruling and are deliberately not identity.
+# A row is keyed by the six legacy identity fields, each read from the column
+# the header names it in. Later columns explain its ruling and are deliberately
+# not identity.
+$identity = @("file", "owner", "mechanism", "subject", "ticket", "disturbed_by_2a")
+
 function Read-DebtRows([string[]]$lines) {
     $rows = @()
-    $header = $false
+    $columns = $null
     foreach ($line in $lines) {
         if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
-        if (-not $header) { $header = $true; continue }
         $fields = @($line -split "`t")
-        if ($fields.Count -lt 6) {
-            throw "$relative has a row with $($fields.Count) fields; six identify a debt reader: $line"
+        if ($null -eq $columns) {
+            $columns = foreach ($name in $identity) {
+                $at = [array]::IndexOf($fields, $name)
+                if ($at -lt 0) { throw "$relative has no ``$name`` column in its header: $line" }
+                $at
+            }
+            $width = $fields.Count
+            continue
         }
-        $rows += (($fields[0..5]) -join "`t")
+        if ($fields.Count -ne $width) {
+            throw "$relative has a row with $($fields.Count) fields under a header of ${width}: $line"
+        }
+        $rows += (($columns | ForEach-Object { $fields[$_] }) -join "`t")
     }
-    if (-not $header) { throw "$relative has no column header" }
+    if ($null -eq $columns) { throw "$relative has no column header" }
     return , $rows
 }
 

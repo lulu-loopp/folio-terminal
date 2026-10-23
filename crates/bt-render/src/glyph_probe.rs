@@ -15,7 +15,7 @@
 //! **the two paths must be handed the same frame by construction, not by two
 //! call sites that look alike.** [`GlyphFixture::present`] is the single
 //! builder. An offscreen window reads back through
-//! [`crate::WindowRenderer::read_back`]; a real window on a Mac is captured
+//! `bt_render_probe::read_back`; a real window on a Mac is captured
 //! from outside the process, because a swapchain cannot be read. Both arrive
 //! here as `[b, g, r, a]` and are measured by the same functions.
 //!
@@ -296,6 +296,7 @@ impl GlyphFixture {
                 // two runs of the same fixture differ, because it blinks.
                 visible: false,
             },
+            cursor_in_view: true,
             row_map: (0..rows)
                 .map(|row| bt_viewport::FrameVisualRow {
                     top_subpixels: i64::from(row) * height_subpixels,
@@ -563,7 +564,7 @@ pub struct BandStats {
 /// Read one band out of a readback.
 ///
 /// `pixels` is `[b, g, r, a]` in rows of `width`, which is what
-/// [`crate::WindowRenderer::read_back`] answers and what a window capture is
+/// `bt_render_probe::read_back` answers and what a window capture is
 /// converted to.
 ///
 /// **Coverage is read off the encoded byte, not off linear light**, and that is

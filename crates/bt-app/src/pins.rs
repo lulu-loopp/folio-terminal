@@ -57,11 +57,15 @@ pub const PINS_FILE_NAME: &str = "pins.json";
 /// pointer of the hand that is still on the menu.
 ///
 /// Rows of other categories, and rows of no category this build knows, are not
-/// touched: this walks for one target under one tag and edits one row.
+/// touched: this walks for one target under one tag and edits its rows only. An
+/// unpin takes every row of that target and tag — the first, which the menus
+/// read, and the later duplicates they never did, which go with it
+/// (`document_request::First::alongside`; every pin row is
+/// usable), so a duplicate never becomes the pin.
 pub fn toggle_pin(table: &mut PinsV1, kind: PinKind, target: &str) -> bool {
     match row_of(table, kind, target) {
-        Some(index) => {
-            table.pins.remove(index);
+        Some(_) => {
+            crate::document_request::unpin(&mut table.pins, kind.tag(), target);
             false
         }
         None => {
@@ -125,6 +129,10 @@ pub struct PinsStore {
     document: DocumentState<PinsV1>,
     /// Why the file on disk was not usable, if it was not.
     fault: Option<String>,
+    /// **What a quit merged and did not put in force**
+    /// ([`crate::persist::ProfilesStore`]'s rule): the next storage pass
+    /// rebuilds the menus from it and says it, should the quit be cancelled.
+    merged_at_quit: Option<crate::settings_merge::Account>,
 }
 
 /// `pins.json` in a quit and on a stop: its [`DocumentState`]'s answers (T-QUIT-DOCUMENTS).
@@ -137,8 +145,16 @@ impl QuitDocument for PinsStore {
         self.document.quit_begin();
     }
 
-    fn quit_turn(&mut self) {
-        self.document.quit_turn();
+    /// A turn that folds a changed file in before it sends: a `Moved` or
+    /// `Displaced` answer at quit is merged as the running window merges it,
+    /// without the door.
+    fn quit_turn(&mut self) -> Option<String> {
+        let _ = self.document.take_answers();
+        let merged = self.merge_at_quit();
+        if self.document.standing() == crate::quit::Standing::Unsent {
+            self.document.send_owed();
+        }
+        merged
     }
 
     fn standing(&self) -> crate::quit::Standing {
@@ -197,6 +213,7 @@ impl PinsStore {
                 lane,
             ),
             fault,
+            merged_at_quit: None,
         }
     }
 
@@ -216,6 +233,12 @@ impl PinsStore {
     #[cfg(test)]
     pub(crate) fn document(&mut self) -> &mut DocumentState<PinsV1> {
         &mut self.document
+    }
+
+    /// Whether a file's bytes wait for the merge.
+    #[cfg(test)]
+    pub(crate) fn merge_waits(&self) -> bool {
+        self.document.merge_waits()
     }
 
     /// Take the read fault, so a notice about it is raised once and not once a
@@ -268,12 +291,75 @@ impl PinsStore {
         self.document.ask_read();
     }
 
+    /// Whether a re-read of `pins.json` is still to be answered.
+    pub(crate) fn reading(&self) -> bool {
+        self.document.reading()
+    }
+
     /// Record the table as it stands now and hand it to the storage worker.
     ///
     /// Returns whether anything changed, so a press that moved nothing costs no
     /// write.
     pub fn store(&mut self, file: PinsV1) -> bool {
         self.document.store(file, false)
+    }
+
+    /// **A storage pass's merge, the store's half** (design note 2026-10-11
+    /// §3.4, (b)8, (c)1): every file stored for the merge is merged by
+    /// identity and by key ([`crate::pins_merge::merge`]) and folded into
+    /// `desired`, which moves the revision to the file the merge read; the
+    /// merged table is then what the menus read, built from it whenever one
+    /// opens; the turn presents once after every pass. `None` when nothing was merged.
+    pub(crate) fn begin_merge(&mut self) -> Option<crate::table_merge::MergePass> {
+        let at_quit = self.merged_at_quit.take();
+        if !self.document.merge_waits() && at_quit.is_none() {
+            return None;
+        }
+        let merges = self.document.merge_stored(merge_pins);
+        if merges.is_empty() && at_quit.is_none() {
+            return None;
+        }
+        let mut account = crate::settings_merge::Account::default();
+        for merge in merges {
+            account.add(merge);
+        }
+        self.document.project(self.document.desired().clone());
+        Some(crate::table_merge::MergePass::new(
+            PINS_FILE_NAME,
+            account,
+            at_quit.unwrap_or_default(),
+        ))
+    }
+
+    /// **A quit's merge**: [`Self::begin_merge`]'s fold, and nothing put in
+    /// force — the windows are leaving. Answers its one `diagnostics.log` line
+    /// (`SettingsStore`'s `merge_at_quit`, for its reason); what it merged is
+    /// kept for the next storage pass, which puts it in force should the quit be
+    /// cancelled.
+    fn merge_at_quit(&mut self) -> Option<String> {
+        if !self.document.merge_waits() {
+            return None;
+        }
+        let merges = self.document.merge_stored(merge_pins);
+        if merges.is_empty() {
+            return None;
+        }
+        let mut account = crate::settings_merge::Account::default();
+        for merge in merges {
+            account.add(merge);
+        }
+        let line = account.said(PINS_FILE_NAME, crate::settings_merge::Said::AtQuit);
+        self.merged_at_quit
+            .get_or_insert_with(Default::default)
+            .add(account);
+        Some(line)
+    }
+
+    /// **A storage pass's merge, its last step**: the merged table is handed to
+    /// the worker, conditional on the file the merge read, if it differs from
+    /// it — the pins that kept Folio's state.
+    pub(crate) fn end_merge(&mut self) {
+        self.document.send_owed();
     }
 
     /// **An update's trial was committed: the table as it stands is handed
@@ -294,12 +380,35 @@ impl PinsStore {
         self.document.settle()
     }
 
-    /// Read the file again on the worker and take the answer — a pass, in a test.
+    /// **A storage pass, in a test**: the file read again on the worker, the
+    /// answer taken, and the store's merge run with the send after it (the
+    /// door is the window's). `Changed` when the pass moved what the readers
+    /// read.
     #[cfg(test)]
     pub(crate) fn reread(&mut self) -> crate::document_request::Heard {
         self.ask_reread();
-        self.settle().heard()
+        let news = self.settle();
+        let before = self.document.projection().clone();
+        if self.begin_merge().is_some() {
+            self.end_merge();
+        }
+        match news.heard() {
+            crate::document_request::Heard::Unchanged if *self.document.projection() != before => {
+                crate::document_request::Heard::Changed
+            }
+            heard => heard,
+        }
     }
+}
+
+/// **`pins.json`'s merge, as the store's seam takes it.**
+fn merge_pins(
+    base: &PinsV1,
+    ours: &PinsV1,
+    theirs: &PinsV1,
+) -> (PinsV1, crate::settings_merge::Account) {
+    let merged = crate::pins_merge::merge(base, ours, theirs);
+    (merged.document, merged.account)
 }
 
 /// `pins.json` read again with a refused file's copy kept — what an update's
@@ -601,6 +710,198 @@ mod tests {
         );
 
         drop(claim);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A pin store over a scratch `pins.json` holding `file`, on a lane nobody
+    /// serves: what it would write stays queued, and a test hands it the reads.
+    fn merging_store(
+        case: &str,
+        file: &PinsV1,
+    ) -> (std::path::PathBuf, PinsStore, crate::persist::UnservedJobs) {
+        let root = bt_testpath::temp_path(&format!("bt-app-pins-merge-{case}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private storage folder for this test");
+        let path = root.join(PINS_FILE_NAME);
+        std::fs::write(
+            &path,
+            bt_persist::serialize_pins(file).expect("it serializes"),
+        )
+        .expect("the pins file");
+        let (lane, jobs) = crate::persist::StorageLane::unserved();
+        let store = PinsStore::at_on(path, lane);
+        (root, store, jobs)
+    }
+
+    /// The file changed to `theirs`, heard by the store and merged: the pass's
+    /// store half.
+    fn merge_in(store: &mut PinsStore, theirs: &PinsV1) -> crate::table_merge::MergePass {
+        let bytes: std::sync::Arc<[u8]> = bt_persist::serialize_pins(theirs)
+            .expect("it serializes")
+            .into();
+        let _ = store
+            .document()
+            .hear_read(bt_persist::StableRead::Bytes(bytes));
+        store.begin_merge().expect("the file waits for the merge")
+    }
+
+    fn with_extra(mut pin: PinEntryV1, key: &str, value: serde_json::Value) -> PinEntryV1 {
+        pin.extra.insert(key.to_owned(), value);
+        pin
+    }
+
+    /// RED ((b)14-12, (b)8) — **the document's top-level keys of its own merge
+    /// key by key**: a key only Folio's document changed is Folio's, a key only
+    /// the file changed or added is the file's, and a key both changed to two
+    /// values is the file's, named.
+    ///
+    /// MUTATION: take `O`'s top-level `extra` (in `pins_merge::merge`, the
+    /// document's `extra` is `ours.extra`) — the file's `b` and `c` are lost.
+    #[test]
+    fn top_level_extra_merges_by_key() {
+        let mut base = table(&[("folder", r"C:\甲")]);
+        for (key, value) in [
+            ("主题", serde_json::json!("暗 dark")),
+            ("a", serde_json::json!(1)),
+            ("b", serde_json::json!(1)),
+        ] {
+            base.extra.insert(key.to_owned(), value);
+        }
+        let (root, mut store, _jobs) = merging_store("top-level", &base);
+        let mut ours = base.clone();
+        ours.extra.insert("a".to_owned(), serde_json::json!(2));
+        ours.extra
+            .insert("主题".to_owned(), serde_json::json!("亮 light"));
+        assert!(store.store(ours));
+        let mut theirs = base.clone();
+        theirs.extra.insert("b".to_owned(), serde_json::json!(3));
+        theirs
+            .extra
+            .insert("主题".to_owned(), serde_json::json!("蓝 blue"));
+        theirs
+            .extra
+            .insert("c".to_owned(), serde_json::json!(["新", "new"]));
+
+        let pass = merge_in(&mut store, &theirs);
+        let merged = &store.document().desired().extra;
+        assert_eq!(merged.get("a"), Some(&serde_json::json!(2)), "Folio's");
+        assert_eq!(merged.get("b"), Some(&serde_json::json!(3)), "the file's");
+        assert_eq!(merged.get("c"), Some(&serde_json::json!(["新", "new"])));
+        assert_eq!(
+            merged.get("主题"),
+            Some(&serde_json::json!("蓝 blue")),
+            "changed on both: the file's"
+        );
+        assert_eq!(
+            pass.replaced().map(|replaced| replaced.values),
+            Some(vec!["主题".to_owned()])
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((b)14-12, (b)8) — **remove against change goes to the file**: Folio
+    /// unpinned a folder whose fields the file changed — it stays, as the file
+    /// has it; the file unpinned a file whose fields Folio changed — it goes.
+    /// Both are named.
+    ///
+    /// MUTATION: removal always wins (in `pins_merge::resolve`, the
+    /// `(Some, None, Some)` arm answers `None`) — the folder is gone.
+    #[test]
+    fn remove_against_change_goes_to_the_file() {
+        let folder = with_extra(
+            PinEntryV1::new(PinKind::Folder, r"C:\甲"),
+            "颜色",
+            serde_json::json!("红 red"),
+        );
+        let file = with_extra(
+            PinEntryV1::new(PinKind::File, r"D:\乙 notes.md"),
+            "行",
+            serde_json::json!(1),
+        );
+        let base = PinsV1 {
+            pins: vec![folder.clone(), file.clone()],
+            ..PinsV1::default()
+        };
+        let (root, mut store, _jobs) = merging_store("remove-change", &base);
+        assert!(
+            !store.toggle(PinKind::Folder, r"C:\甲"),
+            "Folio unpinned it"
+        );
+        let mut ours = store.document().projection().clone();
+        ours.pins[0] = with_extra(file.clone(), "行", serde_json::json!(42));
+        assert!(store.store(ours));
+        let folder_there = with_extra(folder.clone(), "颜色", serde_json::json!("蓝 blue"));
+        let theirs = PinsV1 {
+            pins: vec![folder_there.clone()],
+            ..PinsV1::default()
+        };
+
+        let pass = merge_in(&mut store, &theirs);
+        assert_eq!(
+            store.document().desired().pins,
+            vec![folder_there],
+            "the folder the file changed stays; the file the file unpinned goes"
+        );
+        assert_eq!(
+            pass.replaced().map(|replaced| replaced.values),
+            Some(vec![r"C:\甲".to_owned(), r"D:\乙 notes.md".to_owned()])
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED ((b)14-12, (b)8's one rule) — **a later row of a pin the file already
+    /// holds is carried**, verbatim and in its place, and Folio's addition
+    /// follows the file's rows.
+    ///
+    /// MUTATION: collapse duplicates (in `pins_merge::merge`, skip a `T` row
+    /// whose identity was seen instead of carrying it) — the second `C:\甲` is
+    /// gone.
+    #[test]
+    fn a_later_duplicate_pin_is_carried() {
+        let base = table(&[("folder", r"C:\甲"), ("file", r"D:\乙.md")]);
+        let (root, mut store, _jobs) = merging_store("duplicate", &base);
+        assert!(store.toggle(PinKind::Folder, r"E:\我的"));
+        let second = with_extra(
+            PinEntryV1::new(PinKind::Folder, r"C:\甲"),
+            "注",
+            serde_json::json!("第二 second"),
+        );
+        let mut theirs = base.clone();
+        theirs.pins.push(second.clone());
+
+        let _ = merge_in(&mut store, &theirs);
+        let mut expected = theirs.pins.clone();
+        expected.push(PinEntryV1::new(PinKind::Folder, r"E:\我的"));
+        assert_eq!(store.document().desired().pins, expected);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (review round 3, coordinator's ruling) — **an unpin takes every row
+    /// of its target and tag**: the file pins a folder twice; the menus read
+    /// the first; unpinning it leaves neither, in the table the press makes and
+    /// in the document Folio writes — the later row never becomes the pin.
+    ///
+    /// MUTATION: keep the duplicate (`document_request::First::alongside`
+    /// answers nothing — the press road before round 3) — the later row is
+    /// pinned after the unpin.
+    #[test]
+    fn an_unpin_takes_the_later_duplicates_of_its_pin() {
+        let file = table(&[
+            ("folder", "项目 project"),
+            ("file", "笔记 notes.md"),
+            ("folder", "项目 project"),
+        ]);
+        let mut pressed = file.clone();
+        assert!(!toggle_pin(&mut pressed, PinKind::Folder, "项目 project"));
+        assert!(!is_pinned(&pressed, PinKind::Folder, "项目 project"));
+
+        let (root, mut store, _jobs) = merging_store("unpin-duplicate", &file);
+        assert!(!store.toggle(PinKind::Folder, "项目 project"));
+        assert_eq!(
+            store.document().desired().pins,
+            vec![PinEntryV1::new(PinKind::File, "笔记 notes.md")],
+            "the document Folio writes holds neither row of the folder"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

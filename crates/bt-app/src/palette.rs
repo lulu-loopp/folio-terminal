@@ -253,7 +253,8 @@ mod fuzzy_tests {
         let difference = score("x", "a x") - score("x", "aax");
         assert!(
             (difference - super::WORD_START_BONUS).abs() < 1e-4,
-            "the difference is exactly the bonus and not something resembling              it: {difference} against {}",
+            "the difference is exactly the bonus and not something resembling \
+             it: {difference} against {}",
             super::WORD_START_BONUS
         );
         // The pair the section is actually about, kept because it is what the
@@ -2713,7 +2714,8 @@ mod list_tests {
         let waiting_end = placed.runs.last().map_or(0.0, |run| run.rect[2]);
         assert!(
             plain_end - waiting_end >= super::DOT_LOGICAL_PX,
-            "a waiting row gives the dot its room out of the label's: {plain_end}              against {waiting_end}"
+            "a waiting row gives the dot its room out of the label's: {plain_end} \
+             against {waiting_end}"
         );
     }
 

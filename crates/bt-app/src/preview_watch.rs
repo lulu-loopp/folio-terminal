@@ -88,7 +88,7 @@ use std::{
     time::{Instant, SystemTime},
 };
 
-use winit::event_loop::EventLoopProxy;
+use crate::window_seam::LoopProxy;
 
 use crate::{
     AppEvent,
@@ -237,7 +237,7 @@ impl PreviewWatch {
     /// top of it would schedule the next turn and the turn after that, for ever,
     /// over a window nobody is looking at. The clone belongs in [`listener`],
     /// once per window, when its ear opens, and nowhere on this path.
-    pub fn sync(&mut self, wanted: &BTreeSet<PathBuf>, proxy: &EventLoopProxy<AppEvent>) -> bool {
+    pub fn sync(&mut self, wanted: &BTreeSet<PathBuf>, proxy: &LoopProxy) -> bool {
         let changed = self.sync_with(wanted, Stamp::of);
         tell_the_ear(&mut self.ear, &self.folders, changed, || {
             crate::watch_steward::open_ear(
@@ -515,7 +515,7 @@ fn tell_the_ear(
 fn listener(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
     listening_for: &Arc<Mutex<BTreeMap<PathBuf, BTreeSet<String>>>>,
-    proxy: &EventLoopProxy<AppEvent>,
+    proxy: &LoopProxy,
 ) -> Listener {
     let mailbox = Arc::clone(news);
     let listening_for = Arc::clone(listening_for);
@@ -586,7 +586,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// variable for the same class of question would be one more thing to know
 /// before you can ask it. Set-but-empty is off, on `BT_PERF_TRACE`'s own rule.
 fn trace(message: &str) {
-    if std::env::var_os("BT_GIT_TRACE").is_some_and(|value| !value.is_empty()) {
+    if crate::entry_doors::installed().git {
         eprintln!("preview watch: {message}");
     }
 }

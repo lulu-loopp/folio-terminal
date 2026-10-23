@@ -3,125 +3,15 @@
 
 use crate::profiles;
 use crate::shell_integration;
+use crate::window_seam::prelude::*;
 use crate::{
     Announce, Runtime, attention_codex, attention_copilot, attention_hooks, attention_ownership,
-    diagnostics, explorer_menu, first_run, i18n, install_channel, persist, psreadline, restore,
-    toast, tooltip,
+    diagnostics, explorer_menu, first_run, i18n, install_channel, restore, toast, tooltip,
 };
 use anyhow::Result;
-use std::path::PathBuf;
 use winit::keyboard::{Key, NamedKey};
 
-impl Runtime<'_> {
-    /// What the Terminal page's PSReadLine row is describing.
-    pub(crate) fn psreadline_row_state(&self) -> psreadline::RowState {
-        psreadline::after_the_newest_check(
-            psreadline::row_state(
-                psreadline::probe(),
-                self.app.settings_store.loaded().psreadline_invite,
-                self.app.psreadline_installed.unwrap_or_default(),
-            ),
-            psreadline::probe_failed(),
-        )
-    }
-
-    /// Re-read whether the module is on disk. Cheap enough at the three moments
-    /// it is called and far too expensive on every frame — see the field.
-    pub(crate) fn refresh_psreadline_installed(&mut self) {
-        psreadline::refresh_installed(
-            &mut self.app.psreadline_installed,
-            self.app.psreadline_documents.as_deref(),
-        );
-    }
-
-    /// Where this machine's `Documents` is, asked again if the launch could not
-    /// say (§7.47).
-    ///
-    /// The answer is cached because the row re-reads the disk three times a
-    /// session and a known-folder round trip per read is not free. **`None` is
-    /// not cached**, though, and that is the whole of this function: a launch
-    /// that could not resolve the folder used to freeze that "no" for the life
-    /// of the process, and every press on the row after it returned in silence.
-    /// A machine can grow the answer under a running window — a profile that
-    /// finishes redirecting, a network home that comes back — and the press is
-    /// exactly the moment worth asking again.
-    pub(crate) fn psreadline_documents(&mut self) -> Option<PathBuf> {
-        if self.app.psreadline_documents.is_none() {
-            self.app.psreadline_documents = psreadline::documents_directory();
-        }
-        self.app.psreadline_documents.clone()
-    }
-
-    /// Write the module, or take Folio's own copy back off disk.
-    ///
-    /// **Every road out of here says something** (§7.47). The decision itself
-    /// belongs to `psreadline::apply`, which has no silent exit; this function
-    /// is the two lines that turn its answer into a card and a line in
-    /// `diagnostics.log`. Before 2026-08-29 there were three ways for a press
-    /// on this row to change nothing and report nothing — a `Documents` folder
-    /// Windows would not name, a removal the guard refused, and (the one a user
-    /// met on a new machine) an execution policy that greyed the item so the
-    /// press never arrived at all.
-    pub(crate) fn apply_psreadline(&mut self, install: bool) -> Result<bool> {
-        let documents = self.psreadline_documents();
-        let state = self.psreadline_row_state();
-        let outcome = psreadline::apply_recorded(
-            install,
-            documents.as_deref(),
-            state,
-            psreadline::probe(),
-            &persist::storage_dir(),
-        );
-        match outcome {
-            psreadline::Outcome::Installed(root) => {
-                eprintln!(
-                    "BT_PSREADLINE installed {} to {}",
-                    psreadline::PATCHED_VERSION,
-                    root.display()
-                );
-                self.record_psreadline_invite(bt_persist::PsReadLineInviteV1::Installed);
-                self.refresh_psreadline_installed();
-                self.toast(
-                    toast::ToastKind::Ok,
-                    toast::ToastAnchor::Window,
-                    None,
-                    i18n::psreadline_installed_toast(psreadline::PATCHED_VERSION),
-                )?;
-                Ok(true)
-            }
-            psreadline::Outcome::Removed(root) => {
-                eprintln!("BT_PSREADLINE removed {}", root.display());
-                self.record_psreadline_invite(bt_persist::PsReadLineInviteV1::Dismissed);
-                self.refresh_psreadline_installed();
-                self.toast(
-                    toast::ToastKind::Ok,
-                    toast::ToastAnchor::Window,
-                    None,
-                    i18n::Text::PsReadLineRemovedToast.text().to_owned(),
-                )?;
-                Ok(true)
-            }
-            psreadline::Outcome::Refused(refusal) => {
-                // The log line and the card carry the same fact, and the log
-                // line is not the card: on the machine where this fires nobody
-                // can see the screen, and a tag is what a `diagnostics.log`
-                // can be grepped for in either language.
-                eprintln!(
-                    "BT_PSREADLINE refused install={install} why={} — {}",
-                    refusal.tag(),
-                    refusal.sentence()
-                );
-                self.toast(
-                    toast::ToastKind::Error,
-                    toast::ToastAnchor::Window,
-                    None,
-                    refusal.sentence(),
-                )?;
-                Ok(false)
-            }
-        }
-    }
-
+impl<B: Backend> Runtime<'_, B> {
     /// Register the package that puts Folio on the first page of Explorer's
     /// menu, or take it back off (§7.4a).
     ///
@@ -173,7 +63,10 @@ impl Runtime<'_> {
     /// refusal names a condition — a certificate the machine will not trust, a
     /// package already registered by another user — that no words of ours could
     /// guess.
-    pub(crate) fn report_explorer_package(&mut self, outcome: Result<bool, String>) -> Result<()> {
+    pub(crate) fn report_explorer_package(
+        &mut self,
+        outcome: Result<bool, explorer_menu::PressFailure>,
+    ) -> Result<()> {
         match outcome {
             // The first-run card asked for this beside three others and the
             // Settings row now reads it; a card for each is noise (§7.56 §8).
@@ -193,7 +86,7 @@ impl Runtime<'_> {
                 toast::ToastKind::Error,
                 toast::ToastAnchor::Window,
                 None,
-                i18n::explorer_first_page_failed(&error),
+                error.sentence(),
             ),
         }
     }
@@ -445,112 +338,11 @@ impl Runtime<'_> {
         }
     }
 
-    fn record_psreadline_invite(&mut self, state: bt_persist::PsReadLineInviteV1) {
-        if self.app.settings_store.loaded().psreadline_invite == state {
-            return;
-        }
-        let mut settings = self.app.settings_store.loaded().clone();
-        settings.psreadline_invite = state;
-        self.app.settings_store.store(settings);
-    }
-
-    /// Raise the invitation once the probe has answered and the table says it is
-    /// owed — `psreadline::invite_decision`.
-    ///
-    /// Polled from the event loop rather than pushed from the probe thread,
-    /// because raising a modal is a change to the window and the window is this
-    /// thread's. The check is three comparisons on the common path.
-    pub(in crate::runtime) fn raise_psreadline_invite_if_due(&mut self) -> Result<()> {
-        if self.window.psreadline_invite.is_open() || psreadline::probe().is_none() {
-            return Ok(());
-        }
-        let installed = psreadline::installed_on_probe(
-            &mut self.app.psreadline_installed,
-            self.app.psreadline_documents.as_deref(),
-            psreadline::probe(),
-        );
-        // **Any Folio copy silences the invitation**, this build's or an older
-        // one's: the offer is "let Folio put its module on this machine", and it
-        // is already there. What the older copy is owed is an *update*, and the
-        // Terminal page's row is where that is offered — an unbidden modal for a
-        // patch bump would be this product interrupting a reader over its own
-        // release history.
-        if installed != psreadline::InstalledCopy::None {
-            return Ok(());
-        }
-        let decision = psreadline::invite_decision(
-            psreadline::probe(),
-            self.app.settings_store.loaded().psreadline_invite,
-            self.window.psreadline_size_changed,
-        );
-        if decision != psreadline::InviteDecision::Show {
-            return Ok(());
-        }
-        // The second showing is spent whether it is answered or not: a dialog
-        // raised by a font-size change has had its one exception.
-        if self.window.psreadline_size_changed {
-            self.window.psreadline_size_changed = false;
-        }
-        self.window.psreadline_invite.open();
-        if self.refresh_overlay() {
-            self.present_chrome_change()?;
-        }
-        Ok(())
-    }
-
-    /// The invitation, measured against a real font, or nothing while it is shut.
-    pub(in crate::runtime) fn psreadline_invite_layout(&mut self) -> Option<restore::InviteLayout> {
-        if !self.window.psreadline_invite.is_open() {
-            return None;
-        }
-        let documents = self.app.psreadline_documents.clone()?;
-        let (body, reason) = psreadline::invite_body(
-            psreadline::probe(),
-            &psreadline::module_directory(&documents),
-        );
-        let install_enabled = reason.is_none();
-        let title = i18n::Text::PsReadLineInviteTitle.text();
-        let decline_text = i18n::Text::PsReadLineNotNow.text();
-        let install_text = i18n::Text::PsReadLineInstall.text();
-        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        let (width, height) = (width as f32, height as f32);
-        let scale = self.window.renderer.scale_factor() as f32;
-        let room = restore::content_width(width, scale);
-        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let mut wrap = |text: &str| {
-            restore::wrap(text, room, |line| {
-                renderer.measure_chrome_text(gpu, line, restore::SUB_FONT_LOGICAL_PX * scale)
-            })
-        };
-        let message_lines = wrap(&body);
-        let reason_lines = reason.as_deref().map(&mut wrap).unwrap_or_default();
-        let content = restore::InviteContent {
-            title,
-            message_lines,
-            reason_lines,
-            decline_text,
-            install_text,
-            install_enabled,
-            decline_text_width: renderer.measure_chrome_text(
-                gpu,
-                decline_text,
-                restore::BUTTON_FONT_LOGICAL_PX * scale,
-            ),
-            install_text_width: renderer.measure_chrome_text(
-                gpu,
-                install_text,
-                restore::BUTTON_FONT_LOGICAL_PX * scale,
-            ),
-        };
-        Some(restore::invite_layout(&content, width, height, scale))
-    }
-
     /// Put the first-run card up, once, on a machine that has never run Folio
     /// (§7.56).
     ///
-    /// Polled from the event loop for `raise_psreadline_invite_if_due`'s reason
-    /// — raising a modal is a change to the window and the window is this
-    /// thread's — and for one more of its own: the copilot row cannot be offered
+    /// Polled from the event loop — raising a modal is a change to the window
+    /// and the window is this thread's — and for one more reason of its own: the copilot row cannot be offered
     /// until the version question has been answered, and that answer arrives on
     /// another thread.
     ///
@@ -563,8 +355,7 @@ impl Runtime<'_> {
         }
         let store = &self.app.settings_store;
         // **`BT_FIRST_RUN_CARD` raises it over a machine that has already
-        // answered**, `BT_PSREADLINE_PROBE`'s door and for its reason: this card
-        // is shown once per machine, ever, so without a door there is no way to
+        // answered**: this card is shown once per machine, ever, so without a door there is no way to
         // photograph it in a second language or to look at it again after a
         // change. It overrides **the gate and nothing else** — which rows are
         // offered, what `Done` spends, what is written down are all exactly what
@@ -956,30 +747,6 @@ impl Runtime<'_> {
             if self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
-        }
-        Ok(())
-    }
-
-    /// One press on the invitation, or Esc.
-    pub(in crate::runtime) fn answer_psreadline_invite(
-        &mut self,
-        target: restore::InviteTarget,
-    ) -> Result<()> {
-        match target {
-            restore::InviteTarget::Panel => return Ok(()),
-            restore::InviteTarget::Decline => {
-                let next = psreadline::state_after_decline(
-                    self.app.settings_store.loaded().psreadline_invite,
-                );
-                self.record_psreadline_invite(next);
-            }
-            restore::InviteTarget::Install => {
-                self.apply_psreadline(true)?;
-            }
-        }
-        self.window.psreadline_invite.close();
-        if self.refresh_overlay() {
-            self.present_chrome_change()?;
         }
         Ok(())
     }

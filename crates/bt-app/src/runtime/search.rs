@@ -1,19 +1,21 @@
 //! `search` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     PointerTarget, Runtime, SearchRefresh, SearchScanCache, frame_row_of_anchor, hang_watch, input,
-    marks, native_window, rescan_leaf_for_search, search, seats, tooltip, trace_sink,
+    marks, rescan_leaf_for_search, search, seats, tooltip, trace_sink,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
-use winit::event::{Ime, KeyEvent};
+use winit::event::Ime;
 use winit::keyboard::{Key, NamedKey};
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Note which rail the pointer is on, open or fold the bucket under it, and
     /// aim every rail's clocks at where the hand has left them. Returns whether
     /// the rail owns this pointer — a press there is a jump and not a selection.
@@ -150,10 +152,8 @@ impl Runtime<'_> {
         // Only over a page. A terminal never had the Win32 focus to begin with,
         // and calling `SetFocus` on the window it is already in would be this
         // window taking something from itself.
-        if self.seat_holds_a_page(seat)
-            && let Ok(native) = native_window(&self.window.window)
-        {
-            let _ = bt_platform::take_keyboard_focus(native);
+        if self.seat_holds_a_page(seat) {
+            let _ = self.window.window.take_keyboard_focus();
         }
         self.refresh_search(SearchRefresh::Asked)?;
         self.after_search_change()
@@ -547,7 +547,7 @@ impl Runtime<'_> {
     /// returns `true` and why this rung sits beside the files column's and the preview's rather
     /// than above the shortcut table: a field holding the keyboard is not a modal, so the window's
     /// own chords still work over it, and only *typing* is claimed.
-    pub(in crate::runtime) fn search_field_key(&mut self, event: &KeyEvent) -> Result<bool> {
+    pub(in crate::runtime) fn search_field_key(&mut self, event: &Keystroke) -> Result<bool> {
         if !self.window.search.is_focused() {
             return Ok(false);
         }

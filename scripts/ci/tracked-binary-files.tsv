@@ -4,10 +4,6 @@ path	reason
 assets/app-icon/folio-1024.png	binary format contains NUL bytes
 assets/app-icon/folio.ico	binary format contains NUL bytes
 assets/fonts/NotoColorEmoji_WindowsCompatible.ttf	binary format contains NUL bytes
-assets/psreadline/2.4.6/Microsoft.PowerShell.PSReadLine.dll	binary format contains NUL bytes
-assets/psreadline/2.4.6/Microsoft.PowerShell.Pager.dll	binary format contains NUL bytes
-assets/psreadline/2.4.6/net6plus/Microsoft.PowerShell.PSReadLine.Polyfiller.dll	binary format contains NUL bytes
-assets/psreadline/2.4.6/netstd/Microsoft.PowerShell.PSReadLine.Polyfiller.dll	binary format contains NUL bytes
 assets/readme/surfaces-dark.png	binary format contains NUL bytes
 assets/readme/surfaces-light.png	binary format contains NUL bytes
 assets/syntaxes/PowerShell.packdump	binary format contains NUL bytes
@@ -174,4 +170,5 @@ tests/corpus/shell-dollars.btcr	binary format contains NUL bytes
 tests/corpus/tui-redraw.btcr	binary format contains NUL bytes
 vendor/conpty/Microsoft.Windows.Console.ConPTY.1.24.260512001.nupkg	binary format contains NUL bytes
 vendor/conpty/Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg	binary format contains NUL bytes
+vendor/psreadline/PSReadLine.2.4.5.nupkg	binary format contains NUL bytes
 vendor/vte/tests/demo.vte	binary format contains NUL bytes

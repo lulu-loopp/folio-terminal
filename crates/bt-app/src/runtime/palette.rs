@@ -1,6 +1,8 @@
 //! `palette` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, MenuPaint, Popup, RecallFlash, Runtime, i18n, input,
     install_page_ground_color, install_theme_class_background, palette, recall_flash, shortcuts,
@@ -9,11 +11,10 @@ use anyhow::Result;
 use bt_render::{FrameSource, FrameTrigger, Travel};
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, Ime, KeyEvent, MouseScrollDelta};
+use winit::event::{Ime, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
-use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Everything a new palette costs this window**, whichever door it came
     /// through.
     ///
@@ -138,7 +139,7 @@ impl Runtime<'_> {
         }
         self.ask_for_file_indexes();
         let candidates = self.palette_candidates();
-        let note = self.palette_files_note();
+        let files_note = self.palette_files_note();
         // **The composed reading and not the buffer** (user ruling 2026-09-05):
         // a composition in progress is part of what the box is asking, so a
         // Chinese query narrows the list while it is being typed rather than
@@ -149,7 +150,7 @@ impl Runtime<'_> {
             .as_ref()
             .map(|state| state.query().into_owned())
             .unwrap_or_default();
-        let listing = palette::arrange(&candidates, &query, note);
+        let listing = palette::arrange(&candidates, &query, files_note);
         if let Some(state) = self.window.palette.as_mut() {
             state.refill(listing, requeried);
         }
@@ -320,8 +321,8 @@ impl Runtime<'_> {
     /// added: Esc closes, the arrows walk, Enter runs, and everything else goes
     /// into the box. Nothing falls through — a palette that let a keystroke
     /// reach the shell behind it would be a box you cannot type a `p` into.
-    pub(in crate::runtime) fn palette_key(&mut self, event: &KeyEvent) -> Result<()> {
-        if event.state != ElementState::Pressed {
+    pub(in crate::runtime) fn palette_key(&mut self, event: &Keystroke) -> Result<()> {
+        if !event.pressed {
             return Ok(());
         }
         // **The chord that raised it puts it away**, and which chord that is
@@ -378,33 +379,25 @@ impl Runtime<'_> {
         // gesture is "type a few letters and press Enter" would be a second
         // way to do the one thing Enter already does.
         //
-        // **The clipboard is read before the field is borrowed**, and only for
-        // the chord that wants it: reading it costs a window handle and a trip
-        // to the platform, and doing that on every keystroke would be a box
-        // that opens the clipboard to find out whether you pressed `k`.
+        // **The clipboard's chord lands in the box, not in the shell behind it**
+        // (user ruling 2026-09-05). `Ctrl+V` and `Ctrl+Shift+V` are one verb here:
+        // the terminal tells them apart because `Ctrl+V` is a control code a
+        // program may want, and a text field has no such reading to protect. It is
+        // asked of the clipboard lane, and only for the chord that wants it —
+        // reading it is a trip to the platform, and doing that on every keystroke
+        // would be a box that opens the clipboard to find out whether you pressed
+        // `k`; the line lands through the box's own insert door
+        // ([`Self::palette_ime`]) on the turn the clipboard answers. Above the
+        // `Ctrl+A` arm and the ordinary character arm, both of which would
+        // otherwise answer for `v`.
+        if input::is_paste_shortcut(&event.logical_key, self.window.modifiers) {
+            return self.paste_into_field(crate::TextFieldSeat::Palette);
+        }
         let mut typed = false;
         let mut moved = false;
-        let pasted = input::is_paste_shortcut(&event.logical_key, self.window.modifiers)
-            .then(|| self.clipboard_line());
         if let Some(state) = self.window.palette.as_mut() {
             let field = state.field_mut();
             match &event.logical_key {
-                // **The clipboard's chord lands in the box, not in the shell
-                // behind it** (user ruling 2026-09-05). `Ctrl+V` and
-                // `Ctrl+Shift+V` are one verb here: the terminal tells them
-                // apart because `Ctrl+V` is a control code a program may want,
-                // and a text field has no such reading to protect.
-                //
-                // Above the `Ctrl+A` arm and above the ordinary character arm,
-                // both of which would otherwise answer for `v`.
-                _ if pasted.is_some() => {
-                    if let Some(line) = pasted.as_deref()
-                        && !line.is_empty()
-                    {
-                        field.insert(line);
-                        typed = true;
-                    }
-                }
                 // **An `Alt`-modified character is not typed here**: the palette
                 // reads it as a chord somebody meant for something else, and
                 // typing its letter would be the box answering a question it was

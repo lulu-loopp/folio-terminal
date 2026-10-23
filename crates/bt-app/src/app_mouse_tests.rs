@@ -267,7 +267,8 @@ fn a_wheel_notch_belongs_to_the_pane_it_is_over_on_either_screen() {
                 assert_eq!(
                     answer(held | shift_held),
                     Some(wheel_route(shift, modes, scrolled)),
-                    "{platform:?} {held:?} keeps the original route, shift={shift}                      modes={modes:?} scrolled={scrolled}"
+                    "{platform:?} {held:?} keeps the original route, shift={shift} \
+                     modes={modes:?} scrolled={scrolled}"
                 );
             }
         }
@@ -1554,7 +1555,7 @@ fn a_right_press_on_a_tab_raises_its_menu_and_leaves_the_active_tab_alone() {
     assert!(
         opener < router_call,
         "the tab menu's opener stands above the chrome router, where an open \
-             rail lies over the panes (Q179) and the tab list is what
+             rail lies over the panes (Q179) and the tab list is what \
              `chrome_target_at` answers first"
     );
 }
@@ -3613,7 +3614,7 @@ fn every_pointer_reader_below_the_in_pane_surfaces_reads_their_claim() {
         .find("letSome(surface)=self.in_pane_surface_at(position)")
         .expect("wheel: a notch asks the router whether a surface inside a pane owns it");
     for below in [
-        "self.point_is_on_the_web_page(position)",
+        "self.page_under_the_hand(position)",
         "self.preview_surface_at(position)",
         "seats::files_body_at(",
     ] {
@@ -3680,7 +3681,8 @@ fn every_pointer_reader_below_the_in_pane_surfaces_reads_their_claim() {
 /// rule — is false for a pane that closed, a shell restarted in the same seat
 /// and a tab no longer on top. Read: the release and the drag's moves take the
 /// seat from the route, ask whether the owner is live, and drop the route
-/// without a byte when it is not.
+/// without a byte when it is not. (A tab switch no longer leaves a gesture to
+/// find its tab gone from the top: since cut 5 it releases the gesture first.)
 ///
 /// Red gates: take the release's seat from `focused_leaf` again (focus moved
 /// mid-drag) and the owner assertion fails; drop the liveness question from the
@@ -3726,6 +3728,12 @@ fn a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to() {
         !paste_target_is_live(TabId(7), Some(42), owner),
         "nor a shell restarted in the same seat"
     );
+    // A tab no longer on top is not a live address — but since T-POINTER-CAPTURE cut 5 (R-9,
+    // Q2's recommendation) no gesture is left on one: the tab switch ends the capture first,
+    // while the tab is still on top, and the program is told its button came up at the last cell
+    // it was told about (`runtime::pointer::ending::tests::
+    // a_forwarded_press_is_told_its_button_came_up_from_its_last_report`). What was "dropped,
+    // nothing sent" for a switched tab is now "released from the last report".
     assert!(
         !paste_target_is_live(TabId(8), Some(41), owner),
         "nor a pane whose tab is no longer on top"
@@ -3777,13 +3785,14 @@ fn a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to() {
 ///
 /// Run: left down forwarded; right down and up (over an overlay, or anywhere);
 /// left up. The child hears exactly a left press and a left release, and the
-/// route stands until the left release and comes off there. Read: the owned
-/// release hands a different button's release on down the ordinary road, and
-/// the cell road takes no second button while a forwarded gesture is latched.
+/// route stands until the left release and comes off there. Since
+/// T-POINTER-CAPTURE cut 4 (R-8) the slot swallows the right button's press and
+/// release before any road is asked, so neither reaches the owned release nor
+/// the cell road, where a second press would have begun a selection.
 ///
 /// Red gates: drop the latched-button test from the release arm, or let a
-/// second press overwrite the route, and the chord's byte list is wrong; drop
-/// the owned release's button test and its assertion fails.
+/// second press overwrite the route, and the chord's byte list is wrong; let
+/// the slot route another button's release and its assertion fails.
 #[test]
 fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
     let mut session =
@@ -3837,23 +3846,31 @@ fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
     );
     assert!(route.is_none());
 
-    let release = squeezed_body("Runtime", "release_cell_route");
-    assert!(
-        release.contains("ifprotocol_mouse_button(button)!=Some(latched){returnOk(false);}"),
-        "the owned release hands another button's release on as an event of its own"
-    );
-    assert!(
-        release.contains("ifbutton!=MouseButton::Left{returnOk(false);}"),
-        "and a selection, begun by the left button, is ended only by it"
-    );
-    let road = squeezed_body("Runtime", "mouse_input");
-    assert!(
-        road.contains(
-            "ifmatches!(self.held_mouse_route(),Some(MouseRoute::Forward{..})){returnOk(());}match state"
-                .replace(' ', "")
-                .as_str()
+    let forwarded = crate::runtime::pointer::PointerCapture {
+        window: winit::window::WindowId::from(1_u64),
+        owner: crate::runtime::pointer::CaptureOwner::Route(MouseRoute::Forward {
+            button: input::MouseProtocolButton::Left,
+            sgr: true,
+            owner: a_shell(),
+        }),
+        button: MouseButton::Left,
+        started: None,
+        os: None,
+        last: None,
+    };
+    assert_eq!(
+        crate::runtime::pointer::release_against_the_slot(
+            Some(&forwarded),
+            crate::runtime::pointer::ButtonSet::default(),
+            MouseButton::Right,
         ),
-        "the cell road begins no selection under a latched forwarded gesture"
+        crate::runtime::pointer::ReleaseVerdict::Swallow,
+        "another button's release goes nowhere under the forwarded gesture (R-8)"
+    );
+    assert_eq!(
+        crate::runtime::pointer::press_against_the_slot(Some(&forwarded), MouseButton::Right),
+        crate::runtime::pointer::PressVerdict::Swallow,
+        "and another button's press reaches no road, so it begins no selection under it"
     );
 }
 
@@ -3902,7 +3919,7 @@ fn a_band_painted_above_the_panes_owns_the_wheel_over_its_area() {
         );
     }
     for beneath in [
-        "self.point_is_on_the_web_page(position)",
+        "self.page_under_the_hand(position)",
         "seats::files_body_at(",
         "self.preview_surface_at(position)",
         "self.in_pane_surface_at(position)",

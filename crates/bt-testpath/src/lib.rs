@@ -25,6 +25,11 @@
 //! The tag is the test's own word for what the path is for. It only has to be
 //! readable in a listing of the temporary directory; uniqueness never rests on
 //! it.
+//!
+//! The crate also answers the one question a test asks of such a path after a
+//! lane has answered about it — whether anything still holds it
+//! ([`nobody_holds`], T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — so the platform's
+//! two spellings of that question live in one place.
 
 use std::path::{Component, PathBuf, Prefix};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -95,6 +100,54 @@ pub fn link_free_temp_dir() -> PathBuf {
 #[must_use]
 pub fn link_free_temp_path(tag: &str) -> PathBuf {
     link_free_temp_dir().join(unique_name(tag))
+}
+
+/// **Whether [`nobody_holds`] sees any open handle on this platform**, or only a lock.
+///
+/// On Windows a handle with data access (reading, writing, deleting) is seen whatever it shares:
+/// the exclusive open refuses it; a handle opened for attributes or synchronization alone is not
+/// checked. On Unix an open descriptor refuses nothing, so [`nobody_holds`] sees only an advisory
+/// lock (`flock`) a holder took. A test that asserts a reader *holds* a file it opened without locking it — a
+/// precondition, the opposite of the release it pins — asserts it only where this is `true`, and
+/// states the release on every platform.
+pub const OPEN_HANDLES_ARE_SEEN: bool = cfg!(windows);
+
+/// **Whether nobody holds `path` now** (T-ANSWER-AFTER-THE-FILE-IS-CLOSED): the
+/// strongest claim on a file or a directory this platform lets one opener make
+/// succeeds at once.
+///
+/// On Windows an open that shares nothing (`share_mode(0)`), which any handle
+/// still open on it — this process's or another's, whatever it shares — refuses
+/// with a sharing violation: the refusal an editor saving over the file would
+/// meet. A Unix file has no such open: an open descriptor refuses no writer, no
+/// truncation and no unlink, so the equivalent fact is that an exclusive
+/// advisory lock (`flock`) is taken at once — what a lane that locks a file it
+/// reads would still be holding. A directory is asked the same, read rather
+/// than written.
+#[must_use]
+pub fn nobody_holds(path: &std::path::Path) -> bool {
+    let directory = path.is_dir();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        // What lets a directory be opened at all; a file opens with it as without it.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(!directory)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(!directory)
+            .open(path)
+            .is_ok_and(|opened| opened.try_lock().is_ok())
+    }
 }
 
 #[cfg(test)]

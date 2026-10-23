@@ -166,8 +166,15 @@ not the move.
 **Ten since 2026-09-26** (0.4.6 ticket 72): `explorer_menu::read_state` is one
 declaration on every platform — its Windows arm reads only what
 `bt_platform::msix` offers everywhere, and `supported()` answers off Windows
-first — so its row above is history, and `bt-source`'s pin is
-`the_identities_bt_app_declares_twice_are_the_ten`. Identity is the tuple
+first — so its row above is history, and `bt-source`'s pin was
+`the_identities_bt_app_declares_twice_are_the_ten`.
+
+**Nine since 2026-10-15** (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH round 4):
+`shell_integration::run_profile_path_probe` is one declaration on every platform — the
+`$PROFILE` path question carries its asker's worker to the packaged-turn door on every
+platform, the door answers "no package, no turn" off Windows, and off Windows no PowerShell is
+listed to ask — so its row above is history too, and the pin is
+`the_identities_bt_app_declares_twice_are_the_nine`. Identity is the tuple
 
 ```
 module path  ·  type owner (None for a free function)  ·  trait (None for an inherent impl)  ·  conditional variant

@@ -1020,7 +1020,7 @@ static PROBE: LazyLock<CopilotProbe> =
 
 /// Teach the probe how to bring the event loop round when its answer lands.
 ///
-/// [`crate::psreadline::install_wake`]'s twin and for its reason: a settings dialog standing on the
+/// [`crate::update::install_wake`]'s twin and for its reason: a settings dialog standing on the
 /// Agents page while the probe is still out has a row that will not correct itself — a modal is up,
 /// so there is no shell output, no hover and no keystroke coming to produce a frame.
 pub(crate) fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
@@ -1186,7 +1186,7 @@ mod tests {
     use crate::attention::{MappedAction, Tier};
     use crate::test_support::{host_path, host_spelling};
     use bt_source::{Needle, Pattern, Scope, View};
-    use std::sync::{Arc, Condvar, mpsc};
+    use std::sync::{Arc, mpsc};
 
     /// **A copilot a test writes**: what each probe answers, in order, and a gate that holds a
     /// probe inside its run until the test lets it go.
@@ -1194,17 +1194,12 @@ mod tests {
     struct FakeCopilot {
         answers: Arc<Mutex<Vec<Option<Version>>>>,
         runs: Arc<Mutex<u64>>,
-        gate: Arc<(Mutex<bool>, Condvar)>,
+        gate: Arc<crate::lane::Hold>,
     }
 
     impl FakeCopilot {
         fn run(&self) -> Option<Version> {
-            let (held, released) = &*self.gate;
-            let mut held = held.lock().unwrap();
-            while *held {
-                held = released.wait(held).unwrap();
-            }
-            drop(held);
+            self.gate.pass();
             *self.runs.lock().unwrap() += 1;
             let mut answers = self.answers.lock().unwrap();
             if answers.len() > 1 {
@@ -1215,12 +1210,16 @@ mod tests {
         }
 
         fn hold(&self) {
-            *self.gate.0.lock().unwrap() = true;
+            self.gate.hold();
+        }
+
+        /// Waits until a probe stands in its run, held there: the probe is out.
+        fn wait_held(&self, what: &str) {
+            self.gate.wait_standing(what);
         }
 
         fn release(&self) {
-            *self.gate.0.lock().unwrap() = false;
-            self.gate.1.notify_all();
+            self.gate.release();
         }
     }
 
@@ -1346,9 +1345,7 @@ mod tests {
         let (probe, wakes, notes) = probe_over(&copilot);
         copilot.hold();
         let first = probe.ask(ProbeTrigger::AgentsPage);
-        while probe.lock().out.is_none() {
-            std::thread::yield_now();
-        }
+        copilot.wait_held("the first probe, held");
         probe.ask(ProbeTrigger::AgentsPage);
         probe.ask(ProbeTrigger::ProgramMoved);
         let newest = probe.ask(ProbeTrigger::AgentsPage);

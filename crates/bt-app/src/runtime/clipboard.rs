@@ -2,16 +2,22 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::PtyTarget;
+use crate::clipboard_lane::{
+    Ask, ClipboardRequest, ClipboardTerminal, Declined, Held, OwedCopy, OwedPaste, PASTES_OWED,
+    PasteHold, PasteInto, Reply,
+};
+use crate::lane::Terminal;
+use crate::window_seam::prelude::*;
 use crate::{
     ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
     PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
-    TextFieldSeat, UserInputKind, copy_selection, hang_watch, input_line_needs_a_space_first,
-    offer_pty_input, paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept,
+    TextFieldSeat, UserInputKind, clear_copied_selection, i18n, input_line_needs_a_space_first,
+    menubar, offer_pty_input, paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept,
     paste_target_is_live, pending_paste_in, prepare_clipboard_paste, prepare_dropped_paste,
-    profile_banner_name, recoverable_clipboard_write, restore, seats, stage_paste,
-    take_pending_paste, text_field, toast, write_selection_text, write_terminal_clipboard_text,
+    profile_banner_name, restore, seats, selection_to_copy, stage_paste, take_pending_paste,
+    text_field, toast,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};
 use bt_viewport::MathBlockAnchor;
@@ -19,48 +25,96 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use winit::event::Ime;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **`Copy` on a row whose execution policy the user can change**: put the command on the
     /// clipboard and say so only after the platform accepts the write.
     pub(crate) fn copy_policy_command(&mut self) -> Result<()> {
-        match copy_policy_command_with(crate::write_terminal_clipboard_text) {
-            Some(said) => self.toast(toast::ToastKind::Ok, toast::ToastAnchor::Window, None, said),
-            None => Ok(()),
-        }
+        let (text, effect) = policy_command_copy();
+        self.submit_clipboard_write(text, "copy the execution policy command", effect)
+            .map(drop)
     }
 
-    /// Submit one copy through the platform's clipboard path, and apply its
-    /// effect only after the write succeeds.
+    /// **Put one request on the clipboard lane**, through this window's clipboard door.
+    fn ask_the_clipboard(&mut self, ask: Ask) -> Result<ClipboardRequest, Declined> {
+        self.window.window.clipboard(&self.app.clipboard_lane, ask)
+    }
+
+    /// **Submit one copy to the clipboard lane**, and apply its effect only once the write has
+    /// landed ([`Self::settle_clipboard`]). Answers whether the lane took it.
+    ///
+    /// A newer copy replaces the window's last copy not yet answered, which ends `Superseded` — the
+    /// clipboard ends holding the newer either way, and only the newer says it landed — **unless a
+    /// paste was asked after that copy**, in any window: a paste reads the clipboard as it stood at
+    /// its press, so the newer copy then queues behind the paste instead.
+    ///
+    /// A copy the lane refuses at its door is said once, through the window's door
+    /// (`WindowHost::note`, `diagnostics.log` in the product), with `action`; one the clipboard
+    /// refuses is said once by the lane's ledger. Neither says anything on screen, which is the
+    /// owner's rule for a copy (2026-09-14 ②): only a copy that landed says it landed.
     pub(crate) fn submit_clipboard_write(
         &mut self,
         text: String,
         action: &'static str,
         effect: ClipboardWriteEffect,
     ) -> Result<bool> {
-        if recoverable_clipboard_write(write_terminal_clipboard_text(&text), action) {
-            self.apply_clipboard_write_effect(effect)?;
-            Ok(true)
-        } else {
-            Ok(false)
+        let request = match self.ask_the_clipboard(Ask::Write(text)) {
+            Ok(request) => request,
+            Err(declined) => {
+                self.window.window.note(&format!(
+                    "the clipboard lane refused a copy at its door; {action} ignored: {}",
+                    declined.reason()
+                ));
+                return Ok(false);
+            }
+        };
+        let newer = request.id();
+        let replaces = self.window.clipboard.copies.last().is_some_and(|older| {
+            !self
+                .app
+                .clipboard_lane
+                .a_paste_was_asked_after(older.request.id())
+        });
+        if replaces && let Some(older) = self.window.clipboard.copies.pop() {
+            // An answer that came before the newer copy was asked is the older copy's own.
+            let ended = self.app.clipboard_lane.supersede(older.request, newer);
+            self.answer_copy(older.effect, ended)?;
+        }
+        self.window
+            .clipboard
+            .copies
+            .push(OwedCopy { request, effect });
+        Ok(true)
+    }
+
+    /// **What a copy's terminal does**: a write that landed applies its effect; a refusal was said
+    /// by the lane's ledger, a replaced copy says nothing, and a lane whose worker ended said so.
+    fn answer_copy(
+        &mut self,
+        effect: ClipboardWriteEffect,
+        ended: ClipboardTerminal,
+    ) -> Result<()> {
+        match ended {
+            Terminal::Done(_) => self.apply_clipboard_write_effect(effect),
+            Terminal::Failed(_)
+            | Terminal::Superseded { .. }
+            | Terminal::Cancelled
+            | Terminal::Joined { .. }
+            | Terminal::WorkerGone => Ok(()),
         }
     }
 
     /// Put a rendered page's selection on the clipboard, through the door the
-    /// terminal's own copy already uses.
+    /// terminal's own copy already uses. Answers whether the lane took it.
     pub(in crate::runtime) fn copy_preview_text_selection(
         &mut self,
         surface: PreviewSurface,
-    ) -> bool {
+    ) -> Result<bool> {
         let Some(text) = self.preview_selected_text(surface) else {
-            return false;
+            return Ok(false);
         };
-        if let Err(error) = write_terminal_clipboard_text(&text) {
-            // Recoverable on `recoverable_clipboard_write`'s terms: the
-            // selection stays standing so the reader can try again.
-            eprintln!("recoverable preview copy failure: {error:#}");
-            return false;
-        }
-        true
+        // The selection stays standing whatever the clipboard answers, so the
+        // reader can try again.
+        self.submit_clipboard_write(text, "copy a page's selection", ClipboardWriteEffect::None)
     }
 
     /// **Asked of the pane the block is in.** This used to ask the *focused* one, and a right
@@ -72,32 +126,32 @@ impl Runtime<'_> {
         &mut self,
         target: PasteTarget,
         anchor: &MathBlockAnchor,
-    ) {
+    ) -> Result<()> {
         // A block anchor names a place in a shell's transcript, so a tab with no
         // shell has no anchor anybody could have clicked and nothing to copy
         // (§7.1.6h) — the same `None` a stale anchor already answers with.
         let Some(index) = self.live_paste_target(target) else {
-            return;
+            return Ok(());
         };
         let Some(source) = self.window.tabs[index]
             .sessions
             .get(&target.seat)
             .and_then(|leaf| leaf.session.math_source(anchor))
+            .map(str::to_owned)
         else {
-            return;
+            return Ok(());
         };
-        let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
-            bt_platform::set_clipboard_text(source)
-        })
-        .map_err(|error| anyhow!(error))
-        .context("copy original LaTeX source to clipboard");
-        // **Only a copy that landed says it landed** (owner ruling 2026-09-14 ②).
-        // The bool this helper already returned was being thrown away, and a tick on a
-        // clipboard the window could not reach would be the one acknowledgement in this
-        // product that confirms nothing.
-        if recoverable_clipboard_write(result, "formula copy") {
-            self.window.math_copied = Some((anchor.clone(), Instant::now()));
-        }
+        // **Only a copy that landed says it landed** (owner ruling 2026-09-14 ②):
+        // the tick is the write's effect, applied on the turn the clipboard lane
+        // answers that it landed, and a tick on a clipboard the lane could not
+        // reach would be the one acknowledgement in this product that confirms
+        // nothing.
+        self.submit_clipboard_write(
+            source,
+            "formula copy",
+            ClipboardWriteEffect::MathCopied(anchor.clone()),
+        )
+        .map(drop)
     }
 
     pub(crate) fn apply_clipboard_write_effect(
@@ -108,6 +162,22 @@ impl Runtime<'_> {
             ClipboardWriteEffect::None => Ok(()),
             ClipboardWriteEffect::Toast { anchor, text } => {
                 self.toast(toast::ToastKind::Ok, anchor, None, text)
+            }
+            ClipboardWriteEffect::ClearSelection { target, copied } => {
+                let Some(index) = self.live_paste_target(target) else {
+                    return Ok(());
+                };
+                let Some(leaf) = self.window.tabs[index].sessions.get_mut(&target.seat) else {
+                    return Ok(());
+                };
+                if !clear_copied_selection(&mut leaf.session, &mut leaf.projection, &copied) {
+                    return Ok(());
+                }
+                self.publish_interaction_frame()
+            }
+            ClipboardWriteEffect::MathCopied(anchor) => {
+                self.window.math_copied = Some((anchor, Instant::now()));
+                self.publish_interaction_frame()
             }
         }
     }
@@ -196,19 +266,32 @@ impl Runtime<'_> {
             .map(drop)
     }
 
+    /// `Ctrl+C`: the focused pane's selection onto the clipboard, and the selection taken down
+    /// once the copy has landed ([`ClipboardWriteEffect::ClearSelection`]).
     pub(in crate::runtime) fn copy_selection(&mut self) -> Result<()> {
         let active = self.window.active_tab;
-        let Some(leaf) = self.window.tabs[active].focused_mut() else {
+        let focused = self.window.tabs[active].focused_leaf;
+        let Some(leaf) = self.window.tabs[active].sessions.get(&focused) else {
             return Ok(());
         };
-        if !copy_selection(
-            &mut leaf.session,
-            &mut leaf.projection,
-            write_terminal_clipboard_text,
-        ) {
+        let Some(text) = selection_to_copy(&leaf.session, false) else {
             return Ok(());
-        }
-        self.publish_interaction_frame()
+        };
+        // The pane the selection was made in, named now: its copy lands on a later turn.
+        let target = PasteTarget {
+            tab: self.window.tabs[active].id,
+            seat: focused,
+            incarnation: leaf.incarnation,
+        };
+        self.submit_clipboard_write(
+            text.clone(),
+            "copy",
+            ClipboardWriteEffect::ClearSelection {
+                target,
+                copied: text,
+            },
+        )
+        .map(drop)
     }
 
     /// Copy-on-select, from the pane the gesture began in.
@@ -216,11 +299,16 @@ impl Runtime<'_> {
     /// The text is that pane's, whatever pane the pointer let go over: it is the
     /// selection just made that the hand means, and there is only one pane it was
     /// ever made in.
-    pub(in crate::runtime) fn copy_selection_on_release(&mut self, seat: SeatId) {
-        let Some(leaf) = self.sessions.get(&seat) else {
-            return;
+    pub(in crate::runtime) fn copy_selection_on_release(&mut self, seat: SeatId) -> Result<()> {
+        let Some(text) = self
+            .sessions
+            .get(&seat)
+            .and_then(|leaf| selection_to_copy(&leaf.session, true))
+        else {
+            return Ok(());
         };
-        write_selection_text(&leaf.session, true, write_terminal_clipboard_text);
+        self.submit_clipboard_write(text, "copy on select", ClipboardWriteEffect::None)
+            .map(drop)
     }
 
     /// **The four questions a text write answers that no other drop has to**
@@ -296,23 +384,6 @@ impl Runtime<'_> {
         )
     }
 
-    /// **What the clipboard can put into a one-line field**, or nothing when
-    /// the platform will not hand it over.
-    ///
-    /// A failure is silent on [`Self::paste_into_preview`]'s own terms: a
-    /// clipboard another process is holding open is a condition that clears
-    /// itself, and a box that raised a card about it would be interrupting a
-    /// reader mid-query to report an event they can simply repeat.
-    pub(in crate::runtime) fn clipboard_line(&self) -> String {
-        hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            bt_platform::clipboard_text()
-        })
-        .ok()
-        .as_deref()
-        .map(text_field::one_line)
-        .unwrap_or_default()
-    }
-
     /// **One paste into the text field that holds the keyboard** (B-AUDIT-046
     /// RT-1) — the keystroke's (`Ctrl+V`, `Shift+Insert`, `Cmd+V`) and Edit ▸
     /// Paste's alike, and never into the terminal the field is standing on.
@@ -326,12 +397,16 @@ impl Runtime<'_> {
     /// fields (`text_field::one_line`, as [`Self::apply_clipboard_text_to_field`] cuts it);
     /// the settings dialog drops the line breaks instead, its own long-standing
     /// rule for a pasted path.
+    ///
+    /// **Asked of the clipboard lane, and landed on the turn it answers** —
+    /// into the field, if that field still holds the keyboard then; a field that
+    /// let it go withdraws the paste. A failure is silent on
+    /// [`Self::paste_into_preview`]'s own terms: a clipboard another process is
+    /// holding open is a condition that clears itself, and a box that raised a
+    /// card about it would be interrupting a reader mid-query to report an event
+    /// they can simply repeat; the lane's ledger says it once in the log.
     pub(crate) fn paste_into_field(&mut self, field: TextFieldSeat) -> Result<()> {
-        let text = hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            bt_platform::clipboard_text()
-        })
-        .unwrap_or_default();
-        self.apply_clipboard_text_to_field(field, &text)
+        self.ask_for_a_paste(PasteInto::Field(field), Ask::Text)
     }
 
     fn apply_clipboard_text_to_field(&mut self, field: TextFieldSeat, text: &str) -> Result<()> {
@@ -378,6 +453,11 @@ impl Runtime<'_> {
     /// press past it to raise that menu. So the door asks the ladder's own
     /// question, once, before the clipboard is read — and with the restore card
     /// up, the menu's *Paste* writes nothing, as `Ctrl+V` writes nothing.
+    ///
+    /// **The clipboard is asked on its own lane** (`clipboard_lane`), and its
+    /// answer lands on a later turn, where the gesture was made: the pane is named
+    /// now, by tab, seat and incarnation (review X-1), and the person's input to
+    /// it waits behind the paste until the answer is spent ([`PasteHold`]).
     pub(in crate::runtime) fn paste_from_clipboard_into(&mut self, seat: SeatId) -> Result<()> {
         if self.a_surface_above_the_clipboard_rung_holds_the_keyboard() {
             return Ok(());
@@ -386,23 +466,355 @@ impl Runtime<'_> {
         let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
             return Ok(());
         };
-        // Named now, while the gesture is happening, because the picture rung
-        // below spends it on a later turn (review X-1).
+        // Named now, while the gesture is happening, because the answer is spent on a later
+        // turn (review X-1).
         let target = PasteTarget {
             tab: self.window.tabs[active].id,
             seat,
             incarnation: leaf.incarnation,
         };
-        let leaving = hang_watch::enter(hang_watch::Station::ClipboardRead);
-        let payload = bt_platform::clipboard_payload();
-        hang_watch::at(leaving);
-        self.apply_clipboard_payload(target, payload)
+        self.ask_for_a_paste(PasteInto::Terminal(target), Ask::Payload)
+    }
+
+    /// **One paste asked of the clipboard lane**, aimed at `into`.
+    ///
+    /// An earlier paste's answer that has come is spent first. A paste still owed is never
+    /// replaced by a later one: this one queues behind it — both read the clipboard, in order — and
+    /// a terminal's pane holds this paste's place behind whatever it already holds ([`PasteHold`]),
+    /// so `Ctrl+V`, `k`, `Ctrl+V` reaches the shell as the first paste, `k`, the second. A window
+    /// owes at most [`PASTES_OWED`]; a paste past that desk, or one the lane refuses at its door,
+    /// is said once in the log and, for a terminal, once on screen.
+    pub(in crate::runtime) fn ask_for_a_paste(&mut self, into: PasteInto, ask: Ask) -> Result<()> {
+        let now = Instant::now();
+        self.settle_clipboard(now)?;
+        if self.window.clipboard.pastes.len() >= PASTES_OWED {
+            self.window.window.note(&format!(
+                "the clipboard lane: a paste was refused on the window: {PASTES_OWED} pastes are \
+                 already owed"
+            ));
+            return self.say_the_clipboard_busy(into);
+        }
+        let request = match self.ask_the_clipboard(ask) {
+            Ok(request) => request,
+            Err(declined) => {
+                self.window.window.note(&format!(
+                    "the clipboard lane refused a paste at its door: {}",
+                    declined.reason()
+                ));
+                return self.say_the_clipboard_busy(into);
+            }
+        };
+        let id = request.id();
+        self.window.clipboard.pastes.push(OwedPaste {
+            id,
+            request: Some(request),
+            ended: None,
+            into,
+            asked_at: now,
+        });
+        if let PasteInto::Terminal(target) = into
+            && let Some(leaf) = self.paste_leaf_mut(target)
+        {
+            leaf.paste_hold
+                .get_or_insert_with(PasteHold::default)
+                .queue_paste(id);
+        }
+        Ok(())
+    }
+
+    /// **Take what the clipboard lane has answered this window, withdraw what it no longer
+    /// wants, and spend what can be spent** — on the turn its wake brings
+    /// (`AppEvent::ClipboardAnswered`), on every turn of the window's (so a lost wake loses no
+    /// answer), and before a new paste is asked.
+    ///
+    /// A copy that landed applies its effect. Every paste's terminal is taken as it comes. A paste
+    /// still owed is withdrawn — ended `Cancelled`, its terminal to the lane's sink, a line in
+    /// `diagnostics.log` saying why — when its pane closed, was restarted or left the front, when
+    /// its field or page let the keyboard go, when it has been owed for
+    /// [`crate::clipboard_lane::PASTE_DEADLINE`], or when what its pane holds has passed the cap;
+    /// the last two also say once on screen that the clipboard was busy. A field's or a page's
+    /// paste is spent as soon as it has ended; a terminal's when it reaches the front of its pane's
+    /// hold ([`Self::advance_the_hold`]). `now` is the turn's clock, read once by the caller.
+    pub(crate) fn settle_clipboard(&mut self, now: Instant) -> Result<()> {
+        // The copies end in the order they were asked (one worker, first in first out); each that
+        // has is answered, in that order.
+        let mut at = 0;
+        while at < self.window.clipboard.copies.len() {
+            let Some(ended) = self.window.clipboard.copies[at].request.take() else {
+                at += 1;
+                continue;
+            };
+            let owed = self.window.clipboard.copies.remove(at);
+            self.answer_copy(owed.effect, ended)?;
+        }
+        for owed in &mut self.window.clipboard.pastes {
+            if owed.ended.is_none()
+                && let Some(ended) = owed.request.as_mut().and_then(ClipboardRequest::take)
+            {
+                owed.ended = Some(ended);
+                owed.request = None;
+            }
+        }
+        let mut busy = None;
+        for at in 0..self.window.clipboard.pastes.len() {
+            let owed = &self.window.clipboard.pastes[at];
+            if owed.ended.is_some() {
+                continue;
+            }
+            let (into, deadline) = (owed.into, owed.deadline());
+            let Some(why) = self.paste_withdrawn(into, deadline, now) else {
+                continue;
+            };
+            let owed = &mut self.window.clipboard.pastes[at];
+            let request = owed.request.take();
+            owed.ended = Some(Terminal::Cancelled);
+            if let Some(request) = request {
+                self.app.clipboard_lane.withdraw(request);
+            }
+            self.window.window.note(&format!(
+                "the clipboard lane: a paste was cancelled: {}",
+                why.words()
+            ));
+            if why.is_the_clipboard_busy() && busy.is_none() {
+                busy = Some(into);
+            }
+        }
+        if let Some(into) = busy {
+            self.say_the_clipboard_busy(into)?;
+        }
+        let mut at = 0;
+        while at < self.window.clipboard.pastes.len() {
+            let owed = &self.window.clipboard.pastes[at];
+            if matches!(owed.into, PasteInto::Terminal(_)) || owed.ended.is_none() {
+                at += 1;
+                continue;
+            }
+            let owed = self.window.clipboard.pastes.remove(at);
+            if let Some(ended) = owed.ended {
+                self.spend_paste(owed.into, ended)?;
+            }
+        }
+        let holding: Vec<PasteTarget> = self
+            .window
+            .tabs
+            .iter()
+            .flat_map(|tab| {
+                tab.sessions
+                    .iter()
+                    .filter(|(_, leaf)| leaf.paste_hold.is_some())
+                    .map(move |(seat, leaf)| PasteTarget {
+                        tab: tab.id,
+                        seat: *seat,
+                        incarnation: leaf.incarnation,
+                    })
+            })
+            .collect();
+        for target in holding {
+            self.advance_the_hold(target)?;
+        }
+        // A terminal paste that has ended and that no pane holds a place for any more — its pane
+        // closed, or moved to another window — has nowhere to be spent.
+        let held = self.places_held();
+        self.window
+            .clipboard
+            .pastes
+            .retain(|owed| owed.ended.is_none() || held.contains(&owed.id));
+        Ok(())
+    }
+
+    /// The pastes whose places this window's panes hold.
+    fn places_held(&self) -> Vec<crate::clipboard_lane::ClipboardId> {
+        let mut held = Vec::new();
+        for tab in &self.window.tabs {
+            for leaf in tab.sessions.values() {
+                if let Some(hold) = &leaf.paste_hold {
+                    held.extend(hold.pastes());
+                }
+            }
+        }
+        held
+    }
+
+    /// **Why a paste still owed is withdrawn now**, if it is.
+    fn paste_withdrawn(
+        &mut self,
+        into: PasteInto,
+        deadline: Instant,
+        now: Instant,
+    ) -> Option<Withdrawn> {
+        let gone = match into {
+            PasteInto::Terminal(target) => self.live_paste_target(target).is_none(),
+            PasteInto::Field(field) => {
+                menubar::paste_seat(self.clipboard_focus()) != menubar::ClipboardSeat::Field(field)
+            }
+            PasteInto::Preview(surface) => self.preview_keyboard_surface() != Some(surface),
+        };
+        if gone {
+            return Some(Withdrawn::TargetGone);
+        }
+        if now >= deadline {
+            return Some(Withdrawn::Deadline);
+        }
+        let over = match into {
+            PasteInto::Terminal(target) => self
+                .paste_leaf_mut(target)
+                .and_then(|leaf| leaf.paste_hold.as_ref())
+                .is_some_and(PasteHold::over_the_cap),
+            PasteInto::Field(_) | PasteInto::Preview(_) => false,
+        };
+        over.then_some(Withdrawn::HeldOverTheCap)
+    }
+
+    /// **One pane's hold, spent as far as its answers allow** — from the front: a write of the
+    /// person's goes to the shell as the write it was; a paste whose answer is in hand is spent
+    /// ([`Self::spend_paste`]) with the hold taken off the pane, so its bytes go straight to the
+    /// shell; a paste not yet answered stops it, and so does the multi-line card while it asks
+    /// (its answer goes on from here, [`Self::answer_paste_card`]). An empty hold is let go.
+    fn advance_the_hold(&mut self, target: PasteTarget) -> Result<()> {
+        loop {
+            let Some(leaf) = self.paste_leaf_mut(target) else {
+                return Ok(());
+            };
+            if leaf.pending_paste.is_some() {
+                return Ok(());
+            }
+            let Some(hold) = leaf.paste_hold.take() else {
+                return Ok(());
+            };
+            let Some(front) = hold.pop_front() else {
+                return Ok(());
+            };
+            match front {
+                Held::Typed(bytes) => {
+                    let written = offer_pty_input(
+                        leaf.input_target(),
+                        &bytes,
+                        "release the input held behind a paste to PTY",
+                    );
+                    leaf.paste_hold = Some(hold);
+                    written?;
+                }
+                Held::Paste(id) => {
+                    let at = self
+                        .window
+                        .clipboard
+                        .pastes
+                        .iter()
+                        .position(|owed| owed.id == id);
+                    match at {
+                        Some(at) if self.window.clipboard.pastes[at].ended.is_none() => {
+                            hold.push_front(Held::Paste(id));
+                            if let Some(leaf) = self.paste_leaf_mut(target) {
+                                leaf.paste_hold = Some(hold);
+                            }
+                            return Ok(());
+                        }
+                        Some(at) => {
+                            let owed = self.window.clipboard.pastes.remove(at);
+                            let spent = match owed.ended {
+                                Some(ended) => self.spend_paste(owed.into, ended),
+                                None => Ok(()),
+                            };
+                            if let Some(leaf) = self.paste_leaf_mut(target) {
+                                leaf.paste_hold = Some(hold);
+                            }
+                            spent?;
+                        }
+                        // No paste of this window's owns the place (the pane came here from
+                        // another window while it was owed there): it holds nothing back.
+                        None => {
+                            if let Some(leaf) = self.paste_leaf_mut(target) {
+                                leaf.paste_hold = Some(hold);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **What one paste's terminal does**, where the paste was aimed.
+    ///
+    /// For a terminal (spent from the front of its pane's hold): a read the clipboard answered is
+    /// pasted; a read the clipboard refused, or one lost with the lane's worker, says the notice
+    /// every failed paste says; a paste withdrawn writes nothing. For a field or the quick edit:
+    /// the text lands only if that field or page still holds the keyboard.
+    fn spend_paste(&mut self, into: PasteInto, ended: ClipboardTerminal) -> Result<()> {
+        match into {
+            PasteInto::Terminal(target) => match ended {
+                Terminal::Done(Reply::Payload(payload)) => {
+                    self.apply_clipboard_payload(target, payload)
+                }
+                Terminal::Failed(_) | Terminal::WorkerGone => {
+                    if self.live_paste_target(target).is_some() {
+                        self.toast(
+                            toast::ToastKind::Error,
+                            toast::ToastAnchor::Window,
+                            None,
+                            i18n::Text::PasteClipboardRead.text().to_owned(),
+                        )
+                    } else {
+                        Ok(())
+                    }
+                }
+                Terminal::Done(_)
+                | Terminal::Superseded { .. }
+                | Terminal::Cancelled
+                | Terminal::Joined { .. } => Ok(()),
+            },
+            PasteInto::Field(field) => match ended {
+                Terminal::Done(Reply::Text(text))
+                    if menubar::paste_seat(self.clipboard_focus())
+                        == menubar::ClipboardSeat::Field(field) =>
+                {
+                    self.apply_clipboard_text_to_field(field, &text)
+                }
+                _ => Ok(()),
+            },
+            PasteInto::Preview(surface) => match ended {
+                Terminal::Done(Reply::Text(text))
+                    if self.preview_keyboard_surface() == Some(surface) =>
+                {
+                    self.apply_clipboard_text_to_preview(&text)
+                }
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// **The pane a paste was aimed at, wherever it stands in this window now** — by tab id, seat
+    /// and incarnation, in any tab: its held input is its own whether or not its tab is on top.
+    fn paste_leaf_mut(&mut self, target: PasteTarget) -> Option<&mut LeafSession> {
+        self.window
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == target.tab)?
+            .sessions
+            .get_mut(&target.seat)
+            .filter(|leaf| leaf.incarnation == target.incarnation)
+    }
+
+    /// **"The clipboard was busy", said once on screen** — for a terminal paste only: a field and
+    /// the quick edit say nothing about a clipboard they could not read, on their own terms.
+    fn say_the_clipboard_busy(&mut self, into: PasteInto) -> Result<()> {
+        let PasteInto::Terminal(target) = into else {
+            return Ok(());
+        };
+        if self.live_paste_target(target).is_none() {
+            return Ok(());
+        }
+        self.toast(
+            toast::ToastKind::Error,
+            toast::ToastAnchor::Window,
+            None,
+            i18n::Text::PasteClipboardBusy.text().to_owned(),
+        )
     }
 
     fn apply_clipboard_payload(
         &mut self,
         target: PasteTarget,
-        payload: Result<bt_platform::ClipboardPayload, String>,
+        payload: bt_platform::ClipboardPayload,
     ) -> Result<()> {
         let Some(active) = self.live_paste_target(target) else {
             return Ok(());
@@ -535,9 +947,12 @@ impl Runtime<'_> {
     /// roads do not share: it names the write for a reader of the error, and a
     /// drop that could not reach a shell is not a clipboard that could not.
     ///
-    /// **And the one place a paste may be asked about** (0.4.4 ticket 02). All four doors arrive
-    /// here, so [`stage_paste`] — and through it [`crate::paste_road`] — is asked exactly once per
-    /// paste, after the address is known to be live and before a byte is written. A paste it holds
+    /// **And the one place a paste may be asked about** (0.4.4 ticket 02). Both roads arrive here
+    /// — the clipboard's ([`Self::apply_clipboard_payload`], from the paste chord, the Edit menu and
+    /// the terminal's menu) and paths in hand ([`Self::paste_paths_into`], from a drop, a dragged
+    /// path and a saved clipboard picture) — so [`stage_paste`] — and through it
+    /// [`crate::paste_road`] — is asked exactly once per paste, after the address is known to be
+    /// live and before a byte is written. A paste it holds
     /// raises the card and sends nothing; the card's answer spends it through
     /// [`Self::answer_paste_card`].
     fn deliver_paste(
@@ -611,6 +1026,7 @@ impl Runtime<'_> {
             birth,
             session,
             projection,
+            paste_hold,
             ..
         }) = self.window.tabs[active].sessions.get_mut(&seat)
         else {
@@ -622,8 +1038,15 @@ impl Runtime<'_> {
         // the strength of it. Everything below this line is unchanged — the
         // bookkeeping a paste owes is owed for the gesture rather than for the
         // ring's mood — and only what this function *answers* now depends on it.
+        // **Behind a paste this pane is still owed**, as every input of the person's is: the
+        // paste the clipboard lane answers takes the hold off before it writes, so only what was
+        // offered after it — a drop, a picture's path — waits here (`clipboard_lane`).
+        let target = match paste_hold {
+            Some(hold) => PtyTarget::BehindAPaste(hold),
+            None => PtyTarget::of(pty.as_ref(), birth.as_ref()),
+        };
         let landed = paste_body(session, projection, body, |bytes| {
-            offer_pty_input(PtyTarget::of(pty.as_ref(), birth.as_ref()), bytes, context)
+            offer_pty_input(target, bytes, context)
         })?;
         // A paste is one gesture landing in one named pane, so it answers whatever that pane was
         // asking — and it is the pane the clipboard went into, not the one holding the keyboard
@@ -695,19 +1118,32 @@ impl Runtime<'_> {
     /// spent twice and the card is gone before anything is written. `Cancel` sends nothing and
     /// touches nothing, the clipboard included. The other two go through [`Self::send_paste`],
     /// which re-checks the address before a byte leaves.
+    ///
+    /// **What the pane held behind the paste goes after it** (`clipboard_lane`): taken off the
+    /// pane while the answer is written, and then spent from where the card stopped it, in its
+    /// order — at once, for `Cancel`.
     pub(in crate::runtime) fn answer_paste_card(&mut self, answer: PasteAnswer) -> Result<()> {
         let active = self.window.active_tab;
         let Some(pending) = take_pending_paste(&mut self.window.tabs[active]) else {
             return Ok(());
         };
+        let held = self
+            .paste_leaf_mut(pending.target)
+            .and_then(|leaf| leaf.paste_hold.take());
         self.window.paste_card_hover = None;
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
+        // An error here is the window's end (`App::fail`), and a hold off its pane goes with it.
         if let Some(text) = paste_answer_text(&pending, answer) {
             self.send_paste(pending.target, PasteBody::Text(&text), pending.context)?;
         }
-        Ok(())
+        if let Some(held) = held
+            && let Some(leaf) = self.paste_leaf_mut(pending.target)
+        {
+            leaf.paste_hold = Some(held);
+        }
+        self.advance_the_hold(pending.target)
     }
 
     /// A press on the card, answered by what it landed on. The face and the scrim answer nothing.
@@ -758,46 +1194,75 @@ impl Runtime<'_> {
     }
 }
 
-/// Put [`crate::shell_integration::POLICY_COMMAND`] on the clipboard through `write` — the app's
-/// synchronous clipboard door, or a test's — and return what the window says about it; `None`
-/// when the clipboard refused (the refusal is already logged by the shared door).
-fn copy_policy_command_with(write: impl FnOnce(&str) -> Result<()>) -> Option<String> {
-    crate::recoverable_clipboard_write(
-        write(crate::shell_integration::POLICY_COMMAND),
-        "copy the execution policy command",
+/// **Why a paste still owed is withdrawn** ([`Runtime::settle_clipboard`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Withdrawn {
+    /// Its pane closed, was restarted or left the front; its field or page let the keyboard go.
+    TargetGone,
+    /// It has been owed for [`crate::clipboard_lane::PASTE_DEADLINE`].
+    Deadline,
+    /// What its pane holds behind it has passed `bt_pty::PTY_INPUT_RING_BYTES`.
+    HeldOverTheCap,
+}
+
+impl Withdrawn {
+    /// The reason, in the words `diagnostics.log` says.
+    fn words(self) -> &'static str {
+        match self {
+            Self::TargetGone => "what it was aimed at has gone or let the keyboard go",
+            Self::Deadline => "the clipboard did not answer within a second",
+            Self::HeldOverTheCap => "the input typed behind it passed what a pane holds",
+        }
+    }
+
+    /// Whether the person is told on screen that the clipboard was busy: when the clipboard is
+    /// what kept the paste, not the person's own moving on.
+    fn is_the_clipboard_busy(self) -> bool {
+        matches!(self, Self::Deadline | Self::HeldOverTheCap)
+    }
+}
+
+/// **What `Copy` on the execution-policy row puts on the clipboard, and what the window says once
+/// it has landed**: exactly [`crate::shell_integration::POLICY_COMMAND`], and the toast that names
+/// it in full.
+fn policy_command_copy() -> (String, ClipboardWriteEffect) {
+    (
+        crate::shell_integration::POLICY_COMMAND.to_owned(),
+        ClipboardWriteEffect::Toast {
+            anchor: toast::ToastAnchor::Window,
+            text: crate::i18n::graph_copied(crate::shell_integration::POLICY_COMMAND),
+        },
     )
-    .then(|| crate::i18n::graph_copied(crate::shell_integration::POLICY_COMMAND))
 }
 
 #[cfg(test)]
 mod policy_command_tests {
-    use super::copy_policy_command_with;
+    use super::policy_command_copy;
+    use crate::ClipboardWriteEffect;
     use crate::shell_integration::POLICY_COMMAND;
 
     /// PIN — **`Copy` puts exactly the one command on the clipboard, and says it in full**
-    /// (T-INTEGRATION-INJECT-4 round 4). Through the clipboard seam, never the real clipboard.
+    /// (T-INTEGRATION-INJECT-4 round 4), once the write has landed — the effect a landed write
+    /// applies (`Runtime::answer_copy`); a refused write applies none. Never the real clipboard.
     ///
     /// RED (mutation: copy `"Set-ExecutionPolicy RemoteSigned"`, the LocalMachine scope that
     /// needs elevation, instead of the const).
     #[test]
     fn copy_puts_exactly_the_policy_command_on_the_clipboard() {
-        let mut written = Vec::new();
-        let said = copy_policy_command_with(|text| {
-            written.push(text.to_owned());
-            Ok(())
-        });
+        let (written, effect) = policy_command_copy();
         assert_eq!(
             written,
-            ["Set-ExecutionPolicy -Scope CurrentUser RemoteSigned"]
+            "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned"
         );
-        assert_eq!(written, [POLICY_COMMAND]);
-        assert_eq!(
-            said.as_deref(),
-            Some(crate::i18n::graph_copied(POLICY_COMMAND).as_str())
-        );
-        assert!(said.is_some_and(|said| said.contains(POLICY_COMMAND)));
-
-        let refused = copy_policy_command_with(|_| Err(anyhow::anyhow!("clipboard busy")));
-        assert_eq!(refused, None, "a refused copy says nothing was copied");
+        assert_eq!(written, POLICY_COMMAND);
+        let ClipboardWriteEffect::Toast { text: said, .. } = effect else {
+            panic!("the landed copy says what it copied");
+        };
+        assert_eq!(said, crate::i18n::graph_copied(POLICY_COMMAND));
+        assert!(said.contains(POLICY_COMMAND));
     }
 }
+
+#[cfg(test)]
+#[path = "clipboard_tests.rs"]
+mod tests;

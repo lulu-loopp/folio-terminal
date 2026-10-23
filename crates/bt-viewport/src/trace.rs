@@ -19,6 +19,27 @@
 
 use std::sync::OnceLock;
 
+/// **`BT_PERF_TRACE`, as the program's entry read it** (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY).
+///
+/// The three crates under `bt-app` that time their own work ask [`perf`]; none of them reads the
+/// environment. A library that did honoured the switch in every binary that reached it — a test
+/// binary as readily as the program — so a shell left with it set traced every test. The entry
+/// reads it once and says so here with [`install_perf`]; a process that says nothing, a test
+/// binary above all, writes no perf line from these crates.
+static PERF: OnceLock<bool> = OnceLock::new();
+
+/// **Say whether `BT_PERF_TRACE` is on for this process.** Called once, by the program's entry,
+/// with its answer; by nothing else. The first answer stands: a second call changes nothing.
+pub fn install_perf(on: bool) {
+    let _ = PERF.set(on);
+}
+
+/// Whether this process's entry said `BT_PERF_TRACE` is on; off when it said nothing.
+#[must_use]
+pub fn perf() -> bool {
+    PERF.get().copied().unwrap_or(false)
+}
+
 /// What a trace line is handed to, once somebody has said where lines go.
 type Writer = Box<dyn Fn(String) + Send + Sync>;
 

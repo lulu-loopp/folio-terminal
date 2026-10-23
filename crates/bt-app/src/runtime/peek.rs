@@ -2,16 +2,19 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::CaptureOwner;
+use super::pointer::{Gone, OwnerGone};
+use crate::computation_lane::Asking;
+use crate::window_seam::prelude::*;
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
-    LeafId, MathWorkerRequest, PeekBodyKind, PeekCacheEntry, PeekCandidate, PeekClock, PeekFacts,
-    PeekFootPress, PeekPageOutcome, PeekPageRaster, PeekPageSlot, PeekSubject, PeekThumbnail,
-    PeekThumbnailTarget, PreviewPane, PreviewSurface, ReferenceCard, RowHost, Runtime,
-    ScaleWorkerRequest, ScrollThumbState, ShellAddress, facts_of_a_file_the_user_chose, file_peek,
-    file_peek_promotion, files, float, git, git_document_question, git_panel, hang_watch, i18n,
-    input, mark_opacity, marks, peek_body_kind, peek_cache_key_for_decode, peek_foot_press,
-    peek_page_texture_key, peek_reads_the_file, peek_scale_task, peek_strip, preview,
-    preview_body_bar, profiles, ring_arc, risen_frame, scroll_bar_layer, seats,
+    LeafId, MathWorkerRequest, PeekAsk, PeekBodyKind, PeekCacheEntry, PeekCandidate, PeekClock,
+    PeekFacts, PeekFootPress, PeekPageOutcome, PeekPageRaster, PeekPageSlot, PeekSubject,
+    PeekSurface, PeekThumbnail, PeekThumbnailTarget, PreviewPane, PreviewSurface, ReferenceCard,
+    RowHost, Runtime, ScaleWorkerRequest, ScrollThumbState, ShellAddress,
+    facts_of_a_file_the_user_chose, file_peek, file_peek_promotion, files, float, git,
+    git_document_question, git_panel, hang_watch, i18n, input, mark_opacity, marks, peek_body_kind,
+    peek_foot_press, peek_page_texture_key, peek_reads_the_file, peek_scale_task, peek_strip,
+    preview, preview_body_bar, profiles, ring_arc, risen_frame, scroll_bar_layer, seats,
     session_is_breathing, tooltip, wait_pulse,
 };
 use anyhow::Context;
@@ -27,7 +30,7 @@ use std::time::{Duration, Instant};
 use winit::dpi::PhysicalPosition;
 use winit::event::MouseButton;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Whether this tab has a layout worth showing, and whether now is a moment
     /// to show it (L131).
     ///
@@ -341,42 +344,61 @@ impl Runtime<'_> {
         peek_strip::build(&layout, &leaves, &palette, scale)
     }
 
-    /// **Ask the decoration worker for one file's native pixels**, down whichever of the two
-    /// decoders can read it (user ruling 2026-08-27; §7.23).
+    /// **Ask the decoration worker for one file's native pixels, and file the record of the
+    /// question** — [`crate::ask_for_peek_pixels`] for the window's focused shell, the one door
+    /// every surface that shows a file's pixels asks through (the picture pane's refit, a markdown
+    /// page's pictures, the glance card and the hover flyout). A window whose decoration worker has
+    /// stopped asks nothing.
     ///
-    /// One door for both surfaces that show pixels — the preview pane and the glance card — and
-    /// therefore the one place the fork between the picture decoder and the video decoder is
-    /// written. Both fill the same cache under the same key, so the callers below this line do not
-    /// know which of them answered and must not: what they asked for is "this file's pixels", and
-    /// a second reading of the name at the *delivery* end is how a `.png` and a `.mp4` would come
-    /// to disagree about who owns an entry.
-    ///
-    /// The name is read with [`preview::path_names_a_video`], which is the very predicate
-    /// [`preview_open_lane`] forks on, so a file that opened as a video is decoded as one.
-    ///
-    /// Answers whether the question went out. `false` is a worker that has stopped or a channel
-    /// that has closed, which each caller turns into its own kind of silence.
-    pub(in crate::runtime) fn request_peek_pixels(&self, path: &Path) -> bool {
-        // **The door itself asks whether this is a file to read** (routes A and E of the
-        // untrusted-path audit, 2026-09-08). Three surfaces reach this line — the preview pane,
-        // the glance card and a markdown page's own pictures — and each of them used to decide
-        // locality for itself or not at all, so a share reached the decoder through whichever of
-        // the three had not asked. One door, one question: what goes out of here is a request to
-        // open a file, and a request nobody may make is one this window does not send.
-        if !preview::is_readable_unasked(path) {
-            return false;
-        }
+    /// Answers whether the question went out ([`PeekAsk`]).
+    pub(in crate::runtime) fn request_peek_pixels(&mut self, path: &Path) -> PeekAsk {
         if !self.app.math_worker_running {
-            return false;
+            return PeekAsk::Refused;
         }
         let leaf = self.focused_shell_address();
-        let path = path.to_owned();
-        let request = if preview::path_names_a_video(&path) {
-            MathWorkerRequest::PeekVideoFrame { leaf, path }
-        } else {
-            MathWorkerRequest::PeekImage { leaf, path }
-        };
-        self.app.math_worker.tasks.send(request).is_ok()
+        crate::ask_for_peek_pixels(
+            &mut self.window.peek_cache,
+            &self.app.math_worker,
+            leaf,
+            path,
+        )
+    }
+
+    /// **Every file a surface of this window names to the peek cache** — [`crate::peek_files_named`]
+    /// over this window's tabs, its card and its flyout.
+    pub(in crate::runtime) fn peek_files_named(&self) -> BTreeSet<String> {
+        crate::peek_files_named(
+            &self.window.tabs,
+            &self.window.peek_pane,
+            self.window
+                .file_peek
+                .as_ref()
+                .and_then(|peek| peek.source.file_path()),
+            self.window
+                .peek_hover
+                .active
+                .as_ref()
+                .map(|active| active.subject.key.as_str()),
+        )
+    }
+
+    /// **The failed peeks no surface names any more, let go of**
+    /// ([`crate::let_go_unnamed_peek_records`]; T-PEEK-CACHE-QUESTION-RECORDS). Run by the walk of
+    /// the surfaces ([`Self::refresh_preview_for_layout`]), by the flyout's new peek before it files
+    /// anything, and when the flyout comes down — the surfaces that leave by a road that names no
+    /// file (a tab closed, a pane handed another subject, a page scrolled on) are caught by the
+    /// next of these.
+    pub(in crate::runtime) fn let_go_unnamed_peek_records(&mut self) {
+        if !self
+            .window
+            .peek_cache
+            .iter()
+            .any(|(_, entry)| matches!(entry, PeekCacheEntry::Failed(_)))
+        {
+            return;
+        }
+        let named = self.peek_files_named();
+        crate::let_go_unnamed_peek_records(&mut self.window.peek_cache, &named);
     }
 
     /// The pointer is resting on this row — arm the 350ms, or leave a running
@@ -801,6 +823,25 @@ impl Runtime<'_> {
         self.hide_file_peek()
     }
 
+    /// **A git document's answer, for the card's own buffer** — filed when that
+    /// is the buffer it was asked for (`apply_git_results`); a card that has
+    /// moved on keeps another buffer, and takes nothing. Answers whether it was
+    /// filed.
+    pub(in crate::runtime) fn answer_glanced_git_document(
+        &mut self,
+        buffer: preview::BufferId,
+        answer: Result<preview::HeadOutcome, String>,
+    ) -> bool {
+        self.window.peek_buffer.answer_composed(buffer, answer)
+    }
+
+    /// **Nobody will answer the git document the card is waiting on** — the
+    /// card's half of `Runtime::settle_unanswered_git_documents`. Answers
+    /// whether it was waiting.
+    pub(in crate::runtime) fn settle_glanced_git_document(&mut self) -> bool {
+        self.window.peek_buffer.settle_unanswered()
+    }
+
     /// The intent has matured: read what the card will show (P147).
     ///
     /// **The pool answers first**, and that is P145's "shows the tab's POOL
@@ -829,6 +870,10 @@ impl Runtime<'_> {
         // The 350ms wait is unchanged and the fade starts where it ends.
         if let Some(peek) = self.window.file_peek.as_mut() {
             peek.clock = PeekClock::Shown(now);
+        }
+        // **A new card is new input**: what failed for its file is read again by its body.
+        if let Some(path) = source.file_path() {
+            crate::peek_card_opened(&mut self.window.peek_cache, path);
         }
         // The card's surface is pointed at the file here, once, rather than on
         // every frame that draws it: [`PreviewSurface::Peek`]'s pane is what
@@ -868,6 +913,8 @@ impl Runtime<'_> {
         // this window ever shows.
         let mut buffer = preview::PreviewBuffer::glancing(source.clone(), name);
         let wants_read = buffer.claim_head_read();
+        // The card's own buffer is who waits for a git document's answer.
+        let composed = buffer.ask_composer();
         let held = self.window.peek_buffer.put(buffer);
         self.window.peek_pane.show_source(held);
         // **A composed document waits for git and never for a disk.** A glance
@@ -875,17 +922,23 @@ impl Runtime<'_> {
         // `false` for it by construction — so without this the card would sit
         // empty for as long as the hand did. The question is the one the *pane*
         // would ask (`git_document_question`), on the column the glance is over,
-        // and its answer comes home through `apply_git_results`.
+        // and its answer comes home through `apply_git_results` — into this
+        // card's buffer, by its name, or to the sink when the card has moved on.
         if let Some(seat) = git_seat
+            && let Some(buffer) = composed
             && let Some(question) = git_document_question(&source, None)
+            && let Some(asker) = self.git_trees.get(&seat).map(git::GitCache::id)
         {
             let tab = self.id;
             if !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab, seat }),
+                asker,
+                buffer: Some(buffer),
                 question,
             }) {
                 self.disable_git_worker();
+                self.settle_unanswered_git_documents();
             }
             return true;
         }
@@ -913,6 +966,11 @@ impl Runtime<'_> {
     /// Answers whether a card that was **showing** came down — a matured peek,
     /// not a timer — because that is the only case that owes a frame.
     pub(crate) fn hide_file_peek(&mut self) -> bool {
+        // **The hand that was on it goes first** (T-POINTER-CAPTURE R-9, owner gone): on its head,
+        // its thumb, or a gesture inside its page. A press whose card has gone has nothing left
+        // to promote, and a promotion that fired afterwards would open a window over a file
+        // nobody is pointing at any more.
+        self.end_capture(OwnerGone(Gone::GlanceCard));
         let showing = self
             .window
             .file_peek
@@ -932,17 +990,20 @@ impl Runtime<'_> {
         if !self.window.video_carried_off_the_card {
             self.window.video.close(PreviewSurface::Peek);
         }
+        // **A card that comes down is a surface leaving**: what failed for its file or its page's
+        // pictures alone goes with it, and a failure another surface still shows stays
+        // ([`Self::let_go_unnamed_peek_records`], below, once the card names nothing) — before a
+        // next card is matured in the same turn, with no walk between. The next card over the
+        // file asks again on opening ([`crate::peek_card_opened`]). A page it asked about is asked
+        // again too (below).
+        self.window.peek_card_pending = None;
         self.window.file_peek = None;
-        // And the hand that was on its head. A press whose card has gone has
-        // nothing left to promote, and a promotion that fired afterwards would
-        // open a window over a file nobody is pointing at any more.
-        self.drop_file_peek_press();
-        self.drop_glance_thumb();
         self.window.peek_buffer.clear();
         // And the parsed document with it: a card that is down is holding a
         // markdown layout for a file nobody is looking at.
         self.window.peek_pane = PreviewPane::default();
         self.window.peek_picture = None;
+        self.let_go_unnamed_peek_records();
         // And the facts with it: they are about the file the card was over, and
         // the next card asks for its own.
         self.window.peek_facts = None;
@@ -954,17 +1015,9 @@ impl Runtime<'_> {
         if let Some(slot) = self.window.peek_page.as_mut() {
             slot.asked.clear();
         }
-        // And any hand that was on a block inside it. The card's surface is the
-        // one the sweep deliberately never retires ([`Self::sweep_preview_panes`]),
-        // because its life is this field's — so this is where that life ends for
-        // the gestures too.
-        if self
-            .held_preview_block_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == PreviewSurface::Peek)
-        {
-            self.drop_preview_block_drag();
-        }
+        // (A hand that was on a block inside it was let go of by the ending at the top: the
+        // card's surface is the one the sweep deliberately never retires
+        // ([`Self::sweep_preview_panes`]), because its life is this field's.)
         if self
             .preview_block_hover
             .is_some_and(|(surface, _)| surface == PreviewSurface::Peek)
@@ -1118,7 +1171,7 @@ impl Runtime<'_> {
                 height_px,
                 ..
             } => Some((*width_px, *height_px)),
-            PeekCacheEntry::Pending | PeekCacheEntry::Failed(_) => None,
+            PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_) => None,
         }
     }
 
@@ -1149,11 +1202,11 @@ impl Runtime<'_> {
                     height_px,
                     ..
                 }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
-                Some(PeekCacheEntry::Pending | PeekCacheEntry::Failed(_)) => return None,
+                Some(PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_)) => return None,
                 None => {
-                    if self.request_peek_pixels(path) {
-                        self.window.peek_cache.insert(key, PeekCacheEntry::Pending);
-                    }
+                    // The one door files what it asked: the read under its identity, or the
+                    // unstarted record.
+                    self.request_peek_pixels(path);
                     return None;
                 }
             };
@@ -1179,13 +1232,20 @@ impl Runtime<'_> {
         if self
             .app
             .math_worker
-            .scale_tasks
-            .send(ScaleWorkerRequest::Peek {
+            .scale(ScaleWorkerRequest::Peek {
+                // The card's own surface, so it never stands in for the flyout's question over the
+                // same file. The leaf is the focused shell's rather than the card's host: the card
+                // is one per window and a floating tree's row has no seat, and what the leaf
+                // decides on the way home — the window that owns the answer, the tab it lands in —
+                // is the same for every seat of this tab.
                 leaf: self.focused_shell_address(),
+                surface: PeekSurface::Card,
                 task: peek_scale_task(&target, rgba, native_width, native_height),
             })
-            .is_ok()
+            .is_ok_or_unstarted()
         {
+            // Asked — or its thread not started, which marks it asked too: the next hover, a new
+            // size, asks again; a redraw does not.
             self.window.peek_card_pending = Some(target);
         }
         None
@@ -1320,19 +1380,19 @@ impl Runtime<'_> {
             if self
                 .app
                 .math_worker
-                .tasks
-                .send(MathWorkerRequest::PeekPage {
+                .decorate(MathWorkerRequest::PeekPage {
                     leaf,
                     path: path.to_owned(),
                     page: index,
                     fit,
                     known,
                 })
-                .is_err()
+                .is_full()
                 && let Some(slot) = self.window.peek_page.as_mut()
             {
-                // Nobody is going to answer, so nothing is out: leave the slot able to ask again
-                // rather than waiting for ever on a lane that has gone.
+                // The lane was full, so nothing is out: leave the slot able to ask again on the
+                // next frame. A thread not started leaves the page asked: the card asks again
+                // when it is shown again.
                 slot.asked.remove(&index);
             }
         }
@@ -1420,7 +1480,19 @@ impl Runtime<'_> {
             })
             | hang_watch::during(hang_watch::Station::ClockFileClose, || {
                 self.expire_file_peek(now)
-            });
+            })
+            // **A shown card whose buffer has gone is taken down** (T-WINDOW-THREAD-UNDER-LOAD).
+            // It is a view of a buffer ([`Self::file_peek_subject`]); with none behind it the
+            // paint draws no card, and a card that is still reported shown owes a frame no frame
+            // can pay — the debt books the last present's frame, an instant in the past once
+            // nothing presents, on every turn.
+            | (self
+                .window
+                .file_peek
+                .as_ref()
+                .is_some_and(|peek| peek.clock.is_shown())
+                && self.file_peek_subject().is_none()
+                && self.hide_file_peek());
         if !moved && !self.animation_frame_is_due() {
             return Ok(());
         }
@@ -2611,7 +2683,15 @@ impl Runtime<'_> {
     /// Drop peek hover state and hide the flyout. Idempotent; used by every dismiss gesture
     /// (pointer off the span, pointer left, wheel, click, any key).
     pub(in crate::runtime) fn dismiss_peek(&mut self) -> Result<()> {
-        self.window.peek_hover.clear();
+        // A flyout that was up was a surface naming its file: what failed for it alone goes with
+        // it. A dismiss with no flyout up (a keystroke, a wheel over the terminal) is no surface
+        // leaving.
+        if self.window.peek_hover.clear() {
+            self.let_go_unnamed_peek_records();
+        }
+        // The next hover is the flyout's new input: a resample still owed — answered late, or
+        // failed on the worker, or never started — is asked again by it rather than waited on.
+        self.window.peek_thumbnail_pending = None;
         self.present_peek_overlay(None)
     }
 
@@ -2647,6 +2727,11 @@ impl Runtime<'_> {
         candidate: &PeekCandidate,
         settled: bool,
     ) -> Result<()> {
+        // A new peek: the flyout it replaced named its file until now, and a failure filed for
+        // that one alone goes before this one files anything.
+        if settled {
+            self.let_go_unnamed_peek_records();
+        }
         let cache_key = candidate.subject.key.clone();
         let (content_key, native_rgba, native_width_px, native_height_px) =
             match self.window.peek_cache.get(&cache_key) {
@@ -2668,23 +2753,8 @@ impl Runtime<'_> {
                     let Some(path) = candidate.subject.path.clone() else {
                         return Ok(());
                     };
-                    if !self.app.math_worker_running {
-                        return Ok(());
-                    }
-                    if self
-                        .app
-                        .math_worker
-                        .tasks
-                        .send(MathWorkerRequest::PeekImage {
-                            leaf: self.focused_shell_address(),
-                            path,
-                        })
-                        .is_ok()
-                    {
-                        self.window
-                            .peek_cache
-                            .insert(cache_key, PeekCacheEntry::Pending);
-                    }
+                    // Through the one door, which files the read under its identity.
+                    self.request_peek_pixels(&path);
                     return Ok(());
                 }
             };
@@ -2716,8 +2786,7 @@ impl Runtime<'_> {
         if self
             .app
             .math_worker
-            .scale_tasks
-            .send(ScaleWorkerRequest::Peek {
+            .scale(ScaleWorkerRequest::Peek {
                 leaf: ShellAddress {
                     window: self.window.window.id(),
                     leaf: LeafId {
@@ -2725,10 +2794,12 @@ impl Runtime<'_> {
                         seat: candidate.seat,
                     },
                 },
+                surface: PeekSurface::Flyout,
                 task: peek_scale_task(&target, native_rgba, native_width_px, native_height_px),
             })
-            .is_ok()
+            .is_ok_or_unstarted()
         {
+            // Asked, or its thread not started: either way the flyout's next new input asks.
             self.window.peek_thumbnail_pending = Some(target);
         }
         Ok(())
@@ -2757,17 +2828,7 @@ impl Runtime<'_> {
         let Some(decoded) = decoded else {
             return;
         };
-        let cache_key = peek_cache_key_for_decode(&task.source, decoded);
-        self.window.peek_cache.insert(
-            cache_key,
-            PeekCacheEntry::Ready {
-                key: decoded.key.clone(),
-                rgba: Arc::clone(&decoded.rgba),
-                width_px: decoded.width_px,
-                height_px: decoded.height_px,
-                native_size: decoded.native_size,
-            },
-        );
+        crate::remember_decode(&mut self.window.peek_cache, &task.source, decoded);
     }
 
     /// **Take delivery of a glance card's first page** (user ruling 2026-08-25).
@@ -2832,11 +2893,22 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// Take delivery of the flyout's display-sized raster. Only the question still outstanding is
-    /// answered here: an earlier size arriving after the viewport moved on leaves the newer request
-    /// in flight rather than asking for it twice.
+    /// Take delivery of a peek resample, on the surface that asked for it ([`PeekSurface`]). Only
+    /// the question still outstanding is answered here: an earlier size arriving after the viewport
+    /// moved on leaves the newer request in flight rather than asking for it twice.
+    ///
+    /// **Two hovers ask down this one lane**, the terminal's inline-image flyout and the file
+    /// tree's glance card, because the question is identical — one content key at one display size
+    /// — and the answer is the same pixels. They ask as two surfaces, and each answer comes home to
+    /// the surface it was asked for: its pending question is cleared only by its own answer. The
+    /// card adopts only the answer it awaits; the flyout files every answer of its own, since its
+    /// next hover reads the slot before it looks at the pending question. The day both want the same picture they ask twice, once each, and each is
+    /// answered (T-PEEK-SCALE-ADDRESS-BY-SURFACE): until then they were one address on the scale
+    /// share, and whichever asked second superseded the other, whose slot waited on for an answer
+    /// that was never coming.
     pub(in crate::runtime) fn complete_peek_scale(
         &mut self,
+        surface: PeekSurface,
         scaled: bt_term::ScaledInlineImage,
     ) -> Result<()> {
         let delivered: PeekThumbnailTarget = (
@@ -2844,31 +2916,34 @@ impl Runtime<'_> {
             scaled.width_px,
             scaled.height_px,
         );
-        // **Two hovers ask down this one lane.** The terminal's inline-image
-        // flyout is one; the file tree's glance card is the other, and it asks
-        // here rather than through a fourth worker verb because the question is
-        // identical — one content key at one display size — and the answer is the
-        // same pixels. Which of them asked is the target tuple, which each of
-        // them recorded before sending. The card is checked first and returns:
-        // on the day both want the same picture at the same size the flyout will
-        // simply find its slot cold and ask again, which costs one resample of an
-        // image already decoded.
-        if self.window.peek_card_pending.as_ref() == Some(&delivered) {
-            self.window.peek_card_pending = None;
-            self.window.peek_picture = Some(PeekThumbnail::from_scaled(scaled));
-            // The card is chrome, and a picture that lands while it is up owes
-            // the frame that shows it.
-            if self.refresh_overlay() {
-                self.present_chrome_change()?;
+        match surface {
+            PeekSurface::Card => {
+                // Only the size the card awaits is adopted. Any other card answer is about a size
+                // it has moved on from, or a card that has come down (`hide_file_peek` cleared
+                // both slots): filed, it would replace a picture that matches or refill a slot a
+                // card that is gone no longer holds.
+                if self.window.peek_card_pending.as_ref() != Some(&delivered) {
+                    return Ok(());
+                }
+                self.window.peek_card_pending = None;
+                self.window.peek_picture = Some(PeekThumbnail::from_scaled(scaled));
+                // The card is chrome, and the picture it was waiting for owes the frame that
+                // shows it.
+                if self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
             }
-            return Ok(());
-        }
-        if self.window.peek_thumbnail_pending.as_ref() == Some(&delivered) {
-            self.window.peek_thumbnail_pending = None;
-        }
-        self.window.peek_thumbnail = Some(PeekThumbnail::from_scaled(scaled));
-        if let Some(active) = self.window.peek_hover.active.clone() {
-            self.show_or_request_peek(&active, false)?;
+            PeekSurface::Flyout => {
+                if self.window.peek_thumbnail_pending.as_ref() == Some(&delivered) {
+                    self.window.peek_thumbnail_pending = None;
+                }
+                self.window.peek_thumbnail = Some(PeekThumbnail::from_scaled(scaled));
+                // A flyout that came down while this was in flight shows it on its next hover,
+                // which finds it in hand ([`Self::show_or_request_peek`]).
+                if let Some(active) = self.window.peek_hover.active.clone() {
+                    self.show_or_request_peek(&active, false)?;
+                }
+            }
         }
         Ok(())
     }
@@ -2890,3 +2965,7 @@ impl Runtime<'_> {
         file_peek::contains(head, [at.x as f32, at.y as f32]).then_some(FloatGrasp::Head)
     }
 }
+
+#[cfg(test)]
+#[path = "peek_tests.rs"]
+mod tests;

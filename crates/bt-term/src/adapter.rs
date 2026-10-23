@@ -262,6 +262,11 @@ pub enum AdapterEvent {
     /// request is a question about what this session was already asserting, and the session is
     /// where it is answered — this seam says what the bytes said.
     AttentionRequest(crate::session::AttentionRequest),
+    /// Folio's PowerShell integration reported that the pane's PSReadLine after the profile ran is
+    /// not Folio's copy, and its version (`OSC 777;folio-psreadline;<version>`).
+    ForeignLineEditor {
+        version: String,
+    },
     /// A kitty keyboard protocol request asked for flags this terminal does not honour
     /// ([`SUPPORTED_KITTY_FLAGS`]). `requested` is the whole `u16` as it was written; `in_force` is
     /// what the showing screen holds after the request. Whether this is news is the session's
@@ -1167,6 +1172,9 @@ impl TerminalAdapter {
                 }
                 InlineImageStreamAction::AttentionRequest(request) => {
                     events.push(AdapterEvent::AttentionRequest(request));
+                }
+                InlineImageStreamAction::ForeignLineEditor(version) => {
+                    events.push(AdapterEvent::ForeignLineEditor { version });
                 }
                 InlineImageStreamAction::TooLarge => {
                     self.write_inline_image_placeholder(b"[image:too-large]");

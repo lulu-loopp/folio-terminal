@@ -53,10 +53,18 @@ use crate::{
     profiles::{self, Integration, Profile, windows_to_wsl},
 };
 
+mod language;
 pub mod profile_marks;
 mod profile_runtime;
+pub(crate) use language::{Language, language_for_birth, windows_powershell_birth};
+pub use language::{LanguageAsked, begin_language_question};
+// The real Windows PowerShell 5.1 panes Folio's PSReadLine is proven in (T-INTEGRATION-INJECT-2-
+// BUILD); that file says it is Windows-only, so this one names no platform for it.
+#[cfg(test)]
+#[path = "shell_integration_psreadline_tests.rs"]
+mod psreadline_tests;
 pub use profile_runtime::{
-    ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
+    Migrated, ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
     begin_profile_observation_for, begin_removal, begin_startup_migration, profile_installs_for,
     remove_shell_integration, remove_shell_integration_at, take_profile_installs, take_removal,
 };
@@ -195,6 +203,10 @@ const CMD_MARKS_AFTER_REPORT: &str = r"$e]133;A$e\";
 /// forwards whatever value ends up on the Win32 side, so a user who set their
 /// own answer has it carried into the distribution rather than overwritten by
 /// its absence.
+///
+/// **Listed for every pane whose program enters WSL** (owner ruling 2026-10-12):
+/// `wsl.exe` or another launcher, handed a script or not, because these say what
+/// the terminal is and not what a script installed.
 ///
 /// **[`INSTALLED_MARKER`] is deliberately not among them** (2026-09-07). It is
 /// set inside the distribution, by the one branch of [`WSL_LOGIN_SHELL`] that
@@ -420,9 +432,11 @@ impl WriteNotice {
 /// **One file of this build's, written into a directory, and kept current**
 /// (review row R4-6).
 ///
-/// The compare-and-repair all three installed scripts go through, as a function
-/// of a directory so it can be exercised against a temp one rather than against
-/// the machine's own `%APPDATA%`.
+/// The compare-and-repair all three installed scripts go through — and, since
+/// T-INTEGRATION-INJECT-2-BUILD, each of the PSReadLine module's six files
+/// ([`install_psreadline_module_at`]), which are bytes and not text, hence
+/// `contents` — as a function of a directory so it can be exercised against a
+/// temp one rather than against the machine's own `%APPDATA%`.
 ///
 /// Rewritten only when it differs, so that the common start — the same build
 /// opening the same kind of tab again — is one read rather than one write, and
@@ -430,7 +444,12 @@ impl WriteNotice {
 /// Rewritten *whenever* it differs, which is the half that was missing for
 /// PowerShell: an upgraded, deleted or truncated copy is the same finding as a
 /// copy that was never there.
-fn install_script_at(directory: &Path, name: &str, text: &str) -> std::io::Result<PathBuf> {
+fn install_script_at(
+    directory: &Path,
+    name: &str,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<PathBuf> {
+    let contents = contents.as_ref();
     let path = directory.join(name);
     std::fs::create_dir_all(directory)?;
     // The launch worker and a pane birth can arrive together. A native
@@ -439,15 +458,15 @@ fn install_script_at(directory: &Path, name: &str, text: &str) -> std::io::Resul
     // permission or volume failure still returns promptly and is never cached.
     let mut failure = None;
     for _ in 0..3 {
-        if bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, &path)
-            .is_ok_and(|existing| existing == text)
+        if bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, &path)
+            .is_ok_and(|existing| existing == contents)
         {
             return Ok(path);
         }
         let written = if path.exists() {
-            bt_persist::atomic_replace_preserving(&path, text.as_bytes())
+            bt_persist::atomic_replace_preserving(&path, contents)
         } else {
-            bt_persist::atomic_write(&path, text.as_bytes())
+            bt_persist::atomic_write(&path, contents)
         };
         match written {
             Ok(_) => return Ok(path),
@@ -558,8 +577,9 @@ pub struct ShellCommand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EnvironmentDerivation {
     pub(crate) integration: Integration,
+    /// The program enters WSL ([`profiles::ShellProgram::enters_wsl`]): the terminal's
+    /// declarations and the profile's own variables are listed in `WSLENV`.
     pub(crate) crosses_wsl: bool,
-    pub(crate) forwards_terminal_into_wsl: bool,
 }
 
 impl Default for EnvironmentDerivation {
@@ -567,7 +587,6 @@ impl Default for EnvironmentDerivation {
         Self {
             integration: Integration::None,
             crosses_wsl: false,
-            forwards_terminal_into_wsl: false,
         }
     }
 }
@@ -590,19 +609,27 @@ impl Default for EnvironmentDerivation {
 /// `environment` is read, not written: Command Prompt's integration is a
 /// variable this process already has one of, and prefixing rather than replacing
 /// it means the composition has to see what is there.
+///
+/// `program_kind` is what the program walk found the row's program to be
+/// ([`profiles::ProfilePrograms::shell`]): the door is the one the row is served through as that
+/// kind of program ([`profiles::door_of`]), and a program that enters WSL lists the terminal's
+/// declarations ([`FORWARDED`]) and the profile's own variables in `WSLENV`, whatever its door and
+/// whether or not it was handed a script (owner ruling 2026-10-12).
 #[must_use]
 pub fn shell_command(
     profile: &Profile,
+    program_kind: &profiles::ShellProgram,
     place_arguments: &[OsString],
     scripts: Scripts<'_>,
     environment: &dyn ShellEnvironment,
 ) -> ShellCommand {
+    let door = profiles::door_of(profile, program_kind);
     // The row's login flag and then its own words (0.4.6 ticket 74): what the row
     // asks the program for, before any door below trades a word for its script.
     let words = profiles::launch_args(profile);
     let own = || {
         let words = words.iter().map(OsString::from);
-        if profiles::served_by(profile) == Integration::PowerShellOptIn {
+        if door == Integration::PowerShellOptIn {
             // PowerShell keeps parsing non-terminal switches only until a terminal such as
             // -Command. A starting-place launcher flag therefore has to precede the row's own
             // words; after -Command it would become user command text instead of a host flag.
@@ -617,21 +644,18 @@ pub fn shell_command(
                 .collect::<Vec<_>>()
         }
     };
-    let mut command = shell_command_for(profile, scripts, environment, &own);
+    let mut command = shell_command_for(profile, program_kind, door, scripts, environment, &own);
+    if program_kind.enters_wsl() {
+        command.environment.extend(crossing_environment());
+    }
     command.environment_derivation = EnvironmentDerivation {
-        integration: profiles::served_by(profile),
-        crosses_wsl: profile.paths == profiles::PathNamespace::Wsl,
-        forwards_terminal_into_wsl: command
-            .environment
-            .iter()
-            .any(|(name, _)| environment_name_eq(name, OsStr::new("WSLENV"))),
+        integration: door,
+        crosses_wsl: program_kind.enters_wsl(),
     };
     let mine = &profile.env;
-    command.environment.extend(hyperlink_declaration(
-        profiles::served_by(profile),
-        environment,
-        mine,
-    ));
+    command
+        .environment
+        .extend(hyperlink_declaration(door, environment, mine));
     command.environment.extend(locale_declaration(
         crate::locale_declaration::held().as_ref(),
         environment,
@@ -642,7 +666,7 @@ pub fn shell_command(
     // one of the names it could set — a reader who writes their own `WSLENV` row
     // is answering the question outright, and the layering below is what lets
     // them.
-    if profile.paths == profiles::PathNamespace::Wsl {
+    if program_kind.enters_wsl() {
         forward_into_wsl(&mut command.environment, mine);
     }
     layer_profile_environment(&mut command.profile_environment, mine);
@@ -739,10 +763,8 @@ pub(crate) fn derive_environment_for_birth(
             list.push_str(name);
             list.push_str("/u");
         };
-        if derivation.forwards_terminal_into_wsl {
-            for name in FORWARDED {
-                append(name);
-            }
+        for name in FORWARDED {
+            append(name);
         }
         for (name, _) in profile {
             let name = name.to_string_lossy();
@@ -1436,6 +1458,17 @@ pub fn compose_powershell_birth(
     arguments: &[OsString],
     powershell_integration: bool,
 ) -> Vec<OsString> {
+    compose_powershell_birth_loading(program, arguments, powershell_integration).arguments
+}
+
+/// [`compose_powershell_birth`], saying whether the loader went in — which is the one decision a
+/// Windows PowerShell pane's PSReadLine prefix shares with it ([`declare_psreadline_module`]).
+#[must_use]
+pub fn compose_powershell_birth_loading(
+    program: &Path,
+    arguments: &[OsString],
+    powershell_integration: bool,
+) -> ComposedBirth {
     compose_with_prepared_and_retry(
         program,
         arguments,
@@ -1443,6 +1476,24 @@ pub fn compose_powershell_birth(
         powershell_script_for_birth,
         schedule_parse_retry,
     )
+}
+
+/// **A PowerShell birth's argv, and whether it carries Folio's loader.**
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComposedBirth {
+    pub arguments: Vec<OsString>,
+    /// The loader was composed into `arguments` (`-NoExit -Command <loader>`, or appended to the
+    /// row's own command text); `false` when they are the row's own words.
+    pub loads: bool,
+}
+
+impl ComposedBirth {
+    fn as_written(arguments: &[OsString]) -> Self {
+        Self {
+            arguments: arguments.to_vec(),
+            loads: false,
+        }
+    }
 }
 
 /// [`compose_powershell_birth`] with the preparation handed in: `prepare` is asked only when the
@@ -1455,6 +1506,7 @@ fn compose_with_prepared(
     prepare: impl FnOnce() -> Option<PathBuf>,
 ) -> Vec<OsString> {
     compose_with_prepared_and_retry(program, arguments, powershell_integration, prepare, |_| {})
+        .arguments
 }
 
 /// The birth seam with its background retry handed in. The callback is told
@@ -1466,15 +1518,15 @@ fn compose_with_prepared_and_retry(
     powershell_integration: bool,
     prepare: impl FnOnce() -> Option<PathBuf>,
     retry: impl FnOnce(ParseQuestion),
-) -> Vec<OsString> {
+) -> ComposedBirth {
     if !powershell_integration || !is_powershell(program) {
-        return arguments.to_vec();
+        return ComposedBirth::as_written(arguments);
     }
     let Some(parsed) = classify_powershell_arguments(program, arguments) else {
-        return arguments.to_vec();
+        return ComposedBirth::as_written(arguments);
     };
     if parsed.non_interactive {
-        return arguments.to_vec();
+        return ComposedBirth::as_written(arguments);
     }
     let parse_answer = match &parsed.terminal {
         PowerShellTerminal::Command { .. } | PowerShellTerminal::EncodedCommand { .. } => {
@@ -1483,7 +1535,7 @@ fn compose_with_prepared_and_retry(
         PowerShellTerminal::None => None,
         PowerShellTerminal::File
         | PowerShellTerminal::CommandWithArgs
-        | PowerShellTerminal::Stdin => return arguments.to_vec(),
+        | PowerShellTerminal::Stdin => return ComposedBirth::as_written(arguments),
     };
     if matches!(
         parsed.terminal,
@@ -1493,13 +1545,18 @@ fn compose_with_prepared_and_retry(
         if let Some(text) = command_text(program, arguments) {
             retry(ParseQuestion::new(program, arguments, text));
         }
-        return arguments.to_vec();
+        return ComposedBirth::as_written(arguments);
     }
     let Some(script) = prepare().filter(|path| path.is_file()) else {
-        return arguments.to_vec();
+        return ComposedBirth::as_written(arguments);
     };
-    composed_powershell_arguments(program, arguments, &script, parse_answer)
-        .unwrap_or_else(|| arguments.to_vec())
+    match composed_powershell_arguments(program, arguments, &script, parse_answer) {
+        Some(arguments) => ComposedBirth {
+            arguments,
+            loads: true,
+        },
+        None => ComposedBirth::as_written(arguments),
+    }
 }
 
 /// The complete argument list `bt-pty`'s last-resort retry is started with when a pane's own
@@ -1562,6 +1619,14 @@ fn powershell_single_quoted(value: &Path) -> String {
 }
 
 /// The command text appended after `-NoExit -Command`.
+///
+/// **Whether `PSConsoleHostReadLine` exists is asked of the function drive, not of command
+/// discovery** (T-INTEGRATION-INJECT-2-BUILD, measured 2026-10-17). A Windows PowerShell pane
+/// that loaded Folio's binary-only module has no such function until this text defines it, and
+/// `Get-Command PSConsoleHostReadLine` for a name nothing loaded defines is an autoload: discovery
+/// finds the in-box PSReadLine 2.0.0, whose manifest exports that function, and imports it as a
+/// second PSReadLine beside Folio's (`Get-Module PSReadLine` then answered `2.4.5 2.0.0`). The
+/// function drive answers what is defined and loads nothing.
 #[must_use]
 pub fn powershell_load_command(program: &Path, script: &Path) -> String {
     let path = powershell_single_quoted(script);
@@ -1571,7 +1636,7 @@ pub fn powershell_load_command(program: &Path, script: &Path) -> String {
         ""
     };
     format!(
-        "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ {revive}if ((Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and -not (Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction Ignore)) {{ if (-not $Global:__FolioShellIntegration) {{ $Global:__FolioShellIntegration = @{{}} }}; $Global:__FolioShellIntegration.ReadLineType = (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | Where-Object ImplementingAssembly | Select-Object -Last 1).ImplementingAssembly.GetType('Microsoft.PowerShell.PSConsoleReadLine'); function global:PSConsoleHostReadLine {{ $lastRunStatus = $?; Microsoft.PowerShell.Core\\Set-StrictMode -Off; $Global:__FolioShellIntegration.ReadLineType::ReadLine($host.Runspace, $ExecutionContext, $lastRunStatus) }} }}; if (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) {{ $folioScript = $null; try {{ $folioScript = [IO.File]::ReadAllText({path}) }} catch {{}}; if ($null -ne $folioScript) {{ . ([scriptblock]::Create($folioScript)) }} }} }}"
+        "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ {revive}if ((Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and -not (Test-Path Function:PSConsoleHostReadLine)) {{ if (-not $Global:__FolioShellIntegration) {{ $Global:__FolioShellIntegration = @{{}} }}; $Global:__FolioShellIntegration.ReadLineType = (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | Where-Object ImplementingAssembly | Select-Object -Last 1).ImplementingAssembly.GetType('Microsoft.PowerShell.PSConsoleReadLine'); function global:PSConsoleHostReadLine {{ $lastRunStatus = $?; Microsoft.PowerShell.Core\\Set-StrictMode -Off; $Global:__FolioShellIntegration.ReadLineType::ReadLine($host.Runspace, $ExecutionContext, $lastRunStatus) }} }}; if (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) {{ $folioScript = $null; try {{ $folioScript = [IO.File]::ReadAllText({path}) }} catch {{}}; if ($null -ne $folioScript) {{ . ([scriptblock]::Create($folioScript)) }} }} }}"
     )
 }
 
@@ -1666,12 +1731,11 @@ fn environment_name_eq(left: &OsStr, right: &OsStr) -> bool {
 /// translation writes their own `WSLENV` row, and the layering above lets that
 /// row win outright.
 ///
-/// The terminal's own five are **not** added here, and that is deliberate rather
-/// than an omission: they are listed by the install path alone, which is what
-/// `docs/shell-integration.md`'s matrix states about a WSL login that lands in
-/// `zsh` ("set, but not forwarded"). What changes in this slice is that a
-/// profile's own rows cross whatever the login shell turns out to be, because
-/// they are the reader's instruction and not this terminal's guess.
+/// The terminal's own four ([`FORWARDED`]) are not added here: [`shell_command`]
+/// lists them for every pane whose program enters WSL, handed a script or not
+/// (owner ruling 2026-10-12). This lists the profile's own rows, which cross
+/// whatever the login shell turns out to be, because they are the reader's
+/// instruction and not this terminal's guess.
 fn forward_into_wsl(environment: &mut Vec<(OsString, OsString)>, mine: &[(String, String)]) {
     let names: Vec<&str> = mine
         .iter()
@@ -1714,11 +1778,23 @@ fn forward_into_wsl(environment: &mut Vec<(OsString, OsString)>, mine: &[(String
 
 fn shell_command_for(
     profile: &Profile,
+    program_kind: &profiles::ShellProgram,
+    door: Integration,
     scripts: Scripts<'_>,
     environment: &dyn ShellEnvironment,
     own: &dyn Fn() -> Vec<OsString>,
 ) -> ShellCommand {
-    match profiles::served_by(profile) {
+    match door {
+        // `bash.exe`: a bash inside WSL behind a launcher with no `-e`, handed the script in
+        // WSL's spelling through the one line the distribution's shell re-reads.
+        Integration::BashInitFile
+            if matches!(program_kind, profiles::ShellProgram::WslLauncher { .. }) =>
+        {
+            match scripts.bash {
+                Some(script) => wsl_bash_launcher_command(script, profile, own),
+                None => plain_command(own),
+            }
+        }
         Integration::BashInitFile if scripts.bash.is_some() => match profile.paths {
             // Git Bash: bash *is* the program, and takes the flag directly.
             //
@@ -1836,12 +1912,7 @@ fn wsl_command(scripts: Scripts<'_>, own: &dyn Fn() -> Vec<OsString>) -> ShellCo
     let bash = named(scripts.bash);
     let zdotdir = named(scripts.zdotdir);
     if bash.is_empty() && zdotdir.is_empty() {
-        return ShellCommand {
-            arguments: own(),
-            environment: Vec::new(),
-            profile_environment: Vec::new(),
-            environment_derivation: EnvironmentDerivation::default(),
-        };
+        return plain_command(own);
     }
     ShellCommand {
         arguments: own()
@@ -1860,10 +1931,111 @@ fn wsl_command(scripts: Scripts<'_>, own: &dyn Fn() -> Vec<OsString>) -> ShellCo
                 .map(OsString::from),
             )
             .collect(),
-        environment: crossing_environment(),
+        environment: Vec::new(),
         profile_environment: Vec::new(),
         environment_derivation: EnvironmentDerivation::default(),
     }
+}
+
+/// The row's own words and no door.
+fn plain_command(own: &dyn Fn() -> Vec<OsString>) -> ShellCommand {
+    ShellCommand {
+        arguments: own(),
+        environment: Vec::new(),
+        profile_environment: Vec::new(),
+        environment_derivation: EnvironmentDerivation::default(),
+    }
+}
+
+/// **`bash.exe`'s door** (T-WSL-LEGACY-BASH-DOOR): bash's init file, handed to the bash a
+/// launcher with no `-e` starts inside WSL — `System32\bash.exe` or WSL's Store alias.
+///
+/// What follows `bash.exe`'s name is re-read by a shell inside the distribution, and the bash it
+/// starts is the one that runs `-c`'s text (measured 2026-10-12, Ubuntu-24.04, through the
+/// Windows quoting this process's child command line uses: a single-quoted path with a space
+/// arrived whole; `$HOME` and a backtick inside the single quotes were expanded by the outer
+/// shell; the `-c` shell's parent is `/init`). So the launcher is handed `-c` and one line, which
+/// the Windows command line wraps in double quotes because it has a space in it:
+///
+/// `[ -r '<script>' ] && BT_SHELL_INTEGRATION=<mode> exec bash --init-file '<script>' '<word>'… -i;
+/// exec bash '<word>'…`
+///
+/// * The script is named in WSL's spelling, as [`wsl_command`] names it.
+/// * Every path and word is single-quoted for the inner bash and is handed over only when neither
+///   quoting can read it differently ([`reads_alike_in_both_quotes`]); otherwise the row gets no
+///   door, as `wsl.exe` gets none for a script WSL cannot name: its own words, the plain shell.
+///   The row's own words are not dropped one by one: a door that cannot carry all of them is not
+///   opened, and they reach the launcher as the row wrote them.
+/// * `[ -r … ]`: where the distribution cannot read the script (no `/mnt/c`, another mount root),
+///   the second command starts the bash the row asked for, instead of a bash that skips a missing
+///   init file and `~/.bashrc` with it.
+/// * The marker is set by the branch that reads the init file, for the reason [`FORWARDED`]
+///   leaves it out: a bash that did not read the script must not carry it.
+/// * The login flag is traded for the marker's mode exactly as on the Windows road.
+fn wsl_bash_launcher_command(
+    script: &Path,
+    profile: &Profile,
+    own: &dyn Fn() -> Vec<OsString>,
+) -> ShellCommand {
+    let words = own();
+    let named = windows_to_wsl(script)
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .filter(|path| reads_alike_in_both_quotes(path));
+    let said = words
+        .iter()
+        .map(|word| {
+            word.to_str()
+                .filter(|word| reads_alike_in_both_quotes(word))
+                .map(single_quoted)
+        })
+        .collect::<Option<Vec<_>>>();
+    let (Some(script), Some(said)) = (named, said) else {
+        return plain_command(own);
+    };
+    let mut door = vec!["--init-file".to_owned(), single_quoted(&script)];
+    let mut interactive = false;
+    for word in words.iter().filter_map(|word| without_login_flag(word)) {
+        interactive |= word == *"-i" || word == *"--interactive";
+        door.push(single_quoted(&word.to_string_lossy()));
+    }
+    if !interactive {
+        door.push("-i".to_owned());
+    }
+    let mode = if asks_for_login(&profiles::launch_args(profile)) {
+        MODE_LOGIN
+    } else {
+        MODE_INTERACTIVE
+    };
+    let read = format!("{INSTALLED_MARKER}={mode} exec bash {}", door.join(" "));
+    let plain = std::iter::once("exec bash".to_owned())
+        .chain(said)
+        .collect::<Vec<_>>()
+        .join(" ");
+    ShellCommand {
+        arguments: vec![
+            OsString::from("-c"),
+            OsString::from(format!(
+                "[ -r {} ] && {read}; {plain}",
+                single_quoted(&script)
+            )),
+        ],
+        environment: Vec::new(),
+        profile_environment: Vec::new(),
+        environment_derivation: EnvironmentDerivation::default(),
+    }
+}
+
+/// Whether `text` means itself both inside the double quotes the Windows command line wraps a
+/// `bash.exe` argument in, as the distribution's shell re-reads them, and inside the single quotes
+/// the inner bash reads: none of `$`, `` ` ``, `\`, `"` (special inside double quotes in sh, bash,
+/// zsh, dash, fish, tcsh and nu) and no `'` (which would end the single quotes).
+fn reads_alike_in_both_quotes(text: &str) -> bool {
+    !text.contains(['$', '`', '\\', '"', '\''])
+}
+
+/// `text` in single quotes, for a text [`reads_alike_in_both_quotes`] accepts.
+fn single_quoted(text: &str) -> String {
+    format!("'{text}'")
 }
 
 /// `ZDOTDIR`, and the reader's own beside it when this window inherited one.
@@ -2087,14 +2259,22 @@ pub enum DeclaredValue {
 /// from — the account's current logon environment where the platform has one,
 /// this process's own where it has not or the read failed (2026-10-05 ruling;
 /// [`page_environment`] holds the one the Profiles page read when it opened).
+/// `program_kind` is the kind of program the walk found for the row, as the spawn is handed it.
 #[must_use]
 pub fn declared_environment(
     profile: &Profile,
+    program_kind: &profiles::ShellProgram,
     scripts: Scripts<'_>,
     before_folio: &[(OsString, OsString)],
     endpoint: Option<&'static str>,
 ) -> Vec<(String, DeclaredValue)> {
-    let mut command = shell_command(profile, &[], scripts, &ComposedEnvironment(before_folio));
+    let mut command = shell_command(
+        profile,
+        program_kind,
+        &[],
+        scripts,
+        &ComposedEnvironment(before_folio),
+    );
     // The wire's three go into the terminal's layer where the spawn puts them;
     // the two a pane has its own of travel as empty values and are named per
     // pane below.
@@ -2633,7 +2813,8 @@ impl PowerShellProfileFallback {
             | Self::Enabled
             | Self::NoProfile
             | Self::Unsupported
-            | Self::Constrained => None,
+            | Self::Constrained
+            | Self::NotRun => None,
         }
     }
 }
@@ -2769,7 +2950,7 @@ struct ProfileSlot {
 /// round 2): observation workers can overlap — every Profiles-page open starts one, and a
 /// one-click install observes again — so what each publishes carries the number its run took,
 /// and an answer from a run older than the one already filed is refused (the
-/// `psreadline::PsReadLineProbe` rule). Counted from `1`.
+/// rule the retired PSReadLine probe kept). Counted from `1`.
 static OBSERVATION_REQUESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Number an observation run.
@@ -2941,14 +3122,25 @@ fn file_observation(
     true
 }
 
-/// **What has been heard from a question asked in the background**: nothing yet, a failure (the
-/// question was asked and got no answer), or the answer. A failure is not an answer about the
-/// row, and the row says so (release read m2).
+/// **What has been heard from a question asked in the background**: nothing yet, a failure, or
+/// the answer. A failure is not an answer about the row, and the row says so (release read m2);
+/// it carries why nothing was heard ([`Unanswered`]), so the row can say that too.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Heard<T> {
     NotYet,
-    Failed,
+    Failed(Unanswered),
     Answer(T),
+}
+
+/// **Why a question asked in the background was not answered.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Unanswered {
+    /// It was asked and got no answer: the shell did not answer in time, or the account's
+    /// environment could not be read.
+    NoAnswer,
+    /// The worker that asks it could not run — the thread door refused its start, or it ended
+    /// (a panic) before it answered (T-OBSERVATION-REFUSAL-ON-THE-PAGE). Nothing was asked.
+    NotRun,
 }
 
 /// What an uncomposable PowerShell row can honestly offer on the Profiles page.
@@ -2982,6 +3174,11 @@ pub enum PowerShellProfileFallback {
     /// asked and got no answer; the next visit to the Profiles page asks again
     /// ([`PolicyCause::Undetermined`]).
     Undetermined,
+    /// **The edition's observation could not run** ([`Unanswered::NotRun`]): the thread door
+    /// refused its worker, or the worker ended before it answered for this edition. Nothing was
+    /// asked, so nothing is claimed and nothing offered, and the row says the check could not
+    /// run; the next visit to the Profiles page asks again (T-OBSERVATION-REFUSAL-ON-THE-PAGE).
+    NotRun,
     /// This platform has no `$PROFILE` probe ([`PROFILE_PROBE_EXISTS`]), so nothing is observed
     /// and nothing is offered.
     Unsupported,
@@ -3037,7 +3234,7 @@ pub fn powershell_profile_fallback(
         parse,
         match observed {
             Heard::NotYet => Heard::NotYet,
-            Heard::Failed => Heard::Failed,
+            Heard::Failed(unanswered) => Heard::Failed(unanswered),
             Heard::Answer(observed) => Heard::Answer((
                 edition_cause(&observed, row),
                 observed.seen.carries_the_line(),
@@ -3051,6 +3248,13 @@ pub fn powershell_profile_fallback(
 /// first one lands the row is `Pending`, and on a platform with no probe it never lands, which
 /// is `Unsupported` rather than a wait. A question that was asked and got no answer — the parse
 /// probe, or the observation — is `Undetermined`, never the "not provided" of a refusal.
+///
+/// **An observation that could not run is `NotRun`, ahead of what the parse question heard**
+/// (T-OBSERVATION-REFUSAL-ON-THE-PAGE): the row cannot be decided without the observation, and
+/// what kept it from being decided is that the check never ran — which the row says, rather than
+/// waiting on a parse answer or naming a question that was asked. Each reason is matched by
+/// name on both sides, so a reason added later is decided here, not swallowed by a wildcard; a
+/// parse question that could not run (no road files one today) is said the same way.
 ///
 /// **A line that is present is `Enabled` only when both sessions load it** ([`edition_cause`]):
 /// a line an ordinary session refuses — written by an older Folio, or by hand, before the policy
@@ -3083,10 +3287,14 @@ fn profile_fallback_from_parts(
         return PowerShellProfileFallback::Unsupported;
     }
     match (parse, observed) {
+        (_, Heard::Failed(Unanswered::NotRun)) | (Heard::Failed(Unanswered::NotRun), _) => {
+            PowerShellProfileFallback::NotRun
+        }
         (Heard::NotYet, _) | (Heard::Answer(()), Heard::NotYet) => {
             PowerShellProfileFallback::Pending
         }
-        (Heard::Failed, _) | (Heard::Answer(()), Heard::Failed) => {
+        (Heard::Failed(Unanswered::NoAnswer), _)
+        | (Heard::Answer(()), Heard::Failed(Unanswered::NoAnswer)) => {
             PowerShellProfileFallback::Undetermined
         }
         (Heard::Answer(()), Heard::Answer((cause, line_present, _))) => match cause {
@@ -3131,8 +3339,36 @@ fn publish_profile_observation_failed(program: &Path, observation: u64) {
             .unwrap_or_else(|error| error.into_inner()),
         powershell_edition(program),
         observation,
-        Heard::Failed,
+        Heard::Failed(Unanswered::NoAnswer),
     );
+}
+
+/// **Run `observation`'s worker could not run, or ended before it answered** — filed for each of
+/// `editions` (the editions of the rows the run was asked about) as [`Unanswered::NotRun`], so
+/// the Profiles page's rows say the check could not run instead of keeping their previous state
+/// with no word of why (T-OBSERVATION-REFUSAL-ON-THE-PAGE). The page's next visit asks again.
+fn publish_profile_observation_not_run(editions: &[PowerShellEdition], observation: u64) {
+    let mut held = PROFILE_OBSERVATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    for edition in editions {
+        file_not_run(&mut held, *edition, observation);
+    }
+}
+
+/// **File that run `observation` did not answer for `edition`, unless an answer from it or from a
+/// newer run is held**: a worker that panicked after it published an edition's answer leaves that
+/// answer standing, and a newer run's is never replaced. Answers whether it was filed.
+fn file_not_run(held: &mut Observations, edition: PowerShellEdition, observation: u64) -> bool {
+    if held
+        .get(&edition)
+        .is_some_and(|(filed, _)| *filed >= observation)
+    {
+        return false;
+    }
+    held.insert(edition, (observation, Heard::Failed(Unanswered::NotRun)));
+    true
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -3211,7 +3447,7 @@ fn heard_parse(program: &Path, arguments: &[OsString]) -> Heard<()> {
         .get(&parse_key(program, arguments))
     {
         Some(ParseAnswer::Valid | ParseAnswer::Invalid) => Heard::Answer(()),
-        Some(ParseAnswer::Failed { .. }) => Heard::Failed,
+        Some(ParseAnswer::Failed { .. }) => Heard::Failed(Unanswered::NoAnswer),
         Some(ParseAnswer::Pending { .. }) | None => Heard::NotYet,
     }
 }
@@ -3385,8 +3621,14 @@ fn publish_parse_attempt(key: ParseKey, number: u8, result: Result<bool, ParsePr
     }
 }
 
-fn run_parse_attempt(attempt: ParseAttempt, parse: ParseProbe, environment: &ProbeEnvironment) {
+fn run_parse_attempt(
+    worker: &bt_platform::admission::WorkerCtx,
+    attempt: ParseAttempt,
+    parse: ParseProbe,
+    environment: &ProbeEnvironment,
+) {
     let result = parse(
+        worker,
         &attempt.question.program,
         &attempt.question.text,
         environment,
@@ -3395,21 +3637,32 @@ fn run_parse_attempt(attempt: ParseAttempt, parse: ParseProbe, environment: &Pro
 }
 
 fn ask_parse_question(
+    worker: &bt_platform::admission::WorkerCtx,
     question: ParseQuestion,
     asker: ParseAsker,
     parse: ParseProbe,
     environment: &ProbeEnvironment,
 ) {
     if let Some(attempt) = claim_or_say(question, asker, &crate::diagnostics::note) {
-        run_parse_attempt(attempt, parse, environment);
+        run_parse_attempt(worker, attempt, parse, environment);
     }
 }
 
 /// **The Profiles page's visit asks every failed parse question again** (release read m2), on
 /// the visit's own observation worker; a question with an answer, or one in flight, is not asked.
-fn ask_failed_parse_questions_again(questions: Vec<ParseQuestion>, environment: &ProbeEnvironment) {
+fn ask_failed_parse_questions_again(
+    worker: &bt_platform::admission::WorkerCtx,
+    questions: Vec<ParseQuestion>,
+    environment: &ProbeEnvironment,
+) {
     for question in questions {
-        ask_parse_question(question, ParseAsker::Visit, run_parse_probe, environment);
+        ask_parse_question(
+            worker,
+            question,
+            ParseAsker::Visit,
+            run_parse_probe,
+            environment,
+        );
     }
 }
 
@@ -3589,15 +3842,47 @@ fn output_prefix(bytes: &[u8]) -> String {
     format!("[{rendered}]")
 }
 
-/// How a parse question is put to a PowerShell: [`run_parse_probe`], or a test's stand-in.
-type ParseProbe = fn(&Path, &str, &ProbeEnvironment) -> Result<bool, ParseProbeFailure>;
+/// How a parse question is put to a PowerShell, on the worker that asks it: [`run_parse_probe`],
+/// or a test's stand-in.
+type ParseProbe = fn(
+    &bt_platform::admission::WorkerCtx,
+    &Path,
+    &str,
+    &ProbeEnvironment,
+) -> Result<bool, ParseProbeFailure>;
 
 fn run_parse_probe(
+    worker: &bt_platform::admission::WorkerCtx,
     program: &Path,
     text: &str,
     environment: &ProbeEnvironment,
 ) -> Result<bool, ParseProbeFailure> {
-    let output = run_powershell_probe(
+    parse_probe_through(
+        program,
+        text,
+        environment,
+        |program, command, input, patience, environment| {
+            check_powershell(worker, program, command, input, patience, environment)
+        },
+    )
+}
+
+/// [`run_parse_probe`] with the check that starts the PowerShell handed in: the parse command,
+/// the text on its input, **the patience every PowerShell machine probe a pane or a page asks**
+/// ([`POWERSHELL_PROBE_PATIENCE`]), and the answer read from what it printed.
+fn parse_probe_through(
+    program: &Path,
+    text: &str,
+    environment: &ProbeEnvironment,
+    check: impl FnOnce(
+        &Path,
+        &str,
+        Option<&str>,
+        bt_platform::ProbePatience,
+        &ProbeEnvironment,
+    ) -> Result<ProbeOutput, ParseProbeFailure>,
+) -> Result<bool, ParseProbeFailure> {
+    let output = check(
         program,
         PARSE_COMMAND,
         Some(text),
@@ -3638,8 +3923,9 @@ fn profile_key(program: &Path) -> PathBuf {
 /// **What a caller brings to `program`'s `$PROFILE` slot**: a question to ask when the slot holds
 /// no answer, with the asker's patience ([`POWERSHELL_PROBE_PATIENCE`] for the Profiles page,
 /// [`REMOVAL_PROBE_PATIENCE`] for a removal somebody asked for), or an answer heard elsewhere.
-enum ProfileQuestion {
-    Ask(bt_platform::ProbePatience),
+enum ProfileQuestion<'a> {
+    /// Asked from `asker` ([`CheckAsker`]).
+    Ask(bt_platform::ProbePatience, CheckAsker<'a>),
     /// **A newer answer**, heard by edition observation run number `.1` (which asks the same
     /// edition the same question at every Profiles-page open, T-PROBE-NO-CACHED-FAILURE): it
     /// replaces the slot's unless a newer run's is held, so a removal reads the newest any probe
@@ -3653,7 +3939,7 @@ enum ProfileQuestion {
 fn cached_profile_answer(
     program: &Path,
     environment: &ProbeEnvironment,
-    question: ProfileQuestion,
+    question: ProfileQuestion<'_>,
 ) -> Option<PathBuf> {
     let resolved = environment
         .program(program)
@@ -3673,8 +3959,8 @@ fn cached_profile_answer(
         slot
     };
     match question {
-        ProfileQuestion::Ask(patience) => answer_once(&slot.path, || {
-            run_profile_path_probe(&resolved, patience, environment)
+        ProfileQuestion::Ask(patience, asker) => answer_once(&slot.path, || {
+            run_profile_path_probe(asker, &resolved, patience, environment)
         }),
         ProfileQuestion::Heard(path, observation) => {
             let mut held = slot.path.lock().unwrap_or_else(|error| error.into_inner());
@@ -3756,12 +4042,20 @@ static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
 /// Teach the probe how to bring the event loop round when an answer lands.
 ///
-/// [`crate::psreadline::install_wake`]'s twin and for its reason: a pane that
-/// has started, printed its prompt and gone quiet produces no further frame on
-/// its own, so an answer that landed after that frame would sit unread until the
-/// reader typed something.
+/// A pane that has started, printed its prompt and gone quiet produces no further frame on its
+/// own, so an answer that landed after that frame would sit unread until the reader typed
+/// something.
 pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
+}
+
+/// **Bring the window round for an answer about a legacy PowerShell artefact** — the earlier
+/// Folio's PSReadLine copy (`psreadline::begin_legacy_removal`), which the window takes on the
+/// same wake as the `$PROFILE` line's (`AppEvent::PowerShellProfileProbed`).
+pub(crate) fn wake_for_profile_answers() {
+    if let Some(wake) = WAKE.get() {
+        wake();
+    }
 }
 
 /// **The environment a probe's child runs in** (T-PROBE-NO-CACHED-FAILURE): the one a pane of the
@@ -3949,12 +4243,131 @@ fn stopped_output(mut child: bt_platform::ProbeChild) -> ProbeOutput {
 const REMOVAL_PROBE_PATIENCE: bt_platform::ProbePatience =
     bt_platform::ProbePatience::fixed(std::time::Duration::from_secs(60));
 
-pub(crate) fn run_powershell_probe(
+/// **Where a PowerShell check is asked from** (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH): a worker
+/// of this application, whose panes are born in this process, so the check takes its turn with
+/// their births ([`crate::packaged_turns`]); or a command-line verb's process of its own
+/// (`--remove-shell-integration`, `--uninstall-cleanup`), which births no pane and takes none.
+/// Carried by the one question both ask, where a PowerShell keeps `$PROFILE`.
+#[derive(Clone, Copy)]
+pub enum CheckAsker<'a> {
+    Worker(&'a bt_platform::admission::WorkerCtx),
+    Verb,
+}
+
+/// The edition a PowerShell check is of, in a diagnostics line's words.
+fn edition_words(program: &Path) -> &'static str {
+    match powershell_edition(program) {
+        PowerShellEdition::PowerShellSeven => "PowerShell 7",
+        PowerShellEdition::WindowsPowerShell => "Windows PowerShell",
+    }
+}
+
+/// **A PowerShell check asked on `worker`, in its package's turn**
+/// (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH): the program as `environment` resolves it, then the
+/// turn ([`crate::packaged_turns::PackagedTurns::check_turn`] — it waits while a pane of the same
+/// package is being born, and holds the package until the check has settled), then the probe.
+pub(crate) fn check_powershell(
+    worker: &bt_platform::admission::WorkerCtx,
     program: &Path,
     command: &str,
     input: Option<&str>,
     patience: bt_platform::ProbePatience,
     environment: &ProbeEnvironment,
+) -> Result<ProbeOutput, ParseProbeFailure> {
+    check_powershell_in(
+        &crate::packaged_turns::TURNS,
+        worker,
+        program,
+        command,
+        input,
+        patience,
+        environment,
+    )
+}
+
+/// [`check_powershell`] in `turns` — the process's, or a test's own.
+pub(crate) fn check_powershell_in(
+    turns: &crate::packaged_turns::PackagedTurns,
+    worker: &bt_platform::admission::WorkerCtx,
+    program: &Path,
+    command: &str,
+    input: Option<&str>,
+    patience: bt_platform::ProbePatience,
+    environment: &ProbeEnvironment,
+) -> Result<ProbeOutput, ParseProbeFailure> {
+    let probe = powershell_probe_command(program, environment)?;
+    let package = bt_platform::package_family_of(Path::new(probe.get_program()));
+    let turn = turns.check_turn(worker, package.clone(), edition_words(program));
+    run_powershell_probe(
+        probe,
+        Some(turn),
+        package,
+        program,
+        command,
+        input,
+        patience,
+    )
+}
+
+/// **A PowerShell check asked from a command-line verb's own process**, which births no pane and
+/// so takes no turn ([`CheckAsker::Verb`]).
+fn check_powershell_from_a_verb(
+    program: &Path,
+    command: &str,
+    patience: bt_platform::ProbePatience,
+    environment: &ProbeEnvironment,
+) -> Result<ProbeOutput, ParseProbeFailure> {
+    let probe = powershell_probe_command(program, environment)?;
+    let package = bt_platform::package_family_of(Path::new(probe.get_program()));
+    run_powershell_probe(probe, None, package, program, command, None, patience)
+}
+
+/// The `diagnostics.log` line a check leaves when its job held other processes as it settled
+/// ([`bt_platform::ProbeChild::others_at_settlement`]): closing the job ended them with it. Never
+/// expected while the turns hold; `None` when it held none.
+fn settled_beside_line(program: &Path, others: Option<usize>) -> Option<String> {
+    others.filter(|others| *others > 0).map(|others| {
+        format!(
+            "Folio: the {} check settled with {others} other processes in its job",
+            edition_words(program)
+        )
+    })
+}
+
+/// The `diagnostics.log` line a check of a packaged PowerShell leaves when, as it settled, other
+/// processes of its package ran outside its tree (`beside`, by id): the witness of a desktop app
+/// container the check shared — a pane of that package, a Windows Terminal tab, a `pwsh` typed in
+/// another shell. Expected beside panes already running (a check that joins their container is
+/// harmless); a pane born during the check is what the turns keep out. `None` when there were
+/// none, or nothing was read.
+fn package_beside_line(program: &Path, beside: Option<&[u32]>) -> Option<String> {
+    beside.filter(|beside| !beside.is_empty()).map(|beside| {
+        format!(
+            "Folio: the {} check settled while {} other processes of its package ran ({})",
+            edition_words(program),
+            beside.len(),
+            beside
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
+}
+
+/// **One PowerShell probe of `program`, already resolved into `probe`** (its package `package`),
+/// run while `turn` holds that package; the turn is let go once the probe has settled and its
+/// output is collected — every handle of it let go. Its settlement is read
+/// ([`bt_platform::ProbeChild::watch_its_settlement`]) and said when it held anything outside the
+/// probe's own tree.
+pub(crate) fn run_powershell_probe(
+    mut probe: std::process::Command,
+    turn: Option<crate::packaged_turns::CheckTurn<'_>>,
+    package: Option<bt_platform::PackageFamily>,
+    program: &Path,
+    command: &str,
+    input: Option<&str>,
+    patience: bt_platform::ProbePatience,
 ) -> Result<ProbeOutput, ParseProbeFailure> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time a PowerShell pane is opened.
@@ -3963,8 +4376,7 @@ pub(crate) fn run_powershell_probe(
     // `pwsh.exe` with no path at all, and a bare name is resolved by
     // `CreateProcess` out of the working directory before `PATH`. The probe
     // asks about the program a pane will run, so it asks about the one an
-    // administrator installed.
-    let mut probe = powershell_probe_command(program, environment)?;
+    // administrator installed ([`powershell_probe_command`], the caller's).
     probe.args(["-NoProfile", "-NonInteractive", "-Command", command]);
     let stdio = if input.is_some() {
         bt_platform::ProbeStdio::FED
@@ -3973,6 +4385,7 @@ pub(crate) fn run_powershell_probe(
     };
     let mut child = bt_platform::spawn_probe(&mut probe, stdio)
         .map_err(|error| ParseProbeFailure::Spawn(error.to_string()))?;
+    child.watch_its_settlement(package);
     if let Some(input) = input {
         let written = child.take_stdin().map_or_else(
             || Err("the piped stdin handle was absent".to_owned()),
@@ -3993,7 +4406,9 @@ pub(crate) fn run_powershell_probe(
     }
     // **Waited for while it works** (G-SWEEP-048): the probe door's own patience, looked at every
     // 20 ms on this worker; a probe that shows no life for the quiet period, or works past the
-    // budget, is ended with everything it started.
+    // budget, is ended with everything it started. **Its turn ends once its output is collected**
+    // (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH), the last of its handles let go: a birth of its
+    // package waits no longer than this patience lets the probe run.
     match child.wait_within(patience, &mut || {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }) {
@@ -4001,6 +4416,7 @@ pub(crate) fn run_powershell_probe(
         Ok(Err(overdue)) => {
             crate::diagnostics::note(&overdue_line(program, overdue, patience));
             let output = stopped_output(child);
+            drop(turn);
             return Err(ParseProbeFailure::Overdue {
                 overdue,
                 patience,
@@ -4010,6 +4426,7 @@ pub(crate) fn run_powershell_probe(
         }
         Err(error) => {
             let output = stopped_output(child);
+            drop(turn);
             return Err(ParseProbeFailure::Wait {
                 error: error.to_string(),
                 stdout: output_prefix(&output.stdout),
@@ -4017,6 +4434,8 @@ pub(crate) fn run_powershell_probe(
             });
         }
     }
+    let others = child.others_at_settlement().map(<[u32]>::len);
+    let beside = child.package_beside_at_settlement().map(<[u32]>::to_vec);
     let output = child
         .wait_with_output()
         .map_err(|error| ParseProbeFailure::Wait {
@@ -4024,6 +4443,16 @@ pub(crate) fn run_powershell_probe(
             stdout: "[]".to_owned(),
             stderr: "[]".to_owned(),
         })?;
+    drop(turn);
+    for line in [
+        settled_beside_line(program, others),
+        package_beside_line(program, beside.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        crate::diagnostics::note(&line);
+    }
     bt_platform::file_reads::pipe_output(bt_platform::file_reads::Lane::Settings, &output);
     if !output.status.success() {
         return Err(ParseProbeFailure::Exit {
@@ -4041,13 +4470,17 @@ pub(crate) fn run_powershell_probe(
 /// **Where this PowerShell keeps `$PROFILE`, and nothing else** — the one question a removal
 /// needs (release read M1). No cmdlet runs: a cmdlet is found through command discovery, which is
 /// what a cold module analysis cache makes slow, while `$PROFILE` is a variable the host sets
-/// before its first command. Windows only, like [`PROFILE_COMMAND`].
-#[cfg(windows)]
+/// before its first command. The same command on every platform; off Windows no PowerShell is
+/// listed to ask ([`installed_powershells`]), so nothing asks it there.
 const PROFILE_PATH_COMMAND: &str =
     "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $PROFILE.CurrentUserCurrentHost";
 
-#[cfg(windows)]
+/// **Ask `program` where it keeps `$PROFILE`**, from where `asker` stands: a worker of this
+/// application through [`check_powershell`] — whose turn door answers "no package, no turn" for a
+/// program in no package, which is every program off Windows — or a command-line verb's own
+/// process through [`check_powershell_from_a_verb`]. One road on every platform.
 fn run_profile_path_probe(
+    asker: CheckAsker<'_>,
     program: &Path,
     patience: bt_platform::ProbePatience,
     environment: &ProbeEnvironment,
@@ -4055,23 +4488,25 @@ fn run_profile_path_probe(
     if profile_sandboxed() {
         return None;
     }
-    let output =
-        run_powershell_probe(program, PROFILE_PATH_COMMAND, None, patience, environment).ok()?;
+    let output = match asker {
+        CheckAsker::Worker(worker) => check_powershell(
+            worker,
+            program,
+            PROFILE_PATH_COMMAND,
+            None,
+            patience,
+            environment,
+        ),
+        CheckAsker::Verb => {
+            check_powershell_from_a_verb(program, PROFILE_PATH_COMMAND, patience, environment)
+        }
+    }
+    .ok()?;
     parse_profile_path(std::str::from_utf8(&output.stdout).ok()?)
-}
-
-#[cfg(not(windows))]
-fn run_profile_path_probe(
-    _program: &Path,
-    _patience: bt_platform::ProbePatience,
-    _environment: &ProbeEnvironment,
-) -> Option<PathBuf> {
-    None
 }
 
 /// The path [`PROFILE_PATH_COMMAND`] prints: its first line, taken verbatim, and only when it is
 /// absolute — whatever the shell names is the file, wherever it is.
-#[cfg(windows)]
 fn parse_profile_path(stdout: &str) -> Option<PathBuf> {
     stdout
         .lines()
@@ -4090,13 +4525,15 @@ const PROFILE_PROBE_EXISTS: bool = cfg!(windows);
 /// **One edition observed**, its child in `environment` — the block the ordinary session's Process
 /// scope is read out of too ([`ordinary_process_scope`]), so one read serves both.
 fn probe_profile_observation(
+    worker: &bt_platform::admission::WorkerCtx,
     program: &Path,
     environment: &ProbeEnvironment,
 ) -> Option<ProfileObservation> {
     probe_profile_observation_unless(profile_sandboxed(), || {
         #[cfg(windows)]
         {
-            let output = run_powershell_probe(
+            let output = check_powershell(
+                worker,
                 program,
                 PROFILE_COMMAND,
                 None,
@@ -4111,7 +4548,7 @@ fn probe_profile_observation(
         }
         #[cfg(not(windows))]
         {
-            let _ = (program, environment);
+            let _ = (worker, program, environment);
             None
         }
     })
@@ -4314,14 +4751,16 @@ fn trial_script_directory() -> Option<PathBuf> {
     Some(crate::update_trial::temp_folder(&std::env::temp_dir(), txn).join(SCRIPT_DIRECTORY))
 }
 
-/// Remove the script copy owned by a transaction after that transaction's
+/// Remove the script and PSReadLine copies owned by a transaction after that transaction's
 /// own directory has been retired: the transaction's temporary folder
-/// ([`crate::update_trial::temp_folder`], the name [`trial_script_directory`]
-/// writes under), its script folder and then the folder itself when nothing
-/// else is in it. No durable Folio or user directory is beneath this path.
+/// ([`crate::update_trial::temp_folder`], the name [`trial_script_directory`] and
+/// [`trial_psmodules_directory`] write under), its script and module folders and then the folder
+/// itself when nothing else is in it. No durable Folio or user directory is beneath this path. A
+/// module a trial pane's shell still holds stays until the next retirement asks.
 pub(crate) fn remove_trial_script(txn: crate::update_txn::TxnId) {
     let root = crate::update_trial::temp_folder(&std::env::temp_dir(), txn);
     let _ = std::fs::remove_dir_all(root.join(SCRIPT_DIRECTORY));
+    let _ = std::fs::remove_dir_all(root.join(PSMODULES_DIRECTORY));
     let _ = std::fs::remove_dir(root);
 }
 
@@ -4340,6 +4779,444 @@ fn powershell_script_in_trial(
         return Ok(durable);
     }
     install_script_at(trial_directory, SCRIPT_FILE_PS1, text)
+}
+
+// ── Folio's PSReadLine in a Windows PowerShell pane (T-INTEGRATION-INJECT-2-BUILD) ───────────
+//
+// The design is `docs/plans/design/integration-inject-2-2026-10-15.md` §2.2–§2.3, and the owner's
+// rulings of 2026-10-15: the binary is Microsoft's signed 2.4.5 (Q1), and Folio's copy wins in
+// Folio's 5.1 panes whatever the account has installed (Q2). A 5.1 console host imports
+// PSReadLine while it creates its runspace, before any profile runs and before `-Command`, and a
+// second import binds to the assembly already loaded — so the editor is chosen by the module path
+// the host searches, or not at all. Folio composes a pane-only `PSModulePath` whose first entry is
+// a directory holding only Folio's binary-only module, and declares it on the pane's command.
+
+/// The directory under Folio's local data folder the module's artefacts live in:
+/// `%LOCALAPPDATA%\Folio\psmodules\<artefact>\PSReadLine\2.4.5\`.
+const PSMODULES_DIRECTORY: &str = "psmodules";
+
+/// The module's durable artefact directory (`psmodules\<artefact>`), prepared once per process —
+/// outside a trial, or after its commit.
+static DURABLE_PSREADLINE_MODULE: OnceLock<PathBuf> = OnceLock::new();
+/// The artefact directory an update's trial names while its writes are held back.
+static TRIAL_PSREADLINE_MODULE: OnceLock<PathBuf> = OnceLock::new();
+/// The cause of a failed module preparation, said once ([`WriteNotice`]).
+static PSREADLINE_MODULE_NOTICE: WriteNotice = WriteNotice::new();
+/// Whether this process has removed the artefacts other builds left (once: at the launch's
+/// preparation, or at the first durable preparation of a birth, whichever comes first).
+static PSREADLINE_PRUNED: std::sync::Once = std::sync::Once::new();
+
+/// **Folio's local data folder**, `%LOCALAPPDATA%\Folio`, where the module is a machine-local
+/// cache of what the executable carries (the note's §2.2: local, not roaming; WebView2's root).
+/// `None` off Windows and when the account names no local application data folder.
+fn local_data_root() -> Option<PathBuf> {
+    if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
+        return None;
+    }
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map(|base| PathBuf::from(base).join("Folio"))
+}
+
+/// **The module, written into `psmodules` and kept current**: each of the executable's module
+/// files ([`crate::psreadline::module_files`], the manifest last) compared with what is on disk
+/// under `psmodules\<artefact>\` and written only where it differs, through the atomic replace
+/// every script goes through ([`install_script_at`]). Answers the artefact directory — the one
+/// entry a pane's `PSModulePath` is given. A function of the directory so a test writes into one
+/// of its own; nothing else is read or written.
+///
+/// The manifest lands last, so a write that stops part-way leaves a directory PowerShell does not
+/// read as a module (a version folder is a module by its `PSReadLine.psd1`), and the next birth
+/// tries again.
+pub(crate) fn install_psreadline_module_at(psmodules: &Path) -> std::io::Result<PathBuf> {
+    install_psreadline_files_at(
+        psmodules,
+        crate::psreadline::ARTEFACT,
+        crate::psreadline::module_files(),
+    )
+}
+
+/// [`install_psreadline_module_at`] over an artefact and its files handed in. An executable that
+/// carries no module (any target but Windows) has nothing to write, which is an error here and a
+/// question its callers never ask.
+fn install_psreadline_files_at(
+    psmodules: &Path,
+    artefact: &str,
+    files: &[(&str, &[u8])],
+) -> std::io::Result<PathBuf> {
+    if files.is_empty() {
+        return Err(std::io::Error::other(
+            "this executable carries no PSReadLine module",
+        ));
+    }
+    let directory = psmodules.join(artefact);
+    for (name, bytes) in files {
+        // Each file into its own directory (`PSReadLine/2.4.5/netstd/…`), made level by level.
+        let path = directory.join(name);
+        let (Some(parent), Some(leaf)) = (path.parent(), path.file_name()) else {
+            return Err(std::io::Error::other(format!("{name} names no file")));
+        };
+        install_script_at(parent, &leaf.to_string_lossy(), bytes)?;
+    }
+    Ok(directory)
+}
+
+/// **The artefact directory a Windows PowerShell birth names in its module path** — called on
+/// the birth worker, never on the window thread, and only for a pane that also gets Folio's
+/// loader ([`declare_psreadline_module`]). The rule is [`powershell_script_for_birth`]'s:
+///
+/// - **Not a trial, or a committed one**: the durable copy under Folio's local data folder,
+///   compared once per process with the bytes this build carries and repaired where it differs.
+///   Once it stands, the artefacts other builds left are removed ([`prune_psreadline_artefacts`]).
+/// - **A trial not yet committed**: the durable copy when it already holds this build's bytes,
+///   read and never written; otherwise this build's module written into the trial's own folder
+///   under the system temporary directory, which the trial's cleanup removes. The commit releases
+///   [`update_trial::Writer::PsReadLineModule`], whose preparation writes the durable copy.
+///
+/// `None` — the pane then gets the account's PSReadLine, exactly as before this build — when the
+/// executable carries no module, when there is no local data folder, or when the write failed: a
+/// failure is said once in `diagnostics.log` and retried by the next birth
+/// (T-PROBE-NO-CACHED-FAILURE).
+///
+/// [`update_trial::Writer::PsReadLineModule`]: crate::update_trial::Writer::PsReadLineModule
+pub fn psreadline_module_for_birth() -> Option<PathBuf> {
+    if crate::psreadline::module_files().is_empty() {
+        return None;
+    }
+    let durable = local_data_root()?.join(PSMODULES_DIRECTORY);
+    if crate::update_trial::defer(crate::update_trial::Writer::PsReadLineModule) {
+        if let Some(path) = TRIAL_PSREADLINE_MODULE.get().filter(|path| path.is_dir()) {
+            return Some(path.clone());
+        }
+        let prepared = PSREADLINE_MODULE_NOTICE.said(
+            &psreadline_module_noun(),
+            psreadline_module_in_trial(&durable, &trial_psmodules_directory()?),
+            &crate::diagnostics::note,
+        )?;
+        let _ = TRIAL_PSREADLINE_MODULE.set(prepared.clone());
+        return Some(prepared);
+    }
+    if let Some(path) = DURABLE_PSREADLINE_MODULE.get().filter(|path| path.is_dir()) {
+        return Some(path.clone());
+    }
+    let prepared = PSREADLINE_MODULE_NOTICE.said(
+        &psreadline_module_noun(),
+        install_psreadline_module_at(&durable),
+        &crate::diagnostics::note,
+    )?;
+    let _ = DURABLE_PSREADLINE_MODULE.set(prepared.clone());
+    prune_psreadline_artefacts_once(&durable);
+    Some(prepared)
+}
+
+/// What a failed module write is called in `diagnostics.log`: the module and its version, so a
+/// line read beside a pane's own `Get-Module` names the copy it is about.
+fn psreadline_module_noun() -> String {
+    format!(
+        "Folio's PSReadLine {} module",
+        crate::psreadline::SHIPPED_VERSION
+    )
+}
+
+/// The trial half of [`psreadline_module_for_birth`]'s rule, over directories a test can name:
+/// the durable artefact when every file of it already holds this build's bytes (read only),
+/// otherwise the module written into `trial_psmodules`. Never writes into `durable_psmodules`.
+fn psreadline_module_in_trial(
+    durable_psmodules: &Path,
+    trial_psmodules: &Path,
+) -> std::io::Result<PathBuf> {
+    let durable = durable_psmodules.join(crate::psreadline::ARTEFACT);
+    let files = crate::psreadline::module_files();
+    let whole = files.iter().all(|(name, bytes)| {
+        bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, durable.join(name))
+            .is_ok_and(|existing| existing == *bytes)
+    });
+    if whole {
+        return Ok(durable);
+    }
+    install_psreadline_module_at(trial_psmodules)
+}
+
+/// A trial's own `psmodules`: under its transaction's folder in the system temporary directory,
+/// beside the script's ([`trial_script_directory`]); [`remove_trial_script`] removes the folder.
+fn trial_psmodules_directory() -> Option<PathBuf> {
+    let txn = crate::update_startup::trial()
+        .map(|(txn, _)| txn)
+        .or_else(crate::update_startup::held)?;
+    Some(crate::update_trial::temp_folder(&std::env::temp_dir(), txn).join(PSMODULES_DIRECTORY))
+}
+
+/// [`prune_psreadline_artefacts`] over the durable `psmodules`, once per process, outside a
+/// trial (the old build's artefact is the old build's until the trial is committed, and the
+/// commit's preparation asks again).
+fn prune_psreadline_artefacts_once(durable_psmodules: &Path) {
+    if crate::update_trial::defer(crate::update_trial::Writer::PsReadLineModule) {
+        return;
+    }
+    PSREADLINE_PRUNED.call_once(|| {
+        for (artefact, why) in prune_psreadline_artefacts(
+            durable_psmodules,
+            crate::psreadline::ARTEFACT,
+            &crate::psreadline::directory_entries,
+            &|path| std::fs::remove_file(path),
+        ) {
+            crate::diagnostics::note(&format!(
+                "Folio's PSReadLine artefact {artefact} from another build was kept ({why}); the \
+                 next launch tries again"
+            ));
+        }
+    });
+}
+
+/// The launch preparation's half: the durable `psmodules` pruned, without writing the module —
+/// that is a Windows PowerShell birth's, so a machine that never opens one is given none.
+fn prune_psreadline_artefacts_at_launch() {
+    if let Some(root) = local_data_root() {
+        prune_psreadline_artefacts_once(&root.join(PSMODULES_DIRECTORY));
+    }
+}
+
+/// What is directly in a directory, and which of it is itself one
+/// (`psreadline::directory_entries`, handed in).
+type DirectoryEntries = dyn Fn(&Path) -> std::io::Result<Vec<(OsString, bool)>>;
+
+/// **The artefacts other builds left, removed when nothing holds them** (the note's §2.2): every
+/// directory under `psmodules` but `keep`. A content-addressed directory is never rewritten, so a
+/// build that ships a new package writes a sibling, and this is what retires the old one.
+///
+/// **The module's assembly goes first, and it is the test of whether anything holds the
+/// artefact.** A shell that has the module loaded has its assembly
+/// (`PSReadLine\<version>\Microsoft.PowerShell.PSReadLine.dll`) mapped, and Windows refuses to
+/// delete a mapped image — measured by `a_loaded_artefact_is_kept_until_its_shell_ends`. The
+/// assembly is the first file of the module a shell loads, so when it can be deleted nothing has
+/// the module loaded, and the rest of the directory follows; when it cannot, nothing of the
+/// artefact has been touched, and it stays whole for the next launch. Answers each artefact kept,
+/// with why. `entries` and `remove_file` are the disk, handed in.
+fn prune_psreadline_artefacts(
+    psmodules: &Path,
+    keep: &str,
+    entries: &DirectoryEntries,
+    remove_file: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> Vec<(String, String)> {
+    let mut kept = Vec::new();
+    let Ok(artefacts) = entries(psmodules) else {
+        return kept;
+    };
+    'artefacts: for (name, is_directory) in artefacts {
+        let name = name.to_string_lossy().into_owned();
+        if name == keep || !is_directory {
+            continue;
+        }
+        let artefact = psmodules.join(&name);
+        let module = artefact.join(crate::psreadline::MODULE_NAME);
+        for (version, is_directory) in entries(&module).unwrap_or_default() {
+            if !is_directory {
+                continue;
+            }
+            let assembly = module.join(version).join(crate::psreadline::ASSEMBLY);
+            match remove_file(&assembly) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    kept.push((name, error.to_string()));
+                    continue 'artefacts;
+                }
+            }
+        }
+        if let Err(error) = std::fs::remove_dir_all(&artefact) {
+            kept.push((name, error.to_string()));
+        }
+    }
+    kept
+}
+
+/// **A Windows PowerShell pane's module path, composed** (the note's §2.3, spike Follow-up C):
+///
+/// ```text
+/// PSModulePath = <folio> ; [<documents>\WindowsPowerShell\Modules ;] <value>
+/// ```
+///
+/// - `folio` is the artefact directory, which holds only `PSReadLine`, so the prefix shadows
+///   nothing else; an entry of `value` naming it already is dropped there (no double entry).
+/// - `value` is the module path the pane would otherwise have — the environment Folio builds for
+///   the birth after the row's own layer, `environment` — and is kept, entry for entry, after
+///   Folio's.
+/// - The Documents entry is added only where 5.1 would have added it itself: `value` unset or
+///   equal (ignoring case) to the machine's own value, and the entry not already in `value`. 5.1
+///   keeps any other inherited value as it is. **Both sides are compared expanded**, as 5.1
+///   compares them (its `GetExpandedEnvironmentVariable`): an account's fresh block carries
+///   `%ProgramFiles%\WindowsPowerShell\Modules` unexpanded — Windows expands `%SystemRoot%` in it
+///   and not `%ProgramFiles%` (measured 2026-10-17) — while the machine's value comes back
+///   expanded, so a comparison of the raw texts would drop the Documents entry on a stock machine.
+///   `value`'s references are expanded over `environment`, the block the pane is started with,
+///   which is the block the child expands them over.
+/// - With `value` unset, 5.1 itself would compose the Documents entry and the machine's value, so
+///   that is what follows Folio's; with no machine value either there is nothing to compose that
+///   would still find the system's own modules, and the answer is `None` (no prefix).
+///
+/// `None` as well when `folio` cannot be an entry of the path (it holds the separator).
+#[must_use]
+pub(crate) fn compose_module_path(
+    folio: &Path,
+    documents: Option<&Path>,
+    value: Option<&OsStr>,
+    machine: Option<&OsStr>,
+    environment: &[(OsString, OsString)],
+) -> Option<OsString> {
+    let folio = folio.as_os_str().to_string_lossy();
+    if folio.is_empty() || folio.contains(';') {
+        return None;
+    }
+    let expand = |text: &str| expand_environment_references(text, environment);
+    let same = |left: &str, right: &str| {
+        let (left, right) = (expand(left), expand(right));
+        left.trim_end_matches(['\\', '/'])
+            .eq_ignore_ascii_case(right.trim_end_matches(['\\', '/']))
+    };
+    let inherited = match value {
+        Some(value) => value.to_string_lossy().into_owned(),
+        None => machine?.to_string_lossy().into_owned(),
+    };
+    let defaulted = match (value, machine) {
+        (None, _) => true,
+        (Some(value), Some(machine)) => expand(&value.to_string_lossy())
+            .eq_ignore_ascii_case(&expand(&machine.to_string_lossy())),
+        (Some(_), None) => false,
+    };
+    let entries: Vec<&str> = inherited
+        .split(';')
+        .filter(|entry| !entry.is_empty() && !same(entry, &folio))
+        .collect();
+    let mut composed = vec![folio.into_owned()];
+    if defaulted && let Some(documents) = documents {
+        let personal = documents
+            .join("WindowsPowerShell")
+            .join("Modules")
+            .to_string_lossy()
+            .into_owned();
+        if !personal.contains(';') && !entries.iter().any(|entry| same(entry, &personal)) {
+            composed.push(personal);
+        }
+    }
+    composed.extend(entries.into_iter().map(str::to_owned));
+    Some(OsString::from(composed.join(";")))
+}
+
+/// **`text` with each `%NAME%` replaced by `NAME`'s value in `environment`** (names compared
+/// ignoring case, as Windows compares them), the way `ExpandEnvironmentStrings` reads a value: a
+/// reference to a name the block does not hold is left as written, and the scan goes on from its
+/// closing `%`.
+fn expand_environment_references(text: &str, environment: &[(OsString, OsString)]) -> String {
+    let mut expanded = String::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('%') {
+        expanded.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('%') else {
+            expanded.push_str(&rest[open..]);
+            return expanded;
+        };
+        let name = &after[..close];
+        let value = (!name.is_empty())
+            .then(|| {
+                environment
+                    .iter()
+                    .find(|(key, _)| environment_name_eq(key, OsStr::new(name)))
+            })
+            .flatten();
+        match value {
+            Some((_, value)) => {
+                expanded.push_str(&value.to_string_lossy());
+                rest = &after[close + 1..];
+            }
+            None => {
+                expanded.push('%');
+                expanded.push_str(name);
+                rest = &after[close..];
+            }
+        }
+    }
+    expanded.push_str(rest);
+    expanded
+}
+
+/// The variable a PowerShell's module path is in.
+const MODULE_PATH: &str = "PSModulePath";
+
+/// **What a Windows PowerShell birth's module path is decided from**, read on the birth worker:
+/// the artefact directory (writing it if need be), the account's Documents and the machine's own
+/// `PSModulePath`. A seam so a test hands in its own.
+pub(crate) struct ModulePathFacts {
+    pub(crate) module: Option<PathBuf>,
+    pub(crate) documents: Option<PathBuf>,
+    pub(crate) machine: Option<OsString>,
+}
+
+impl ModulePathFacts {
+    /// The machine's: [`psreadline_module_for_birth`], the Documents known folder and the
+    /// machine block.
+    pub(crate) fn of_this_machine() -> Self {
+        Self {
+            module: psreadline_module_for_birth(),
+            documents: crate::psreadline::documents_directory(),
+            machine: bt_platform::environment::machine_variable(MODULE_PATH),
+        }
+    }
+}
+
+/// **Declare Folio's PSReadLine on a Windows PowerShell pane's command** (the note's §2.3).
+///
+/// Only when the pane also gets Folio's loader (`loads`): a binary-only module leaves the host on
+/// its legacy line editor without the `PSConsoleHostReadLine` the loader defines, so the prefix
+/// and the loader are one decision. So no prefix for pwsh 7 (which puts its own module folders
+/// first and ships 2.4.5 in-box), for a row the composer did not load into (`-File`,
+/// `-NonInteractive`, an uncomposable argv, the Shell integration switch off) — each of those panes
+/// gets the account's PSReadLine, exactly as before. **`loads` is the birth's decision from the
+/// edition's known language-mode answer** ([`windows_powershell_birth`], ruling B′): a pane is
+/// given the prefix only when Windows PowerShell answered `FullLanguage`; a constrained edition's
+/// pane is the switch-off pane and a failed question's pane gets the loader without the prefix,
+/// both decided before this is called. `facts` is asked only for a pane that will be composed.
+///
+/// The composed value is written into the last layer, `profile`, replacing the row's own
+/// `PSModulePath` (which it carries after Folio's entry): it is declared on the command
+/// explicitly, because `portable_pty`'s builder rebuilds `PSModulePath` from the registry
+/// otherwise (`declare_probe_module_path`'s finding). It stays for the pane's life (the spike's
+/// disposition (i): removing it after the load pulls 2.0.0 in as a second module).
+pub(crate) fn declare_psreadline_module(
+    program: &Path,
+    loads: bool,
+    before_folio: &[(OsString, OsString)],
+    folio: &[(OsString, OsString)],
+    profile: &mut Vec<(OsString, OsString)>,
+    facts: impl FnOnce() -> ModulePathFacts,
+) {
+    if !loads || !is_powershell(program) || is_pwsh(program) {
+        return;
+    }
+    let facts = facts();
+    let Some(module) = facts.module else {
+        return;
+    };
+    // Names are compared by the spawn's own rule (`bt_pty::same_environment_name`), the one the
+    // pane's environment is layered by: the value found is the one the pane would read, and the
+    // rows replaced are the ones that would have set it.
+    let pane = bt_pty::spawn_environment(before_folio, &[], folio, profile);
+    let value = pane
+        .iter()
+        .find(|(name, _)| bt_pty::same_environment_name(name, OsStr::new(MODULE_PATH)))
+        .map(|(_, value)| value.as_os_str())
+        .filter(|value| !value.is_empty());
+    let Some(composed) = compose_module_path(
+        &module,
+        facts.documents.as_deref(),
+        value,
+        facts.machine.as_deref(),
+        &pane,
+    ) else {
+        return;
+    };
+    profile.retain(|(name, _)| !bt_pty::same_environment_name(name, OsStr::new(MODULE_PATH)));
+    profile.push((OsString::from(MODULE_PATH), composed));
 }
 
 /// **Prepare the script ahead of the first PowerShell birth, on a worker nobody waits for.**
@@ -4361,6 +5238,8 @@ enum PowershellPreparation {
 #[derive(Clone, Copy)]
 struct PreparationEffects {
     script: fn() -> Option<PathBuf>,
+    /// Remove the PSReadLine artefacts other builds left ([`prune_psreadline_artefacts`]).
+    prune: fn(),
     parse: ParseProbe,
     /// The environment the parse questions are asked in, read on the worker.
     environment: fn(&bt_platform::admission::WorkerCtx) -> ProbeEnvironment,
@@ -4371,6 +5250,7 @@ impl PreparationEffects {
     /// current logon environment.
     const MACHINE: Self = Self {
         script: powershell_script_for_birth,
+        prune: prune_psreadline_artefacts_at_launch,
         parse: run_parse_probe,
         environment: |worker| ProbeEnvironment::current(worker, "PowerShell parse probe"),
     };
@@ -4386,12 +5266,14 @@ fn spawn_powershell_preparation(
         move |ctx| match work {
             PowershellPreparation::ScriptAndQuestions(questions) => {
                 let _ = (effects.script)();
+                (effects.prune)();
                 if questions.is_empty() {
                     return;
                 }
                 let environment = (effects.environment)(ctx);
                 for question in questions {
                     ask_parse_question(
+                        ctx,
                         question,
                         ParseAsker::Background,
                         effects.parse,
@@ -4400,7 +5282,7 @@ fn spawn_powershell_preparation(
                 }
             }
             PowershellPreparation::ParseAttempt(attempt) => {
-                run_parse_attempt(attempt, effects.parse, &(effects.environment)(ctx));
+                run_parse_attempt(ctx, attempt, effects.parse, &(effects.environment)(ctx));
             }
         },
     )
@@ -4418,12 +5300,15 @@ fn begin_powershell_preparation(questions: Vec<ParseQuestion>, effects: Preparat
 /// Prepare the script and ask the target parser about every command-bearing
 /// PowerShell row in this profile snapshot. Called at startup and after a table
 /// change; exact argv keys make unchanged rows free and changed rows new work.
-pub fn begin_powershell_preparation_for(programs: &profiles::ProfilePrograms) {
+///
+/// Answers [`QuestionsAsked`], the start's witness that its questions step asked them.
+pub fn begin_powershell_preparation_for(programs: &profiles::ProfilePrograms) -> QuestionsAsked {
     begin_powershell_preparation_over(
         profiles::table().profiles(),
         programs,
         PreparationEffects::MACHINE,
     );
+    QuestionsAsked(())
 }
 
 /// [`begin_powershell_preparation_for`] over rows and effects handed in: the questions are
@@ -4437,8 +5322,37 @@ fn begin_powershell_preparation_over(
 }
 
 /// Re-prepare only the script when a trial releases its durable write.
-pub fn begin_powershell_script_preparation() {
+///
+/// Answers [`ScriptPrepared`], the start's witness that its script step asked for this.
+pub fn begin_powershell_script_preparation() -> ScriptPrepared {
     begin_powershell_preparation(Vec::new(), PreparationEffects::MACHINE);
+    ScriptPrepared(())
+}
+
+/// **That a start's script step asked for the script's preparation** (T-STARTUP-ORDER-SHARED):
+/// the value `startup::FirstWindow::script` must answer, and only
+/// [`begin_powershell_script_preparation`] makes one.
+pub struct ScriptPrepared(());
+
+/// **That a start's questions step put the PowerShell rows' parser questions**
+/// (T-STARTUP-ORDER-SHARED): the value `startup::FirstWindow::questions` must answer, and only
+/// [`begin_powershell_preparation_for`] makes one.
+pub struct QuestionsAsked(());
+
+#[cfg(test)]
+impl ScriptPrepared {
+    /// The headless start's stand-in for the step.
+    pub(crate) fn stand_in() -> Self {
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl QuestionsAsked {
+    /// The headless start's stand-in for the step.
+    pub(crate) fn stand_in() -> Self {
+        Self(())
+    }
 }
 
 /// What one write into a profile did.
@@ -5018,7 +5932,7 @@ mod tests {
             cached_profile_answer(
                 &program,
                 &environment,
-                ProfileQuestion::Ask(POWERSHELL_PROBE_PATIENCE),
+                ProfileQuestion::Ask(POWERSHELL_PROBE_PATIENCE, CheckAsker::Verb),
             )
         };
         file_profile_answer(&program, old.clone(), 1, &environment);
@@ -5068,7 +5982,12 @@ mod tests {
             ),
             "the older run's answer is refused"
         );
-        assert!(!file_observation(&mut held, edition, 7, Heard::Failed));
+        assert!(!file_observation(
+            &mut held,
+            edition,
+            7,
+            Heard::Failed(Unanswered::NoAnswer)
+        ));
         match &held[&edition] {
             (8, Heard::Answer(kept)) => {
                 assert_eq!(kept.path, PathBuf::from(newer));
@@ -5076,7 +5995,12 @@ mod tests {
             }
             other => panic!("run 8's answer is held, not {other:?}"),
         }
-        assert!(file_observation(&mut held, edition, 9, Heard::Failed));
+        assert!(file_observation(
+            &mut held,
+            edition,
+            9,
+            Heard::Failed(Unanswered::NoAnswer)
+        ));
 
         let directory = temp_dir("b4-overlapping-observations");
         let program = directory.join("pwsh.exe");
@@ -5087,7 +6011,7 @@ mod tests {
             cached_profile_answer(
                 &program,
                 &environment,
-                ProfileQuestion::Ask(POWERSHELL_PROBE_PATIENCE)
+                ProfileQuestion::Ask(POWERSHELL_PROBE_PATIENCE, CheckAsker::Verb)
             ),
             Some(PathBuf::from(newer)),
             "a removal reads the newer run's path"
@@ -5397,89 +6321,424 @@ mod tests {
         );
     }
 
+    /// RED (T-STARTUP-ORDER-SHARED; it was read from `run_parse_probe`'s text before) — **a parse
+    /// question is put with the patience every PowerShell machine probe a pane or a page asks**: the
+    /// parse command, the row's text on the input, [`POWERSHELL_PROBE_PATIENCE`], and the answer
+    /// read from what the PowerShell printed.
+    ///
+    /// MUTATION: hand the check [`REMOVAL_PROBE_PATIENCE`] in `parse_probe_through` — the patience
+    /// it was handed is not the shared one.
     #[test]
-    fn shell_integration_startup_and_removal_doors_are_above_window_work() {
-        let main = crate::test_support::item_body(
-            &bt_source::ItemQuery::function("main").in_module("crate"),
+    fn a_parse_question_is_put_with_the_shared_powershell_patience() {
+        let program = Path::new(r"C:\Program Files\PowerShell\7\pwsh.exe");
+        let text = "Write-Host '你好, 世界'";
+        let answer = parse_probe_through(
+            program,
+            text,
+            &ProbeEnvironment::Inherited,
+            |asked, command, input, patience, _| {
+                assert_eq!(asked, program);
+                assert_eq!(command, PARSE_COMMAND);
+                assert_eq!(input, Some(text));
+                assert_eq!(patience, POWERSHELL_PROBE_PATIENCE);
+                Ok(ProbeOutput {
+                    stdout: b"1".to_vec(),
+                    stderr: Vec::new(),
+                })
+            },
         );
-        let removed = main
-            .find("shell_integration::remove_shell_integration(")
-            .unwrap();
-        for later in [
-            "cli::parse(",
-            "launch_wire::hand_over(",
-            "diagnostics::enter_resident_run(",
-            "EventLoop::<AppEvent>::with_user_event()",
-        ] {
-            assert!(removed < main.find(later).unwrap(), "{later}");
-        }
-        let create = crate::test_support::method_body("Runtime", "create");
-        let prepare = create
-            .find("shell_integration::begin_startup_migration();")
-            .expect("startup prepares the PowerShell script");
-        assert!(prepare < create.find("opening_window_attributes(").unwrap());
-        assert!(
-            !crate::test_support::found(
-                bt_source::Needle::new(bt_source::Pattern::text(
-                    "shell_integration::begin_removal();",
-                )),
-                bt_source::View::CodeKeepingLiterals,
-            )
-            .in_the_product(crate::test_support::source())
-            .is_empty()
-        );
-        let begin = crate::test_support::item_body(
-            &bt_source::ItemQuery::function("begin_startup_migration")
-                .in_module("crate::shell_integration::profile_runtime"),
-        );
-        assert!(begin.contains("spawn_profile_observation("));
-        let worker = crate::test_support::item_body(
-            &bt_source::ItemQuery::function("spawn_profile_observation")
-                .in_module("crate::shell_integration::profile_runtime"),
-        );
-        assert!(worker.contains("\"powershell-profile-observation\""));
-        assert!(
-            !worker.contains(".join()"),
-            "the window thread waits for no startup worker"
-        );
-        // The script is prepared before the window; the parser questions about the PowerShell
-        // rows follow the program walk's answers (T-PROGRAMS-REFRESH), read before the panes.
-        let warmed = create
-            .find("shell_integration::begin_powershell_script_preparation();")
-            .expect("launch starts the script's preparation");
-        assert!(warmed < create.find("opening_window_attributes(").unwrap());
-        let asked = create
-            .find("shell_integration::begin_powershell_preparation_for(&profile_programs);")
-            .expect("launch asks about the PowerShell rows the walk answered");
-        assert!(
-            asked
-                < create
-                    .find("let (tab, conpty_source) = create_tab_state(")
-                    .unwrap()
-        );
-        let probe = source_for_profile_probe();
-        let command = source_for_probe_command();
-        assert!(command.contains("environment.program(program)"));
-        assert!(command.contains("bt_platform::quiet_command(resolved)"));
-        assert!(probe.contains("-NoProfile"));
-        assert!(
-            !crate::test_support::found_in(
-                bt_source::Needle::new(
-                    bt_source::Pattern::identifier("POWERSHELL_PROBE_PATIENCE",)
-                ),
-                bt_source::View::Identifiers,
-                bt_source::Scope::Module("crate::shell_integration".to_owned()),
-            )
-            .in_the_product(crate::test_support::source())
-            .is_empty()
-        );
+        assert_eq!(answer, Ok(true));
+    }
+
+    /// RED — **a removal somebody asked for waits longer for a quiet PowerShell than a pane's or a
+    /// page's probe does**: it is asked once and not again by itself, so a cold start's silence is
+    /// waited out where a probe that will be asked again gives up.
+    ///
+    /// MUTATION: give [`REMOVAL_PROBE_PATIENCE`] the probes' five seconds.
+    #[test]
+    fn a_removal_waits_longer_for_a_quiet_powershell_than_a_probe_does() {
         assert!(REMOVAL_PROBE_PATIENCE.quiet > POWERSHELL_PROBE_PATIENCE.quiet);
-        let parse_probe =
-            crate::test_support::item_body(&bt_source::ItemQuery::function("run_parse_probe"));
-        assert!(parse_probe.contains("POWERSHELL_PROBE_PATIENCE"));
-        assert!(probe.contains("ProbeStdio::FED"));
-        assert!(probe.contains("input.as_bytes()"));
-        assert!(!probe.contains(".arg(input)"));
+    }
+
+    /// RED (T-HEADLESS-RUNTIME-SEAM round 2) — **a startup observation the thread door refuses is
+    /// said once, and the next asking tries again.** The startup's latch is set by a start, not by
+    /// an attempt: two askings that are both refused are two attempts, each said in the voice the
+    /// startup was handed, and the latch is still open after them. Before, the refusal was thrown
+    /// away (`let _ =`) and the latch taken first, so one refused start meant no startup
+    /// observation until the Profiles page was opened.
+    ///
+    /// MUTATIONS: drop the `latch.store(false, ..)` after a refused start in
+    /// `begin_startup_migration_through` — the second asking returns at the latch and only one
+    /// refusal is said; say nothing in `lane::Answered::worker_ended` — the refusals are thrown
+    /// away again; hand `spawn_profile_observation` a row from the startup (T-OBSERVATION-REFUSAL-
+    /// ON-THE-PAGE review) — its refusal is filed on a page nobody opened.
+    #[test]
+    fn a_refused_startup_observation_is_said_and_asked_again() {
+        // The edition no other test files, and Windows PowerShell's held in turn, so a filing
+        // numbered between `before` and `after` could only be the startup's.
+        let _turn = WINDOWS_POWERSHELL_OBSERVATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = next_observation();
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let executor = crate::lane::Executor::scripted(std::sync::Arc::clone(&gate));
+        let latch = std::sync::atomic::AtomicBool::new(false);
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let data = temp_dir("startup-observation 观察");
+        for _ in 0..2 {
+            gate.refuse_next_start();
+            let lines = std::sync::Arc::clone(&said);
+            profile_runtime::begin_startup_migration_through(
+                &latch,
+                &executor,
+                || data.clone(),
+                move |line| lines.lock().unwrap().push(line.to_owned()),
+            );
+        }
+        let after = next_observation();
+        let filed = PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|(_, (number, _))| (before..after).contains(number))
+            .map(|(edition, (number, _))| (*edition, *number))
+            .collect::<Vec<_>>();
+        let said = said.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&data);
+        assert_eq!(
+            filed,
+            Vec::new(),
+            "the startup's asking names no rows, so nothing is filed on the page"
+        );
+        assert_eq!(
+            said.len(),
+            2,
+            "each refused start is said once, and the second asking tries again: {said:?}"
+        );
+        assert!(
+            said.iter()
+                .all(|line| line.contains(crate::lane::REFUSED_START)),
+            "what is said is the door's refusal: {said:?}"
+        );
+        assert!(
+            !latch.load(std::sync::atomic::Ordering::Acquire),
+            "the latch stays open on a refused start"
+        );
+    }
+
+    /// RED (T-OBSERVATION-REFUSAL-ON-THE-PAGE review) — **a worker that panicked after it started
+    /// is said once, its asked rows read could-not-run, and the window is woken once**; a run no
+    /// row asked for is said and wakes nothing. Driven end to end through the scripted executor:
+    /// `start_profile_observation` is handed a body that panics on the worker, `start_worker`
+    /// contains the panic and tells the run's `lane::Answered` once (`WorkerEnd::Panicked`). The
+    /// wake and the voice each hold a sender, so the test reads them until the worker's end lets
+    /// the last sender go — no clock.
+    ///
+    /// MUTATIONS: `lane::Answered::worker_ended` returning on `Panicked` as on `Returned` —
+    /// nothing said, nothing filed, no wake; drop the `editions.is_empty()` return — the run no
+    /// row asked for wakes the window.
+    #[test]
+    fn a_panicked_observation_worker_is_said_on_the_profiles_page() {
+        let _turn = WINDOWS_POWERSHELL_OBSERVATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let program = Path::new("powershell.exe");
+        let edition = powershell_edition(program);
+        let row = os_words(&["-NoExit", "-File", "enter.ps1"]);
+        let executor =
+            crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default()));
+        let run = |editions: Vec<PowerShellEdition>| {
+            let (said, lines) = std::sync::mpsc::channel::<String>();
+            let (woken, wakes) = std::sync::mpsc::channel::<()>();
+            let started = profile_runtime::start_profile_observation(
+                &executor,
+                editions,
+                move |line| said.send(line.to_owned()).unwrap(),
+                move || woken.send(()).unwrap(),
+                |_, _| panic!("the observation suite fails this worker on purpose"),
+            );
+            // Each iterator ends when the worker's end has let its sender go.
+            (
+                started,
+                lines.iter().collect::<Vec<_>>(),
+                wakes.iter().count(),
+            )
+        };
+        let (started, said, wakes) = run(vec![edition]);
+        let filed = PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&edition)
+            .is_some_and(|(_, heard)| matches!(heard, Heard::Failed(Unanswered::NotRun)));
+        let fallback = powershell_profile_fallback(program, &row, true);
+        PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&edition);
+        let (_, unasked_said, unasked_wakes) = run(Vec::new());
+        assert!(started, "the worker started, then panicked");
+        assert_eq!(said.len(), 1, "the panic is said once: {said:?}");
+        assert!(
+            said[0].contains("the observation suite fails this worker on purpose"),
+            "what is said is the worker's panic: {said:?}"
+        );
+        assert!(filed, "the asked row's edition is filed as not run");
+        assert_eq!(
+            fallback,
+            if PROFILE_PROBE_EXISTS {
+                PowerShellProfileFallback::NotRun
+            } else {
+                PowerShellProfileFallback::Unsupported
+            }
+        );
+        assert_eq!(wakes, 1, "the window is woken once to draw it");
+        assert_eq!(
+            unasked_said.len(),
+            1,
+            "a run no row asked for is still said"
+        );
+        assert_eq!(unasked_wakes, 0, "and wakes nothing: nothing was filed");
+    }
+
+    /// **Taken in turn by the tests that file Windows PowerShell's edition** on the process's
+    /// observations: each reads the row that edition's newest filing decides, and the suite runs
+    /// tests on parallel threads.
+    pub(super) static WINDOWS_POWERSHELL_OBSERVATIONS: std::sync::Mutex<()> =
+        std::sync::Mutex::new(());
+
+    /// RED (T-OBSERVATION-REFUSAL-ON-THE-PAGE) — **an observation the Profiles page asked for and
+    /// the thread door refused is said on the page's rows, and the next open asks again.** The
+    /// page's opening asks for the edition of each of its rows; a refused start files that the
+    /// check could not run ([`Unanswered::NotRun`]), so the row says so in its own sentence
+    /// instead of keeping its previous state with no word of why. The refusal is still said once
+    /// in the voice it was handed, and the next open goes to the door again: a second refusal,
+    /// said again and filed under a newer number.
+    ///
+    /// Through the scripted executor, not the headless app: the page's opening edge
+    /// (`begin_profile_observation_for`) starts its worker at the product's thread door, and the
+    /// same edge asks the program walk and the page environment of the machine, which the headless
+    /// backend does not stand in for. What the edge hands the door is driven here as it hands it:
+    /// the rows' programs, the data root and the voice.
+    ///
+    /// MUTATIONS: drop `publish_profile_observation_not_run` from `start_profile_observation`'s
+    /// `lane::Answered` — nothing is filed and the row stays `Pending`; decide `Heard::Failed(Unanswered::NotRun)`
+    /// as `Undetermined` in `profile_fallback_from_parts` — the row names a question that was
+    /// asked; answer `CapPowerShellNotProvided` for `NotRun` in `profiles::powershell_row_text` —
+    /// the row reads as a refusal.
+    #[test]
+    fn a_refused_observation_start_is_said_on_the_profiles_page() {
+        let _turn = WINDOWS_POWERSHELL_OBSERVATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let program = Path::new("powershell.exe");
+        let edition = powershell_edition(program);
+        let row = os_words(&["-NoExit", "-File", "enter.ps1"]);
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let executor = crate::lane::Executor::scripted(std::sync::Arc::clone(&gate));
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let data = temp_dir("page-observation 观察");
+        let filed = || {
+            PROFILE_OBSERVATIONS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&edition)
+                .map(|(number, heard)| {
+                    (*number, matches!(heard, Heard::Failed(Unanswered::NotRun)))
+                })
+        };
+        let mut opens = Vec::new();
+        for _ in 0..2 {
+            gate.refuse_next_start();
+            let lines = std::sync::Arc::clone(&said);
+            let started = profile_runtime::spawn_profile_observation(
+                &executor,
+                data.clone(),
+                vec![program.to_path_buf()],
+                Vec::new(),
+                move |line| lines.lock().unwrap().push(line.to_owned()),
+            );
+            let fallback = powershell_profile_fallback(program, &row, true);
+            opens.push((started, filed(), fallback));
+        }
+        PROFILE_OBSERVATIONS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&edition);
+        let said = said.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&data);
+        assert_eq!(said.len(), 2, "each refused start is said once: {said:?}");
+        assert!(
+            said.iter()
+                .all(|line| line.contains(crate::lane::REFUSED_START)),
+            "what is said is the door's refusal: {said:?}"
+        );
+        let mut numbers = Vec::new();
+        for (started, filed, fallback) in opens {
+            assert!(!started, "the door refused the start");
+            let (number, not_run) = filed.expect("the refusal is filed for the row's edition");
+            assert!(not_run, "what is filed is that the check could not run");
+            numbers.push(number);
+            if PROFILE_PROBE_EXISTS {
+                assert_eq!(fallback, PowerShellProfileFallback::NotRun);
+                assert_eq!(
+                    crate::profiles::powershell_row_text(fallback),
+                    Some(crate::i18n::Text::CapPowerShellCheckNotRun),
+                    "the row says the check could not run"
+                );
+            } else {
+                assert_eq!(fallback, PowerShellProfileFallback::Unsupported);
+            }
+        }
+        assert!(
+            numbers[1] > numbers[0],
+            "the second open asked again, as a newer run: {numbers:?}"
+        );
+    }
+
+    /// RED (T-OBSERVATION-REFUSAL-ON-THE-PAGE) — **a run that ended without answering files only
+    /// what it did not answer.** A worker that panicked after it published one edition's answer
+    /// leaves that answer standing and files the other edition as not run; a newer run's filing
+    /// is never replaced; and a row whose observation could not run says so whatever its parse
+    /// question has heard.
+    ///
+    /// MUTATIONS: `file_not_run` refusing only a newer run (`>` for `>=`) — the run's own answer
+    /// is replaced; move the `NotRun` arm of `profile_fallback_from_parts` below the parse arms —
+    /// a row whose parse answer is still awaited reads `Pending`.
+    #[test]
+    fn a_run_that_ended_unanswered_files_only_what_it_did_not_answer() {
+        use crate::psreadline::ExecutionPolicy::{RemoteSigned, Undefined};
+        let observed = ProfileObservation {
+            full_language: true,
+            path: PathBuf::from("profile.ps1"),
+            scopes: scopes(Undefined, Undefined, Undefined, RemoteSigned, Undefined),
+            edition_says: Some(true),
+            location: ProfileLocation {
+                local_fixed: true,
+                marked: false,
+            },
+            ordinary_process: Some(Undefined),
+            seen: ProfileRevision::default(),
+        };
+        let answered = PowerShellEdition::PowerShellSeven;
+        let unanswered = PowerShellEdition::WindowsPowerShell;
+        let mut held = Observations::new();
+        assert!(file_observation(
+            &mut held,
+            answered,
+            8,
+            Heard::Answer(observed)
+        ));
+        assert!(
+            !file_not_run(&mut held, answered, 8),
+            "the run's own answer stands"
+        );
+        assert!(matches!(held[&answered], (8, Heard::Answer(_))));
+        assert!(file_not_run(&mut held, unanswered, 8));
+        assert!(matches!(
+            held[&unanswered],
+            (8, Heard::Failed(Unanswered::NotRun))
+        ));
+        assert!(
+            !file_not_run(&mut held, answered, 7),
+            "an older run never files over a newer one"
+        );
+        assert!(file_not_run(&mut held, answered, 9));
+        for parse in [
+            Heard::NotYet,
+            Heard::Failed(Unanswered::NoAnswer),
+            Heard::Failed(Unanswered::NotRun),
+            Heard::Answer(()),
+        ] {
+            assert_eq!(
+                profile_fallback_from_parts(
+                    true,
+                    true,
+                    false,
+                    false,
+                    parse,
+                    Heard::Failed(Unanswered::NotRun)
+                ),
+                PowerShellProfileFallback::NotRun,
+                "parse={parse:?}"
+            );
+        }
+        assert_eq!(PowerShellProfileFallback::NotRun.policy_cause(), None);
+        assert_eq!(
+            crate::settings::ProfileButton::of(PowerShellProfileFallback::NotRun),
+            None
+        );
+    }
+
+    /// RED (T-HEADLESS-RUNTIME-SEAM, from the startup pin) — **a probe asks its PowerShell without
+    /// a profile and without a prompt, and hands it the text to read on standard input**, never
+    /// on the command line: the stand-in prints the arguments it was started with, one a line, and
+    /// then what it read.
+    ///
+    /// **Unix only, and why** (the coordinator asked for a Windows twin): the probe starts its
+    /// program through `bt_platform::spawn_probe`, which on Windows hands the path straight to
+    /// `CreateProcessW` as the application. That runs an executable and nothing else — a batch
+    /// stand-in is refused there (tried: `cmd.exe` is not asked to read it, and the start fails
+    /// with the path not recognised) — and Windows ships no executable that prints its arguments
+    /// and its standard input back, so a Windows twin would need a stand-in program built for the
+    /// suite. The facts read here are the probe's own (`run_powershell_probe` builds the same
+    /// arguments and writes the same input on every platform); the Mac gate runs them.
+    ///
+    /// The probe is built as both product callers build it: the program resolved into its command
+    /// by [`powershell_probe_command`], then handed to `run_powershell_probe` with no turn (as the
+    /// verb road asks) and no package (off Windows `bt_platform::package_family_of` names none).
+    ///
+    /// MUTATIONS: drop `-NoProfile` from the arguments `run_powershell_probe` adds to `probe` — the
+    /// stand-in does not print it; hand the input over as `probe.arg(input)` — it arrives among the
+    /// arguments and the standard input is empty.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_asks_without_a_profile_and_feeds_its_input_on_stdin() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = temp_dir("probe-arguments 参数");
+        let program = directory.join("pwsh");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nfor argument in \"$@\"; do printf '%s\\n' \"$argument\"; done\nprintf 'stdin:'\ncat\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let probe = powershell_probe_command(&program, &ProbeEnvironment::Inherited)
+            .expect("an absolute name is resolved as it stands");
+        let output = run_powershell_probe(
+            probe,
+            None,
+            None,
+            &program,
+            "Write-Output $input",
+            Some("输入 the text"),
+            POWERSHELL_PROBE_PATIENCE,
+        )
+        .expect("the stand-in answers");
+        let _ = std::fs::remove_dir_all(&directory);
+        let said = String::from_utf8(output.stdout).expect("the stand-in prints UTF-8");
+        let (arguments, read) = said
+            .split_once("stdin:")
+            .expect("the stand-in read its input");
+        assert_eq!(
+            arguments.lines().collect::<Vec<_>>(),
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Write-Output $input"
+            ],
+            "the probe is asked without a profile and without a prompt"
+        );
+        assert_eq!(
+            read.trim_end_matches(['\r', '\n']),
+            "输入 the text",
+            "the text is read from standard input"
+        );
     }
 
     /// PIN — **the window hears a removal only through the report's own answer,
@@ -5545,14 +6804,6 @@ mod tests {
         );
     }
 
-    fn source_for_profile_probe() -> &'static str {
-        crate::test_support::item_body(&bt_source::ItemQuery::function("run_powershell_probe"))
-    }
-
-    fn source_for_probe_command() -> &'static str {
-        crate::test_support::item_body(&bt_source::ItemQuery::function("powershell_probe_command"))
-    }
-
     #[test]
     fn shell_integration_managed_line_is_guarded_and_user_code_is_not_ours() {
         assert!(!profile_marks::Forms::new(&[]).owns(". D:\\tools\\folio.ps1"));
@@ -5570,6 +6821,24 @@ mod tests {
             .into_iter()
             .find(|profile| profile.id == id)
             .expect("a Windows seed id")
+    }
+
+    /// [`shell_command`] for a row whose program is the kind a shipped row's program is on a
+    /// machine with no Store alias, legacy launcher or Cygwin program
+    /// ([`profiles::shipped_kind`]): `wsl.exe` for the WSL row, a native program for the others.
+    fn shipped_command(
+        profile: &Profile,
+        place_arguments: &[OsString],
+        scripts: Scripts<'_>,
+        environment: &dyn ShellEnvironment,
+    ) -> ShellCommand {
+        shell_command(
+            profile,
+            &profiles::shipped_kind(profile),
+            place_arguments,
+            scripts,
+            environment,
+        )
     }
 
     /// `parts` joined by this platform's own separator: `[r"C:\", "Git", "bash.exe"]` is
@@ -6006,7 +7275,7 @@ mod tests {
         assert!(parse_profile_observation("  \r\n").is_none());
     }
 
-    fn scopes(
+    pub(super) fn scopes(
         machine_policy: crate::psreadline::ExecutionPolicy,
         user_policy: crate::psreadline::ExecutionPolicy,
         process: crate::psreadline::ExecutionPolicy,
@@ -6104,10 +7373,11 @@ mod tests {
             assert_eq!(policy_cause(list, here, row), cause, "{name}");
         }
         // And `Changeable` means the command works: the CurrentUser scope it writes, then read.
-        let command_policy = crate::psreadline::ExecutionPolicy::parse(
-            POLICY_COMMAND.rsplit(' ').next().expect("a policy word"),
+        assert_eq!(
+            POLICY_COMMAND.rsplit(' ').next(),
+            Some(POLICY_COMMAND_POLICY.name()),
+            "the command writes the policy the cause promises, in Get-ExecutionPolicy's own word"
         );
-        assert_eq!(command_policy, POLICY_COMMAND_POLICY);
         assert!(POLICY_COMMAND.contains("-Scope CurrentUser"));
         for list in [
             scopes(none, none, none, Restricted, none),
@@ -6116,7 +7386,7 @@ mod tests {
         ] {
             assert_eq!(policy_cause(list, here, Absent), Changeable);
             let after = PolicyScopes {
-                current_user: command_policy,
+                current_user: POLICY_COMMAND_POLICY,
                 ..list
             };
             assert_eq!(policy_cause(after, here, Absent), Allows, "{list:?}");
@@ -6389,7 +7659,11 @@ mod tests {
     #[test]
     fn a_policy_changed_since_the_last_visit_flips_the_row_to_offer() {
         use crate::psreadline::ExecutionPolicy::{RemoteSigned, Restricted, Undefined};
-        // Windows PowerShell's edition, which no other test publishes for; restored after.
+        // Windows PowerShell's edition, which only the tests that take
+        // `WINDOWS_POWERSHELL_OBSERVATIONS` publish for; restored after.
+        let _turn = WINDOWS_POWERSHELL_OBSERVATIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let program = Path::new("powershell.exe");
         let row = os_words(&["-NoExit", "-File", "enter.ps1"]);
         let observed = |current_user| ProfileObservation {
@@ -6936,12 +8210,17 @@ mod tests {
     fn a_platform_without_the_profile_probe_never_offers() {
         for observed in [
             Heard::NotYet,
-            Heard::Failed,
+            Heard::Failed(Unanswered::NoAnswer),
+            Heard::Failed(Unanswered::NotRun),
             Heard::Answer((PolicyCause::Allows, false, true)),
             Heard::Answer((PolicyCause::Allows, true, true)),
             Heard::Answer((PolicyCause::Changeable, false, true)),
         ] {
-            for parse in [Heard::Answer(()), Heard::NotYet, Heard::Failed] {
+            for parse in [
+                Heard::Answer(()),
+                Heard::NotYet,
+                Heard::Failed(Unanswered::NoAnswer),
+            ] {
                 assert_eq!(
                     profile_fallback_from_parts(false, true, false, false, parse, observed),
                     PowerShellProfileFallback::Unsupported,
@@ -7414,7 +8693,10 @@ mod tests {
             claim_parse_attempt(question.clone(), ParseAsker::Background).expect("first attempt");
         assert_eq!(heard_parse(program, &arguments), Heard::NotYet, "in flight");
         fail(first);
-        assert_eq!(heard_parse(program, &arguments), Heard::Failed);
+        assert_eq!(
+            heard_parse(program, &arguments),
+            Heard::Failed(Unanswered::NoAnswer)
+        );
         for _ in 1..PARSE_PROBE_ATTEMPT_LIMIT {
             fail(claim_parse_attempt(question.clone(), ParseAsker::Background).expect("bounded"));
         }
@@ -7433,7 +8715,14 @@ mod tests {
             "an answered question is not asked again"
         );
         assert_eq!(
-            profile_fallback_from_parts(true, true, false, false, Heard::Failed, Heard::NotYet),
+            profile_fallback_from_parts(
+                true,
+                true,
+                false,
+                false,
+                Heard::Failed(Unanswered::NoAnswer),
+                Heard::NotYet
+            ),
             PowerShellProfileFallback::Undetermined
         );
         assert_eq!(
@@ -7484,7 +8773,8 @@ mod tests {
                     Ok(())
                 });
             },
-        );
+        )
+        .arguments;
         assert_eq!(actual, arguments);
         assert!(!prepared.get());
         assert_eq!(
@@ -7705,6 +8995,14 @@ mod tests {
             assert!(!load.contains("$Global:__FolioReadLineType"));
         }
         assert!(!winps.contains("GetAssemblies"));
+        // **One road** (T-INTEGRATION-INJECT-2-BUILD round 3b, ruling B′): the loader acts only in
+        // `FullLanguage`; the round-2 give-back that removed Folio's module and imported another
+        // in any other mode is gone, because a constrained edition's pane is never given the
+        // prefix to give back.
+        for load in [&winps, &pwsh] {
+            assert!(!load.contains("} else {"), "{load}");
+            assert!(!load.contains("Remove-Module"), "{load}");
+        }
         assert_eq!(pwsh.contains("GetAssemblies"), cfg!(windows));
         assert_eq!(
             pwsh.contains("Microsoft.PowerShell.PSReadLine.dll"),
@@ -7842,7 +9140,8 @@ mod tests {
         let environment = ProbeEnvironment::Logon(block);
         let mut failures = Vec::new();
         for attempt in 1..=PARSE_PROBE_ATTEMPT_LIMIT {
-            match run_parse_probe(program, text, &environment) {
+            let asked = (program.to_path_buf(), text.to_owned(), environment.clone());
+            match on_a_worker(move |worker| run_parse_probe(worker, &asked.0, &asked.1, &asked.2)) {
                 Ok(answer) => return answer,
                 Err(failure) => {
                     eprintln!(
@@ -7863,7 +9162,7 @@ mod tests {
     /// `bt_pty::test_shell` so the test shell does not read the row a second, different way
     /// (`-noe -c` is the genuine Visual Studio row, and the subject here).
     #[cfg(windows)]
-    fn test_shell_shape(
+    pub(super) fn test_shell_shape(
         program: &Path,
         arguments: &[OsString],
     ) -> bt_pty::test_shell::PowerShellShape {
@@ -8100,6 +9399,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// GUARD — **every terminal birth uses the one PowerShell composition.** Its subject is how
+    /// the source is written: the census of `create_leaf_session`'s callers, the switch read once
+    /// in the constructor, and the composer called only on the birth worker (CONVENTIONS, "A test
+    /// pins behaviour by running it"). The composition itself is driven by the
+    /// `compose_powershell_birth` tests.
     #[test]
     fn every_terminal_birth_uses_the_one_powershell_composition() {
         let index = Index::of_package("bt-app");
@@ -8126,14 +9430,17 @@ mod tests {
             .expect("the birth worker's body");
         assert_eq!(
             birth
-                .matches("shell_integration::compose_powershell_birth(")
+                .matches("shell_integration::compose_powershell_birth_loading(")
                 .count(),
             1,
-            "the birth worker composes the pane's argv"
+            "the birth worker composes the pane's argv (and learns whether the loader went in)"
         );
+        // The retry's composer is handed to `pty_door::plan_birth`, which composes it with the
+        // integration the edition's answer leaves; that decision is driven by
+        // `pty_door::tests::a_birth_composes_with_the_integration_its_edition_leaves`.
         assert!(
-            birth.contains("shell_integration::last_resort_arguments(powershell_integration)"),
-            "and the retry's, with the same switch"
+            birth.contains("shell_integration::last_resort_arguments,"),
+            "and the retry's, with the one composer"
         );
 
         let found = index
@@ -8371,6 +9678,7 @@ mod tests {
 
         /// The [`ParseProbe`] stand-in.
         fn probe(
+            _worker: &bt_platform::admission::WorkerCtx,
             program: &Path,
             _text: &str,
             _environment: &ProbeEnvironment,
@@ -8474,6 +9782,7 @@ mod tests {
             &programs,
             PreparationEffects {
                 script: no_script,
+                prune: || {},
                 parse: NeverAnswers::probe,
                 environment: |_| ProbeEnvironment::Inherited,
             },
@@ -8544,7 +9853,7 @@ mod tests {
             .into_iter()
             .find(|profile| profile.id == profiles::fallback_profile_id())
             .expect("the floor is a row this build ships");
-        let command = shell_command(&floor, &[], Scripts::default(), &bare());
+        let command = shipped_command(&floor, &[], Scripts::default(), &bare());
         for (name, _) in &command.environment {
             for declared in DECLARED {
                 assert!(
@@ -8658,7 +9967,7 @@ mod tests {
     #[test]
     fn git_bash_trades_its_login_flag_for_the_init_file() {
         let script = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash");
-        let command = shell_command(&row("gitbash"), &[], bash_only(script), &bare());
+        let command = shipped_command(&row("gitbash"), &[], bash_only(script), &bare());
         assert_eq!(
             args(&command),
             [
@@ -8676,11 +9985,12 @@ mod tests {
                 OsString::from("BT_SHELL_INTEGRATION"),
                 OsString::from(MODE_LOGIN)
             )),
-            "the marker is what makes the script run the chain it displaced, and this row's own              arguments say which chain that is"
+            "the marker is what makes the script run the chain it displaced, and this row's own \
+             arguments say which chain that is"
         );
         // No script on this machine, and Git Bash is the shell it always was.
         assert_eq!(
-            args(&shell_command(
+            args(&shipped_command(
                 &row("gitbash"),
                 &[],
                 Scripts::default(),
@@ -8744,7 +10054,7 @@ mod tests {
             bash: Some(script),
             zdotdir: Some(zdotdir),
         };
-        let first = shell_command(&row("wsl"), &place, doors, &bare());
+        let first = shipped_command(&row("wsl"), &place, doors, &bare());
         assert_eq!(
             args(&first),
             expected,
@@ -8764,7 +10074,7 @@ mod tests {
         );
         // The whole of the defect, said as a sentence: the second pane of a run
         // used to be the first one that worked.
-        let second = shell_command(&row("wsl"), &place, doors, &bare());
+        let second = shipped_command(&row("wsl"), &place, doors, &bare());
         assert_eq!(
             args(&second),
             args(&first),
@@ -8842,7 +10152,7 @@ mod tests {
     fn a_script_wsl_cannot_name_is_not_handed_to_it() {
         let place = [OsString::from("--cd"), OsString::from("/mnt/d/Developer")];
         for unreachable in [r"\\nas\home\Folio\folio.bash", "relative\\folio.bash"] {
-            let command = shell_command(
+            let command = shipped_command(
                 &row("wsl"),
                 &place,
                 Scripts {
@@ -8900,7 +10210,7 @@ mod tests {
             ],
             ..row("gitbash")
         };
-        let command = shell_command(
+        let command = shipped_command(
             &theirs,
             &[OsString::from("--rcfile-is-not-here")],
             bash_only(Path::new(r"C:\Folio\folio.bash")),
@@ -8923,7 +10233,7 @@ mod tests {
             args: vec!["-li".to_owned()],
             ..row("gitbash")
         };
-        let command = shell_command(
+        let command = shipped_command(
             &clustered,
             &[],
             bash_only(Path::new(r"C:\Folio\folio.bash")),
@@ -8939,7 +10249,7 @@ mod tests {
             args: Vec::new(),
             ..row("gitbash")
         };
-        let command = shell_command(
+        let command = shipped_command(
             &bare_row,
             &[],
             bash_only(Path::new(r"C:\Folio\folio.bash")),
@@ -8965,7 +10275,7 @@ mod tests {
     /// documentation puts them — has none of them.
     #[test]
     fn the_startup_chain_a_pane_emulates_is_the_one_its_profile_asked_for() {
-        let login = shell_command(
+        let login = shipped_command(
             &row("gitbash"),
             &[],
             bash_only(Path::new(r"C:\Folio\folio.bash")),
@@ -8983,7 +10293,7 @@ mod tests {
             login: false,
             ..row("gitbash")
         };
-        let plain = shell_command(
+        let plain = shipped_command(
             &plain,
             &[],
             bash_only(Path::new(r"C:\Folio\folio.bash")),
@@ -9029,7 +10339,7 @@ mod tests {
             paths: profiles::PathNamespace::Windows,
             ..row("gitbash")
         };
-        let command = shell_command(
+        let command = shipped_command(
             &theirs,
             &[],
             both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
@@ -9043,7 +10353,7 @@ mod tests {
         assert_eq!(value_of(&command, "BT_USER_ZDOTDIR"), None);
         // A reader who keeps their own startup files somewhere else has said so
         // in that variable, and the script needs it to put them back.
-        let inherited = shell_command(
+        let inherited = shipped_command(
             &theirs,
             &[],
             both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
@@ -9086,17 +10396,17 @@ mod tests {
         }
         let rows = profiles::shipped_for(profiles::SeedPlatform::MacOs, &Mac);
         let scripts = both("/F/folio.bash", "/F/zdotdir");
-        let zsh = shell_command(&rows[0], &[], scripts, &bare());
+        let zsh = shipped_command(&rows[0], &[], scripts, &bare());
         assert_eq!(args(&zsh), ["-l"]);
         assert_eq!(value_of(&zsh, "ZDOTDIR").as_deref(), Some("/F/zdotdir"));
-        let bash = shell_command(&rows[1], &[], scripts, &bare());
+        let bash = shipped_command(&rows[1], &[], scripts, &bare());
         assert_eq!(args(&bash), ["--init-file", "/F/folio.bash", "-i"]);
         assert_eq!(
             value_of(&bash, INSTALLED_MARKER).as_deref(),
             Some(MODE_LOGIN),
             "the script replays the login chain bash will not run beside an init file"
         );
-        let sh = shell_command(&rows[2], &[], scripts, &bare());
+        let sh = shipped_command(&rows[2], &[], scripts, &bare());
         assert_eq!(args(&sh), ["-l"]);
     }
 
@@ -9173,7 +10483,7 @@ mod tests {
                 bash: Some(&script),
                 zdotdir: Some(&zdotdir),
             };
-            let mut command = shell_command(row, &[], scripts, &bare());
+            let mut command = shipped_command(row, &[], scripts, &bare());
             command
                 .environment
                 .push((OsString::from("HOME"), home.clone().into_os_string()));
@@ -9255,7 +10565,7 @@ mod tests {
             login: false,
             ..row("gitbash")
         };
-        let command = shell_command(
+        let command = shipped_command(
             &theirs,
             &[],
             both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
@@ -9286,7 +10596,7 @@ mod tests {
     #[test]
     fn the_question_asked_inside_the_distribution_names_both_doors() {
         let place = [OsString::from("--cd"), OsString::from("/mnt/d/Developer")];
-        let command = shell_command(
+        let command = shipped_command(
             &row("wsl"),
             &place,
             both(r"C:\Folio\folio.bash", r"C:\Folio\zdotdir"),
@@ -9348,7 +10658,7 @@ mod tests {
                 Integration::PowerShellOptIn,
                 "{id}: PowerShell's script is the user's to install"
             );
-            let command = shell_command(
+            let command = shipped_command(
                 &profile,
                 &[],
                 bash_only(Path::new(r"C:\script.bash")),
@@ -9394,7 +10704,7 @@ mod tests {
     ///   [`profiles::Integration::CmdPrompt`].
     #[test]
     fn command_prompt_marks_its_command_boundaries_and_reports_its_directory() {
-        let command = shell_command(
+        let command = shipped_command(
             &row("cmd"),
             &[],
             bash_only(Path::new(r"C:\script.bash")),
@@ -9440,7 +10750,7 @@ mod tests {
     #[test]
     fn every_shell_is_told_this_terminal_renders_hyperlinks_unless_it_was_already_told() {
         let forced = |id: &str, environment: &dyn ShellEnvironment| {
-            shell_command(
+            shipped_command(
                 &row(id),
                 &[],
                 bash_only(Path::new(r"C:\s.bash")),
@@ -9473,7 +10783,7 @@ mod tests {
         );
         // And across the WSL boundary a variable that is not listed does not
         // travel, so the declaration is listed whether or not we set it.
-        let wsl = shell_command(
+        let wsl = shipped_command(
             &row("wsl"),
             &[],
             bash_only(Path::new(r"C:\s.bash")),
@@ -9511,7 +10821,7 @@ mod tests {
         assert!(!rows.is_empty(), "a Mac ships its shells");
         for row in &rows {
             let forced = |environment: &dyn ShellEnvironment| {
-                shell_command(row, &[], both("/F/folio.bash", "/F/zdotdir"), environment)
+                shipped_command(row, &[], both("/F/folio.bash", "/F/zdotdir"), environment)
                     .environment
                     .into_iter()
                     .find(|(key, _)| key == "FORCE_HYPERLINK")
@@ -9539,7 +10849,7 @@ mod tests {
     /// *that* prints it three times.
     #[test]
     fn a_prompt_the_user_already_set_is_kept_and_reported_in_front_of_exactly_once() {
-        let theirs = shell_command(
+        let theirs = shipped_command(
             &row("cmd"),
             &[],
             Scripts::default(),
@@ -9550,7 +10860,7 @@ mod tests {
             r"$e]133;D$e\$e]7;file:///$P$e\$e]133;A$e\$T$S$P$G"
         );
 
-        let again = shell_command(
+        let again = shipped_command(
             &row("cmd"),
             &[],
             Scripts::default(),
@@ -9567,7 +10877,7 @@ mod tests {
 
         // An empty `PROMPT` is not a prompt the user chose to have; it is what
         // `cmd` reads as "use the default", and the default is what it gets.
-        let empty = shell_command(
+        let empty = shipped_command(
             &row("cmd"),
             &[],
             Scripts::default(),
@@ -9614,7 +10924,7 @@ mod tests {
     /// overridden - with no symptom except that the row appears not to work.
     #[test]
     fn a_profiles_own_rows_are_written_over_what_this_terminal_says() {
-        let command = shell_command(
+        let command = shipped_command(
             &row_with(
                 "gitbash",
                 &[("FOO", "bar"), ("TERM_PROGRAM", "xterm"), ("EMPTY", "")],
@@ -9634,7 +10944,7 @@ mod tests {
         assert_eq!(value_of(&command, "EMPTY").as_deref(), Some(""));
         // And it is this row's sentence and no other's: the shipped table is
         // untouched, so a sibling profile still hears what the terminal says.
-        let sibling = shell_command(
+        let sibling = shipped_command(
             &row("gitbash"),
             &[],
             bash_only(Path::new(r"C:\s.bash")),
@@ -9654,7 +10964,7 @@ mod tests {
     /// throwing away what somebody is in the middle of writing.
     #[test]
     fn a_nameless_row_never_reaches_a_child() {
-        let command = shell_command(
+        let command = shipped_command(
             &row_with("cmd", &[("", "orphan"), ("KEPT", "1")]),
             &[],
             Scripts::default(),
@@ -9680,7 +10990,7 @@ mod tests {
     #[test]
     fn the_hyperlink_answer_a_profile_gives_replaces_the_declaration_rather_than_joining_it() {
         for answer in ["0", "1"] {
-            let command = shell_command(
+            let command = shipped_command(
                 &row_with("gitbash", &[(FORCE_HYPERLINK, answer)]),
                 &[],
                 bash_only(Path::new(r"C:\s.bash")),
@@ -9691,7 +11001,7 @@ mod tests {
         }
         // `Auto` - no row of that name - is the behaviour that shipped before
         // the picker existed, unchanged.
-        let auto = shell_command(
+        let auto = shipped_command(
             &row("gitbash"),
             &[],
             bash_only(Path::new(r"C:\s.bash")),
@@ -9700,7 +11010,7 @@ mod tests {
         assert_eq!(value_of(&auto, FORCE_HYPERLINK).as_deref(), Some("1"));
         // And a profile's own `0` beats an inherited `1`, which the declaration
         // would have left alone: this is not a declaration, it is the answer.
-        let over_inherited = shell_command(
+        let over_inherited = shipped_command(
             &row_with("gitbash", &[(FORCE_HYPERLINK, "0")]),
             &[],
             bash_only(Path::new(r"C:\s.bash")),
@@ -9726,7 +11036,7 @@ mod tests {
                 paths: profiles::PathNamespace::Windows,
                 ..row(id)
             };
-            let command = shell_command(&shut, &[], bash_only(Path::new(r"C:\s.bash")), &bare());
+            let command = shipped_command(&shut, &[], bash_only(Path::new(r"C:\s.bash")), &bare());
             assert_eq!(
                 command.arguments,
                 // The row's own words, its login switch spelled among them
@@ -9807,6 +11117,194 @@ mod tests {
         }
     }
 
+    /// PIN — **`bash.exe` is handed `wsl.exe`'s door: the script in WSL's spelling**
+    /// (T-WSL-LEGACY-BASH-DOOR round 2). The door follows the program kind, not the stem: a bash
+    /// inside WSL is given WSL-spelled paths or no door.
+    ///
+    /// `System32\bash.exe` and WSL's Store `bash.exe` alias start the default distribution's bash
+    /// through a shell that re-reads what follows their name, so the door is one `-c` line: the
+    /// script translated as `wsl.exe`'s road translates it, single-quoted, behind a readability
+    /// guard that falls back to the bash the row asked for, with the marker set by the branch that
+    /// reads the script. A distribution's own launcher gets no door. A Git Bash and a Cygwin bash
+    /// keep `--init-file` with the script as Windows spells it. Every program that enters WSL
+    /// lists the terminal's declarations and the profile's own variables in `WSLENV`, and its
+    /// birth re-derives that list (`crosses_wsl`); no other program does.
+    ///
+    /// MUTATIONS: ① decide by stem (`door_on` hands every launcher the row's door, and the
+    /// `WslLauncher` arm of `shell_command_for` is skipped) and `System32\bash.exe` is handed
+    /// `--init-file C:\…`; ② drop the `[ -r … ]` guard and the line differs; ③ `crosses_wsl` read
+    /// off `paths` and the launcher's birth would not re-list `WSLENV`.
+    ///
+    /// Windows only: a drive-letter path is a Windows path grammar, and WSL is a Windows launcher.
+    #[cfg(windows)]
+    #[test]
+    fn a_wsl_bash_launcher_gets_wsl_exes_translated_door() {
+        use profiles::ShellProgram;
+        let script =
+            Path::new(r"C:\Users\alice\AppData\Roaming\Folio\shell-integration\folio.bash");
+        let translated = "/mnt/c/Users/alice/AppData/Roaming/Folio/shell-integration/folio.bash";
+        let mine = [("FOLIO_样本", "混合 text")];
+        let custom = |program: &str, integration: profiles::IntegrationChoice| Profile {
+            id: "mine".into(),
+            program: ProgramSource::Path(PathBuf::from(program)),
+            integration,
+            ..row_with("gitbash", &mine)
+        };
+        let auto = profiles::IntegrationChoice::Auto;
+        let crosses = |command: &ShellCommand, wanted: &[&str]| {
+            let listed = value_of(command, "WSLENV").unwrap_or_default();
+            wanted
+                .iter()
+                .all(|name| listed.contains(&format!("{name}/u")))
+                && command.environment_derivation.crosses_wsl
+        };
+        let wsl_exe = shell_command(
+            &row_with("wsl", &mine),
+            &ShellProgram::WslExe,
+            &[],
+            bash_only(script),
+            &bare(),
+        );
+        assert_eq!(
+            args(&wsl_exe),
+            ["-e", "sh", "-c", WSL_LOGIN_SHELL, WSL_ARGV0, translated, ""],
+            "wsl.exe: the script, translated into the distribution's spelling"
+        );
+        assert!(crosses(&wsl_exe, &["TERM_PROGRAM", "FOLIO_样本"]));
+        for program in [
+            r"C:\Windows\System32\bash.exe",
+            r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\bash.exe",
+        ] {
+            let row = custom(program, auto);
+            assert_eq!(profiles::launch_args(&row), ["--login", "-i"]);
+            let command = shell_command(
+                &row,
+                &ShellProgram::WslLauncher { distribution: None },
+                &[],
+                bash_only(script),
+                &bare(),
+            );
+            assert_eq!(
+                args(&command),
+                [
+                    "-c".to_owned(),
+                    format!(
+                        "[ -r '{translated}' ] && BT_SHELL_INTEGRATION=login exec bash \
+                         --init-file '{translated}' '-i'; exec bash '--login' '-i'"
+                    ),
+                ],
+                "{program}: the script in WSL's spelling, read by the bash the launcher starts"
+            );
+            assert_eq!(
+                value_of(&command, INSTALLED_MARKER),
+                None,
+                "{program}: the marker is set inside, by the branch that reads the script"
+            );
+            assert!(
+                crosses(&command, &["TERM_PROGRAM", "FORCE_HYPERLINK", "FOLIO_样本"]),
+                "{program}: {:?}",
+                value_of(&command, "WSLENV")
+            );
+        }
+        // A distribution's own launcher reads its own verbs: no door, and it still crosses.
+        let ubuntu = custom(
+            r"C:\Users\alice\AppData\Local\Microsoft\WindowsApps\ubuntu2204.exe",
+            profiles::IntegrationChoice::Named(Integration::BashInitFile),
+        );
+        let command = shell_command(
+            &ubuntu,
+            &ShellProgram::WslLauncher {
+                distribution: Some("Ubuntu-22.04".into()),
+            },
+            &[],
+            bash_only(script),
+            &bare(),
+        );
+        assert_eq!(args(&command), profiles::launch_args(&ubuntu), "no door");
+        assert!(crosses(&command, &["TERM_PROGRAM", "FOLIO_样本"]));
+        // A bash this side starts keeps its own door, with the script as Windows spells it.
+        for (program, kind) in [
+            (r"C:\Program Files\Git\bin\bash.exe", ShellProgram::Native),
+            (r"C:\cygwin64\bin\bash.exe", ShellProgram::Cygwin),
+        ] {
+            let command = shell_command(
+                &custom(program, auto),
+                &kind,
+                &[],
+                bash_only(script),
+                &bare(),
+            );
+            assert_eq!(
+                args(&command),
+                [
+                    "--init-file".to_owned(),
+                    script.display().to_string(),
+                    "-i".to_owned()
+                ],
+                "{program}"
+            );
+            assert_eq!(value_of(&command, "WSLENV"), None, "{program}");
+            assert!(!command.environment_derivation.crosses_wsl, "{program}");
+        }
+    }
+
+    /// PIN — **`bash.exe`'s door is not opened for a path or word its two quotings would read
+    /// differently** (T-WSL-LEGACY-BASH-DOOR round 2): `$`, `` ` ``, `\` and `"` inside the outer
+    /// shell's double quotes (measured: `$HOME` and a backtick inside the inner single quotes were
+    /// expanded by it), and `'`, which ends the inner single quotes. Such a row gets what `wsl.exe`
+    /// gets for a script WSL cannot name: its own words as the row wrote them, the plain shell.
+    /// A space and Chinese are handed over whole.
+    ///
+    /// MUTATION: accept every text in `reads_alike_in_both_quotes` and the `$` folder's line
+    /// names `/mnt/c/Users/alice/fo$lio/…`, which the outer shell expands.
+    ///
+    /// Windows only: a drive-letter path is a Windows path grammar, and WSL is a Windows launcher.
+    #[cfg(windows)]
+    #[test]
+    fn a_wsl_bash_launcher_is_not_handed_what_its_shells_would_reread() {
+        use profiles::ShellProgram;
+        let launcher = ShellProgram::WslLauncher { distribution: None };
+        let row = Profile {
+            id: "mine".into(),
+            program: ProgramSource::Path(PathBuf::from(r"C:\Windows\System32\bash.exe")),
+            ..row("gitbash")
+        };
+        let at = |script: &str, row: &Profile| {
+            args(&shell_command(
+                row,
+                &launcher,
+                &[],
+                bash_only(Path::new(script)),
+                &bare(),
+            ))
+        };
+        for refused in [
+            r"C:\Users\alice\fo$lio\folio.bash",
+            r"C:\Users\alice\a`b\folio.bash",
+            r"C:\Users\alice\o'neil\folio.bash",
+            r"\\nas\home\folio.bash",
+        ] {
+            assert_eq!(at(refused, &row), ["--login", "-i"], "{refused}");
+        }
+        for word in ["$HOME", "`id`", r"a\b", "say \"hi\"", "it's"] {
+            let worded = Profile {
+                args: vec![word.to_owned()],
+                ..row.clone()
+            };
+            assert_eq!(
+                at(r"C:\Users\alice\folio.bash", &worded),
+                profiles::launch_args(&worded),
+                "{word}: the row's words reach the launcher as written, with no door"
+            );
+        }
+        let whole = at(r"C:\Users\alice\Program Files 样本\folio.bash", &row);
+        assert_eq!(whole[0], "-c");
+        assert!(
+            whole[1].contains("--init-file '/mnt/c/Users/alice/Program Files 样本/folio.bash'"),
+            "{whole:?}"
+        );
+    }
+
     /// PIN - **a WSL profile's own variables are listed so that they cross.**
     ///
     /// A variable set on `wsl.exe` is set on a *Win32* process, and the
@@ -9823,7 +11321,7 @@ mod tests {
         let script = Path::new(r"C:\Users\dev\AppData\Roaming\Folio\shell-integration\folio.bash");
         let listed = |profile: &Profile| {
             value_of(
-                &shell_command(profile, &[], bash_only(script), &bare()),
+                &shipped_command(profile, &[], bash_only(script), &bare()),
                 "WSLENV",
             )
         };
@@ -9852,14 +11350,15 @@ mod tests {
             listed(&row("wsl")).is_some_and(|listed| listed.contains("FORCE_HYPERLINK/u")),
             "a WSL pane crosses the boundary whichever shell is behind it"
         );
-        // The one WSL pane that lists nothing new is the one handed no script,
-        // which is the pane that was never injected into.
-        assert_eq!(
+        // **And a WSL pane handed no script lists them too** (owner ruling
+        // 2026-10-12): they say what the terminal is, not what a script installed.
+        assert!(
             value_of(
-                &shell_command(&row("wsl"), &[], Scripts::default(), &bare()),
+                &shipped_command(&row("wsl"), &[], Scripts::default(), &bare()),
                 "WSLENV"
-            ),
-            None
+            )
+            .is_some_and(|listed| listed.contains("TERM_PROGRAM/u")),
+            "a WSL pane with no script crosses the boundary too"
         );
     }
 
@@ -9956,6 +11455,7 @@ mod tests {
         assert_eq!(
             declared_environment(
                 &row("gitbash"),
+                &profiles::ShellProgram::Native,
                 bash_only(script),
                 &[],
                 Some("folio-attention-pipe")
@@ -9971,7 +11471,13 @@ mod tests {
         ];
         expected.extend(locale.iter().cloned());
         assert_eq!(
-            declared_environment(&row("pwsh"), Scripts::default(), &[], None),
+            declared_environment(
+                &row("pwsh"),
+                &profiles::ShellProgram::Native,
+                Scripts::default(),
+                &[],
+                None
+            ),
             expected,
             "folio.ps1 is the half that says FORCE_HYPERLINK, and with no wire open no pane is given its three"
         );
@@ -9997,8 +11503,13 @@ mod tests {
             said(FORCE_HYPERLINK, "1"),
         ];
         expected.extend(locale.iter().cloned());
-        let page =
-            declared_environment(&mine, Scripts::default(), &[], Some("folio-attention-pipe"));
+        let page = declared_environment(
+            &mine,
+            &profiles::ShellProgram::Native,
+            Scripts::default(),
+            &[],
+            Some("folio-attention-pipe"),
+        );
         // `Term_Program` is `TERM_PROGRAM` only where names are case-blind.
         if bt_pty::same_environment_name(OsStr::new("Term_Program"), OsStr::new("TERM_PROGRAM")) {
             assert_eq!(page, expected);
@@ -10030,7 +11541,13 @@ mod tests {
             Some(OsStr::new("新 $P$G")),
             "the fixture's prompt is one this process does not have"
         );
-        let page = declared_environment(&row("cmd"), Scripts::default(), &account, None);
+        let page = declared_environment(
+            &row("cmd"),
+            &profiles::ShellProgram::Native,
+            Scripts::default(),
+            &account,
+            None,
+        );
         let value = |wanted: &str| {
             page.iter()
                 .find(|(name, _)| name == wanted)
@@ -10183,7 +11700,7 @@ mod tests {
             ..row("cmd")
         };
         assert_eq!(profiles::served_by(&theirs), Integration::None);
-        let command = shell_command(&theirs, &[], Scripts::default(), &bare());
+        let command = shipped_command(&theirs, &[], Scripts::default(), &bare());
         assert_eq!(command.arguments, [OsString::from("--verbose")]);
         assert_eq!(
             value_of(&command, "ANTHROPIC_LOG").as_deref(),
@@ -10548,6 +12065,69 @@ mod tests {
     /// rather than asking a shell where it is.
     const PROFILE_LEAF: &str = "Microsoft.PowerShell_profile.ps1";
 
+    /// RED (round 2) — **the witness line**: a check of a packaged PowerShell that settled while
+    /// other processes of its package ran says how many and which, naming its edition; none, or
+    /// nothing read, says nothing.
+    ///
+    /// MUTATION: say the line for an empty list (drop the `is_empty` filter) — a check beside
+    /// nothing leaves a line.
+    #[test]
+    fn a_check_settled_beside_its_package_says_which() {
+        // Joined, so the file name — what the edition is read from — is `pwsh.exe` on every
+        // platform.
+        let pwsh = &Path::new("李四").join("WindowsApps").join("pwsh.exe");
+        assert_eq!(
+            package_beside_line(pwsh, Some(&[4242, 77])).as_deref(),
+            Some(
+                "Folio: the PowerShell 7 check settled while 2 other processes of its package ran \
+                 (4242, 77)"
+            )
+        );
+        assert_eq!(package_beside_line(pwsh, Some(&[])), None);
+        assert_eq!(package_beside_line(pwsh, None), None);
+    }
+
+    /// Run `body` on a worker the thread door started — where every PowerShell check is asked —
+    /// and wait for it.
+    fn on_a_worker<T: Send + 'static>(
+        body: impl FnOnce(&bt_platform::admission::WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        match bt_platform::spawn_at_priority(
+            "bt-shell-integration-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            body,
+        )
+        .expect("the thread door starts a thread")
+        .join()
+        {
+            Ok(answer) => answer,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// RED (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH) — **the proof line**: a check whose job held
+    /// other processes as it settled says how many, naming its edition; one whose job held none,
+    /// or was not read, says nothing.
+    ///
+    /// MUTATION: say the line for every settlement (drop the `> 0` filter) — a check whose job
+    /// held nothing else leaves a line.
+    #[test]
+    fn a_check_settled_beside_other_processes_says_so() {
+        // Joined, so the file name — what the edition is read from — is `pwsh.exe` on every
+        // platform.
+        let pwsh = &Path::new("张三").join("WindowsApps").join("pwsh.exe");
+        assert_eq!(
+            settled_beside_line(pwsh, Some(2)).as_deref(),
+            Some("Folio: the PowerShell 7 check settled with 2 other processes in its job")
+        );
+        assert_eq!(
+            settled_beside_line(Path::new("powershell.exe"), Some(1)).as_deref(),
+            Some("Folio: the Windows PowerShell check settled with 1 other processes in its job")
+        );
+        assert_eq!(settled_beside_line(pwsh, Some(0)), None);
+        assert_eq!(settled_beside_line(pwsh, None), None);
+    }
+
     /// A stand-in for a PowerShell that the parse probe asks: it reads the
     /// whole of standard input and answers `1`, as the parse command does for
     /// text that parses.
@@ -10568,11 +12148,15 @@ mod tests {
     #[test]
     fn a_parse_probe_on_unix_answers_after_its_poll_settled_the_child() {
         let (directory, program) = parse_stand_in("unix-parse");
-        let answer = run_parse_probe(
-            &program,
-            "Write-Output 'na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1}'",
-            &ProbeEnvironment::Inherited,
-        );
+        let asked = program.clone();
+        let answer = on_a_worker(move |worker| {
+            run_parse_probe(
+                worker,
+                &asked,
+                "Write-Output 'na\u{ef}ve \u{3a9}\u{3bc}\u{3ad}\u{3b3}\u{3b1}'",
+                &ProbeEnvironment::Inherited,
+            )
+        });
         let _ = std::fs::remove_dir_all(&directory);
         assert_eq!(answer, Ok(true));
     }
@@ -10695,7 +12279,15 @@ mod tests {
         );
         pane.set_spawn_directory(place.directory.clone());
         let card = |pane: &bt_term::DualPlaneSession| {
-            PathBuf::from(crate::files_root_of(Some(pane), &environment))
+            // The pane's report ladder alone: this test's subject is the report and the folder
+            // the pane was opened in, so no shell process is handed to the read.
+            let folder = crate::pane_folder::pane_folder(
+                pane,
+                None,
+                &crate::pane_folder::ProcessFolderMemo::default(),
+                &crate::pane_folder::SystemProcessFolders,
+            );
+            PathBuf::from(crate::files_root_of(Some(folder), &environment).root)
         };
         assert_ne!(home, fixed);
         assert_eq!(
@@ -10816,5 +12408,452 @@ mod tests {
             )
             .unwrap()
         });
+    }
+
+    /// Feed `leaf`'s shell output to its session until what it has written holds `marker`, waiting
+    /// between reads on the session's own output wake (`wakes`, from
+    /// `TestShell::spawn_shell_in_waking`) within the lane suite's patience for each — a slow
+    /// machine delivers the same bytes further apart, and a shell that falls silent fails by name.
+    #[cfg(windows)]
+    fn feed_leaf_until(
+        leaf: &mut crate::LeafSession,
+        wakes: &std::sync::mpsc::Receiver<()>,
+        marker: &str,
+    ) {
+        let mut seen = Vec::new();
+        while !String::from_utf8_lossy(&seen).contains(marker) {
+            let chunk = leaf.pty.as_ref().expect("the pane's shell").read_output();
+            if chunk.is_empty() {
+                crate::lane::wait_for_a_wake(
+                    wakes,
+                    &format!(
+                        "the shell's output holding {marker:?}; it had written {:?}",
+                        String::from_utf8_lossy(&seen)
+                    ),
+                );
+                continue;
+            }
+            leaf.session.feed(&chunk).unwrap();
+            seen.extend(chunk);
+        }
+    }
+
+    /// RED (T-CWD-FROM-PROCESS) — **a Command Prompt pane with no integration stands where its
+    /// process stands, and the verbs that start a shell from it start there**: `cmd.exe` with a
+    /// plain `PROMPT` (`$P$G`, no OSC 7), started in a folder whose name is not ASCII, read through
+    /// the pane's own road (`LeafSession::folder`, the shell's pid and its output count off the
+    /// real pseudoconsole) at the first prompt and again after `cd` into a subfolder. The pane
+    /// never reports a folder. After the `cd`, the place Split with, Duplicate pane, Duplicate tab
+    /// and Restart shell start a shell in (`seed_place_for_a_new_shell`, the one reader each of
+    /// them calls) and the one a new tab beside carries (`place_for_a_new_tab_beside`) are the
+    /// subfolder.
+    ///
+    /// MUTATIONS (observed red): `LeafSession::folder` hands the ladder no shell (`None`) — at the
+    /// first prompt the pane answers `Opened`, the folder it was opened in, not its process; the
+    /// memo keyed by the shell alone (output not counted) — after `cd` the first read, the
+    /// starting folder, is answered again; `place_where_the_pane_stands` reading the old ladder
+    /// (`place_for_a_new_shell`) — the verbs start in the starting folder; the old
+    /// `place_for_a_new_tab_beside` (report only) — the new tab carries nothing.
+    #[cfg(windows)]
+    #[test]
+    fn a_silent_command_prompt_panes_folder_follows_its_process() {
+        let hygiene = bt_pty::test_shell::Hygiene::new();
+        let start = hygiene.root().join("起点 start");
+        let moved = start.join("moved-here");
+        std::fs::create_dir_all(&moved).unwrap();
+        let cmd = bt_platform::program_on_path(Path::new("cmd.exe")).expect("cmd.exe");
+        let (woke, wakes) = crate::lane::wake_channel();
+        let woke = std::sync::Mutex::new(woke);
+        let shell = bt_pty::test_shell::TestShell::spawn_shell_in_waking(
+            hygiene,
+            cmd,
+            &[],
+            &|| last_resort_arguments(false),
+            &[(OsString::from(CMD_PROMPT), OsString::from("$P$G"))],
+            bt_pty::PtySize::cells(
+                std::num::NonZeroU16::new(160).unwrap(),
+                std::num::NonZeroU16::new(30).unwrap(),
+            ),
+            Some(start.clone()),
+            std::sync::Arc::new(move || {
+                let woke = woke
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                woke();
+            }),
+        )
+        .unwrap();
+        let (pty, hygiene) = shell.into_session();
+        let mut leaf = crate::test_support::leaf_saying("");
+        leaf.session.set_spawn_directory(Some(start.clone()));
+        leaf.spawn_place = Some(start.clone());
+        leaf.pty = Some(pty);
+        let door = crate::pane_folder::SystemProcessFolders;
+
+        feed_leaf_until(&mut leaf, &wakes, "start>");
+        match leaf.folder(&door) {
+            crate::pane_folder::PaneFolder::Process(folder) => assert!(
+                bt_platform::same_file(&folder, &start),
+                "at the first prompt the process stands in {folder:?}, not {start:?}"
+            ),
+            other => panic!("at the first prompt: {other:?}"),
+        }
+
+        leaf.pty
+            .as_ref()
+            .unwrap()
+            .write(b"cd moved-here\r")
+            .unwrap();
+        feed_leaf_until(&mut leaf, &wakes, "moved-here>");
+        assert_eq!(leaf.session.working_directory(), None, "no report was made");
+
+        // **A folder nobody can say keeps today's behaviour**: with the process refusing, the
+        // verbs start where the pane was opened and a new tab beside carries nothing.
+        struct Refusing;
+        impl crate::pane_folder::ProcessFolders for Refusing {
+            fn current_directory(
+                &self,
+                _shell: bt_pty::ShellProcessId,
+            ) -> Result<PathBuf, bt_platform::process_folder::FolderRefusal> {
+                Err(bt_platform::process_folder::FolderRefusal::NoAccess)
+            }
+        }
+        assert_eq!(
+            leaf.seed_place_for_a_new_shell_through(&Refusing),
+            Some(profiles::SeedPlace::Carried(start.clone())),
+            "an unknown folder: a shell is started where the pane was opened, as before"
+        );
+        assert_eq!(
+            leaf.place_for_a_new_tab_beside_through(&Refusing),
+            None,
+            "an unknown folder: a new tab beside carries nothing, as before"
+        );
+        // That refusal is this moment's read; one more prompt is a new moment for the real door.
+        leaf.pty.as_ref().unwrap().write(b"\r").unwrap();
+        feed_leaf_until(&mut leaf, &wakes, "moved-here>");
+        match leaf.folder(&door) {
+            crate::pane_folder::PaneFolder::Process(folder) => assert!(
+                bt_platform::same_file(&folder, &moved),
+                "after cd the process stands in {folder:?}, not {moved:?}"
+            ),
+            other => panic!("after cd: {other:?}"),
+        }
+        match leaf.seed_place_for_a_new_shell() {
+            Some(profiles::SeedPlace::Carried(folder)) => assert!(
+                bt_platform::same_file(&folder, &moved),
+                "after cd a split, a duplicate or a restart starts in {folder:?}, not {moved:?}"
+            ),
+            other => panic!("after cd, the place a shell is started in: {other:?}"),
+        }
+        match leaf.place_for_a_new_tab_beside() {
+            Some(profiles::SeedPlace::Carried(folder)) => assert!(
+                bt_platform::same_file(&folder, &moved),
+                "after cd a new tab beside carries {folder:?}, not {moved:?}"
+            ),
+            other => panic!("after cd, what a new tab beside carries: {other:?}"),
+        }
+        let mut pty = leaf.pty.take().unwrap();
+        pty.write(b"exit\r").unwrap();
+        pty.shutdown().unwrap();
+        drop(pty);
+        drop(hygiene);
+    }
+
+    /// A headless window to deliver a `$PROFILE` answer to, and the voice a worker's end is said
+    /// in, collecting its lines.
+    fn a_window_that_clicked(
+        tag: &str,
+    ) -> (
+        crate::headless::HeadlessFolio,
+        impl Fn(&str) + Send + Sync + 'static,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let folio = crate::headless::HeadlessFolio::with_tabs(
+            tag,
+            vec![crate::test_support::ringing_tab(1, 1)],
+            0,
+        );
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let lines = std::sync::Arc::clone(&said);
+        (
+            folio,
+            move |line: &str| lines.lock().unwrap().push(line.to_owned()),
+            said,
+        )
+    }
+
+    /// The answers the queue holds for `window`, each delivered to it as the window's event
+    /// delivers them, and the cards the window then shows, as `(kind, body)`.
+    fn delivered(
+        folio: &mut crate::headless::HeadlessFolio,
+    ) -> (
+        Vec<ProfileInstallOutcome>,
+        Vec<(crate::toast::ToastKind, String)>,
+    ) {
+        let window = folio.runtime().window_id();
+        let answers = take_profile_installs();
+        let owed: Vec<_> = profile_installs_for(&answers, window).cloned().collect();
+        for outcome in owed.clone() {
+            folio
+                .runtime()
+                .deliver_profile_install(outcome)
+                .expect("a headless window takes its answer");
+        }
+        let cards = folio
+            .window
+            .toasts
+            .toasts()
+            .iter()
+            .map(|card| (card.kind(), card.body().to_owned()))
+            .collect();
+        (owed, cards)
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **an Enable whose worker the thread door refused is
+    /// answered on the window that clicked**: the refusal's card, in the sentence that says
+    /// nothing was changed, and one line in diagnostics with the door's reason. Before, the start
+    /// was thrown away (`let _ =` on the thread door's answer): no answer was filed, the window was
+    /// never woken, and nothing said why the click did nothing.
+    ///
+    /// Through the scripted executor, which refuses the start as a machine out of threads would;
+    /// what the window does with the answer is its own delivery (`deliver_profile_install`), on
+    /// the headless window.
+    ///
+    /// MUTATIONS: the install's `Answered` answering nothing — no outcome, no card; its voice
+    /// dropped (`Answered` not saying) — no line; `unfinished_change` answering `ChangeStopped`
+    /// for a refused start — the card claims the change may have run.
+    #[test]
+    fn a_refused_enable_is_answered_on_the_window_that_clicked() {
+        let _turn = profile_runtime::PROFILE_INSTALL_ANSWERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut folio, say, said) = a_window_that_clicked("refused-enable");
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        gate.refuse_next_start();
+        let started = profile_runtime::start_profile_install(
+            &crate::lane::Executor::scripted(gate),
+            say,
+            PathBuf::from("powershell.exe"),
+            Vec::new(),
+            None,
+            folio.runtime().window_id(),
+        );
+        let (owed, cards) = delivered(&mut folio);
+        let said = said.lock().unwrap().clone();
+        assert!(!started, "the door refused the start");
+        assert_eq!(
+            owed,
+            vec![ProfileInstallOutcome::Refused(
+                crate::i18n::Text::ChangeNotStarted.text().to_owned()
+            )],
+            "the click is answered as the install's own refusal"
+        );
+        assert_eq!(
+            cards,
+            vec![(
+                crate::toast::ToastKind::Error,
+                crate::i18n::Text::ChangeNotStarted.text().to_owned()
+            )],
+            "and the window that clicked shows it"
+        );
+        assert_eq!(said.len(), 1, "the refused start is said once: {said:?}");
+        assert!(
+            said[0].contains(crate::lane::REFUSED_START),
+            "in the door's words: {said:?}"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **an Undo whose worker the thread door refused is
+    /// answered on the window that pressed it**, as the Enable's refusal is: the Undo's own
+    /// refusal, its card, and one line in diagnostics.
+    ///
+    /// MUTATIONS: the Undo's `Answered` answering nothing — no outcome, no card; answering
+    /// `Refused` for `UndoRefused` — the outcome names the wrong road; its voice dropped — no
+    /// line.
+    #[test]
+    fn a_refused_undo_is_answered_on_the_window_that_pressed_it() {
+        let _turn = profile_runtime::PROFILE_INSTALL_ANSWERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut folio, say, said) = a_window_that_clicked("refused-undo");
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        gate.refuse_next_start();
+        let edit = ProfileEdit {
+            profile: PathBuf::from("profile.ps1"),
+            before: ProfileRevision::default(),
+            after: ProfileRevision::default(),
+        };
+        let started = profile_runtime::start_profile_install_undo(
+            &crate::lane::Executor::scripted(gate),
+            say,
+            PathBuf::from("powershell.exe"),
+            edit,
+            folio.runtime().window_id(),
+        );
+        let (owed, cards) = delivered(&mut folio);
+        let said = said.lock().unwrap().clone();
+        assert!(!started, "the door refused the start");
+        assert_eq!(
+            owed,
+            vec![ProfileInstallOutcome::UndoRefused(
+                crate::i18n::Text::ChangeNotStarted.text().to_owned()
+            )],
+            "the press is answered as the Undo's own refusal"
+        );
+        assert_eq!(
+            cards,
+            vec![(
+                crate::toast::ToastKind::Error,
+                crate::i18n::Text::ChangeNotStarted.text().to_owned()
+            )],
+            "and the window that pressed it shows it"
+        );
+        assert_eq!(said.len(), 1, "the refused start is said once: {said:?}");
+        assert!(
+            said[0].contains(crate::lane::REFUSED_START),
+            "in the door's words: {said:?}"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **a Settings removal whose worker the thread door
+    /// refused is answered**: the removal's slot holds an unfinished removal, which the window
+    /// raises as a refusal in the sentence that says nothing was changed, and the refusal is said
+    /// once. Before, the start was thrown away and the click did nothing anyone could see.
+    ///
+    /// MUTATIONS: the removal's `Answered` answering nothing — the slot stays empty; read an
+    /// unfinished removal as no news (`window_text` answering `None`) — no card; its voice dropped
+    /// — no line.
+    #[test]
+    fn a_refused_settings_removal_is_answered() {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        gate.refuse_next_start();
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let lines = std::sync::Arc::clone(&said);
+        let started =
+            profile_runtime::start_removal(&crate::lane::Executor::scripted(gate), move |line| {
+                lines.lock().unwrap().push(line.to_owned())
+            });
+        let answer = take_removal();
+        let said = said.lock().unwrap().clone();
+        assert!(!started, "the door refused the start");
+        assert!(
+            matches!(
+                answer,
+                Some(profile_runtime::RemovalAnswer::Unfinished(
+                    crate::i18n::Text::ChangeNotStarted
+                ))
+            ),
+            "the removal is answered as one that did not run: {answer:?}"
+        );
+        assert_eq!(
+            answer.and_then(|answer| answer.window_text()),
+            Some((true, crate::i18n::Text::ChangeNotStarted.text().to_owned())),
+            "and the window raises it as a refusal"
+        );
+        assert_eq!(said.len(), 1, "the refused start is said once: {said:?}");
+        assert!(
+            said[0].contains(crate::lane::REFUSED_START),
+            "in the door's words: {said:?}"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **a worker that never started and one that stopped
+    /// in a panic are told apart in the sentence their asker is answered with**: the first changed
+    /// nothing and says so; the second may have stopped anywhere and claims nothing. A worker
+    /// that returned answered for itself and never reaches the sentence.
+    ///
+    /// MUTATION: `WorkerEnd::started` answering `true` for `NotStarted` — a refused start claims
+    /// it may have run.
+    #[test]
+    fn a_change_that_never_started_is_not_told_as_one_that_stopped() {
+        use crate::lane::WorkerEnd;
+        assert_eq!(
+            crate::i18n::unfinished_change(WorkerEnd::NotStarted("refused".to_owned()).started()),
+            crate::i18n::Text::ChangeNotStarted
+        );
+        assert_eq!(
+            crate::i18n::unfinished_change(WorkerEnd::Panicked("stopped".to_owned()).started()),
+            crate::i18n::Text::ChangeStopped
+        );
+    }
+
+    /// A click's worker started by the scripted executor with `body`, which files `answer` and
+    /// then panics: the answers the queue then holds for its window, and the lines its end said
+    /// (read until the worker's end lets the voice go — no clock).
+    fn a_click_that_panics_after_it_answered(
+        unfinished: fn(String) -> ProfileInstallOutcome,
+        answer: ProfileInstallOutcome,
+    ) -> (Vec<ProfileInstallOutcome>, Vec<String>) {
+        let window = winit::window::WindowId::from(41_u64);
+        let (said, lines) = std::sync::mpsc::channel::<String>();
+        let (filed, ends) = profile_runtime::click_answer(
+            window,
+            "the click suite's worker",
+            move |line| said.send(line.to_owned()).unwrap(),
+            unfinished,
+        );
+        crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default()))
+            .start_worker("powershell-profile-click-suite", ends, move |_| {
+                filed.file(answer);
+                panic!("the click suite fails this worker after it answered, on purpose");
+            })
+            .expect("the worker started");
+        let said = lines.iter().collect::<Vec<_>>();
+        let answers = take_profile_installs();
+        let owed = profile_installs_for(&answers, window).cloned().collect();
+        (owed, said)
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **an Enable that answered and then panicked
+    /// keeps its answer**: the line was written (here: found present), so the click is answered
+    /// with that, and the panic is said once — never a second answer saying the change stopped
+    /// before it finished. The product's Enable files its answer before the observation that
+    /// follows the write (`Written::publish`), so a panic there is this case.
+    ///
+    /// MUTATION: `ClickAnswer::file` filing every time (no `filed` swap) — a second answer,
+    /// `Refused("Folio stopped before this change finished.")`, follows the true one.
+    #[test]
+    fn an_enable_that_panicked_after_it_answered_keeps_its_answer() {
+        let _turn = profile_runtime::PROFILE_INSTALL_ANSWERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (owed, said) = a_click_that_panics_after_it_answered(
+            ProfileInstallOutcome::Refused,
+            ProfileInstallOutcome::Present,
+        );
+        assert_eq!(
+            owed,
+            vec![ProfileInstallOutcome::Present],
+            "one answer, the true one"
+        );
+        assert_eq!(said.len(), 1, "the panic is said once: {said:?}");
+        assert!(
+            said[0].contains("after it answered, on purpose"),
+            "{said:?}"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **an Undo that answered and then panicked
+    /// keeps its answer**: the Undo is done, so the click is answered `Undone`; a panic in the
+    /// observation that follows (the product files `Undone` before it) is said once and answers
+    /// nothing more.
+    ///
+    /// MUTATION: as above — a second answer, `UndoRefused("Folio stopped before this change
+    /// finished.")`.
+    #[test]
+    fn an_undo_that_panicked_after_it_answered_keeps_its_answer() {
+        let _turn = profile_runtime::PROFILE_INSTALL_ANSWERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (owed, said) = a_click_that_panics_after_it_answered(
+            ProfileInstallOutcome::UndoRefused,
+            ProfileInstallOutcome::Undone,
+        );
+        assert_eq!(
+            owed,
+            vec![ProfileInstallOutcome::Undone],
+            "one answer, the true one"
+        );
+        assert_eq!(said.len(), 1, "the panic is said once: {said:?}");
     }
 }

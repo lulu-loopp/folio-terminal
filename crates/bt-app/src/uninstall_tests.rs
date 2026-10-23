@@ -130,7 +130,12 @@ fn execute_then(
     }
 }
 
-fn seed(scope: &Scope, owner: &Path) {
+/// The fixtures of every test that seeds the account the way an earlier Folio left it: among them
+/// a PSReadLine copy in Documents carrying an older Folio's build stamp, which the uninstall
+/// removes (`psreadline::tests::recorded_older_copy_in`). The guard answers that copy's stamp on
+/// this thread while it is held.
+#[must_use]
+fn seed(scope: &Scope, owner: &Path) -> crate::psreadline::tests::LegacyDisk {
     let data = &scope.data[0];
     fs::create_dir_all(data).unwrap();
     let profile = &scope.profiles.as_ref().unwrap()[0];
@@ -140,7 +145,7 @@ fn seed(scope: &Scope, owner: &Path) {
         crate::shell_integration::profile_marks::LEGACY_LINE,
     )
     .unwrap();
-    crate::psreadline::install_recorded(&scope.documents[0], data).unwrap();
+    let legacy = crate::psreadline::tests::recorded_older_copy_in(&scope.documents[0], data);
     for (index, roots) in scope.agents.iter().enumerate() {
         let path = agent_path(index, &roots[0]);
         assert_eq!(
@@ -148,12 +153,13 @@ fn seed(scope: &Scope, owner: &Path) {
             Outcome::Installed
         );
     }
+    legacy
 }
 
 #[test]
 fn uninstall_everything_then_rerun_is_absent() {
     let (root, scope) = sandbox("all");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     let mut registrations = [true, true, true];
     let mut system = |remover| {
         let index = match remover {
@@ -213,7 +219,7 @@ fn uninstall_psreadline_leaves_every_file_folio_never_wrote() {
     let (root, scope) = sandbox("psreadline-sidecars");
     let data = &scope.data[0];
     fs::create_dir_all(data).unwrap();
-    crate::psreadline::install_recorded(&scope.documents[0], data).unwrap();
+    let _legacy = crate::psreadline::tests::recorded_older_copy_in(&scope.documents[0], data);
     let leaf = crate::psreadline::module_directory(&scope.documents[0]);
     let sidecars = [
         ("PSGetModuleInfo.xml", "<Objs/>"),
@@ -228,7 +234,7 @@ fn uninstall_psreadline_leaves_every_file_folio_never_wrote() {
 
     let report = execute(&scope, false, system_absent);
     assert_eq!(report.code, 0, "{}", report.stderr());
-    for (name, _) in crate::psreadline::BUNDLED_FILES {
+    for (name, _) in crate::psreadline::LEGACY_FILES {
         assert!(!leaf.join(name).exists(), "{name} is Folio's and stayed");
     }
     for (name, body) in sidecars {
@@ -262,7 +268,7 @@ fn uninstall_live_other_copy_is_left_and_dead_copy_is_removed() {
     let other = root.join("other/folio.exe");
     fs::create_dir_all(other.parent().unwrap()).unwrap();
     fs::write(&other, b"other copy").unwrap();
-    seed(&scope, &other);
+    let _legacy = seed(&scope, &other);
     let report = execute(&scope, false, system_absent);
     assert_eq!(report.code, 0);
     assert_eq!(
@@ -291,7 +297,7 @@ fn uninstall_live_other_copy_is_left_and_dead_copy_is_removed() {
 fn uninstall_refused_agent_is_identical_and_others_still_removed() {
     for case in ["malformed", "future", "readonly"] {
         let (root, scope) = sandbox(case);
-        seed(&scope, &scope.exe);
+        let _legacy = seed(&scope, &scope.exe);
         let path = agent_path(2, &scope.agents[2][0]);
         match case {
             "malformed" => fs::write(&path, b"{broken").unwrap(),
@@ -327,7 +333,7 @@ fn uninstall_refused_agent_is_identical_and_others_still_removed() {
 #[test]
 fn uninstall_running_claim_refuses_before_any_remover() {
     let (root, scope) = sandbox("running");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     let profile = scope.profiles.as_ref().unwrap()[0].clone();
     let before = fs::read(&profile).unwrap();
     let report = super::execute_with_claim(
@@ -355,7 +361,7 @@ fn uninstall_running_claim_refuses_before_any_remover() {
 #[test]
 fn uninstall_purge_only_resolved_roots_and_never_application() {
     let (root, scope) = sandbox("purge");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     let sibling = root.join("sibling/sentinel");
     fs::create_dir_all(sibling.parent().unwrap()).unwrap();
     fs::write(&sibling, b"keep").unwrap();
@@ -431,7 +437,7 @@ fn uninstall_purge_junction_refuses_root_without_touching_target() {
 fn uninstall_purge_busy_file_returns_two_before_touching_marks() {
     use std::os::windows::fs::OpenOptionsExt;
     let (root, scope) = sandbox("busy");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     let path = scope.data[0].join("busy");
     fs::write(&path, b"held data").unwrap();
     let held = fs::OpenOptions::new()
@@ -527,7 +533,7 @@ fn uninstall_registry_decisions_use_only_injected_readings() {
 fn uninstall_history_finds_redirected_module_and_agent_roots() {
     let (root, scope) = sandbox("history");
     let historical = root.join("old-documents");
-    crate::psreadline::install_recorded(&historical, &scope.data[0]).unwrap();
+    let _legacy = crate::psreadline::tests::recorded_older_copy_in(&historical, &scope.data[0]);
     let old_agent = root.join("old-codex");
     assert_eq!(
         agent_apply(
@@ -665,12 +671,6 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             "add_to_profile",
         ),
         (
-            Remover::PsReadLine,
-            app,
-            function("crate::psreadline", "install_recorded"),
-            "install_recorded",
-        ),
-        (
             Remover::Agent(0),
             app,
             function("crate::attention_hooks", "apply_at"),
@@ -754,6 +754,12 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             "user_data_folder_in",
         ),
         (
+            Remover::Data(HostPlatform::Windows, Base::Local, "Folio"),
+            app,
+            function("crate::shell_integration", "install_psreadline_module_at"),
+            "install_psreadline_module_at",
+        ),
+        (
             Remover::Data(
                 HostPlatform::MacOs,
                 Base::Library("Application Support"),
@@ -812,26 +818,6 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .filter(|m| matches!(m.remover, Remover::Data(HostPlatform::Windows, ..)))
             .count(),
         3
-    );
-    // `root` is borrowed since the record moved inside the writer's own
-    // occupancy check (audit 3, E-1); what is pinned is that the module root
-    // still reaches `integration-marks.json` before the first byte is written.
-    assert!(
-        item_body(
-            &bt_source::ItemQuery::function("install_recorded").in_module("crate::psreadline")
-        )
-        .contains("marks.psreadline_module_roots.push(root.to_owned())")
-    );
-    // And that the one caller of the recording writer is the row's own press.
-    // A positive over a whole file says *somewhere in that file* and goes silent
-    // the day the method it means moves out of it, so the subject,
-    // `Runtime::apply_psreadline`, is asked for by its identity and no file is
-    // mentioned.
-    assert!(
-        method_body("Runtime", "apply_psreadline").contains("psreadline::apply_recorded("),
-        "`Runtime::apply_psreadline` no longer reaches `psreadline::apply_recorded`, \
-         which is the call that records the module root this door later reads out of \
-         `integration-marks.json` to remove"
     );
     for name in ["Folio", "BetterTerminal"] {
         assert!(INVENTORY.iter().any(|m| matches!(m.remover, Remover::Data(HostPlatform::Windows, Base::Roaming, relative) if relative == name)));
@@ -1170,7 +1156,7 @@ fn uninstall_creates_nothing_on_an_account_that_never_ran_folio() {
 #[test]
 fn uninstall_refuses_hostile_recorded_paths_with_no_sandbox_to_contain_them() {
     let (root, scope) = unsandboxed("hostile");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     let data = scope.data[0].clone();
     let document = root.join("home/thesis.txt");
     fs::write(&document, b"the reader's own file").unwrap();
@@ -1181,7 +1167,7 @@ fn uninstall_refuses_hostile_recorded_paths_with_no_sandbox_to_contain_them() {
     );
     let agent_before = fs::read(&agent).unwrap();
     let documents = root.join("documents-elsewhere");
-    crate::psreadline::install_recorded(&documents, &data).unwrap();
+    let _other = crate::psreadline::tests::recorded_older_copy_in(&documents, &data);
     let module = crate::psreadline::module_directory(&documents);
     assert!(module.exists());
     let hostile = [
@@ -1488,7 +1474,7 @@ fn uninstall_purge_says_on_macos_that_held_data_cannot_be_told() {
 #[test]
 fn uninstall_existing_instance_mechanism_blocks_the_door() {
     let (root, scope) = sandbox("native-claim");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     let profile = scope.profiles.as_ref().unwrap()[0].clone();
     let before = fs::read(&profile).unwrap();
     let claim = bt_platform::instance::claim_data_directory(&scope.data[0]).unwrap();
@@ -1788,7 +1774,7 @@ fn settings_speaking(scope: &Scope, language: bt_persist::LanguageV1) {
 #[test]
 fn the_uninstall_keeps_settings_and_data_and_hands_the_program_to_the_remover() {
     let (root, scope) = sandbox("uninstall-keeps");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     settings_speaking(&scope, bt_persist::LanguageV1::English);
     let app = seed_program(&scope);
     let scope = std::sync::Arc::new(scope);
@@ -1860,7 +1846,7 @@ fn the_uninstall_keeps_settings_and_data_and_hands_the_program_to_the_remover() 
 #[test]
 fn the_uninstall_with_remove_data_removes_the_data_roots_and_the_program() {
     let (root, scope) = sandbox("uninstall-removes");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     settings_speaking(&scope, bt_persist::LanguageV1::English);
     seed_program(&scope);
     let scope = std::sync::Arc::new(scope);
@@ -1918,7 +1904,7 @@ fn a_refusal_before_the_purge_keeps_the_data_and_the_purge_comes_last() {
     };
     for (row_refuses, program_refuses) in [(true, false), (false, true), (false, false)] {
         let (root, scope) = sandbox("uninstall-order");
-        seed(&scope, &scope.exe);
+        let _legacy = seed(&scope, &scope.exe);
         settings_speaking(&scope, bt_persist::LanguageV1::English);
         let scope = std::sync::Arc::new(scope);
         let data = scope.data[0].clone();
@@ -2352,7 +2338,7 @@ fn a_cleanup_that_did_not_complete_keeps_the_program() {
 #[test]
 fn a_running_folio_is_exit_two_and_nothing_is_removed() {
     let (root, scope) = sandbox("uninstall-running");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     let profile = scope.profiles.as_ref().unwrap()[0].clone();
     let before = fs::read(&profile).unwrap();
     let scope = std::sync::Arc::new(scope);
@@ -2571,7 +2557,7 @@ fn the_door_waits_until_the_asker_has_let_go_of_its_claim() {
 fn the_door_speaks_the_settings_language_and_the_os_language_without_one() {
     let lines = |language: Option<bt_persist::LanguageV1>, os: &str| {
         let (root, scope) = sandbox("uninstall-language");
-        seed(&scope, &scope.exe);
+        let _legacy = seed(&scope, &scope.exe);
         if let Some(language) = language {
             settings_speaking(&scope, language);
         }
@@ -2710,7 +2696,7 @@ fn the_way_out_starts_the_door_with_its_own_grammar() {
 #[test]
 fn the_program_plan_hands_the_process_identity_to_the_native_remover_and_keeps_data() {
     let (root, scope) = sandbox("uninstall-end-to-end");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     seed_program(&scope);
     let waited = Running {
         pid: 4242,
@@ -3095,7 +3081,7 @@ fn the_removers_folder_is_inside_no_purge_root() {
 #[test]
 fn a_remove_data_run_purges_around_the_remover_it_started() {
     let (root, scope) = sandbox("purge-around-remover");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     settings_speaking(&scope, bt_persist::LanguageV1::English);
     for (_, purged) in &scope.purge_roots {
         if purged.extension().is_none() {
@@ -3172,7 +3158,7 @@ fn a_remove_data_run_purges_around_the_remover_it_started() {
 #[test]
 fn a_purge_takes_a_removers_folder_left_behind() {
     let (root, scope) = sandbox("stale-remover");
-    seed(&scope, &scope.exe);
+    let _legacy = seed(&scope, &scope.exe);
     let stale = scope
         .remover_home
         .join("uninstall-00000000000000000000000000000000");
@@ -3350,4 +3336,27 @@ fn uninstall_removes_the_folder_of_the_trial_its_journal_names() {
         "no journal: no transaction, nothing to remove"
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (T-JOINED-PANIC-VALUES round 2) — **a panic in the update image detach is the step's
+/// refusal**: the detach runs inside `contained_panic::contain` on its worker, so at the panic the
+/// resident hook's decision (`the_hook_lets_this_panic_unwind`) is to let it unwind, and the join
+/// answers the refusal — the same answer whether or not the process has the resident hook (the
+/// uninstall cleanup runs before it is installed).
+///
+/// MUTATION: the worker's body without `contained_panic::contain` in `detach_on_a_worker`
+/// (`move |worker| Ok(detach(worker))`) — the decision at the panic is no, and the first assert
+/// goes red.
+#[test]
+fn a_panicking_image_detach_is_the_steps_refusal() {
+    let (told, decision) = std::sync::mpsc::channel();
+    let answer = detach_on_a_worker(move |_worker| {
+        let _ = told.send(crate::the_hook_lets_this_panic_unwind());
+        std::panic::panic_any("scripted: 卸载镜像失败 panicked");
+    });
+    assert!(
+        decision.recv().expect("the detach was reached"),
+        "the hook's decision at the detach's panic is to let it unwind"
+    );
+    assert_eq!(answer, Err("the detach's worker stopped".to_owned()));
 }

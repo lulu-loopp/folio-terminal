@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::test_support::{
-    a_decode, a_held_raster, found, found_in, found_in_package, free_fn_body, in_product,
-    method_body, package_item_body, source_block,
+    a_decode, a_held_raster, a_read_out, found, found_in, found_in_package, free_fn_body,
+    in_product, method_body, package_item_body, source_block,
 };
 use bt_source::{ItemQuery, Pattern, Scope, View, needle};
 
@@ -174,7 +174,7 @@ fn a_visible_working_set_over_the_cache_settles() {
                 if !already {
                     asked += 1;
                     inbox.push(index);
-                    peek.insert(keys[index].clone(), PeekCacheEntry::Pending);
+                    peek.insert(keys[index].clone(), a_read_out());
                 }
                 continue;
             }
@@ -187,7 +187,7 @@ fn a_visible_working_set_over_the_cache_settles() {
                 PictureErrand::Read => {
                     asked += 1;
                     inbox.push(index);
-                    peek.insert(keys[index].clone(), PeekCacheEntry::Pending);
+                    peek.insert(keys[index].clone(), a_read_out());
                 }
                 // The scale lane answers, the way it answers on the window:
                 // the surface is handed the raster and holds it.
@@ -237,7 +237,8 @@ fn a_chinese_line_folds_at_the_columns_the_wrap_names() {
     assert_eq!(
         wrap.row_span(1),
         Some((0, 10, 19)),
-        "and the rest is the second, whose far end runs one column past the \n             line to stand the break in",
+        "and the rest is the second, whose far end runs one column past the \
+         line to stand the break in",
     );
     let palette = bt_render::chrome_palette();
     let mut quads = Vec::new();

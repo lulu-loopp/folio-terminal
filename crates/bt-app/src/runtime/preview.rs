@@ -1,17 +1,21 @@
 //! `preview` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::{Gone, OwnerGone};
+use crate::computation_lane::{Asking, ComputationId};
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
     BackgroundDecode, BlockScrollPaint, ClipboardPictureAnswer, ClipboardPictureJob,
     DOCK_PREVIEW_FADE, DiffRow, DocumentMath, DocumentPictures, DragLatch, DrawnAnimation,
-    DropPreview, FOOT_REVEAL_FEEDBACK, FileMenuTarget, FilePick, FootSaying, ForeignPane,
+    DropPreview, FOOT_REVEAL_FEEDBACK, FileMenuTarget, FilePick, FillSent, FootSaying, ForeignPane,
     FormulaSwitches, FrameTraces, HyperlinkActivation, ImageDrag, ImageGrasp, ImageZoom, ImeOwner,
     LeafId, LeafSeed, MARKDOWN_CHIP_RADIUS_LOGICAL_PX, MarkdownBlockLayout, MarkdownCaretBlock,
     MarkdownCaretPaint, MarkdownCaretSeat, MarkdownLive, MarkdownPage, MarkdownPicture,
     MarkdownPreedit, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest, MarkdownSourceBlock,
     MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost, PAGE_ADDRESS_REFUSAL,
-    PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey, PageHandOff, PagePicture, PasteTarget,
+    PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey, PageHandOff, PagePicture, PasteTarget, PeekAsk,
     PeekCacheEntry, PeekThumbnailTarget, PictureErrand, PictureOnGlass, PictureReach,
     PictureRefusal, PopoverTrigger, Popup, PresentIntent, PreviewBlockDrag, PreviewBodyDrag,
     PreviewDocument, PreviewEditPaint, PreviewHeadFrame, PreviewHexHover, PreviewImageState,
@@ -20,23 +24,22 @@ use crate::{
     RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest, ScrollThumbState,
     SourceBlocks, Step, SurfacePixels, SurfaceSubject, TabClick, TabId, TabRename, TabState,
     TabTriggerHand, VideoGlance, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime,
-    advance_drawn_animations, animation, animation_layer_key, animation_refusal_notice,
-    animations_opened, answer_one_picture, answers_for, attention_trace, build_preview_diff_body,
-    build_preview_markdown_body, build_preview_table_body, build_preview_text_body,
-    clipboard_picture, create_leaf_session, crumb_segments, deliver_clipboard_picture, diagnostics,
-    documents_held_in, documents_held_mut_in, documents_pictures, earliest_deadline, file_peek,
-    files, files_a_tab_stands_on, files_row_display_name, float, float_dock_label, folded_levels,
+    animation, animation_layer_key, animation_refusal_notice, answer_one_picture, answers_for,
+    attention_trace, build_preview_diff_body, build_preview_markdown_body,
+    build_preview_table_body, build_preview_text_body, clipboard_picture, create_leaf_session,
+    crumb_segments, deliver_clipboard_picture, diagnostics, documents_held_in,
+    documents_held_mut_in, documents_pictures, earliest_deadline, file_peek, files,
+    files_a_tab_stands_on, files_row_display_name, float, float_dock_label, folded_levels,
     foot_revealed_label, forget_a_picture, forget_standing_answers, git_panel, graph_key_of,
     hang_watch, hex_peek, highlight, i18n, image_clamped_pan, image_destination, image_is_pannable,
     image_meta_sentence, image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale,
     image_zoom_settles, image_zoom_toggled, ime_owner, input, markdown_empty_page_offset,
     markdown_prose_composition, markdown_prose_paragraphs, markdown_runs, markdown_source_cell,
-    markdown_source_offset_at, marks, measure_preview_links, native_window, notice,
-    owe_sharpened_rasters, page_address_hand_off, page_destination, page_foot_flash,
-    page_foot_lead, page_source_file, peek_scale_task, picture_channel_owner, picture_errand,
-    picture_files_of, pictures_awaited_by, pictures_need_handing_over, place_preview_math,
-    preedit_caret_byte, present_diagnostics, present_drawn_animations, preview,
-    preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_prose,
+    markdown_source_offset_at, marks, measure_preview_links, notice, owe_sharpened_rasters,
+    page_address_hand_off, page_destination, page_foot_flash, page_foot_lead, page_source_file,
+    peek_scale_task, picture_channel_owner, picture_errand, picture_files_of, pictures_awaited_by,
+    pictures_need_handing_over, place_preview_math, preedit_caret_byte, present_diagnostics,
+    preview, preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_prose,
     preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
     preview_document_max_scroll, preview_edit, preview_edit_bands, preview_image_placement,
     preview_link_activation, preview_link_answers_a_press, preview_live,
@@ -51,7 +54,7 @@ use crate::{
     surface_takes_image_zoom, switcher_rows, tab_owes_frame, tab_trailing_targets, table_block,
     text_field, tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key,
     video_seat, video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
-    wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
+    wheel_points_sideways, window_taskbar_progress,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
@@ -67,10 +70,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
-use winit::event::{Ime, KeyEvent, MouseScrollDelta};
+use winit::event::{Ime, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Prefer the live column's order, including watcher refreshes. A preview
     /// outside the tree uses the very same worker and comparator.
     fn preview_folder_listing(
@@ -769,8 +772,7 @@ impl Runtime<'_> {
     /// physical size, which is the only other fact available and is never zero.
     fn background_picture_ceiling(&self) -> (u32, u32) {
         let mut ceiling = (0_u32, 0_u32);
-        for monitor in self.window.window.available_monitors() {
-            let size = monitor.size();
+        for size in self.window.window.monitor_sizes() {
             ceiling.0 = ceiling.0.max(size.width);
             ceiling.1 = ceiling.1.max(size.height);
         }
@@ -850,11 +852,11 @@ impl Runtime<'_> {
         let start = (!stored.is_empty())
             .then(|| Path::new(&stored).parent().map(Path::to_path_buf))
             .flatten();
-        match self
-            .window
-            .image_picker
-            .request(bt_platform::FilePickKind::Image, start.as_deref())
-        {
+        match self.window.image_picker.request(
+            bt_platform::FilePickKind::Image,
+            start.as_deref(),
+            crate::i18n::Text::ImageFileType.text(),
+        ) {
             Ok(true) => self.window.image_pick_pending = Some(FilePick::BackgroundImage),
             Ok(false) => {}
             Err(error) => eprintln!("recoverable picture chooser failure: {error}"),
@@ -1679,6 +1681,18 @@ impl Runtime<'_> {
             self.refresh_chrome();
             self.present_chrome_change()?;
         }
+        // **And an animation of the file** (T-ANIMATION-RECORDS-BOUND): its playback and its
+        // refusal are answers about bytes that are no longer there, so both are let go of and the
+        // walk asks about the file as it is now — a `.gif` caught half-written is asked again once
+        // the writer has moved its bytes, rather than refused for the window's life.
+        if self
+            .window
+            .animations
+            .let_go_changed_file(&normalized_local_image_path_key(path))
+        {
+            self.refresh_video_layers();
+            self.present_chrome_change()?;
+        }
         // **The pane and not the seat number** (F1b′): this walk is over every
         // tab, and a seat number means nothing outside the tab it was read from.
         let reload: Vec<LeafId> = self
@@ -2218,23 +2232,29 @@ impl Runtime<'_> {
         // `EngineError` is sticky — an engine that has errored does not
         // un-error — and it can arrive at any time: a codec that fails on a
         // frame a minute in, a file that was replaced under the decoder, a
-        // container that turned out to be truncated. A seat left standing on one
-        // is a rectangle that will never receive another picture, so it is shut
-        // down and the surface is given the same sentence a refused *open*
-        // gives, out of the same place.
-        let faulted: Vec<(PreviewSurface, bt_platform::video::engine::EngineError)> = self
+        // container that turned out to be truncated, a source that never
+        // finished loading. A seat left standing on one is a rectangle that will
+        // never receive another picture, so it is shut down and the surface is
+        // given the sentence `video_seat::retirement` names for it.
+        let faulted: Vec<(
+            PreviewSurface,
+            bt_platform::video::engine::EngineError,
+            i18n::Text,
+        )> = self
             .window
             .video
             .iter()
-            .filter_map(|(surface, seat)| Some((surface, seat.fault()?)))
+            .filter_map(|(surface, seat)| {
+                let (error, says) = seat.retirement()?;
+                Some((surface, error, says))
+            })
             .collect();
         membership_moved |= !faulted.is_empty();
-        for (surface, error) in faulted {
+        for (surface, error, says) in faulted {
             self.mouse_trace(|| format!("video_seat surface={surface:?} fault={error:?}"));
             self.window.video.close(surface);
-            self.preview_pane_mut(surface).refuse_picture(Some(
-                PictureRefusal::this_window_cannot(i18n::Text::VideoFormatCannotPlay.text()),
-            ));
+            self.preview_pane_mut(surface)
+                .refuse_picture(Some(PictureRefusal::this_window_cannot(says.text())));
         }
         membership_moved
     }
@@ -2288,10 +2308,10 @@ impl Runtime<'_> {
             // **And what that surface was showing an animation of.** The record
             // is deliberately not cleared when a surface stops being *drawn* —
             // that is the whole of how a tab switch resumes rather than restarts
-            // (see [`WindowRuntime::animation_presence`]) — so the one moment it
+            // (see [`AnimationCache::forget_surface`]) — so the one moment it
             // may be dropped is the moment the surface stops existing, which is
             // here.
-            self.window.animation_presence.remove(&surface);
+            self.window.animations.forget_surface(surface);
         }
         // And this tab's head measurements beside them. A seat id is re-minted
         // from a counter, so a width left behind for a pane that has gone comes
@@ -2321,19 +2341,9 @@ impl Runtime<'_> {
         {
             self.preview_edit_focus = None;
         }
-        if self
-            .held_preview_selecting()
-            .copied()
-            .is_some_and(|surface| !alive.contains(&surface))
-        {
-            self.drop_preview_selecting();
-        }
-        if self
-            .held_preview_text_drag()
-            .is_some_and(|drag| !alive.contains(&drag.surface))
-        {
-            self.drop_preview_text_drag();
-        }
+        // **And the gesture held on a surface that is gone** (T-POINTER-CAPTURE R-9, owner
+        // gone): a selection, a thumb, a picture being panned, a scrubber.
+        //
         // **The card is not in `alive` and must not be swept out by its
         // absence.** [`PreviewSurface::Peek`] is not in the tree and not in the
         // float host — that is the same sentence the `Peek` arm above answers
@@ -2341,22 +2351,17 @@ impl Runtime<'_> {
         // [`Self::hide_file_peek`] is where a gesture on the card is let go.
         // Without the guard, any seat-set change would drop a hand that is in
         // the middle of dragging a table sideways inside a glance.
-        if self.held_preview_block_drag().copied().is_some_and(|drag| {
-            drag.surface != PreviewSurface::Peek && !alive.contains(&drag.surface)
-        }) {
-            self.drop_preview_block_drag();
+        if let Some(surface) = self
+            .own_capture()
+            .and_then(|capture| capture.owner.preview_surface())
+            .filter(|surface| *surface != PreviewSurface::Peek && !alive.contains(surface))
+        {
+            self.end_capture(OwnerGone(Gone::Surface(surface)));
         }
         if self.preview_block_hover.is_some_and(|(surface, _)| {
             surface != PreviewSurface::Peek && !alive.contains(&surface)
         }) {
             self.preview_block_hover = None;
-        }
-        if self
-            .held_preview_body_drag()
-            .copied()
-            .is_some_and(|drag| !alive.contains(&drag.surface))
-        {
-            self.drop_preview_body_drag();
         }
         if self
             .preview_body_hover
@@ -2993,7 +2998,10 @@ impl Runtime<'_> {
         if let Some((left, at)) = left {
             self.window.tabs[index].preview_views.remember(&left, at);
         }
-        self.let_go_of_preview_gestures_on(surface);
+        // The surface is showing another document now: the gesture held on the one it left ends
+        // with it (T-POINTER-CAPTURE R-9, owner gone), as it does when the buffer is left.
+        self.end_capture(OwnerGone(Gone::Surface(surface)));
+        self.let_go_of_preview_hovers_on(surface);
         if let Some(want) = wants_read
             && !self.app.preview_worker.request(preview::PreviewRequest {
                 window: self.window_id(),
@@ -3112,53 +3120,28 @@ impl Runtime<'_> {
                     .remember(&source, view);
             }
         }
-        self.let_go_of_preview_gestures_on(surface);
+        // **The gesture held on it ends with the document it was held on** (T-POINTER-CAPTURE
+        // R-9, owner gone): a selection of a document nobody is looking at any more, a thumb on
+        // a track that means something else in the next one.
+        self.end_capture(OwnerGone(Gone::Surface(surface)));
+        self.let_go_of_preview_hovers_on(surface);
     }
 
-    /// **What the keyboard and the hand were doing on this surface ends with
+    /// **What the keyboard and the pointer's hover were doing on this surface ends with
     /// the document it was doing it to** — the tab's singletons, cleared only
     /// when they name this surface: there is one pointer and one keyboard, so a
-    /// pane leaving a document has no business answering for a gesture that is
-    /// happening in the pane beside it.
-    fn let_go_of_preview_gestures_on(&mut self, surface: PreviewSurface) {
+    /// pane leaving a document has no business answering for a hover or a caret
+    /// that is in the pane beside it. The gesture a held button was making on it
+    /// is the capture's to end ([`Self::end_capture`]).
+    fn let_go_of_preview_hovers_on(&mut self, surface: PreviewSurface) {
         if self.preview_edit_focus == Some(surface) {
             self.preview_edit_focus = None;
-        }
-        if self.held_preview_selecting().copied() == Some(surface) {
-            self.drop_preview_selecting();
-        }
-        // A selection being drawn across a page that has just been swapped out
-        // is a selection of a document nobody is looking at any more.
-        if self
-            .held_preview_text_drag()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_text_drag();
-        }
-        // A thumb held over the swap would be dragging a block that is not there
-        // any more.
-        if self
-            .held_preview_block_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_block_drag();
         }
         if self
             .preview_block_hover
             .is_some_and(|(hovered, _)| hovered == surface)
         {
             self.preview_block_hover = None;
-        }
-        // And the body's own bar with them: the next document is a different
-        // length, so a thumb held across the swap would be dragging a track that
-        // means something else.
-        if self
-            .held_preview_body_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_body_drag();
         }
         if self
             .preview_body_hover
@@ -4001,13 +3984,14 @@ impl Runtime<'_> {
         // the duplication the ruling retired.
         let railed = self.preview_rail_kind(surface) == Some(seats::PreviewRailKind::Crumbs);
         let revealed = self.foot_reveal_is_fresh(RevealedFoot::Preview(seat), now);
-        let saved = self.preview_save_notice(surface, now) == Some(preview::preview_saved_notice());
+        let saved = self
+            .preview_save_notice(surface, now)
+            .filter(|notice| preview::is_a_save_acknowledgement(notice))
+            .map(str::to_owned);
         let wanted = if revealed {
             Some(foot_revealed_label())
-        } else if saved {
-            Some(preview::preview_saved_notice())
         } else {
-            None
+            saved.as_deref()
         };
         let (flash, dissolved) = self.foot_saying(FootSaying::Preview(surface), wanted, now);
         let notice = self
@@ -4874,7 +4858,7 @@ impl Runtime<'_> {
     /// **The bar of one surface, laid out** — `None` when nothing is playing
     /// there or the bar is not up.
     ///
-    /// The same [`video_seat::bar_layout`] the painter used, off the same
+    /// The same [`video_seat::bar_layout_of`] the painter used, off the same
     /// [`Self::video_shape_of`] rectangle: a hit test that derived the boxes a
     /// second way would be a bar that answers a hand somewhere other than where
     /// it was drawn, which is the one defect a control bar cannot have.
@@ -4886,12 +4870,10 @@ impl Runtime<'_> {
             return None;
         }
         let shape = self.video_shape_of(surface, scale, now)?;
-        let state = seat.state();
-        let figures = video_seat::clock_figures(state.position_secs, state.duration_secs);
-        video_seat::bar_layout(
+        video_seat::bar_layout_of(
+            &seat.state(),
             shape.rect(),
             scale,
-            figures,
             self.video_meta_of(surface).width,
         )
     }
@@ -5977,23 +5959,6 @@ impl Runtime<'_> {
         )
     }
 
-    /// **A gesture on a rendered page that will get no release** — the window
-    /// lost the focus, and with it the pointer capture, mid-drag (K129's
-    /// `pointercancel`, one surface along).
-    ///
-    /// The record is dropped unspent, as every other press this window cancels
-    /// on a blur is: a gesture nobody finished chose nothing. What it frees is
-    /// the span the gesture was holding (owner's ruling 2026-09-23): a drag left
-    /// standing would keep the page drawing the span it began on however the
-    /// caret moved after, so the page is laid out again from where the caret and
-    /// the rendered selection stand now.
-    pub(crate) fn cancel_preview_text_drag(&mut self) -> Result<()> {
-        if self.take_preview_text_drag().is_some() {
-            self.repaint_preview()?;
-        }
-        Ok(())
-    }
-
     /// **Whether a press on this surface may put a caret in the page** (T5 ①).
     ///
     /// Three answers folded into one so that the press does not have to hold
@@ -6324,7 +6289,7 @@ impl Runtime<'_> {
             // rule next door: the reader has not asked for it to go away, and a
             // highlight that vanished the instant the button came up would be a
             // highlight nobody could check.
-            self.copy_preview_text_selection(drag.surface);
+            self.copy_preview_text_selection(drag.surface)?;
         }
         Ok(true)
     }
@@ -6760,7 +6725,7 @@ impl Runtime<'_> {
     /// surface is asked — which is what "from any focus state" (mock-up
     /// 6139-6150) means when the condition is data rather than two call sites
     /// agreeing.
-    pub(in crate::runtime) fn preview_key(&mut self, event: &KeyEvent) -> Result<bool> {
+    pub(in crate::runtime) fn preview_key(&mut self, event: &Keystroke) -> Result<bool> {
         let Some(surface) = self.preview_edit_focus() else {
             return self.preview_browse_key(event);
         };
@@ -6817,9 +6782,9 @@ impl Runtime<'_> {
                 self.preview_pane_mut(surface).place_caret(caret);
                 self.repaint_preview()?;
             }
-            preview_edit::EditCommand::Copy => self.copy_preview_selection(),
+            preview_edit::EditCommand::Copy => self.copy_preview_selection()?,
             preview_edit::EditCommand::Cut => {
-                self.copy_preview_selection();
+                self.copy_preview_selection()?;
                 self.edit_preview(|content, caret| {
                     !caret.is_empty() && preview_edit::insert(content, caret, "")
                 })?;
@@ -6856,7 +6821,7 @@ impl Runtime<'_> {
     ///
     /// Travel keys honour repeats and nothing else does, which is the same line
     /// the tree draws: holding an arrow is one continuous "further".
-    fn preview_browse_key(&mut self, event: &KeyEvent) -> Result<bool> {
+    fn preview_browse_key(&mut self, event: &Keystroke) -> Result<bool> {
         // **A field standing over this surface is asked before it** (§7.7 ②,
         // B69: 「search keys are the search box's」).
         //
@@ -6884,7 +6849,7 @@ impl Runtime<'_> {
                 &image.path,
                 &event.logical_key,
                 self.window.modifiers,
-                event.state.is_pressed(),
+                event.pressed,
             )
         }) {
             self.step_preview_neighbour(surface, direction)?;
@@ -6904,7 +6869,7 @@ impl Runtime<'_> {
         // when the pane does. The glance card is never that surface and never
         // takes a key — it is read-only by its own founding ruling, and a card
         // that swallowed Space would be a hover eating the shell's keys.
-        if event.state.is_pressed()
+        if event.pressed
             && !self.window.modifiers.control_key()
             && !self.window.modifiers.alt_key()
             && !self.window.modifiers.super_key()
@@ -7410,7 +7375,7 @@ impl Runtime<'_> {
             // padlock — so the one thing this slot takes from the save ledger is
             // the word that *is* news.
             self.preview_save_notice(surface, now)
-                .filter(|notice| *notice == preview::preview_saved_notice())
+                .filter(|notice| preview::is_a_save_acknowledgement(notice))
                 .map(str::to_owned)
         };
         flashed.map(|word| (word, &[] as &'static [notice::NoticeVerb]))
@@ -7449,7 +7414,7 @@ impl Runtime<'_> {
             })
             .or_else(|| {
                 self.preview_save_notice(surface, now)
-                    .filter(|notice| *notice != preview::preview_saved_notice())
+                    .filter(|notice| !preview::is_a_save_acknowledgement(notice))
             })
     }
 
@@ -7622,12 +7587,12 @@ impl Runtime<'_> {
 
     /// Put the selection on the clipboard, through the door the terminal's own
     /// copy already uses.
-    pub(in crate::runtime) fn copy_preview_selection(&mut self) {
+    pub(in crate::runtime) fn copy_preview_selection(&mut self) -> Result<()> {
         let Some(surface) = self.preview_keyboard_surface() else {
-            return;
+            return Ok(());
         };
         let Some(caret) = self.preview_pane(surface).map(|pane| pane.caret()) else {
-            return;
+            return Ok(());
         };
         let Some(text) = self
             .preview_buffer_on(surface)
@@ -7635,11 +7600,16 @@ impl Runtime<'_> {
             .map(|content| caret.selected(content).to_owned())
             .filter(|text| !text.is_empty())
         else {
-            return;
+            return Ok(());
         };
-        if let Err(error) = write_terminal_clipboard_text(&text) {
-            eprintln!("recoverable preview copy failure: {error:#}");
-        }
+        // A copy the clipboard refuses is said once by the clipboard lane's ledger, and the
+        // selection stays, so the reader can try again.
+        self.submit_clipboard_write(
+            text,
+            "copy the quick edit's selection",
+            crate::ClipboardWriteEffect::None,
+        )
+        .map(drop)
     }
 
     /// Paste into the buffer, with the breaks the *file* uses.
@@ -7647,17 +7617,18 @@ impl Runtime<'_> {
     /// A clipboard on this platform carries CRLF whatever it was copied from, so
     /// pasting it verbatim into a file written with bare newlines is how a
     /// one-line paste turns the next diff into a whole-file rewrite.
+    ///
+    /// Asked of the clipboard lane (`clipboard_lane`) for the page that holds the keyboard, and
+    /// landed on the turn it answers if that page still holds it; a refused read is said once by
+    /// the lane's ledger.
     pub(in crate::runtime) fn paste_into_preview(&mut self) -> Result<()> {
-        let text = match hang_watch::during(hang_watch::Station::ClipboardRead, || {
-            bt_platform::clipboard_text()
-        }) {
-            Ok(text) => text,
-            Err(error) => {
-                eprintln!("recoverable preview paste failure: {error}");
-                return Ok(());
-            }
+        let Some(surface) = self.preview_keyboard_surface() else {
+            return Ok(());
         };
-        self.apply_clipboard_text_to_preview(&text)
+        self.ask_for_a_paste(
+            crate::clipboard_lane::PasteInto::Preview(surface),
+            crate::clipboard_lane::Ask::Text,
+        )
     }
 
     pub(in crate::runtime) fn apply_clipboard_text_to_preview(&mut self, text: &str) -> Result<()> {
@@ -7742,26 +7713,193 @@ impl Runtime<'_> {
     /// mock-up's "from any focus state", 6139-6150), a button means the window it
     /// is drawn on. Splitting the naming from the verb is what keeps them one
     /// verb.
+    ///
+    /// **A request on the storage worker, and nothing written here** (S-6a): the
+    /// buffer hands its body to the worker ([`preview::PreviewBuffer::request_save`])
+    /// and the door returns. The sentence is said when the answer comes back
+    /// ([`Self::hear_preview_saves`], `AppEvent::DocumentsAnswered`) — "Saved", the
+    /// conflict, or why not — and the press itself says nothing, because the
+    /// answer is back within the turn or two a frame takes. A press the door
+    /// refuses (no file, a body over the bound, nothing that would write it) is
+    /// said now. The meter (`Station::PreviewSave`) holds the encode and the
+    /// hand-over, the one part of a save still on this thread.
     pub(in crate::runtime) fn save_preview_on(&mut self, surface: PreviewSurface) -> Result<()> {
         if !self.preview_is_editable(surface) {
             return Ok(());
         }
-        let Some(buffer) = self.preview_buffer_on_mut(surface) else {
+        let flipped = self.page_source_shown_on(surface).map(Path::to_path_buf);
+        let index = self.preview_tab_index(surface);
+        let Some(source) = flipped.map(preview::PreviewSource::file).or_else(|| {
+            self.window.tabs[index]
+                .preview_panes
+                .get(surface)?
+                .source()
+                .cloned()
+        }) else {
+            return Ok(());
+        };
+        let saves = &mut self.app.preview_saves;
+        let Some(buffer) = self.window.tabs[index].preview_pool.get_mut(&source) else {
             return Ok(());
         };
         if !buffer.dirty() {
             return Ok(());
         }
-        let notice = match hang_watch::during(hang_watch::Station::PreviewSave, || buffer.save()) {
-            preview::SaveOutcome::Saved => preview::preview_saved_notice().to_owned(),
-            preview::SaveOutcome::Conflict => preview::preview_conflict_notice().to_owned(),
-            preview::SaveOutcome::Failed(error) => {
-                eprintln!("recoverable preview save failure: {error}");
-                i18n::not_saved(&error)
+        let asked = hang_watch::during(hang_watch::Station::PreviewSave, || {
+            buffer.request_save(saves, surface)
+        });
+        match asked {
+            preview::SaveAsked::Sent | preview::SaveAsked::Pending => Ok(()),
+            preview::SaveAsked::Refused(why) => {
+                self.preview_pane_mut(surface).say(Some((
+                    preview::save_notice(preview::SaveOutcome::Failed(why)),
+                    Instant::now(),
+                )));
+                self.repaint_preview()
             }
-        };
-        self.preview_pane_mut(surface)
-            .say(Some((notice, Instant::now())));
+        }
+    }
+
+    /// **Every dirty buffer of this window's tabs handed to the storage worker,
+    /// for a shut answered `Save all`** (S-6b): each as a press on it would hand
+    /// it ([`preview::PreviewPool::save_for_a_shut`]) — the window thread writes
+    /// nothing — its answer said on the pane of its tab that shows its file, and
+    /// a refusal at the hand-over said there now. A buffer no pane of its tab
+    /// shows is said on no surface: if it does not land, the window's card names
+    /// it (`Runtime::settle_close_wait`). Answers the refusals, with why, and every
+    /// buffer the wait that follows waits for ([`preview::PreviewPool::close_awaited`]).
+    pub(in crate::runtime) fn save_every_dirty_preview(&mut self) -> preview::HandedOver {
+        let refused = self.app.preview_saves.save_a_window_for_a_shut(self.window);
+        let now = Instant::now();
+        let mut handed = preview::HandedOver::default();
+        for (surface, source, why) in refused {
+            let still_shows_it = self
+                .preview_buffer_on(surface)
+                .is_some_and(|buffer| buffer.source() == &source);
+            if still_shows_it {
+                self.preview_pane_mut(surface).say(Some((
+                    preview::save_notice(preview::SaveOutcome::Failed(why.clone())),
+                    now,
+                )));
+            }
+            handed.refused.push((source, why));
+        }
+        handed.awaited = self
+            .window
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.preview_pool.close_awaited())
+            .collect();
+        handed
+    }
+
+    /// **Keep what this window would lose, on a stop that cannot ask** (D-4, 0.4.8 G7; S-6c):
+    /// the first half of the stop, once the window has been photographed and let go
+    /// (`FolioApp::stop_every_window`). Every dirty buffer's save is handed to the storage
+    /// worker as a press hands it ([`Self::save_every_dirty_preview`]) — the window thread
+    /// writes nothing — and every tab's pool is held past the window
+    /// ([`preview::StopKeeps`]) until the worker has ended, when what no file took is kept in
+    /// `recovery` (`App::keep_what_the_stop_did_not_save`). No card and no repaint: the
+    /// window is going with a process that is stopping, and its renderer may be what failed.
+    pub(crate) fn keep_unsaved_edits(&mut self, recovery: &Path) {
+        let handed = self.save_every_dirty_preview();
+        self.app.stop_keeps.handed(recovery, handed);
+        for tab in &mut self.window.tabs {
+            self.app
+                .stop_keeps
+                .hold(std::mem::take(&mut tab.preview_pool));
+        }
+    }
+
+    /// **Hand this window's saves over for the system's end of the session, and take nothing
+    /// from it** (T-ENDSESSION-SAVES): every dirty buffer's save handed to the storage worker as
+    /// a press hands it ([`Self::save_every_dirty_preview`]) — the window thread writes nothing —
+    /// with every pool left in its tab and the window left standing, because a session taken back
+    /// finds every window as it was. What the hand-over came to is the caller's, for
+    /// [`Self::keep_what_the_systems_end_did_not_save`] once the document behind these saves has
+    /// had its wait.
+    pub(crate) fn hand_over_for_the_systems_end(&mut self) -> preview::HandedOver {
+        self.save_every_dirty_preview()
+    }
+
+    /// **What the system's end of the session keeps of this window's edits, once the document's
+    /// wait is over and the answers have been heard** (T-ENDSESSION-SAVES): each tab's
+    /// [`preview::PreviewPool::kept_after_the_stop`] over what [`Self::hand_over_for_the_systems_end`]
+    /// handed — a buffer its save cleaned is `Saved`, and one its save did not clean, or a body a
+    /// save sent that did not land, is copied into `recovery`, never over the file (§5.3 row 20c).
+    /// The pools stay in their tabs and the buffers as they stand: dirty where the save did not
+    /// land, so a session taken back still holds the edit.
+    ///
+    /// `said` is every refusal the storage worker's answers gave (heard by
+    /// [`Self::hear_preview_saves`]): with the hand-over's own refusals, each copy's line names
+    /// why its file did not take the edit — the disk's own reason where the disk refused it.
+    pub(crate) fn keep_what_the_systems_end_did_not_save(
+        &mut self,
+        handed: &preview::HandedOver,
+        said: &[(preview::PreviewSource, String)],
+        recovery: &Path,
+        at: SystemTime,
+    ) -> Vec<preview::Kept> {
+        let mut refused = handed.refused.clone();
+        refused.extend_from_slice(said);
+        self.window
+            .tabs
+            .iter_mut()
+            .flat_map(|tab| {
+                tab.preview_pool
+                    .kept_after_the_stop(&handed.awaited, &refused, recovery, at)
+            })
+            .collect()
+    }
+
+    /// **The storage worker's answers about preview saves, heard by this
+    /// window's buffers** (S-6a): each answer goes to the buffer that asked, if
+    /// one of this window's tabs holds it ([`preview::PreviewSaves::deliver`]),
+    /// and its sentence to the surface that pressed, if it still shows that
+    /// file. An
+    /// answer this window holds no buffer for is left in `answers`, for the next
+    /// window or the sink.
+    ///
+    /// Every answer that says the file did not take its body — the conflict, or the disk's own
+    /// refusal ([`preview::SaveOutcome::refusal`]) — is put in `refused`, before the repaint, so
+    /// a caller that keeps copies of what did not land names the reason
+    /// (`FolioApp::keep_what_the_systems_end_did_not_save`, as `preview::StopKeeps::keep` does).
+    pub(crate) fn hear_preview_saves(
+        &mut self,
+        answers: &mut Vec<preview::SaveAnswer>,
+        refused: &mut Vec<(preview::PreviewSource, String)>,
+    ) -> Result<()> {
+        let mut pools: Vec<&mut preview::PreviewPool> = self
+            .window
+            .tabs
+            .iter_mut()
+            .map(|tab| &mut tab.preview_pool)
+            .collect();
+        let heard = self.app.preview_saves.deliver(answers, &mut pools);
+        if heard.is_empty() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        for (surface, source, said) in heard {
+            let Some(said) = said else {
+                continue;
+            };
+            let still_shows_it = self
+                .preview_buffer_on(surface)
+                .is_some_and(|buffer| buffer.source() == &source);
+            if let Some(why) = said.clone().refusal() {
+                refused.push((source, why));
+            }
+            if still_shows_it {
+                self.preview_pane_mut(surface)
+                    .say(Some((preview::save_notice(said), now)));
+            }
+        }
+        // A body a Reload replaced while its save was out is owed the file the
+        // save just wrote (`PreviewBuffer::hear_save`): its read is asked.
+        for index in 0..self.window.tabs.len() {
+            self.request_stale_previews(index);
+        }
         self.repaint_preview()
     }
 
@@ -7772,7 +7910,9 @@ impl Runtime<'_> {
     /// (ruling 6: the mock-up's four durations are one). A refusal does not
     /// expire, because it is not a report of something that happened but of
     /// something that did *not*, and a warning that fades is a warning the user
-    /// is entitled to have missed.
+    /// is entitled to have missed. The sentence of a save by an ordinary write
+    /// ([`preview::preview_saved_ordinarily_notice`]) is said once per drive and
+    /// does not expire either: it stays until the pane's next notice.
     fn preview_save_notice(&self, surface: PreviewSurface, now: Instant) -> Option<&str> {
         let (notice, at) = self.preview_pane(surface)?.notice()?;
         if notice == preview::preview_saved_notice()
@@ -8698,14 +8838,9 @@ impl Runtime<'_> {
         };
         self.preview_pane_mut(surface)
             .key_parsed_source(parsed_source);
-        // Drag and hover identities are positional too; a new parse retires them.
-        if self
-            .held_preview_block_drag()
-            .copied()
-            .is_some_and(|drag| drag.surface == surface)
-        {
-            self.drop_preview_block_drag();
-        }
+        // Drag and hover identities are positional too; a new parse retires them — the block
+        // thumb held on one (T-POINTER-CAPTURE R-9, owner gone) and the block under the hand.
+        self.end_capture(OwnerGone(Gone::Blocks(surface)));
         if self
             .preview_block_hover
             .is_some_and(|(over, _)| over == surface)
@@ -8844,13 +8979,16 @@ impl Runtime<'_> {
                 if !needs_pixels {
                     return answer;
                 }
-                if self.request_peek_pixels(path) {
-                    preview_trace::picture_read(preview_trace::global(), path);
-                    self.window.peek_cache.insert(
-                        bt_term::normalized_local_image_path_key(path),
-                        PeekCacheEntry::Pending,
-                    );
-                    return answer;
+                // The one door files what it asked: the read under its identity, or —
+                // its thread not started — a failed decode, asked again by new input.
+                match self.request_peek_pixels(path) {
+                    // The lane was full: nothing is out, and the page's next resolve asks again.
+                    PeekAsk::NotNow => return answer,
+                    PeekAsk::Asked(_) => {
+                        preview_trace::picture_read(preview_trace::global(), path);
+                        return answer;
+                    }
+                    PeekAsk::Unstarted | PeekAsk::Refused => {}
                 }
                 // A file this window will not open draws what a picture it cannot
                 // read draws — unless the page already has something true to show,
@@ -8896,17 +9034,17 @@ impl Runtime<'_> {
                 request.native[0],
                 request.native[1],
             );
-            if self
+            let asked = self
                 .app
                 .math_worker
-                .scale_tasks
-                .send(ScaleWorkerRequest::MarkdownImage { leaf, task })
-                .is_ok()
-            {
+                .scale(ScaleWorkerRequest::MarkdownImage { leaf, task });
+            if asked.is_ok_or_unstarted() {
+                // Asked — or its thread not started, which leaves the pass owed as asked: the
+                // decode's own pixels stand, and a new size asks again.
+                sent |= asked.is_ok();
                 self.window
                     .markdown_pictures
                     .land(request.key, MarkdownRaster::Pending);
-                sent = true;
             }
         }
         sent
@@ -10125,6 +10263,10 @@ impl Runtime<'_> {
             }
         }
         self.window.renderer.set_preview_images(pictures);
+        // **And the failed peeks no surface names any more** (T-PEEK-CACHE-QUESTION-RECORDS):
+        // after the pages and the panes above have said what they show this walk, so a tab
+        // closed, a pane handed another file or a page scrolled past a picture lets its record go.
+        self.let_go_unnamed_peek_records();
     }
 
     /// **Every playing recording, as this frame's video layers** (user ruling
@@ -10314,9 +10456,17 @@ impl Runtime<'_> {
     /// worker opens the file again; the answer is a new
     /// [`AnimationEntry::Ready`] with a new serial, standing on frame zero. A
     /// surface that was merely not on the glass has not *begun* anything, so its
-    /// entry is untouched and it resumes. `animation_presence` is the record
-    /// that tells those two apart; see it for why drawn-ness cannot.
+    /// entry is untouched and it resumes. What each surface shows is the record
+    /// that tells those two apart; see [`AnimationCache`] for why drawn-ness cannot.
     fn request_animations(&mut self, drawn: &[DrawnAnimation]) {
+        // **The surfaces a tab took with it.** A tab closed, carried to another window or folded
+        // into another tab leaves by roads that never name its surfaces, so each walk forgets what
+        // a surface no longer in the window was showing ([`AnimationCache::forget_surfaces_gone`]).
+        // What counts as still in the window is [`animation_surface_exists`].
+        let window = &mut *self.window;
+        window
+            .animations
+            .forget_surfaces_gone(|surface| crate::animation_surface_exists(&window.tabs, surface));
         if !self.app.math_worker_running {
             return;
         }
@@ -10325,51 +10475,18 @@ impl Runtime<'_> {
             .into_iter()
             .map(|surface| (surface, self.animation_path_of(surface)))
             .collect();
-        let named: Vec<(PreviewSurface, Option<String>)> = showing
-            .iter()
-            .map(|(surface, path)| {
-                (
-                    *surface,
-                    path.as_deref().map(normalized_local_image_path_key),
-                )
-            })
-            .collect();
-        for key in animations_opened(&mut self.window.animation_presence, &named) {
-            // **Let go of the playback, keep the refusal.** Whether a file can
-            // be animated at all is a property of the file and does not change
-            // by being opened again, so asking a second time would be a walk of
-            // a container this window has already declined. A decode already in
-            // flight is likewise the answer to this open: it will land standing
-            // on frame zero.
-            if matches!(
-                self.window.animations.get(&key),
-                Some(AnimationEntry::Ready { .. })
-            ) {
-                self.window.animations.remove(&key);
-            }
-        }
-        for (_, path) in &showing {
-            let Some(path) = path else {
-                continue;
-            };
-            let key = normalized_local_image_path_key(path);
-            if self.window.animations.contains_key(&key) {
-                continue;
-            }
-            let leaf = self.focused_shell_address();
-            if self
-                .app
-                .math_worker
-                .tasks
-                .send(MathWorkerRequest::PeekAnimation {
-                    leaf,
-                    path: path.clone(),
-                })
-                .is_ok()
-            {
-                self.window.animations.insert(key, AnimationEntry::Pending);
-            }
-        }
+        // **Let go of the playback, keep the refusal** — and ask, once, for what is shown and not
+        // held: [`AnimationCache::ask_for_showing`]. Whether a file can be animated at all is a
+        // property of the file and does not change by being opened again, so asking a second
+        // time would be a walk of a container this window has already declined. A decode already
+        // in flight is likewise the answer to this open: it will land standing on frame zero. An
+        // unanswered open — its work failed, or its thread could not be started — is no fact about
+        // the file: the new open asks again, and no redraw does.
+        let leaf = self.focused_shell_address();
+        let worker = &self.app.math_worker;
+        self.window
+            .animations
+            .ask_for_showing(&showing, |path| crate::ask_to_open(worker, leaf, path));
         // **The refills, over the drawn set and each animation once.** Two
         // surfaces showing one `loading.gif` are one animation at one phase
         // (§7.44 ⑤), so they are also one order to the worker.
@@ -10403,48 +10520,28 @@ impl Runtime<'_> {
     /// supersession, so a lane that could double-post would queue frames of one
     /// file in front of every other question on it).
     fn request_animation_fill(&mut self, key: &str, path: &std::path::Path) {
-        let wants = matches!(
-            self.window.animations.get(key),
-            Some(AnimationEntry::Ready { animation, .. }) if animation.frames_wanted() > 0
-        );
-        if !wants {
-            return;
-        }
-        let Some(AnimationEntry::Ready {
-            serial,
-            mut animation,
-        }) = self.window.animations.remove(key)
-        else {
-            return;
-        };
-        if let Some((cursor, want)) = animation.take_cursor() {
-            let leaf = self.focused_shell_address();
-            let sent = self
-                .app
-                .math_worker
-                .tasks
-                .send(MathWorkerRequest::AnimationFill {
+        let leaf = self.focused_shell_address();
+        let worker = &self.app.math_worker;
+        self.window
+            .animations
+            .send_fill(key, |serial, cursor, want| {
+                // **A request the lane refused at its door.** Full: the cursor comes home, and
+                // the next frame that draws the animation asks again. Its thread not started: the
+                // fill is lost as a failed one is, so no frame retries it.
+                match worker.decorate(MathWorkerRequest::AnimationFill {
                     leaf,
                     path: path.to_owned(),
                     serial,
                     cursor,
                     want,
-                });
-            // **A request that could not be posted brings the cursor home.** The
-            // lane is gone, so no completion is coming, and an animation whose
-            // decoder went with the request would stand on its last frame for as
-            // long as this window is open.
-            if let Err(std::sync::mpsc::SendError(MathWorkerRequest::AnimationFill {
-                cursor,
-                ..
-            })) = sent
-            {
-                animation.park_cursor(cursor, Vec::new());
-            }
-        }
-        self.window
-            .animations
-            .insert(key.to_owned(), AnimationEntry::Ready { serial, animation });
+                }) {
+                    Err((crate::lane::Refused::NotStarted(_), _)) => FillSent::Lost,
+                    Err((_, MathWorkerRequest::AnimationFill { cursor, .. })) => {
+                        FillSent::TurnedAway(cursor)
+                    }
+                    _ => FillSent::Sent,
+                }
+            });
     }
 
     /// **Where one surface's video is drawn, and in which stack** — the geometry
@@ -10572,12 +10669,9 @@ impl Runtime<'_> {
             .iter()
             .map(|animation| (animation.key.clone(), animation.serial))
             .collect();
-        present_drawn_animations(
-            &mut self.window.animations,
-            &self.window.animations_drawn,
-            &presented,
-            now,
-        );
+        self.window
+            .animations
+            .present_drawn(&self.window.animations_drawn, &presented, now);
         self.window.animations_drawn = presented;
     }
 
@@ -10600,11 +10694,9 @@ impl Runtime<'_> {
     /// holding still, which costs nothing and is the right thing to be showing
     /// the moment it is looked at again.
     fn advance_animations(&mut self, now: Instant) -> bool {
-        advance_drawn_animations(
-            &mut self.window.animations,
-            &self.window.animations_drawn,
-            now,
-        )
+        self.window
+            .animations
+            .advance_drawn(&self.window.animations_drawn, now)
     }
 
     /// Whether anything on the glass is an animation this window is running —
@@ -10711,9 +10803,9 @@ impl Runtime<'_> {
             self.hide_preview_picture(surface);
             return None;
         };
-        let Some(path) = self
+        let Some((path, asker)) = self
             .preview_picture(surface)
-            .map(|picture| picture.path.clone())
+            .map(|picture| (picture.path.clone(), picture.asker))
         else {
             self.hide_preview_picture(surface);
             return None;
@@ -10800,16 +10892,25 @@ impl Runtime<'_> {
                     if asked {
                         return None;
                     }
-                    if self.request_peek_pixels(&path) {
-                        self.window
-                            .peek_cache
-                            .insert(cache_key, PeekCacheEntry::Pending);
-                    } else {
-                        self.preview_pane_mut(surface).refuse_picture(Some(
-                            PictureRefusal::this_window_cannot(
-                                i18n::Text::PreviewFailedImageWorker.text(),
-                            ),
-                        ));
+                    // The one door files what it asked: the read under its identity, or the
+                    // unstarted record.
+                    match self.request_peek_pixels(&path) {
+                        // Out, or nothing is out and the pane's next resolve asks again.
+                        PeekAsk::Asked(_) | PeekAsk::NotNow => {}
+                        PeekAsk::Unstarted => {
+                            self.preview_pane_mut(surface).refuse_picture(Some(
+                                PictureRefusal::this_window_cannot(
+                                    i18n::Text::PreviewFailedImageWorker.text(),
+                                ),
+                            ));
+                        }
+                        PeekAsk::Refused => {
+                            self.preview_pane_mut(surface).refuse_picture(Some(
+                                PictureRefusal::this_window_cannot(
+                                    i18n::Text::PreviewFailedImageWorker.text(),
+                                ),
+                            ));
+                        }
                     }
                     return None;
                 }
@@ -10990,11 +11091,7 @@ impl Runtime<'_> {
             // on the glass while it travels; the store's own `Pending` is what
             // keeps it to one. This is [`answer_one_picture`]'s own arm, said for
             // a pane instead of for a page.
-            if self.request_peek_pixels(&path) {
-                self.window
-                    .peek_cache
-                    .insert(cache_key, PeekCacheEntry::Pending);
-            }
+            self.request_peek_pixels(&path);
             return produced;
         };
         // **Every exact-size question this surface puts to the resample lane.**
@@ -11015,21 +11112,27 @@ impl Runtime<'_> {
             ));
         }
         let task = peek_scale_task(&target, rgba, native_width, native_height);
-        if self
-            .app
-            .math_worker
-            .scale_tasks
-            .send(ScaleWorkerRequest::Preview {
-                leaf: self.focused_shell_address(),
-                task,
-            })
-            .is_ok()
-        {
-            self.preview_pane_mut(surface).ask_picture_scale(target);
-        } else {
-            self.preview_pane_mut(surface).refuse_picture(Some(
-                PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedImageWorker.text()),
-            ));
+        match self.app.math_worker.scale(ScaleWorkerRequest::Preview {
+            // The leaf is the focused shell's — a float has no seat, and what the leaf decides on
+            // the way home, the window and the tab that own the answer, is this tab's either way —
+            // so the picture's own number is what makes a second pane over the same file a second
+            // question, which neither displaces nor joins this one (T-SCALE-ADDRESS-PER-ASKER).
+            leaf: self.focused_shell_address(),
+            asker,
+            task,
+        }) {
+            // Asked — or its thread not started, which marks it asked too: a refit to a new size
+            // asks again, a redraw does not.
+            Ok(_) | Err((crate::lane::Refused::NotStarted(_), _)) => {
+                self.preview_pane_mut(surface).ask_picture_scale(target);
+            }
+            // Full: nothing is out, and the pane's next resolve asks again.
+            Err((crate::lane::Refused::Full { .. }, _)) => {}
+            Err(_) => {
+                self.preview_pane_mut(surface).refuse_picture(Some(
+                    PictureRefusal::this_window_cannot(i18n::Text::PreviewFailedImageWorker.text()),
+                ));
+            }
         }
         produced
     }
@@ -11084,6 +11187,7 @@ impl Runtime<'_> {
         // Whether a read landing raised the "this file changed on disk" strip
         // over a document somebody had typed in — see [`preview::ReadLanded`].
         let mut said_disk_news = false;
+        let mut read_again = Vec::new();
         let answers: Vec<preview::PreviewResponse> =
             answers_for(batch, |response| self.owns(response.owner()));
         for response in answers {
@@ -11137,6 +11241,15 @@ impl Runtime<'_> {
                     let Some((landed, content)) = landed else {
                         continue;
                     };
+                    // **News that arrived while this read was out** (round 6):
+                    // the buffer owes another read, asked below.
+                    if self.window.tabs[index]
+                        .preview_pool
+                        .get(&response.source)
+                        .is_some_and(preview::PreviewBuffer::is_behind_the_disk)
+                    {
+                        read_again.push(index);
+                    }
                     match landed {
                         // **And out by the one door**, whichever slot it landed
                         // in.
@@ -11154,6 +11267,9 @@ impl Runtime<'_> {
                         // somebody's document, so the seats are re-solved and
                         // not merely repainted.
                         preview::ReadLanded::Kept { said } => said_disk_news |= said,
+                        // The watcher's comparison found a clean body the file
+                        // no longer holds: its body is asked for (S-6a).
+                        preview::ReadLanded::ReadAgain => read_again.push(index),
                     }
                 }
                 // A picture's byte count, for the meta line under it.
@@ -11218,6 +11334,9 @@ impl Runtime<'_> {
         // the seats are re-solved when the set of panes wearing one moves.
         if said_disk_news {
             self.settle_preview_disk_notices()?;
+        }
+        for index in read_again {
+            self.request_stale_previews(index);
         }
         Ok(())
     }
@@ -11655,13 +11774,14 @@ impl Runtime<'_> {
         // as a consequence). "Saved" was drawn only in a docked pane's foot, and
         // a float's went to the body strip that the ruling retired — so without
         // this the word would have had nowhere left to be printed at all.
-        let saved = self.preview_save_notice(surface, now) == Some(preview::preview_saved_notice());
+        let saved = self
+            .preview_save_notice(surface, now)
+            .filter(|notice| preview::is_a_save_acknowledgement(notice))
+            .map(str::to_owned);
         let wanted = if revealed {
             Some(foot_revealed_label())
-        } else if saved {
-            Some(preview::preview_saved_notice())
         } else {
-            None
+            saved.as_deref()
         };
         let (flash, foot_dissolved) = self.foot_saying(FootSaying::FloatPreview(id), wanted, now);
         let notice = self
@@ -12055,6 +12175,7 @@ impl Runtime<'_> {
                 formulas,
                 scrollback,
                 self.app.settings_store.loaded().line_wrapping,
+                &bt_pty::SystemShellEnvironment,
             )?;
             let Some(arrived) = self.seats.stand_in_terminal(&metrics, seat) else {
                 *self.preview_panes.entry(surface) = pane;
@@ -12443,7 +12564,7 @@ impl Runtime<'_> {
     ///
     /// It costs nothing when nothing is live. A window with no recording sweeps
     /// an empty list and pumps an empty map; one drawing no animation has no
-    /// clock to run ([`advance_drawn_animations`] walks what is *drawn*), and the
+    /// clock to run ([`AnimationCache::advance_drawn`] walks what is *drawn*), and the
     /// layers are rebuilt only when something is there to rebuild them from.
     ///
     /// The debt it leaves is the one thing that has to outlive it. A frame that
@@ -12882,7 +13003,10 @@ impl Runtime<'_> {
     /// Every animation deadline this window reports is clamped to it. Reporting
     /// an earlier one would wake the loop to be turned away by the rate gate
     /// and then re-arm the same deadline — a spin dressed as a schedule.
-    fn strip_animation_next_tick(&self, interval: Duration) -> Option<Instant> {
+    pub(in crate::runtime) fn strip_animation_next_tick(
+        &self,
+        interval: Duration,
+    ) -> Option<Instant> {
         let strip = self
             .window
             .strip_animation_ticked_at
@@ -13332,12 +13456,47 @@ impl Runtime<'_> {
 
     /// Record a peek decode outcome and, when the hover is still settled on that path, show the
     /// flyout at the settle pointer.
+    ///
+    /// **Only the answer to the read the window awaits** (T-PEEK-ANSWER-IDENTITY): `asked` is the
+    /// identity of the request this answers, and [`crate::file_peek_answer`] files it only for the
+    /// file's read in flight under that identity. An answer the window has let go of — the file
+    /// changed under the read and a surface asked about the bytes there now — is set aside here:
+    /// nothing is filed, no surface is told, no page is sharpened from it.
     pub(in crate::runtime) fn complete_peek_image(
         &mut self,
+        asked: ComputationId,
         path: PathBuf,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     ) -> Result<()> {
         let cache_key = normalized_local_image_path_key(&path);
+        let sharpening = result.as_ref().ok().map(|decoded| {
+            (
+                decoded.key.clone(),
+                Arc::clone(&decoded.rgba),
+                [decoded.width_px, decoded.height_px],
+            )
+        });
+        let failure = result.as_ref().err().cloned();
+        // **Filed with its reason** (owner's ruling 2026-09-12), so that a surface which opens
+        // this file later says the same sentence rather than the one generic line — see
+        // [`PeekCacheEntry::Failed`]. A failure is filed only while some surface names the file.
+        let named = self.peek_files_named();
+        let answer = result.map(|decoded| PeekCacheEntry::Ready {
+            key: decoded.key,
+            rgba: decoded.rgba,
+            width_px: decoded.width_px,
+            height_px: decoded.height_px,
+            native_size: decoded.native_size,
+        });
+        if !crate::file_peek_answer(
+            &mut self.window.peek_cache,
+            &named,
+            cache_key.clone(),
+            asked,
+            answer,
+        ) {
+            return Ok(());
+        }
         // **Every picture waiting on this file, not just the lane's.** A decode
         // is addressed by *path* and the answer is the same pixels for whoever
         // asked: a pane, a window torn off it, or both at once. Asking only the
@@ -13353,62 +13512,41 @@ impl Runtime<'_> {
             })
             .collect();
         let preview_matches = !waiting.is_empty();
-        match result {
-            Ok(decoded) => {
-                // **And the pages that asked for these pixels to sharpen a
-                // picture they are already drawing** (§7.1.3u ③). Owed here,
-                // before the pixels go into the store, because this is the one
-                // moment they are in hand and named: the page cannot make the
-                // exact-size pass itself, which is why it asked for the file at
-                // all. See [`owe_sharpened_rasters`] — and note what is *not*
-                // done, which is ticking the picture generation: nothing about
-                // the document's shape has changed, so no paragraph is re-shaped
-                // for a picture that is already the right size on the glass.
-                owe_sharpened_rasters(
-                    &mut self.window.markdown_pictures,
-                    // The one walk ([`documents_held_in`]), spelled with the two
-                    // fields it reads rather than through `Self::documents_held`:
-                    // the ledger being written is a third field of the same
-                    // window, and borrowing it mutably while the holders are read
-                    // is only possible when the compiler can see the three are
-                    // different fields.
-                    documents_pictures(documents_held_in(
-                        &self.window.tabs,
-                        &self.window.peek_pane,
-                    )),
-                    &cache_key,
-                    &decoded.key,
-                    &decoded.rgba,
-                    [decoded.width_px, decoded.height_px],
-                    Instant::now(),
-                );
-                self.window.peek_cache.insert(
-                    cache_key.clone(),
-                    PeekCacheEntry::Ready {
-                        key: decoded.key,
-                        rgba: decoded.rgba,
-                        width_px: decoded.width_px,
-                        height_px: decoded.height_px,
-                        native_size: decoded.native_size,
-                    },
-                );
-                if let Some(active) = self.window.peek_hover.active.clone()
-                    && active.subject.key == cache_key
-                {
-                    self.show_or_request_peek(&active, false)?;
-                }
+        if let Some((content, rgba, native)) = sharpening {
+            // **And the pages that asked for these pixels to sharpen a
+            // picture they are already drawing** (§7.1.3u ③). Owed here,
+            // because this is the one moment the pixels are in hand and
+            // named: the page cannot make the exact-size pass itself, which
+            // is why it asked for the file at all. See
+            // [`owe_sharpened_rasters`] — and note what is *not* done, which
+            // is ticking the picture generation: nothing about the document's
+            // shape has changed, so no paragraph is re-shaped for a picture
+            // that is already the right size on the glass.
+            owe_sharpened_rasters(
+                &mut self.window.markdown_pictures,
+                // The one walk ([`documents_held_in`]), spelled with the two
+                // fields it reads rather than through `Self::documents_held`:
+                // the ledger being written is a third field of the same
+                // window, and borrowing it mutably while the holders are read
+                // is only possible when the compiler can see the three are
+                // different fields.
+                documents_pictures(documents_held_in(&self.window.tabs, &self.window.peek_pane)),
+                &cache_key,
+                &content,
+                &rgba,
+                native,
+                Instant::now(),
+            );
+            if let Some(active) = self.window.peek_hover.active.clone()
+                && active.subject.key == cache_key
+            {
+                self.show_or_request_peek(&active, false)?;
             }
-            Err(error) => {
-                for surface in &waiting {
-                    self.preview_pane_mut(*surface)
-                        .refuse_picture(Some(PictureRefusal::decoded(&error)));
-                }
-                // **Filed with its reason** (owner's ruling 2026-09-12), so that
-                // a surface which opens this file later says the same sentence
-                // rather than the one generic line — see [`PeekCacheEntry::Failed`].
-                self.window
-                    .peek_cache
-                    .insert(cache_key.clone(), PeekCacheEntry::Failed(error));
+        }
+        if let Some(error) = failure {
+            for surface in &waiting {
+                self.preview_pane_mut(*surface)
+                    .refuse_picture(Some(PictureRefusal::decoded(&error)));
             }
         }
         // **And every markdown page that was waiting to see this file**
@@ -13464,21 +13602,21 @@ impl Runtime<'_> {
     /// `.png` that is not one is a thing the reader should be told about. A video that will not
     /// decode is very often an ordinary file in a container this machine has no codec for, and the
     /// card and the pane have something true to draw either way: the format and the size. So the
-    /// facts are filed **before** the frame is looked at, and the cache is marked `Failed` without
+    /// facts are filed with the frame or without one, and the cache is marked `Failed` without
     /// anybody's failure line being written.
+    ///
+    /// **And only the answer to the read the window awaits** (T-PEEK-ANSWER-IDENTITY), for
+    /// [`Self::complete_peek_image`]'s reason: a frame and facts read from bytes the file no
+    /// longer holds are set aside, and neither is filed.
     pub(in crate::runtime) fn complete_peek_video_frame(
         &mut self,
+        asked: ComputationId,
         path: PathBuf,
         glance: VideoGlance,
     ) -> Result<()> {
         let cache_key = normalized_local_image_path_key(&path);
-        // Filed first and unconditionally: these outlive the pixels and are the whole of the
-        // degraded card — see [`WindowRuntime::video_facts`].
-        self.window
-            .video_facts
-            .insert(cache_key.clone(), glance.facts);
-        let entry = match glance.frame {
-            Some(frame) => PeekCacheEntry::Ready {
+        let answer = match glance.frame {
+            Some(frame) => Ok(PeekCacheEntry::Ready {
                 key: video_frame_texture_key(&path, glance.mtime, frame.width, frame.height),
                 rgba: Arc::from(frame.rgba.into_boxed_slice()),
                 width_px: frame.width,
@@ -13488,19 +13626,34 @@ impl Runtime<'_> {
                 // which is where every surface reads it from — see
                 // [`PreviewImageState::stated_size`].
                 native_size: None,
-            },
+            }),
             // **A container this machine has no codec for, said in the
             // decoder's own words.** The picture lane's variants are about a
             // picture file's size and none of them is this; `Decode` is the
             // seam that carries a reason nobody here can translate, which is
             // what the pane has always printed for a video that would not
             // decode — and it prints nothing at all for one, by the paragraph
-            // above.
-            None => PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
+            // above. Filed only while some surface names the file
+            // ([`crate::file_peek_answer`]).
+            None => Err(bt_term::InlineImageDecodeError::Decode(
                 "no decoder for this container".to_owned(),
             )),
         };
-        self.window.peek_cache.insert(cache_key.clone(), entry);
+        let named = self.peek_files_named();
+        if !crate::file_peek_answer(
+            &mut self.window.peek_cache,
+            &named,
+            cache_key.clone(),
+            asked,
+            answer,
+        ) {
+            return Ok(());
+        }
+        // Filed with or without a frame: these outlive the pixels and are the whole of the
+        // degraded card — see [`WindowRuntime::video_facts`].
+        self.window
+            .video_facts
+            .insert(cache_key.clone(), glance.facts);
         // Every surface standing on this file, for `complete_peek_image`'s reason: a decode is
         // addressed by path and the answer is the same pixels for a pane, for a window torn off
         // it, or for both at once.
@@ -13536,8 +13689,13 @@ impl Runtime<'_> {
     /// later refit answer "already asked", so the picture never came back at
     /// all. The target tuple travels with the pane because it lives on it, which
     /// is why looking the asker up by it is a routing that a move cannot break.
+    ///
+    /// **And by the picture's own number** ([`crate::PictureAsker`]), which the answer carries
+    /// home: two panes over one picture at one size asked two questions, and each answer goes to
+    /// the picture that asked it (T-SCALE-ADDRESS-PER-ASKER).
     pub(in crate::runtime) fn complete_preview_scale(
         &mut self,
+        asker: crate::PictureAsker,
         scaled: bt_term::ScaledInlineImage,
     ) -> Result<()> {
         let delivered: PeekThumbnailTarget = (
@@ -13553,7 +13711,7 @@ impl Runtime<'_> {
             .window
             .tabs
             .iter()
-            .find_map(|tab| tab.preview_panes.awaiting_scale(&delivered))
+            .find_map(|tab| tab.preview_panes.awaiting_scale(asker, &delivered))
         else {
             return Ok(());
         };
@@ -13800,10 +13958,7 @@ impl Runtime<'_> {
             hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
                 // Native observations are taken only once a line is due. The
                 // attention heuristic never decides visibility for this diagnostic.
-                let native = native_window(&self.window.window)
-                    .ok()
-                    .map(bt_platform::native_present_facts)
-                    .unwrap_or_default();
+                let native = self.window.window.present_facts();
                 let text = state.line(
                     u64::from(self.window.window.id()),
                     now,
@@ -14010,5 +14165,84 @@ impl Runtime<'_> {
         });
         self.finish_present_attempt(attempt, &result);
         result
+    }
+}
+
+#[cfg(test)]
+#[path = "preview_tests.rs"]
+mod tests;
+
+/// **A shut's `Save all`, done by the two owners of what it touches** (S-6b round 3): the desk
+/// hands itself to the window ([`preview::PreviewSaves::save_a_window_for_a_shut`]), and the
+/// window walks its own tabs ([`WindowRuntime::save_every_dirty_preview`]) — so neither the
+/// application's desk nor the window's tabs is lent out of its owner.
+impl preview::PreviewSaves {
+    /// **Every dirty buffer of `window` handed to this desk, for a shut answered `Save all`**:
+    /// the refusals made at the hand-over, each with the surface to say it on.
+    fn save_a_window_for_a_shut<B: Backend>(
+        &mut self,
+        window: &mut WindowRuntime<B>,
+    ) -> Vec<(PreviewSurface, preview::PreviewSource, String)> {
+        window.save_every_dirty_preview(self)
+    }
+}
+
+impl<B: Backend> WindowRuntime<B> {
+    /// **This window's tabs, each one's dirty buffers handed to `saves`** as a press on each
+    /// would hand it ([`preview::PreviewPool::save_for_a_shut`]); a buffer is said on the pane
+    /// of its tab that shows its file, or on no surface. Answers the refusals made at the
+    /// hand-over.
+    fn save_every_dirty_preview(
+        &mut self,
+        saves: &mut preview::PreviewSaves,
+    ) -> Vec<(PreviewSurface, preview::PreviewSource, String)> {
+        let mut refused = Vec::new();
+        for tab in self.tabs.iter_mut() {
+            let shown: Vec<(PreviewSurface, preview::PreviewSource)> = tab
+                .preview_panes
+                .iter()
+                .filter_map(|(surface, pane)| pane.source().map(|source| (surface, source.clone())))
+                .collect();
+            refused.extend(tab.preview_pool.save_for_a_shut(saves, |source| {
+                shown
+                    .iter()
+                    .find(|(_, showing)| showing == source)
+                    .map_or(PreviewSurface::Peek, |(surface, _)| *surface)
+            }));
+        }
+        refused
+    }
+}
+
+/// **The preview's saves on the storage worker, as the application holds them**
+/// (S-6a) — written here and nowhere else: the press hands a request over
+/// ([`Runtime::save_preview_on`]), each window's buffers hear the answers owed
+/// them ([`Runtime::hear_preview_saves`]), and these two take the answers off
+/// the worker's channels and end the ones no buffer is waiting for.
+impl<B: Backend> crate::App<B> {
+    /// Every answer the storage worker has given about a preview save. Never
+    /// waits.
+    pub(crate) fn take_preview_save_answers(&mut self) -> Vec<preview::SaveAnswer> {
+        self.preview_saves.take_answers()
+    }
+
+    /// The answers no standing window's buffer was waiting for — its tab, pane
+    /// or edits gone, or its window leaving: recorded by the sink, then ignored
+    /// (C6).
+    pub(crate) fn sink_preview_save_answers(&mut self, answers: Vec<preview::SaveAnswer>) {
+        for answer in answers {
+            self.preview_saves.sink(answer);
+        }
+    }
+
+    /// **The second half of a stop that cannot ask** (S-6c; D-4, 0.4.8 G7), once the storage
+    /// worker has ended or been let go at its bound (`SessionStore::close`, §5.3 row 16b): the
+    /// buffers the stop held hear what came back, and whatever no file took is copied into the
+    /// `recovered` folder ([`preview::StopKeeps::keep`]), each said in `diagnostics.log` with
+    /// where its edit is. Nothing on every road but a stop.
+    pub(crate) fn keep_what_the_stop_did_not_save(&mut self, at: SystemTime) {
+        for kept in self.stop_keeps.keep(&mut self.preview_saves, at) {
+            crate::diagnostics::note(&kept.line());
+        }
     }
 }

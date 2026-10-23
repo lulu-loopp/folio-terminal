@@ -13,19 +13,29 @@
 //! 2026-10-11 §3.3, §5.1; T-STORE-MERGE-SETTINGS): the storage pass's merge
 //! ([`Runtime::merge_documents`], `settings_merge::run_pass` with this window
 //! as its `MergeWindow`) walks each changed row's own apply function with the
-//! store's writes held, exactly as an import's settings part does.
+//! store's writes held, exactly as an import's settings part does. A hand edit
+//! of `keybindings.json` is merged by action, then by chord
+//! (`keybindings_merge::run_pass`), and the table is rebuilt from this build's
+//! defaults and the merged departures by the reader an import's shortcuts part
+//! uses (T-STORE-MERGE-KEYBINDINGS). Hand edits of `profiles.json` and `pins.json`
+//! are merged by row and by pin (`table_merge::run_pass`): the profile table
+//! is installed by the import's own installer, and the PINNED sections are
+//! derived from the pin store whenever a menu is built
+//! (T-STORE-MERGE-PROFILES-PINS). What the files' values replaced is named on
+//! one card per batch of re-reads (`storage_pass`, T-STORE-NOTICE).
 
+use crate::window_seam::prelude::*;
 use std::path::Path;
 
 use anyhow::Result;
 use bt_persist::{ExportParts, FallbackReason, KeybindingsV1};
 
 use crate::settings_bundle::{self, ImportFault, SettingChange};
-use crate::settings_merge;
 use crate::{
     FilePick, Runtime, document_request, hang_watch, i18n, persist, profiles, schemes, settings,
     shortcuts, toast,
 };
+use crate::{keybindings_merge, settings_merge, storage_pass, table_merge};
 
 fn keybindings_for_export(
     table: &shortcuts::Shortcuts,
@@ -44,7 +54,7 @@ fn keybindings_for_export(
     )
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **A press on one of the three doors.**
     ///
     /// Export and import only *post* a dialog: the system's own dialogs run a
@@ -66,11 +76,11 @@ impl Runtime<'_> {
                     eprintln!("recoverable save dialog failure: {error}");
                 }
             }
-            settings::ConfigurationDoor::Import => match self
-                .window
-                .image_picker
-                .request(bt_platform::FilePickKind::SettingsFile, None)
-            {
+            settings::ConfigurationDoor::Import => match self.window.image_picker.request(
+                bt_platform::FilePickKind::SettingsFile,
+                None,
+                crate::i18n::Text::ImageFileType.text(),
+            ) {
                 Ok(true) => self.window.image_pick_pending = Some(FilePick::SettingsImport),
                 // Already queued or already open: whoever asked first keeps it.
                 Ok(false) => {}
@@ -94,7 +104,7 @@ impl Runtime<'_> {
             .window
             .save_picker
             .as_ref()
-            .and_then(bt_platform::SaveFilePicker::take_result)
+            .and_then(SavePickerDoor::take_result)
         else {
             return Ok(());
         };
@@ -352,18 +362,47 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// **The storage pass's merges, put in force** (design note 2026-10-11
-    /// §3.3, §3.6): `settings.json`'s, through `settings_merge::run_pass` with
-    /// this window as its doors. Answers what the files' merges replaced and
-    /// could not apply, for the pass's one card (T-STORE-NOTICE raises it) —
-    /// nothing for a clean hand edit — and, beside it, whether the presentation
-    /// after the merge went through: the data is made first and a failed
-    /// presentation never takes it away.
-    pub(crate) fn merge_documents(&mut self) -> (document_request::MergeNotice, Result<()>) {
-        let outcome = settings_merge::run_pass(self);
-        let mut notice = document_request::MergeNotice::default();
-        notice.files.extend(outcome.replaced);
-        (notice, outcome.presented)
+    /// **The storage pass's merges, put in force, and the batch's one card**
+    /// (design note 2026-10-11 §3.3, §3.4, §3.6): `settings.json`'s, through
+    /// `settings_merge::run_pass` with this window as its doors, then
+    /// `keybindings.json`'s, through `keybindings_merge::run_pass` with this
+    /// window's one shortcut table as its door, then `profiles.json`'s and
+    /// `pins.json`'s, through `table_merge::run_pass` — each pass whole, all four
+    /// on one notice ([`storage_pass::merge_documents_on`]). Each pass's
+    /// presentation is owed to the turn ([`MergeTurn`]), and the window presents
+    /// once after all four. Then what the files' merges replaced and could not
+    /// apply joins the batch's notice, and the batch's one card is raised on this
+    /// window once no store is still reading — nothing for a clean hand edit,
+    /// and whatever the presentation answered (T-STORE-NOTICE).
+    pub(crate) fn merge_documents(&mut self) -> Result<()> {
+        storage_pass::take_merges(&mut MergeTurn {
+            runtime: self,
+            present_owed: false,
+            frame_owed: false,
+        })
+    }
+
+    /// **What a merge put in force, shown**: an open Settings dialog re-derived —
+    /// the row a merge moved, the Shortcuts page's table, the Profiles page's
+    /// rows — and the chrome presented; and, when the profile table moved
+    /// (`frame`), the window's frame, which draws every name a profile gives.
+    fn present_merged(&mut self, frame: bool) -> Result<()> {
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        let content =
+            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+        self.window.settings.keep_focus_reachable(content);
+        // One present per turn: a whole frame when the profile table moved,
+        // which draws the chrome too, else the chrome alone when it changed.
+        let chrome = self.refresh_chrome();
+        if frame {
+            self.publish_frame(bt_render::FrameTrigger {
+                occurred_at: std::time::Instant::now(),
+                source: bt_render::FrameSource::Expose,
+            })?;
+        } else if chrome {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// **A re-read that found `settings.json` or `keybindings.json` would not
@@ -533,13 +572,11 @@ impl Runtime<'_> {
             SettingChange::WebPages(scheme) => {
                 self.apply_web_color_scheme(scheme)?;
             }
-            // Read where they are used, so the store is their door: the answer
-            // the PSReadLine card was given, the open Advanced groups, the
-            // summoned terminal's profile — stored
-            // by id, which is what its row's press stores too, rather than
-            // through the row's index into this table — and its top gap.
-            ref change @ (SettingChange::PsReadLineInvite(_)
-            | SettingChange::AdvancedOpen(_)
+            // Read where they are used, so the store is their door: the open
+            // Advanced groups, the summoned terminal's profile — stored by id,
+            // which is what its row's press stores too, rather than through the
+            // row's index into this table — and its top gap.
+            ref change @ (SettingChange::AdvancedOpen(_)
             | SettingChange::QuakeProfile(_)
             | SettingChange::QuakeTopGap(_)) => self.store_imported_value(change),
         }
@@ -589,30 +626,41 @@ impl Runtime<'_> {
     }
 }
 
+/// **One storage pass's merges on this window** ([`Runtime::merge_documents`]):
+/// each pass runs through this window's doors, and what each owes the screen is
+/// noted here — the window presents once, after the four passes.
+struct MergeTurn<'r, 'a, B: Backend> {
+    runtime: &'r mut Runtime<'a, B>,
+    present_owed: bool,
+    /// The profile table in force moved: the presentation is a whole frame.
+    frame_owed: bool,
+}
+
 /// **This window is the settings merge's** (`settings_merge::run_pass`): the
 /// store's merge steps, what is in force, each row's own door — the import's
-/// `apply_imported_setting` — and the presentation after.
-impl settings_merge::MergeWindow for Runtime<'_> {
+/// `apply_imported_setting` — and the presentation, owed to the turn.
+impl<B: Backend> settings_merge::MergeWindow for MergeTurn<'_, '_, B> {
     fn merge_begin(&mut self) -> Option<settings_merge::SettingsPass> {
-        self.app
+        self.runtime
+            .app
             .settings_store
             .begin_merge(bt_platform::host_platform())
     }
 
     fn merge_in_force(&self) -> &bt_persist::SettingsV1 {
-        self.app.settings_store.loaded()
+        self.runtime.app.settings_store.loaded()
     }
 
     fn merge_door(&mut self, change: &SettingChange) -> Result<()> {
-        self.apply_imported_setting(change.clone())
+        self.runtime.apply_imported_setting(change.clone())
     }
 
     fn merge_store_as_it_came(&mut self, change: &SettingChange) {
-        self.store_imported_value(change);
+        self.runtime.store_imported_value(change);
     }
 
     fn merge_end(&mut self) {
-        self.app.settings_store.end_merge();
+        self.runtime.app.settings_store.end_merge();
     }
 
     fn merge_say(&mut self, line: &str) {
@@ -620,14 +668,117 @@ impl settings_merge::MergeWindow for Runtime<'_> {
     }
 
     fn merge_present(&mut self) -> Result<()> {
-        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
-        let content =
-            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
-        self.window.settings.keep_focus_reachable(content);
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
-        }
+        self.present_owed = true;
         Ok(())
+    }
+}
+
+/// `keybindings.json`'s merge, with this window as its door (T-STORE-MERGE-KEYBINDINGS).
+impl<B: Backend> keybindings_merge::KeybindingsWindow for MergeTurn<'_, '_, B> {
+    fn keybindings_merge_begin(&mut self) -> Option<keybindings_merge::KeybindingsPass> {
+        self.runtime
+            .app
+            .keybindings_store
+            .begin_merge(bt_platform::host_platform())
+    }
+
+    /// The table a recorded chord edits, replaced whole, and the departures it put in
+    /// force told to the store — what a press is measured against (start-up's order).
+    fn keybindings_put_in_force(&mut self, table: shortcuts::Shortcuts) {
+        self.runtime.app.keybindings_store.project(
+            table
+                .overrides()
+                .into_iter()
+                .map(|entry| bt_persist::BindingOverrideV1 {
+                    action: entry.id,
+                    chord: entry.chord,
+                })
+                .collect(),
+        );
+        self.runtime.app.shortcuts = table;
+    }
+
+    fn keybindings_merge_end(&mut self) {
+        self.runtime.app.keybindings_store.end_merge();
+    }
+
+    fn keybindings_say(&mut self, line: &str) {
+        eprintln!("{line}");
+    }
+
+    fn keybindings_present(&mut self) -> Result<()> {
+        self.present_owed = true;
+        Ok(())
+    }
+}
+
+/// **The two tables' merges, with this window as their door**
+/// (`table_merge::run_pass`, T-STORE-MERGE-PROFILES-PINS): each store's merge
+/// steps, and each table's door — the profile installer, which follows the
+/// editor by its id, re-points no pane and raises its refusals' cards; the pin
+/// store, which the PINNED sections are derived from whenever a menu is built.
+/// What each owes the screen is noted on the turn.
+impl<B: Backend> table_merge::TableMergeWindow for MergeTurn<'_, '_, B> {
+    fn table_merge_begin(&mut self, table: table_merge::Table) -> Option<table_merge::MergePass> {
+        match table {
+            table_merge::Table::Profiles => self.runtime.app.profiles_store.begin_merge(),
+            table_merge::Table::Pins => self.runtime.app.pins_store.begin_merge(),
+        }
+    }
+
+    fn table_door(&mut self, table: table_merge::Table) -> Result<()> {
+        self.present_owed = true;
+        match table {
+            table_merge::Table::Profiles => {
+                self.frame_owed |= self.runtime.install_merged_profile_table()?;
+                Ok(())
+            }
+            table_merge::Table::Pins => Ok(()),
+        }
+    }
+
+    fn table_merge_end(&mut self, table: table_merge::Table) {
+        match table {
+            table_merge::Table::Profiles => self.runtime.app.profiles_store.end_merge(),
+            table_merge::Table::Pins => self.runtime.app.pins_store.end_merge(),
+        }
+    }
+
+    fn table_merge_say(&mut self, line: &str) {
+        eprintln!("{line}");
+    }
+}
+
+/// **The storage pass on this window** ([`storage_pass::take_merges`]): the one
+/// presentation the passes owe, the batch's notice held by the application —
+/// its card is due once none of the four stores is still reading — and the card
+/// raised here.
+impl<B: Backend> storage_pass::StoragePassWindow for MergeTurn<'_, '_, B> {
+    fn present_merges(&mut self) -> Result<()> {
+        if self.present_owed {
+            self.runtime.present_merged(self.frame_owed)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn merge_notice_due(
+        &mut self,
+        turn: document_request::MergeNotice,
+    ) -> Option<document_request::MergeNotice> {
+        let app = &mut *self.runtime.app;
+        storage_pass::notice_due(
+            &mut app.merge_notice,
+            turn,
+            &app.settings_store,
+            &app.keybindings_store,
+            &app.profiles_store,
+            &app.pins_store,
+        )
+    }
+
+    fn raise_merge_notice(&mut self, notice: &document_request::MergeNotice) -> Result<()> {
+        self.runtime.raise_merge_notice(notice)
     }
 }
 

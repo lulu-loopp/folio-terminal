@@ -192,7 +192,8 @@ fn a_remembered_line_comes_only_from_a_mark_the_reader_was_at() {
     let clause = &leaf[at..];
     assert!(
         clause.contains("!mark.command_text.is_empty() && mark.typed_by_user"),
-        "the line written into session.json comes from a mark whose command              the reader's own keyboard was present for: {clause}"
+        "the line written into session.json comes from a mark whose command \
+         the reader's own keyboard was present for: {clause}"
     );
 }
 
@@ -383,7 +384,7 @@ fn a_page_follows_the_pane_it_is_drawn_in() {
     // goes back in.
     let carrier = squeezed_body("Runtime", "carry_the_pages_of_moved_panes");
     let removed = carrier
-        .find("self.window.web.remove(was)?")
+        .find("self.window.web.remove(&was)?")
         .expect("the pages are taken out of the window's table");
     // Read from the remove and not from the start of the method: the first
     // `.collect();` here is the one that reads the window's keys, and it
@@ -1731,7 +1732,13 @@ fn a_pane_squeezed_narrow_and_let_go_leaves_its_shell_wide() {
 /// every later resize of every pane of this window is held, unreleased and unsettled, for the
 /// rest of its life.
 ///
-/// Red gate: delete the `end_a_divider_drag_that_lost_its_pointer` line from
+/// Generalised by T-POINTER-CAPTURE cut 5 (R-9): the sample is every capture's
+/// (`PointerCapture::os`), and the flush asks `end_a_capture_that_lost_its_pointer`, which cancels
+/// whichever gesture the system took the pointer away from — the divider among them, restoring
+/// its ratio; `runtime::pointer::ending::tests::each_door_ends_a_held_capture` drives it for every
+/// owner.
+///
+/// Red gate: delete the `end_a_capture_that_lost_its_pointer` line from
 /// `flush_pending_pty_resize` — the last assertion names the release that never came. Phrase
 /// the predicate as "this window holds the capture" instead of "the same window holds it as
 /// held it at the press" and the macOS case cancels every divider drag on its first turn.
@@ -1739,26 +1746,26 @@ fn a_pane_squeezed_narrow_and_let_go_leaves_its_shell_wide() {
 fn a_divider_drag_that_loses_its_pointer_stops_holding_the_resize() {
     let held = Some(bt_platform::NativeWindow::stand_in(0x1234));
     assert!(
-        divider_drag_still_holds_its_pointer(held, held),
+        a_capture_still_holds_its_pointer(held, held),
         "an untouched capture is a hand still on the divider"
     );
     assert!(
-        divider_drag_still_holds_its_pointer(None, None),
+        a_capture_still_holds_its_pointer(None, None),
         "and on a platform with no per-thread capture to lose, nothing was taken away"
     );
-    assert!(!divider_drag_still_holds_its_pointer(
+    assert!(!a_capture_still_holds_its_pointer(
         held,
         Some(bt_platform::NativeWindow::stand_in(0x4321))
     ));
     assert!(
-        !divider_drag_still_holds_its_pointer(held, None),
+        !a_capture_still_holds_its_pointer(held, None),
         "and the shape the report is about: the system took it and told nobody"
     );
 
     // The recovery is read before the held-hand question it exists to keep honest.
     let flush = method_body("Runtime", "flush_pending_pty_resize");
     let recovery = flush
-        .find("end_a_divider_drag_that_lost_its_pointer")
+        .find("end_a_capture_that_lost_its_pointer")
         .expect("the flush ends a gesture nobody is holding any more");
     let hand = flush
         .find("let hand_on_the_geometry")
@@ -1786,7 +1793,7 @@ fn a_divider_drag_that_loses_its_pointer_stops_holding_the_resize() {
 
     // The pointer is taken away. No blur, no button-up: the only thing that changes is the
     // answer the recovery reads.
-    harness.hand_down = divider_drag_still_holds_its_pointer(held, None);
+    harness.hand_down = a_capture_still_holds_its_pointer(held, None);
     harness.tick(start + Duration::from_secs(5) + Duration::from_millis(1));
     assert_eq!(
         harness.requests,

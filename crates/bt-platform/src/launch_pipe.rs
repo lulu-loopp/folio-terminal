@@ -196,17 +196,30 @@ pub struct Decision<T> {
     pub admitted: Option<T>,
 }
 
-/// **The endpoint.** Live from the moment [`LaunchPipe::start`] returns, closed when this is
-/// dropped.
+/// **The endpoint.** Live from the moment [`LaunchPipe::start`] returns, closed by
+/// [`LaunchPipe::retire_within`] — its door (T-DROP-DOORS, D-79): *an endpoint is retired through an
+/// explicit door, not by its drop.*
+///
+/// The product's endpoint lives in a `static` for the process's life and is never retired; the
+/// door is the road for a scope that owns one (every test, anything later). A drop that finds the
+/// door was not called waits for nothing: it tells the listener to stop, lets the thread go, leaves
+/// the stop event to the end of the process (the listener may still be waiting on it) and says so
+/// once ([`crate::door_skipped`]).
+#[must_use = "an endpoint is retired through `LaunchPipe::retire_within`, never by its drop"]
 pub struct LaunchPipe {
     name: String,
     stop: SendHandle,
     listener: Option<JoinHandle<()>>,
+    /// The listener's first word, and then its end: the sender is the listener's body's, so the
+    /// receiver hears `Disconnected` once the listener has left (the door's bounded wait).
+    said: mpsc::Receiver<io::Result<()>>,
 }
 
-// SAFETY: the only raw handle in this value is the stop event. Setting an event is thread-safe by
-// contract and is the only thing done with it before `drop`, which runs once on the sole owner and
-// joins the listener before closing it.
+// SAFETY: `said` is an `mpsc::Receiver`, `!Sync` because two threads receiving at once would race;
+// nothing receives on it after `start` returns but `retire_within`, which takes the value by `self`
+// and runs once on the sole owner. The only raw handle in this value is the stop event. Setting an event is thread-safe by
+// contract and is the only thing done with it before `retire_within`, which runs once on the sole owner
+// and joins the listener before closing it (a drop without it never closes it).
 unsafe impl Sync for LaunchPipe {}
 
 impl LaunchPipe {
@@ -258,8 +271,8 @@ impl LaunchPipe {
             &crate::instance::directory_tag(directory),
         );
         let descriptor = SecurityDescriptor::from_sddl(&security_descriptor_sddl(&logon))?;
-        // Manual-reset: the listener may be anywhere between two waits when `drop` fires, so once
-        // this is set it has to stay set. Owned from the moment it exists — the spawn below can
+        // Manual-reset: the listener may be anywhere between two waits when the stop is set, so
+        // once this is set it has to stay set. Owned from the moment it exists — the spawn below can
         // fail, and a stop event held only as a `Copy` integer would be a kernel object this
         // process never closes on the one path nobody exercises.
         // SAFETY: a nameless, unowned event.
@@ -279,14 +292,15 @@ impl LaunchPipe {
             )?
         };
         // The listener is running and shares the event, so the guard's job is over: from here the
-        // handle is closed by whichever of the three arms below is taken, and by `Drop` on the arm
-        // that hands the endpoint back.
+        // handle is closed by whichever of the three arms below is taken, and by `retire_within` on the
+        // arm that hands the endpoint back.
         let stop = SendHandle(stop.into_raw());
-        match first_word.recv_timeout(Duration::from_secs(5)) {
+        match crate::listener_says_within(&first_word, Duration::from_secs(5)) {
             Ok(Ok(())) => Ok(Self {
                 name,
                 stop,
                 listener: Some(listener),
+                said: first_word,
             }),
             Ok(Err(error)) => {
                 let _ = listener.join();
@@ -316,20 +330,59 @@ impl LaunchPipe {
     pub fn name(&self) -> &str {
         &self.name
     }
-}
 
-impl Drop for LaunchPipe {
-    fn drop(&mut self) {
-        // SAFETY: the stop event is alive until after the join below.
+    /// **The door: stop listening, wait — up to `bound` — for the listener to leave, and close the
+    /// stop event.** Answers whether it left in time.
+    ///
+    /// The one road on which this endpoint waits, and its wait is bounded by the caller: the
+    /// listener leaves at its next wait, which the stop event ends — after the client it is serving
+    /// has had its frame or its deadline, and after the caller's own closure has returned, which no
+    /// bound written here could cover. So the door waits on the listener's end (the sender its body
+    /// holds goes with it) for `bound`, and a listener still standing past it is let go with the
+    /// stop event, which the process's end closes — never a handle closed under the listener.
+    /// Called on whatever thread owns the endpoint; nothing in the product does (its endpoint is a
+    /// `static`).
+    pub fn retire_within(mut self, bound: Duration) -> bool {
+        self.stop_listening();
+        let Some(listener) = self.listener.take() else {
+            return true;
+        };
+        match crate::listener_says_within(&self.said, bound) {
+            Err(RecvTimeoutError::Disconnected) => {
+                let _ = listener.join();
+                // SAFETY: the only other user of this handle has been joined.
+                unsafe {
+                    let _ = CloseHandle(self.stop.0);
+                }
+                true
+            }
+            Ok(_) | Err(RecvTimeoutError::Timeout) => false,
+        }
+    }
+
+    /// Tell the listener to leave. Needs no wait: setting an event is sound from any thread.
+    fn stop_listening(&self) {
+        // SAFETY: the stop event is alive until the door closes it, after the listener has gone;
+        // without the door it is never closed.
         unsafe {
             let _ = SetEvent(self.stop.0);
         }
+    }
+}
+
+impl Drop for LaunchPipe {
+    /// Waits for nothing. After [`LaunchPipe::retire_within`] there is nothing left to do; without it,
+    /// the listener is told to stop and let go of, and the drop says so once.
+    fn drop(&mut self) {
         if let Some(listener) = self.listener.take() {
-            let _ = listener.join();
-        }
-        // SAFETY: the only other user of this handle has been joined.
-        unsafe {
-            let _ = CloseHandle(self.stop.0);
+            self.stop_listening();
+            drop(listener);
+            crate::door_skipped::say(
+                "the launch endpoint (`LaunchPipe`)",
+                "its retire door",
+                "its listener was told to stop and let go of, and its stop event is the \
+                 process's to close",
+            );
         }
     }
 }
@@ -710,23 +763,44 @@ pub fn hand_over(
             Err(error) => return Err(error),
         }
     };
-    // **Step 1: who answered?** Before a byte of the command line is written — the request names a
+    // **The conversation is the one both arms speak** (`crate::launch_conversation`): who answered
+    // is asked of the kernel before a byte of the command line is written — the request names a
     // folder somebody is standing in, and a process that is not this program has no business being
-    // told it.
-    let server = vetted_server(handle.0)?;
-    write_bounded(handle.0, request.as_bytes())?;
-    let mut buffer = vec![0u8; MAX_FRAME_BYTES];
-    let left = HANDOVER_BUDGET.saturating_sub(began.elapsed());
-    let read = read_reply(handle.0, &mut buffer, left)?;
-    on_reply(server, &String::from_utf8_lossy(&buffer[..read]));
-    // **Step 4's second half, and the server's commit point.** Written out rather than left
-    // implicit so that the order of the last statements is the order of the protocol: the
-    // foreground has been granted above, and only now is the server told it may act. A failure
-    // here is a handover that did not happen — the server parks nothing — so it is reported, and
+    // told it — and [`CONFIRM`] goes last, after `on_reply` has granted the foreground. A failure
+    // there is a handover that did not happen — the server parks nothing — so it is reported, and
     // the caller opens its own window.
-    write_bounded(handle.0, CONFIRM.as_bytes())?;
-    drop(handle);
-    Ok(())
+    crate::launch_conversation::hand_over_on(
+        Client {
+            pipe: handle,
+            began,
+        },
+        request,
+        on_reply,
+    )
+}
+
+/// **The client's end of one connected pipe**, under the budget the handover began with.
+struct Client {
+    pipe: OwnedHandle,
+    began: Instant,
+}
+
+impl crate::launch_conversation::Connection for Client {
+    fn vetted_peer(&mut self) -> io::Result<u32> {
+        vetted_server(self.pipe.0)
+    }
+
+    fn say(&mut self, frame: &[u8]) -> io::Result<()> {
+        write_bounded(self.pipe.0, frame)
+    }
+
+    fn hear(&mut self) -> io::Result<Vec<u8>> {
+        let mut buffer = vec![0u8; MAX_FRAME_BYTES];
+        let left = HANDOVER_BUDGET.saturating_sub(self.began.elapsed());
+        let read = read_reply(self.pipe.0, &mut buffer, left)?;
+        buffer.truncate(read);
+        Ok(buffer)
+    }
 }
 
 /// **The process at the other end of this pipe, if it is this program.**
@@ -748,16 +822,22 @@ fn vetted_server(pipe: HANDLE) -> io::Result<u32> {
             "the launch endpoint named a process id that is not a process",
         ));
     }
-    let mine = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.file_name().map(std::ffi::OsStr::to_ascii_lowercase));
-    let theirs = crate::process_image_path(pid)
-        .and_then(|exe| exe.file_name().map(std::ffi::OsStr::to_ascii_lowercase));
-    match (mine, theirs) {
+    let Some(theirs) = crate::process_image_path(pid) else {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the other end of the launch endpoint has an image this process cannot read",
+        ));
+    };
+    let named = |exe: &Path| exe.file_name().map(std::ffi::OsStr::to_ascii_lowercase);
+    let mine = std::env::current_exe().ok();
+    match (mine.as_deref().and_then(named), named(&theirs)) {
         (Some(mine), Some(theirs)) if mine == theirs => Ok(pid),
         _ => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "the launch endpoint is held by a process that is not this program",
+            format!(
+                "the launch endpoint is held by {}, which is not a Folio",
+                theirs.display()
+            ),
         )),
     }
 }
@@ -936,7 +1016,8 @@ mod tests {
             assert_eq!(
                 server,
                 std::process::id(),
-                "the server this client vetted is the process it is actually talking to, and the                  pid it grants the foreground to comes from the kernel and not from the reply"
+                "the server this client vetted is the process it is actually talking to, and the \
+                 pid it grants the foreground to comes from the kernel and not from the reply"
             );
             let _ = heard.send(reply.to_owned());
         })
@@ -1147,5 +1228,115 @@ mod tests {
             "a launch with no Folio running must not wait out the budget"
         );
         assert_ne!(refused.kind(), io::ErrorKind::TimedOut);
+    }
+
+    /// An endpoint whose listener stands inside `decide` until the test lets it go, and the flag
+    /// `decide` raises on its way out. The request that holds it is handed over on a thread of its
+    /// own, which gives up at [`HANDOVER_BUDGET`] whatever the test does.
+    fn a_held_endpoint(
+        line: u32,
+    ) -> (
+        LaunchPipe,
+        mpsc::Sender<()>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (entered, inside) = mpsc::channel();
+        let (release, held) = mpsc::channel::<()>();
+        let left = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leaving = std::sync::Arc::clone(&left);
+        let pipe = LaunchPipe::start(
+            &scratch(line),
+            move |_line| {
+                let _ = entered.send(());
+                let _ = held.recv();
+                leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+                None::<Decision<()>>
+            },
+            |()| {},
+        )
+        .expect("open the launch endpoint");
+        let name = pipe.name().to_owned();
+        std::thread::spawn(move || {
+            let _ = hand_over(&name, "hold", |_, _| {});
+        });
+        crate::door_skipped::received(&inside, "the listener inside `decide`");
+        (pipe, release, left)
+    }
+
+    /// RED (T-DROP-DOORS, D-79) — **the door waits for the listener to leave, and says no skipped
+    /// door.**
+    ///
+    /// The listener is held inside `decide`; the door is called on a thread of its own, and the
+    /// hold let go once that thread is on its way into the door. When the door returns, `decide`
+    /// has returned and the name answers nobody.
+    ///
+    /// MUTATION: let the listener go in `retire_within` instead of joining it and the door returns while
+    /// `decide` still stands — `left` reads false (unless the release overtakes the door, which the
+    /// order below makes the rare case).
+    #[test]
+    fn the_door_waits_for_the_listener_to_leave() {
+        let (pipe, release, left) = a_held_endpoint(line!());
+        let name = pipe.name().to_owned();
+        let (going, on_its_way) = mpsc::channel();
+        let (retired, heard) = mpsc::channel();
+        let leaving = std::sync::Arc::clone(&left);
+        std::thread::spawn(move || {
+            let _ = going.send(());
+            assert!(
+                pipe.retire_within(crate::door_skipped::PATIENCE),
+                "the listener left"
+            );
+            let _ = retired.send((
+                leaving.load(std::sync::atomic::Ordering::SeqCst),
+                crate::door_skipped::skipped_on_this_thread(),
+            ));
+        });
+        crate::door_skipped::received(&on_its_way, "the retiring thread");
+        let _ = release.send(());
+        let (had_left, skipped) =
+            crate::door_skipped::received(&heard, "the door, once the listener is let go");
+        assert!(had_left, "the door returned before the listener left");
+        assert_eq!(skipped, 0, "a retired endpoint's drop says nothing");
+        assert!(
+            hand_over(&name, "after", |_, _| panic!("a retired endpoint answered")).is_err(),
+            "a retired endpoint must not still take requests"
+        );
+    }
+
+    /// RED (T-DROP-DOORS, D-79) — **an endpoint dropped without its door waits for nothing, and
+    /// says so once.**
+    ///
+    /// The listener is held inside `decide` for the whole of the drop: a drop that joined it would
+    /// stand until the test let go, and the test lets go only after the drop has answered.
+    ///
+    /// MUTATION: put the join back in `Drop` and the drop's thread does not answer within the
+    /// suite's patience; take the saying out and the count is zero.
+    #[test]
+    fn an_endpoint_dropped_without_its_door_waits_for_nothing_and_says_so_once() {
+        let (pipe, release, _left) = a_held_endpoint(line!());
+        let skipped = crate::door_skipped::dropped_alone(pipe, "a drop while the listener is held");
+        assert_eq!(skipped, 1, "the drop says its skipped door once");
+        let _ = release.send(());
+    }
+
+    /// RED (T-DROP-DOORS, D-79, the review's bound) — **the door's wait ends at its bound**: a
+    /// listener held inside the caller's closure has not left within no time at all, and the door
+    /// answers so and lets it go.
+    ///
+    /// MUTATION: join the listener in `retire_within` without the bounded wait and the door's
+    /// thread does not answer within the suite's patience.
+    #[test]
+    fn the_door_lets_a_listener_go_past_its_bound() {
+        let (endpoint, release, _left) = a_held_endpoint(line!());
+        let (answered, heard) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answered.send(endpoint.retire_within(Duration::ZERO));
+        });
+        let left = crate::door_skipped::received(&heard, "the door with no time at all");
+        assert!(
+            !left,
+            "a listener held in its closure has not left within no time at all"
+        );
+        drop(release);
     }
 }

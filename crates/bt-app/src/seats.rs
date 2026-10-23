@@ -623,6 +623,20 @@ impl Seats {
         self.zoom == Some(seat)
     }
 
+    /// **Whether [`Self::toggle_zoom`] on `seat` would zoom into it** — and so take every other
+    /// pane off the glass — rather than let a zoom go or do nothing (T-POINTER-CAPTURE R-9: the
+    /// door that ends a gesture held on a pane leaving the glass asks this before the toggle).
+    #[must_use]
+    pub fn toggle_would_zoom_in(&self, seat: SeatId) -> bool {
+        self.zoom_can_toggle(seat) && self.zoom != Some(seat)
+    }
+
+    /// Whether [`Self::toggle_zoom`] on `seat` changes anything at all: a lone pane has nothing
+    /// to zoom out of, and a seat not in the tree is no pane.
+    fn zoom_can_toggle(&self, seat: SeatId) -> bool {
+        self.pane_count() >= 2 && self.tree.find_seat(seat).is_some()
+    }
+
     /// **Zoom this pane, or let it go if it is already the one on the stage**
     /// (§7.1.6l). Answers whether anything changed.
     ///
@@ -650,10 +664,10 @@ impl Seats {
     /// looking at — so there is no remembered focus anywhere and nothing to
     /// restore.
     pub fn toggle_zoom(&mut self, seat: SeatId) -> bool {
-        if self.pane_count() < 2 || self.tree.find_seat(seat).is_none() {
+        if !self.zoom_can_toggle(seat) {
             return false;
         }
-        self.zoom = (self.zoom != Some(seat)).then_some(seat);
+        self.zoom = self.toggle_would_zoom_in(seat).then_some(seat);
         if self.zoom.is_some() {
             self.focus = seat;
         }
@@ -10670,9 +10684,9 @@ pub fn build_chrome_for_tabs(
                         // the head's reason: a foot printing the file a *sibling*
                         // pane is showing is the same lie one strip lower.
                         SeatKind::Preview => preview_foot(placement.id),
-                        // A folder has no standing fact to state: truncation and
-                        // a save's refusal are both about a *buffer*, and a tree
-                        // holds none.
+                        // Truncation and a save's refusal are both about a
+                        // *buffer*, and a tree holds none; its one standing fact is
+                        // a root nobody could say (`FilesTreeContent::foot_notice`).
                         _ => files_tree.map(|tree| FootStrip {
                             path: tree.foot_path.as_str(),
                             // A band fills its strip and never hugs its text,
@@ -10681,8 +10695,8 @@ pub fn build_chrome_for_tabs(
                             path_width: 0.0,
                             revealed: tree.foot_revealed,
                             dissolved: tree.foot_dissolved,
-                            notice: "",
-                            notice_width: 0.0,
+                            notice: tree.foot_notice.as_str(),
+                            notice_width: tree.foot_notice_width,
                             web: false,
                             favicon: None,
                         }),
@@ -17452,6 +17466,11 @@ pub struct FilesTreeContent {
     /// clock is, and a painter that worked one of them out for itself would be a
     /// painter that can disagree with the words it was handed.
     pub foot_dissolved: f32,
+    /// The standing fact on the foot's right hand — "Folder unknown" for a root that is the home
+    /// folder standing in for a folder nobody could say (`crate::folder_foot_notice`), or empty —
+    /// with the width it draws, measured beside the renderer ([`dress_foot`]).
+    pub foot_notice: String,
+    pub foot_notice_width: f32,
 }
 
 /// **The open name editor, as one tree row has to draw it** (0.3).
@@ -22533,6 +22552,14 @@ pub struct FilesLeafState {
     /// more remote branches than local ones, and a column 240 pixels wide that
     /// opened on other people's work would be answering a question nobody asked.
     pub git_remotes_open: bool,
+    /// **Whether this root is the account's home standing in for a folder nobody could say**
+    /// (T-CWD-FROM-PROCESS): the pane it was opened from had reported no folder and its shell's
+    /// process could not be read (`crate::files_root_of`). The foot says "Folder unknown" while
+    /// it holds; choosing a root clears it (`crate::reroot_files_state`).
+    ///
+    /// Not on [`bt_persist::FilesLeafV1`]: it is a fact about how this root was arrived at in
+    /// this run, and a restored column's root is the root it was left on.
+    pub folder_unknown: bool,
 }
 
 impl Seats {
@@ -26498,7 +26525,8 @@ mod tests {
         assert_eq!(
             typing.len(),
             2,
-            "a field and a caret — the two marks that are true of every open              editor, selection or no selection"
+            "a field and a caret — the two marks that are true of every open \
+             editor, selection or no selection"
         );
         let (field, caret) = (typing[0], typing[1]);
         assert!(
@@ -26532,7 +26560,8 @@ mod tests {
         assert_ne!(
             (field.color, field.opacity),
             (band.color, band.opacity),
-            "and a selection you cannot tell from its own ground is not a              selection"
+            "and a selection you cannot tell from its own ground is not a \
+             selection"
         );
         assert_eq!(
             (band.color, band.opacity),
@@ -26588,7 +26617,8 @@ mod tests {
         let (field, band, caret) = (editing_head[0], editing_head[1], editing_head[2]);
         assert_eq!(
             caret.rect[2], field.rect[2],
-            "a caret at the end of the name stands on the field's last hairline              rather than being refused for reaching it"
+            "a caret at the end of the name stands on the field's last hairline \
+             rather than being refused for reaching it"
         );
         assert!(
             band.rect[2] <= field.rect[2] && field.rect[0] <= band.rect[0],
@@ -28897,7 +28927,8 @@ mod tests {
                         hit_window_chrome(width, scale, mac, RailState::default(), summoned, x, y);
                     assert!(
                         !answer.is_some_and(|target| forbidden.contains(&target)),
-                        "x={x} answers {answer:?} on a window whose platform draws its own                          (summoned={summoned})"
+                        "x={x} answers {answer:?} on a window whose platform draws its own \
+                         (summoned={summoned})"
                     );
                 }
             }
@@ -29411,7 +29442,8 @@ mod tests {
             assert_eq!(
                 first(lit),
                 (lit.strip_left_px as f32) + WINDOW_TAB_FLOAT_LEAD_IN_LOGICAL_PX * scale,
-                "and with the lights on the window it is still the run plus twelve                  ({scale}x)"
+                "and with the lights on the window it is still the run plus twelve \
+                 ({scale}x)"
             );
             assert!(
                 tab_strip_geometry(width, scale, dark, &trailers, 0, 0.0).floating,
@@ -30624,6 +30656,8 @@ mod tests {
             focus_ring: false,
             foot_path: String::new(),
             foot_revealed: false,
+            foot_notice: String::new(),
+            foot_notice_width: 0.0,
         }
     }
 
@@ -32435,7 +32469,8 @@ mod tests {
             let midway = chevron_of(turn, true);
             assert_eq!(
                 midway.rect, resting.rect,
-                "the `.chevbtn` box is the same 9x6 at {turn} of the turn —                  a transform does not touch layout"
+                "the `.chevbtn` box is the same 9x6 at {turn} of the turn — \
+                 a transform does not touch layout"
             );
             let ChromeMark::Chevron { turned_degrees } = midway.mark else {
                 panic!("the strip draws a chevron");
@@ -32444,7 +32479,8 @@ mod tests {
         }
         assert!(
             seen.len() >= 12,
-            "twenty samples of the turn produced {} angles — the strip is not drawing              the transition, only its two ends",
+            "twenty samples of the turn produced {} angles — the strip is not drawing \
+             the transition, only its two ends",
             seen.len()
         );
 
@@ -33510,7 +33546,8 @@ mod tests {
         assert_eq!(
             fills(&sprites).len(),
             1,
-            "a collapsed caret has no band behind it — only the field's own              ground, which is there for as long as the editor is"
+            "a collapsed caret has no band behind it — only the field's own \
+             ground, which is there for as long as the editor is"
         );
     }
 

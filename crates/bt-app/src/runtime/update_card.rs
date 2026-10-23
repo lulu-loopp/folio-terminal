@@ -9,6 +9,7 @@
 //! dialog by `Uninstall…` (T-UNINSTALL-UX); its facts are the dialog's own
 //! (`SettingsPanel::uninstall_card`, `SettingsPanel::uninstall_remove_data`).
 
+use crate::window_seam::prelude::*;
 use crate::{Runtime, restore, update, update_card, update_job};
 use anyhow::Result;
 use winit::keyboard::{Key, NamedKey};
@@ -92,7 +93,7 @@ pub(crate) fn dispatch_version_control<W: Copy + Eq>(
     }
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Whether the update card is up in this window** — the job's
     /// [`update_job::Job::card_window`] naming this one. It is also whether the
     /// card holds this window's keyboard and pointer: it does not dim, and
@@ -421,6 +422,7 @@ mod tests {
             capable: true,
             recorded: false,
             trial: false,
+            rescue_copy: false,
             platform: HostPlatform::Windows,
         }
     }

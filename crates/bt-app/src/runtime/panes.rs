@@ -1,25 +1,26 @@
 //! `panes` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::{Ending, Gone, Leaving, OwnerGone};
+use crate::window_seam::prelude::*;
 use crate::{
     BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due, born_in_tab,
     conpty_source_of, decided_birth, deliver_held_input, diagnostics, exit_diagnostics, i18n,
     land_shell_birth, land_successor, landed_source, resolved_birth_seed, toast,
 };
 use crate::{
-    ColumnNotch, CommandFlash, DividerGrip, Drag, DragCarry, DragHandover, DragSource, DropLanding,
-    FilesFocusArrival, FlashBand, FolderPick, FormulaSwitches, FrameImageReferences, FrameTraces,
-    HandoverInto, LeafId, LeafOnStage, LeafSession, MathHoverExit, MenuPaint, Motion,
+    ColumnNotch, CommandFlash, DividerDrag, DividerGrip, Drag, DragCarry, DragHandover, DragSource,
+    DropLanding, FilesFocusArrival, FlashBand, FolderPick, FormulaSwitches, FrameImageReferences,
+    FrameTraces, HandoverInto, LeafId, LeafOnStage, LeafSession, MathHoverExit, MenuPaint, Motion,
     NewWindowPlan, NoticeHost, PaneDraw, PaneMenuState, PaneTransform, PopoverTrigger, Popup,
     PopupOwner, PresentIntent, PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY,
     RAIL_TRANSITION, RevealTween, RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed,
     TabId, TabState, TabSurface, TearOut, animated_pane_viewports, attention_trace,
     auto_split_axis, card_trace, clamp_into_body, closing_this_pane_closes_the_tab, cmdrail,
-    column_notch, create_leaf_session, divider_drag_still_holds_its_pointer, end_leaves_of,
-    file_menu_powers, files, float, float_dock_label, glyph_trace, hang_watch, host_screen_after,
-    leaf_resize_plan, marks, mouse_trace, native_window, notice, notify,
-    pages_that_move_with_their_panes, palette, pane_fade_veil_layers, panel_opacity,
-    persisted_pane_count, picture_channel_owner, popup_owner, present_diagnostics,
+    column_notch, create_leaf_session, end_leaves_of, file_menu_powers, files, float,
+    float_dock_label, glyph_trace, hang_watch, host_screen_after, leaf_resize_plan, marks,
+    mouse_trace, notice, notify, pages_that_move_with_their_panes, palette, pane_fade_veil_layers,
+    panel_opacity, persisted_pane_count, picture_channel_owner, popup_owner, present_diagnostics,
     presentation_physical_size, preview, preview_image_placement, preview_trace, profiles,
     rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer, rail_zone_wants_open,
     restated_scroll, restore, restore_row_seed, risen_frame, row_verb, schedule_leaf_grid_change,
@@ -29,10 +30,7 @@ use crate::{
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{Axis, SeatId, SeatMetrics, SizePolicy};
-use bt_render::{
-    FrameSource, FrameTrigger, GpuContext, GridSize, PresentOutcome, PresentPhase, Travel,
-    WindowRenderer,
-};
+use bt_render::{FrameSource, FrameTrigger, GridSize, PresentOutcome, PresentPhase, Travel};
 use bt_viewport::horizontal::ContentColumn;
 use bt_viewport::{ViewSelection, ViewportFrame};
 use std::collections::BTreeSet;
@@ -40,9 +38,9 @@ use std::path::Path;
 use std::time::Instant;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::MouseScrollDelta;
-use winit::window::{Window, WindowId};
+use winit::window::WindowId;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Land every birth of this window that is due** — one pass over both places a birth can
     /// sit (a pane's own, and a *Restart shell* successor's beside it) in both of its waits
     /// ([`births_due`]): T-PROGRAMS-REFRESH's rows and T-BIRTH-OFF-WINDOW's shell. Called when the
@@ -276,6 +274,7 @@ impl Runtime<'_> {
             FormulaSwitches::from_settings(self.app.settings_store.loaded()),
             scrollback_quota(self.app.settings_store.loaded().scrollback_lines),
             self.app.settings_store.loaded().line_wrapping,
+            &bt_pty::SystemShellEnvironment,
         )?;
         // What was typed meanwhile moves to the new pane — into its own birth's queue while its
         // shell is being made, or to its shell or nowhere when it has none to wait for — ahead of
@@ -1483,6 +1482,10 @@ impl Runtime<'_> {
         if closing_this_pane_closes_the_tab(self.seats.pane_count()) {
             return self.close_tab(self.window.active_tab);
         }
+        // **And the gesture held on it** (T-POINTER-CAPTURE R-9, owner gone): a press on its
+        // head, a thumb, a selection, a press handed to its program — owed nothing now, and let
+        // go of before the pane is.
+        self.end_capture(OwnerGone(Gone::Pane(self.leaf_here(seat))));
         // **And the hovered formula goes with the pane** (audit 2026-09-15,
         // RB-3). Placed here on purpose: both gates have passed, so the close is
         // certain, and nothing has moved yet — the sweep can still reach the
@@ -1667,9 +1670,9 @@ impl Runtime<'_> {
         let inherited = self
             .sessions
             .get(&source)
-            // Where the source stands is §7.1.4's ladder, the one `Restart shell` reads: a source
-            // whose shell never reported stands where it was put down, not at its profile's
-            // default.
+            // Where the source stands, the one `Restart shell` reads: its report, else its shell
+            // process's folder (T-CWD-FROM-PROCESS), else where it was put down — never its
+            // profile's default.
             .map(|leaf| seed.applied(&leaf.profile, leaf.seed_place_for_a_new_shell().as_ref()))
             // A seat with no shell to inherit from has no profile to inherit
             // either, and the fallback is the one answer that is startable by
@@ -1706,6 +1709,7 @@ impl Runtime<'_> {
             formulas,
             scrollback,
             self.app.settings_store.loaded().line_wrapping,
+            &bt_pty::SystemShellEnvironment,
         )?;
         self.sessions.insert(arriving, leaf);
         debug_assert!(
@@ -2094,8 +2098,10 @@ impl Runtime<'_> {
         if names.is_empty() {
             return None;
         }
-        let lines = request.lines(&names);
-        let title = request.title();
+        // The request's lines, and the line a question put at the end of a close's
+        // wait adds (S-6b).
+        let lines = self.window.dirty_gate.lines(&names);
+        let title = crate::gate_title_over(&self.window.tabs, self.window.active_tab, &request);
         // **`Discard all` when the card is a list, `Discard` when it names one
         // thing** (B1). The word is a fact about the subject, and the subject is
         // what `offers_save` is deciding about too.
@@ -2681,7 +2687,7 @@ impl Runtime<'_> {
     /// question — "what does this menu owe at some instant" — and a menu cannot
     /// be both waiting to open its child and holding it open against the rows.
     pub(in crate::runtime) fn advance_pane_menu(&mut self, now: Instant) -> Result<()> {
-        let Some(menu) = self.window.pane_menu.as_ref() else {
+        let Some(menu) = self.window.pane_menu.as_mut() else {
             return Ok(());
         };
         let Some(due) = menu.submenu_hold_until else {
@@ -2690,6 +2696,13 @@ impl Runtime<'_> {
         if now < due {
             return Ok(());
         }
+        // **A matured hold is spent on the turn it comes due, whatever follows**
+        // (T-WINDOW-THREAD-UNDER-LOAD). Left standing by a road below that cannot act — a rest
+        // whose pointer has left the window, a heading that has no child to open — it was an
+        // instant in the past that the wake fold handed `ControlFlow::WaitUntil` on every turn,
+        // and the loop spun until the next pointer move. Whatever the roads below arm again
+        // (the hover they drive) is a new hold of its own.
+        menu.submenu_hold_until = None;
         if menu.submenu.is_some() {
             // The cap ran out with the hand still short of the child. The
             // submenu goes, and the highlight is owed to whatever the pointer is
@@ -2976,6 +2989,15 @@ impl Runtime<'_> {
     /// that skips it because it happens to know the answer is a caller that will
     /// be wrong the day the answer changes.
     pub(in crate::runtime) fn toggle_pane_zoom(&mut self, seat: SeatId) -> Result<()> {
+        // **A zoom takes every other pane off the glass, and the gesture held on one with it**
+        // (T-POINTER-CAPTURE R-9, off the glass) — before the posture changes, while that pane
+        // is still drawn. Letting a zoom go takes nothing away.
+        if self.seats.toggle_would_zoom_in(seat) {
+            self.end_capture(Ending::OffTheGlass(Leaving {
+                tab: self.id,
+                kept: Some(seat),
+            }))?;
+        }
         if !self.seats.toggle_zoom(seat) {
             return Ok(());
         }
@@ -3002,15 +3024,15 @@ impl Runtime<'_> {
     /// is a popup nothing can dismiss: it takes no input while the dialog owns
     /// the loop, and the click that dismisses the dialog is spent on the dialog.
     ///
-    /// The chooser opens where the pane is standing (`standing_folder`: its
-    /// shell's last report, else the folder it was opened in) — the same
-    /// courtesy `browse_for_root` shows a column, and the same
-    /// one I88 asks of every arriving shell.
+    /// The chooser opens where the pane is standing (`LeafSession::folder`: its
+    /// shell's last report, else its shell process's folder, else the folder it
+    /// was opened in) — the same courtesy `browse_for_root` shows a column, and
+    /// the same one I88 asks of every arriving shell.
     fn browse_for_split_root(&mut self, seat: SeatId) {
-        let start = self
-            .sessions
-            .get(&seat)
-            .and_then(|leaf| leaf.session.standing_folder().map(Path::to_path_buf));
+        let start = self.sessions.get(&seat).and_then(|leaf| {
+            leaf.folder(&crate::pane_folder::SystemProcessFolders)
+                .into_folder()
+        });
         match self.window.folder_picker.request(start.as_deref()) {
             Ok(true) => self.window.folder_pick = Some(FolderPick::SplitInto(seat)),
             // Already queued or already open: a second request while one is up
@@ -3198,18 +3220,15 @@ impl Runtime<'_> {
         let PreviewSurface::Seat(landed) = landing else {
             return;
         };
-        let address = webhost::SeatAddress {
-            page: bt_platform::PageVisual {
-                tab: landed.tab.0,
-                seat: landed.seat.0,
-            },
-            window: match native_window(&self.window.window) {
-                Ok(native) => native,
-                Err(error) => {
-                    eprintln!("BT_WEB {error}");
-                    return;
-                }
-            },
+        let address = match self.window.window.page_address(bt_platform::PageVisual {
+            tab: landed.tab.0,
+            seat: landed.seat.0,
+        }) {
+            Ok(address) => address,
+            Err(error) => {
+                eprintln!("BT_WEB {error}");
+                return;
+            }
         };
         // **A seat that already holds a page keeps it.** `preview_landing_surface`
         // picks a preview seat, and a preview seat can itself be a page; moving
@@ -3645,7 +3664,8 @@ impl Runtime<'_> {
     /// It is what [`bt_transcript::paths::PathNamer::Pane`] carries, and therefore what decides
     /// whether a `\\wsl.localhost\<distro>\…` target printed into *this* pane names a place this
     /// window may read (route D of the untrusted-path audit, 2026-09-08). A seat with no session
-    /// behind it — a folder tab, a file tab — prints nothing at all, and `Windows` is the honest
+    /// behind it — a folder tab, a file tab — prints nothing at all, and this machine's own
+    /// spelling (the namespace's default: `Windows` on Windows, `Posix` elsewhere) is the honest
     /// answer for a pane that has no shell to speak another namespace.
     pub(crate) fn seat_path_namespace(
         &self,
@@ -3980,26 +4000,25 @@ impl Runtime<'_> {
     /// Zero side effects when there is nothing to undo: a press that never moved
     /// the ratio restores a value equal to the one already there, `drag_divider`
     /// reports no change, and no re-solve is asked for.
-    /// **End a divider drag the system has taken the pointer away from** (Codex review
-    /// 2026-09-17), through the same door `Esc` and a blur use — so it restores the one ratio it
-    /// was moving, exactly as an unfinished gesture must.
-    ///
-    /// The whole of the test is [`divider_drag_still_holds_its_pointer`]; what is here is the one
-    /// sample it is asked about, taken only while a drag is actually in the air.
-    pub(in crate::runtime) fn end_a_divider_drag_that_lost_its_pointer(&mut self) -> Result<bool> {
-        let Some(drag) = self.held_divider_drag().copied() else {
-            return Ok(false);
-        };
-        if divider_drag_still_holds_its_pointer(drag.capture, bt_platform::thread_mouse_capture()) {
-            return Ok(false);
-        }
-        self.cancel_divider_drag()
-    }
-
     pub(crate) fn cancel_divider_drag(&mut self) -> Result<bool> {
         let Some(drag) = self.take_divider_drag() else {
             return Ok(false);
         };
+        self.put_the_ratio_back(drag)?;
+        if let Some(position) = self.window.pointer_position {
+            self.update_chrome_hover(position)?;
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// **A divider drag already let go of, put back** — the cancel's own business, for a drag
+    /// that is no longer in the slot: [`Self::cancel_divider_drag`]'s, and a capture's ending's
+    /// ([`Self::end_capture`]), which runs it before the tab whose seats it reads changes. Each
+    /// caller then re-asks the hover the restored layout moved, and repaints the chrome.
+    pub(crate) fn put_the_ratio_back(&mut self, drag: DividerDrag) -> Result<()> {
         self.window.seat_pointer.dragging = None;
         let usable = self
             .seats
@@ -4031,13 +4050,7 @@ impl Runtime<'_> {
             self.commit_seat_geometry()?;
         }
         self.apply_pointer_cursor();
-        if let Some(position) = self.window.pointer_position {
-            self.update_chrome_hover(position)?;
-        }
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
-        }
-        Ok(true)
+        Ok(())
     }
 
     /// **The docked chrome's own ladder** — everything this window draws *in*
@@ -4785,30 +4798,36 @@ impl Runtime<'_> {
         if travelling.is_empty() {
             return Ok(());
         }
-        let native = native_window(&self.window.window)?;
-        let carried: Vec<(LeafId, webhost::WebSeat)> = travelling
+        // **Each page's new place, asked before anything moves**: a window that cannot name one
+        // refuses here, with every page still where it was.
+        let addressed: Vec<(LeafId, LeafId, webhost::SeatAddress)> = travelling
             .iter()
-            .filter_map(|(was, now)| {
-                let page = self.window.web.remove(was)?;
-                let picture = self.window.web_thumbs.take(*was);
+            .map(|(was, now)| {
+                let address = self.window.window.page_address(bt_platform::PageVisual {
+                    tab: now.tab.0,
+                    seat: now.seat.0,
+                })?;
+                Ok((*was, *now, address))
+            })
+            .collect::<Result<_, String>>()
+            .map_err(|error| anyhow!(error))?;
+        let carried: Vec<(LeafId, webhost::SeatAddress, webhost::WebSeat)> = addressed
+            .into_iter()
+            .filter_map(|(was, now, address)| {
+                let page = self.window.web.remove(&was)?;
+                let picture = self.window.web_thumbs.take(was);
                 if let Some(picture) = picture {
-                    self.window.web_thumbs.put(*now, picture);
+                    self.window.web_thumbs.put(now, picture);
                 }
-                Some((*now, page))
+                Some((now, address, page))
             })
             .collect();
-        for (now, mut page) in carried {
+        for (now, address, mut page) in carried {
             let mut outcomes = Vec::new();
             let report = page.rehost(
                 &self.window.compositor,
                 &self.window.compositor,
-                webhost::SeatAddress {
-                    page: bt_platform::PageVisual {
-                        tab: now.tab.0,
-                        seat: now.seat.0,
-                    },
-                    window: native,
-                },
+                address,
                 false,
                 &mut outcomes,
             );
@@ -5468,10 +5487,10 @@ impl Runtime<'_> {
     /// nothing new for the compositor to publish and the frame is re-filed by
     /// the caller.
     pub(in crate::runtime) fn present_seats_and_commit(
-        gpu: &mut GpuContext,
-        renderer: &mut WindowRenderer,
-        compositor: &bt_platform::Compositor,
-        window: &Window,
+        gpu: &mut B::Device,
+        renderer: &mut B::Glass,
+        compositor: &B::Compositor,
+        window: &B::Window,
         traces: FrameTraces<'_>,
         seat_frames: &[bt_render::SeatFrame<'_>],
         intent: PresentIntent,

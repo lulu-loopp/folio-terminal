@@ -27,7 +27,7 @@ to one of them is replacing it wholesale when its upstream changes.
 
 | File | Copied from | Covers |
 |---|---|---|
-| `typst-assets-NOTICE.txt` | `typst-assets` 0.15.1, `NOTICE` | Everything `typst-kit-embed-fonts` compiles in: Libertinus (OFL), NewComputerModern (GUST), NewCM10-Regular (GPL-3.0-or-later + FE + DE), DejaVu (Bitstream Vera / Arev), ICC profiles (CC0), WHATWG data (CC BY 4.0 / BSD-3), W3C data (W3C Document Licence), Foxit fonts (PDFium BSD-3). **Reproduced whole**: the W3C Document Licence in it requires the full text of the notice to travel with any redistribution, so a summary would breach one of the licences it summarises |
+| `typst-assets-NOTICE.txt` | `typst-assets` 0.15.1, `NOTICE` | Everything `typst-kit-embed-fonts` compiles into the desktop build (a `wasm32` build of `bt-math` compiles none of it): Libertinus (OFL), NewComputerModern (GUST), NewCM10-Regular (GPL-3.0-or-later + FE + DE), DejaVu (Bitstream Vera / Arev), ICC profiles (CC0), WHATWG data (CC BY 4.0 / BSD-3), W3C data (W3C Document Licence), Foxit fonts (PDFium BSD-3). **Reproduced whole**: the W3C Document Licence in it requires the full text of the notice to travel with any redistribution, so a summary would breach one of the licences it summarises |
 | `hayro-LICENSE_FOXIT.txt` | `hayro-interpret` 0.7.0, `assets/LICENSE_FOXIT` | The fourteen standard PDF fonts embedded by `hayro`'s `embed-fonts` |
 | `hayro-assets-README.md` | `hayro-interpret` 0.7.0, `assets/README.md` | Upstream's own statement of where the Foxit fonts and the two ICC profiles came from |
 | `hayro-CGATS_LICENSE.txt` | `hayro-interpret` 0.7.0, `assets/CGATS_LICENSE.txt` | CC0 1.0, for `CGATS001Compat-v2-micro.icc` |
@@ -60,7 +60,7 @@ exist upstream, so `bundled-assets.md` quotes what does.
 | `../vendor/conpty/LICENSE-MICROSOFT-TERMINAL` | The two ConPTY `.nupkg` files and the `conpty.dll` / `OpenConsole.exe` extracted from them |
 | `../vendor/conpty/portable-pty/LICENSE.md` | The patched `portable-pty` 0.9.0 |
 | `../assets/fonts/NotoColorEmoji-LICENSE` | The embedded colour emoji font (OFL-1.1) |
-| `../assets/psreadline/2.4.6/License.txt` | PSReadLine 2.4.6, which is installed with this file beside it |
+| `../vendor/psreadline/LICENSE-PSREADLINE.txt` | PSReadLine 2.4.5 — the package's own `License.txt`, byte for byte (`scripts/ci/check-psreadline-artefact.ps1` holds the two equal); the module is written with it beside it |
 
 Every one of them is also reproduced in `THIRD-PARTY-NOTICES.md`, so a release
 archive carrying only that one file is still complete.

@@ -12,14 +12,14 @@ PackageUrl: https://github.com/lulu-loopp/folio-terminal
 License: Apache-2.0 OR MIT
 LicenseUrl: https://raw.githubusercontent.com/lulu-loopp/folio-terminal/v0.4.7-preview/LICENSE-APACHE
 Copyright: Copyright (c) Weiyi Shi
-ShortDescription: 'A terminal for Windows and macOS: formulas are typeset where a command prints them, files preview beside the prompt, and an agent that is waiting for you says so.'
+ShortDescription: 'A terminal for Windows and macOS: formulas are typeset where a command prints them, files preview beside the prompt, and a tab says so when a program in it stops to wait for an answer.'
 Description: |-
   Folio is a terminal for Windows. The LaTeX a command prints is typeset where it
   was printed, above the next prompt. A file a command names opens in a pane beside
   the shell, rendered rather than paged: Markdown, images, PDF and, where the
-  WebView2 Runtime is installed, a web page. A tab says so when Claude Code, Codex
-  or Copilot CLI has stopped and is waiting on an answer, so a window left in the
-  background is not read late.
+  WebView2 Runtime is installed, a web page. A tab says so when a program in it
+  has stopped and is waiting on an answer, so a window left in the background is
+  not read late.
 
   It starts PowerShell 7, Windows PowerShell, WSL, Git Bash and Command Prompt
   through ConPTY, and draws on the GPU. There is no installer and nothing is
@@ -29,17 +29,13 @@ Description: |-
   to, which is why this package puts its own directory on PATH rather than
   linking the one file somewhere else. Needs Windows 10 1809 or newer, 64-bit.
 
-  0.4.7 is a preview build; folio.exe and folio.msix in it are signed by Weiyi Shi.
+  0.4.7 is a preview build.
 Moniker: folio
 Tags:
-- agent
-- claude-code
 - cli
-- codex
 - command-line
 - conpty
 - console
-- copilot
 - latex
 - markdown
 - math

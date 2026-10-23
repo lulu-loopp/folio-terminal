@@ -704,7 +704,9 @@ pub enum Outcome {
 enum Schedule {
     Off,
     /// An update's trial holds the check's writes (`update_trial`, F-7);
-    /// [`release_trial`] starts the check when the trial is committed.
+    /// [`release_trial`] starts the check when the trial is committed. Or this
+    /// process is the rescue copy, whose check never asks
+    /// ([`check_entry_allowed`]): held for its life ([`schedule_held`]).
     Held,
     InFlight,
     Start,
@@ -725,11 +727,11 @@ pub struct CheckView {
 /// `docs/ARCHITECTURE.md` §4.2, structural debt D-53).
 ///
 /// The only reader and writer of `update-check.json` and of this process's copy
-/// of it, and the holder of the claim file beside it. The file's four fields —
-/// `checked_at_ms`, `latest_tag`, `seen_tag`, `skipped_tag` — change only through
-/// [`Self::transact`], which holds [`Self::file`] across the **whole**
-/// read-modify-write: read the file, change it, write it, publish the result to
-/// [`Self::known`].
+/// of it, and the holder of the claim file beside it. The file's seven fields —
+/// `checked_at_ms`, `attempted_at_ms`, `latest_tag`, `seen_tag`, `skipped_tag`,
+/// `local_stamp`, `local_tag` — change only through [`Self::transact`], which
+/// holds [`Self::file`] across the **whole** read-modify-write: read the file,
+/// change it, write it, publish the result to [`Self::known`].
 ///
 /// # Why one lock, and not re-reading before writing
 ///
@@ -748,7 +750,7 @@ pub struct CheckView {
 /// check writes it from its own thread, and the window thread writes it on the
 /// frame the reader acknowledges the mark, as `settings.json` is written on a
 /// press. Routing it through a worker would add a channel and a wake for a file of
-/// four fields; a lock over one read and one atomic write of a few hundred bytes
+/// seven fields; a lock over one read and one atomic write of a few hundred bytes
 /// serialises the same writers with nothing new. The lock is **never** held
 /// across the network request: what the request did — an answer with its stamp,
 /// or a refusal's attempt — lands after it.
@@ -808,6 +810,10 @@ pub struct OfferState {
     /// a racing writer can land. Fires once.
     #[cfg(test)]
     between: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// A test's refusal of the next write of the file: the one write that
+    /// fails, as a full or read-only disk would fail it.
+    #[cfg(test)]
+    refuse_next_write: AtomicBool,
 }
 
 impl OfferState {
@@ -855,6 +861,8 @@ impl OfferState {
             retry_after_ms: AtomicU64::new(0),
             #[cfg(test)]
             between: Mutex::new(None),
+            #[cfg(test)]
+            refuse_next_write: AtomicBool::new(false),
         }
     }
 
@@ -927,14 +935,15 @@ impl OfferState {
     }
 
     /// The automatic schedule at `now_ms`, from the persisted answer and
-    /// attempt stamps and this process's bounded retry state; `trial_holds` is
-    /// whether an update's trial holds the check's writes. [`due`] remains the
-    /// one owner of the daily decision ([`owed`], [`wait_ms`]).
-    fn schedule(&self, now_ms: u64, trial_holds: bool) -> Schedule {
+    /// attempt stamps and this process's bounded retry state; `held` is
+    /// whether an update's trial holds the check's writes or this process is
+    /// the rescue copy ([`schedule_held`]). [`due`] remains the one owner of
+    /// the daily decision ([`owed`], [`wait_ms`]).
+    fn schedule(&self, now_ms: u64, held: bool) -> Schedule {
         if !self.enabled() {
             return Schedule::Off;
         }
-        if trial_holds {
+        if held {
             return Schedule::Held;
         }
         if self.checking.load(AtomicOrdering::Acquire) {
@@ -1021,6 +1030,13 @@ impl OfferState {
             }
         }
         if changed {
+            #[cfg(test)]
+            if self.refuse_next_write.swap(false, AtomicOrdering::AcqRel) {
+                return Err(bt_persist::WriteError::Io {
+                    path: self.path.clone(),
+                    source: std::io::Error::other("a test refused this write"),
+                });
+            }
             if crate::update_trial::defer(crate::update_trial::Writer::UpdateCheck) {
                 self.owed.store(true, AtomicOrdering::Release);
             } else {
@@ -1062,8 +1078,8 @@ impl OfferState {
     ///    Everything that reads or writes the stamp happens inside the claim.
     /// 2. **Then read the stamps**, and let go if it is not time yet ([`owed`]).
     /// 3. **Then write what the request did**: an answer with its stamp, or a
-    ///    refusal as the day's attempt (`attempted_at_ms`), which leaves the
-    ///    answer's stamp in place. The claim is held across the request, so a
+    ///    refusal — or an answer whose own write failed — as the day's attempt
+    ///    (`attempted_at_ms`), which leaves the answer's stamp in place. The claim is held across the request, so a
     ///    window that starts meanwhile finds it held and does not ask.
     ///
     /// Step 2 is one transaction and step 3 a second, after the request. The
@@ -1163,6 +1179,21 @@ impl OfferState {
 
         let answer = source.latest_tag();
         let completed_at_ms = completed_at();
+        // **The day's attempt is spent**, across every window and process (the
+        // no-retry-storm rule): written for a request that got no answer, and
+        // for an answer whose own write failed (0.4.8 E6) — the stamp says "we
+        // asked", not "we were answered". A feed's attempt is not written: a
+        // feed is a rehearsal, and nothing it does may hold back an ordinary
+        // start's question to the page (U-42e).
+        let spend_the_attempt = || {
+            if !local {
+                let _ = self.transact(|state| {
+                    state.attempted_at_ms = completed_at_ms;
+                    true
+                });
+            }
+            Outcome::Refused
+        };
         match answer {
             Ok(tag) => {
                 // Only the fields this thread fetched are written; everything
@@ -1179,21 +1210,12 @@ impl OfferState {
                     state.local_tag = local;
                     true
                 });
-                persisted.map_or(Outcome::Refused, |()| Outcome::Answered(tag))
-            }
-            Err(_) => {
-                // **The day's attempt is spent**, across every window and
-                // process (the no-retry-storm rule). A feed's refusal is not
-                // written: a feed is a rehearsal, and nothing it does may hold
-                // back an ordinary start's question to the page (U-42e).
-                if !local {
-                    let _ = self.transact(|state| {
-                        state.attempted_at_ms = completed_at_ms;
-                        true
-                    });
+                match persisted {
+                    Ok(()) => Outcome::Answered(tag),
+                    Err(_) => spend_the_attempt(),
                 }
-                Outcome::Refused
             }
+            Err(_) => spend_the_attempt(),
         }
     }
 
@@ -1374,7 +1396,7 @@ pub fn feed() -> Option<&'static Feed> {
 
 /// Install the repaint the answer needs, once per process.
 ///
-/// The same shape as `psreadline::install_wake` and for the same reason: the
+/// The same shape as `attention_copilot::install_wake` and for the same reason: the
 /// answer can land while the window is sitting on a modal with nothing else to
 /// draw, and the mark it lights is on the title bar behind that modal.
 pub fn install_wake<F: Fn() + Send + Sync + 'static>(wake: F) {
@@ -1517,10 +1539,13 @@ pub fn begin_now() -> bool {
 }
 
 /// Whether this entry may start the shared check worker. Automatic check gates
-/// only the scheduled entry; a reader's Check is independent of it.
+/// only the scheduled entry; a reader's Check is independent of it. **The
+/// rescue copy asks nothing** by either entry (`update_startup::rescue_copy`,
+/// T-RESCUE-WINDOW-NO-OFFER): it is a temporary window, never the install, and
+/// the account's `update-check.json` is not its to stamp.
 #[must_use]
-const fn check_entry_allowed(now: bool, automatic: bool) -> bool {
-    now || automatic
+const fn check_entry_allowed(now: bool, automatic: bool, rescue_copy: bool) -> bool {
+    !rescue_copy && (now || automatic)
 }
 
 fn spawn_check(now: bool, now_ms: u64) -> bool {
@@ -1531,7 +1556,7 @@ fn spawn_check(now: bool, now_ms: u64) -> bool {
         owner.settle();
         crate::update_job::evidence_landed();
     };
-    if !check_entry_allowed(now, owner.enabled()) {
+    if !check_entry_allowed(now, owner.enabled(), crate::update_startup::rescue_copy()) {
         settled_without_asking();
         return false;
     }
@@ -1593,20 +1618,32 @@ fn spawn_check(now: bool, now_ms: u64) -> bool {
 /// next look. The caller is the first open window's application-clock turn.
 /// The request itself remains on [`spawn_check`]'s existing worker.
 ///
-/// **Not during an update's trial.** The check's writes are held then, so
-/// [`spawn_check`] would settle without asking, wake the loop, and be asked
-/// again on the turn that wake makes — a loop. [`release_trial`] starts the
-/// check once the trial is committed.
+/// **Not during an update's trial, and never in the rescue copy.** The
+/// check's writes are held in a trial, and the rescue copy asks nothing
+/// ([`check_entry_allowed`]), so [`spawn_check`] would settle without asking,
+/// wake the loop, and be asked again on the turn that wake makes — a loop.
+/// [`release_trial`] starts the check once the trial is committed; the rescue
+/// copy's is held for its life.
 pub(crate) fn advance_schedule(now: Instant, now_ms: u64) -> Option<Instant> {
     let owner = OWNER.get()?;
-    let trial_holds = crate::update_trial::writes_are_deferred();
-    if owner.schedule(now_ms, trial_holds) == Schedule::Start {
+    let held = schedule_held(
+        crate::update_trial::writes_are_deferred(),
+        crate::update_startup::rescue_copy(),
+    );
+    if owner.schedule(now_ms, held) == Schedule::Start {
         let _ = spawn_check(false, now_ms);
     }
-    match owner.schedule(now_ms, trial_holds) {
+    match owner.schedule(now_ms, held) {
         Schedule::After(milliseconds) => now.checked_add(Duration::from_millis(milliseconds)),
         Schedule::Off | Schedule::Held | Schedule::InFlight | Schedule::Start => None,
     }
+}
+
+/// **Whether the automatic schedule is held** ([`Schedule::Held`]): while an
+/// update's trial holds the check's writes, and for the life of the rescue
+/// copy, whose check never asks ([`check_entry_allowed`]).
+const fn schedule_held(trial_holds: bool, rescue_copy: bool) -> bool {
+    trial_holds || rescue_copy
 }
 
 /// The next instant About's relative failed-check text changes, while that page
@@ -1639,6 +1676,7 @@ mod tests {
     use super::{
         CHECK_INTERVAL_MS, CLAIM_STALE_MS, OfferState, Outcome, Releases, STATE_FILE_NAME,
         Schedule, Version, check_entry_allowed, due, eligible, mark_is_lit, newer_than, newest_tag,
+        schedule_held,
     };
     use bt_persist::UpdateCheckV1;
     use bt_source::{Index, Needle, Pattern, Scope, Search, View};
@@ -2118,12 +2156,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// RED (0.4.8 E6, the release read's F9) — **an answer whose write
+    /// failed is still the day's attempt**: the stamp says the page was asked,
+    /// so a second process opened on the file the same day does not ask
+    /// again, and About still says the last question got no answer.
+    ///
+    /// MUTATION: in `ask`, answer `Outcome::Refused` for a failed answer
+    /// transaction without `spend_the_attempt` (the 0.4.7 asymmetry): the
+    /// second process asks at once and the call count goes to two.
+    #[test]
+    fn an_answer_whose_write_failed_is_still_the_days_attempt() {
+        let root = dir("answer-unwritten");
+        let owner = OfferState::load(&root, true);
+        let source = Counting::ok("v0.4.7");
+        let start = 1_756_000_000_000u64;
+        owner
+            .refuse_next_write
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(owner.run(start, &source), Outcome::Refused);
+        let state = state_of(&root);
+        assert_eq!(state.attempted_at_ms, start, "the attempt is stamped");
+        assert_eq!(state.checked_at_ms, 0, "and no answer's stamp");
+        assert_eq!(state.latest_tag, None, "nor its tag");
+
+        let second = OfferState::load(&root, true);
+        assert_eq!(second.run(start + 60_000, &source), Outcome::TooSoon);
+        assert_eq!(source.calls(), 1, "one question that day, for both");
+        assert_eq!(second.view().answered, Some(false));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// RED (T-UPDATE-DAILY) — **the schedule waits while an update's trial
     /// holds the check's writes.** The trial's `spawn_check` settles without
     /// asking and wakes the loop; a schedule still saying `Start` would be
     /// asked again on the turn that wake makes, for as long as the trial.
     ///
-    /// MUTATION: drop the `trial_holds` arm from `OfferState::schedule`; the
+    /// MUTATION: drop the `held` arm from `OfferState::schedule`; the
     /// held row answers `Start` and this goes red.
     #[test]
     fn a_trial_holds_the_schedule_until_it_is_committed() {
@@ -2765,10 +2833,45 @@ mod tests {
     /// refused while Off and this goes red.
     #[test]
     fn automatic_check_off_stops_only_the_scheduled_entry() {
-        assert!(!check_entry_allowed(false, false));
-        assert!(check_entry_allowed(false, true));
-        assert!(check_entry_allowed(true, false));
-        assert!(check_entry_allowed(true, true));
+        assert!(!check_entry_allowed(false, false, false));
+        assert!(check_entry_allowed(false, true, false));
+        assert!(check_entry_allowed(true, false, false));
+        assert!(check_entry_allowed(true, true, false));
+    }
+
+    /// RED (T-RESCUE-WINDOW-NO-OFFER) — **the rescue copy asks nothing**: not
+    /// the launch's or the clock's scheduled entry, not a reader's Check,
+    /// whatever Automatic check says; and its schedule is held for its life,
+    /// so the settle-without-asking `spawn_check` answers it with does not
+    /// wake the clock into asking again every turn.
+    ///
+    /// MUTATION: drop `!rescue_copy &&` from `check_entry_allowed` (every
+    /// entry is admitted again), or `|| rescue_copy` from `schedule_held` (the
+    /// held row answers `Start`); either goes red.
+    #[test]
+    fn the_rescue_copy_never_checks_and_its_schedule_is_held() {
+        for (now, automatic) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert!(
+                !check_entry_allowed(now, automatic, true),
+                "now {now}, automatic {automatic}"
+            );
+        }
+        let root = dir("schedule-rescue-copy");
+        let owner = OfferState::load(&root, true);
+        let now = 1_756_000_000_000u64;
+        assert_eq!(
+            owner.schedule(now, schedule_held(false, true)),
+            Schedule::Held
+        );
+        assert_eq!(
+            owner.schedule(now, schedule_held(true, false)),
+            Schedule::Held
+        );
+        assert_eq!(
+            owner.schedule(now, schedule_held(false, false)),
+            Schedule::Start
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// RED (T-UPDATE-DAILY) — **a due check runs while an older offer is open
@@ -2819,6 +2922,7 @@ mod tests {
             capable: true,
             recorded: false,
             trial: false,
+            rescue_copy: false,
             platform: bt_platform::HostPlatform::Windows,
         };
         let presenters = Presenters {
@@ -2988,6 +3092,7 @@ mod tests {
             capable: true,
             recorded: false,
             trial: false,
+            rescue_copy: false,
             platform: bt_platform::HostPlatform::Windows,
         };
         let presenters = Presenters {

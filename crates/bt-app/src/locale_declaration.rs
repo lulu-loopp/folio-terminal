@@ -384,7 +384,7 @@ pub(crate) fn settled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Condvar, mpsc};
+    use std::sync::{Arc, mpsc};
 
     /// **A system a test writes**: what each reading answers, in order, a gate that holds a
     /// reading inside its run until the test lets it go, and how many readings ran and how many
@@ -394,7 +394,7 @@ mod tests {
         answers: Arc<Mutex<Vec<LocaleReading>>>,
         runs: Arc<Mutex<u64>>,
         running: Arc<Mutex<(u64, u64)>>,
-        gate: Arc<(Mutex<bool>, Condvar)>,
+        gate: Arc<crate::lane::Hold>,
     }
 
     impl FakeSystem {
@@ -404,12 +404,7 @@ mod tests {
                 running.0 += 1;
                 running.1 = running.1.max(running.0);
             }
-            let (held, released) = &*self.gate;
-            let mut held = held.lock().unwrap();
-            while *held {
-                held = released.wait(held).unwrap();
-            }
-            drop(held);
+            self.gate.pass();
             *self.runs.lock().unwrap() += 1;
             self.running.lock().unwrap().0 -= 1;
             let mut answers = self.answers.lock().unwrap();
@@ -427,12 +422,16 @@ mod tests {
         }
 
         fn hold(&self) {
-            *self.gate.0.lock().unwrap() = true;
+            self.gate.hold();
+        }
+
+        /// Waits until a reading stands in its run, held there: the reading is out.
+        fn wait_held(&self, what: &str) {
+            self.gate.wait_standing(what);
         }
 
         fn release(&self) {
-            *self.gate.0.lock().unwrap() = false;
-            self.gate.1.notify_all();
+            self.gate.release();
         }
 
         fn runs(&self) -> u64 {
@@ -533,12 +532,10 @@ mod tests {
 
     /// Wait until no reading is out or waiting and the worker has gone.
     fn until_idle(cell: &LocaleCell) {
-        while {
+        crate::lane::wait_until("the locale worker's end", || {
             let state = cell.lock();
-            state.asked() || state.worker
-        } {
-            std::thread::yield_now();
-        }
+            !state.asked() && !state.worker
+        });
     }
 
     /// RED (T-OS-SIGNALS-MAC) — **a changed locale is read again, and reaches the panes born
@@ -652,9 +649,7 @@ mod tests {
         let (cell, wakes, _) = cell_over(&system, true);
         system.hold();
         cell.ask(LocaleTrigger::Launch);
-        while cell.lock().out.is_none() {
-            std::thread::yield_now();
-        }
+        system.wait_held("the first reading, held");
         assert_eq!(cell.at_birth(), AtBirth::Waiting, "nothing has finished");
         cell.ask(LocaleTrigger::LocaleChanged);
         assert_eq!(cell.at_birth(), AtBirth::Waiting);

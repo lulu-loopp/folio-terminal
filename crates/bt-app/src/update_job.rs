@@ -263,6 +263,8 @@ pub(crate) struct Gathered {
     pub(crate) recorded: bool,
     /// Whether this process is an update's trial ([`crate::update_startup::trial`]).
     pub(crate) trial: bool,
+    /// Whether this process is the rescue copy ([`crate::update_startup::rescue_copy`]).
+    pub(crate) rescue_copy: bool,
     /// Which platform's release files an offer would name.
     pub(crate) platform: HostPlatform,
 }
@@ -279,6 +281,7 @@ impl Gathered {
             capable: crate::update::eligible(),
             recorded: crate::install_channel::at_recorded_target(),
             trial: crate::update_startup::trial().is_some(),
+            rescue_copy: crate::update_startup::rescue_copy(),
             platform: bt_platform::host_platform(),
         }
     }
@@ -296,6 +299,7 @@ impl Gathered {
                 capable: self.capable,
                 recorded: self.recorded,
                 trial: self.trial,
+                rescue_copy: self.rescue_copy,
                 platform: self.platform,
             }),
             (None, None) => Err(Pending::AwaitingBoth),
@@ -320,6 +324,8 @@ pub(crate) struct Evidence {
     pub(crate) recorded: bool,
     /// Whether this process is an update's trial.
     pub(crate) trial: bool,
+    /// Whether this process is the rescue copy.
+    pub(crate) rescue_copy: bool,
     /// Which platform's release files an offer would name.
     pub(crate) platform: HostPlatform,
 }
@@ -335,6 +341,12 @@ pub(crate) struct Eligible {
 pub(crate) enum NotEligible {
     /// This process is an update's trial: it is proving a build, not choosing one.
     Trial,
+    /// **This process is the rescue copy** (`H\<txn>\rescue\folio.exe`, or
+    /// the macOS rescue clone; T-RESCUE-WINDOW-NO-OFFER): a temporary window
+    /// until the next sign-in finishes the update, never the install. It
+    /// neither checks nor stages nor applies: the releases page, as for a
+    /// copy whose updater cannot reach it.
+    RescueCopy,
     /// Nothing newer than the running build is known.
     NoNewerRelease,
     /// The newest tag is at or below the one the reader skipped.
@@ -379,7 +391,8 @@ impl NotEligible {
         match self {
             Self::Trial | Self::NoNewerRelease | Self::Skipped { .. } => Route::Nothing,
             Self::Managed { command, .. } => Route::Command(command),
-            Self::NotOurs
+            Self::RescueCopy
+            | Self::NotOurs
             | Self::Unknown
             | Self::NotUpdaterBuild
             | Self::NoAsset { .. }
@@ -392,6 +405,7 @@ impl NotEligible {
     pub(crate) fn why(&self) -> String {
         match self {
             Self::Trial => "this start is an update's trial".to_owned(),
+            Self::RescueCopy => "this start is the rescue copy of an unfinished update".to_owned(),
             Self::NoNewerRelease => "no newer release is known".to_owned(),
             Self::Skipped { tag } => format!("{tag} is at or below the skipped tag"),
             Self::Managed { manager, command } => {
@@ -420,8 +434,8 @@ impl Evidence {
     /// **Whether this copy may be offered an update now** — pure, and the whole
     /// of §B's "when all of" and §D's classification column.
     ///
-    /// The order is the order a reason is named in: a trial first (it never
-    /// offers), then whether there is anything newer, then who owns the copy,
+    /// The order is the order a reason is named in: a trial or the rescue copy
+    /// first (neither ever offers), then whether there is anything newer, then who owns the copy,
     /// then the build, then the file. Automatic check is a schedule and is not
     /// eligibility.
     ///
@@ -430,6 +444,9 @@ impl Evidence {
     pub(crate) fn eligibility(&self) -> Result<Eligible, NotEligible> {
         if self.trial {
             return Err(NotEligible::Trial);
+        }
+        if self.rescue_copy {
+            return Err(NotEligible::RescueCopy);
         }
         let Some(tag) = should_offer(&self.check, self.running) else {
             return Err(
@@ -543,8 +560,15 @@ pub(crate) enum Failure {
     /// window for a refused write** (0.4.8 E4): `error` is the operating
     /// system's last refusal, `then` the failure the journal itself shows. The
     /// card names the hold and its error and says what `then` did; it never
-    /// says that the new version did not start.
-    JournalHeld { error: String, then: Box<Failure> },
+    /// says that the new version did not start. **`file` names the member the
+    /// flip or its rollback moves when the held file was one**
+    /// (T-UPDATE-MOVE-HELD-RETRY): the card then names that file instead of
+    /// the update record; `None` is the journal.
+    JournalHeld {
+        error: String,
+        file: Option<String>,
+        then: Box<Failure>,
+    },
     /// **The update was committed after its trial ended, and what the person
     /// changed in the trial was not kept** (0.4.8 E4, R3): the trial's writes
     /// were held until a commit it never saw, and the trial left its mark in
@@ -1899,6 +1923,15 @@ impl<W: Copy + Eq> Job<W> {
         self.answer.as_ref()
     }
 
+    /// **Whether About's Check can ask for this process**: every decision but
+    /// the rescue copy's ([`NotEligible::RescueCopy`]), whose check never
+    /// asks (`update::spawn_check`), so its Check is drawn disabled rather
+    /// than as a button that does nothing (T-RESCUE-WINDOW-NO-OFFER).
+    #[must_use]
+    pub(crate) const fn may_check(&self) -> bool {
+        !matches!(self.answer, Some(Err(NotEligible::RescueCopy)))
+    }
+
     /// The failure About > Version keeps naming after its card was closed.
     #[must_use]
     pub(crate) fn last_failure(&self) -> Option<(&Option<Offer>, &Failure)> {
@@ -2385,6 +2418,7 @@ mod tests {
             capable: true,
             recorded: false,
             trial: false,
+            rescue_copy: false,
             platform: HostPlatform::Windows,
         }
     }
@@ -3004,6 +3038,37 @@ mod tests {
         assert_eq!(job.answer(), Some(&Err(NotEligible::Trial)));
     }
 
+    /// RED (T-RESCUE-WINDOW-NO-OFFER) — **the rescue copy is never offered an
+    /// update, on either platform, whatever else holds**: a copy that is ours,
+    /// updater-capable, behind a newer tag, with nothing skipped, is refused
+    /// `RescueCopy` first — and sent to the releases page, as a copy its
+    /// updater cannot reach is — so neither the unasked offer nor About's
+    /// asked one ([`Job::asked_offer`]) is raised. Pure: the macOS clone's
+    /// decision is this one.
+    ///
+    /// MUTATION: drop the `rescue_copy` clause of `Evidence::eligibility`.
+    #[test]
+    fn a_rescue_copy_is_never_offered_an_update() {
+        for platform in [HostPlatform::Windows, HostPlatform::MacOs] {
+            let mut job = job();
+            job.consider(
+                Gathered {
+                    rescue_copy: true,
+                    platform,
+                    ..gathered("v0.4.7", None, Some(Channel::Ours))
+                },
+                &one_window(),
+                || txn(1),
+            );
+            assert_eq!(job.state(), &State::Idle, "{platform:?}");
+            assert_eq!(job.answer(), Some(&Err(NotEligible::RescueCopy)));
+            assert_eq!(job.asked_offer(Some("v0.4.7")), None, "{platform:?}");
+            assert!(!job.offer_again(1, Some("v0.4.7")), "{platform:?}");
+            assert!(!job.may_check(), "{platform:?}");
+        }
+        assert_eq!(NotEligible::RescueCopy.route(), Route::ReleasesPage);
+    }
+
     fn eligibility(
         channel: Channel,
         capable: bool,
@@ -3016,6 +3081,7 @@ mod tests {
             capable,
             recorded: false,
             trial: false,
+            rescue_copy: false,
             platform,
         }
         .eligibility()
@@ -3366,6 +3432,7 @@ mod tests {
                     capable: true,
                     recorded: false,
                     trial: false,
+                    rescue_copy: false,
                     platform: HostPlatform::Windows,
                 },
                 &one_window(),
@@ -3513,6 +3580,7 @@ mod tests {
                 capable: true,
                 recorded: false,
                 trial: false,
+                rescue_copy: false,
                 platform: HostPlatform::Windows,
             };
             job.consider(now(&owner), &one_window(), || txn(1));

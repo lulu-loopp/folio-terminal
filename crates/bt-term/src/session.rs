@@ -40,7 +40,7 @@ use bt_viewport::{
     BlockOverflowOwner, FrameProjectionError, FrameViewportOrigin, GridCursor,
     LiveMathOccurrenceId, MathBlockAnchor, MathBlockDisplay, MathBlockPlacement,
     MathFailurePlacement, ProjectedLiveMathArtifact, ProjectedMathArtifact, SelectionSpan,
-    ViewSelection, ViewportFrame, ViewportProjection,
+    ViewSelection, ViewportFrame, ViewportProjection, ViewportScrollState,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -280,14 +280,16 @@ fn win32_would_trim_the_name(path: &Path) -> bool {
         .is_some_and(|name| name.ends_with(['.', ' ']))
 }
 
-/// Whether a `BT_…` diagnostic variable is switched on.
-///
-/// **Set-but-empty is off**, which is the word every environment variable in
-/// this program is read with: a shell that writes `BT_PERF_TRACE=` has said "not
-/// this run", and a build that answered presence alone would turn a profiling
-/// session into a measurement of its own `eprintln!`s.
-fn switched_on(name: &str) -> bool {
-    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+/// Whether `BT_SEMANTIC_TRACE` is on, as the host's entry installed it
+/// ([`crate::install_diagnostics`]); off in a process that installed nothing.
+fn semantic_trace() -> bool {
+    crate::host::diagnostics().semantic_trace
+}
+
+/// Whether `BT_PERF_TRACE` is on, as the host's entry switched it
+/// (`bt_viewport::trace::perf`); off in a process that switched nothing.
+fn perf_trace() -> bool {
+    bt_viewport::trace::perf()
 }
 
 const INLINE_IMAGE_WORKER_QUEUE_CAP: usize = 4;
@@ -301,6 +303,18 @@ const PATH_VERDICT_LEDGER_CAP: usize = 4096;
 /// How many unanswered printed paths one pane will hold for its worker.
 const PATH_VERIFY_QUEUE_CAP: usize = 512;
 const LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP: usize = 64;
+/// **How much formula and decode work one session can hold queued for its host's worker at once**:
+/// its frozen and live formula queues ([`WORKER_QUEUE_CAP`] each), its pasted pictures and its
+/// printed picture paths — what one hand-out pass can put out of that work when the queues are
+/// full. Work already out is not counted: a host that sizes a bound by it sizes it for one pass.
+pub const DECORATION_TASKS_HELD: usize =
+    2 * crate::WORKER_QUEUE_CAP + INLINE_IMAGE_WORKER_QUEUE_CAP + LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP;
+/// **How many pictures one session can hold for decoding at once** — pasted and printed — and so
+/// how many decoded pictures one hand-out can ask to have resampled.
+pub const DECODE_TASKS_HELD: usize =
+    INLINE_IMAGE_WORKER_QUEUE_CAP + LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP;
+/// **How many printed paths one session can hold for its host's verification worker at once.**
+pub const PATH_TASKS_HELD: usize = PATH_VERIFY_QUEUE_CAP;
 /// Two trailing blank rows add at most 36 px at the baseline metrics: enough for common display
 /// math while preventing a single formula from consuming an arbitrarily large blank separator.
 const LIVE_MATH_MAX_BORROWED_BLANK_ROWS: u32 = 2;
@@ -367,6 +381,15 @@ pub enum SessionDecorationTask {
     /// its own repaint to find out would stutter exactly while a full-screen program was printing
     /// the paths worth asking about.
     VerifyPath(PathBuf),
+}
+
+/// **What kind of new input reached a session** ([`DualPlaneSession::hold_decoration_task_until_new_input`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NewInput {
+    /// Bytes from the shell: new output, or an edit's echo.
+    Output,
+    /// A resize or a scroll: what is laid out, or what is seen, moved.
+    Layout,
 }
 
 /// One piece of decoration work a worker holds, named by what its completion carries back.
@@ -1607,6 +1630,10 @@ pub struct DualPlaneSession {
     /// The `diagnostics.log` lines those refusals earned and nobody has collected yet — one per
     /// request that asked for a bit this session had not been asked for before.
     keyboard_protocol_notes: Vec<String>,
+    /// The `diagnostics.log` line a foreign PSReadLine report earned, until the application takes
+    /// it ([`Self::take_line_editor_notes`]); `line_editor_noted` says one was queued already.
+    line_editor_notes: Vec<String>,
+    line_editor_noted: bool,
     /// See [`SessionStatus::attention_request`] — the live value of the weak tier.
     attention_request: Option<u64>,
     /// **The weak tier's cursor: the next generation `=yes` will mint, and it never runs
@@ -1743,6 +1770,17 @@ pub struct DualPlaneSession {
     /// it arrives, whatever its verdict. Path questions are `path_verify_in_flight`'s. Only
     /// [`Self::outstanding_decoration_work`] reads it.
     decoration_work_out: BTreeSet<DecorationWorkOut>,
+    /// **Tasks whose work failed on the host's worker, held for this session's next new input**
+    /// ([`DualPlaneSession::hold_decoration_task_until_new_input`]). Each still counts as handed
+    /// out — its work-out entry or in-flight path stands, so nothing asks the same question
+    /// again meanwhile — and the next bytes from the shell or the next resize give it back to
+    /// its queue, to be handed out once more.
+    held_for_new_input: Vec<SessionDecorationTask>,
+    /// The scroll state of the last frame's projection ([`DualPlaneSession::observe_view`]).
+    last_view: Option<ViewportScrollState>,
+    /// **The host could not start its worker**: nothing is handed out until this session's next
+    /// new input ([`DualPlaneSession::pause_hand_out_until_new_input`]).
+    hand_out_paused: bool,
     /// What this pane last told its projection, kept so the telling is free on the frames where
     /// nothing has changed — which is nearly all of them.
     printed_path_links: bt_transcript::paths::PrintedPathLinks,
@@ -2134,7 +2172,7 @@ fn semantic_witness_rematch(
             })
             .collect::<Vec<_>>();
         let ordered = ordered_semantic_matches(&regions, &candidates);
-        if switched_on("BT_SEMANTIC_TRACE") {
+        if semantic_trace() {
             eprintln!(
                 "SEMANTIC_ORDERED witness={witness:?} regions={regions:?} candidates={candidates:?} matched={ordered:?}"
             );
@@ -2269,6 +2307,8 @@ impl DualPlaneSession {
             notifications: Vec::new(),
             keyboard_flags_refused: 0,
             keyboard_protocol_notes: Vec::new(),
+            line_editor_notes: Vec::new(),
+            line_editor_noted: false,
             attention_request: None,
             next_attention_generation: 1,
             failure_exit_code: None,
@@ -2301,6 +2341,9 @@ impl DualPlaneSession {
             path_declined: BTreeSet::new(),
             path_declined_order: VecDeque::new(),
             decoration_work_out: BTreeSet::new(),
+            held_for_new_input: Vec::new(),
+            last_view: None,
+            hand_out_paused: false,
             printed_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             reprinted_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             image_placeholders: bt_transcript::paths::ImagePlaceholderTargets::default(),
@@ -2348,9 +2391,7 @@ impl DualPlaneSession {
             math_failure_validate_count: 0,
             math_failure_convert_count: 0,
             math_failure_compile_count: 0,
-            decor_trace: std::env::var_os("BT_DECOR_TRACE")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from),
+            decor_trace: crate::host::diagnostics().decor_trace.clone(),
             decor_trace_frame: 0,
         }
     }
@@ -2429,6 +2470,29 @@ impl DualPlaneSession {
     /// is the one reader and writes each line to the log.
     pub fn take_keyboard_protocol_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.keyboard_protocol_notes)
+    }
+
+    /// **The `diagnostics.log` line this session's PSReadLine report earned**, taken
+    /// (T-INTEGRATION-INJECT-2-BUILD round 2).
+    ///
+    /// Folio's PowerShell integration says, once, when a Windows PowerShell pane's PSReadLine after
+    /// the profile ran is not the copy Folio put on its module path — a profile that demanded
+    /// another version by number (`Import-Module PSReadLine -RequiredVersion 2.0.0`). The first such
+    /// report in a session queues one line naming the version; any later one queues nothing, so a
+    /// pane says it once. No card: the line is where somebody asking why that pane lost its command
+    /// marks finds the answer. The application's drain is the one reader.
+    pub fn take_line_editor_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.line_editor_notes)
+    }
+
+    fn note_foreign_line_editor(&mut self, version: &str) {
+        if std::mem::replace(&mut self.line_editor_noted, true) {
+            return;
+        }
+        self.line_editor_notes.push(format!(
+            "shell integration: this pane's PSReadLine after its profile ran is {version}, not \
+             Folio's"
+        ));
     }
 
     /// Every kitty keyboard flag a program in this session has asked for and been refused.
@@ -3998,6 +4062,16 @@ impl DualPlaneSession {
     /// Deterministic replay entry point. Production callers normally use `feed`; integration tests
     /// can supply a monotonic timestamp without sleeping through the resize silence window.
     pub fn feed_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
+        let fed = self.feed_bytes_at(bytes, observed_at);
+        if !bytes.is_empty() {
+            self.new_input(NewInput::Output);
+        }
+        fed
+    }
+
+    /// [`Self::feed_at`]'s parse: the bytes applied to the grid, the transcript and every ledger
+    /// that reads them.
+    fn feed_bytes_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
         // The screen's damage counter, before anything else — see
         // [`Self::screen_revision`]. Bytes from the child are the only thing that
         // writes the live grid outside a resize, so this is where "something
@@ -4456,6 +4530,7 @@ impl DualPlaneSession {
         rows: NonZeroU32,
         observed_at: Instant,
     ) -> Result<(), SessionError> {
+        self.new_input(NewInput::Layout);
         self.refresh_semantic_region_witnesses();
         let plan = plan_resize(self.terminal.dimensions(), (columns, rows));
         // Before a single cell moves: what each registered live anchor names. A reflow is about to
@@ -5230,7 +5305,7 @@ impl DualPlaneSession {
             self.live_admission_row = row;
         }
         self.live_detection_count = self.live_detection_count.saturating_add(scheduled as u64);
-        if scheduled != 0 && switched_on("BT_PERF_TRACE") {
+        if scheduled != 0 && perf_trace() {
             bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
@@ -7032,7 +7107,7 @@ impl DualPlaneSession {
         }
         // Under the same switch `semantic_witness_rematch` traces through, because the two answer
         // the same question about the same event and a reader chasing one wants both.
-        if switched_on("BT_SEMANTIC_TRACE") {
+        if semantic_trace() {
             eprintln!(
                 "REFLOW_RESEAT placed={} of {} over {} lines",
                 placements.len(),
@@ -8981,7 +9056,7 @@ impl DualPlaneSession {
             }
         }
         self.live_invalidation_count = self.live_invalidation_count.saturating_add(invalidated);
-        if invalidated != 0 && switched_on("BT_PERF_TRACE") {
+        if invalidated != 0 && perf_trace() {
             bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_event=invalidate live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
@@ -9058,7 +9133,7 @@ impl DualPlaneSession {
         if !(self.live_screen == ScreenId::Alternate && self.alternate_repaint_in_progress) {
             self.offscreen_decorations.clear();
         }
-        if removed != 0 && switched_on("BT_PERF_TRACE") {
+        if removed != 0 && perf_trace() {
             bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE live_math_event=invalidate-all live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
@@ -9180,6 +9255,9 @@ impl DualPlaneSession {
     pub fn forget_work_in_flight(&mut self) {
         self.path_verify_in_flight.clear();
         self.decoration_work_out.clear();
+        // A task held for new input is work in flight too: let go of it with the rest, or the
+        // re-ask below and its release would ask one question twice.
+        self.held_for_new_input.clear();
         for record in self.inline_images.values_mut() {
             record.display_pending = None;
         }
@@ -9198,6 +9276,9 @@ impl DualPlaneSession {
     }
 
     pub fn take_decoration_worker_task(&mut self) -> Option<SessionDecorationTask> {
+        if self.hand_out_paused {
+            return None;
+        }
         // The display size a record needs is a pure function of the layout and its native
         // dimensions, and anything can move either — a zoom, a reflow, an anchor migrating into
         // history. Deriving it here, where work is handed out, means no state change has to
@@ -9241,6 +9322,164 @@ impl DualPlaneSession {
             self.decoration_work_out.insert(out);
         }
         task
+    }
+
+    /// **A task the host could not hand to its worker, given back** — the host's lane refused it
+    /// at its door (its worker gone, its bound reached, or its thread not started). The task goes
+    /// back to the head of the queue it was taken from and is no longer counted as handed out, so
+    /// the next [`Self::take_decoration_worker_task`] hands it out again: nothing is lost, and
+    /// nothing is asked again until the host's next hand-out.
+    ///
+    /// Given back past a queue's cap: a queue's cap bounds what output can queue, and a task given
+    /// back was admitted under it once and taken. The excess is at most the tasks of this session
+    /// out at once — the host's own bound for that work — and is the first the next hand-out takes.
+    pub fn give_back_decoration_worker_task(&mut self, task: SessionDecorationTask) {
+        if let Some(out) = DecorationWorkOut::of(&task) {
+            self.decoration_work_out.remove(&out);
+        }
+        match task {
+            SessionDecorationTask::Math(task) => match *task {
+                SessionMathTask::Frozen(task) => self.scheduler.give_back(task),
+                SessionMathTask::Live(task) => self.live_tasks.push_front(task),
+            },
+            SessionDecorationTask::InlineImage(task) => match task.source {
+                InlineImageSource::LocalPath(_) => self.local_image_path_tasks.push_front(task),
+                InlineImageSource::Osc1337(_) => self.inline_image_tasks.push_front(task),
+            },
+            SessionDecorationTask::ScaleInlineImage(task) => {
+                self.inline_image_scale_tasks.push_front(task);
+            }
+            SessionDecorationTask::VerifyPath(path) => {
+                self.path_verify_in_flight.remove(&path);
+                self.path_verify_tasks.push_front(path);
+            }
+        }
+    }
+
+    /// **A task whose work failed on the host's worker, held until this session's next new input**
+    /// that could change its answer — a resize or a scroll, or output that changed the task's own
+    /// content ([`Self::new_input`]). Until then it stays handed out, so the same question is not
+    /// asked again on its own; then it goes back to the head of its queue and the next hand-out
+    /// hands it out once more. The decoration stands as it was meanwhile: a formula on its source
+    /// text, a path not yet a link.
+    pub fn hold_decoration_task_until_new_input(&mut self, task: SessionDecorationTask) {
+        self.held_for_new_input.push(task);
+    }
+
+    /// **The host could not start the worker this session's tasks go to**: nothing more is handed
+    /// out until this session's next new input, so the start is tried again only by new input,
+    /// once — never by every hand-out that finds the queues as they were.
+    pub fn pause_hand_out_until_new_input(&mut self) {
+        self.hand_out_paused = true;
+    }
+
+    /// **New input reached this session.** Hand-outs resume (a paused hand-out tries its start
+    /// once more). A held task whose own content changed ([`Self::held_task_changed`]) is let go
+    /// as its stale answer would be ([`Self::let_go_stale_task`]): the session's schedulers ask the
+    /// question the new content asks, and the old one is never asked again. A held task still
+    /// current goes back to the head of its queue, in the order it was held, on a resize or a
+    /// scroll — what is laid out and seen moved — and stays held on output that did not touch it.
+    /// A picture whose decode failed is therefore not tried again on every batch of a `tail -f`,
+    /// and a failure about content that has gone is never retried at all.
+    fn new_input(&mut self, input: NewInput) {
+        self.hand_out_paused = false;
+        let held = std::mem::take(&mut self.held_for_new_input);
+        let mut asked = Vec::new();
+        for task in held {
+            if self.held_task_changed(&task) {
+                // A question about content that is no longer there: let it go as its stale answer
+                // would, so the session's own schedulers ask the question the content asks now.
+                self.let_go_stale_task(task);
+            } else if input == NewInput::Layout {
+                asked.push(task);
+            } else {
+                self.held_for_new_input.push(task);
+            }
+        }
+        for task in asked.into_iter().rev() {
+            self.give_back_decoration_worker_task(task);
+        }
+    }
+
+    /// **Let go of a held task its content has moved past**, exactly as its stale completion
+    /// would be let go of: a frozen formula's scan is refused and its candidate re-armed for the
+    /// next quiescent frame; a live formula's scan is refused and its rows re-armed; a picture
+    /// whose occurrence is gone is answered into nothing; a resample's size is no longer owed, so
+    /// the display it is for asks the size it wants now. Nothing is given back: the old question is
+    /// not asked again.
+    fn let_go_stale_task(&mut self, task: SessionDecorationTask) {
+        match task {
+            SessionDecorationTask::Math(task) => match *task {
+                SessionMathTask::Frozen(task) => {
+                    self.complete_worker_result(task, Err(MathRenderError::Aborted));
+                }
+                SessionMathTask::Live(task) => {
+                    self.complete_live_worker_result(task, Err(MathRenderError::Aborted));
+                }
+            },
+            SessionDecorationTask::InlineImage(task) => {
+                self.complete_inline_image_result(
+                    task,
+                    Err(InlineImageDecodeError::Decode(
+                        "the picture is no longer printed".to_owned(),
+                    )),
+                );
+            }
+            SessionDecorationTask::ScaleInlineImage(task) => {
+                self.decoration_work_out
+                    .remove(&DecorationWorkOut::Scale(task.occurrence_id));
+                if let Some(record) = self.inline_images.get_mut(&task.occurrence_id)
+                    && record.display_pending
+                        == Some((task.display_width_px, task.display_height_px))
+                {
+                    record.display_pending = None;
+                }
+            }
+            SessionDecorationTask::VerifyPath(path) => {
+                self.path_verify_in_flight.remove(&path);
+            }
+        }
+    }
+
+    /// **Whether a held task's content is no longer what it was asked about**: a frozen formula's
+    /// candidate at other versions, or another line of its block rewritten or evicted; a live
+    /// formula's source rows rewritten; a resample whose picture was decoded again; a picture
+    /// whose occurrence is gone. A printed path's question is its text, which output cannot
+    /// change, and a picture file's bytes are not read here: those wait for a resize or a scroll.
+    fn held_task_changed(&self, task: &SessionDecorationTask) -> bool {
+        match task {
+            SessionDecorationTask::Math(task) => match task.as_ref() {
+                SessionMathTask::Frozen(task) => {
+                    !self.worker_task_is_current(task) || !self.frozen_block_is_current(task)
+                }
+                SessionMathTask::Live(task) => {
+                    task.screen != self.live_screen
+                        || live_task_is_current(task, &self.live_capture()).is_some()
+                }
+            },
+            SessionDecorationTask::InlineImage(task) => {
+                !self.inline_images.contains_key(&task.occurrence_id)
+            }
+            SessionDecorationTask::ScaleInlineImage(task) => self
+                .inline_images
+                .get(&task.occurrence_id)
+                .and_then(|record| record.artifact.as_ref())
+                .is_none_or(|decoded| decoded.key != task.content_key),
+            SessionDecorationTask::VerifyPath(_) => false,
+        }
+    }
+
+    /// **What this pane's projection shows moved** — the reader scrolled. Called with each frame's
+    /// projection; a scroll is new input to every task held for it ([`Self::new_input`]), as a
+    /// resize is, because what is on screen is what the visible scheduler asks about.
+    pub fn observe_view(&mut self, projection: &ViewportProjection) {
+        let view = projection.scroll_state();
+        if self.last_view.as_ref().is_some_and(|last| last != view) {
+            self.new_input(NewInput::Layout);
+        }
+        if self.last_view.as_ref() != Some(view) {
+            self.last_view = Some(view.clone());
+        }
     }
 
     /// **How much decoration work this session is still owed an answer for**: every task queued
@@ -9407,7 +9646,7 @@ impl DualPlaneSession {
         if !accepted {
             self.stale_results += 1;
             self.account_stranded_pending(task.candidate_id, task.versions);
-        } else if switched_on("BT_PERF_TRACE") {
+        } else if perf_trace() {
             if let Some(elapsed) = render_time {
                 bt_viewport::trace::line(format!(
                     "BT_PERF_TRACE math_render_us={} source={} resident_bytes={}",
@@ -9490,13 +9729,13 @@ impl DualPlaneSession {
             // formula that stayed at source because its raster was thrown away looked in the trace
             // exactly like a formula that was never scanned. It is the one outcome a recording of
             // this defect needs to show, so it says so.
-            if switched_on("BT_PERF_TRACE") {
+            if perf_trace() {
                 bt_viewport::trace::line(format!(
                     "BT_PERF_TRACE live_math_result_dropped row={} candidate_row={} reason={reason}",
                     task.start.row, task.candidate_row,
                 ));
             }
-        } else if switched_on("BT_PERF_TRACE")
+        } else if perf_trace()
             && let Some(elapsed) = render_time
         {
             bt_viewport::trace::line(format!(
@@ -9526,7 +9765,7 @@ impl DualPlaneSession {
             }
             None => return,
         }
-        if switched_on("BT_PERF_TRACE") {
+        if perf_trace() {
             bt_viewport::trace::line(format!(
                 "BT_PERF_TRACE math_failures_validate={} math_failures_convert={} math_failures_compile={}",
                 self.math_failure_validate_count,
@@ -9751,13 +9990,7 @@ impl DualPlaneSession {
             }
             return true;
         }
-        let block_is_current = task.inputs.iter().all(|input| {
-            self.document
-                .entries()
-                .get(&input.id)
-                .is_some_and(|entry| entry.line.text == input.text)
-        });
-        if !block_is_current {
+        if !self.frozen_block_is_current(&task) {
             return false;
         }
         if task.candidate_id != task.transcript_id
@@ -9855,6 +10088,19 @@ impl DualPlaneSession {
                 record.suppress();
             }
         }
+    }
+
+    /// **Whether every line a frozen scan read is still in history with the text it read** — the
+    /// block's own currency, beside the candidate's ([`Self::worker_task_is_current`]): another
+    /// line of a multi-line block rewritten, or evicted by the scrollback quota, makes the scan's
+    /// answer one about lines that are no longer there.
+    fn frozen_block_is_current(&self, task: &DetectionTask) -> bool {
+        task.inputs.iter().all(|input| {
+            self.document
+                .entries()
+                .get(&input.id)
+                .is_some_and(|entry| entry.line.text == input.text)
+        })
     }
 
     fn worker_task_is_current(&self, task: &DetectionTask) -> bool {
@@ -12065,6 +12311,9 @@ impl DualPlaneSession {
                     requested,
                     in_force,
                 } => self.note_refused_keyboard_flags(requested, in_force),
+                LifecycleDirective::ForeignLineEditor { version } => {
+                    self.note_foreign_line_editor(&version);
+                }
                 LifecycleDirective::GridWrites { screen, rows } => {
                     let screen = match screen {
                         RemovalScreen::Primary => ScreenId::Primary,
@@ -14970,9 +15219,10 @@ fn live_detection_context_signature(
         .flat_map(|scan| scan.inputs().iter())
     {
         let trimmed = input.text.trim();
+        // A row that can move a fence is one the detector's own grammar opens one on: every line
+        // `fence_closes` accepts is also an opener, so openers cover closers too.
         let structural = may_contain_math(trimmed, inline_formulas)
-            || trimmed.starts_with("```")
-            || trimmed.starts_with("~~~");
+            || bt_detect::fence::fence_opening(&input.text).is_some();
         if structural {
             if !framed {
                 // The unframed signature is the historical `LiveDetectionInput` hash byte for
@@ -25798,6 +26048,439 @@ mod tests {
             assert!(record.failed);
             assert_eq!(record.declined_by_host, declined, "{record:?}");
         }
+    }
+
+    /// RED (S-8 rounds 2 and 3) — **a task whose work failed is held until new input that could
+    /// change its answer, and then handed out once more**: idle frames ask nothing, more output
+    /// that leaves the printed path as it was asks nothing (a `tail -f` does not retry it), and a
+    /// resize hands it out again, once. A paused hand-out (the host's worker could not start)
+    /// hands out nothing until new input either.
+    ///
+    /// MUTATION: have `new_input` leave `held_for_new_input` where it is — the resize does not
+    /// give the path back, and it is never asked again. Or release every held task on output (the
+    /// round-2 `new_input`) — more output asks the path again.
+    #[test]
+    fn a_failed_task_waits_for_new_input_and_a_paused_hand_out_resumes_with_it() {
+        let path = bt_testpath::temp_path("bt-term-held").join("\u{622a}\u{56fe}-shot.md");
+        let printed = format!("{}\r\n", path.to_string_lossy());
+        let mut session = DualPlaneSession::new(nz(120), nz(6));
+        enable_path_detection(&mut session);
+        session.feed(printed.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        let Some(task @ SessionDecorationTask::VerifyPath(_)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("the printed name is asked about");
+        };
+        session.hold_decoration_task_until_new_input(task);
+        // Idle frames: the same screen drawn again asks nothing.
+        for _ in 0..3 {
+            session.refresh_projection(&mut projection);
+            session.viewport_frame(&mut projection).unwrap();
+            session.absorb_printed_path_probes(&mut projection);
+            assert!(
+                session.take_decoration_worker_task().is_none(),
+                "no new input, no new question"
+            );
+        }
+        assert_eq!(session.outstanding_decoration_work(), 1, "still owed");
+        session.feed(b"more output, the same path\r\n").unwrap();
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "output that leaves the path as it was asks nothing"
+        );
+        session.resize(nz(100), nz(6)).unwrap();
+        let Some(SessionDecorationTask::VerifyPath(again)) = session.take_decoration_worker_task()
+        else {
+            panic!("a resize hands the held name out again");
+        };
+        assert_eq!(again, path);
+        assert!(session.take_decoration_worker_task().is_none(), "once");
+
+        let mut session = DualPlaneSession::new(nz(20), nz(6));
+        session
+            .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+            .unwrap();
+        session.pause_hand_out_until_new_input();
+        assert!(session.take_decoration_worker_task().is_none(), "paused");
+        session.feed(b"\r\n").unwrap();
+        assert!(
+            matches!(
+                session.take_decoration_worker_task(),
+                Some(SessionDecorationTask::InlineImage(_))
+            ),
+            "new input resumes the hand-out"
+        );
+    }
+
+    /// A pane showing one settled live formula, its scan handed out and held as a failed one.
+    fn a_pane_holding_a_failed_formula() -> DualPlaneSession {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        session
+            .feed_at("$$x+\u{03b1}$$\x1b[?25l".as_bytes(), start)
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL),
+            1
+        );
+        let Some(task @ SessionDecorationTask::Math(_)) = session.take_decoration_worker_task()
+        else {
+            panic!("the formula is handed out");
+        };
+        session.hold_decoration_task_until_new_input(task);
+        session
+    }
+
+    /// What a handed-out live formula reads, resolved as the worker resolves it.
+    fn live_source(task: SessionDecorationTask) -> String {
+        let SessionDecorationTask::Math(task) = task else {
+            panic!("a formula");
+        };
+        let SessionMathTask::Live(mut task) = *task else {
+            panic!("a live formula");
+        };
+        assert!(
+            resolve_live_detection_task(&mut task),
+            "the scan finds its formula"
+        );
+        task.span.render_source
+    }
+
+    /// RED (S-8 rounds 3 and 4) — **a held live formula whose own source is rewritten is let go,
+    /// and the question the new source asks is asked**: a line printed below it leaves it held;
+    /// its row rewritten lets the old scan go as a stale answer would (nothing is handed out while
+    /// the row settles), and once the row settles the scan handed out reads the new formula.
+    ///
+    /// MUTATION: give the changed task back instead of letting it go (`give_back_…` for a changed
+    /// task in `new_input`) — the old `x+α` scan is handed out at once.
+    #[test]
+    fn a_held_formula_whose_source_changed_is_let_go_and_the_new_one_asked() {
+        let mut session = a_pane_holding_a_failed_formula();
+        session
+            .feed("\r\n\u{65e5}\u{5fd7} log line".as_bytes())
+            .unwrap();
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "output below the formula asks nothing"
+        );
+        session.feed("\x1b[H$$y+\u{03b2}$$".as_bytes()).unwrap();
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "the old question is let go, and the new one waits for its row to settle"
+        );
+        session.advance_live_stability(Instant::now() + LIVE_MATH_STABLE_INTERVAL);
+        let asked = session
+            .take_decoration_worker_task()
+            .expect("the rewritten row is asked about");
+        let source = live_source(asked);
+        assert!(source.contains('y'), "the new formula is asked: {source}");
+        assert!(!source.contains('x'), "not the old one: {source}");
+    }
+
+    /// RED (S-8 rounds 4 and 5) — **a failed task about content that has gone is never asked
+    /// again**: once the formula's row is rewritten, the old scan is let go and nothing is handed
+    /// out; the scan the settled row then asks is handed out, fails again and stays held, and
+    /// output that does not touch it asks nothing — no `tail -f` loop.
+    ///
+    /// MUTATION: the round-3 `new_input` (a held task given back on every output) — the scan
+    /// that failed again is handed out on the next batch.
+    #[test]
+    fn a_stale_failed_task_asks_nothing_on_later_output() {
+        let mut session = a_pane_holding_a_failed_formula();
+        session.feed("\x1b[H$$y+\u{03b2}$$".as_bytes()).unwrap();
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "the old scan is let go, not handed out"
+        );
+        session.advance_live_stability(Instant::now() + LIVE_MATH_STABLE_INTERVAL);
+        let task = session
+            .take_decoration_worker_task()
+            .expect("the settled row is asked about");
+        // Handed out, and failed again.
+        session.hold_decoration_task_until_new_input(task);
+        assert_eq!(session.held_for_new_input.len(), 1, "held");
+        for line in 0..3 {
+            session
+                .feed(format!("\x1b[4;1H\u{884c} {line}").as_bytes())
+                .unwrap();
+            assert!(
+                session.take_decoration_worker_task().is_none(),
+                "output elsewhere asks nothing"
+            );
+            assert_eq!(
+                session.held_for_new_input.len(),
+                1,
+                "and the task is still held, not let go"
+            );
+        }
+    }
+
+    /// RED (S-8 rounds 5 and 6) — **a held frozen formula whose block lost another of its lines is
+    /// let go**: the candidate line itself is unchanged, but output evicts the block's opener
+    /// through the scrollback quota (a `tail -f`), so the scan is about lines that are no longer
+    /// there. The output lets it go instead of holding it until a resize or a scroll: the scan is
+    /// no longer out, and the closer — a lone `\end` with no opener left in history — settles
+    /// `Suppressed`, shown as its text, not marked failed, and asked again only by a change to its
+    /// source or the detector.
+    ///
+    /// MUTATION: compare only the candidate's versions in `held_task_changed` (drop the
+    /// `frozen_block_is_current` clause) — the scan stays held. Or make the frozen arm of
+    /// `let_go_stale_task` drop the task — the closer waits on it for as long as the pane lives.
+    #[test]
+    fn a_held_frozen_formula_whose_block_lost_a_line_is_let_go() {
+        let mut session =
+            DualPlaneSession::with_frozen_quota(nz(40), nz(2), NonZeroUsize::new(8).unwrap());
+        session
+            .feed(b"\\begin{align}\r\nx &= y\r\n\\end{align}\r\nafter\r\nmore\r\n")
+            .unwrap();
+        let line = |session: &DualPlaneSession, marker: &str| {
+            *session
+                .document()
+                .entries()
+                .iter()
+                .find(|(_, entry)| entry.line.text.contains(marker))
+                .map(|(id, _)| id)
+                .expect("the block's line")
+        };
+        let opener = line(&session, "\\begin{");
+        let closer = line(&session, "\\end{");
+        let task = std::iter::from_fn(|| session.take_decoration_worker_task())
+            .find(|task| {
+                matches!(task, SessionDecorationTask::Math(math) if matches!(
+                    math.as_ref(),
+                    SessionMathTask::Frozen(task) if task.candidate_id == closer
+                        && task.inputs.iter().any(|input| input.id == opener)
+                ))
+            })
+            .expect("the closer's scan spans the block");
+        assert!(
+            session
+                .decoration_work_out
+                .contains(&DecorationWorkOut::FrozenMath(closer)),
+            "the scan is out"
+        );
+        session.hold_decoration_task_until_new_input(task);
+        let mut fed = 0;
+        while session.document().entries().contains_key(&opener) {
+            assert_eq!(
+                session.held_for_new_input.len(),
+                1,
+                "output that leaves the block whole leaves the scan held"
+            );
+            session
+                .feed("\u{65e5}\u{5fd7} filler\r\n".as_bytes())
+                .unwrap();
+            fed += 1;
+            assert!(fed < 256, "the opener is never evicted");
+            assert!(
+                session.document().entries().contains_key(&closer),
+                "the closer evicted before the opener; tighten the corpus"
+            );
+        }
+        assert!(
+            session.held_for_new_input.is_empty(),
+            "the output that evicted the opener lets the scan go"
+        );
+        assert_eq!(
+            session.decoration(closer).map(|record| record.decoration),
+            Some(DecorationLifecycle::Suppressed),
+            "the closer settles as its text: no opener is left to make it a block"
+        );
+        assert!(
+            !session
+                .decoration_work_out
+                .contains(&DecorationWorkOut::FrozenMath(closer)),
+            "nor is the scan out"
+        );
+    }
+
+    /// RED (S-8 round 5) — **a held decode whose picture is no longer printed is let go**: the
+    /// next output answers it into nothing, so the session owes nothing for it and hands nothing
+    /// out.
+    ///
+    /// MUTATION: make the decode arm of `let_go_stale_task` drop the task — the decode stays owed
+    /// for as long as the pane lives.
+    #[test]
+    fn a_held_decode_whose_picture_is_gone_is_let_go() {
+        let mut session = DualPlaneSession::new(nz(20), nz(6));
+        session
+            .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+            .unwrap();
+        let Some(SessionDecorationTask::InlineImage(task)) = session.take_decoration_worker_task()
+        else {
+            panic!("OSC 1337 files a decode");
+        };
+        let occurrence = task.occurrence_id;
+        session.hold_decoration_task_until_new_input(SessionDecorationTask::InlineImage(task));
+        assert_eq!(session.outstanding_decoration_work(), 1, "held, still owed");
+        // The occurrence goes, as when its line leaves history.
+        session.inline_images.remove(&occurrence);
+        session.feed("\r\n\u{65e5}\u{5fd7}".as_bytes()).unwrap();
+        assert!(session.held_for_new_input.is_empty(), "let go");
+        assert_eq!(session.outstanding_decoration_work(), 0, "owed nothing");
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "asked nothing"
+        );
+    }
+
+    /// RED (S-8 rounds 5 and 6) — **a held resample whose picture was decoded again is let go**:
+    /// the size it asked for is no longer owed, so the next hand-out asks the size the display
+    /// wants of the new decode.
+    ///
+    /// MUTATION: make the resample arm of `let_go_stale_task` drop the task — `display_pending`
+    /// still names the old size and its work stays out. Or have it file the old size as declined —
+    /// the new decode is never asked about.
+    #[test]
+    fn a_held_resample_whose_picture_was_decoded_again_is_let_go() {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(20), nz(12), cell);
+        session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
+        session
+            .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+            .unwrap();
+        let Some(SessionDecorationTask::InlineImage(task)) = session.take_decoration_worker_task()
+        else {
+            panic!("OSC 1337 files a decode");
+        };
+        let occurrence = task.occurrence_id;
+        assert!(session.complete_inline_image_result(
+            task.clone(),
+            Ok(decoded_test_image(occurrence, 200, 300, false)),
+        ));
+        let Some(task @ SessionDecorationTask::ScaleInlineImage(_)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("a decoded picture is resampled to its display box");
+        };
+        session.hold_decoration_task_until_new_input(task);
+        assert!(session.inline_images[&occurrence].display_pending.is_some());
+        // Decoded again: the picture the resample was for is not the one shown now.
+        session
+            .inline_images
+            .get_mut(&occurrence)
+            .and_then(|record| record.artifact.as_mut())
+            .expect("decoded")
+            .key = "image:decoded-again".to_owned();
+        session.feed("\r\n\u{65e5}\u{5fd7}".as_bytes()).unwrap();
+        assert!(session.held_for_new_input.is_empty(), "let go");
+        assert_eq!(
+            session.inline_images[&occurrence].display_pending, None,
+            "the old size is no longer owed"
+        );
+        assert!(
+            !session
+                .decoration_work_out
+                .contains(&DecorationWorkOut::Scale(occurrence)),
+            "nor out"
+        );
+        let Some(SessionDecorationTask::ScaleInlineImage(asked)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("the display asks the size it wants of the new decode");
+        };
+        assert_eq!(asked.occurrence_id, occurrence);
+        assert_eq!(asked.content_key, "image:decoded-again");
+    }
+
+    /// RED (S-8 round 3) — **a scroll is new input to a held task**: the reader scrolling the
+    /// pane gives a held path back, as a resize does.
+    ///
+    /// MUTATION: make `observe_view` never call `new_input` — the scroll asks nothing.
+    #[test]
+    fn a_scroll_asks_a_held_task_again() {
+        let path = bt_testpath::temp_path("bt-term-scrolled").join("\u{6eda}\u{52a8}-notes.md");
+        let mut session = DualPlaneSession::new(nz(120), nz(4));
+        enable_path_detection(&mut session);
+        for line in 0..20 {
+            session
+                .feed(format!("\u{884c} {line}\r\n").as_bytes())
+                .unwrap();
+        }
+        session
+            .feed(format!("{}\r\n", path.to_string_lossy()).as_bytes())
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        session.observe_view(&projection);
+        let Some(task @ SessionDecorationTask::VerifyPath(_)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("the printed name is asked about");
+        };
+        session.hold_decoration_task_until_new_input(task);
+        session.observe_view(&projection);
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "the same view asks nothing"
+        );
+        projection.scroll_by_rows(3);
+        session.refresh_projection(&mut projection);
+        session.viewport_frame(&mut projection).unwrap();
+        session.observe_view(&projection);
+        assert!(
+            matches!(
+                session.take_decoration_worker_task(),
+                Some(SessionDecorationTask::VerifyPath(_))
+            ),
+            "a scroll asks the held name again"
+        );
+    }
+
+    /// RED (S-8) — **a task the host's lane refused is given back, and the next hand-out hands it
+    /// out again**: nothing is lost, nothing is counted as out while it waits, and no question is
+    /// asked twice. A printed path (a name in Chinese and Latin) and a pasted picture, each taken,
+    /// given back, and taken again unchanged.
+    ///
+    /// MUTATION: make `give_back_decoration_worker_task` only clear the task's work-out entry (drop
+    /// the task) — the next hand-out finds nothing.
+    #[test]
+    fn a_task_given_back_is_handed_out_again_and_nothing_is_lost() {
+        let path = bt_testpath::temp_path("bt-term-given-back").join("\u{7b14}\u{8bb0}-notes.md");
+        let printed = format!("{}\r\n", path.to_string_lossy());
+        let mut session = DualPlaneSession::new(nz(120), nz(6));
+        enable_path_detection(&mut session);
+        session.feed(printed.as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        let Some(task @ SessionDecorationTask::VerifyPath(_)) =
+            session.take_decoration_worker_task()
+        else {
+            panic!("the printed name is asked about");
+        };
+        assert_eq!(session.outstanding_decoration_work(), 1, "in flight");
+        session.give_back_decoration_worker_task(task);
+        assert_eq!(session.outstanding_decoration_work(), 1, "queued, not out");
+        let Some(SessionDecorationTask::VerifyPath(again)) = session.take_decoration_worker_task()
+        else {
+            panic!("the name given back is handed out again");
+        };
+        assert_eq!(again, path);
+        assert!(session.take_decoration_worker_task().is_none(), "and once");
+
+        let mut session = DualPlaneSession::new(nz(20), nz(6));
+        session
+            .feed("\u{56fe} \x1b]1337;File=inline=1:AAAA\x07".as_bytes())
+            .unwrap();
+        let Some(SessionDecorationTask::InlineImage(task)) = session.take_decoration_worker_task()
+        else {
+            panic!("OSC 1337 files a decode");
+        };
+        let occurrence = task.occurrence_id;
+        session.give_back_decoration_worker_task(SessionDecorationTask::InlineImage(task));
+        assert_eq!(session.outstanding_decoration_work(), 1);
+        let Some(SessionDecorationTask::InlineImage(again)) = session.take_decoration_worker_task()
+        else {
+            panic!("the picture given back is handed out again");
+        };
+        assert_eq!(again.occurrence_id, occurrence);
+        assert_eq!(session.outstanding_decoration_work(), 1, "out once");
     }
 
     /// RED — **a path the host declined to verify is out of flight, has no verdict, and is never
@@ -38923,6 +39606,48 @@ mod tests {
         );
         session.feed(b"\x1b[>1u\x1b[=1u").unwrap();
         assert!(session.take_keyboard_protocol_notes().is_empty());
+    }
+
+    /// RED (T-INTEGRATION-INJECT-2-BUILD round 2) — **a Windows PowerShell pane whose PSReadLine
+    /// after the profile is not Folio's says so once, in one `diagnostics.log` line naming the
+    /// version** (`OSC 777;folio-psreadline;<version>`, sent by `folio.ps1`), and only a version is
+    /// read: a payload that is not one queues nothing, and none of it reaches the screen or the
+    /// notifications.
+    ///
+    /// MUTATION: drop the `line_editor_noted` latch — the second report queues a second line;
+    /// drop the verb's arm in `finish_osc_777` — no line at all.
+    #[test]
+    fn a_foreign_psreadline_is_named_once_in_the_diagnostics_log() {
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        session
+            .feed(b"\x1b]777;folio-psreadline;not a version\x07\x1b]777;folio-psreadline;\x07")
+            .unwrap();
+        assert!(
+            session.take_line_editor_notes().is_empty(),
+            "a payload that is not a version is not a report"
+        );
+        session
+            .feed(b"\x1b]777;folio-psreadline;2.0.0\x07\x1b]777;folio-psreadline;2.0.0\x07")
+            .unwrap();
+        assert_eq!(
+            session.take_line_editor_notes(),
+            [
+                "shell integration: this pane's PSReadLine after its profile ran is 2.0.0, not \
+              Folio's"
+            ]
+        );
+        session
+            .feed(b"\x1b]777;folio-psreadline;2.3.6\x07")
+            .unwrap();
+        assert!(
+            session.take_line_editor_notes().is_empty(),
+            "a pane says it once"
+        );
+        assert!(session.take_notifications().is_empty(), "never a card");
+        assert!(
+            session.take_keyboard_protocol_notes().is_empty(),
+            "a line of its own"
+        );
     }
 
     /// RED (T-KEYBOARD-PROTOCOL) — **OSC 133 does not touch the keyboard state: after `C`, a push

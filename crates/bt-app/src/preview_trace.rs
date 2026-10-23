@@ -68,7 +68,7 @@ use crate::trace::Gate;
 pub use crate::trace::{Trace, emit};
 
 static GATE: Gate = Gate::new(
-    "BT_PREVIEW_TRACE",
+    |files| files.preview.as_deref(),
     "# BT_PREVIEW_TRACE_V1 elapsed_ms event field=value…",
 );
 

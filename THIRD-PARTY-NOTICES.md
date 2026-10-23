@@ -864,15 +864,16 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
 ---
 
-### PSReadLine 2.4.6
+### PSReadLine 2.4.5
 
 <https://github.com/PowerShell/PSReadLine> — BSD 2-Clause,
 Copyright (c) 2013, Jason Shirk.
 
-Nine files, including two `.dll`s, are embedded in the executable and written to
-`Documents\WindowsPowerShell\Modules\PSReadLine` when the user asks for the
-PowerShell integration. `License.txt` is one of the nine — the module is
-installed with its licence beside it, not without.
+Microsoft's signed PSReadLine 2.4.5, as the PowerShell Gallery publishes it
+(`vendor/psreadline/PSReadLine.2.4.5.nupkg`, pinned by SHA-256 and unmodified).
+Its four assemblies and `License.txt` are embedded in the Windows executable and
+written to Folio's local data folder for Windows PowerShell panes; the module is
+written with its licence beside it, not without.
 
 ``` text
 Copyright (c) 2013, Jason Shirk
@@ -1406,9 +1407,11 @@ SOFTWARE.
 
 ### Assets embedded by `typst-assets` 0.15.1
 
-The `typst-as-lib` dependency is taken with `typst-kit-fonts` and
-`typst-kit-embed-fonts`, which compiles `typst-assets`' fonts and data tables
-into the executable. The crate itself is Apache-2.0 and appears in the crate
+On the desktop the `typst-as-lib` dependency is taken with `typst-kit-fonts`
+and `typst-kit-embed-fonts`, which compiles `typst-assets`' fonts and data tables
+into the executable. A `wasm32` build of `bt-math` takes neither and compiles no
+`typst-assets` face in: a browser host supplies its own faces, and the notices
+for them travel with that host. The crate itself is Apache-2.0 and appears in the crate
 listing below; the *assets* are not, and travel under six further sets of terms.
 
 Upstream states them in one `NOTICE` file, and that file is reproduced here
@@ -3661,7 +3664,7 @@ of what has to be said about a modified copy.
 
 | Licence | Packages |
 |---|---:|
-| MIT License | 476 |
+| MIT License | 477 |
 | Apache License 2.0 | 38 |
 | Unicode License v3 | 26 |
 | BSD 2-Clause "Simplified" License | 6 |
@@ -9832,12 +9835,13 @@ SOFTWARE.
 
 ### MIT License
 
-Used by 87 package(s):
+Used by 88 package(s):
 
 - **block2 0.5.1** — <https://github.com/madsmtm/objc2>
 - **block2 0.6.2** — <https://github.com/madsmtm/objc2>
 - **chrono 0.4.45** — <https://github.com/chronotope/chrono>
 - **comemo-macros 0.5.1** — <https://github.com/typst/comemo>
+- **dispatch2 0.3.1** — <https://github.com/madsmtm/objc2>
 - **dispatch 0.2.0** — <http://github.com/SSheldon/rust-dispatch>
 - **dpi 0.1.2** — <https://github.com/rust-windowing/winit>
 - **fxhash 0.2.1** — <https://github.com/cbreeden/fxhash>
@@ -12219,9 +12223,9 @@ the following restrictions:
 
 ## In the lock file, not in any resolved build
 
-`Cargo.lock` pins 574 packages from crates.io. 537 of them are in the
+`Cargo.lock` pins 574 packages from crates.io. 538 of them are in the
 dependency graph this workspace resolves, and are attributed above with their
-licence texts. The 37 below are optional or platform-specific entries
+licence texts. The 36 below are optional or platform-specific entries
 that no feature resolution here reaches: nothing links them, so nothing
 distributes them. They are listed with the terms they declare, so that the two
 counts a reader might compare are reconciled here rather than left as a gap.
@@ -12229,7 +12233,6 @@ counts a reader might compare are reconciled here rather than left as a gap.
 | Package | Declared licence |
 |---|---|
 | `bitvec 1.1.1` | MIT |
-| `dispatch2 0.3.1` | Zlib OR Apache-2.0 OR MIT |
 | `foldhash 0.1.5` | Zlib |
 | `funty 2.0.0` | MIT |
 | `glifo 0.1.1` | Apache-2.0 OR MIT |

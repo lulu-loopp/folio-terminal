@@ -16,7 +16,12 @@ pub mod elevated_protocol;
 pub mod environment;
 /// The process-wide file-read ledger, `bt-effects`' (re-exported whole).
 pub use bt_effects::file_reads;
+/// That a process has ended, as the kernel signals it: a test's wait for a child it started.
+#[cfg(windows)]
+pub mod exit_witness;
 pub mod foreground_program;
+/// The folder a process is standing in, read from outside it (T-CWD-FROM-PROCESS).
+pub mod process_folder;
 
 /// **The thread door** — one definition, in [`admission`], for every platform: a named thread in
 /// its band whose body is lent a [`admission::WorkerCtx`]. Re-exported here, where every caller
@@ -2318,6 +2323,28 @@ pub fn same_file(one: &std::path::Path, other: &std::path::Path) -> bool {
     }
 }
 
+/// **The identity of the volume `path` is on** — the half of the identity
+/// [`same_file`] compares that names the volume: on Windows the volume serial
+/// number (`FILE_ID_INFO`), on Unix the device (`st_dev`). Two paths on one
+/// volume answer the same number, and two volumes mounted at once answer two.
+/// `None` when the path cannot be asked or the platform keeps no such identity.
+/// **A link is asked as itself**, as [`same_file`] asks it (`symlink_metadata`
+/// on Unix, `FILE_FLAG_OPEN_REPARSE_POINT` on Windows): a symbolic link names
+/// the volume the link is on, not the volume of the file it points at.
+/// It blocks on the disk: a worker's question.
+#[must_use]
+pub fn volume_identity(path: &std::path::Path) -> Option<u64> {
+    #[cfg(any(unix, windows))]
+    {
+        file_identity(path).map(|(volume, _)| volume)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// **Rename `from` to `to`, and never over another entry** — the move both
 /// rename doors make (the Files column's and the preview head's), as one call
 /// that refuses rather than replaces (T-HARDCODE-047 slice 2, RT-3's remainder).
@@ -2667,12 +2694,6 @@ pub const NOTIFICATION_AUMID: &str = "Folio.Terminal";
 pub fn notification_aumid_key() -> String {
     format!(r"Software\Classes\AppUserModelId\{NOTIFICATION_AUMID}")
 }
-
-/// The name shown on the toast and in Windows' own notification settings.
-///
-/// The product name and not the window title: what this names is the *sender*,
-/// and the sender is Folio however many windows it has open.
-pub const NOTIFICATION_DISPLAY_NAME: &str = "Folio";
 
 /// One toast, as the XML the notification platform parses.
 ///
@@ -3335,7 +3356,8 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comm
         not(windows),
         expect(
             unused_mut,
-            reason = "the one thing this door does to the child it builds is a Windows flag, and                       the door itself is the rule rather than the flag"
+            reason = "the one thing this door does to the child it builds is a Windows flag, and \
+                      the door itself is the rule rather than the flag"
         )
     )]
     let mut command = std::process::Command::new(program);
@@ -3375,6 +3397,15 @@ pub struct ProbeChild {
     stderr: Option<ProbePipe>,
     guard: ProbeChildGuard,
     settled: Option<std::process::ExitStatus>,
+    /// How many processes other than the immediate child the probe's job held when the child was
+    /// seen to have exited, read just before the job closed ([`Self::others_at_settlement`]).
+    others_at_settlement: Option<Vec<u32>>,
+    /// Whether the settlement is read ([`Self::watch_its_settlement`]), and the package whose
+    /// running processes it reads.
+    watched: Option<Option<PackageFamily>>,
+    /// The running processes of the watched package outside the probe's tree at the settlement
+    /// ([`Self::package_beside_at_settlement`]).
+    package_beside_at_settlement: Option<Vec<u32>>,
 }
 
 /// The immediate child of a probe. On Windows the probe door created it
@@ -3462,6 +3493,82 @@ impl ProbeChild {
         })
     }
 
+    /// **Read this probe's settlement** (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH): when its
+    /// immediate child is seen to have exited, before the job closes, the job's members outside
+    /// the probe's tree ([`Self::others_at_settlement`]) and, when `package` is given, the running
+    /// processes of that package outside it ([`Self::package_beside_at_settlement`]). Asked by a
+    /// PowerShell check; a probe nobody asks reads nothing at its settlement.
+    pub fn watch_its_settlement(&mut self, package: Option<PackageFamily>) {
+        self.watched = Some(package);
+    }
+
+    /// **The processes outside its own tree the probe's job held when its immediate child was
+    /// seen to have exited**, by id — read at that settlement, just before the job closed and
+    /// ended them (the proof that closing a check's job took nothing but the check's own tree
+    /// with it). The probe's tree is its immediate child and every process whose parent, followed
+    /// up, is that child — the console host it was given and a descendant it left running among
+    /// them; a member already gone from the system is nobody's. Two miscounts are known: a
+    /// descendant whose own parent has exited (an orphan two levels down) is read as another's,
+    /// and a parent id the system has given to a new process since is followed as if it were the
+    /// old one. The immediate child's id is not one of them: the probe holds its handle until it
+    /// is reaped. `None` when it was not read: a probe nobody watched
+    /// ([`Self::watch_its_settlement`]), one ended before its child exited ([`Self::kill`] closes
+    /// the job first), one not yet settled, an uncontained one, a list the kernel would not give,
+    /// and off Windows, where a process group has no such list.
+    #[must_use]
+    pub fn others_at_settlement(&self) -> Option<&[u32]> {
+        self.others_at_settlement.as_deref()
+    }
+
+    /// **The running processes of the watched package outside the probe's tree at its
+    /// settlement**, by id — what can see a desktop app container the probe shares with a pane
+    /// (a pane is never in the probe's job: the job list cannot). `None` when no package was
+    /// watched, under the conditions [`Self::others_at_settlement`] names, and off Windows.
+    #[must_use]
+    pub fn package_beside_at_settlement(&self) -> Option<&[u32]> {
+        self.package_beside_at_settlement.as_deref()
+    }
+
+    /// The settlement's two readings, while the job is held, from one snapshot of the system's
+    /// processes — taken only when there is something to judge.
+    #[cfg(windows)]
+    fn read_the_settlement(&mut self) {
+        let Some(package) = &self.watched else {
+            return;
+        };
+        let Some(job) = self.guard.job.as_ref() else {
+            return;
+        };
+        let Ok(mut members) = job_process_ids(job) else {
+            return;
+        };
+        members.retain(|id| *id != self.leader.id);
+        if members.is_empty() && package.is_none() {
+            self.others_at_settlement = Some(members);
+            return;
+        }
+        let Ok(parents) = process_parents() else {
+            return;
+        };
+        self.others_at_settlement = Some(outside_the_tree(self.leader.id, &members, &parents));
+        if let Some(package) = package {
+            let running: Vec<u32> = parents.keys().copied().collect();
+            let beside: Vec<u32> = outside_the_tree(self.leader.id, &running, &parents)
+                .into_iter()
+                .filter(|id| {
+                    packaged_program::package_family_of_process(*id).as_ref() == Some(package)
+                })
+                .collect();
+            self.package_beside_at_settlement = Some(beside);
+        }
+    }
+
+    /// Off Windows a process group has no list to read: nothing is read, whatever was asked.
+    #[cfg(not(windows))]
+    fn read_the_settlement(&mut self) {
+        let _ = &self.watched;
+    }
+
     /// The one settlement road: observe the immediate child without reaping
     /// it, end the unit, then reap and keep the status. `block` waits for the
     /// child; otherwise a running child answers `None`.
@@ -3472,6 +3579,7 @@ impl ProbeChild {
         if !probe_leader_has_exited(&self.leader, block)? {
             return Ok(None);
         }
+        self.read_the_settlement();
         let ended = self.guard.end();
         let status = reap_probe_leader(&self.leader, ended)?;
         self.settled = Some(status);
@@ -3479,8 +3587,14 @@ impl ProbeChild {
     }
 }
 
+/// One output stream of a probe, read to its end on a thread of its own.
+///
+/// **The reader's body runs inside [`contained_panic::contain`]** (T-JOINED-PANIC-VALUES): the
+/// resident panic hook lets a panic there unwind to the boundary, so the thread ends with its
+/// answer slot still empty, and that — and only that — is what [`Self::finish`] reads as the
+/// reader having panicked: the probe's refusal, an `io::Error` its caller already answers for.
 struct ProbePipeDrain {
-    thread: std::thread::JoinHandle<()>,
+    thread: std::thread::JoinHandle<std::thread::Result<()>>,
     answer: std::sync::Arc<std::sync::Mutex<Option<std::io::Result<Vec<u8>>>>>,
 }
 
@@ -3510,14 +3624,16 @@ fn drain_probe_pipe<R: std::io::Read + Send + 'static>(
     let answer = std::sync::Arc::new(std::sync::Mutex::new(None));
     let worker_answer = answer.clone();
     let thread = spawn_at_priority(name, ThreadPriority::BelowNormal, move |_worker| {
-        let mut bytes = Vec::new();
-        let result = match pipe {
-            Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
-            None => Ok(bytes),
-        };
-        *worker_answer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+        contained_panic::contain(move || {
+            let mut bytes = Vec::new();
+            let result = match pipe {
+                Some(mut pipe) => pipe.read_to_end(&mut bytes).map(|_| bytes),
+                None => Ok(bytes),
+            };
+            *worker_answer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+        })
     })?;
     Ok(ProbePipeDrain { thread, answer })
 }
@@ -3526,6 +3642,110 @@ impl Drop for ProbeChild {
     fn drop(&mut self) {
         let _ = self.guard.end();
     }
+}
+
+/// **The processes a job holds now**, by id — every process in it and in the jobs nested in it, as
+/// the kernel lists them (`JobObjectBasicProcessIdList`). A probe's tree is a handful, so room for
+/// [`JOB_LIST_ROOM`] is asked; a job holding more is the kernel's refusal (`ERROR_MORE_DATA`).
+#[cfg(windows)]
+fn job_process_ids(job: &std::os::windows::io::OwnedHandle) -> std::io::Result<Vec<u32>> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        JOBOBJECT_BASIC_PROCESS_ID_LIST, JobObjectBasicProcessIdList, QueryInformationJobObject,
+    };
+
+    #[repr(C)]
+    struct Listed {
+        head: JOBOBJECT_BASIC_PROCESS_ID_LIST,
+        more: [usize; JOB_LIST_ROOM - 1],
+    }
+
+    let mut list = Listed {
+        head: JOBOBJECT_BASIC_PROCESS_ID_LIST::default(),
+        more: [0; JOB_LIST_ROOM - 1],
+    };
+    // SAFETY: the job handle is live; `list` is a process-id list header followed by room for
+    // `JOB_LIST_ROOM` ids in all, and its size is what the call is told.
+    unsafe {
+        QueryInformationJobObject(
+            Some(HANDLE(job.as_raw_handle())),
+            JobObjectBasicProcessIdList,
+            std::ptr::from_mut(&mut list).cast(),
+            u32::try_from(std::mem::size_of::<Listed>()).expect("process-id list size fits u32"),
+            None,
+        )
+    }?;
+    let listed = usize::try_from(list.head.NumberOfProcessIdsInList).unwrap_or(JOB_LIST_ROOM);
+    Ok(std::iter::once(list.head.ProcessIdList[0])
+        .chain(list.more)
+        .take(listed.min(JOB_LIST_ROOM))
+        .filter_map(|id| u32::try_from(id).ok())
+        .collect())
+}
+
+/// Room for this many process ids in one read of a job's list ([`job_process_ids`]).
+#[cfg(windows)]
+const JOB_LIST_ROOM: usize = 64;
+
+/// **Each running process's parent**, by id, from one snapshot of the system's processes.
+#[cfg(windows)]
+fn process_parents() -> std::io::Result<std::collections::HashMap<u32, u32>> {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+
+    // SAFETY: a snapshot of the system's processes; its handle moves to `OwnedHandle` at once.
+    let snapshot =
+        unsafe { OwnedHandle::from_raw_handle(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?.0) };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: u32::try_from(std::mem::size_of::<PROCESSENTRY32W>())
+            .expect("process entry size fits u32"),
+        ..PROCESSENTRY32W::default()
+    };
+    let mut parents = std::collections::HashMap::new();
+    // SAFETY: the snapshot handle is live and `entry` carries its own size.
+    let mut more =
+        unsafe { Process32FirstW(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
+    while more {
+        parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+        // SAFETY: as for `Process32FirstW`.
+        more = unsafe { Process32NextW(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
+    }
+    Ok(parents)
+}
+
+/// **The processes among `candidates` outside the tree of `leader`**: a process is in the tree
+/// when its parent is `leader`, or a process in the tree, followed up through the snapshot
+/// `parents`; one the snapshot (taken after `candidates` were read) does not hold has exited
+/// since — the console host of a child that just ended — and is nobody's. `leader` itself is
+/// not listed.
+#[cfg(windows)]
+fn outside_the_tree(
+    leader: u32,
+    candidates: &[u32],
+    parents: &std::collections::HashMap<u32, u32>,
+) -> Vec<u32> {
+    let in_tree = |mut at: u32| {
+        // Each step moves to another process the snapshot holds, so a chain longer than the
+        // snapshot is a cycle.
+        for _ in 0..=parents.len() {
+            match parents.get(&at) {
+                Some(parent) if *parent == leader => return true,
+                Some(parent) if parents.contains_key(parent) && *parent != at => at = *parent,
+                _ => return false,
+            }
+        }
+        false
+    };
+    candidates
+        .iter()
+        .copied()
+        .filter(|id| *id != leader && parents.contains_key(id) && !in_tree(*id))
+        .collect()
 }
 
 /// **How long a probe's owner waits for it** (G-SWEEP-048): a probe may go `quiet` without
@@ -3811,44 +4031,10 @@ impl ProbeChild {
         use windows::Win32::System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
         };
-        use windows::Win32::System::JobObjects::{
-            JOBOBJECT_BASIC_PROCESS_ID_LIST, JobObjectBasicProcessIdList, QueryInformationJobObject,
-        };
         use windows::Win32::System::Threading::{OpenThread, THREAD_QUERY_LIMITED_INFORMATION};
 
-        /// Room for this many process ids in a job's list; a probe's tree is a handful.
-        const ROOM: usize = 64;
-        #[repr(C)]
-        struct Listed {
-            head: JOBOBJECT_BASIC_PROCESS_ID_LIST,
-            more: [usize; ROOM - 1],
-        }
-
         let processes: Vec<u32> = match &self.guard.job {
-            Some(job) => {
-                let mut list = Listed {
-                    head: JOBOBJECT_BASIC_PROCESS_ID_LIST::default(),
-                    more: [0; ROOM - 1],
-                };
-                // SAFETY: the job handle is live; `list` is a process-id list header followed by
-                // room for `ROOM` ids in all, and its size is what the call is told.
-                unsafe {
-                    QueryInformationJobObject(
-                        Some(HANDLE(job.as_raw_handle())),
-                        JobObjectBasicProcessIdList,
-                        std::ptr::from_mut(&mut list).cast(),
-                        u32::try_from(std::mem::size_of::<Listed>())
-                            .expect("process-id list size fits u32"),
-                        None,
-                    )
-                }?;
-                let listed = usize::try_from(list.head.NumberOfProcessIdsInList).unwrap_or(ROOM);
-                std::iter::once(list.head.ProcessIdList[0])
-                    .chain(list.more)
-                    .take(listed.min(ROOM))
-                    .filter_map(|id| u32::try_from(id).ok())
-                    .collect()
-            }
+            Some(job) => job_process_ids(job)?,
             None => vec![self.leader.id],
         };
         // SAFETY: a snapshot of the system's threads; its handle moves to `OwnedHandle` at once.
@@ -4213,6 +4399,11 @@ pub(crate) fn end_probe_children_for_process_exit() {
 }
 
 impl ProbeChildGuard {
+    /// A guard that holds nothing — the state an ended guard is in: what a
+    /// Unix probe whose group could not be registered is held by while it is
+    /// ended, and what the Windows tests of the arms that answer for it start
+    /// a probe with.
+    #[cfg(any(test, not(windows)))]
     fn uncontained() -> Self {
         Self {
             #[cfg(windows)]
@@ -4452,10 +4643,11 @@ impl ProbeStdio {
 /// 1703; Folio's minimum is 1809): no process object of the probe exists
 /// outside its job at any moment, so a termination of this process, however it
 /// ends and however long `CreateProcess` takes, leaves no probe behind. The job
-/// handle is not inheritable. If the job cannot be created or limited, the
-/// probe runs uncontained after one process-wide diagnostic (standard error,
-/// which in a resident run is `diagnostics.log`); its deadline still ends its
-/// immediate child.
+/// handle is not inheritable. **A probe that cannot be contained is refused,
+/// never run uncontained** (0.4.8 E6): if the job cannot be created or
+/// limited, no process is created and the start fails with that refusal
+/// ([`uncontainable`]), which the caller's road says as its own step's
+/// failure.
 ///
 /// One kind of program cannot be born in a job: Windows refuses the job list
 /// for a packaged app's executable (PowerShell 7 from the Microsoft Store) when
@@ -4464,8 +4656,9 @@ impl ProbeStdio {
 /// resumed through the primary thread `CreateProcess` returned,
 /// so its descendants are still contained; a termination of this process while
 /// that `CreateProcess` is still running can leave it behind, suspended. Only
-/// that exact refusal (`PACKAGED_JOB_LIST_REFUSAL`) takes this road; any other
-/// failure of the first `CreateProcess` is the start's answer. If the
+/// that refusal takes this road ([`packaged_job_list_refusal`]: its status form,
+/// or access denied for a program in a package); any other failure of the first
+/// `CreateProcess` is the start's answer. If the
 /// assignment or the resume is refused, the suspended child is ended and the
 /// start fails: nothing suspended is left behind.
 ///
@@ -4500,7 +4693,8 @@ impl ProbeStdio {
 /// child has exited and not when every holder of its write end has let go.
 ///
 /// On Unix the command enters a new process group before `exec`, so there is no
-/// interval in which a descendant can escape its guard.
+/// interval in which a descendant can escape its guard; a group that cannot be
+/// registered for its guard is ended at once and the start refused.
 pub fn spawn_probe(
     command: &mut std::process::Command,
     stdio: ProbeStdio,
@@ -4515,12 +4709,34 @@ pub fn spawn_probe(
     }
 }
 
-/// Say once per process that probes run uncontained, and why.
-fn containment_unavailable(error: &std::io::Error) {
-    static SAID: std::sync::Once = std::sync::Once::new();
-    SAID.call_once(|| {
-        eprintln!("Folio probe containment unavailable; probes will still run: {error}");
-    });
+/// **The refusal of a probe that cannot be contained** (0.4.8 E6): the
+/// containment's own error, named as such, of the same kind. The first one of
+/// the process is also said once on standard error, which in a resident run
+/// is `diagnostics.log`, with its reason ([`say_containment_refusal_once`]):
+/// a caller that answers the failed start as an unknown (the `$PROFILE` and
+/// PSReadLine probes) keeps no reason of its own.
+fn uncontainable(error: &std::io::Error) -> std::io::Error {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    say_containment_refusal_once(&SAID, error, &mut |line| eprintln!("{line}"));
+    std::io::Error::new(
+        error.kind(),
+        format!("the probe could not be contained, so it was not run: {error}"),
+    )
+}
+
+/// Say `error` through `say` if `said` has not been set, and set it: one line
+/// per process however many probes are refused, each start still failing
+/// with its own error.
+fn say_containment_refusal_once(
+    said: &std::sync::atomic::AtomicBool,
+    error: &std::io::Error,
+    say: &mut dyn FnMut(&str),
+) {
+    if !said.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        say(&format!(
+            "Folio: a probe could not be contained, so it was not run (said once per process): {error}"
+        ));
+    }
 }
 
 #[cfg(not(windows))]
@@ -4537,11 +4753,11 @@ fn spawn_probe_with(
     }
 
     let mut child = command.spawn()?;
-    let held = guard(&child).unwrap_or_else(|error| {
-        containment_unavailable(&error);
-        ProbeChildGuard::uncontained()
-    });
-    Ok(ProbeChild {
+    let (held, refused) = match guard(&child) {
+        Ok(held) => (held, None),
+        Err(error) => (ProbeChildGuard::uncontained(), Some(error)),
+    };
+    let mut probe = ProbeChild {
         stdin: child.stdin.take(),
         stdout: child
             .stdout
@@ -4554,7 +4770,17 @@ fn spawn_probe_with(
         leader: child,
         guard: held,
         settled: None,
-    })
+        others_at_settlement: None,
+        watched: None,
+        package_beside_at_settlement: None,
+    };
+    if let Some(error) = refused {
+        // No guard holds the child: it is ended and reaped through the probe's
+        // own settlement, and the start refused.
+        let _ = probe.kill();
+        return Err(uncontainable(&error));
+    }
+    Ok(probe)
 }
 
 /// What a test may change about one Windows probe birth; nothing in the
@@ -4575,6 +4801,9 @@ struct ProbeBirthSeam {
     /// Treat the assignment after a refused job list as refused.
     #[cfg(test)]
     refuse_the_assignment: bool,
+    /// Treat the fresh job a refused job list needs as refused.
+    #[cfg(test)]
+    refuse_the_fresh_job: bool,
     /// How many `CreateProcess` calls this birth made.
     #[cfg(test)]
     attempts: std::rc::Rc<std::cell::Cell<u32>>,
@@ -4591,6 +4820,28 @@ struct ProbeBirthSeam {
 /// with PowerShell 7 from the Microsoft Store, from a parent in a job and not.
 #[cfg(windows)]
 const PACKAGED_JOB_LIST_REFUSAL: i32 = i32::from_ne_bytes(0xC007_0005_u32.to_ne_bytes());
+
+/// **Whether a refused first `CreateProcess` is Windows refusing the job list for a packaged
+/// app's executable**: [`PACKAGED_JOB_LIST_REFUSAL`] for any program, or `ERROR_ACCESS_DENIED`
+/// (5) for a program [`package_family_of`] places in a package. The refusal reads in both forms:
+/// `0xC0070005` when the program is the package's own `pwsh.exe`, and 5 when it is the Store's
+/// app execution alias (`%LocalAppData%\Microsoft\WindowsApps\pwsh.exe`, measured 2026-10-14
+/// from a test process: one attempt, refused with 5), which is the path a pane's and a probe's
+/// PowerShell 7 resolve to on a Store install. A 5 for a program in no package is an ordinary
+/// refusal and the start's own answer.
+#[cfg(windows)]
+fn packaged_job_list_refusal(error: &std::io::Error, program: &std::path::Path) -> bool {
+    match error.raw_os_error() {
+        Some(PACKAGED_JOB_LIST_REFUSAL) => true,
+        Some(code)
+            if u32::try_from(code).ok()
+                == Some(windows::Win32::Foundation::ERROR_ACCESS_DENIED.0) =>
+        {
+            package_family_of(program).is_some()
+        }
+        _ => false,
+    }
+}
 
 /// A refused `CreateProcess` as the standard library reports it: the Win32
 /// error itself (`ERROR_FILE_NOT_FOUND` is `NotFound`), not the `HRESULT` the
@@ -4638,8 +4889,8 @@ fn probe_job() -> std::io::Result<ProbeChildGuard> {
     Ok(ProbeChildGuard { job: Some(job) })
 }
 
-/// Create the probe inside `job` (uncontained when the job was refused), with
-/// `raw_tail` appended unquoted to its command line.
+/// Create the probe inside `job` — refused, with nothing created, when the job
+/// was refused — with `raw_tail` appended unquoted to its command line.
 #[cfg(windows)]
 fn spawn_probe_born(
     command: &std::process::Command,
@@ -4677,10 +4928,7 @@ fn spawn_probe_born(
         .map(|directory| wide_with_nul(directory.as_os_str()))
         .transpose()?;
 
-    let mut guard = job.unwrap_or_else(|error| {
-        containment_unavailable(&error);
-        ProbeChildGuard::uncontained()
-    });
+    let mut guard = job.map_err(|error| uncontainable(&error))?;
 
     let (stdin_ours, stdin_theirs) = match stdio.stdin {
         ProbeStream::Null => (None, probe_null_end(false)?),
@@ -4719,8 +4967,11 @@ fn spawn_probe_born(
         flags |= CREATE_SUSPENDED;
     }
     #[cfg(test)]
-    let (refuse_the_job_list, refuse_the_assignment) =
-        (seam.refuse_the_job_list, seam.refuse_the_assignment);
+    let (refuse_the_job_list, refuse_the_assignment, refuse_the_fresh_job) = (
+        seam.refuse_the_job_list,
+        seam.refuse_the_assignment,
+        seam.refuse_the_fresh_job,
+    );
     #[cfg(not(test))]
     let (refuse_the_job_list, refuse_the_assignment) = (false, false);
     #[cfg(test)]
@@ -4813,15 +5064,20 @@ fn spawn_probe_born(
                 // this process inside that `CreateProcess` can leave it behind.
                 // Any other refusal is the start's own answer and is returned
                 // as it is, without a second attempt.
-                Err(error) if error.raw_os_error() == Some(PACKAGED_JOB_LIST_REFUSAL) => {
+                Err(error) if packaged_job_list_refusal(&error, program) => {
                     // The refused attempt has already named its job, and
                     // Windows then refuses to assign any process to that job
                     // (`ERROR_ACCESS_DENIED`, measured): the child goes into a
                     // fresh one.
-                    guard = probe_job().unwrap_or_else(|error| {
-                        containment_unavailable(&error);
-                        ProbeChildGuard::uncontained()
-                    });
+                    #[cfg(test)]
+                    let fresh_job = if refuse_the_fresh_job {
+                        Err(std::io::Error::other("injected fresh job refusal"))
+                    } else {
+                        probe_job()
+                    };
+                    #[cfg(not(test))]
+                    let fresh_job = probe_job();
+                    guard = fresh_job.map_err(|error| uncontainable(&error))?;
                     let fresh = guard.job.as_ref().map(|job| HANDLE(job.as_raw_handle()));
                     let (process, thread, id) = create(None, flags | CREATE_SUSPENDED)?;
                     #[cfg(test)]
@@ -4888,6 +5144,9 @@ fn spawn_probe_born(
         stderr,
         guard,
         settled: None,
+        others_at_settlement: None,
+        watched: None,
+        package_beside_at_settlement: None,
     })
 }
 
@@ -5391,6 +5650,27 @@ mod probe_run_tests {
     use super::*;
     use bt_pty::test_shell::Hygiene;
 
+    /// RED (0.4.8 E6 round 2) — **a refused containment is said once per
+    /// process, with its reason**: the first refusal's line names its error,
+    /// and a second refusal — another probe, another reason — says nothing,
+    /// so a page that asks again at every visit does not fill the log.
+    ///
+    /// MUTATION: in `say_containment_refusal_once`, drop the latch (say every
+    /// time) — two lines.
+    #[test]
+    fn a_refused_containment_is_said_once_per_process_with_its_reason() {
+        let said = std::sync::atomic::AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let first = "the job was refused \u{2014} \u{4f5c}\u{4e1a}";
+        for reason in [first, "a second refusal"] {
+            say_containment_refusal_once(&said, &std::io::Error::other(reason), &mut |line| {
+                lines.push(line.to_owned());
+            });
+        }
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains(first), "{lines:?}");
+    }
+
     /// The run's budget in the tests below, and how long each child of the shared-budget test
     /// runs: 70 % of it, so the first child ends inside the budget with 30 % of it to spare and the
     /// second cannot — and with a budget of its own each, both would end.
@@ -5523,6 +5803,41 @@ mod probe_run_tests {
         assert_eq!(said(&answers[0]), "first-第一");
         assert!(answers[1].is_err(), "{:?}", answers[1]);
         assert_eq!(said(&answers[2]), "third-第三");
+    }
+
+    /// A probe's output pipe whose read panics, after saying whether the panic is contained —
+    /// the half of the resident hook's decision (`the_hook_lets_this_panic_unwind`) that a worker
+    /// of `bt-platform` decides.
+    struct PanickingPipe(std::sync::mpsc::Sender<bool>);
+
+    impl std::io::Read for PanickingPipe {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self.0.send(contained_panic::is_contained());
+            std::panic::panic_any("scripted: 探针的输出读取 panicked");
+        }
+    }
+
+    /// RED (T-JOINED-PANIC-VALUES) — **a probe stream reader's panic is the probe's refusal**:
+    /// the reader's body runs inside `contained_panic::contain`, so at the panic the resident
+    /// hook's decision is "unwind", the reader ends with no answer, and `finish` answers the
+    /// stream's `io::Error` — which every probe's caller already answers for — instead of the
+    /// process ending in the hook.
+    ///
+    /// MUTATION: the reader's body without `contained_panic::contain` (in `drain_probe_pipe`) —
+    /// the decision at the panic is no, and the first assert goes red.
+    #[test]
+    fn a_probe_stream_readers_panic_is_the_probes_refusal() {
+        let (told, decision) = std::sync::mpsc::channel();
+        let drain = drain_probe_pipe("bt-probe-panic-test", Some(PanickingPipe(told)))
+            .expect("a reader thread");
+        let refusal = drain
+            .finish("stdout")
+            .expect_err("a reader that panicked has no answer");
+        assert!(
+            decision.recv().expect("the read was reached"),
+            "the hook's decision at the reader's panic is to let it unwind"
+        );
+        assert_eq!(refusal.to_string(), "probe stdout reader panicked");
     }
 }
 
@@ -5925,14 +6240,6 @@ mod probe_child_tests {
                 "the owned helper process did not end"
             );
         }
-
-        fn end(&self) {
-            // SAFETY: every witness in these tests names only a process printed
-            // by the test's own helper tree.
-            unsafe {
-                let _ = TerminateProcess(self.0, 1);
-            }
-        }
     }
 
     impl Drop for Witness {
@@ -6184,7 +6491,7 @@ mod probe_child_tests {
         )
         .expect("start a contained helper");
         let _contained_tree = HelperTree::of(contained.id());
-        let uncontained = spawn_with_a_refused_job(&command);
+        let uncontained = spawn_holding_nothing(&command);
         let _uncontained_tree = HelperTree::of(uncontained.id());
         for (mut child, how) in [(contained, "contained"), (uncontained, "uncontained")] {
             let pids = announced(child.take_stdout().expect("helper stdout"), "worked");
@@ -6233,7 +6540,7 @@ mod probe_child_tests {
         };
         let contained = born(probe_job());
         let _contained_tree = HelperTree::of(contained.id());
-        let uncontained = born(Err(std::io::Error::other("injected job refusal")));
+        let uncontained = born(Ok(ProbeChildGuard::uncontained()));
         let _uncontained_tree = HelperTree::of(uncontained.id());
         for (mut child, how) in [(contained, "contained"), (uncontained, "uncontained")] {
             let helper = Witness::of(child.id());
@@ -6377,6 +6684,117 @@ mod probe_child_tests {
         grandchild.wait_gone();
     }
 
+    /// RED (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH) — **a probe settled while its job held a
+    /// process outside its own tree names it**: an unrelated helper the test puts in the probe's
+    /// job (as a container's member would be, were it nested there) is listed at the settlement,
+    /// read before the close, which then ends it; the probe's own descendant left running and its
+    /// console host are its tree and are not. A probe whose job held only its tree lists none, one
+    /// ended before its child exited is not read, and one nobody watched reads nothing (round 2:
+    /// a settlement is read only for a PowerShell check, never for git's probes).
+    ///
+    /// MUTATION: in `ProbeChild::settle`, read the job's list after `self.guard.end()` (the job is
+    /// gone, nothing is read) — the list is `None`; or answer every member but the leader from
+    /// `outside_the_tree` — the descendant is listed too; or read every settlement whether watched
+    /// or not — the unwatched probe answers a list.
+    #[test]
+    fn a_probe_settled_beside_another_process_names_it() {
+        use windows::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        let mut command = helper_command_for("child-exits");
+        let mut child = spawn_probe(&mut command, HELPER_STDIO).expect("start contained helper");
+        let _child_tree = HelperTree::of(child.id());
+        child.watch_its_settlement(None);
+        // The grandchild inherits this pipe: it is kept open, so the grandchild is still running
+        // when its parent exits.
+        let mut output = child.take_stdout().expect("helper stdout");
+        let pids = announced(&mut output, "ready");
+        let grandchild = Witness::of(pids[1]);
+        assert!(grandchild.alive(), "the grandchild runs");
+        let mut stranger = quiet_command(std::env::current_exe().expect("test executable"));
+        stranger
+            .args([
+                "--exact",
+                "probe_child_tests::helper_grandchild_waits",
+                "--nocapture",
+            ])
+            .env(HELPER_MODE, "grandchild-inherits-output")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let stranger = stranger.spawn().expect("start the stranger");
+        let stranger_id = stranger.id();
+        let _stranger_tree = HelperTree::of(stranger_id);
+        let stranger_alive = Witness::of(stranger_id);
+        // SAFETY: both handles are live: the probe's job, owned by its guard, and the stranger
+        // this test started.
+        unsafe {
+            AssignProcessToJobObject(
+                HANDLE(
+                    child
+                        .guard
+                        .job
+                        .as_ref()
+                        .expect("the probe has its job")
+                        .as_raw_handle(),
+                ),
+                HANDLE(stranger.as_raw_handle()),
+            )
+        }
+        .expect("put the stranger in the probe's job");
+        assert_eq!(child.others_at_settlement(), None, "not settled yet");
+        let _ = child.wait().expect("settle direct child");
+        let others = child
+            .others_at_settlement()
+            .expect("read at the settlement");
+        assert!(
+            others.contains(&stranger_id),
+            "{others:?} lacks {stranger_id}"
+        );
+        assert!(
+            !others.contains(&pids[1]),
+            "the probe's own descendant was listed: {others:?}"
+        );
+        grandchild.wait_gone();
+        stranger_alive.wait_gone();
+        drop((stranger, output));
+
+        let mut alone = helper_command_for("child-exits");
+        let mut alone = spawn_probe(&mut alone, HELPER_STDIO).expect("start a lone helper");
+        let _alone_tree = HelperTree::of(alone.id());
+        alone.watch_its_settlement(None);
+        let mut alone_output = alone.take_stdout().expect("helper stdout");
+        let _ = announced(&mut alone_output, "ready");
+        let _ = alone.wait().expect("settle the lone helper");
+        drop(alone_output);
+        assert_eq!(alone.others_at_settlement(), Some(&[][..]));
+        assert_eq!(
+            alone.package_beside_at_settlement(),
+            None,
+            "no package watched"
+        );
+
+        let mut unwatched = helper_command_for("child-exits");
+        let mut unwatched =
+            spawn_probe(&mut unwatched, HELPER_STDIO).expect("start an unwatched helper");
+        let _unwatched_tree = HelperTree::of(unwatched.id());
+        let mut unwatched_output = unwatched.take_stdout().expect("helper stdout");
+        let _ = announced(&mut unwatched_output, "ready");
+        let _ = unwatched.wait().expect("settle the unwatched helper");
+        drop(unwatched_output);
+        assert_eq!(unwatched.others_at_settlement(), None, "nobody watched it");
+
+        let mut ended = spawn_probe(&mut helper_command(), HELPER_STDIO).expect("start helper");
+        let _ended_tree = HelperTree::of(ended.id());
+        ended.watch_its_settlement(None);
+        let _ = ready_probe(&mut ended);
+        ended.kill().expect("end the probe at its deadline");
+        assert_eq!(
+            ended.others_at_settlement(),
+            None,
+            "ended before its child exited"
+        );
+    }
+
     /// Start the owner helper — inside a fresh job of `outer` limits when
     /// given, as a harness or a service host starts Folio — terminate it from
     /// outside once it holds its probe, and answer the witnesses of the
@@ -6485,24 +6903,25 @@ mod probe_child_tests {
         }
     }
 
-    /// A probe whose job could not be made, started through the real birth
-    /// with that refusal injected.
-    fn spawn_with_a_refused_job(command: &std::process::Command) -> ProbeChild {
+    /// A probe started through the real birth with a guard that holds no job
+    /// — the state a guard is in once ended, which no product birth makes
+    /// (a refused job refuses the probe) — for the arms that answer for it.
+    fn spawn_holding_nothing(command: &std::process::Command) -> ProbeChild {
         spawn_probe_born(
             command,
             HELPER_STDIO,
             None,
-            Err(std::io::Error::other("injected job refusal")),
+            Ok(ProbeChildGuard::uncontained()),
             ProbeBirthSeam::default(),
         )
-        .expect("a refused job degrades to an uncontained probe")
+        .expect("start a probe whose guard holds nothing")
     }
 
     /// RED mutation: in `ProbeChild::kill`, drop the `end_probe_leader` call
     /// the uncontained arm makes; the direct child outlives its deadline.
     #[test]
     fn an_uncontained_probe_still_ends_its_direct_child_at_the_deadline() {
-        let mut child = spawn_with_a_refused_job(&helper_command());
+        let mut child = spawn_holding_nothing(&helper_command());
         let _child_tree = HelperTree::of(child.id());
         let (direct, grandchild) = ready_probe(&mut child);
         // `kill` settles by waiting for the direct child, so it runs beside the
@@ -6519,19 +6938,57 @@ mod probe_child_tests {
         assert!(grandchild.alive(), "nothing contains an uncontained probe");
     }
 
-    /// RED mutation: in `spawn_probe_born`, return the job's error instead of
-    /// running uncontained; the probe would be refused instead of running.
+    /// RED (0.4.8 E6, the release read's F7(b)) — **a probe that cannot be
+    /// contained is refused, never run uncontained**: a refused job, and a
+    /// refused fresh job after Windows refused the job list, each answer the
+    /// start with an error naming the containment, and no process is created.
+    ///
+    /// MUTATION: in `spawn_probe_born`, run the probe with an empty guard when
+    /// its job is refused (the 0.4.7 degradation) — the start answers `Ok` and
+    /// `CreateProcess` is called.
     #[test]
-    fn a_refused_job_runs_the_probe_uncontained_and_its_owner_can_clean_up() {
-        let mut child = spawn_with_a_refused_job(&helper_command());
-        let _child_tree = HelperTree::of(child.id());
-        let (direct, grandchild) = ready_probe(&mut child);
-        drop(child);
-        assert!(direct.alive() && grandchild.alive());
-        direct.end();
-        grandchild.end();
-        direct.wait_gone();
-        grandchild.wait_gone();
+    fn a_probe_that_cannot_be_contained_is_refused_and_never_created() {
+        let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let refused = spawn_probe_born(
+            &helper_command(),
+            HELPER_STDIO,
+            None,
+            Err(std::io::Error::other("injected job refusal")),
+            ProbeBirthSeam {
+                attempts: attempts.clone(),
+                ..ProbeBirthSeam::default()
+            },
+        );
+        let Err(error) = refused else {
+            panic!("a refused job refuses the probe");
+        };
+        assert!(
+            error.to_string().contains("could not be contained"),
+            "{error}"
+        );
+        assert_eq!(attempts.get(), 0, "no process was created");
+
+        let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
+        let refused = spawn_probe_born(
+            &helper_command(),
+            HELPER_STDIO,
+            None,
+            probe_job(),
+            ProbeBirthSeam {
+                refuse_the_job_list: true,
+                refuse_the_fresh_job: true,
+                attempts: attempts.clone(),
+                ..ProbeBirthSeam::default()
+            },
+        );
+        let Err(error) = refused else {
+            panic!("a refused fresh job refuses the probe");
+        };
+        assert!(
+            error.to_string().contains("could not be contained"),
+            "{error}"
+        );
+        assert_eq!(attempts.get(), 0, "no suspended process was created");
     }
 
     /// RED — **a test that panics with its helpers up leaves none of them running**: an
@@ -6544,7 +7001,7 @@ mod probe_child_tests {
     /// end them, so the red run leaves nothing behind either).
     #[test]
     fn a_test_that_panics_with_its_helpers_up_leaves_none_running() {
-        let mut child = spawn_with_a_refused_job(&helper_command());
+        let mut child = spawn_holding_nothing(&helper_command());
         let tree = HelperTree::of(child.id());
         let (direct, grandchild) = ready_probe(&mut child);
         assert!(direct.alive() && grandchild.alive());
@@ -7469,6 +7926,28 @@ mod probe_child_unix_tests {
             self.0.read_to_string(&mut rest).expect("read to the end");
             assert_eq!(rest, "", "the grandchild outlived the probe");
         }
+    }
+
+    /// RED (0.4.8 E6, the release read's F7(b)) — **a probe whose group
+    /// cannot be registered for its guard is refused, and the child it started
+    /// is ended and reaped**, never left running uncontained.
+    ///
+    /// MUTATION: in `spawn_probe_with`, keep the child with an empty guard
+    /// when the guard is refused (the 0.4.7 degradation) — the start answers
+    /// `Ok`.
+    #[test]
+    fn a_probe_whose_group_cannot_be_guarded_is_refused() {
+        let (_hygiene, mut command) = shell("exec sleep 30");
+        let refused = spawn_probe_with(&mut command, ProbeStdio::ANSWER, |_| {
+            Err(std::io::Error::other("injected guard refusal"))
+        });
+        let Err(error) = refused else {
+            panic!("an unguarded group refuses the probe");
+        };
+        assert!(
+            error.to_string().contains("could not be contained"),
+            "{error}"
+        );
     }
 
     /// Block until the immediate child has exited, without reaping it: the
@@ -8477,6 +8956,13 @@ pub mod mem;
 /// them by. Nothing is installed off Windows; see the module's own header.
 pub mod pump;
 
+/// **Which installed package a program belongs to** (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH):
+/// the identity Windows keeps one desktop app container per account by. Read from the app
+/// execution alias's own data or the installed package's own directory on Windows; `None`
+/// everywhere off it.
+pub mod packaged_program;
+pub use packaged_program::{PackageFamily, package_family_of};
+
 /// **The system ending the session — a shutdown, a restart, a sign-out** (B-ENDSESSION): one
 /// subclass per window that hears `WM_QUERYENDSESSION` and a shutdown taken back, answers the
 /// question yes, and hands the news to the event loop. Hears nothing off Windows, where the
@@ -8573,6 +9059,12 @@ pub mod attention_pipe;
 #[path = "peer_unix.rs"]
 pub(crate) mod peer;
 
+/// **A second launch's side of the launch wire, in the one order both transports speak it**
+/// (T-LAUNCH-WIRE-PEER-READ): ask who answered, then say the request, hear the reply, confirm.
+/// Each real arm of [`launch_pipe`] hands it a connection; the arm without a channel has none.
+#[cfg(any(windows, unix))]
+mod launch_conversation;
+
 /// **The second launch's door into the first** — one well-known named pipe per data directory
 /// (`docs/DESIGN.md` §7.59).
 ///
@@ -8659,6 +9151,10 @@ pub mod hotkey;
 /// How many playback engines this process has made and given back, on every
 /// platform — the one owner both `video` arms read and move.
 mod engine_ledger;
+
+/// A playback engine's load — its budget, the length's three readings and the
+/// deadline's decision — with one owner for both `video` arms.
+mod video_load;
 
 /// The first frame of a video, out of Media Foundation — see the module's own
 /// note for the apartment it runs in and for why the set of files it can draw is
@@ -8822,6 +9318,33 @@ pub mod macos_update;
 /// (0.4.6 ticket U-28; `docs/plans/design/self-update-2026-09-16.md` §C.4,
 /// M4–M8, E-12). Refused by name off macOS.
 pub mod install_flip;
+
+/// **A value dropped without its retire door, said once** (T-DROP-DOORS): the line and the
+/// per-thread count every door-owning value's `Drop` uses when its owner never called the door.
+pub mod door_skipped;
+
+/// **One word from an endpoint's listener — or its end — within `bound`**: the one bounded receive
+/// the two endpoints make, on every arm that has one (T-DROP-DOORS, D-79). Windows' `start`
+/// waits on it for the listener's first word (§5.3 row 24); every arm's `retire_within` waits on it
+/// for the listener's end, which is the receiver hearing `Disconnected` once the sender the
+/// listener's body holds has gone with it.
+#[cfg(any(windows, unix))]
+pub(crate) fn listener_says_within<T>(
+    said: &std::sync::mpsc::Receiver<T>,
+    bound: std::time::Duration,
+) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    said.recv_timeout(bound)
+}
+
+/// **How long a directory watch's retirement waits for its watcher thread to leave**
+/// (`DirWatch::retire_within`, T-DROP-DOORS D-40), on the worker that holds the watch. The
+/// thread's ending is a stop it is already waiting on — microseconds on every ordinary
+/// retirement — so the bound is reached only by a thread inside the kernel and not coming back
+/// soon, and reaching it costs the worker two seconds and the process three handles.
+pub const DIR_WATCH_RETIRE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often that wait asks whether the thread has left.
+const DIR_WATCH_RETIRE_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// **A worker's waits** — `sleep_within`, the one sleep a worker that polls
 /// may take, asked for with the worker's own `WorkerCtx`
@@ -9019,7 +9542,7 @@ mod windows_impl {
         VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
         custom_frame_hit_test, hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
-    use crate::admission::{WaitToken, doors};
+    use crate::admission::{WaitToken, WorkerCtx, doors};
 
     // The custom frame hands the pointer messages its `HTMAXBUTTON` answer turns
     // non-client back to the application as the client messages they were
@@ -12101,9 +12624,10 @@ mod windows_impl {
         /// `wake` is called from whatever thread the platform delivers a click
         /// on. It must do nothing but nudge the event loop — the launch string
         /// is already in the queue by then, and [`Self::take_activations`] is
-        /// where it is read, on the loop's own thread.
-        pub fn new(wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
-            Self::register_identity()?;
+        /// where it is read, on the loop's own thread. `display_name` is
+        /// [`Self::register_identity`]'s.
+        pub fn new(display_name: &str, wake: Box<dyn Fn() + Send>) -> Result<Self, String> {
+            Self::register_identity(display_name)?;
             Self::without_registration(wake)
         }
 
@@ -12111,11 +12635,15 @@ mod windows_impl {
         /// `HKCU\Software\Classes\AppUserModelId\<AUMID>` that names the sender
         /// on a toast and in Windows' notification settings (the uninstall
         /// ledger's *Toast identity*). The one durable write [`Self::new`] makes.
-        pub fn register_identity() -> Result<(), String> {
+        ///
+        /// `display_name` is the caller's product name — the *sender*, not a
+        /// window title — passed in so the name is typed once, in `bt-app`
+        /// (T-NATIVE-LABELS-FROM-THE-CALLER).
+        pub fn register_identity(display_name: &str) -> Result<(), String> {
             write_registry_string(
                 &super::notification_aumid_key(),
                 "DisplayName",
-                super::NOTIFICATION_DISPLAY_NAME,
+                display_name,
             )
         }
 
@@ -12807,6 +13335,10 @@ mod windows_impl {
         Ok(enabled != 0)
     }
 
+    /// **The clipboard's one declared contention wait** (side-effects contract C5 rule 3,
+    /// T-CLIPBOARD-LANE): five opens, with 5, 10, 20 and 40 ms between them while another program
+    /// holds the clipboard open — 75 ms at most, and only ever on the clipboard lane's worker,
+    /// whose capability every caller of [`open_clipboard_with_retry`] hands in.
     fn retry_open_clipboard(
         mut open: impl FnMut() -> Result<(), String>,
         mut wait: impl FnMut(std::time::Duration),
@@ -12857,11 +13389,13 @@ mod windows_impl {
         owners.push(owner);
     }
 
-    /// The newest registered window that is still one of this thread's, with
-    /// the ones that are not dropped from the list on the way past.
+    /// The newest registered window that `still_ours` still answers for — one
+    /// of this thread's ([`owner_window`]) or of this process's
+    /// ([`clipboard_owner`]) — with the ones it does not dropped from the list
+    /// on the way past.
     ///
-    /// Split out from [`owner_window`] and given the liveness question as a
-    /// closure so that the choice can be stated without a window existing —
+    /// Given the liveness question as a closure so that the choice can be
+    /// stated without a window existing —
     /// see `the_windows_clipboard_finds_its_owner_itself`.
     fn newest_live_owner(
         registered: &mut Vec<NativeWindow>,
@@ -12892,14 +13426,13 @@ mod windows_impl {
         thread != 0 && thread == unsafe { GetCurrentThreadId() }
     }
 
-    /// The window the clipboard and the input method act through.
+    /// The window the input method acts through: the newest registered window of this thread.
     ///
-    /// **The same window serves both**, and that is a fact about IMM32 rather
-    /// than a convenience: the system gives a *thread* one default input
-    /// context and associates it with every window that thread creates, so
-    /// `ImmGetContext` answers the same `HIMC` for any window of this thread —
-    /// which is why [`cancel_composition`] cancels the composition in flight
-    /// whichever of this process's windows it is handed.
+    /// **The input method's question, and the window thread's**: the system gives a *thread* one
+    /// default input context and associates it with every window that thread creates, so
+    /// `ImmGetContext` answers the same `HIMC` for any window of this thread — which is why
+    /// [`cancel_composition`] cancels the composition in flight whichever of this process's
+    /// windows it is handed. The clipboard asks [`clipboard_owner`] instead, from its own worker.
     pub(super) fn owner_window() -> Result<HWND, String> {
         let mut owners = CLIPBOARD_OWNERS
             .get_or_init(|| Mutex::new(Vec::new()))
@@ -12910,24 +13443,65 @@ mod windows_impl {
             .ok_or_else(|| "no window of this thread owns the clipboard".to_owned())
     }
 
-    pub(super) fn open_clipboard_with_retry(hwnd: HWND) -> Result<(), String> {
+    /// Whether this handle still names a window of this process, on whichever of its threads.
+    ///
+    /// `GetWindowThreadProcessId` answers 0 for a handle that is no longer a window at all, and
+    /// the process it writes for one that is settles the other half: a recycled handle that now
+    /// belongs to another program fails the same test as a closed one.
+    fn window_is_of_this_process(window: NativeWindow) -> bool {
+        use windows::Win32::System::Threading::GetCurrentProcessId;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+        let mut process = 0_u32;
+        // SAFETY: the handle is not dereferenced (an invalid one is answered with 0), and the out
+        // parameter is a live local.
+        let thread = unsafe { GetWindowThreadProcessId(window.as_hwnd(), Some(&mut process)) };
+        // SAFETY: takes no arguments and answers for the calling process.
+        thread != 0 && process == unsafe { GetCurrentProcessId() }
+    }
+
+    /// **The window the clipboard is opened with, from the clipboard lane's worker**
+    /// (T-CLIPBOARD-LANE): the newest registered window still standing in this process.
+    ///
+    /// The open is the calling thread's — `OpenClipboard` locks the clipboard to the thread that
+    /// opened it, and only that thread may close it — while the window it is handed is only
+    /// recorded as the owner `EmptyClipboard` makes. A window of the window thread is the right
+    /// owner for that: its thread pumps messages, so `WM_DESTROYCLIPBOARD`, sent to the owner
+    /// when another program empties the clipboard, is answered at once. A message-only window of
+    /// the worker's own would hold that program until the worker next pumped, and the worker
+    /// waits on its queue, not on messages.
+    fn clipboard_owner() -> Result<HWND, String> {
+        let mut owners = CLIPBOARD_OWNERS
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .map_err(|_| "clipboard owner list lock poisoned".to_owned())?;
+        newest_live_owner(&mut owners, window_is_of_this_process)
+            .map(NativeWindow::as_hwnd)
+            .ok_or_else(|| "no window of this process owns the clipboard".to_owned())
+    }
+
+    /// **Open the clipboard on the clipboard lane's worker** (`worker`, the capability the thread
+    /// door lent it), with [`clipboard_owner`] as its owner, through the one declared contention
+    /// wait ([`retry_open_clipboard`], each pause through [`crate::wait::sleep_within`]).
+    pub(super) fn open_clipboard_with_retry(worker: &WorkerCtx) -> Result<(), String> {
+        let hwnd = clipboard_owner()?;
         retry_open_clipboard(
             || {
-                // SAFETY: `hwnd` is a live window of the calling thread — see `owner_window` — and
-                // all clipboard transactions run on the event-loop thread that owns it. A failed
-                // open acquires no resource that needs cleanup.
+                // SAFETY: `hwnd` is a live window of this process — see `clipboard_owner` — and is
+                // only recorded as the owner; the open is this worker's own and is closed on this
+                // thread. A failed open acquires no resource that needs cleanup.
                 unsafe { OpenClipboard(Some(hwnd)) }.map_err(|error| error.to_string())
             },
-            std::thread::sleep,
+            |delay| crate::wait::sleep_within(worker, delay),
         )
     }
 
-    pub fn clipboard_text() -> Result<String, String> {
-        let hwnd = owner_window()?;
-        // SAFETY: all calls run on winit's event-loop thread. The clipboard remains open while the
-        // borrowed global-memory handle is locked, its UTF-16 content is copied, and then both the
-        // memory and clipboard are released before returning.
-        open_clipboard_with_retry(hwnd)?;
+    /// **The clipboard's text**, read on the clipboard lane's worker (`worker`).
+    pub fn clipboard_text(worker: &WorkerCtx) -> Result<String, String> {
+        // SAFETY: the calls below run on the worker that opened the clipboard. It remains open
+        // while the borrowed global-memory handle is locked, its UTF-16 content is copied, and then
+        // both the memory and clipboard are released before returning.
+        open_clipboard_with_retry(worker)?;
         unsafe {
             let result = (|| {
                 IsClipboardFormatAvailable(CF_UNICODETEXT)
@@ -12966,14 +13540,15 @@ mod windows_impl {
         }
     }
 
-    pub fn set_clipboard_text(text: &str) -> Result<(), String> {
-        let hwnd = owner_window()?;
+    /// **Put one string on the clipboard**, as `CF_UNICODETEXT`, on the clipboard lane's worker
+    /// (`worker`).
+    pub fn set_clipboard_text(worker: &WorkerCtx, text: &str) -> Result<(), String> {
         let mut units = text.encode_utf16().collect::<Vec<_>>();
         units.push(0);
-        // SAFETY: the event-loop thread owns the clipboard for this transaction. The movable
+        // SAFETY: the worker that opened the clipboard owns it for this transaction. The movable
         // allocation is locked only while copying the NUL-terminated UTF-16 payload. After a
         // successful SetClipboardData Windows owns it; every earlier failure frees it locally.
-        open_clipboard_with_retry(hwnd)?;
+        open_clipboard_with_retry(worker)?;
         unsafe {
             let result = (|| {
                 EmptyClipboard().map_err(|error| format!("EmptyClipboard failed: {error}"))?;
@@ -13089,7 +13664,9 @@ mod windows_impl {
         }
     }
 
-    type MathMenuState = DeferredState<(), Result<bool, String>>;
+    /// The posted request carries the one row's title as the caller wrote it, so the menu reads
+    /// in the language in force when it was asked for (T-NATIVE-LABELS-FROM-THE-CALLER).
+    type MathMenuState = DeferredState<Vec<u16>, Result<bool, String>>;
 
     /// Formula context-menu bridge whose nested native message pump never starts inside a winit
     /// application callback. `request` only posts a private window message. The subclass receives
@@ -13125,8 +13702,11 @@ mod windows_impl {
 
         /// Queue the native menu once. A second request while the first is posted, showing, or
         /// waiting to be consumed is an ordinary coalesced UI race and returns `Ok(false)`.
-        pub fn request(&self) -> Result<bool, String> {
-            if !self.state.begin_request(()) {
+        ///
+        /// `copy_latex` is the menu's one row, in the caller's words: this crate has no table
+        /// of its own to read a title from (T-NATIVE-LABELS-FROM-THE-CALLER).
+        pub fn request(&self, copy_latex: &str) -> Result<bool, String> {
+            if !self.state.begin_request(wide_null(copy_latex)) {
                 return Ok(false);
             }
             // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
@@ -13187,21 +13767,23 @@ mod windows_impl {
         unsafe { Arc::increment_strong_count(state_pointer) };
         // SAFETY: the increment immediately above created the strong reference consumed here.
         let state = unsafe { Arc::from_raw(state_pointer) };
-        if state.begin_showing().is_some() {
-            state.complete(track_math_context_menu(hwnd));
+        if let Some(copy_latex) = state.begin_showing() {
+            state.complete(track_math_context_menu(hwnd, &copy_latex));
         }
         LRESULT(0)
     }
 
-    fn track_math_context_menu(hwnd: HWND) -> Result<bool, String> {
+    fn track_math_context_menu(hwnd: HWND, copy_latex: &[u16]) -> Result<bool, String> {
         // SAFETY: the HWND and menu belong to the current GUI thread. This function is reached only
         // from the posted-message subclass, after winit's initiating callback has returned.
         unsafe {
             let menu =
                 CreatePopupMenu().map_err(|error| format!("CreatePopupMenu failed: {error}"))?;
             let result = (|| {
-                AppendMenuW(menu, MF_STRING, 1, windows::core::w!("Copy LaTeX"))
-                    .map_err(|error| format!("AppendMenuW(Copy LaTeX) failed: {error}"))?;
+                // SAFETY (of the pointer): `copy_latex` is NUL-terminated and outlives the call;
+                // `AppendMenuW` copies the text into the menu.
+                AppendMenuW(menu, MF_STRING, 1, PCWSTR(copy_latex.as_ptr()))
+                    .map_err(|error| format!("AppendMenuW(formula menu) failed: {error}"))?;
                 let mut cursor = POINT::default();
                 GetCursorPos(&mut cursor)
                     .map_err(|error| format!("GetCursorPos failed: {error}"))?;
@@ -13322,8 +13904,10 @@ mod windows_impl {
         }
     }
 
+    /// The kind, the start folder and the image filter's name in the caller's words
+    /// (T-NATIVE-LABELS-FROM-THE-CALLER) — all three only meaningful while the request is posted.
     type ImagePickerState =
-        DeferredState<(ShellPickKind, Vec<u16>), Result<Option<PathBuf>, String>>;
+        DeferredState<(ShellPickKind, Vec<u16>, String), Result<Option<PathBuf>, String>>;
 
     /// The system's own **file** chooser — [`FolderPicker`]'s twin, and every
     /// word of its doc comment applies unchanged.
@@ -13387,7 +13971,16 @@ mod windows_impl {
         /// `start` is a **folder** and not the picture currently chosen: a shell
         /// item that is a file is not a place to open at, and the useful place
         /// to open at is the one the last picture came from.
-        pub fn request(&self, kind: ShellPickKind, start: Option<&Path>) -> Result<bool, String> {
+        ///
+        /// `image_types` is the name the dialog shows beside the image filter, in the
+        /// caller's words; it is read only for [`ShellPickKind::Image`], the one kind
+        /// whose filter is named in a reader's language rather than by a format.
+        pub fn request(
+            &self,
+            kind: ShellPickKind,
+            start: Option<&Path>,
+            image_types: &str,
+        ) -> Result<bool, String> {
             let start = start
                 .map(|start| {
                     let mut units = start.as_os_str().encode_wide().collect::<Vec<_>>();
@@ -13395,7 +13988,10 @@ mod windows_impl {
                     units
                 })
                 .unwrap_or_default();
-            if !self.state.begin_request((kind, start)) {
+            if !self
+                .state
+                .begin_request((kind, start, image_types.to_owned()))
+            {
                 return Ok(false);
             }
             // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
@@ -13458,8 +14054,8 @@ mod windows_impl {
         unsafe { Arc::increment_strong_count(state_pointer) };
         // SAFETY: the increment immediately above created the strong reference consumed here.
         let state = unsafe { Arc::from_raw(state_pointer) };
-        if let Some((kind, start)) = state.begin_showing() {
-            state.complete(show_shell_picker(hwnd, &start, kind));
+        if let Some((kind, start, image_types)) = state.begin_showing() {
+            state.complete(show_shell_picker(hwnd, &start, kind, &image_types));
         }
         LRESULT(0)
     }
@@ -13840,7 +14436,8 @@ mod windows_impl {
         // SAFETY: the increment immediately above created the strong reference consumed here.
         let state = unsafe { Arc::from_raw(state_pointer) };
         if let Some(start) = state.begin_showing() {
-            state.complete(show_shell_picker(hwnd, &start, ShellPickKind::Folder));
+            // A folder chooser has no filter, so no filter name.
+            state.complete(show_shell_picker(hwnd, &start, ShellPickKind::Folder, ""));
         }
         LRESULT(0)
     }
@@ -13884,10 +14481,14 @@ mod windows_impl {
     /// over MTP, a search results folder — that has no directory behind it for
     /// anything here to enumerate. For a picture it does a second job: an image
     /// on a phone over MTP has no path for the decoder to open.
+    ///
+    /// `image_types` names the image filter for [`ShellPickKind::Image`] and is
+    /// not read for the other kinds.
     fn show_shell_picker(
         hwnd: HWND,
         start: &[u16],
         kind: ShellPickKind,
+        image_types: &str,
     ) -> Result<Option<PathBuf>, String> {
         // SAFETY: every call below runs on the window's own GUI thread, reached only from the
         // posted-message subclass after winit's initiating callback has returned. The apartment
@@ -13944,7 +14545,7 @@ mod windows_impl {
                 let filter_name: Vec<u16>;
                 let filter_spec: Vec<u16>;
                 if kind == ShellPickKind::Image {
-                    filter_name = wide_null("Images");
+                    filter_name = wide_null(image_types);
                     filter_spec = wide_null(&crate::image_file_filter_spec());
                     let filters = [COMDLG_FILTERSPEC {
                         pszName: PCWSTR(filter_name.as_ptr()),
@@ -15381,19 +15982,20 @@ mod windows_impl {
     ///
     /// # What a failure looks like
     ///
-    /// A `Vec` and never a `Result`, because there is nothing a caller could do
-    /// with the error that this function has not already done: a machine whose
-    /// DirectWrite refuses still gets [`DEFAULT_MONOSPACE_FAMILY`] in the list,
-    /// which is the face the renderer is already drawing. The picker degrades to
-    /// one row rather than to an empty list or a dialog.
+    /// A family DirectWrite cannot describe is left out, and the walk still
+    /// answers with the rest: that shorter list is the machine's answer. A
+    /// factory or system collection DirectWrite refuses is the walk's `Err`, in
+    /// DirectWrite's words — the caller, `bt-app`'s font lane, ends its request
+    /// `Failed`, says it once, and keeps the list it already shows (S-4).
     ///
     /// A family whose faces are all in a *custom* loader — a font streamed by an
     /// application rather than installed as a file — is skipped, because
     /// `IDWriteLocalFontFileLoader` is the only loader that can name a path and
     /// a family with no path is a row that cannot be honoured if it is chosen.
-    #[must_use]
-    pub fn monospace_font_families() -> Vec<super::MonospaceFamily> {
-        super::order_monospace_families(collect_monospace_families().unwrap_or_default())
+    pub fn monospace_font_families() -> Result<Vec<super::MonospaceFamily>, String> {
+        collect_monospace_families()
+            .map(super::order_monospace_families)
+            .map_err(|error| error.to_string())
     }
 
     /// **One family, looked up by its name** — where its outlines live, and
@@ -15440,10 +16042,13 @@ mod windows_impl {
     /// **Asked of the machine on every call** (ticket 65). It was enumerated
     /// once per process, so a family installed after the first walk never
     /// reached the Chinese-font list until Folio restarted. Its one product
-    /// caller is the font lane, which runs when the dialog opens.
-    #[must_use]
-    pub fn cjk_font_families() -> Vec<super::CjkFamily> {
-        super::order_cjk_families(collect_cjk_families().unwrap_or_default())
+    /// caller is the font lane, which runs when the dialog opens. A failure is
+    /// [`monospace_font_families`]'s: a family left out shortens the list, a
+    /// collection refused is the `Err`.
+    pub fn cjk_font_families() -> Result<Vec<super::CjkFamily>, String> {
+        collect_cjk_families()
+            .map(super::order_cjk_families)
+            .map_err(|error| error.to_string())
     }
 
     /// **The system collection a walk of every family reads: asked to check
@@ -16550,16 +17155,18 @@ mod windows_impl {
 
         /// **The clipboard finds its own owner window** (M1-9).
         ///
-        /// `OpenClipboard` wants a window of the calling thread and
-        /// `SetClipboardData` fails outright if the open was made with none, so
-        /// this backend has to produce one — from the windows its own
-        /// constructors registered, and never from a parameter, because there
-        /// is no window on the other platforms this door now opens on.
+        /// `SetClipboardData` fails outright if the open was made with no
+        /// owner window, so this backend has to produce one — from the windows
+        /// its own constructors registered, and never from a parameter, because
+        /// there is no window on the other platforms this door now opens on.
+        /// The clipboard lane's worker asks for a window of this process
+        /// (`clipboard_owner`), the input method for one of its own thread
+        /// (`owner_window`); both choose through this.
         ///
         /// Three claims: the newest window still standing is the one used, a
-        /// handle that no longer names a window of this thread is dropped
-        /// rather than tried, and a process with none left says so instead of
-        /// opening the clipboard with a null owner.
+        /// handle that no longer names a window it may use is dropped rather
+        /// than tried, and a process with none left says so instead of opening
+        /// the clipboard with a null owner.
         ///
         /// MUTATION: return the *first* registered handle instead of the last
         /// and the first assertion goes red; keep the dead handles and the
@@ -16640,14 +17247,28 @@ mod windows_impl {
         fn deferred_menu_state_requires_posted_dispatch_before_showing() {
             let state = MathMenuState::new();
             assert_eq!(state.take_result(), None);
-            assert!(state.begin_request(()));
-            assert!(!state.begin_request(()));
+            assert!(state.begin_request(wide_null("one")));
+            assert!(!state.begin_request(wide_null("two")));
             assert_eq!(state.take_result(), None);
             assert!(state.begin_showing().is_some());
             assert!(state.begin_showing().is_none());
             state.complete(Ok(true));
             assert_eq!(state.take_result(), Some(Ok(true)));
-            assert!(state.begin_request(()));
+            assert!(state.begin_request(wide_null("one")));
+        }
+
+        /// PIN (T-NATIVE-LABELS-FROM-THE-CALLER) — **the menu's row is the title the
+        /// caller passed at `request`, carried to the dispatch that pops it**, and it is
+        /// the first request's title that a coalesced second request leaves in place.
+        ///
+        /// MUTATION: drop the title from the posted request and this has nothing to
+        /// compare.
+        #[test]
+        fn the_formula_menu_carries_the_callers_title_to_the_dispatch() {
+            let state = MathMenuState::new();
+            assert!(state.begin_request(wide_null("复制 LaTeX")));
+            assert!(!state.begin_request(wide_null("Copy LaTeX")));
+            assert_eq!(state.begin_showing(), Some(wide_null("复制 LaTeX")));
         }
 
         /// PIN — the gesture's own arguments survive the deferral, and only the
@@ -16757,20 +17378,27 @@ mod windows_impl {
             let pictures = ImagePickerState::new();
             let start: Vec<u16> = "C:\\Users\\me\\Pictures\0".encode_utf16().collect();
 
-            assert!(pictures.begin_request((ShellPickKind::Image, start.clone())));
+            assert!(pictures.begin_request((
+                ShellPickKind::Image,
+                start.clone(),
+                "图片".to_owned()
+            )));
             assert!(
                 folders.begin_request(Vec::new()),
                 "a pending picture request must not swallow a folder request"
             );
             assert!(
-                !pictures.begin_request((ShellPickKind::Program, Vec::new())),
-                "a second ask for the same gesture is coalesced, not stacked —                  including one for the other row this bridge answers, which is                  what keeps a program from arriving on the wallpaper's row"
+                !pictures.begin_request((ShellPickKind::Program, Vec::new(), String::new())),
+                "a second ask for the same gesture is coalesced, not stacked — \
+                 including one for the other row this bridge answers, which is \
+                 what keeps a program from arriving on the wallpaper's row"
             );
 
             assert_eq!(
                 pictures.begin_showing(),
-                Some((ShellPickKind::Image, start)),
-                "the kind travels with the request, so the dialog that opens is                  the one that was asked for"
+                Some((ShellPickKind::Image, start, "图片".to_owned())),
+                "the kind travels with the request, so the dialog that opens is \
+                 the one that was asked for"
             );
             assert_eq!(pictures.begin_showing(), None);
             pictures.complete(Ok(Some(PathBuf::from(r"C:\Users\me\Pictures\ridge.jpg"))));
@@ -16931,7 +17559,7 @@ mod windows_impl {
     /// A raw `HANDLE` is not `Send` because it is a pointer-shaped value and the
     /// compiler cannot know what it points at. These three are process-wide
     /// kernel objects with exactly one user apiece — the watcher thread — and
-    /// [`DirWatch::drop`] joins that thread before closing any of them, so there
+    /// [`DirWatch::retire_within`] joins that thread before closing any of them, so there
     /// is no moment at which two threads hold one of these and no moment at which
     /// a closed handle is still reachable.
     #[derive(Clone, Copy)]
@@ -17199,6 +17827,50 @@ mod windows_impl {
             self.end.take_failure()
         }
 
+        /// **The door: stop the watch, and wait — up to `bound`, on the worker `ctx`
+        /// lends — for its thread to leave; then close its handles.** Answers whether
+        /// the thread left in time (T-DROP-DOORS, D-40): *a directory watch is
+        /// retired through its bounded door on the worker that holds it, never by
+        /// its drop.*
+        ///
+        /// The thread cancels its own read: the stop event is one of the two things
+        /// it waits on, so setting it is enough, and a `CancelIoEx` from here would
+        /// be a second thread reaching into an operation whose `OVERLAPPED` lives on
+        /// that thread's stack. The handles are closed only once it has gone — a
+        /// handle closed while the thread still held it would be a handle reused for
+        /// something else by the time it got round to using it. A thread still
+        /// inside the kernel past `bound` is let go with the three handles it holds,
+        /// which the process's end closes: never a handle closed under a reader.
+        pub fn retire_within(
+            mut self,
+            ctx: &crate::admission::WorkerCtx,
+            bound: std::time::Duration,
+        ) -> bool {
+            // SAFETY: the stop event lives until the handles are closed below, after
+            // the thread that shares it has gone.
+            unsafe {
+                let _ = SetEvent(self.stop.0);
+            }
+            let Some(thread) = self.thread.take() else {
+                return true;
+            };
+            let deadline = std::time::Instant::now() + bound;
+            while !thread.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                crate::wait::sleep_within(ctx, crate::DIR_WATCH_RETIRE_POLL);
+            }
+            let _ = thread.join();
+            // SAFETY: the only other user of these handles has been joined.
+            unsafe {
+                close(self.dir.0);
+                close(self.change.0);
+                close(self.stop.0);
+            }
+            true
+        }
+
         /// Start watching `path` and everything under it.
         ///
         /// `wake` is called on the watcher thread, once per notification, with
@@ -17378,9 +18050,9 @@ mod windows_impl {
             };
             // A `RecvError` is the thread ending without a word, which is a
             // panic between the spawn and the read — there is no return path
-            // there that does not send. It is still an answer and not an
-            // unreachable: this is a terminal, and a panic taken as a panic
-            // takes somebody's scrollback with it.
+            // there that does not send. The watcher is not contained, so under the
+            // resident panic hook that panic ends the process before the channel
+            // closes: this arm is reached only where no fatal hook is installed.
             let refused = match listening.recv() {
                 Ok(Ok(())) => {
                     return Ok(Self {
@@ -17408,25 +18080,24 @@ mod windows_impl {
     }
 
     impl Drop for DirWatch {
+        /// Waits for nothing. After [`DirWatch::retire_within`] there is nothing left;
+        /// without it, the thread is told to stop and let go of, with the three handles
+        /// it may still be using left to the process's end — a handle closed while the
+        /// thread still held it would be a handle reused for something else by the
+        /// time it got round to using it — and the drop says so once.
         fn drop(&mut self) {
-            // The thread cancels its own read: the stop event is one of the two
-            // things it is waiting on, so setting it is enough, and a
-            // `CancelIoEx` from here would be a second thread reaching into an
-            // operation whose `OVERLAPPED` lives on that thread's stack.
-            unsafe {
-                let _ = SetEvent(self.stop.0);
-            }
             if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
-            }
-            // Only now: a handle closed while the thread still held it would be a
-            // handle reused for something else by the time it got round to using
-            // it, which is the one Win32 bug that reads as a different subsystem
-            // misbehaving.
-            unsafe {
-                close(self.dir.0);
-                close(self.change.0);
-                close(self.stop.0);
+                // SAFETY: setting an event is sound from any thread that has it, and
+                // this one is never closed on this road.
+                unsafe {
+                    let _ = SetEvent(self.stop.0);
+                }
+                drop(thread);
+                crate::door_skipped::say(
+                    "a directory watch (`DirWatch`)",
+                    "its retire door",
+                    "its watcher was told to stop and let go of, with its three handles",
+                );
             }
         }
     }
@@ -19428,8 +20099,8 @@ mod argument_split_tests {
 /// `handoff`, and [`ShellThread::hand_over`] — on a thread the door started,
 /// which alone can enter a [`ShellThread`] — is the only road to them.
 pub use handoff::{
-    Handoff, PROGRAM_REFUSED, ShellThread, VerifiedTarget, program_in_directories, program_on_path,
-    resolved_for_a_door, reveal_arguments,
+    HandOffRefusal, Handoff, PROGRAM_REFUSED, ShellThread, VerifiedTarget, program_in_directories,
+    program_on_path, resolved_for_a_door, reveal_arguments,
 };
 
 /// The two thread-band calls, off Windows.
@@ -19616,42 +20287,71 @@ pub use portable_ime::cancel_composition;
 /// touched: the Windows arm does not translate either, and `bt-app`'s own paste
 /// path already normalises what it receives.
 ///
+/// **Asked from the clipboard lane's worker, answered on the main thread**
+/// (T-CLIPBOARD-LANE). Every door here takes the worker's capability, as the
+/// Windows arm's does — one signature on every platform — and the owner's
+/// ruling of 2026-10-11 (Q2) keeps the pasteboard itself on the owner thread
+/// until the experiment that asks whether `NSPasteboard` behaves off it (the
+/// side-effects contract's E-2) has answered. So the worker hands the calls to
+/// the main dispatch queue and waits there ([`on_the_main_queue`]): the
+/// pasteboard is touched only on the main thread, and the window's own turn
+/// never waits — the main queue runs the calls between the loop's events. No
+/// main-thread code waits on the clipboard lane, so the hand-over cannot
+/// deadlock.
+///
 /// **Not compiled on this workspace's CI Windows runners**, only checked for
-/// `aarch64-apple-darwin`. Selector existence, the main-thread question and
-/// every real byte moved stay for a Mac ticket
-/// (`docs/plans/port/probe-x6-cross-check-2026-09-12.md`).
+/// `aarch64-apple-darwin`. Selector existence and every real byte moved stay
+/// for a Mac ticket (`docs/plans/port/probe-x6-cross-check-2026-09-12.md`).
 #[cfg(target_os = "macos")]
 mod macos_clipboard {
     use objc2::rc::Retained;
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
     use objc2_foundation::NSString;
 
+    use crate::admission::WorkerCtx;
+
+    /// **Run `work` on the main thread, and wait for its answer on this worker**
+    /// (`_worker`, the capability the thread door lent it: a window thread has
+    /// none, and the main thread waiting on its own queue would never return).
+    pub(crate) fn on_the_main_queue<R: Send>(
+        _worker: &WorkerCtx,
+        work: impl FnOnce() -> R + Send,
+    ) -> R {
+        let mut answer = None;
+        dispatch2::DispatchQueue::main().exec_sync(|| answer = Some(work()));
+        answer.expect("the main queue runs the work it is handed before it returns")
+    }
+
     /// What the general pasteboard holds as plain text, or why it holds none.
-    pub fn clipboard_text() -> Result<String, String> {
-        let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
-        // SAFETY: a message send to the session's own pasteboard, which AppKit
-        // keeps alive for the process. Nothing is borrowed across the send, and
-        // what comes back is a `Retained` that owns its string for as long as
-        // it is read here.
-        let text = unsafe { pasteboard.stringForType(NSPasteboardTypeString) };
-        text.map(|text| text.to_string())
-            .ok_or_else(|| "pasteboard has no plain text".to_owned())
+    pub fn clipboard_text(worker: &WorkerCtx) -> Result<String, String> {
+        on_the_main_queue(worker, || {
+            let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
+            // SAFETY: a message send to the session's own pasteboard, on the
+            // main thread, which AppKit keeps alive for the process. Nothing is
+            // borrowed across the send, and what comes back is a `Retained` that
+            // owns its string for as long as it is read here.
+            let text = unsafe { pasteboard.stringForType(NSPasteboardTypeString) };
+            text.map(|text| text.to_string())
+                .ok_or_else(|| "pasteboard has no plain text".to_owned())
+        })
     }
 
     /// Put one string on the general pasteboard, as plain text.
-    pub fn set_clipboard_text(text: &str) -> Result<(), String> {
-        let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
-        pasteboard.clearContents();
-        let value = NSString::from_str(text);
-        // SAFETY: as above, and the string outlives the send — the pasteboard
-        // copies what it is given. `clearContents` above is what makes this a
-        // legal write: the pasteboard has to be owned and its types declared
-        // before anything can be written into it.
-        if unsafe { pasteboard.setString_forType(&value, NSPasteboardTypeString) } {
-            Ok(())
-        } else {
-            Err("NSPasteboard refused the text".to_owned())
-        }
+    pub fn set_clipboard_text(worker: &WorkerCtx, text: &str) -> Result<(), String> {
+        on_the_main_queue(worker, || {
+            let pasteboard: Retained<NSPasteboard> = NSPasteboard::generalPasteboard();
+            pasteboard.clearContents();
+            let value = NSString::from_str(text);
+            // SAFETY: as above, and the string outlives the send — the
+            // pasteboard copies what it is given. `clearContents` above is what
+            // makes this a legal write: the pasteboard has to be owned and its
+            // types declared before anything can be written into it.
+            if unsafe { pasteboard.setString_forType(&value, NSPasteboardTypeString) } {
+                Ok(())
+            } else {
+                Err("NSPasteboard refused the text".to_owned())
+            }
+        })
     }
 }
 
@@ -19679,13 +20379,16 @@ mod portable_clipboard {
     /// What the clipboard holds. Nobody has been asked, so the honest answer is
     /// the reason rather than an empty string, which would read as a clipboard
     /// that really is empty.
-    pub fn clipboard_text() -> Result<String, String> {
+    pub fn clipboard_text(_worker: &crate::admission::WorkerCtx) -> Result<String, String> {
         Err("this platform has no clipboard backend".to_owned())
     }
 
     /// Put one string on the clipboard. Refused, and said so — the caller's own
     /// failure path already turns this into a line a reader sees.
-    pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+    pub fn set_clipboard_text(
+        _worker: &crate::admission::WorkerCtx,
+        text: &str,
+    ) -> Result<(), String> {
         let _ = text;
         Err("this platform has no clipboard backend".to_owned())
     }
@@ -20793,44 +21496,14 @@ mod macos_window_backend_tests {
         );
     }
 
-    /// RED — **a dark-mode change arrives on the window thread, through
-    /// winit.**
-    ///
-    /// The rule X-4 wrote down for every AppKit callback in this port: never do
-    /// the work inside the handler, hand it to the loop. The watch's three
-    /// callbacks therefore call the wake and nothing else, and the wake
-    /// `bt-app` hands in is one `EventLoopProxy::send_event` — winit's user
-    /// event channel, delivered on the thread that owns the window. The other
-    /// half of the rope is in `bt-app`, where that event re-reads the
-    /// appearance (`the_system_preference_event_re_reads_the_desktops_canvas`).
-    ///
-    /// MUTATION: read the appearance inside `observe_value` and this names it.
+    /// GUARD (kept, T-HEADLESS-RUNTIME-SEAM round 2) — **one Objective-C class owns the
+    /// system-settings callbacks, and it has one value callback.** What the callback does is
+    /// driven on macOS (`macos_impl::tests::the_appearance_callback_only_nudges_the_loop`); that
+    /// there is no second class answering the same notifications, and no second key-value
+    /// callback beside the one driven, is a count of declarations in the source — so these two
+    /// counts, and only these, are read from it, on every platform.
     #[test]
-    fn dark_mode_changes_arrive_on_the_window_thread_through_winit() {
-        assert_eq!(
-            source_test::found(
-                Needle::new(Pattern::text(
-                    "if key_path == Some(ns_string!(\"effectiveAppearance\")) {\n                (self.ivars().0)(crate::SystemNews::Preferences);\n            }",
-                )),
-                View::CodeKeepingLiterals,
-                Scope::Module("crate::macos_impl".to_owned()),
-            )
-            .len(),
-            1,
-            "the observer does not limit itself to nudging the loop"
-        );
-        assert!(
-            !source_test::found(
-                Needle::new(Pattern::identifier(
-                    "addObserver_forKeyPath_options_context"
-                )),
-                View::Identifiers,
-                Scope::Module("crate::macos_impl".to_owned()),
-            )
-            .in_the_product(source_test::index())
-            .is_empty(),
-            "nothing is observed, so nothing can arrive"
-        );
+    fn one_class_owns_the_system_settings_callbacks_with_one_value_callback() {
         let observer_classes: Vec<_> = source_test::index()
             .macros()
             .iter()
@@ -20847,61 +21520,16 @@ mod macos_window_backend_tests {
             "one Objective-C class owns the system-settings callbacks"
         );
         let observer_class = observer_classes[0].tokens();
-        let callback = source_test::found(
+        let callbacks = source_test::found(
             Needle::new(Pattern::identifier("observe_value")),
             View::Identifiers,
             Scope::Module("crate::macos_impl".to_owned()),
-        );
-        let callbacks: Vec<_> = callback
-            .spans()
-            .into_iter()
-            .filter(|span| span.within(observer_class))
-            .collect();
-        assert_eq!(callbacks.len(), 1, "the observer has one value callback");
-        let callback = callbacks[0];
-        let tail = &source_test::index().union()[callback.end()..observer_class.end()];
-        let opening = tail.find('{').expect("the callback has a body");
-        let mut depth = 0usize;
-        let mut callback_end = None;
-        for (offset, character) in tail[opening..].char_indices() {
-            match character {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        callback_end = Some(callback.end() + opening + offset + 1);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let callback_end = callback_end.expect("the callback body closes");
-        for (pattern, forbidden) in [
-            (
-                Pattern::call("effectiveAppearance"),
-                "effectiveAppearance()",
-            ),
-            (
-                Pattern::identifier("appearance_is_light"),
-                "appearance_is_light",
-            ),
-            (Pattern::identifier("NSScreen"), "NSScreen"),
-        ] {
-            let inside_callback = source_test::found(
-                Needle::new(pattern),
-                View::Identifiers,
-                Scope::Module("crate::macos_impl".to_owned()),
-            )
-            .spans()
-            .into_iter()
-            .any(|span| span.start() >= callback.end() && span.end() <= callback_end);
-            assert!(
-                !inside_callback,
-                "the observer reads `{forbidden}` inside AppKit's own delivery instead of on the \
-                 loop's next turn"
-            );
-        }
+        )
+        .spans()
+        .into_iter()
+        .filter(|span| span.within(observer_class))
+        .count();
+        assert_eq!(callbacks, 1, "the observer has one value callback");
     }
 }
 
@@ -21195,7 +21823,8 @@ mod macos_dialog_backend_tests {
         assert_eq!(
             dressing.matches("setAllowedContentTypes(").count(),
             2,
-            "two of the four rows are filtered — the picture one, and the settings file one              (0.4.4 ticket 05), which offers the one type an export is written as"
+            "two of the four rows are filtered — the picture one, and the settings file one \
+             (0.4.4 ticket 05), which offers the one type an export is written as"
         );
         assert!(
             dressing.contains("setTreatsFilePackagesAsDirectories(false)"),
@@ -21249,7 +21878,7 @@ mod macos_notification_backend_tests {
             [
                 (
                     "new",
-                    "pubfnnew(wake:Box<dynFn()+Send>)->Result<Self,String>",
+                    "pubfnnew(display_name:&str,wake:Box<dynFn()+Send>)->Result<Self,String>",
                 ),
                 (
                     "show",
@@ -21737,7 +22366,9 @@ mod watch_contract_tests {
     /// thread other than the scheduling one races the callback it is trying to
     /// stop. The shape that makes it impossible is structural rather than
     /// careful — `DirWatch` holds no stream pointer, so `drop` has nothing to
-    /// invalidate; it signals a run loop source and joins.
+    /// invalidate; it signals a run loop source. Since T-DROP-DOORS the drop waits
+    /// for nothing (the join is the door's, `retire_within`, which the macOS door
+    /// tests hold by behaviour).
     ///
     /// MUTATION: put an `FSEventStreamStop` in `Drop::drop` and this names it.
     #[test]
@@ -21758,9 +22389,9 @@ mod watch_contract_tests {
             );
         }
         assert!(
-            body.contains("self.stopper.signal()") && body.contains("thread.join()"),
-            "`drop` is signal-and-join, or the cancellation is a flag somebody notices later:\n\
-             {body}"
+            body.contains("self.stopper.signal()"),
+            "`drop` signals the watcher's run loop, or the cancellation is a flag somebody \
+             notices later:\n{body}"
         );
         let watcher =
             source_test::body(&ItemQuery::function("watch_loop").in_module("crate::macos_watch"));
@@ -23341,6 +23972,7 @@ mod thread_priority_tests {
 mod dir_watch_tests {
     use super::{DirWatch, admission::WorkerCtx, windows_impl::first_read_gate};
     use std::{
+        path::Path,
         sync::mpsc,
         time::{Duration, Instant},
     };
@@ -23419,7 +24051,7 @@ mod dir_watch_tests {
         rx.recv_timeout(ARRIVES_WITHIN)
             .expect("and reports one several directories down: the watch is recursive");
 
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
         // Drain whatever was already in flight when the watch was dropped — the
         // claim is about what happens *after* the cancellation, not about a
         // notification that had already been posted.
@@ -23512,7 +24144,7 @@ mod dir_watch_tests {
             recursive_reads_before,
             "a shallow watch never asks the kernel for the tree below the directory it was given"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// RED — **a shallow watch can say which entry moved** (user ruling
@@ -23582,7 +24214,7 @@ mod dir_watch_tests {
             "and it names the *directory* whose write time a build moved, which \
              is the entry a repository root hears the whole build through"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// RED (T-PALETTE-DEEP) — **a named tree watch reports a file below the root by its
@@ -23625,7 +24257,7 @@ mod dir_watch_tests {
             next_word(&rx).expect("the root sentinel completes the observation"),
             "the named tree watch reports `one/two/deep.txt` before the later root sentinel"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN — **`start` returns already listening.**
@@ -23679,7 +24311,7 @@ mod dir_watch_tests {
             "`start` returned with no read outstanding — everything that moved in that window \
              reached nobody, and Windows does not send it again"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN — **a path that cannot be watched fails quietly and finally.**
@@ -23780,7 +24412,7 @@ mod dir_watch_tests {
             watch.take_failure().is_none(),
             "and handed over once, not every time it is asked"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN (T-DIRWATCH-LIFECYCLE) — **the named door hears the end as
@@ -23817,7 +24449,109 @@ mod dir_watch_tests {
             "and nothing is said after it: the watcher thread has finished"
         );
         assert!(!watch.is_armed());
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
+    }
+
+    /// **A watch retired the way the product retires one**: through its door, on a worker the
+    /// thread door started, within `bound`. Answers whether the watcher left in time.
+    fn retired_within(watch: DirWatch, bound: Duration) -> bool {
+        on_a_worker(move |ctx| watch.retire_within(ctx, bound))
+    }
+
+    /// [`retired_within`] within the product's own bound.
+    fn retired(watch: DirWatch) -> bool {
+        retired_within(watch, crate::DIR_WATCH_RETIRE_BUDGET)
+    }
+
+    /// A watch on `path` whose watcher stands inside its wake until the test lets it go (drops
+    /// the sender: every wake after that passes at once, since one write can be several
+    /// notifications), and the flag the wake raises on its way out. Written into, so the watcher is in the wake when this
+    /// returns.
+    fn a_held_watch(
+        path: &Path,
+    ) -> (
+        DirWatch,
+        mpsc::Sender<()>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (entered, inside) = mpsc::channel();
+        let (release, held) = mpsc::channel::<()>();
+        let left = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leaving = std::sync::Arc::clone(&left);
+        let watched = path.to_path_buf();
+        let watch = on_a_worker(move |ctx| {
+            DirWatch::start(ctx, &watched, move |_| {
+                let _ = entered.send(());
+                let _ = held.recv();
+                leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        })
+        .expect("watch a directory this process just made");
+        std::fs::write(path.join("hold.txt"), b"x").expect("write into the watched directory");
+        crate::door_skipped::received(&inside, "the watcher inside its wake");
+        (watch, release, left)
+    }
+
+    /// RED (T-DROP-DOORS, D-40) — **the door waits for the watcher to leave, and a watcher that
+    /// does not leave within the bound is let go.**
+    ///
+    /// The watcher is held inside its wake. A door with no time at all answers `false` at once
+    /// and lets it go; a door called while the hold is let go answers `true`, and when it does
+    /// the wake has returned.
+    ///
+    /// MUTATION: return `true` from `retire_within` without the wait and the first door says the
+    /// watcher left while it stands in the wake; drop the `is_finished` loop for a bare `join`
+    /// and the first door never answers within the suite's patience.
+    #[test]
+    fn the_door_waits_for_the_watcher_within_its_bound() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let scratch = Scratch::new("retire-held");
+        let (watch, release, _left) = a_held_watch(&scratch.0);
+        assert!(
+            !retired_within(watch, Duration::ZERO),
+            "a watcher standing in its wake has not left within no time at all"
+        );
+        drop(release);
+
+        let (watch, release, left) = a_held_watch(&scratch.0);
+        let (going, on_its_way) = mpsc::channel();
+        let (answered, heard) = mpsc::channel();
+        let leaving = std::sync::Arc::clone(&left);
+        std::thread::spawn(move || {
+            let _ = going.send(());
+            let left_in_time = retired_within(watch, crate::door_skipped::PATIENCE);
+            let _ = answered.send((
+                left_in_time,
+                leaving.load(std::sync::atomic::Ordering::SeqCst),
+            ));
+        });
+        crate::door_skipped::received(&on_its_way, "the retiring thread");
+        drop(release);
+        let (left_in_time, wake_returned) =
+            crate::door_skipped::received(&heard, "the door, once the watcher is let go");
+        assert!(left_in_time, "the watcher left within the door's bound");
+        assert!(
+            wake_returned,
+            "the door answered before the watcher left its wake"
+        );
+    }
+
+    /// RED (T-DROP-DOORS, D-40) — **a watch dropped without its door waits for nothing, and says
+    /// so once.**
+    ///
+    /// The watcher is held inside its wake for the whole of the drop: a drop that joined it would
+    /// stand until the test let go, and the test lets go only after the drop has answered.
+    ///
+    /// MUTATION: put the join back in `Drop` and the drop's thread does not answer within the
+    /// suite's patience; take the saying out and the count is zero.
+    #[test]
+    fn a_watch_dropped_without_its_door_waits_for_nothing_and_says_so_once() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let scratch = Scratch::new("drop-held");
+        let (watch, release, _left) = a_held_watch(&scratch.0);
+        let skipped = crate::door_skipped::dropped_alone(watch, "a drop while the watcher is held");
+        assert_eq!(skipped, 1, "the drop says its skipped door once");
+        drop(release);
     }
 }
 
@@ -24003,7 +24737,9 @@ mod monospace_family_tests {
         assert_eq!(
             names(&ordered),
             vec![DEFAULT_MONOSPACE_FAMILY, "Zilla Mono"],
-            "which of the two spellings survives matters less than that the same              one survives every time — the tie is broken by exact bytes, so the              answer cannot depend on the order the machine reported them in"
+            "which of the two spellings survives matters less than that the same \
+             one survives every time — the tie is broken by exact bytes, so the \
+             answer cannot depend on the order the machine reported them in"
         );
     }
 }
@@ -24050,7 +24786,7 @@ mod monospace_enumeration_tests {
         let looked_up = monospace_family_named(DEFAULT_MONOSPACE_FAMILY);
         let lookup_us = started.elapsed().as_micros();
         let started = std::time::Instant::now();
-        let walked = monospace_font_families();
+        let walked = monospace_font_families().expect("DirectWrite answers");
         let walk_us = started.elapsed().as_micros();
         println!(
             "BT_PERF_TRACE monospace_enumeration_us={walk_us} families={} \
@@ -24093,7 +24829,7 @@ mod monospace_enumeration_tests {
     /// any of those is a picker row that silently does nothing when chosen.
     #[test]
     fn the_machines_own_monospaced_families_are_named_and_locatable() {
-        let families = monospace_font_families();
+        let families = monospace_font_families().expect("DirectWrite answers");
         assert!(
             families
                 .iter()
@@ -24173,8 +24909,8 @@ mod monospace_enumeration_tests {
     fn every_cjk_walk_asks_the_machine_again() {
         use super::windows_impl::take_collection_update_checks;
         let _ = take_collection_update_checks();
-        let first = cjk_font_families();
-        let second = cjk_font_families();
+        let first = cjk_font_families().expect("DirectWrite answers");
+        let second = cjk_font_families().expect("DirectWrite answers");
         assert_eq!(
             take_collection_update_checks(),
             [true, true],
@@ -24186,7 +24922,7 @@ mod monospace_enumeration_tests {
     #[test]
     fn the_machines_cjk_families_are_named_and_locatable() {
         let started = std::time::Instant::now();
-        let families = cjk_font_families();
+        let families = cjk_font_families().expect("DirectWrite answers");
         eprintln!(
             "BT_PERF_TRACE cjk_enumeration_us={} families={}",
             started.elapsed().as_micros(),
@@ -27030,7 +27766,7 @@ mod macos_file_urls;
 #[cfg(target_os = "macos")]
 pub use macos_clipboard_payload::clipboard_payload;
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn clipboard_payload() -> Result<ClipboardPayload, String> {
+pub fn clipboard_payload(_worker: &admission::WorkerCtx) -> Result<ClipboardPayload, String> {
     Err("terminal clipboard acquisition is unavailable on this platform".to_owned())
 }
 

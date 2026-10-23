@@ -3,7 +3,12 @@ use super::*;
 pub(crate) use bt_platform::ime_trace::{enabled, line};
 use std::cell::Cell;
 
+/// Turn the platform's IME trace on when the entry was asked for `BT_IME_TRACE`
+/// (`entry_doors`); with no file named, nothing is installed and the trace is off.
 pub fn install() {
+    if crate::entry_doors::installed().traces.ime.is_none() {
+        return;
+    }
     bt_platform::ime_trace::install(|message| {
         // One file, one writer: the focus census (`ime_report`) owns the sink.
         ime_report::TRACE.line(|| format!("{:?} {message}", Instant::now()));
@@ -97,11 +102,13 @@ fn ruling_line(
 
 /// Reports the terminal projection only. Alternate-screen mode is context,
 /// never a veto: the compositor can and does draw in a TUI's alternate screen.
-fn draw_reason(owner_matches: bool, visible: bool, nonzero: bool, written: bool) -> &'static str {
+/// `in_view` is the frame's `cursor_in_view`: a cursor the program hid is still where a
+/// composition is drawn, so only a cursor whose cell the frame does not draw stops it.
+fn draw_reason(owner_matches: bool, in_view: bool, nonzero: bool, written: bool) -> &'static str {
     if !owner_matches {
         "owner_mismatch"
-    } else if !visible {
-        "cursor_invisible"
+    } else if !in_view {
+        "cursor_out_of_view"
     } else if !nonzero {
         "zero_size_rectangle"
     } else if !written {
@@ -148,7 +155,7 @@ pub fn caret_line(
     format!("IME_OUT_CARET action={action} reason={reason} position={position:?}")
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     pub(super) fn trace_ime_owner(&self, keyboard: KeyboardOwner) {
         if !enabled() {
             return;
@@ -160,7 +167,6 @@ impl Runtime<'_> {
             }
             ImeOwner::Modal if self.window.dirty_gate.is_open() => "dirty_gate",
             ImeOwner::Modal if self.window.first_run.is_open() => "first_run",
-            ImeOwner::Modal if self.window.psreadline_invite.is_open() => "psreadline_invite",
             ImeOwner::Modal if self.paste_card_seat().is_some() => "paste_card",
             ImeOwner::Modal if self.update_card_is_up() => "update_card",
             ImeOwner::Modal if self.window.settings.is_open() => "settings",
@@ -254,13 +260,10 @@ impl Runtime<'_> {
         let Some(metrics) = self.focused().map(|leaf| leaf.metrics) else {
             return;
         };
-        let area = window_ime_cursor_area(
-            self.window.renderer.seat_viewport(),
-            self.window.renderer.ime_cursor_area(metrics, frame),
-        );
+        let area = terminal_ime_cursor_area(&self.window.renderer, metrics, frame);
         let reason = draw_reason(
             ime_owner(self.keyboard_owner()) == ImeOwner::Shell,
-            frame.cursor.visible,
+            frame.cursor_in_view,
             area.width != 0 && area.height != 0,
             written,
         );
@@ -532,10 +535,10 @@ mod tests {
             alt: true,
             area,
         };
-        let draw = draw_line("cursor_invisible", facts);
+        let draw = draw_line("cursor_out_of_view", facts);
         assert_eq!(
             draw,
-            "IME_DRAW surface=terminal drawn=false reason=cursor_invisible bytes=25 cursor_visible=false row=3 column=7 alt=true x=-3 y=4 width=5 height=6"
+            "IME_DRAW surface=terminal drawn=false reason=cursor_out_of_view bytes=25 cursor_visible=false row=3 column=7 alt=true x=-3 y=4 width=5 height=6"
         );
         assert!(!draw.contains(text));
         assert_eq!(
@@ -570,21 +573,21 @@ mod tests {
 
     #[test]
     fn ime_draw_answers_and_change_latch() {
-        for (owner, visible, nonzero, written, expected) in [
+        for (owner, in_view, nonzero, written, expected) in [
             (false, true, true, true, "owner_mismatch"),
-            (true, false, true, false, "cursor_invisible"),
+            (true, false, true, false, "cursor_out_of_view"),
             (true, true, false, true, "zero_size_rectangle"),
             (true, true, true, false, "no_visible_cells"),
             (true, true, true, true, "drawn"),
         ] {
-            assert_eq!(draw_reason(owner, visible, nonzero, written), expected);
+            assert_eq!(draw_reason(owner, in_view, nonzero, written), expected);
         }
         let last = Cell::new(None);
         assert!(changed(&last, Some("drawn")));
         assert!(!changed(&last, Some("drawn")));
-        assert!(changed(&last, Some("cursor_invisible")));
-        assert!(!changed(&last, Some("cursor_invisible")));
+        assert!(changed(&last, Some("cursor_out_of_view")));
+        assert!(!changed(&last, Some("cursor_out_of_view")));
         assert!(!changed(&last, None));
-        assert!(changed(&last, Some("cursor_invisible")));
+        assert!(changed(&last, Some("cursor_out_of_view")));
     }
 }

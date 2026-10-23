@@ -1,6 +1,7 @@
 //! `tooltips` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     PreviewSurface, Runtime, WebHeadVerb, git_graph, git_panel, i18n, marks, pane_control_tip,
     seats, tab_surface_tip_boxes, tooltip, tooltip_anchor_for, update,
@@ -10,7 +11,7 @@ use bt_layout::SeatId;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Rebuild the tooltip's anchor list from the geometry the strip is about to
     /// be drawn with.
     ///

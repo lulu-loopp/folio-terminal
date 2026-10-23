@@ -19,11 +19,10 @@ use std::path::PathBuf;
 use bt_persist::{
     BackgroundFitV1, DegradationReport, FilesViewV1, LanguageV1, LayoutNodeV1, LeafNodeV1,
     MinimumContrastV1, PreviewLeafV1, PreviewPaneV1, PreviewPoolEntryV1, PreviewSourceV1,
-    PsReadLineInviteV1, ReadReport, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION,
-    SETTINGS_SCHEMA_VERSION, SearchEngineV1, SessionCursorStyleV1, SessionSidebarModeV1,
-    SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, SettingsV1, SplitDirectionV1,
-    TabPreviewV1, TabV1, TermLeafV1, ThemeModeV1, read_session, read_settings,
-    write_session_atomic, write_settings_atomic,
+    ReadReport, RecentPreviewV1, RecentSeedV1, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
+    SearchEngineV1, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1,
+    SessionV1, SessionWindowV1, SettingsV1, SplitDirectionV1, TabPreviewV1, TabV1, TermLeafV1,
+    ThemeModeV1, read_session, read_settings, write_session_atomic, write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -891,7 +890,58 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          hints the v21-to-v22, and the Terminal page's own Turn finished the \
          v22-to-v23, and the Cards column's own first-arrival hint the v23-to-v24, \
          and the terminal's own silent write to the clipboard on a dragged \
-         selection the v24-to-v25 — one key on one day, fifteen times running \n         and the one key in this file that lets this build ask a server anything, the v25-to-v26: sixteen          — and the summoned terminal's two, how tall it opens and whether it goes away when the          keyboard leaves it, the v26-to-v27: two keys on one rung because they are one window's          description and a rung is a release of this file's shape, not a key — and how wide it opens the          v27-to-v28, one key on its own day and the first rung here that changes a shape a reader          already had: the full span it replaces was never a preference anybody expressed          — and whether this program keeps an icon on the taskbar the v28-to-v29,          one key on its own day, and the second rung here whose default is not          'what you already had': it ships on, because the icon is the only door to          a program with no window on the screen and a reader cannot go looking in          the settings of a program they cannot see          — and whether a click somewhere else puts the summoned terminal away the          v29-to-v30, one key on its own day and the second rung here that          overwrites a shape a reader already had, for the v27-to-v28 rung's exact          reason: the row was born with the feature already set, so nobody ever          expressed the preference it would be carrying forward          — and the v30-to-v31, which is the first rung on this ladder to take a key          *away*: the notification-area icon is withdrawn (the summoned terminal lives          and dies with Folio), and the four keys the summoned terminal's own settings          section is made of arrive with it — which profile it opens on, the one          command it may be asked to run once a run, how far below the top of the          screen it hangs, and how much of it a new run puts back          — and the v31-to-v32, the first rung on this ladder that carries a rule rather than a          value: the first-run card's own state, written `Shown` into every document the step walks,          which is the whole of 'a reader who was already here never meets it', and beside it the          intent a card left on records about a `$PROFILE` no shell has named yet          — and the v32-to-v33, one key on its own day and the third rung whose default is not          'what you already had': what a second start of Folio opens, written `NewWindow` into every          document the step walks, because the tab those documents were written under was a          behaviour nobody was ever asked about          — and the v33-to-v34, one key on its own day: what the Option key is, written `false`          into every document the step walks, which is both the shipped answer and, vacuously,          the one every one of those documents was written under — no build that could have          written one ran on a machine with an Option key on it          — and the v34-to-v35, one key on its own day: which installed family draws Han, kana          and hangul in the grid, written as the empty string into every document the step walks,          because a file that was never asked must follow this build's platform chain rather than          pin today's first family          — and the v35-to-v36, one key on its own day: whether the detector puts back the row          separators a coding agent's own redraw of its answer eats, written `true` into every          document the step walks, because every build that could have written one made that repair          with no way to ask for anything else          — and the v36-to-v37, one key on its own day: whether a paste of several lines into a          shell that would run them one by one asks first, written `true` into every document the          step walks, because that is the owner's ruling for a question no earlier build asked          — and the v37-to-v38, one key on its own day: which colour scheme a web pane asks its          page for, written `FollowTheme` into every document the step walks, because no earlier          build told a page anything and the owner ruled that a page follows the window it is in          — and the v38-to-v39, one key on its own day and a receipt rather than a preference: whether          a web page has ever committed in this profile, written `Never` into every document the step          walks, because a settings file is no evidence that a page was ever opened"
+         selection the v24-to-v25 — one key on one day, fifteen times running \
+         and the one key in this file that lets this build ask a server anything, the v25-to-v26: sixteen \
+         — and the summoned terminal's two, how tall it opens and whether it goes away when the \
+         keyboard leaves it, the v26-to-v27: two keys on one rung because they are one window's \
+         description and a rung is a release of this file's shape, not a key — and how wide it opens the \
+         v27-to-v28, one key on its own day and the first rung here that changes a shape a reader \
+         already had: the full span it replaces was never a preference anybody expressed \
+         — and whether this program keeps an icon on the taskbar the v28-to-v29, \
+         one key on its own day, and the second rung here whose default is not \
+         'what you already had': it ships on, because the icon is the only door to \
+         a program with no window on the screen and a reader cannot go looking in \
+         the settings of a program they cannot see \
+         — and whether a click somewhere else puts the summoned terminal away the \
+         v29-to-v30, one key on its own day and the second rung here that \
+         overwrites a shape a reader already had, for the v27-to-v28 rung's exact \
+         reason: the row was born with the feature already set, so nobody ever \
+         expressed the preference it would be carrying forward \
+         — and the v30-to-v31, which is the first rung on this ladder to take a key \
+         *away*: the notification-area icon is withdrawn (the summoned terminal lives \
+         and dies with Folio), and the four keys the summoned terminal's own settings \
+         section is made of arrive with it — which profile it opens on, the one \
+         command it may be asked to run once a run, how far below the top of the \
+         screen it hangs, and how much of it a new run puts back \
+         — and the v31-to-v32, the first rung on this ladder that carries a rule rather than a \
+         value: the first-run card's own state, written `Shown` into every document the step walks, \
+         which is the whole of 'a reader who was already here never meets it', and beside it the \
+         intent a card left on records about a `$PROFILE` no shell has named yet \
+         — and the v32-to-v33, one key on its own day and the third rung whose default is not \
+         'what you already had': what a second start of Folio opens, written `NewWindow` into every \
+         document the step walks, because the tab those documents were written under was a \
+         behaviour nobody was ever asked about \
+         — and the v33-to-v34, one key on its own day: what the Option key is, written `false` \
+         into every document the step walks, which is both the shipped answer and, vacuously, \
+         the one every one of those documents was written under — no build that could have \
+         written one ran on a machine with an Option key on it \
+         — and the v34-to-v35, one key on its own day: which installed family draws Han, kana \
+         and hangul in the grid, written as the empty string into every document the step walks, \
+         because a file that was never asked must follow this build's platform chain rather than \
+         pin today's first family \
+         — and the v35-to-v36, one key on its own day: whether the detector puts back the row \
+         separators a coding agent's own redraw of its answer eats, written `true` into every \
+         document the step walks, because every build that could have written one made that repair \
+         with no way to ask for anything else \
+         — and the v36-to-v37, one key on its own day: whether a paste of several lines into a \
+         shell that would run them one by one asks first, written `true` into every document the \
+         step walks, because that is the owner's ruling for a question no earlier build asked \
+         — and the v37-to-v38, one key on its own day: which colour scheme a web pane asks its \
+         page for, written `FollowTheme` into every document the step walks, because no earlier \
+         build told a page anything and the owner ruled that a page follows the window it is in \
+         — and the v38-to-v39, one key on its own day and a receipt rather than a preference: whether \
+         a web page has ever committed in this profile, written `Never` into every document the step \
+         walks, because a settings file is no evidence that a page was ever opened"
     );
     // RED — **the repair ships on, because it is the screen every reader of a v35 document
     // already had.** MUTATION: ship `false` and a matrix an agent printed comes back as one row
@@ -921,12 +971,14 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     assert_eq!(
         defaults.quake_height,
         bt_persist::DEFAULT_QUAKE_HEIGHT,
-        "the summoned terminal opens as tall as the row says it does, and the row          says forty percent until somebody moves it"
+        "the summoned terminal opens as tall as the row says it does, and the row \
+         says forty percent until somebody moves it"
     );
     assert_eq!(
         defaults.quake_width,
         bt_persist::DEFAULT_QUAKE_WIDTH,
-        "and as wide as its own row says — sixty percent, centred, which is the answer a 4K          ultrawide gave to the shape that spanned the whole work area"
+        "and as wide as its own row says — sixty percent, centred, which is the answer a 4K \
+         ultrawide gave to the shape that spanned the whole work area"
     );
     // RED (user ruling 2026-09-05, `docs/DESIGN.md` §7.54e) — **the summoned terminal comes back
     // standing where it stood, with what a pinned tab last ran typed and not pressed.** MUTATION:
@@ -1161,7 +1213,8 @@ fn settings_v6_fixture_migrates_to_v7_following_the_system_and_disturbs_nothing(
     assert_eq!(
         v7.language,
         LanguageV1::System,
-        "a v6 build never asked which language to speak, so the migration must          write the answer that defers rather than one that decides"
+        "a v6 build never asked which language to speak, so the migration must \
+         write the answer that defers rather than one that decides"
     );
     assert_eq!(v7.theme_mode, ThemeModeV1::Light);
     assert!(!v7.display_formulas);
@@ -1203,11 +1256,6 @@ fn settings_v7_fixture_migrates_to_v8_with_an_unnamed_face_and_disturbs_nothing(
         v8.terminal_font_size, 16,
         "16 is the size every v7 build drew at — the step writes that answer \
          down rather than changing it"
-    );
-    assert_eq!(
-        v8.psreadline_invite,
-        PsReadLineInviteV1::NotAsked,
-        "a v7 build had no invitation, so this user is owed the offer once"
     );
     assert_eq!(v8.theme_mode, ThemeModeV1::Dark);
     assert!(!v8.display_formulas);
@@ -1264,11 +1312,6 @@ fn settings_v8_fixture_migrates_to_v9_with_no_scheme_named_and_disturbs_nothing(
     assert_eq!(v9.language, LanguageV1::Chinese);
     assert_eq!(v9.terminal_font_family, "Cascadia Mono");
     assert_eq!(v9.terminal_font_size, 20);
-    assert_eq!(
-        v9.psreadline_invite,
-        PsReadLineInviteV1::Installed,
-        "v8→v9 is structural: every sibling crosses untouched"
-    );
 }
 
 /// PIN — a v9 file that *names* both schemes is loaded without migration and
@@ -1300,7 +1343,6 @@ fn a_v9_settings_file_that_names_both_schemes_keeps_both_names() {
     assert_eq!(v9.language, LanguageV1::English);
     assert_eq!(v9.terminal_font_family, "MS Gothic");
     assert_eq!(v9.terminal_font_size, 14);
-    assert_eq!(v9.psreadline_invite, PsReadLineInviteV1::Declined);
 
     // And back out again, byte-for-byte in meaning: the pair a user chose is the
     // pair the next launch reads.
@@ -1366,7 +1408,6 @@ fn settings_v9_fixture_migrates_to_v10_with_the_ground_v9_drew_and_disturbs_noth
     assert_eq!(v10.language, LanguageV1::English);
     assert_eq!(v10.terminal_font_family, "Lucida Console");
     assert_eq!(v10.terminal_font_size, 12);
-    assert_eq!(v10.psreadline_invite, PsReadLineInviteV1::Dismissed);
     assert_eq!(v10.light_scheme, "One Half Light");
     assert_eq!(
         v10.dark_scheme, "Gruvbox Dark",
@@ -1463,7 +1504,8 @@ fn settings_v10_migrates_with_every_group_shut_and_v11_keeps_the_pages_it_names(
             "appearance".to_owned(),
             "a-page-this-build-retired".to_owned()
         ],
-        "this crate stores the keys it was given; deciding which of them name a          page is the reader's job"
+        "this crate stores the keys it was given; deciding which of them name a \
+         page is the reader's job"
     );
 
     // And back out again: the pages a reader opened are the pages the next
@@ -1760,7 +1802,8 @@ fn settings_v16_migrates_with_notifications_on_and_v17_keeps_the_silence_it_was_
     assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
     assert!(
         migrated.terminal_notifications,
-        "a v16 build could raise no notification at all, so `false` would freeze an absence          rather than preserve a choice — the feature takes the product's default"
+        "a v16 build could raise no notification at all, so `false` would freeze an absence \
+         rather than preserve a choice — the feature takes the product's default"
     );
     assert_eq!(
         migrated.minimum_contrast,
@@ -2553,11 +2596,13 @@ fn settings_v25_migrates_with_the_update_check_on_and_v26_keeps_an_answer_alread
     assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
     assert!(
         migrated.update_check,
-        "the check is on by default, and a migration is where that default reaches an existing          install"
+        "the check is on by default, and a migration is where that default reaches an existing \
+         install"
     );
     assert!(
         !migrated.copy_on_select,
-        "the sibling added one version ago is the one a copy-paste of the step above would most          plausibly reset"
+        "the sibling added one version ago is the one a copy-paste of the step above would most \
+         plausibly reset"
     );
     assert!(!migrated.cards_gesture_hint_offer);
     assert!(!migrated.turn_end_notification);

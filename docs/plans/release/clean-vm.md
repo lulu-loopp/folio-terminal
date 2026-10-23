@@ -673,6 +673,7 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
 | `rows.ps1` | 行表(数据):每一行的按键计划、监视参数、收集时刻 |
 | `vm-door.ps1` | 所有 `vmrun` 调用走的一扇门:找 `vmrun`、`-vp`/`-gp` 打印成 `<hidden>`、等客户机能跑交互程序 |
 | `guest/watch.ps1` | 客户机端:盯日志阶段,到达目标行时冻结全部 `folio.exe` 并写哨兵;或按行持有文件 |
+| `guest/waits.ps1` | 客户机端:监视器的有界等待(W4 的 Run 值、毫秒级行的自旋、被结束的 trial 退出),每个界限的数值与理由写在文件头 |
 | `guest/keys.ps1` | 客户机端:启动 Folio,经 `ui-probe.ps1` 按更新卡的键,每次按键前后截图 |
 | `guest/collect.ps1` | 客户机端:安装目录清单(带 SHA-256)、日志、`diagnostics.log`、Run 键、进程,打成 zip |
 | `mac/setup.sh`、`mac/row.sh`、`mac/teardown.sh` | macOS 的同一件事(见「macOS 步骤」) |
@@ -818,6 +819,7 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
 | ☐ | W13 | 更新后 1–2 秒内取消 | `Abandoned` | 无日志、无 `H\<txn>`、无 Run 值;旧版完整。W13 的第一次普通启动不带 `--update-feed`,源的回答不保留,不出更新卡;检查直接问 github.com |
 | ☐ | W14 | 更新 → 重启;Run 值一出现,监视器以 `Read`、共享 `Read`(无 delete、无 write)打开 `H\journal.json` 3 秒 | 不断电 | rename 重试扛过去:`wrote [Armed, Moving, Trial, Committed, Retired]`,trial 是那扇窗 |
 | ☐ | W14long | 同上,持有 120 秒。**前提:A 为 0.4.7 或更高**(A = 0.4.6 时是已知问题:新版以未记录状态运行,直到下次启动或登录完成更新;本行不执行) | 不断电;句柄持有覆盖 applier 的 `TrialBegan` 写入及其回滚声明 | 句柄持有期间:`diagnostics.log` 包含 `the trial <pid> could not be recorded`,然后 `is asked to quit`,然后 `started …\folio.exe`;唯一的 Folio 窗口是以 trial 启动的新版,卡片显示「Update incomplete.」并指出文件夹;日志停留在 `Moving`;Run 值仍存在。释放句柄后,trial 的 watchdog 到期时(该 trial 启动后 102 s、204 s、408 s、816 s;至多四次,前一次恢复仍在运行时不启动下一次)或在下次启动/登录时立即完成:`BT_UPDATE_TRIAL … it is handed back to …\rescue\folio.exe (ready)`(仅 watchdog 路径),然后 `BT_UPDATE_RECOVER the trial <pid> runs and its receipt names it, and the journal does not record it: it is recorded`。句柄仍持有时,人手动启动触发的恢复记录 `BT_UPDATE_RECOVER deferred: …` 且不启动第二个进程 trial 窗口不会被自行结束;唯一可以结束从未变为 ready 的 trial 的是持有事务的恢复进程。日志最终为 `Retired{Committed}`;Run 值 `FolioUpdate-<txn8>` 已删除;安装目录为 B 版;唯一的窗口是句柄持有期间启动的 trial,保留不变,卡片现显示「Updated.」;持有期间在该窗口做的更改(如设置)保留。释放句柄后普通启动 Folio 立即到达相同终态,不再启动 B 的第二个进程 |
+| ☐ | W14m | 更新 → 重启;Run 值一出现(暂存集合已验证过),监视器以 `Read`、共享 `Read`(无 delete、无 write)打开 `H\<txn>\set\folio.exe`:(a) 一直持有到 `Moving` 写入之后再过 3 秒(从 `Moving` 起算,持有就不会在移入之前结束);(b) 60 秒 | 不断电;句柄持有覆盖 applier 把 `folio.exe` 移入安装目录的那一步(T-UPDATE-MOVE-HELD-RETRY) | (a) 移动被重试扛过去:`diagnostics.log` 有一行或多行 `` BT_UPDATE_APPLY `folio.exe` held by another program for … s: …; asked again in … ms ``,然后 `wrote [Armed, Moving, Trial, Committed, Retired]`,trial 是那扇窗,安装目录为 B 版。(b) 十秒窗口过后 `` … past the 10 s window: …; the move is given up ``,然后 `` BT_UPDATE_APPLY the move of `folio.exe` failed: another program held it open past the window: … ``,`wrote [Armed, Moving, RollbackIntent, RolledBack, Retired]`;旧版以 `--update-failed <journal> --update-journal-held <错误> --update-held-file folio.exe` 打开,卡片标题是 *Another program held folio.exe open: <Windows 的错误>*(中文界面为 *另一个程序占用了 folio.exe：<Windows 的错误>*),下面是 *Previous version restored.*;Run 值已删,安装目录为 A 版 |
 | ☐ | W15 | 从 `Prepared` 起以 `Read`、共享 `None` 持有 `H\<txn>\rescue\folio.exe` 40 秒,再按「重启」 | 不断电 | `its applier could not be started` → `Abandoned`,无文件被移动;旧 Folio `leaving after an update: started …`,普通方式打开一次。(启动仅迟缓、应答未在 15 秒 `HANDOFF_DEADLINE` 内到达的路径由单元测试 `a_hand_over_with_no_answer_in_time_still_opens_folio_once` 覆盖) |
 | — | W16 / U-35 | **Not staged by hand; covered by the harness.** The cell needs a holder that leaves `Moving` with B live, its own trial neither launched nor recorded, and then has both B and the rescue refused by the operating system. Denying execute on B does not reach it: P's own trial launch fails first and P declares and performs the rollback before its exit guard runs. The only release-build road there is a journal write P cannot make (W14-like), and then the reservation's own write fails too. | — | Pinned instead by `update_apply::exit_guard_tests::u35_the_last_trial_requires_two_os_launch_refusals` (the 27-cell created / refused / unacknowledged table) and, in the Windows sandbox, `update_apply_windows::tests::u35_two_windows_launch_refusals_reserve_exactly_one_last_trial` (journal `TrialStarting` with the reserved nonce at the third process creation), `u35_a_ready_last_trial_commits_itself_without_any_rescue_process`, `u35_an_unready_last_trial_commits_nothing_and_the_recovery_ends_it` and `u35_the_guard_and_a_start_agree_on_the_reserved_trial`. Windows only; macOS has no such cell. |
 | ☐ | E7 | 从 `Prepared` 起不共享地持有 `THIRD-PARTY-NOTICES.md` 200 秒,按「重启」 | 不断电 | `nothing is moved: held open by another process`,`wrote [Armed, Prepared]`,删 Run 值,旧版重新打开(约 60 秒无窗,D-15);放开后重启卡从暂存集合再按一次 → 提交 |
@@ -922,6 +924,69 @@ M 表的原始定义见 (b).2 的 macOS 表;上表与它的差别只在 M4/M5/M6
 
 macOS 上,trial 在被观察前结束(M9 在 `Trial` 之前被杀)不再耗费 90 秒:applier 看到启动结束(`the trial ended before it could be seen`)后立即回滚。此条适用于候选版 A 为 0.4.7 或更高;被信号杀死的 `open` 视为未知(applier 照常等待 trial 至截止时间)。
 
+#### E1-b: the journal escape hatch (RV, RW; 0.4.8) <!-- zh: pending T-JOURNAL-ESCAPE-HATCH E1-b -->
+
+What a build does with an update journal it cannot read whole (DESIGN 2026-10-08, E1-a1/E1-a2):
+the rows reverse the usual pair. **A** is the build under test (it carries the hatch); **B** is a
+rehearsal successor built from a throwaway branch that is never merged or shipped: it reads one
+test-only word per journal vocabulary as the word it replaces (class `rehearsal_destructive`,
+outcome `rehearsal_rolled_back`, header `v` 2, phase `RehearsalRolledBack`, layout
+`RehearsalMembers`, adapter `RehearsalOurs`, `Retired.outcome` `RehearsalRolledBack`) and writes
+its receipt as v2; **C** is B with the next version number. **A-mut** is A built from a second
+throwaway branch with the hatch's arms put back to their pre-E1 behaviour (the start's unknown
+header continued plainly with no card, the held-writes continue removed, the Windows exit guard's
+`Installed{failed:false}`, the holders' `Left`/`Refused`, the door's header-alone exit). B and C
+are signed with the release identity (the B -> C update needs it); A and A-mut need not be.
+
+Snapshots: `a-installed` (A), `amut-installed` (A-mut), `b-installed` (B), each by
+`install-candidate.ps1`. The planted rows plant from journals B wrote itself: `rolled-back.json`,
+the journal at RV-W11's marker, and `retired.json`, its `Retired{RolledBack}`.
+
+```powershell
+$pass = Get-Content <the VM password file>   # into a variable, never printed
+# RV: B installed, the feed holds C, A's archive laid over the install at the W state
+pwsh -File scripts/release/cleanvm/updater/run-row.ps1 -Vmx <folio-win11.vmx> -VmPassword $pass `
+    -Snapshot b-installed -Feed <feed of C> -OverlayZip <folio-A-windows-x64.zip> -Row RV-W11,RV-W6
+# the controls (R2-17): B installed meets the planted journal and settles it
+pwsh -File scripts/release/cleanvm/updater/run-row.ps1 ... -Snapshot b-installed -Feed <feed of C> `
+    -TemplateDir <folder> -RescueB <B's folio.exe> -Row BC-class,BC-phase
+# RW: A installed; then the same rows on A-mut with -Mutant
+pwsh -File scripts/release/cleanvm/updater/run-row.ps1 ... -Snapshot a-installed -Feed <feed of C> `
+    -TemplateDir <folder> -RescueB <B's folio.exe> -Row RW-class-B,RW-class-none,RW-phase-B,RW-phase-none,RW-class-A,RW-phase-A
+pwsh -File scripts/release/cleanvm/updater/run-row.ps1 ... -Snapshot amut-installed -Mutant ...
+```
+
+**An RV row** is a W row of the table above run on B -> C, with one difference at the marker
+(`guest\watch.ps1 -OverlayZip`): the frozen processes are ended (each within `$KillWithinMs`; a
+running or suspended `folio.exe` keeps its image open and cannot be written over), every member of
+A's archive is written over the install and flushed, `.folio-update` is left as it is, and only
+then the marker and the cut. Then logon (+45 s), start1, start2, as for every cut row.
+
+**A planted row** runs no update: the host writes `H\journal.json` from B's journal with one word
+replaced (`rows.ps1` `Get-PlantedJournal`; `written_by` stays B's version), `guest\plant.ps1` puts
+it in place with the rescue copy the row names, and Folio is started plainly twice. The first run
+is answered beforehand (`keys.ps1 answerfirstrun`), each start's card is read by the operating
+system's OCR over Folio's own window (`guest\card.ps1`, the capture kept beside the text), and the
+close is `WM_CLOSE` to Folio's `Window Class` window. The verdict is `Get-PlantedVerdict`, cell by
+cell, written to `<row>\verdict.txt`.
+
+| ✓ | row | word / rescue | expected (A, the hatch) | expected (A-mut: the mutation column) |
+| --- | --- | --- | --- | --- |
+| ☐ | RV-W1 … RV-W12 | B's own journal; A laid over | A never deletes or rewrites a journal it did not settle: a change between two collections has a rescue's `BT_UPDATE_RECOVER … recovery ended` line in that interval, or a `terminal`, `preparing` or `deferred` header before it (A1); a Folio window at the end. **RV-W4** (Handoff with the Run value, before Armed) is not reached by the harness: twice the journal already read `Moving` when the watcher froze on the Run value (the window is milliseconds wide); it goes to 0.4.9 (E1-b-rest) | — |
+| ☐ | RV-W6 | as above, cut at `Moving` | B's rescue finds neither whole set live → `Stuck`, and opens its rescue copy, which shows *Update incomplete.* with the folder (T-RESCUE-COPY-CARD) — when B carries that fix; a B built before it opens the rescue copy with no card | — |
+| ☐ | BC-class … BC-retired-outcome | each word; B's rescue (B installed) | B reads its word and settles: `recovery ended RolledBack`, the journal gone, *Previous version restored.* | — |
+| ☐ | RW-class-B, RW-outcome-B, RW-v-B | header word; B's rescue | A hands it to B's rescue (`an update is being finished by …\rescue\folio.exe`), which settles it as above | A continues plainly, nothing handed over, no card (`… is left as it is`) |
+| ☐ | RW-class-none, -held (and outcome, v) | header word; no rescue / B's held share-none | held-writes continue: `could not be started; Folio starts with its writes held`, the journal byte for byte, *An update by a newer Folio is not finished.* … *Changes made in this session are not kept.* | as above |
+| ☐ | RW-class-A (and outcome, v) | header word; A placed as the rescue (R2-19) | A as the recovery stands aside (`recovery ended StoodAside(`), the exit guard opens the rescue copy, never the installed build plainly, and that window shows the newer Folio's card (T-RESCUE-COPY-CARD: the rescue copy reads the real home's journal; before it, the rescue copy read its own home and showed no card) | as above |
+| ☐ | RW-phase-B, RW-layout-B, RW-adapter-B | body word; B's rescue | the header hands it over; B settles it | the same (the control) |
+| ☐ | RW-phase-none, -held (and layout, adapter) | body word; no rescue / held | held-writes continue; the card is the newer Folio's whenever A cannot read the journal whole (`update_startup::unfinished`), with the not-kept sentence | continues plainly (`Folio starts without it`), no card |
+| ☐ | RW-phase-A (and layout, adapter) | body word; A as the rescue | as RW-class-A: stands aside, the rescue copy's window with the newer Folio's card | `recovery ended Left(`, the rescue copy's window, no card |
+| ☐ | RW-retired-outcome-B | `Retired.outcome` (terminal header) | A retires it on its frozen header (A1): the journal gone, nothing handed over, no card (a plain start) | the same |
+
+| ☐ | RW-receipt-v2 | live: A installed, A -> B through the feed (A and B signed by the same identity; first run answered) | B as the trial writes its receipt as v2; A's holder never accepts it: `BT_UPDATE_APPLY the receipt: version 2 is not one this build reads`, no receipt by the deadline, rollback (`RolledBack`), the journal gone, A restored with *The new version did not start. / Previous version restored.* (cells read from the `t240` and `then` collections) | — |
+
+Not yet staged here: the macOS rows (`mac/row.sh`; B and C signed and notarised on the Mac).
+
 #### 每一行检查什么(通用)
 
 对每一行,重启后(或每个收集时刻)收集以下证据:
@@ -948,7 +1013,168 @@ macOS 上,trial 在被观察前结束(M9 在 `Trial` 之前被杀)不再耗费 9
 窗)修掉,stuck-a/b 的预期按 U-32 计划缺陷 8 改正。**这份仓库版本尚未整轮跑过**:下一次演练
 是它的第一次。
 
+**2026-10-15(H6)演练脚本的改动。**
+
+- **macOS 截图只截 Folio 的窗。** 全屏截图曾拍到这台 Mac 上一扇远程桌面窗口和上面的密钥。`row.sh` 的
+  `capture_folio_window` 经 `osascript -l JavaScript`(`CGWindowListCopyWindowInfo`,只读窗口号与所属进程,
+  不读标题与像素)找本文件夹进程最前面的一扇屏上窗,用 `screencapture -l <窗口号>` 只截它;找不到就不截,
+  在该行日志里写一行 `REFUSED`,绝不退回全屏。没有本文件夹进程时(`after-cleanup`)与 R-D5 的系统提示框
+  (不属于 Folio 进程)因此如实拒绝。`row.sh --capture-dry-run <应用名>` 只找窗、从不截图。
+- **`-KillNewInstallProcess` 在句柄上等。** 原先 `Stop-Process -Force` 之后既不等也不核实就记「ended」;
+  现在第一次看到这个进程时就打开并持有它的句柄(句柄开着,pid 不会被别的进程重用),路径核对、`Kill()`
+  与等待退出都落在这一个进程上;界限 `$KillWithinMs` = 2 秒(产品的 `CHILD_EXIT_BUDGET`),到界仍在运行则该行
+  `FAILED` 并写出 pid,不再往下走。
+- **W4 不再空转。** 原先 120 秒墙钟、到时不判失败,主循环读到仍是 `Handoff` 又进同一自旋,直到监视器的总超时(切电行是 `-MarkerTimeoutSeconds`,
+  默认 600 秒);
+  现在 `Wait-RunValue` 等 Run 值,界限 `$W4RunWithinMs` = 90 秒(`old_within` 60 秒加 30 秒),日志目录项变了
+  而 Run 值没来即结束等待,到界该行 `FAILED` 并写出最后所见。其余毫秒级行的自旋同理,界限 `$SpinWithinMs`
+  = 180 秒。三个界限的推导在 `guest/waits.ps1` 文件头。
+- **失败传到宿主。** `run-row.ps1` 把切电行的哨兵拷回(`marker.txt`),并在每次收集回来的监视器日志里找
+  `ROW <行> FAILED`;哨兵缺失或为 `MISSED`/`NOT_REACHED`/`FAILED`、或日志里有失败行,该行在宿主上记为
+  FAILED。最后打印各行结果表,有失败则以退出码 1 结束。
+
 ---
+
+### 4.5 winget local manifest: two clients (every release) <!-- zh: pending T-WINGET-TWO-CLIENTS -->
+
+`docs/RELEASING.md` "Validating before submitting" is the rule; this is how the row is run.
+It runs on **`folio-win11` only**: the install fetches `InstallerUrl` from the release
+page, and `folio-win10` has no network adapter (§2.4). Both cells start from the `clean`
+snapshot and run in one session, image client first, because the second cell changes the
+client.
+
+| Cell | Client | How the client gets there | Expected shape |
+| --- | --- | --- | --- |
+| **W-a** | the image's App Installer, as it is (`clean` carried **1.6.10121** on 2026-10-08) | nothing: record `winget --version` | `folio` resolves to `%LOCALAPPDATA%\Microsoft\WinGet\Links\folio.exe`, a symbolic link whose target is `<package folder>\folio-<version>\folio.exe`; user `PATH` gains `WinGet\Links`; `diagnostics.log` says `Folio was started as …\WinGet\Links\folio.exe and runs from …\folio-<version>\folio.exe; its own files are looked for there` |
+| **W-b** | the current App Installer (**1.29.290** on 2026-10-08) | updated in the guest, steps below; record `winget --version` | `folio` resolves to `<package folder>\folio-<version>\folio.exe`; user `PATH` gains that folder; nothing named `folio.exe` in `WinGet\Links`; no line about where Folio was started |
+
+Both cells, in addition: install exits 0; `folio --version` prints this release's version;
+`conpty.dll`, `OpenConsole.exe` and `folio.msix` are in `<package folder>\folio-<version>\`;
+Folio started by `folio` with one pane open has that folder's `conpty.dll` in its module list
+(`(Get-Process folio).Modules | Where-Object ModuleName -eq 'conpty.dll'`) and **no**
+`ConPTY: this pane runs on the Windows inbox ConPTY` line in `diagnostics.log`;
+`winget uninstall WeiyiShi.Folio` leaves no package folder, no `PATH` entry and no link.
+
+Recorded, not judged: winget's `Archive scan detected malware. Proceeding due to
+--ignore-local-archive-malware-scan` line, and `ZoneId=3` in every extracted file's
+`Zone.Identifier` stream (RELEASING.md, Troubleshooting).
+
+Red cells:
+
+- **W-b with the link shape**: `ArchiveBinariesDependOnPath` no longer takes effect on the
+  current client. The manifest is not submitted until that is understood.
+- **Either cell on the inbox ConPTY**: Folio does not find its own files through the road
+  that cell exercises. Up to 0.4.7 W-a was exactly this (the 0.4.7 post-publish row:
+  `…\WinGet\Links\conpty.dll is missing`); from 0.4.8 it is a regression.
+- **W-a with the folder shape** is not red: it is what winget does on a machine where it cannot
+  make a symbolic link. The row says which shape it met. When the image's own client is 1.9 or
+  newer, W-a cannot reach the link road; the row says so and W-a expects W-b's shape.
+
+Steps (PowerShell in the guest; the two settings need an elevated one):
+
+1. Copy `packaging/winget/manifests/w/WeiyiShi/Folio/<version>/` into the guest.
+2. Elevated: `winget settings --enable LocalManifestFiles` and
+   `winget settings --enable LocalArchiveMalwareScanOverride`.
+3. **W-a**: `winget --version`; `winget install --manifest <folder> --ignore-local-archive-malware-scan`;
+   in a new shell (the `PATH` change reaches only new ones), `Get-Command folio -All`, the
+   user `PATH`, the `WinGet\Links` listing with each entry's target, the package folder's
+   listing, `folio --version`; start `folio`, wait for the pane's prompt, read the module list
+   and the new `diagnostics.log` lines, close it; `winget uninstall WeiyiShi.Folio`; the
+   three listings again.
+4. **Update App Installer** (measured 2026-10-08: the bundle alone is refused with
+   `0x80073CF3`, the framework `Microsoft.WindowsAppRuntime.1.8` missing):
+   - download `https://aka.ms/getwinget` (the App Installer bundle) and
+     `https://github.com/microsoft/winget-cli/releases/latest/download/DesktopAppInstaller_Dependencies.zip`;
+   - `Add-AppxPackage` each `x64` package in the dependencies archive, then the bundle;
+   - `winget --version` again, and step 2 again (the 0.4.7 run enabled both settings again on
+     the new client).
+5. **W-b**: step 3's commands, unchanged.
+
+Evidence: `vm-live\winget\a-image\` and `vm-live\winget\b-current\`, each with the act logs,
+the elevated install's output and the shots. Report the two client versions on the row's
+line: `PASS on <current> / PASS on <image's>`, or which cell went red and its exact
+`diagnostics.log` line.
+
+### 4.6 Windows PowerShell under a lockdown (every release) <!-- zh: pending T-INTEGRATION-INJECT-2-BUILD -->
+
+The rule is RULES §38: a Windows PowerShell 5.1 pane is given Folio's PSReadLine only when the
+edition answered `FullLanguage`; on a machine whose 5.1 runs constrained the pane is exactly the
+Shell-integration-off pane. A lockdown cannot be entered from a test on the development machine
+(`__PSLockdownPolicy` is read from the machine's block only, and writing it needs an
+administrator), so these two rows are where it is proved. **`folio-win11`, an elevated shell in
+the guest, the `clean` snapshot first; run by the coordinator at release time.**
+
+| Row | Make the lockdown | Check |
+| --- | --- | --- |
+| **V0** — the debug lockdown (cheap) | `[Environment]::SetEnvironmentVariable('__PSLockdownPolicy','4','Machine')`, sign out and in; `powershell -NoProfile -Command $ExecutionContext.SessionState.LanguageMode` says `ConstrainedLanguage` | Folio started, the first Windows PowerShell pane of the launch and a second one: `$env:PSModulePath` holds no `psmodules` entry; `(Get-Module PSReadLine).ModuleBase` is the in-box 2.0.0; colouring and `Ctrl+R` history search work (the in-box editor); `diagnostics.log` has the one "runs constrained" line and, for the first pane, the "waited N ms" line. Revert: delete the variable, or the snapshot. |
+| **V1** — a real WDAC lockdown | `$x="$env:TEMP\clm.xml"; Copy-Item "$env:windir\schemas\CodeIntegrity\ExamplePolicies\DefaultWindows_Enforced.xml" $x`; admit Folio (unsigned): `New-CIPolicy -Level Hash -UserPEs -ScanPath '<Folio install folder>' -FilePath "$env:TEMP\folio.xml"`, `Merge-CIPolicy -PolicyPaths $x,"$env:TEMP\folio.xml" -OutputFilePath $x`; `ConvertFrom-CIPolicy -XmlFilePath $x -BinaryFilePath "$env:TEMP\clm.cip"`; `CiTool.exe --update-policy "$env:TEMP\clm.cip"`; `CiTool.exe --list-policies` shows it enforced; a new 5.1 says `ConstrainedLanguage`. Check `Get-Command New-CIPolicy` first (the ConfigCI module). | The rows of V0. A second pass with `AllowMicrosoft.xml` (audit mode deleted: `Set-RuleOption -FilePath $x -Option 3 -Delete`) records the same. Remove: `CiTool.exe --remove-policy <PolicyID>`, or the snapshot. |
+### 4.7 Load row: the window thread under a machine-wide CPU load (T-WINDOW-THREAD-UNDER-LOAD) <!-- zh: pending T-WINDOW-THREAD-UNDER-LOAD -->
+
+The owner's report of 2026-10-18 on a machine with nothing else running. `folio-win11`,
+`clean` snapshot, a candidate's `folio.exe`, `conpty.dll` and `OpenConsole.exe` (a release
+build's `target\release`), copied in; no install.
+
+```powershell
+$pass = Get-Content <the VM password file>   # into a variable, never printed
+pwsh -File scripts/release/cleanvm/run-load-row.ps1 -Vmx <folio-win11.vmx> -VmPassword $pass `
+    -Candidate <target\release of the candidate> -Tag before
+```
+
+`run-load-row.ps1` reverts, starts `nogui`, copies the candidate and `guest\load-row.ps1`,
+`guest\cpu-hog.ps1`, `ui-probe.ps1` in, runs the row in the logged-on session and copies out
+`load-<Tag>.txt`, `-perf.txt` (Folio's stderr under `BT_PERF_TRACE=1`), `-diagnostics.log`,
+`-hog.txt`; `read-load-row.ps1` prints the cells (`cells-<Tag>.txt`). In the guest: four rows
+with a box rule printed in the first tab (a frame candidate, as an agent's TUI is), a second
+tab opened over it, then three phases of `-Seconds` (60) each — **baseline**, **hog**
+(`cpu-hog.ps1`: 2 x logical processors spinners at the Normal priority class), **after** —
+with the person's cycle every two seconds: `1..400|%{$_}` typed and Enter, three wheel notches
+up and three down.
+
+| Cell | Read from | Expected (the fix) | Red |
+| --- | --- | --- | --- |
+| turns/s | the budget lines' `turn=` over the phase | the turn rate of the work: tens to a few hundred a second | thousands a second (the loop spins) |
+| stale turns, max, sources | `stale us=` lines and their `suppressed=` | none past a few `SearchWalk`/`ImeCursor` turns | a `stale` line a second naming a clock, `ForegroundProgram` in the unmodified build |
+| delay max | `delay_us=` on the `wall` lines | under one frame in baseline and after; the hog phase says what the guest's scheduler gives | — (reported, not judged) |
+| present cadence | `since_previous_us` of `BT_PERF_TRACE present` | about the display's frame while the pane prints | presents stop while input is sent |
+| echo / notch / output | `event_to_present_us` by `source=` | within a frame or two in every phase | seconds |
+| close | `close ok` / `FAILED close` in `load-<Tag>.txt` (with the processes still standing and `load-<Tag>-hang-reports.zip`) | Folio exits within 30 s of WM_CLOSE | still running: the row's failure |
+
+**The row runs with the first-run card already answered.** Before it launches the candidate, the guest script places `guest/load-row-settings.json` as the clean account's `%APPDATA%\Folio\settings.json`: a schema-25 document, every value the shipped default but the PowerShell invitation (`Declined`). The candidate's own migrations carry it to its version, and the v31 → v32 step writes `first_run_card: Shown`, the product's rule that a returning reader never meets the card. The welcome card and the invitation are therefore not over the pane, and they are not under test here; the first-run card is a row of its own. A guest that already holds a `settings.json` is left as it is.
+
+A phase whose driver cycles never reached Folio is printed `NOT EXERCISED`, and its cells are not a result. The guest is told not to sleep before the row (`powercfg` standby, monitor and hibernate timeouts on AC to 0). The row runs `-NoWait`, and the host waits for `load-<Tag>-done.txt` (bounded at 3 × `-Seconds` + 480 s (the driver waits up to 180 s for the foreground)).
+
+Run it twice: `-Tag before` on the build at the instrumentation commit (the named fold and the `stale_us`/`source=` cells, no fix), `-Tag after` on the fix; the report carries both tables.
+
+**Recorded 2026-10-21** (folio-win11, 2 logical processors, so the hog runs 4 Normal-priority spinners). before3 is the instrumentation build without the fixes (7d00c2ed); after10 is the fix (1b911da7, with main 453c0c7c), on the harness at 81779f7a:
+
+| cell | before3 (7d00c2ed) | after10 (1b911da7) |
+|---|---|---|
+| exercised | yes: the boxed tab printed, 18 / 17 / 19 cycles | yes: the driver chose `class=Window Class title=folio`; 19 / 18 / 20 cycles; keyboard presents 247 / 244 / 259 |
+| turns/s (baseline / hog / after) | ≥103 / ≥127 / ≥97 | ≥83 / ≥152 / ≥55 |
+| delay max | 0 / 0 / 26.5 ms | 0 / 0 / 0 |
+| stale turns (count, max) | 289, 399 ms / 374, 3.4 ms / 397, 437 ms | 229, 532 ms / 549, 462 ms / 262, 526 ms |
+| stale sources | LiveStability, StripAnimation, RefusedFrame (1–5 ms; one 42 ms), ShellCaret, ProgramsEar; TerminalThumbs ~0.4 s twice a phase | LiveStability, RefusedFrame, StripAnimation, TerminalThumbs (~0.5 s), ShellCaret (after) |
+| ForegroundProgram spin | none: the boxed tab was not an armed candidate | none (and the entry is no longer booked) |
+| keyboard echo p50 / p95 | 5.5 / 25 → 21.8 / 50 → 6.6 / 21 ms | 3.9 / 11.8 → 15.9 / 36.9 → 5.0 / 13.3 ms |
+| present cadence p50 | 8.3 → 18.9 → 9.9 ms | 5.9 → 17.8 → 16.0 ms |
+| shell output p50 | 3.1 → 3.3 → 4.2 ms | 2.3 → 3.1 → 3.6 ms |
+| close | ok | ok: `WM_CLOSE posted -> True`, Folio exited |
+
+**What the row measures, and what it does not.**
+- **CPU starvation.** Under the hog, keys echo about 4× slower at the median (3.9 → 15.9 ms; 5.5 → 21.8 ms on before3) and recover after. The present cadence settles at about one per vblank. Shell output barely moves. No wake is ever late (`delay max` 0 in every phase on the fix). That is the per-turn cost residual, measured and not fixed in T-WINDOW-THREAD-UNDER-LOAD.
+- **The stale turns** are the single-extra-turn class: clocks that came due inside the turn that booked them, at 100-odd turns a second. They are not a spin. One shape is recorded for follow-up: `TerminalThumbs` booking an instant about 0.5 s already past, once or twice a phase.
+- **The owner's spin is not reproduced here.** That needs a background tab whose pane keeps redrawing a boxed frame (an armed foreground-program candidate), and this row's boxed tab is printed once. That shape is §4.7b, a 0.4.9 row (row 26), with a trace line that the cadence armed.
+
+**The ten runs that measured nothing, and why** (each fixed in the harness this row lands with):
+
+| runs | cause | fix |
+|---|---|---|
+| before2, after, after3, after4 | the guest suspended itself (ACPI S1, 13–21 min after boot) while a slow logon held `Wait-GuestReady` | `no sleep` steps (`powercfg` standby / monitor / hibernate on AC to 0); the readiness wait prints what it waited for and how long |
+| after5 | the `no sleep` step handed powercfg its words as one argument | through `cmd /c`, not tolerant |
+| the 10-20 run, after6 | the driver was refused the foreground; the first-run card stayed up | the row waits up to 180 s for the keyboard, else `FAILED foreground`; the first run is answered before the launch |
+| main453, after7 | the foreground was taken but not the keyboard (`input_seen=false` all run) | the driver checks the foreground thread's focus window (`GetGUIThreadInfo`) and clicks a verified pixel otherwise; the reader marks `KEYS NOT SEEN BY FOLIO` |
+| after8 | the desktop held the foreground; the click point found no window | an Alt tap before the foreground is asked; a click at the window's verified centre; the close recorded on every road |
+| after6, main453, after7, after9 (the close) | `Process.CloseMainWindow()` and the probe's `AppWindow` both picked winit's `Winit Thread Event Target` popup, so the row typed into and closed a window that draws nothing | the row drives and posts WM_CLOSE to the visible window of winit's application class (`Window Class`); every top-level window is logged |
 
 ## 5. 截图清单
 

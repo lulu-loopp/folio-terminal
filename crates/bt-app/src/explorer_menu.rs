@@ -435,7 +435,63 @@ static KNOWN: Mutex<Option<PackageState>> = Mutex::new(None);
 static BUSY: AtomicBool = AtomicBool::new(false);
 
 /// The outcome of the last press, waiting for the frame that will show it.
-static OUTCOME: Mutex<Option<Result<bool, String>>> = Mutex::new(None);
+static OUTCOME: Mutex<Option<Result<bool, PressFailure>>> = Mutex::new(None);
+
+/// **Why a press did not leave the machine where it asked**, by who said no
+/// (T-PROFILE-INSTALL-REFUSED-START review): the card names Windows only for
+/// Windows' own answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PressFailure {
+    /// Windows refused the deployment, in its own words: `install` says whether
+    /// it was asked to register the package or to remove it.
+    Windows { install: bool, message: String },
+    /// Folio's own sentence: no package file to register, a deployment
+    /// database that would not say what is registered, a job that never
+    /// started or stopped before it finished.
+    Folio(String),
+}
+
+impl PressFailure {
+    /// The card's sentence.
+    #[must_use]
+    pub fn sentence(&self) -> String {
+        match self {
+            Self::Windows {
+                install: true,
+                message,
+            } => crate::i18n::explorer_first_page_failed(message),
+            Self::Windows {
+                install: false,
+                message,
+            } => crate::i18n::explorer_first_page_remove_failed(message),
+            Self::Folio(sentence) => sentence.clone(),
+        }
+    }
+}
+
+/// **What one deployment job has done of its exit**, shared by its body and its
+/// end: a job whose body reported, or reached [`finish_job`], is not reported
+/// or finished again by its end — a panic after the press was answered leaves
+/// the true answer standing.
+#[derive(Default)]
+struct JobExit {
+    reported: AtomicBool,
+    finished: AtomicBool,
+}
+
+impl JobExit {
+    fn report(&self, outcome: Result<bool, PressFailure>) {
+        if !self.reported.swap(true, Ordering::AcqRel) {
+            report(outcome);
+        }
+    }
+
+    fn finish(&self, state: &PackageState) {
+        if !self.finished.swap(true, Ordering::AcqRel) {
+            finish_job(state);
+        }
+    }
+}
 
 /// **Whether this process has registered the package since it started, and
 /// therefore whether Explorer may not have noticed yet** (§7.4b).
@@ -1007,7 +1063,11 @@ pub struct MenuRemovalReport {
 /// thread door at `Normal` (RULES 53's standalone-process exception).
 #[must_use]
 pub fn remove_from_explorer_menu() -> MenuRemovalReport {
-    removal_waited_on(both_registrations_removed)
+    removal_waited_on(
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+        |line| eprintln!("folio {}: {line}", crate::cli::REMOVE_EXPLORER_MENU_FLAG),
+        both_registrations_removed,
+    )
 }
 
 /// **The role the `--remove-explorer-menu` process's main thread takes to wait**:
@@ -1020,34 +1080,62 @@ const REMOVAL_ENTRY: &str = "folio-remove-explorer-menu";
 const ENTERED_ONCE: &str =
     "a door process's main thread has no role before it waits on Explorer, and waits once";
 
-/// [`remove_from_explorer_menu`]'s entry and wait, with the removal it waits on
-/// handed in — the real one there, and in a test one that removes nothing.
-fn removal_waited_on(remove: fn() -> MenuRemovalReport) -> MenuRemovalReport {
+/// [`remove_from_explorer_menu`]'s entry and wait, with the executor the removal's thread is
+/// started by, the voice its end is said in (standard error, as the timeout's line) and the
+/// removal it waits on handed in — the real ones there, and in a test one that removes nothing.
+///
+/// **A thread the door refuses is answered, not thrown** (T-PROFILE-INSTALL-REFUSED-START): it is
+/// said once in `say` and the report says nothing was removed, exit code 1, as a removal nobody
+/// answered does; before, the refusal panicked this process's main thread.
+///
+/// **One line per end** (T-PROFILE-INSTALL-REFUSED-START review): a removal thread that ends
+/// without answering — a panic — closes the channel at once; its end was said by its `Answered`,
+/// and the report says it stopped. Only a wait that ran out says that nothing answered.
+fn removal_waited_on(
+    executor: &crate::lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+    remove: fn() -> MenuRemovalReport,
+) -> MenuRemovalReport {
+    let say = std::sync::Arc::new(say);
+    let ended = std::sync::Arc::clone(&say);
     bt_platform::admission::enter_standalone_main(REMOVAL_ENTRY, |_ctx| {
         let (answered, waiting) = mpsc::channel();
-        bt_platform::spawn_at_priority(
+        let started = executor.start_worker(
             "folio-explorer-removal",
-            bt_platform::ThreadPriority::Normal,
+            crate::lane::Answered::new("the Explorer menu's removal", move |line| ended(line), |_| ()),
             move |_ctx| {
                 let _ = answered.send(remove());
             },
-        )
-        // What `std::thread::spawn` said when the system refused a thread, kept word for word.
-        .expect("failed to spawn thread");
-        waiting.recv_timeout(REMOVAL_TIMEOUT).unwrap_or_else(|_| {
-            let seconds = REMOVAL_TIMEOUT.as_secs();
-            eprintln!(
-                "folio {}: nothing answered within {seconds} seconds",
-                crate::cli::REMOVE_EXPLORER_MENU_FLAG
-            );
-            MenuRemovalReport {
+        );
+        if let Err(end) = started {
+            return MenuRemovalReport {
                 line: format!(
-                    "Folio Explorer menu: nothing answered within {seconds} seconds, \
-                     so nothing is known to have been removed."
+                    "Folio Explorer menu: the removal did not start ({end}), so nothing was removed."
                 ),
                 exit_code: 1,
-            }
-        })
+            };
+        }
+        waiting
+            .recv_timeout(REMOVAL_TIMEOUT)
+            .unwrap_or_else(|unanswered| match unanswered {
+                mpsc::RecvTimeoutError::Disconnected => MenuRemovalReport {
+                    line: "Folio Explorer menu: the removal stopped before it answered, \
+                           so nothing is known to have been removed."
+                        .to_owned(),
+                    exit_code: 1,
+                },
+                mpsc::RecvTimeoutError::Timeout => {
+                    let seconds = REMOVAL_TIMEOUT.as_secs();
+                    say(&format!("nothing answered within {seconds} seconds"));
+                    MenuRemovalReport {
+                        line: format!(
+                            "Folio Explorer menu: nothing answered within {seconds} seconds, \
+                             so nothing is known to have been removed."
+                        ),
+                        exit_code: 1,
+                    }
+                }
+            })
     })
     .expect(ENTERED_ONCE)
 }
@@ -1114,7 +1202,12 @@ pub(crate) enum CleanupRegistration {
 /// (`uninstall::standalone`) — the door's other waits are that worker's too
 /// (T-UNINSTALL-UX; it entered here, for this wait alone, until then).
 pub(crate) fn cleanup_registrations(worker: &WorkerCtx) -> Vec<(Text, CleanupRegistration)> {
-    cleanup_waited_on(worker, both_registrations_cleaned)
+    cleanup_waited_on(
+        worker,
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+        |line| eprintln!("folio: {line}"),
+        both_registrations_cleaned,
+    )
 }
 
 /// The two registrations, each with its answer.
@@ -1128,33 +1221,56 @@ fn both_registrations_cleaned() -> Vec<(Text, CleanupRegistration)> {
     ]
 }
 
-/// [`cleanup_registrations`]' wait, on the door's worker, with the cleanup it
-/// waits on handed in — the real one there, and in a test one that removes
+/// [`cleanup_registrations`]' wait, on the door's worker, with the executor the
+/// cleanup's thread is started by, the voice its end is said in and the cleanup
+/// it waits on handed in — the real ones there, and in a test one that removes
 /// nothing.
+///
+/// **A thread the door refuses is answered, not thrown** (T-PROFILE-INSTALL-REFUSED-START):
+/// said once in `say`, and the door's report reads the registrations as
+/// refused — could not be read, with the door's reason — as it reads a cleanup
+/// nobody answered; before, the refusal panicked the door's main thread. A
+/// cleanup thread that ends without answering closes the channel at once: its
+/// end was said by its `Answered`, and the registrations read as not read,
+/// with no wait named (T-PROFILE-INSTALL-REFUSED-START review).
 fn cleanup_waited_on(
     _worker: &WorkerCtx,
+    executor: &crate::lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
     clean: fn() -> Vec<(Text, CleanupRegistration)>,
 ) -> Vec<(Text, CleanupRegistration)> {
     let (send, receive) = mpsc::channel();
-    bt_platform::spawn_at_priority(
+    let started = executor.start_worker(
         "folio-explorer-cleanup",
-        bt_platform::ThreadPriority::Normal,
+        crate::lane::Answered::new("the Explorer menu's cleanup", say, |_| ()),
         move |_ctx| {
             let _ = send.send(clean());
         },
-    )
-    // What `std::thread::spawn` said when the system refused a thread, kept word for word.
-    .expect("failed to spawn thread");
-    receive.recv_timeout(REMOVAL_TIMEOUT).unwrap_or_else(|_| {
-        vec![(
+    );
+    if let Err(end) = started {
+        return vec![(
             Text::CleanupMarkExplorer,
-            CleanupRegistration::Refused(format!(
-                "{} ({}s)",
-                Text::CleanupSystemUnknown.text(),
-                REMOVAL_TIMEOUT.as_secs()
-            )),
-        )]
-    })
+            CleanupRegistration::Refused(format!("{} ({end})", Text::CleanupSystemUnknown.text())),
+        )];
+    }
+    receive
+        .recv_timeout(REMOVAL_TIMEOUT)
+        .unwrap_or_else(|unanswered| {
+            let reason = match unanswered {
+                mpsc::RecvTimeoutError::Disconnected => {
+                    Text::CleanupSystemUnknown.text().to_owned()
+                }
+                mpsc::RecvTimeoutError::Timeout => format!(
+                    "{} ({}s)",
+                    Text::CleanupSystemUnknown.text(),
+                    REMOVAL_TIMEOUT.as_secs()
+                ),
+            };
+            vec![(
+                Text::CleanupMarkExplorer,
+                CleanupRegistration::Refused(reason),
+            )]
+        })
 }
 
 fn cleanup_package() -> CleanupRegistration {
@@ -1446,6 +1562,7 @@ fn probe(deployment: &impl Deployment, start: &Start<'_>, latch: &AtomicBool) ->
     if !latched {
         return probed;
     }
+    let _unwound = LatchUnwound(latch);
     // The file, and the folder to register it against. Either being absent is
     // the same answer, so they are fetched as one.
     let target = start
@@ -1497,33 +1614,113 @@ pub fn begin_probe() {
         remember(PackageState::Unsupported);
         return;
     }
-    bt_platform::spawn_at_priority(
-        "folio-explorer-probe",
-        bt_platform::ThreadPriority::Normal,
-        |_ctx| {
-            let start = Start::this_process();
-            let Some(probed) =
-                probe_at_start(crate::update_trial::defer, &ThisMachine, &start, &BUSY)
-            else {
-                return;
-            };
-            if probed.repaired {
-                REGISTERED_HERE.store(true, Ordering::Release);
-            }
-            // Once per start, whatever it came to: the renewal is re-evaluated
-            // at every start, so the log is where a reader sees which way this
-            // one went.
-            eprintln!("{}", probed.renewal.log_line(start.this_build));
-            remember_renewal_refusal(probed.renewal.refusal().map(str::to_owned));
-            remember(probed.state.clone());
-            if probed.latched {
-                finish_job(&probed.state);
-            }
-            wake();
-        },
-    )
-    // What `std::thread::spawn` said when the system refused a thread, kept word for word.
-    .expect("failed to spawn thread");
+    start_probe(
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+        crate::diagnostics::note,
+    );
+}
+
+/// [`begin_probe`]'s worker, with the executor it is started by and the voice its end is said in
+/// handed in; `true` when it started.
+///
+/// **A start the door refuses is said once and answered as the probe's own "not known"**
+/// (T-PROFILE-INSTALL-REFUSED-START; before, it panicked the window thread that asked): the row
+/// stays [`PackageState::Unknown`], which is true — nothing was asked — and which a press already
+/// treats as not known, so the press runs its job and reads the machine itself. No repair or
+/// renewal ran, and none was held back for an update's commit (the trial's gate is asked on the
+/// worker); the next launch probes again. Nothing changed, so nothing is woken.
+///
+/// A probe that panics is said once the same way. If it held the deployment latch, the latch is
+/// let go as the thread unwinds ([`LatchUnwound`]), and a press written down meanwhile is run
+/// ([`run_queued_press`]): before, the panic ended the process.
+fn start_probe(
+    executor: &crate::lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+) -> bool {
+    start_probe_with(executor, say, |_ctx| {
+        let start = Start::this_process();
+        let Some(probed) = probe_at_start(crate::update_trial::defer, &ThisMachine, &start, &BUSY)
+        else {
+            return;
+        };
+        let unwound = probed.latched.then(|| LatchUnwound(&BUSY));
+        if probed.repaired {
+            REGISTERED_HERE.store(true, Ordering::Release);
+        }
+        // Once per start, whatever it came to: the renewal is re-evaluated
+        // at every start, so the log is where a reader sees which way this
+        // one went.
+        eprintln!("{}", probed.renewal.log_line(start.this_build));
+        remember_renewal_refusal(probed.renewal.refusal().map(str::to_owned));
+        remember(probed.state.clone());
+        // Let go before `finish_job`, which may hand the latch to a press written down
+        // meanwhile: the guard is this probe's, and a panic after the hand-over must not
+        // take the latch from that press's job.
+        drop(unwound);
+        if probed.latched {
+            finish_job(&probed.state);
+        }
+        wake();
+    })
+}
+
+/// [`start_probe`] with the probe's body handed in — the real one there, and in a test one that
+/// takes the latch and panics. A probe that panics is said once and runs the press written down
+/// while it held the latch ([`run_queued_press`]), by the same executor and voice.
+fn start_probe_with(
+    executor: &crate::lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+    body: impl FnOnce(&WorkerCtx) + Send + 'static,
+) -> bool {
+    let say: std::sync::Arc<dyn Fn(&str) + Send + Sync> = std::sync::Arc::new(say);
+    let voice = std::sync::Arc::clone(&say);
+    let press = executor.clone();
+    executor
+        .start_worker(
+            "folio-explorer-probe",
+            crate::lane::Answered::new(
+                "the Explorer package probe",
+                move |line| voice(line),
+                move |end| {
+                    if end.started() {
+                        run_queued_press(&press, &say);
+                    }
+                },
+            ),
+            body,
+        )
+        .is_ok()
+}
+
+/// **The deployment latch, let go if the thread holding it unwinds** (T-PROFILE-INSTALL-REFUSED-START).
+/// A probe that took the latch and then panicked would otherwise hold it for the rest of the run,
+/// and every later press would be written down for a job that never finishes. Dropped on a return,
+/// it does nothing: the holder hands the latch on itself ([`finish_job`]).
+struct LatchUnwound<'a>(&'a AtomicBool);
+
+impl Drop for LatchUnwound<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// **The press written down while a job held the latch, run now** — for a holder that ended
+/// without handing the latch on ([`LatchUnwound`]). A press taken by a job still running is
+/// written down again, as [`request`] writes any press it cannot start.
+fn run_queued_press(
+    executor: &crate::lane::Executor,
+    say: &std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+) {
+    if QUEUED_SET.swap(false, Ordering::AcqRel) {
+        let say = std::sync::Arc::clone(say);
+        ask_for(
+            executor,
+            move |line| say(line),
+            QUEUED.load(Ordering::Acquire),
+        );
+    }
 }
 
 /// Register the package, or take it back off — half of what the row's third
@@ -1562,6 +1759,19 @@ static QUEUED: AtomicBool = AtomicBool::new(false);
 static QUEUED_SET: AtomicBool = AtomicBool::new(false);
 
 pub fn request(install: bool) {
+    ask_for(
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+        crate::diagnostics::note,
+        install,
+    );
+}
+
+/// [`request`] with the executor a job is started by and the voice its end is said in handed in.
+fn ask_for(
+    executor: &crate::lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+    install: bool,
+) {
     if BUSY.swap(true, Ordering::AcqRel) {
         // **The press is written down rather than dropped** (review row R4-12).
         // The job in flight reads this on its way out and runs one more job if
@@ -1573,7 +1783,7 @@ pub fn request(install: bool) {
         return;
     }
     QUEUED_SET.store(false, Ordering::Release);
-    run_request(install);
+    start_request(executor, say, install);
 }
 
 /// **Whether a deployment is running right now** (review row R4-12).
@@ -1589,72 +1799,112 @@ pub fn job_in_flight() -> bool {
 
 /// One deployment, on a thread of its own, with the latch already taken.
 fn run_request(install: bool) {
+    start_request(
+        &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+        crate::diagnostics::note,
+        install,
+    );
+}
+
+/// [`run_request`] with the executor and the voice handed in; `true` when the job started.
+///
+/// **Every press is answered** (T-PROFILE-INSTALL-REFUSED-START; before, a refused start panicked
+/// the window thread that pressed): a start the door refuses is said once in `say` and answered
+/// as the press's own failure — the card on the window that pressed, in
+/// [`crate::i18n::unfinished_change`]'s words — and the job's exit is taken as any job's
+/// ([`finish_job`], against the state as last read: nothing was changed), so the latch is let go
+/// or handed to a press written down meanwhile. The switch is still there, so the same press asks
+/// again. A job that panics is answered the same way, with the sentence that claims nothing about
+/// what it did.
+fn start_request(
+    executor: &crate::lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+    install: bool,
+) -> bool {
     let package = package_file();
-    bt_platform::spawn_at_priority(
-        "folio-explorer-deploy",
-        bt_platform::ThreadPriority::Normal,
-        move |_ctx| {
-            let outcome = if install {
-                match package.as_deref().and_then(|package| {
-                    // The file, and the folder to register it against. Either being
-                    // absent is the same answer, so they are fetched as one.
-                    Some((package, package.parent()?))
-                }) {
-                    Some((package, here)) => msix::register(package, here).map(|()| {
-                        // The row's line says what to do if Explorer has not
-                        // noticed — see `REGISTERED_HERE`. Set on the way out of a
-                        // registration that worked and never on one that did not,
-                        // because a refusal leaves the menu exactly as it was.
-                        REGISTERED_HERE.store(true, Ordering::Release);
-                        true
-                    }),
-                    None => Err(Text::ExplorerFirstPageNoPackage.text().to_owned()),
-                }
-            } else {
-                // **The name is fetched here and not carried in from the press.** The
-                // cached answer can be [`PackageState::Unknown`] — the first probe of
-                // a launch has not landed — and a removal that read `Unknown` as "no
-                // package" would report success over a package that is still
-                // registered. This thread can afford the question; the one that took
-                // the press could not.
-                let state = read_state();
-                match removal_for(&state) {
-                    // **A question Windows refused is not an answer** (R2-20).
-                    // Reporting success here would put the row on `Off` over a
-                    // package that may well still be registered; the press is told
-                    // what actually happened, and the next one asks again.
-                    Removal::Unanswerable => {
-                        Err(Text::ExplorerFirstPageUnreadable.text().to_owned())
+    let job = std::sync::Arc::new(JobExit::default());
+    let ended = std::sync::Arc::clone(&job);
+    executor
+        .start_worker(
+            "folio-explorer-deploy",
+            crate::lane::Answered::new("the Explorer menu's deployment", say, move |end| {
+                let sentence = crate::i18n::unfinished_change(end.started()).text();
+                ended.report(Err(PressFailure::Folio(sentence.to_owned())));
+                ended.finish(&state());
+            }),
+            move |_ctx| {
+                let outcome = if install {
+                    match package.as_deref().and_then(|package| {
+                        // The file, and the folder to register it against. Either being
+                        // absent is the same answer, so they are fetched as one.
+                        Some((package, package.parent()?))
+                    }) {
+                        Some((package, here)) => msix::register(package, here)
+                            .map_err(|message| PressFailure::Windows {
+                                install: true,
+                                message,
+                            })
+                            .map(|()| {
+                                // The row's line says what to do if Explorer has not
+                                // noticed — see `REGISTERED_HERE`. Set on the way out of a
+                                // registration that worked and never on one that did not,
+                                // because a refusal leaves the menu exactly as it was.
+                                REGISTERED_HERE.store(true, Ordering::Release);
+                                true
+                            }),
+                        None => Err(PressFailure::Folio(
+                            Text::ExplorerFirstPageNoPackage.text().to_owned(),
+                        )),
                     }
-                    Removal::Remove(full_name) => msix::remove(full_name).map(|()| {
-                        // **And the sentence goes away with the registration it was
-                        // about.** `REGISTERED_HERE` means "this process registered
-                        // the package and has not since taken it back"; a flag that
-                        // only ever went up would leave the row telling a reader who
-                        // just switched this off that Folio is registered for the
-                        // first page.
-                        REGISTERED_HERE.store(false, Ordering::Release);
-                        false
-                    }),
-                    // Nothing registered and a press asking for that: the machine is
-                    // already where the press wanted it.
-                    Removal::AlreadyGone => Ok(false),
+                } else {
+                    // **The name is fetched here and not carried in from the press.** The
+                    // cached answer can be [`PackageState::Unknown`] — the first probe of
+                    // a launch has not landed — and a removal that read `Unknown` as "no
+                    // package" would report success over a package that is still
+                    // registered. This thread can afford the question; the one that took
+                    // the press could not.
+                    let state = read_state();
+                    match removal_for(&state) {
+                        // **A question Windows refused is not an answer** (R2-20).
+                        // Reporting success here would put the row on `Off` over a
+                        // package that may well still be registered; the press is told
+                        // what actually happened, and the next one asks again.
+                        Removal::Unanswerable => Err(PressFailure::Folio(
+                            Text::ExplorerFirstPageUnreadable.text().to_owned(),
+                        )),
+                        Removal::Remove(full_name) => msix::remove(full_name)
+                            .map_err(|message| PressFailure::Windows {
+                                install: false,
+                                message,
+                            })
+                            .map(|()| {
+                                // **And the sentence goes away with the registration it was
+                                // about.** `REGISTERED_HERE` means "this process registered
+                                // the package and has not since taken it back"; a flag that
+                                // only ever went up would leave the row telling a reader who
+                                // just switched this off that Folio is registered for the
+                                // first page.
+                                REGISTERED_HERE.store(false, Ordering::Release);
+                                false
+                            }),
+                        // Nothing registered and a press asking for that: the machine is
+                        // already where the press wanted it.
+                        Removal::AlreadyGone => Ok(false),
+                    }
+                };
+                let state = read_state();
+                // A press that worked left the registration where the reader asked
+                // for it, so a refusal of this start's renewal is no longer the
+                // row's news (U-25).
+                if outcome.is_ok() {
+                    remember_renewal_refusal(None);
                 }
-            };
-            let state = read_state();
-            // A press that worked left the registration where the reader asked
-            // for it, so a refusal of this start's renewal is no longer the
-            // row's news (U-25).
-            if outcome.is_ok() {
-                remember_renewal_refusal(None);
-            }
-            remember(state.clone());
-            report(outcome);
-            finish_job(&state);
-        },
-    )
-    // What `std::thread::spawn` said when the system refused a thread, kept word for word.
-    .expect("failed to spawn thread");
+                remember(state.clone());
+                job.report(outcome);
+                job.finish(&state);
+            },
+        )
+        .is_ok()
 }
 
 /// **The one exit every deployment takes** (review row R4-12).
@@ -1687,7 +1937,7 @@ fn queued_next(queued: Option<bool>, registered: bool) -> Option<bool> {
     queued.filter(|wanted| *wanted != registered)
 }
 
-fn report(outcome: Result<bool, String>) {
+fn report(outcome: Result<bool, PressFailure>) {
     *OUTCOME
         .lock()
         .expect("the package outcome is not held across a panic") = Some(outcome);
@@ -1695,7 +1945,7 @@ fn report(outcome: Result<bool, String>) {
 }
 
 /// The outcome of a press, taken once by the window that shows it.
-pub fn take_outcome() -> Option<Result<bool, String>> {
+pub fn take_outcome() -> Option<Result<bool, PressFailure>> {
     OUTCOME
         .lock()
         .expect("the package outcome is not held across a panic")
@@ -1712,7 +1962,7 @@ pub fn take_outcome() -> Option<Result<bool, String>> {
 /// The switch has one label on every machine and means a different amount on
 /// each of them, so this line is where the difference is written. It is the
 /// same job the line did while the top answer could be greyed —
-/// `psreadline::row_description`'s idiom, a control's own line carrying what
+/// the retired PSReadLine row's idiom, a control's own line carrying what
 /// the control cannot say — asked now of a switch that is never refused.
 #[must_use]
 pub fn row_description() -> &'static str {
@@ -2637,7 +2887,11 @@ mod tests {
         ) {
             return;
         }
-        let report = removal_waited_on(removes_nothing);
+        let report = removal_waited_on(
+            &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+            |line| panic!("the removal started and returned, so nothing is said: {line}"),
+            removes_nothing,
+        );
         assert_eq!(report.line, r#"Worker("folio-explorer-removal")"#);
         assert_eq!(report.exit_code, 0);
         assert_eq!(role(), Role::Worker("folio-remove-explorer-menu"));
@@ -2682,7 +2936,12 @@ mod tests {
         }
         let cleaned = crate::uninstall::standalone(|worker| {
             assert_eq!(role(), Role::Worker("folio-uninstall-cleanup"));
-            cleanup_waited_on(worker, cleans_nothing)
+            cleanup_waited_on(
+                worker,
+                &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
+                |line| panic!("the cleanup started and returned, so nothing is said: {line}"),
+                cleans_nothing,
+            )
         });
         let [(Text::CleanupMarkExplorer, CleanupRegistration::Refused(ran_as))] =
             cleaned.as_slice()
@@ -2968,12 +3227,14 @@ mod tests {
             &gate,
             (
                 &path,
-                &path.with_file_name(crate::update_txn::UNKEPT_FILE),
+                crate::update_trial::Mark::on_disk(
+                    &path.with_file_name(crate::update_txn::UNKEPT_FILE),
+                ),
                 &path.with_file_name("health-test"),
             ),
             txn,
-            Duration::from_millis(5),
-            &|| {},
+            crate::update_trial::Cadence::every(Duration::from_millis(5)),
+            crate::update_trial::Told::to_the_log(&|| {}),
             None,
             &mut crate::update_trial::watchdog_asleep(),
         );
@@ -3112,5 +3373,329 @@ mod tests {
             "no path in the log: {log}"
         );
         let _ = std::fs::remove_dir_all(&here);
+    }
+
+    /// **Taken in turn by the tests that hold the deployment latch or read a press's outcome**:
+    /// both are the process's, and the suite runs tests on parallel threads.
+    static DEPLOYMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The scripted executor with its next start refused, and a voice collecting its lines.
+    fn refusing() -> (
+        crate::lane::Executor,
+        impl Fn(&str) + Send + Sync + 'static,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        gate.refuse_next_start();
+        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let lines = std::sync::Arc::clone(&said);
+        (
+            crate::lane::Executor::scripted(gate),
+            move |line: &str| lines.lock().unwrap().push(line.to_owned()),
+            said,
+        )
+    }
+
+    /// Asserts `said` is one line in the door's words.
+    fn said_once(said: &std::sync::Mutex<Vec<String>>) {
+        let said = said.lock().unwrap().clone();
+        assert_eq!(said.len(), 1, "the refused start is said once: {said:?}");
+        assert!(
+            said[0].contains(crate::lane::REFUSED_START),
+            "in the door's words: {said:?}"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **a launch probe the thread door refused is said
+    /// once and holds nothing**: the window thread that asked goes on, the row stays "not known",
+    /// and the deployment latch is free for a press. Before, the refusal panicked the window
+    /// thread (an `expect` on the thread door's answer).
+    ///
+    /// MUTATIONS: put the `expect` back on the start — the test panics; the probe's `Answered`
+    /// not saying — no line.
+    #[test]
+    fn a_refused_probe_is_said_and_holds_nothing() {
+        let _turn = DEPLOYMENT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (executor, say, said) = refusing();
+        assert!(!start_probe(&executor, say), "the door refused the start");
+        said_once(&said);
+        assert!(!job_in_flight(), "the deployment latch is free for a press");
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **a press whose deployment the thread door refused
+    /// is answered on the window that pressed, and lets the latch go**: the press's outcome is its
+    /// failure, in the sentence that says nothing was changed (the window's card), the refusal is
+    /// said once, and the next press starts a job of its own. Before, the refusal panicked the
+    /// window thread and left the latch taken.
+    ///
+    /// MUTATIONS: put the `expect` back on the start — the test panics; the deployment's
+    /// `Answered` not reporting — no outcome; not finishing the job — the latch stays taken and
+    /// every later press is written down for a job that never ends.
+    #[test]
+    fn a_refused_press_is_answered_and_lets_the_latch_go() {
+        let _turn = DEPLOYMENT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (executor, say, said) = refusing();
+        ask_for(&executor, say, true);
+        assert_eq!(
+            take_outcome(),
+            Some(Err(PressFailure::Folio(
+                Text::ChangeNotStarted.text().to_owned()
+            ))),
+            "the press is answered as its own failure"
+        );
+        said_once(&said);
+        assert!(!job_in_flight(), "and the latch is let go");
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **a probe that panicked while it held the
+    /// deployment latch lets it go as it unwinds**, and a dropped guard on a return does not.
+    ///
+    /// MUTATION: `LatchUnwound` letting go on a return as well — the probe's own `finish_job`
+    /// would be handed a latch someone else may hold; never letting go — a probe that panicked
+    /// holds the latch for the rest of the run.
+    #[test]
+    fn a_latch_held_through_a_panic_is_let_go() {
+        let latch = AtomicBool::new(true);
+        drop(LatchUnwound(&latch));
+        assert!(
+            latch.load(Ordering::Acquire),
+            "a return leaves the latch to its holder"
+        );
+        let unwound = crate::contained_panic::contain(|| {
+            let _held = LatchUnwound(&latch);
+            panic!("the explorer suite fails this probe on purpose");
+        });
+        assert!(unwound.is_err(), "the probe panicked");
+        assert!(!latch.load(Ordering::Acquire), "and its latch was let go");
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **the `--remove-explorer-menu` process reports a
+    /// removal thread the door refused**: one line saying nothing was removed, exit code 1, and the
+    /// refusal said once on standard error. Before, the refusal panicked the process's main
+    /// thread. Run alone in a process of its own, because the entry is once per process.
+    ///
+    /// MUTATION: put the `expect` back on the start — the child panics.
+    #[test]
+    fn a_refused_menu_removal_thread_is_reported() {
+        fn never_runs() -> MenuRemovalReport {
+            unreachable!("the door refused the removal's thread")
+        }
+        if !crate::test_support::alone_in_a_process(
+            "explorer_menu::tests::a_refused_menu_removal_thread_is_reported",
+            b"",
+        ) {
+            return;
+        }
+        let (executor, say, said) = refusing();
+        let report = removal_waited_on(&executor, say, never_runs);
+        assert_eq!(report.exit_code, 1);
+        assert!(
+            report.line.contains("nothing was removed")
+                && report.line.contains(crate::lane::REFUSED_START),
+            "{}",
+            report.line
+        );
+        said_once(&said);
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START) — **the uninstaller's door reports a cleanup thread
+    /// the door refused**: the Explorer registrations read as refused, could not be read, with the
+    /// door's reason, and the refusal is said once. Before, the refusal panicked the door's main
+    /// thread. Alone in a process of its own, through the door's own entry.
+    ///
+    /// MUTATION: put the `expect` back on the start — the child panics.
+    #[test]
+    fn a_refused_uninstall_cleanup_thread_is_reported() {
+        fn never_runs() -> Vec<(Text, CleanupRegistration)> {
+            unreachable!("the door refused the cleanup's thread")
+        }
+        if !crate::test_support::alone_in_a_process(
+            "explorer_menu::tests::a_refused_uninstall_cleanup_thread_is_reported",
+            b"",
+        ) {
+            return;
+        }
+        let (executor, say, said) = refusing();
+        let cleaned = crate::uninstall::standalone(|worker| {
+            cleanup_waited_on(worker, &executor, say, never_runs)
+        });
+        let [(Text::CleanupMarkExplorer, CleanupRegistration::Refused(reason))] =
+            cleaned.as_slice()
+        else {
+            panic!("the cleanup is reported as refused");
+        };
+        assert!(
+            reason.contains(Text::CleanupSystemUnknown.text())
+                && reason.contains(crate::lane::REFUSED_START),
+            "{reason}"
+        );
+        said_once(&said);
+    }
+
+    /// The scripted executor that starts every worker, and a voice sending its lines on a
+    /// channel — read until every holder of the voice has let it go.
+    fn starting() -> (
+        crate::lane::Executor,
+        impl Fn(&str) + Send + Sync + 'static,
+        std::sync::mpsc::Receiver<String>,
+    ) {
+        let (said, lines) = std::sync::mpsc::channel::<String>();
+        (
+            crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default())),
+            move |line: &str| said.send(line.to_owned()).unwrap(),
+            lines,
+        )
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **a removal thread that panicked is one
+    /// line, not two**: its end is said once, and the report says the removal stopped — never a
+    /// second line that nothing answered within the wait, which did not run out. Alone in a
+    /// process of its own, because the entry is once per process.
+    ///
+    /// MUTATION: read a closed channel as a timeout — a second line, "nothing answered within 30
+    /// seconds", and a report naming the wait.
+    #[test]
+    fn a_removal_thread_that_panicked_is_said_once() {
+        fn panics() -> MenuRemovalReport {
+            panic!("the explorer suite fails this removal on purpose")
+        }
+        if !crate::test_support::alone_in_a_process(
+            "explorer_menu::tests::a_removal_thread_that_panicked_is_said_once",
+            b"",
+        ) {
+            return;
+        }
+        let (executor, say, lines) = starting();
+        let report = removal_waited_on(&executor, say, panics);
+        let said = lines.iter().collect::<Vec<_>>();
+        assert_eq!(report.exit_code, 1);
+        assert!(
+            report.line.contains("stopped before it answered"),
+            "{}",
+            report.line
+        );
+        assert_eq!(said.len(), 1, "one line for one end: {said:?}");
+        assert!(
+            said[0].contains("on purpose"),
+            "the panic is what is said: {said:?}"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **a cleanup thread that panicked reads as
+    /// not read, with no wait named**, and its end is said once. Alone in a process of its own.
+    ///
+    /// MUTATION: read a closed channel as a timeout — the reason names thirty seconds nobody
+    /// waited.
+    #[test]
+    fn a_cleanup_thread_that_panicked_names_no_wait() {
+        fn panics() -> Vec<(Text, CleanupRegistration)> {
+            panic!("the explorer suite fails this cleanup on purpose")
+        }
+        if !crate::test_support::alone_in_a_process(
+            "explorer_menu::tests::a_cleanup_thread_that_panicked_names_no_wait",
+            b"",
+        ) {
+            return;
+        }
+        let (executor, say, lines) = starting();
+        let cleaned = crate::uninstall::standalone(|worker| {
+            cleanup_waited_on(worker, &executor, say, panics)
+        });
+        let said = lines.iter().collect::<Vec<_>>();
+        let [(Text::CleanupMarkExplorer, CleanupRegistration::Refused(reason))] =
+            cleaned.as_slice()
+        else {
+            panic!("the cleanup is reported as refused");
+        };
+        assert_eq!(reason, Text::CleanupSystemUnknown.text());
+        assert_eq!(said.len(), 1, "one line for one end: {said:?}");
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **a probe that panics while it holds the
+    /// latch runs the press written down behind it.** The probe takes the latch, a press arrives
+    /// and is written down, and the probe panics: the latch is let go as it unwinds, and the
+    /// probe's end runs the press — here refused at the door, so the press is answered with its
+    /// own failure and the latch is let go again. Both ends are said.
+    ///
+    /// MUTATION: drop `run_queued_press` from the probe's end — the press is never run, no
+    /// outcome, and it stays written down.
+    #[test]
+    fn a_probe_that_panicked_runs_the_press_behind_it() {
+        let _turn = DEPLOYMENT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let gate = std::sync::Arc::new(crate::lane::Gate::default());
+        let executor = crate::lane::Executor::scripted(std::sync::Arc::clone(&gate));
+        let (said, lines) = std::sync::mpsc::channel::<String>();
+        let pressed = said.clone();
+        let behind = executor.clone();
+        let started = start_probe_with(
+            &executor,
+            move |line| said.send(line.to_owned()).unwrap(),
+            move |_ctx| {
+                assert!(
+                    !BUSY.swap(true, Ordering::AcqRel),
+                    "the probe takes the latch"
+                );
+                let _unwound = LatchUnwound(&BUSY);
+                ask_for(
+                    &behind,
+                    move |line| pressed.send(line.to_owned()).unwrap(),
+                    true,
+                );
+                // The press's job is refused at the door, so no deployment runs in the suite.
+                gate.refuse_next_start();
+                panic!("the explorer suite fails this probe on purpose");
+            },
+        );
+        assert!(started, "the probe started");
+        let said = lines.iter().collect::<Vec<_>>();
+        assert_eq!(
+            take_outcome(),
+            Some(Err(PressFailure::Folio(
+                Text::ChangeNotStarted.text().to_owned()
+            ))),
+            "the press behind the probe ran, and was answered"
+        );
+        assert!(!job_in_flight(), "and the latch is free");
+        assert!(
+            !QUEUED_SET.load(Ordering::Acquire),
+            "nothing is left written down"
+        );
+        assert_eq!(
+            said.len(),
+            2,
+            "the probe's panic and the press's refusal: {said:?}"
+        );
+    }
+
+    /// RED (T-PROFILE-INSTALL-REFUSED-START review) — **a press's card names Windows only for
+    /// Windows' answer**, with the verb of what it was asked: register for On, remove for Off.
+    /// Folio's own sentence — a job that did not start, a package file that is not there — is the
+    /// card as it is.
+    ///
+    /// MUTATIONS: give `PressFailure::Folio` the Windows prefix — Folio's refusal blames Windows;
+    /// render a refused removal with `explorer_first_page_failed` — Off reads "register".
+    #[test]
+    fn a_press_card_names_windows_only_for_windows_answers() {
+        let refused = |install| PressFailure::Windows {
+            install,
+            message: "0x80073CF9".to_owned(),
+        };
+        assert_eq!(
+            refused(true).sentence(),
+            crate::i18n::explorer_first_page_failed("0x80073CF9")
+        );
+        assert_eq!(
+            refused(false).sentence(),
+            crate::i18n::explorer_first_page_remove_failed("0x80073CF9")
+        );
+        assert_ne!(refused(true).sentence(), refused(false).sentence());
+        let own = Text::ChangeNotStarted.text();
+        assert_eq!(PressFailure::Folio(own.to_owned()).sentence(), own);
     }
 }

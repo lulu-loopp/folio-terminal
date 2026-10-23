@@ -1560,3 +1560,267 @@ fn a_cancelled_folder_chooser_asks_the_window_for_nothing() {
         Some(FolderPick::Reroot(SeatId(7))),
     );
 }
+
+// ── Issue #28: a Recent row reopened, and the files card it is asked for ──
+
+/// An account whose home is `home`, and nothing else.
+struct HomeIs(PathBuf);
+
+impl bt_pty::ShellEnvironment for HomeIs {
+    fn var_os(&self, key: &str) -> Option<std::ffi::OsString> {
+        (key == profiles::home_variable(profiles::SeedPlatform::of_this_build()))
+            .then(|| self.0.clone().into_os_string())
+    }
+
+    fn is_file(&self, _: &Path) -> bool {
+        false
+    }
+}
+
+/// **A `profile_id` opened in a folder, closed into Recent and reopened from its row**, through
+/// the vault's own doors (`SeedVault::record`, then `SeedVault::take` as the menu's row does) and
+/// the seed `Runtime::reopen_recent` rebuilds from a `Seed::Term` — `recent_term_leaf_seed`, the
+/// function the product calls (the entry's own profile through `revived_profile`, its folder
+/// carried). The pane is then born by `create_leaf_session` itself, as it bears a pane with no
+/// shell behind it (the probe's direct input), in the account `account` describes — the
+/// environment it is handed — with a `PtyWakeSignal` over a headless loop's proxy, so no program
+/// starts, no event loop is made and nothing reports a folder (T-HEADLESS-RUNTIME-SEAM's
+/// additions (a), (b) and (c)).
+///
+/// Answers the pane, and the directory its program would have been started in.
+fn reopened_from_recent(
+    profile_id: &str,
+    folder: &Path,
+    account: &HomeIs,
+) -> (LeafSession, Option<PathBuf>) {
+    let mut vault = seed::SeedVault::default();
+    vault.record(
+        seed::Seed::Term {
+            profile_id: profile_id.to_owned(),
+            cwd: folder.display().to_string(),
+            manual_name: None,
+        },
+        Vec::new(),
+        std::time::UNIX_EPOCH + Duration::from_secs(1_000),
+    );
+    let entry = vault.take(0).expect("the row the reader pressed");
+    let seed::Seed::Term {
+        profile_id, cwd, ..
+    } = entry.seed
+    else {
+        panic!("a terminal was recorded: {:?}", entry.seed);
+    };
+    let seed = crate::runtime::recent_term_leaf_seed(&profile_id, cwd);
+    let every_row =
+        profiles::ProfilePrograms::with_only(&(0..profiles::count()).collect::<Vec<_>>());
+    let (born, started) = birth_here(&seed, "", &every_row).expect("every row is answered");
+    assert_eq!(started, Started::AsAsked, "{profile_id} is born as itself");
+    let profiles::BirthPlace { place, .. } = profiles::spawn_place(
+        profiles::index_of_id(&born.profile),
+        born.cwd.clone(),
+        account,
+    );
+    let wake = PtyWakeSignal::new(crate::headless::LoopEvents::default().proxy());
+    let leaf = create_leaf_session(
+        LeafView {
+            text_scale: TextScale::ACTUAL,
+            metrics: fixture_cell_metrics(1.0, 16.0),
+        },
+        bt_render::SeatViewport::whole(800, 600),
+        LeafId {
+            tab: TabId(1),
+            seat: SeatId(1),
+        },
+        &wake,
+        Some("π 已就绪 ready\r\n".as_bytes()),
+        &seed,
+        &every_row,
+        "",
+        FormulaSwitches::from_settings(&bt_persist::SettingsV1::default()),
+        NonZeroUsize::new(1_000).unwrap(),
+        true,
+        account,
+    )
+    .expect("a pane with no shell behind it is born");
+    (leaf, place.working_directory)
+}
+
+/// The reopened pane stands in the entry's folder for the files card, and its program was asked
+/// to start there — with the account's home elsewhere and nothing ever reported by the pane.
+fn a_reopened_recent_row_stands_in_its_folder(profile_id: &str) {
+    let root = bt_testpath::temp_path("recent-road");
+    let folder = root.join("沙盒 sandbox");
+    let home = root.join("家 home");
+    // Neither the place a pane is started in nor the card's folder is asked of the disk, so the
+    // two folders are only names.
+    let account = HomeIs(home.clone());
+    let (leaf, working_directory) = reopened_from_recent(profile_id, &folder, &account);
+    let card = PathBuf::from(
+        files_root_of(
+            Some(leaf.folder(&crate::pane_folder::SystemProcessFolders)),
+            &account,
+        )
+        .root,
+    );
+    assert_eq!(
+        working_directory.as_deref(),
+        Some(folder.as_path()),
+        "{profile_id}: the program is started in the entry's folder"
+    );
+    assert_eq!(
+        leaf.spawn_place.as_deref(),
+        Some(folder.as_path()),
+        "{profile_id}: the pane records the folder it was started in"
+    );
+    assert_eq!(
+        leaf.session.working_directory(),
+        None,
+        "{profile_id}: nothing in the pane reported a folder"
+    );
+    assert_eq!(
+        card, folder,
+        "{profile_id}: the files card opens on the entry's folder, not on {home:?}"
+    );
+}
+
+/// RED (issue #28, Windows) — **a `pi` pane reopened from a Recent row shows the row's folder on
+/// the files card**, not the account's home: `pi` is a program profile with no shell integration
+/// (`start_at: Inherit`, `starting_dir: AccountHome`), so its pane never reports a folder and
+/// stands, for its whole life, in the folder it was opened in. The `pi` row is in the Windows
+/// table only; the same road for the host's own fallback shell is
+/// [`a_shell_reopened_from_a_recent_row_shows_its_folder_on_the_files_card`].
+///
+/// MUTATION (observed red): `files_root_of` reading `DualPlaneSession::working_directory` else
+/// the home (0.4.7's reader) — the card is the home folder. MUTATION (observed red): the rebuilt
+/// seed without its `Carried` folder (`cwd: None`) — the program is started in the home folder.
+#[cfg(windows)]
+#[test]
+fn a_pi_pane_reopened_from_a_recent_row_shows_its_folder_on_the_files_card() {
+    a_reopened_recent_row_stands_in_its_folder("pi");
+}
+
+/// RED (issue #28) — the same road for the host table's fallback shell, on every platform: a pane
+/// reopened from a Recent row, before its shell has said anything, shows the row's folder on the
+/// files card and was started there.
+///
+/// MUTATIONS as for [`a_pi_pane_reopened_from_a_recent_row_shows_its_folder_on_the_files_card`].
+#[test]
+fn a_shell_reopened_from_a_recent_row_shows_its_folder_on_the_files_card() {
+    a_reopened_recent_row_stands_in_its_folder(profiles::fallback_profile_id());
+}
+
+// ── T-CWD-FROM-PROCESS: the card's folder when the shell has said nothing ──
+
+/// A process door that answers `answer` and counts its asks.
+struct ScriptedProcessFolder {
+    answer: Result<PathBuf, bt_platform::process_folder::FolderRefusal>,
+    asked: std::cell::Cell<usize>,
+}
+
+impl pane_folder::ProcessFolders for ScriptedProcessFolder {
+    fn current_directory(
+        &self,
+        _shell: bt_pty::ShellProcessId,
+    ) -> Result<PathBuf, bt_platform::process_folder::FolderRefusal> {
+        self.asked.set(self.asked.get() + 1);
+        self.answer.clone()
+    }
+}
+
+/// The files card's root for `session`, its shell's process asked through `door`.
+fn card_of(
+    session: &bt_term::DualPlaneSession,
+    door: &ScriptedProcessFolder,
+    account: &HomeIs,
+) -> FilesRoot {
+    let shell = pane_folder::ShellMoment {
+        shell: bt_pty::ShellProcessId::for_test(4242),
+        output: 7,
+        exited: false,
+    };
+    let memo = pane_folder::ProcessFolderMemo::default();
+    files_root_of(
+        Some(pane_folder::pane_folder(session, Some(shell), &memo, door)),
+        account,
+    )
+}
+
+/// RED (T-CWD-FROM-PROCESS) — **the files card of a shell that reported nothing opens on its
+/// process's folder; when that cannot be read it opens on the home folder and its foot says
+/// "Folder unknown"; a shell that reported is never read.**
+///
+/// MUTATIONS (observed red): `files_root_of` without the `folder_unknown` bit (`FilesRoot::known`
+/// for the home) — the refused card is unmarked; `folder_foot_notice` answering "" — the foot says
+/// nothing; `reroot_files_state` keeping the bit — a chosen root still says "Folder unknown". The
+/// ladder's own order (a report before the process) is red in
+/// `pane_folder::tests::a_report_is_the_answer_and_the_door_is_never_asked`.
+#[test]
+fn the_files_card_opens_on_the_process_folder_or_says_the_folder_is_unknown() {
+    let root = bt_testpath::temp_path("process-card");
+    let home = root.join("家 home");
+    let account = HomeIs(home.clone());
+    let silent = leaf_saying("no report from this shell");
+    let moved = root.join("moved");
+
+    let door = ScriptedProcessFolder {
+        answer: Ok(moved.clone()),
+        asked: std::cell::Cell::new(0),
+    };
+    let card = card_of(&silent.session, &door, &account);
+    assert_eq!(card, FilesRoot::known(moved.display().to_string()));
+    assert_eq!(door.asked.get(), 1, "the process is asked once");
+    let state = seats::FilesLeafState {
+        root: card.root,
+        folder_unknown: card.folder_unknown,
+        ..seats::FilesLeafState::default()
+    };
+    assert_eq!(
+        folder_foot_notice(&state),
+        "",
+        "a folder that is known says nothing more"
+    );
+
+    let door = ScriptedProcessFolder {
+        answer: Err(bt_platform::process_folder::FolderRefusal::NoAccess),
+        asked: std::cell::Cell::new(0),
+    };
+    let card = card_of(&silent.session, &door, &account);
+    assert_eq!(
+        card,
+        FilesRoot {
+            root: home.display().to_string(),
+            folder_unknown: true,
+        },
+        "a refused read opens on the home folder, marked"
+    );
+    let mut state = seats::FilesLeafState {
+        root: card.root,
+        folder_unknown: card.folder_unknown,
+        ..seats::FilesLeafState::default()
+    };
+    assert_eq!(
+        folder_foot_notice(&state),
+        i18n::Text::FilesFolderUnknown.text(),
+        "the foot says the folder is unknown"
+    );
+    assert!(reroot_files_state(&mut state, &moved.display().to_string()));
+    assert_eq!(
+        folder_foot_notice(&state),
+        "",
+        "a chosen root is a known folder"
+    );
+
+    let reported = leaf_saying(&format!(
+        "\u{1b}]7;file://localhost{}\u{7}",
+        crate::test_support::host_uri_path(r"D:\reported")
+    ));
+    let door = ScriptedProcessFolder {
+        answer: Ok(moved.clone()),
+        asked: std::cell::Cell::new(0),
+    };
+    assert_eq!(
+        card_of(&reported.session, &door, &account),
+        FilesRoot::known(host_path(r"D:\reported").display().to_string())
+    );
+    assert_eq!(door.asked.get(), 0, "a shell that reported is never read");
+}

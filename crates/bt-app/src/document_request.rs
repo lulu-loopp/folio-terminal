@@ -29,7 +29,11 @@
 //! still holding what was written, so the person's file is back under its name,
 //! and answers `Conflict`. **A link** is refused unless the request's
 //! `link_policy` is `PlainWriter`, which writes it the plain way; a volume that
-//! cannot exchange is refused for every request ((b)1). **Per-file order** holds
+//! cannot exchange is refused unless the request's `no_exchange` is
+//! `PlainWriter` — the preview's save (T-PREVIEW-NO-EXCHANGE-RULING, owner
+//! ruling 2026-10-15); every store refuses ((b)1). The plain road reads the file
+//! again just before it writes and writes only while it still holds `expected`,
+//! so a writer that crossed is not written over. **Per-file order** holds
 //! because there is one queue: every request naming one path, whichever store or
 //! buffer queued it, is served in the order it was queued.
 //!
@@ -60,14 +64,10 @@
 //! every one; a generation only keeps a stale answer's visible effect from
 //! landing after a newer one's ((b)4).
 //!
-//! **Two policies per store.** The request's ([`Mode`]): `settings.json` sends
-//! `Merge` requests (T-STORE-MERGE-SETTINGS); the other three still send
-//! `Restore` ((b)16 item 1) until their merges exist — a crossing hand edit is
-//! put back and kept, its bytes are stored for the merge, and the store is held
-//! against a file it will not write over. And the re-read's ([`Follow`]): a file
-//! that changed is merged (settings), held for a merge still to be built
-//! (keybindings, T-STORE-MERGE-KEYBINDINGS), or taken whole (profiles and pins,
-//! until T-STORE-MERGE-PROFILES-PINS).
+//! **One policy for all four stores.** Every store sends `Merge` requests
+//! (T-STORE-MERGE-SETTINGS, T-STORE-MERGE-KEYBINDINGS,
+//! T-STORE-MERGE-PROFILES-PINS): a displaced file is kept for its merge. And a
+//! re-read that found the file changed stores it for the merge.
 //!
 //! **The merge's seam** ([`DocumentState::merge_stored`]): every file stored
 //! for the merge, in the order it was stored, is merged by the document's own
@@ -81,12 +81,14 @@ use std::sync::{Arc, mpsc};
 use std::time::SystemTime;
 
 use bt_persist::{
-    FallbackReason, KeybindingsV1, PinsV1, ProfilesV1, SettingsV1, StableRead, Staging,
+    BindingOverrideV1, FallbackReason, KeybindingsV1, PinsV1, ProfilesV1, SettingsV1, StableRead,
+    Staging,
 };
 use bt_platform::admission::WorkerCtx;
 
-use crate::persist::{DocumentWrites, Revision, StorageLane};
+use crate::persist::{DocumentWrites, OnTheWorker, Reply, Revision, StorageLane};
 use crate::quit::{CopyStanding, Standing};
+use crate::settings_bundle::{LineRead, read_lines};
 
 /// **Which semantic policy a request asks for** ((c)3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,7 +97,9 @@ pub(crate) enum Mode {
     /// for its merge.
     Merge,
     /// The asker has no merge: a displaced file is put back under its name and
-    /// the answer is a conflict.
+    /// the answer is a conflict. No store sends it — all four merge — and it is
+    /// the preview's save's policy on this worker (design note (c)3, J5 S-6a;
+    /// `preview::PreviewBuffer::request_save`).
     Restore,
 }
 
@@ -104,17 +108,72 @@ pub(crate) enum Mode {
 pub(crate) enum LinkPolicy {
     /// Refuse: nothing is written ((b)2, owner ruling Q5).
     Refuse,
-    /// Write the link's name the plain way, as the preview's save does today.
-    /// Honoured for a link only: a volume that cannot exchange is refused
-    /// whatever the policy.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T-STORAGE-WORKER-REQUEST until 2026-10-31: S-6a's preview save sends it"
-        )
-    )]
+    /// Write the link's name the plain way — the preview's save, until the
+    /// owner's ruling on links (J5 Q5(b), `Refuse`) is built for it. Honoured
+    /// for a link only: a volume that cannot exchange is answered by the
+    /// request's `no_exchange`, whatever the link policy; see [`NoExchange`].
     PlainWriter,
+}
+
+/// **What a request does on a volume that cannot exchange two files in one
+/// step** ((b)1; hand-off item 6). The four stores refuse. The preview's save
+/// writes plainly (owner ruling 2026-10-15, T-PREVIEW-NO-EXCHANGE-RULING); its
+/// one switch is `preview::ON_A_VOLUME_THAT_CANNOT_EXCHANGE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoExchange {
+    /// Nothing is written; the answer is `Refused(ExchangeUnavailable)`.
+    Refuse,
+    /// Write the file the plain way, still only while it holds `expected`, and
+    /// name the drive on the landing ([`Outcome::Landed`]'s `ordinary_on`).
+    PlainWriter,
+}
+
+/// **A drive, as a landing names it**: the identity of the volume the file is
+/// on (`bt_platform::volume_identity`), or `None` when the volume would not
+/// say. Two files on one drive name the same drive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Drive(pub(crate) Option<u64>);
+
+/// **The volume a request's file is on, as the worker meets it**: its exchange,
+/// its identity and the plain road's rename. The product's is [`TheVolume`]; a test scripts one that
+/// answers as a drive without the exchange does.
+pub(crate) trait Volume {
+    /// `bt_platform::replace_keeping_displaced`'s contract.
+    fn exchange(
+        &self,
+        worker: &WorkerCtx,
+        temp: &Path,
+        target: &Path,
+    ) -> Result<bt_platform::Displaced, bt_platform::ExchangeRefusal>;
+    /// The drive `file` is on.
+    fn drive(&self, file: &Path) -> Drive;
+    /// The plain road's one step on the file: `staged`, already written and
+    /// flushed, takes `target`'s name by one rename
+    /// (`bt_persist::commit_staged`). The error in the system's words.
+    fn commit(&self, staged: &Path, target: &Path) -> Result<(), String>;
+}
+
+/// **The operating system's volume**: the exchange door and the volume's own
+/// identity.
+pub(crate) struct TheVolume;
+
+impl Volume for TheVolume {
+    fn exchange(
+        &self,
+        worker: &WorkerCtx,
+        temp: &Path,
+        target: &Path,
+    ) -> Result<bt_platform::Displaced, bt_platform::ExchangeRefusal> {
+        bt_platform::replace_keeping_displaced(worker, temp, target)
+    }
+
+    fn drive(&self, file: &Path) -> Drive {
+        Drive(bt_platform::volume_identity(file))
+    }
+
+    fn commit(&self, staged: &Path, target: &Path) -> Result<(), String> {
+        bt_persist::commit_staged(staged, target).map_err(|error| error.to_string())
+    }
 }
 
 /// **A file the worker left beside a document, and the version whose landing
@@ -147,6 +206,7 @@ pub(crate) struct DocumentJob {
     pub(crate) bytes: Arc<[u8]>,
     pub(crate) mode: Mode,
     pub(crate) link_policy: LinkPolicy,
+    pub(crate) no_exchange: NoExchange,
     /// Opaque to the worker and echoed on the answer: the preview's body
     /// revision, `0` for a store.
     pub(crate) asker: u64,
@@ -172,19 +232,23 @@ pub(crate) struct RecoveredJob {
     pub(crate) answer: mpsc::Sender<Result<PathBuf, String>>,
 }
 
-/// **Serve one [`RecoveredJob`] on the storage worker** and answer it.
-pub(crate) fn serve_recovered(worker: &WorkerCtx, job: RecoveredJob) {
+/// **Serve one [`RecoveredJob`] on the storage worker** and answer it. The job
+/// is lent: its road stands until the worker has published its terminal.
+pub(crate) fn serve_recovered(worker: &WorkerCtx, job: &RecoveredJob) {
     let _ = worker;
     let kept = crate::preview::keep_in_recovered(&job.folder, job.name, &job.bytes, job.at);
     let _ = job.answer.send(kept);
 }
 
 /// **One stable read of a document**: the bytes go to `answer` with the
-/// request's generation, on the worker, which parses them there.
+/// request's generation, on the worker, which parses them there. The answer is
+/// called through the job, which the worker lets go only after the request's
+/// terminal is published — so a parse that panics leaves its road standing until
+/// its `Failed` is there to read.
 pub(crate) struct ReadJob {
     pub(crate) which: PathBuf,
     pub(crate) generation: u64,
-    pub(crate) answer: Box<dyn FnOnce(u64, StableRead) + Send>,
+    pub(crate) answer: Box<dyn Fn(u64, StableRead) + Send>,
 }
 
 /// **What became of one [`DocumentJob`].**
@@ -210,10 +274,19 @@ pub(crate) struct DocumentAnswer {
 pub(crate) enum Outcome {
     /// The file holds `bytes`. `kept` names the displaced copy of the bytes the
     /// file held before, kept because the exchange is not known to be durable;
-    /// a later durable landing retires it.
+    /// a later durable landing retires it. `ordinary_on` names the drive when
+    /// the bytes went there by an ordinary write because it cannot exchange two
+    /// files in one step (`NoExchange::PlainWriter`): the staged copy took the
+    /// name by one rename, so a crash leaves the old file or the new one, never
+    /// a part of either; on a drive with no journal (FAT, exFAT) an interruption
+    /// at that rename can leave the file only under the copy's name beside it,
+    /// or the folder's entry damaged, which the system's disk check can usually
+    /// repair; and a writer that wrote the file between the end of the last
+    /// check of its bytes and the rename is replaced unseen.
     Landed {
         bytes: Arc<[u8]>,
         kept: Option<PathBuf>,
+        ordinary_on: Option<Drive>,
     },
     /// The precondition saw another file — `None`: no file, where one was
     /// expected — and nothing was written.
@@ -252,6 +325,10 @@ pub(crate) enum Refusal {
     Disk(String),
     /// No worker took the request, or the worker ended before answering it.
     NoWorker(String),
+    /// The worker failed on the request — its task panicked — and went on
+    /// (T-STORAGE-WORKER-ON-THE-SEAM, R2); the words are
+    /// `persist::storage_task_failed`'s.
+    Failed(String),
 }
 
 impl Refusal {
@@ -262,7 +339,9 @@ impl Refusal {
         matches!(self, Self::Link | Self::ExchangeUnavailable(_))
     }
 
-    fn described(&self) -> String {
+    /// The refusal in words, as `diagnostics.log` and a pane that was not
+    /// saved say it.
+    pub(crate) fn described(&self) -> String {
         match self {
             Self::Link => "it is a link or has a second name".to_owned(),
             Self::ExchangeUnavailable(error) => {
@@ -275,7 +354,7 @@ impl Refusal {
                 )
             }
             Self::Unread(error) => format!("it could not be read: {error}"),
-            Self::Disk(error) | Self::NoWorker(error) => error.clone(),
+            Self::Disk(error) | Self::NoWorker(error) | Self::Failed(error) => error.clone(),
         }
     }
 }
@@ -290,18 +369,29 @@ pub(crate) enum Step {
     Exchanged,
 }
 
-/// **Serve one [`DocumentJob`] on the storage worker** and answer it.
-pub(crate) fn serve_document(worker: &WorkerCtx, job: DocumentJob) {
+/// **Serve one [`DocumentJob`] on the storage worker** and answer it. The job is
+/// lent: its road stands until the worker has published its terminal.
+pub(crate) fn serve_document(worker: &WorkerCtx, job: &DocumentJob) {
     serve_document_between(worker, job, &mut |_| {});
 }
 
 /// [`serve_document`], with `between` run at each [`Step`].
 pub(crate) fn serve_document_between(
     worker: &WorkerCtx,
-    job: DocumentJob,
+    job: &DocumentJob,
     between: &mut dyn FnMut(Step),
 ) {
-    let served = conditional_write(worker, &job, between);
+    serve_document_on(worker, &TheVolume, job, between);
+}
+
+/// [`serve_document_between`] on `volume`. The job is lent, as there.
+pub(crate) fn serve_document_on(
+    worker: &WorkerCtx,
+    volume: &dyn Volume,
+    job: &DocumentJob,
+    between: &mut dyn FnMut(Step),
+) {
+    let served = conditional_write(worker, volume, job, between);
     let retired = match (&served.outcome, &served.not_durable) {
         (Outcome::Landed { .. }, None) => retire(worker, &job.kept, job.version),
         _ => Vec::new(),
@@ -318,7 +408,7 @@ pub(crate) fn serve_document_between(
 }
 
 /// **Serve one [`ReadJob`]**: the stable read, handed to the asker's answer.
-pub(crate) fn serve_read(worker: &WorkerCtx, job: ReadJob) {
+pub(crate) fn serve_read(worker: &WorkerCtx, job: &ReadJob) {
     let read = bt_persist::read_stable(worker, &job.which);
     (job.answer)(job.generation, read);
 }
@@ -364,23 +454,30 @@ pub(crate) fn precondition(read: StableRead, expected: Option<&[u8]>) -> Precond
     }
 }
 
+/// **What a precondition that does not hold answers**: `None` when it holds and
+/// the write may go ahead; otherwise the answer, nothing written.
+fn unless_it_holds(read: StableRead, expected: Option<&[u8]>) -> Option<Served> {
+    match precondition(read, expected) {
+        Precondition::Holds => None,
+        Precondition::Moved(bytes) => Some(Served::plainly(Outcome::Moved { bytes })),
+        Precondition::Raced => Some(Served::plainly(Outcome::MovedDuringRead)),
+        Precondition::Unread(error) => Some(Served::plainly(Outcome::Refused {
+            cause: Refusal::Unread(error),
+        })),
+    }
+}
+
 /// §3.2's steps 1–4, as revised.
 fn conditional_write(
     worker: &WorkerCtx,
+    volume: &dyn Volume,
     job: &DocumentJob,
     between: &mut dyn FnMut(Step),
 ) -> Served {
     let read = bt_persist::read_stable(worker, &job.which);
     between(Step::Read);
-    match precondition(read, job.expected.as_deref()) {
-        Precondition::Holds => {}
-        Precondition::Moved(bytes) => return Served::plainly(Outcome::Moved { bytes }),
-        Precondition::Raced => return Served::plainly(Outcome::MovedDuringRead),
-        Precondition::Unread(error) => {
-            return Served::plainly(Outcome::Refused {
-                cause: Refusal::Unread(error),
-            });
-        }
+    if let Some(answer) = unless_it_holds(read, job.expected.as_deref()) {
+        return answer;
     }
     let staging = if job.expected.is_some() {
         Staging::Replacing
@@ -397,7 +494,7 @@ fn conditional_write(
     };
     match &job.expected {
         None => first_write(worker, job, &temp),
-        Some(expected) => exchange(worker, job, expected, &temp, between),
+        Some(expected) => exchange(worker, volume, job, expected, &temp, between),
     }
 }
 
@@ -408,6 +505,7 @@ fn first_write(worker: &WorkerCtx, job: &DocumentJob, temp: &Path) -> Served {
         Ok(()) => Served::plainly(Outcome::Landed {
             bytes: Arc::clone(&job.bytes),
             kept: None,
+            ordinary_on: None,
         }),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let _ = std::fs::remove_file(temp);
@@ -424,6 +522,7 @@ fn first_write(worker: &WorkerCtx, job: &DocumentJob, temp: &Path) -> Served {
             outcome: Outcome::Landed {
                 bytes: Arc::clone(&job.bytes),
                 kept: None,
+                ordinary_on: None,
             },
             not_durable: Some(error.to_string()),
             left: None,
@@ -440,6 +539,7 @@ fn first_write(worker: &WorkerCtx, job: &DocumentJob, temp: &Path) -> Served {
 /// The exchange, keeping what it displaced, and what follows each answer.
 fn exchange(
     worker: &WorkerCtx,
+    volume: &dyn Volume,
     job: &DocumentJob,
     expected: &[u8],
     temp: &Path,
@@ -450,10 +550,19 @@ fn exchange(
         let _ = std::fs::remove_file(temp);
         Served::plainly(Outcome::Refused { cause })
     };
-    match bt_platform::replace_keeping_displaced(worker, temp, &job.which) {
-        Ok(displaced) => settle_exchange(worker, job, expected, &displaced.path, None, between),
+    match volume.exchange(worker, temp, &job.which) {
+        Ok(displaced) => settle_exchange(
+            worker,
+            volume,
+            job,
+            expected,
+            &displaced.path,
+            None,
+            between,
+        ),
         Err(ExchangeRefusal::NotDurable { displaced, error }) => settle_exchange(
             worker,
+            volume,
             job,
             expected,
             &displaced.path,
@@ -462,27 +571,62 @@ fn exchange(
         ),
         Err(ExchangeRefusal::Link) => match job.link_policy {
             LinkPolicy::Refuse => refused(Refusal::Link),
-            LinkPolicy::PlainWriter => {
-                let _ = std::fs::remove_file(temp);
-                Served::plainly(
-                    match bt_persist::atomic_replace_keeping_metadata(&job.which, &job.bytes) {
-                        Ok(()) => Outcome::Landed {
-                            bytes: Arc::clone(&job.bytes),
-                            kept: None,
-                        },
-                        Err(error) => Outcome::Refused {
-                            cause: Refusal::Disk(error.to_string()),
-                        },
-                    },
-                )
-            }
+            LinkPolicy::PlainWriter => plainly(worker, volume, job, expected, temp, None),
         },
-        Err(ExchangeRefusal::ExchangeUnavailable(error)) => {
-            refused(Refusal::ExchangeUnavailable(error.to_string()))
-        }
+        Err(ExchangeRefusal::ExchangeUnavailable(error)) => match job.no_exchange {
+            NoExchange::Refuse => refused(Refusal::ExchangeUnavailable(error.to_string())),
+            NoExchange::PlainWriter => plainly(
+                worker,
+                volume,
+                job,
+                expected,
+                temp,
+                Some(volume.drive(&job.which)),
+            ),
+        },
         Err(ExchangeRefusal::BackupNameTaken(path)) => refused(Refusal::BackupNameTaken(path)),
         Err(ExchangeRefusal::Failed(error)) => refused(Refusal::Disk(error.to_string())),
     }
+}
+
+/// **The plain write** a request's policy asks for where the exchange refused:
+/// the sibling already staged and flushed is the copy that goes in — nothing
+/// writes the body again. What a rename can carry is carried onto it first
+/// (`bt_platform::carry_metadata`: the attribute word on Windows; owner, mode
+/// and extended attributes on Unix); then the file is read again, and only
+/// while it still holds `expected` does the staged copy take its name by one
+/// rename ([`Volume::commit`]), with no displaced copy to read back. A writer
+/// that crossed before that read is answered as the precondition answers it —
+/// `Moved` with its bytes — and is not written over; the staged copy goes. One
+/// that writes between the end of that read and the rename is replaced unseen:
+/// that span is the plain road's whole window, which the exchange road does
+/// not have. `ordinary_on`: the drive, when the road was taken because the drive
+/// cannot exchange.
+fn plainly(
+    worker: &WorkerCtx,
+    volume: &dyn Volume,
+    job: &DocumentJob,
+    expected: &[u8],
+    temp: &Path,
+    ordinary_on: Option<Drive>,
+) -> Served {
+    bt_platform::carry_metadata(temp, &job.which);
+    if let Some(answer) =
+        unless_it_holds(bt_persist::read_stable(worker, &job.which), Some(expected))
+    {
+        let _ = std::fs::remove_file(temp);
+        return answer;
+    }
+    Served::plainly(match volume.commit(temp, &job.which) {
+        Ok(()) => Outcome::Landed {
+            bytes: Arc::clone(&job.bytes),
+            kept: None,
+            ordinary_on,
+        },
+        Err(error) => Outcome::Refused {
+            cause: Refusal::Disk(error),
+        },
+    })
 }
 
 /// **§3.2 step 4: what the exchange displaced, read and judged.** The bytes
@@ -492,6 +636,7 @@ fn exchange(
 /// Anything else is a hand edit that crossed: kept for a merge, or put back.
 pub(crate) fn settle_exchange(
     worker: &WorkerCtx,
+    volume: &dyn Volume,
     job: &DocumentJob,
     expected: &[u8],
     displaced: &Path,
@@ -506,6 +651,7 @@ pub(crate) fn settle_exchange(
                 outcome: Outcome::Landed {
                     bytes: Arc::clone(&job.bytes),
                     kept: None,
+                    ordinary_on: None,
                 },
                 not_durable,
                 left: Some((
@@ -526,6 +672,7 @@ pub(crate) fn settle_exchange(
             outcome: Outcome::Landed {
                 bytes: Arc::clone(&job.bytes),
                 kept,
+                ordinary_on: None,
             },
             not_durable,
             left: None,
@@ -541,7 +688,7 @@ pub(crate) fn settle_exchange(
             left: None,
         },
         Mode::Restore => {
-            let mut restored = restore(worker, job, displaced, theirs);
+            let mut restored = restore(worker, volume, job, displaced, theirs);
             restored.not_durable = restored.not_durable.or(not_durable);
             restored
         }
@@ -553,7 +700,13 @@ pub(crate) fn settle_exchange(
 /// displaces in turn is judged by [`settle_restoring_exchange`]; a file that
 /// moved again before it, or a second exchange that is refused, leaves both
 /// files and names the one beside it.
-fn restore(worker: &WorkerCtx, job: &DocumentJob, displaced: &Path, theirs: Arc<[u8]>) -> Served {
+fn restore(
+    worker: &WorkerCtx,
+    volume: &dyn Volume,
+    job: &DocumentJob,
+    displaced: &Path,
+    theirs: Arc<[u8]>,
+) -> Served {
     let crossed = |kept: &Path| {
         Served::plainly(Outcome::Conflict {
             theirs: Arc::clone(&theirs),
@@ -564,7 +717,7 @@ fn restore(worker: &WorkerCtx, job: &DocumentJob, displaced: &Path, theirs: Arc<
         StableRead::Bytes(bytes) if *bytes == *job.bytes => {}
         _ => return crossed(displaced),
     }
-    match bt_platform::replace_keeping_displaced(worker, displaced, &job.which) {
+    match volume.exchange(worker, displaced, &job.which) {
         Err(
             bt_platform::ExchangeRefusal::Link
             | bt_platform::ExchangeRefusal::ExchangeUnavailable(_)
@@ -755,11 +908,134 @@ where
     serde_json::from_value(Value::Object(desired)).ok()
 }
 
-/// Which of several entries under one key a reader puts in force.
-#[derive(Clone, Copy)]
-enum InForce {
-    First,
-    Last,
+/// **A document's own reader, as a press needs it**: which entry under a key is
+/// in force, and which entries go with it when a press takes it away — the one
+/// rule the document's readers use, never a second one in the press.
+trait InForce<E, K> {
+    /// The entry under `key` its readers put in force.
+    fn in_force(&self, list: &[E], key: &K) -> Option<usize>;
+    /// The entries that go with it when it goes.
+    fn alongside(&self, list: &[E], key: &K) -> Vec<usize>;
+    /// **Where an entry the press adds under `key` goes, when the list already
+    /// holds entries under it that are not in force**: after the last of them,
+    /// so the reader's rule makes the new entry the one in force. `None`: no
+    /// such entries, and the entry goes after its nearest predecessor.
+    fn last_under(&self, list: &[E], key: &K) -> Option<usize>;
+}
+
+/// **The first usable entry under a key is the one in force** — the installer's
+/// rule for profiles (`usable`: `profiles::installable`, its own test), the
+/// menus' for pins (every pin row is usable) — and **the entries under the key
+/// after it are its duplicates, which go with it**: they were never in force,
+/// and none of them becomes the live entry because the one in force went
+/// (T-STORE-MERGE-PROFILES-PINS, review rounds 3–5). An unusable entry before
+/// it is refused: it is not in force, does not go with it, and stays.
+struct First<F, U> {
+    key: F,
+    usable: U,
+}
+
+impl<E, K: PartialEq, F: Fn(&E) -> K, U: Fn(&E) -> bool> InForce<E, K> for First<F, U> {
+    fn in_force(&self, list: &[E], key: &K) -> Option<usize> {
+        list.iter()
+            .position(|entry| (self.key)(entry) == *key && (self.usable)(entry))
+    }
+
+    fn alongside(&self, list: &[E], key: &K) -> Vec<usize> {
+        let Some(in_force) = self.in_force(list, key) else {
+            return Vec::new();
+        };
+        (in_force + 1..list.len())
+            .filter(|&at| (self.key)(&list[at]) == *key)
+            .collect()
+    }
+
+    /// An entry the press adds goes after its nearest predecessor: the reader
+    /// takes the first usable entry under the key wherever it stands, and a
+    /// refused entry before it stays refused.
+    fn last_under(&self, _: &[E], _: &K) -> Option<usize> {
+        None
+    }
+}
+
+/// **A shortcut document's lines as its readers take them**
+/// (`settings_bundle::read_lines`): an action's line in force is the one that
+/// `Reads`, and its `Shadowed` lines go with it.
+struct ShortcutLines {
+    dialect: bt_persist::KeybindingsPlatformV1,
+    platform: bt_platform::HostPlatform,
+}
+
+impl ShortcutLines {
+    fn lines(
+        &self,
+        list: &[BindingOverrideV1],
+        action: &str,
+        wanted: fn(&LineRead) -> bool,
+    ) -> Vec<usize> {
+        list.iter()
+            .zip(read_lines(list, self.dialect, self.platform))
+            .enumerate()
+            .filter(|(_, (line, read))| line.action == action && wanted(read))
+            .map(|(index, _)| index)
+            .collect()
+    }
+}
+
+impl InForce<BindingOverrideV1, String> for ShortcutLines {
+    fn in_force(&self, list: &[BindingOverrideV1], action: &String) -> Option<usize> {
+        self.lines(list, action, |read| matches!(read, LineRead::Reads(_)))
+            .into_iter()
+            .next()
+    }
+
+    fn alongside(&self, list: &[BindingOverrideV1], action: &String) -> Vec<usize> {
+        self.lines(list, action, |read| *read == LineRead::Shadowed)
+    }
+
+    /// An action whose only lines do not read: the line a press adds goes after
+    /// them, so the later readable line shadows them and they are silent.
+    fn last_under(&self, list: &[BindingOverrideV1], action: &String) -> Option<usize> {
+        list.iter().rposition(|line| line.action == *action)
+    }
+}
+
+/// **The pins menus' reader**: a pin's identity is its category and target as
+/// the file spells them; the first row of an identity is the pin, and every
+/// row of a category this build names is usable — a row of one it cannot name
+/// has an identity no press asks for, and is never taken.
+fn pin_reader() -> First<
+    impl Fn(&bt_persist::PinEntryV1) -> (String, String),
+    impl Fn(&bt_persist::PinEntryV1) -> bool,
+> {
+    First {
+        key: |pin: &bt_persist::PinEntryV1| (pin.kind.clone(), pin.target.clone()),
+        usable: |_: &bt_persist::PinEntryV1| true,
+    }
+}
+
+/// **The one removal road**: the entry under `name` that `reader` puts in
+/// force, and every entry its reader says goes with it (`alongside`) —
+/// for profiles and pins its duplicates after it, never a refused row before
+/// it; for keybindings the lines it shadows. A press's delta takes an entry
+/// away by this, and so does an unpin.
+fn take_away<E, K>(list: &mut Vec<E>, name: &K, reader: &impl InForce<E, K>) {
+    let Some(at) = reader.in_force(list, name) else {
+        return;
+    };
+    let mut gone = reader.alongside(list, name);
+    gone.push(at);
+    gone.sort_unstable();
+    gone.dedup();
+    for index in gone.into_iter().rev() {
+        list.remove(index);
+    }
+}
+
+/// **Unpin**: the pin `(kind, target)` and its duplicates go, by the menus'
+/// reader ([`take_away`]) — `pins::toggle_pin`'s removal.
+pub(crate) fn unpin(pins: &mut Vec<bt_persist::PinEntryV1>, kind: &str, target: &str) {
+    take_away(pins, &(kind.to_owned(), target.to_owned()), &pin_reader());
 }
 
 /// **A press's delta over a list of entries named by a key** ((b)6, (b)8's
@@ -769,13 +1045,19 @@ enum InForce {
 /// `after` has none — and, when the press reordered the keys both sides hold,
 /// those entries take `after`'s order in the places they hold in `desired`.
 /// Entries `desired` carries that the projection never had (a line a reader
-/// refused, a shadowed duplicate) keep their place.
+/// refused, a refused profile row) keep their place — except what the reader
+/// says goes with an entry in force (`alongside`: a keybindings line's earlier
+/// lines about its action; a profile's or a pin's later duplicates), which is
+/// removed with it ([`take_away`]).
+///
+/// `in_force` is the document's own reader's answer to "which entry under this
+/// key is in force": the one rule its readers use, never a second one here.
 fn apply_keyed_press<E, K>(
     desired: &mut Vec<E>,
     before: &[E],
     after: &[E],
     key: impl Fn(&E) -> K,
-    in_force: InForce,
+    reader: &impl InForce<E, K>,
 ) where
     E: Clone + PartialEq,
     K: PartialEq + Clone,
@@ -784,17 +1066,7 @@ fn apply_keyed_press<E, K>(
         *desired = after.to_vec();
         return;
     }
-    let position = |list: &[E], wanted: &K| -> Option<usize> {
-        let mut found = list
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| key(entry) == *wanted);
-        match in_force {
-            InForce::First => found.next(),
-            InForce::Last => found.last(),
-        }
-        .map(|(index, _)| index)
-    };
+    let position = |list: &[E], wanted: &K| -> Option<usize> { reader.in_force(list, wanted) };
     let mut keys: Vec<K> = Vec::new();
     for entry in before.iter().chain(after) {
         let name = key(entry);
@@ -810,15 +1082,15 @@ fn apply_keyed_press<E, K>(
         }
         match (position(desired, name), is) {
             (Some(at), Some(entry)) => desired[at] = entry.clone(),
-            (Some(at), None) => {
-                desired.remove(at);
-            }
+            (Some(_), None) => take_away(desired, name, reader),
             (None, Some(entry)) => {
                 let at = position(after, name).unwrap_or(0);
-                let anchor = after[..at]
-                    .iter()
-                    .rev()
-                    .find_map(|earlier| position(desired, &key(earlier)));
+                let anchor = reader.last_under(desired, name).or_else(|| {
+                    after[..at]
+                        .iter()
+                        .rev()
+                        .find_map(|earlier| position(desired, &key(earlier)))
+                });
                 desired.insert(anchor.map_or(0, |index| index + 1), entry.clone());
             }
             (None, None) => {}
@@ -865,14 +1137,35 @@ impl StoredDocument for KeybindingsV1 {
         bt_persist::parse_keybindings(bytes)
     }
 
-    /// The unit is the action, the last line about it in force (the reader's
-    /// rule). A press in another platform's dialect than `desired`'s is the
-    /// whole document: its lines cannot share one `writing_platform`, and their
-    /// translation is the keybindings merge's (T-STORE-MERGE-KEYBINDINGS).
+    /// The unit is the action, and the line in force is the one the readers
+    /// put in force (`settings_bundle::read_lines`, the one selection of the
+    /// launch, an import and the merge): the last line about the action that
+    /// reads. A press that takes an action's departure away removes that line
+    /// and the earlier lines it shadows, which would otherwise be the last about
+    /// the action at the next start.
+    ///
+    /// **A press is laid in the press's dialect** — the one the store writes in
+    /// (`KeybindingsStore::store_on`), which every press records. `desired` in
+    /// another dialect (a file written on the other platform, before any merge
+    /// carried it here) is first carried into it the way the merge carries a
+    /// side (`keybindings_merge::in_dialect`): each line read in its own dialect
+    /// and spelled in this one, what is not in force — an action this build has
+    /// no row for, a shadowed line, a line this dialect cannot read — kept
+    /// verbatim in place. Then the press is a delta, so nothing the projection
+    /// lacks is lost to a dialect difference.
     fn apply_press(desired: &mut Self, before: &Self, after: &Self) {
-        if desired == before || desired.writing_platform != after.writing_platform {
+        // A press always records the dialect it is written in; a document that
+        // records none is a v1 file, never a press.
+        let Some(here) = crate::settings_bundle::dialect_of(after.writing_platform) else {
             *desired = after.clone();
             return;
+        };
+        if desired == before {
+            *desired = after.clone();
+            return;
+        }
+        if desired.writing_platform != after.writing_platform {
+            *desired = crate::keybindings_merge::in_dialect(desired, here);
         }
         desired.schema_version = after.schema_version;
         apply_keyed_press(
@@ -880,7 +1173,10 @@ impl StoredDocument for KeybindingsV1 {
             &before.bindings,
             &after.bindings,
             |binding| binding.action.clone(),
-            InForce::Last,
+            &ShortcutLines {
+                dialect: desired.writing_platform,
+                platform: here,
+            },
         );
     }
 
@@ -901,7 +1197,9 @@ impl StoredDocument for ProfilesV1 {
         bt_persist::parse_profiles(bytes)
     }
 
-    /// The unit is the row, by id, the first in force (the installer's rule).
+    /// The unit is the row, by id: the first row the installer can start
+    /// (`profiles::installable`, the installer's rule). A removal takes it and
+    /// its duplicates after it, and leaves a refused row before it ([`First`]).
     fn apply_press(desired: &mut Self, before: &Self, after: &Self) {
         if desired == before {
             *desired = after.clone();
@@ -913,7 +1211,10 @@ impl StoredDocument for ProfilesV1 {
             &before.profiles,
             &after.profiles,
             |row| row.id.clone(),
-            InForce::First,
+            &First {
+                key: |row: &bt_persist::ProfileEntryV1| row.id.clone(),
+                usable: crate::profiles::installable(),
+            },
         );
     }
 
@@ -956,7 +1257,7 @@ impl StoredDocument for PinsV1 {
             &before.pins,
             &after.pins,
             |pin| (pin.kind.clone(), pin.target.clone()),
-            InForce::First,
+            &pin_reader(),
         );
     }
 
@@ -1015,8 +1316,6 @@ impl<T: StoredDocument> ReadAnswer<T> {
 /// **A re-read's news for a reader** ([`DocumentState::take_answers`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ReadNews {
-    /// A read put a new document in force (the projection moved).
-    pub(crate) taken: bool,
     /// Whether the newest read found a file that would not read — `None` when
     /// no read was answered. A stale read's verdict is not said over a newer
     /// one's.
@@ -1027,10 +1326,9 @@ pub(crate) struct ReadNews {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Heard {
-    /// The file is the one Folio left, or holds the document in force, or a
-    /// change made here kept it from being taken.
+    /// The file is the one Folio left, or the pass put nothing new in force.
     Unchanged,
-    /// A new document is in force.
+    /// The pass's merge put a new document in force (a store's `reread`).
     Changed,
     /// The file would not read, and what was in force stays.
     Unreadable,
@@ -1042,8 +1340,6 @@ impl ReadNews {
     pub(crate) fn heard(self) -> Heard {
         if self.unreadable == Some(true) {
             Heard::Unreadable
-        } else if self.taken {
-            Heard::Changed
         } else {
             Heard::Unchanged
         }
@@ -1066,22 +1362,6 @@ pub(crate) struct PendingMerge<T> {
     /// The document the exchange wrote (`Displaced`): the merge's `O` ((c)1).
     /// `None` for every other answer, whose `O` is `desired`.
     pub(crate) written: Option<T>,
-}
-
-/// **What a store does with a re-read that found its file changed** — the
-/// file not Folio's own write, and the store not held.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Follow {
-    /// Taken whole when nothing of Folio's is owed; stored for the merge when
-    /// something is (`profiles.json`, `pins.json`, until their merge).
-    Take,
-    /// Stored for the merge, always: the document's merge puts it in force
-    /// through its doors (`settings.json`).
-    Merge,
-    /// Stored for a merge still to be built, and the store held: nothing is
-    /// taken and nothing is written over it (`keybindings.json`, until
-    /// T-STORE-MERGE-KEYBINDINGS).
-    Hold,
 }
 
 /// **What one merge pass replaced in one file** — the data the pass's card
@@ -1107,7 +1387,7 @@ pub(crate) struct MergeNotice {
 enum Outstanding<T> {
     Document(InFlight<T>),
     Read {
-        answer: mpsc::Receiver<(u64, ReadAnswer<T>)>,
+        answer: OnTheWorker<(u64, ReadAnswer<T>)>,
     },
 }
 
@@ -1118,7 +1398,7 @@ struct InFlight<T> {
     bytes: Arc<[u8]>,
     /// The revision the write is conditional on.
     base: Revision<T>,
-    answer: mpsc::Receiver<DocumentAnswer>,
+    answer: OnTheWorker<DocumentAnswer>,
 }
 
 /// **The store half one hand-editable document holds** — see the module
@@ -1132,7 +1412,6 @@ pub(crate) struct DocumentState<T> {
     version: u64,
     generation: u64,
     mode: Mode,
-    follow: Follow,
     outstanding: VecDeque<Outstanding<T>>,
     /// A re-read was asked for while one was on the worker: one more is sent
     /// when it has been answered.
@@ -1164,7 +1443,7 @@ pub(crate) struct DocumentState<T> {
 
 /// A quit's copy of a document, on the storage worker or answered.
 enum RecoveryCopy {
-    Sent(mpsc::Receiver<Result<PathBuf, String>>),
+    Sent(OnTheWorker<Result<PathBuf, String>>),
     Answered(Result<PathBuf, String>),
 }
 
@@ -1187,8 +1466,7 @@ impl<T: StoredDocument> DocumentState<T> {
             revision,
             version: 0,
             generation: 0,
-            mode: Mode::Restore,
-            follow: Follow::Take,
+            mode: Mode::Merge,
             outstanding: VecDeque::new(),
             read_again: false,
             send_again: false,
@@ -1203,14 +1481,6 @@ impl<T: StoredDocument> DocumentState<T> {
             refusal: None,
             recovery: None,
         }
-    }
-
-    /// **This store's two policies**: what its writes ask of the worker, and
-    /// what it does with a file a re-read found changed.
-    pub(crate) fn with_policies(mut self, mode: Mode, follow: Follow) -> Self {
-        self.mode = mode;
-        self.follow = follow;
-        self
     }
 
     /// The document readers read.
@@ -1285,7 +1555,6 @@ impl<T: StoredDocument> DocumentState<T> {
             T::apply_press(&mut self.desired, &self.projection, &next);
             self.version += 1;
             self.projection = next;
-            self.writes.rearm();
         }
         if !held {
             self.send_owed();
@@ -1347,30 +1616,35 @@ impl<T: StoredDocument> DocumentState<T> {
             bytes: Arc::clone(&bytes),
             mode: self.mode,
             link_policy: LinkPolicy::Refuse,
+            no_exchange: NoExchange::Refuse,
             asker: 0,
             kept: self.kept.clone(),
             answer,
         };
-        if !self.lane.send_document(job) {
-            let _ = refusal.send(DocumentAnswer {
-                generation: self.generation,
-                version: self.version,
-                asker: 0,
-                outcome: Outcome::Refused {
-                    cause: Refusal::NoWorker(crate::persist::NO_STORAGE_WORKER.to_owned()),
-                },
-                not_durable: None,
-                retired: Vec::new(),
-                left: None,
-            });
-            self.lane.wake();
-        }
+        let answer = match self.lane.send_document(job) {
+            Ok(request) => OnTheWorker::admitted(answered, request),
+            Err(refused) => {
+                let _ = refusal.send(DocumentAnswer {
+                    generation: self.generation,
+                    version: self.version,
+                    asker: 0,
+                    outcome: Outcome::Refused {
+                        cause: Refusal::NoWorker(refused.said(crate::persist::NO_STORAGE_WORKER)),
+                    },
+                    not_durable: None,
+                    retired: Vec::new(),
+                    left: None,
+                });
+                self.lane.wake();
+                OnTheWorker::answered_at_the_door(answered)
+            }
+        };
         self.outstanding.push_back(Outstanding::Document(InFlight {
             generation: self.generation,
             document: self.desired.clone(),
             bytes,
             base: self.revision.clone(),
-            answer: answered,
+            answer,
         }));
     }
 
@@ -1397,15 +1671,18 @@ impl<T: StoredDocument> DocumentState<T> {
                 let _ = answer.send((generation, ReadAnswer::<T>::of(read)));
             }),
         };
-        if !self.lane.send_read(job) {
-            let _ = refusal.send((
-                self.generation,
-                ReadAnswer::NotServed(crate::persist::NO_STORAGE_WORKER.to_owned()),
-            ));
-            self.lane.wake();
-        }
-        self.outstanding
-            .push_back(Outstanding::Read { answer: answered });
+        let answer = match self.lane.send_read(job) {
+            Ok(request) => OnTheWorker::admitted(answered, request),
+            Err(refused) => {
+                let _ = refusal.send((
+                    self.generation,
+                    ReadAnswer::NotServed(refused.said(crate::persist::NO_STORAGE_WORKER)),
+                ));
+                self.lane.wake();
+                OnTheWorker::answered_at_the_door(answered)
+            }
+        };
+        self.outstanding.push_back(Outstanding::Read { answer });
     }
 
     /// **Take every answer the worker has given, in the order it served them**,
@@ -1414,22 +1691,30 @@ impl<T: StoredDocument> DocumentState<T> {
         let mut news = ReadNews::default();
         let mut landed = false;
         let mut heard = false;
-        while let Some(request) = self.outstanding.front() {
+        while let Some(request) = self.outstanding.front_mut() {
             let answered = match request {
-                Outstanding::Document(flight) => match flight.answer.try_recv() {
-                    Ok(answer) => Some(Ok(answer)),
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(())),
+                Outstanding::Document(flight) => match flight.answer.hear() {
+                    Reply::Answered(answer) => Some(Ok(answer)),
+                    Reply::Waiting => None,
+                    Reply::Failed(words) => Some(Err(Refusal::Failed(words))),
+                    Reply::Gone => Some(Err(Refusal::NoWorker(
+                        crate::persist::STORAGE_WORKER_GONE.to_owned(),
+                    ))),
                 },
-                Outstanding::Read { answer } => match answer.try_recv() {
-                    Ok((generation, read)) => {
+                Outstanding::Read { answer } => match answer.hear() {
+                    Reply::Answered((generation, read)) => {
                         self.outstanding.pop_front();
                         heard = true;
                         self.on_read(generation, read, &mut news);
                         continue;
                     }
-                    Err(mpsc::TryRecvError::Empty) => None,
-                    Err(mpsc::TryRecvError::Disconnected) => {
+                    Reply::Waiting => None,
+                    Reply::Failed(words) => {
+                        self.outstanding.pop_front();
+                        eprintln!("BT_PERSIST {} was not read again: {words}", self.file);
+                        continue;
+                    }
+                    Reply::Gone => {
                         self.outstanding.pop_front();
                         eprintln!(
                             "BT_PERSIST {} was not read again: {}",
@@ -1460,14 +1745,21 @@ impl<T: StoredDocument> DocumentState<T> {
         let mut news = ReadNews::default();
         let mut landed = false;
         let mut heard = false;
+        let file = self.file;
         for _ in 0..self.outstanding.len() {
             match self.outstanding.pop_front() {
-                Some(Outstanding::Document(flight)) => {
-                    let answer = within_patience(&flight.answer, self.file);
+                Some(Outstanding::Document(mut flight)) => {
+                    let answer = match flight.answer.within_patience(file) {
+                        Reply::Answered(answer) => Ok(answer),
+                        Reply::Failed(words) => Err(Refusal::Failed(words)),
+                        Reply::Waiting | Reply::Gone => Err(Refusal::NoWorker(
+                            crate::persist::STORAGE_WORKER_GONE.to_owned(),
+                        )),
+                    };
                     landed |= self.on_document(flight, answer);
                 }
-                Some(Outstanding::Read { answer }) => {
-                    if let Ok((generation, read)) = within_patience(&answer, self.file) {
+                Some(Outstanding::Read { mut answer }) => {
+                    if let Reply::Answered((generation, read)) = answer.within_patience(file) {
                         heard = true;
                         self.on_read(generation, read, &mut news);
                     }
@@ -1513,14 +1805,20 @@ impl<T: StoredDocument> DocumentState<T> {
     }
 
     /// **One write's answer** — every one is processed, whatever its generation
-    /// ((b)4). Answers whether it landed.
-    fn on_document(&mut self, flight: InFlight<T>, answer: Result<DocumentAnswer, ()>) -> bool {
+    /// ((b)4). Answers whether it landed. `Err` is a write that ended without an
+    /// answer: the worker gone with it, or failed on it.
+    fn on_document(
+        &mut self,
+        flight: InFlight<T>,
+        answer: Result<DocumentAnswer, Refusal>,
+    ) -> bool {
         let file = self.file;
-        let Ok(answer) = answer else {
-            self.refused(&Refusal::NoWorker(
-                crate::persist::STORAGE_WORKER_GONE.to_owned(),
-            ));
-            return false;
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(cause) => {
+                self.refused(&cause);
+                return false;
+            }
         };
         if let Some((path, why)) = &answer.left {
             eprintln!(
@@ -1532,7 +1830,7 @@ impl<T: StoredDocument> DocumentState<T> {
             self.kept.retain(|kept| kept.path != *retired);
         }
         match answer.outcome {
-            Outcome::Landed { bytes, kept } => {
+            Outcome::Landed { bytes, kept, .. } => {
                 self.revision.landed(bytes, flight.document);
                 self.writes.record(file, Ok(()));
                 if let Some(error) = &answer.not_durable {
@@ -1706,60 +2004,14 @@ impl<T: StoredDocument> DocumentState<T> {
             self.held_file_moved(bytes, document);
             return;
         }
-        match self.follow {
-            Follow::Take => {}
-            Follow::Merge => {
-                self.keep_for_the_merge(PendingMerge {
-                    base: self.revision.clone(),
-                    theirs: bytes,
-                    kept: None,
-                    written: None,
-                });
-                return;
-            }
-            Follow::Hold => {
-                eprintln!(
-                    "BT_PERSIST {file} changed on disk; it is held until it can be merged, and \
-                     not written over"
-                );
-                self.keep_for_the_merge(PendingMerge {
-                    base: self.revision.clone(),
-                    theirs: bytes.clone(),
-                    kept: None,
-                    written: None,
-                });
-                self.revision = Revision { bytes, document };
-                self.held_for_merge = true;
-                return;
-            }
-        }
-        if self.desired != self.revision.document {
-            // A change of Folio's is not on disk — in flight, refused, or a
-            // process that does not write here — and a re-read does not undo it.
-            // The file's bytes wait for the merge.
-            eprintln!(
-                "BT_PERSIST {file} changed on disk while a change made here is not on it; the \
-                 change made here stays"
-            );
-            self.keep_for_the_merge(PendingMerge {
-                base: self.revision.clone(),
-                theirs: bytes,
-                kept: None,
-                written: None,
-            });
-            return;
-        }
-        let read_bytes = match bytes {
-            Some(bytes) => bt_persist::DocumentBytes::Loaded(bytes),
-            None => bt_persist::DocumentBytes::Absent,
-        };
-        if self.revision.adopt(document.clone(), read_bytes) {
-            self.projection = document.clone();
-            self.desired = document;
-            self.version += 1;
-            self.merges.clear();
-            news.taken = true;
-        }
+        // A file that changed is stored for the merge, which folds it in and
+        // puts it in force through the document's doors.
+        self.keep_for_the_merge(PendingMerge {
+            base: self.revision.clone(),
+            theirs: bytes,
+            kept: None,
+            written: None,
+        });
     }
 
     /// **A held document's file changed again**: the file is stored for the
@@ -1805,6 +2057,18 @@ impl<T: StoredDocument> DocumentState<T> {
     /// Whether a file's bytes wait for the merge.
     pub(crate) fn merge_waits(&self) -> bool {
         !self.merges.is_empty()
+    }
+
+    /// **Whether a re-read of this file is still to be answered** — one on the
+    /// worker, or one asked while it was and owed after it ([`Self::ask_read`]).
+    /// The storage pass's card waits while any store is reading
+    /// (`MergeNotice::gather`, T-STORE-NOTICE).
+    pub(crate) fn reading(&self) -> bool {
+        self.read_again
+            || self
+                .outstanding
+                .iter()
+                .any(|request| matches!(request, Outstanding::Read { .. }))
     }
 
     /// **The merge's seam: every file stored for the merge, merged and
@@ -1923,7 +2187,9 @@ pub(crate) trait QuitDocument {
     /// **One turn of the documents phase**: what the storage worker answered is
     /// taken, a file a merge can fold is merged (purely — no door runs, the
     /// windows are leaving), and what is owed with nothing on the worker is sent.
-    fn quit_turn(&mut self);
+    /// Answers the `diagnostics.log` line of what this turn merged, if it merged
+    /// anything — said once, whether the quit completes or is cancelled.
+    fn quit_turn(&mut self) -> Option<String>;
     /// Where the document stands ([`Standing`]).
     fn standing(&self) -> Standing;
     /// **Hand the owed document to the storage worker as a copy into `folder`**,
@@ -1954,11 +2220,12 @@ impl<T: StoredDocument> QuitDocument for DocumentState<T> {
         }
     }
 
-    fn quit_turn(&mut self) {
+    fn quit_turn(&mut self) -> Option<String> {
         let _ = self.take_answers();
         if self.standing() == Standing::Unsent {
             self.send_owed();
         }
+        None
     }
 
     fn standing(&self) -> Standing {
@@ -2010,21 +2277,21 @@ impl<T: StoredDocument> QuitDocument for DocumentState<T> {
             at,
             answer,
         };
-        self.recovery = Some(if self.lane.send_recovered(job) {
-            RecoveryCopy::Sent(answered)
-        } else {
-            RecoveryCopy::Answered(Err(crate::persist::NO_STORAGE_WORKER.to_owned()))
+        self.recovery = Some(match self.lane.send_recovered(job) {
+            Ok(request) => RecoveryCopy::Sent(OnTheWorker::admitted(answered, request)),
+            Err(refused) => {
+                RecoveryCopy::Answered(Err(refused.said(crate::persist::NO_STORAGE_WORKER)))
+            }
         });
     }
 
     fn copy_standing(&mut self) -> CopyStanding {
-        if let Some(RecoveryCopy::Sent(answer)) = &self.recovery {
-            let answered = match answer.try_recv() {
-                Ok(answered) => answered,
-                Err(mpsc::TryRecvError::Empty) => return CopyStanding::Waiting,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    Err(crate::persist::STORAGE_WORKER_GONE.to_owned())
-                }
+        if let Some(RecoveryCopy::Sent(answer)) = &mut self.recovery {
+            let answered = match answer.hear() {
+                Reply::Answered(answered) => answered,
+                Reply::Waiting => return CopyStanding::Waiting,
+                Reply::Failed(words) => Err(words),
+                Reply::Gone => Err(crate::persist::STORAGE_WORKER_GONE.to_owned()),
             };
             self.recovery = Some(RecoveryCopy::Answered(answered));
         }
@@ -2062,38 +2329,13 @@ impl<T: StoredDocument> QuitDocument for DocumentState<T> {
     }
 }
 
-/// **One answer, within the suite's patience** (`lane::PATIENCE`): a lost
-/// completion fails the test that awaited it, naming the file, instead of
-/// hanging the suite. The wait ends on the answer, so a quick machine pays
-/// nothing. `Err` is the worker gone with the request unanswered.
-#[cfg(test)]
-fn within_patience<A>(answer: &mpsc::Receiver<A>, file: &str) -> Result<A, ()> {
-    match answer.recv_timeout(crate::lane::PATIENCE) {
-        Ok(answer) => Ok(answer),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(()),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            panic!("no answer about {file} within the suite's patience")
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{Arc, mpsc};
 
-    use super::{DocumentAnswer, DocumentJob, LinkPolicy, Mode, ReadJob};
-    use crate::persist::StorageLane;
-
-    /// Whether `answer` has been given its terminal by the worker's end: the channel closed with
-    /// nothing in it, which a store reads as `Refused(NoWorker(STORAGE_WORKER_GONE))` for a write
-    /// and as "not read again" for a read.
-    fn ended_by_the_workers_end<A>(answer: &Mutex<mpsc::Receiver<A>>) -> bool {
-        matches!(
-            answer.lock().expect("the answer").try_recv(),
-            Err(mpsc::TryRecvError::Disconnected)
-        )
-    }
+    use super::{DocumentAnswer, DocumentJob, LinkPolicy, Mode, Outcome, ReadJob};
+    use crate::persist::{OnTheWorker, Reply, StorageLane};
 
     /// A write of `bytes` to `which`, answered on `answer`.
     fn write(which: &Path, answer: mpsc::Sender<DocumentAnswer>) -> DocumentJob {
@@ -2105,92 +2347,96 @@ mod tests {
             bytes: Arc::from(&b"{\"\xe5\x86\x99\": 1}"[..]),
             mode: Mode::Restore,
             link_policy: LinkPolicy::Refuse,
+            no_exchange: super::NoExchange::Refuse,
             asker: 0,
             kept: Vec::new(),
             answer,
         }
     }
 
-    /// RED (T-PANIC-ROWS-HONEST) — **a storage worker that panics ends every request it owes with
-    /// its terminal, each once, and then wakes the loop; a later request is refused at the door.**
+    /// RED (T-STORAGE-WORKER-ON-THE-SEAM, R2; was T-PANIC-ROWS-HONEST's "a storage worker panic
+    /// ends every owed request") — **a panic in one storage request is that request's `Failed`,
+    /// and the worker goes on.**
     ///
     /// Two requests are admitted: a re-read, whose answer (the store's parse, on the worker)
     /// panics, and behind it a write. The product's panic hook ends the process for a panic it is
-    /// not told is contained, so the worker's loop runs inside `contained_panic::contain`: the
-    /// hook's decision at the panic is yes, the read's answer is dropped by the unwind (its
-    /// terminal: not read again), the worker's end drops the queued write (its terminal:
-    /// `Refused(NoWorker(STORAGE_WORKER_GONE))`), and only then wakes the loop — once. A request
-    /// made after it is refused where it is handed over.
+    /// not told is contained, so each request runs inside `lane::task`
+    /// (`contained_panic::contain`): the hook's decision at the panic is yes, the read ends
+    /// `Failed` in its own words, and the worker serves the write behind it, which lands. Each
+    /// answer is followed by its wake, and a request made after them is admitted: the worker
+    /// is still there. (The worker's own end — every request still owed ending `WorkerGone`,
+    /// then one wake — is the lane contract's `ADeadWorkerIsObservable`, run on this lane
+    /// through `persist::contract_adapter`.)
     ///
-    /// MUTATIONS: ① the worker's loop without `contained_panic::contain` — the decision at the
-    /// panic is no (the process would end there); ② `WorkerEnd::drop` without its drain (the
-    /// queued jobs dropped only after the wake) — the write has no terminal when the loop is woken.
+    /// MUTATIONS: ① serve the job without its `lane::task` in `SessionWriter::start`'s loop — the
+    /// panic is the worker's end, which wakes the loop once, and the write behind the read is
+    /// never answered; ② publish `Done` for a failed task — the read is heard gone (its road
+    /// closed, no answer on it), not failed.
     #[test]
-    fn a_storage_worker_panic_ends_every_owed_request_with_its_terminal() {
+    fn a_panic_in_one_storage_request_fails_it_and_the_worker_goes_on() {
         let which = bt_testpath::temp_path("panic-rows-存储");
-        let (read_answer, read_answered) = mpsc::channel::<u64>();
-        let read_answered = Arc::new(Mutex::new(read_answered));
-        let (write_answer, write_answered) = mpsc::channel::<DocumentAnswer>();
-        let write_answered = Arc::new(Mutex::new(write_answered));
-        let (woke, wakes) = mpsc::channel::<bool>();
-        let (read_seen, write_seen) = (Arc::clone(&read_answered), Arc::clone(&write_answered));
+        let _ = std::fs::remove_file(&which);
+        let (woke, wakes) = mpsc::channel::<()>();
         let lane = StorageLane::with_a_worker_and_wake(move || {
-            // At the wake: has every request the worker owed been given its terminal?
-            let _ = woke.send(
-                ended_by_the_workers_end(&read_seen) && ended_by_the_workers_end(&write_seen),
-            );
+            let _ = woke.send(());
         });
 
         let (told, decision) = mpsc::channel();
         let (open, gate) = mpsc::channel::<bool>();
-        let admitted = lane.send_read(ReadJob {
-            which: which.clone(),
-            generation: 1,
-            answer: Box::new(move |generation, _read| {
-                let _ = told.send(crate::the_hook_lets_this_panic_unwind());
-                if crate::lane::receive(&gate, "the test's word to fail the parse") {
-                    panic!("scripted: the document would not parse 解析失败");
-                }
-                let _ = read_answer.send(generation);
-            }),
-        });
-        assert!(admitted, "the read is admitted");
+        let (read_answer, read_answered) = mpsc::channel();
+        let admitted = lane
+            .send_read(ReadJob {
+                which: which.clone(),
+                generation: 1,
+                answer: Box::new(move |generation, _read| {
+                    let _ = told.send(crate::the_hook_lets_this_panic_unwind());
+                    if crate::lane::receive(&gate, "the test's word to fail the parse") {
+                        panic!("scripted: the document would not parse 解析失败");
+                    }
+                    let _ = read_answer.send(generation);
+                }),
+            })
+            .expect("the read is admitted");
+        let mut read = OnTheWorker::admitted(read_answered, admitted);
         assert!(
             crate::lane::receive(&decision, "the hook's decision inside the read's answer"),
             "the worker serves where the resident hook lets a panic unwind"
         );
-        assert!(
-            lane.send_document(write(&which, write_answer)),
-            "the write is admitted behind it"
-        );
+        let (write_answer, write_answered) = mpsc::channel::<DocumentAnswer>();
+        let admitted = lane
+            .send_document(write(&which, write_answer))
+            .expect("the write is admitted behind it");
+        let mut written = OnTheWorker::admitted(write_answered, admitted);
         open.send(true).expect("the worker waits at the gate");
 
-        assert!(
-            crate::lane::receive(&wakes, "the worker's end"),
-            "every owed request had its terminal when the loop was woken"
-        );
-        assert!(
-            ended_by_the_workers_end(&read_answered),
-            "the read ended once"
-        );
-        assert!(
-            ended_by_the_workers_end(&write_answered),
-            "the write ended once"
-        );
-
-        let (late, late_answered) = mpsc::channel::<DocumentAnswer>();
-        assert!(
-            !lane.send_document(write(&which, late)),
-            "a request after the worker's end is refused at the door"
-        );
-        assert!(
-            matches!(
-                late_answered.try_recv(),
-                Err(mpsc::TryRecvError::Disconnected)
+        crate::lane::wait_for_a_wake(&wakes, "the read's end");
+        crate::lane::wait_for_a_wake(&wakes, "the write's answer");
+        match read.hear() {
+            Reply::Failed(words) => assert!(
+                words.contains("scripted: the document would not parse 解析失败"),
+                "the read failed in its own words: {words}"
             ),
-            "and the job is not kept"
+            heard => panic!("the read is that request's failure, not {heard:?}"),
+        }
+        match written.hear() {
+            Reply::Answered(answer) => assert!(
+                matches!(answer.outcome, Outcome::Landed { .. }),
+                "the write behind it landed: {:?}",
+                answer.outcome
+            ),
+            heard => panic!("the worker went on to the write, not {heard:?}"),
+        }
+        assert!(which.exists(), "and the write is on the disk");
+
+        assert!(
+            lane.send_read(ReadJob {
+                which: which.clone(),
+                generation: 3,
+                answer: Box::new(|_, _| {}),
+            })
+            .is_ok(),
+            "a request after the failure is admitted: the worker is still there"
         );
-        assert!(wakes.try_recv().is_err(), "the end woke the loop once");
-        assert!(!which.exists(), "nothing was written");
+        let _ = std::fs::remove_file(&which);
     }
 }

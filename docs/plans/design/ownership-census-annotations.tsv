@@ -125,7 +125,6 @@ WindowRuntime.pane_menu	-	VIEW	panes	the 2026-09-25 table
 WindowRuntime.pane_motion	-	PROJ	tabs	the 2026-09-25 table
 WindowRuntime.pane_motion_revision	-	PROJ	tabs	the 2026-09-25 table
 WindowRuntime.paste_card_hover	-	VIEW	clipboard	the 2026-09-25 table
-WindowRuntime.peek_cache	-	PROJ	peek	the 2026-09-25 table
 WindowRuntime.peek_facts	-	ASYNC	peek	the 2026-09-25 table
 WindowRuntime.peek_hover	-	VIEW	peek	the 2026-09-25 table
 WindowRuntime.pending_frames	-	PROJ	frame	the 2026-09-25 table
@@ -136,8 +135,6 @@ WindowRuntime.present_diagnostics	-	PROJ	frame	the 2026-09-25 table
 WindowRuntime.preview_menu	-	VIEW	preview	proposed by census-1
 WindowRuntime.preview_name_clicks	-	VIEW	preview	the 2026-09-25 table
 WindowRuntime.profile_menu	-	VIEW	profiles	proposed by census-1
-WindowRuntime.psreadline_invite	-	OBS	first_run	the 2026-09-25 table
-WindowRuntime.psreadline_size_changed	-	VIEW	first_run	the 2026-09-25 table
 WindowRuntime.pty_coalesce	-	PROJ	terminal	the 2026-09-25 table
 WindowRuntime.rail_scroll	-	VIEW	panes	the 2026-09-25 table
 WindowRuntime.rename	-	VIEW	tabs	the 2026-09-25 table
@@ -169,5 +166,4 @@ WindowRuntime.web_pointer_inside	-	VIEW	web	the 2026-09-25 table
 WindowRuntime.web_thumbs	-	PROJ	web	the 2026-09-25 table
 App.update_job	-	ASYNC	the application (update_job)	proposed at the census-1 merge (2026-09-26): U-19's card and row press the job on the window thread; the job stays the application's
 WindowRuntime.update_card	-	VIEW	update_card	proposed at the census-1 merge (2026-09-26): U-19's card state, written by the card module and by the window's pointer and settle roads
-WindowRuntime.powershell_profile_undo	-	ASYNC	profiles	T-INTEGRATION-INJECT-4: the success toast owns its one managed-line undo
 WindowRuntime.pane_head_clicks	-	VIEW	panes	T-POINTER-CAPTURE cut 3: the release ladder moved into runtime::pointer::release, which interrupts the pane-head click chain as the ladder did

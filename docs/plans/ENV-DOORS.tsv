@@ -1,0 +1,65 @@
+# ENV-DOORS — the product items that read the process environment (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY).
+#
+# A `BT_` variable is the person's shell speaking to one run of the program, so it is read once, at
+# the program's entry, and handed down; a library never reads one at the moment of use.
+# crates/bt-source/tests/env_doors.rs reads every product item of every first-party package and holds
+# it to this list as an EQUALITY keyed by (file, item): every item that reads a `BT_` name in a
+# supported shape, or holds a shape the guard's grammar refuses, has exactly its row; `names` is
+# exactly the `BT_` names it reads (comma-separated, `-` for none); `refused` is exactly the number
+# of refused shapes in it; a row whose item reads nothing is stale. See docs/ARCHITECTURE-GUARDS.md,
+# "Environment doors", for the grammar.
+# An `item` of `-` is a read outside every item bt-source indexes: a static's initializer, a
+# module-level macro or `use`; such reads in one file share the row.
+#
+# category:
+#   entry     a program's entry: bt-app's one reader of the recording and trace doors, and the
+#             tools' own entries in bt-corpus;
+#   door      a behaviour or test door still read where it is used; `ticket` names the follow-up
+#             that moves it to the entry;
+#   unjudged  a refused shape that reads no `BT_` door; `reason` says what it reads, and the follow-up
+#             T-ENV-UNJUDGED-ROWS rewrites each into a supported shape or a parameter.
+#
+# THIS LIST ONLY SHRINKS (scripts/ci/check-env-doors.ps1 against the merge base). A new reader is
+# moved to the entry, never listed; an added row (or a row that reads more) is refused, and the
+# grammar is not widened to quiet a refusal.
+file	item	category	names	refused	ticket	reason
+crates/bt-app/src/attention_copilot.rs	crate::attention_copilot::run_probe	unjudged	-	2	T-ENV-UNJUDGED-ROWS	PATH and PATHEXT of this process, or of the environment block a probe was handed
+crates/bt-app/src/attention_hooks.rs	crate::attention_hooks::AgentHomesCell::reading	unjudged	-	1	T-ENV-UNJUDGED-ROWS	the agents' home variables (CLAUDE_CONFIG_DIR, CODEX_HOME, COPILOT_HOME, HOME or USERPROFILE)
+crates/bt-app/src/attention_wire.rs	crate::attention_wire::variable	unjudged	-	1	T-ENV-UNJUDGED-ROWS	FOLIO_ATTENTION_PIPE and FOLIO_ATTENTION, the pane's own capability, which an agent's hook inherits
+crates/bt-app/src/cli.rs	crate::cli::CarriedEnvironment::of_this_process	unjudged	-	1	T-ENV-UNJUDGED-ROWS	the whole block --with-environment carries into a pane, laid over the account's as the launch-overrides layer; it is a child's environment, not a door Folio reads
+crates/bt-app/src/entry_doors.rs	crate::entry_doors::EntryDoors::at_the_entry	entry	BT_ATTENTION_TRACE,BT_CARD_TRACE,BT_CHROME_DUMP,BT_DECOR_TRACE,BT_FOCUS_THUMB_DUMP,BT_GIT_TRACE,BT_GLYPH_CENSUS,BT_HOTKEY_TRACE,BT_IME_TRACE,BT_LAYOUT_EVENTS,BT_MOUSE_TRACE,BT_PERF_TRACE,BT_PREVIEW_TRACE,BT_PTY_DUMP,BT_PTY_INPUT_DUMP,BT_RESIZE_TRACE,BT_SEMANTIC_TRACE,BT_STARTUP_TRACE,BT_WEB_TRACE	1	T-DIAGNOSTIC-DOORS-AT-THE-ENTRY	folio.exe's one reader of the recording and trace doors, called by main before any station; the enumeration collects the BT_ names the console and trace-sink shape rules read
+crates/bt-app/src/hang_watch.rs	-	door	BT_HANG_SELFTEST	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_HANG_SELFTEST (debug builds), read in the initializer of the static SELFTEST_HOLD, which bt-source indexes as no item
+crates/bt-app/src/main.rs	-	door	BT_PANIC_SELFTEST,BT_SURFACE_SELFTEST	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_PANIC_SELFTEST and BT_SURFACE_SELFTEST (debug builds), read in the initializers of the statics PANIC_SELFTEST_AFTER and SURFACE_SELFTEST_AFTER, which bt-source indexes as no item
+crates/bt-app/src/main.rs	crate::load_probe_input	door	BT_PROBE_INPUT	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_PROBE_INPUT, read once at startup outside main
+crates/bt-app/src/persist.rs	crate::persist::storage_dir	unjudged	-	1	T-ENV-UNJUDGED-ROWS	APPDATA, HOME and XDG_DATA_HOME, the data directory's place
+crates/bt-app/src/persist.rs	crate::persist::storage_dir_as_it_stands	unjudged	-	1	T-ENV-UNJUDGED-ROWS	APPDATA, HOME and XDG_DATA_HOME, the data directory's place
+crates/bt-app/src/persist.rs	crate::persist::storage_dir_unmoved	unjudged	-	1	T-ENV-UNJUDGED-ROWS	APPDATA, HOME and XDG_DATA_HOME, the data directory's place
+crates/bt-app/src/psreadline.rs	crate::psreadline::documents_directory	door	BT_PSREADLINE_DOCUMENTS	0	T-TEST-DOORS-AT-THE-ENTRY	BT_PSREADLINE_DOCUMENTS, the PSReadLine installer's Documents redirect, read at use
+crates/bt-app/src/pty_door.rs	crate::pty_door::bear	unjudged	-	1	T-ENV-UNJUDGED-ROWS	the block a shell inherits when no account environment can be read; its readers (ComposedEnvironment in derive_environment_for_birth, package_of_birth) ask for PROMPT, FORCE_HYPERLINK, ZDOTDIR, WSLENV, the locale variables and PATH, no BT_ name
+crates/bt-app/src/runtime/first_run.rs	crate::runtime::first_run::Runtime::raise_first_run_if_due	door	BT_FIRST_RUN_CARD	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_FIRST_RUN_CARD, read when the first-run card is considered
+crates/bt-app/src/shell_integration.rs	crate::shell_integration::ProbeEnvironment::apply	unjudged	-	1	T-ENV-UNJUDGED-ROWS	the inherited block a probe's child starts from
+crates/bt-app/src/shell_integration.rs	crate::shell_integration::ProbeEnvironment::var_os	door	-	1	T-PRODUCT-DOORS-AT-THE-ENTRY	the probes' ShellEnvironment: its Inherited arm answers any key of this process, and installed_powershells hands it to ProfilePrograms::probe_rows, resolve_row and bt_pty::resolve_powershell_seven, which reads BT_SHELL (as well as PATH, PATHEXT and WSLENV)
+crates/bt-app/src/shell_integration.rs	crate::shell_integration::page_environment	unjudged	-	1	T-ENV-UNJUDGED-ROWS	the inherited block the Profiles page composes declarations over (ComposedEnvironment: PROMPT, FORCE_HYPERLINK, ZDOTDIR, WSLENV, the locale variables), no BT_ name
+crates/bt-app/src/shell_integration.rs	crate::shell_integration::profile_sandboxed	door	BT_POWERSHELL_PROFILE	0	T-TEST-DOORS-AT-THE-ENTRY	BT_POWERSHELL_PROFILE, the installer's $PROFILE redirect, read at use
+crates/bt-app/src/shell_integration.rs	crate::shell_integration::read_page_environment	unjudged	-	1	T-ENV-UNJUDGED-ROWS	the inherited block the Profiles page composes declarations over (ComposedEnvironment: PROMPT, FORCE_HYPERLINK, ZDOTDIR, WSLENV, the locale variables), no BT_ name
+crates/bt-app/src/shell_integration/profile_runtime.rs	crate::shell_integration::profile_runtime::sandbox_profile	door	BT_POWERSHELL_PROFILE	0	T-TEST-DOORS-AT-THE-ENTRY	BT_POWERSHELL_PROFILE, the installer's $PROFILE redirect, read at use
+crates/bt-app/src/uninstall.rs	crate::uninstall::run_within	door	BT_UNINSTALL_ROOT	1	T-TEST-DOORS-AT-THE-ENTRY	BT_UNINSTALL_ROOT (debug and test builds); the refused closure hands Scope::resolve the account's variables, BT_POWERSHELL_PROFILE and BT_PSREADLINE_DOCUMENTS among them
+crates/bt-app/src/webhost.rs	crate::webhost::development_target	door	BT_WEB_DEV	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_WEB_DEV, read when the first preview seat is opened
+crates/bt-app/src/webhost.rs	crate::webhost::user_data_folder	unjudged	-	1	T-ENV-UNJUDGED-ROWS	LOCALAPPDATA and HOME, the web engine's folder
+crates/bt-corpus/src/bin/bt-repaint-oracle.rs	crate::HeadlessOracle::audit_occlusion_residue	entry	BT_PROBE_OCCLUSION_AUDIT	0	T-DIAGNOSTIC-DOORS-AT-THE-ENTRY	a tool binary's own code: bt-corpus has no library, so its binaries' functions are the tool's entry
+crates/bt-corpus/src/bin/bt-repaint-oracle.rs	crate::HeadlessOracle::new	entry	BT_PROBE_IMAGE_PATHS,BT_PROBE_MATH_LATENCY_US,BT_PROBE_PATH_REASK,BT_PROBE_UNDERLINE	0	T-DIAGNOSTIC-DOORS-AT-THE-ENTRY	a tool binary's own code: bt-corpus has no library, so its binaries' functions are the tool's entry
+crates/bt-corpus/src/bin/bt-repaint-oracle.rs	crate::HeadlessOracle::publish	entry	BT_PROBE_GEOMETRY,BT_PROBE_OWNERSHIP,BT_PROBE_VERBOSE	0	T-DIAGNOSTIC-DOORS-AT-THE-ENTRY	a tool binary's own code: bt-corpus has no library, so its binaries' functions are the tool's entry
+crates/bt-corpus/src/bin/bt-repaint-oracle.rs	crate::env_dimension	entry	-	1	T-DIAGNOSTIC-DOORS-AT-THE-ENTRY	a tool binary's own code: bt-corpus has no library, so its binaries' functions are the tool's entry
+crates/bt-corpus/src/bin/bt-repaint-oracle.rs	crate::main	entry	BT_PROBE_ANNOTATIONS,BT_PROBE_CHUNKS,BT_PROBE_CLIP_AUDIT,BT_PROBE_DOCDUMP,BT_PROBE_FROZEN,BT_PROBE_GEOMETRY,BT_PROBE_HELD_UNBACKED,BT_PROBE_INPUT,BT_PROBE_LAYOUT_AUDIT,BT_PROBE_OCCLUSION_AUDIT,BT_PROBE_OWNERSHIP,BT_PROBE_OWNERSHIP_DUMP,BT_PROBE_REVIEW,BT_PROBE_SCROLLTOP,BT_PROBE_STAGED,BT_PROBE_STYLES,BT_PROBE_TEXTURE_AUDIT,BT_PROBE_UNDERLINE	0	T-DIAGNOSTIC-DOORS-AT-THE-ENTRY	a tool binary's own code: bt-corpus has no library, so its binaries' functions are the tool's entry
+crates/bt-corpus/src/bin/bt-replay.rs	crate::main	entry	BT_PERF_TRACE	0	T-DIAGNOSTIC-DOORS-AT-THE-ENTRY	a tool binary's own code: bt-corpus has no library, so its binaries' functions are the tool's entry
+crates/bt-corpus/src/bin/bt-replay.rs	crate::smoke_private_corpus	entry	BT_REPLAY_PRIVATE_CORPUS	0	T-DIAGNOSTIC-DOORS-AT-THE-ENTRY	a tool binary's own code: bt-corpus has no library, so its binaries' functions are the tool's entry
+crates/bt-corpus/src/bin/bt-zoom-perf.rs	crate::env_dimension	entry	-	1	T-DIAGNOSTIC-DOORS-AT-THE-ENTRY	a tool binary's own code: bt-corpus has no library, so its binaries' functions are the tool's entry
+crates/bt-corpus/src/bin/bt-zoom-perf.rs	crate::main	entry	BT_ZOOM_PERF_CPU_ONLY,BT_ZOOM_PERF_SCROLL_ROWS,BT_ZOOM_PERF_STOP_SEQUENCE,BT_ZOOM_PERF_TARGET_SCALE	0	T-DIAGNOSTIC-DOORS-AT-THE-ENTRY	a tool binary's own code: bt-corpus has no library, so its binaries' functions are the tool's entry
+crates/bt-corpus/src/bin/bt-zoom-perf.rs	crate::print_geometry	entry	BT_ZOOM_PERF_GEOMETRY	0	T-DIAGNOSTIC-DOORS-AT-THE-ENTRY	a tool binary's own code: bt-corpus has no library, so its binaries' functions are the tool's entry
+crates/bt-platform/src/deferred_removal.rs	crate::deferred_removal::removal_from_environment	unjudged	-	1	T-ENV-UNJUDGED-ROWS	FOLIO_NATIVE_REMOVAL_*, the private remover's own arguments
+crates/bt-platform/src/deferred_removal.rs	crate::deferred_removal::required	unjudged	-	1	T-ENV-UNJUDGED-ROWS	FOLIO_NATIVE_REMOVAL_*, the private remover's own arguments
+crates/bt-platform/src/deferred_removal.rs	crate::deferred_removal::required_indexed	unjudged	-	1	T-ENV-UNJUDGED-ROWS	FOLIO_NATIVE_REMOVAL_*, the private remover's own arguments
+crates/bt-platform/src/lib.rs	crate::probe_environment	unjudged	-	1	T-ENV-UNJUDGED-ROWS	the inherited block a quiet child's environment is built from
+crates/bt-pty/src/shell.rs	crate::shell::SystemShellEnvironment::var_os	door	-	1	T-PRODUCT-DOORS-AT-THE-ENTRY	the default-shell seam's system answer: BT_SHELL, SHELL, ProgramFiles, LocalAppData and PATH by a computed name
+crates/bt-render/src/lib.rs	crate::gpu_power_request	door	BT_GPU_PREFERENCE	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_GPU_PREFERENCE, read once at the first device
+crates/bt-render/src/theme.rs	crate::theme::process_theme	door	BT_BG	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_BG, read once at the first theme read

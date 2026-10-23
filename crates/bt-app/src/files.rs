@@ -31,8 +31,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use crate::window_seam::LoopProxy;
 use anyhow::{Context, Result};
-use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
 use crate::seats::FilesLeafState;
@@ -1182,8 +1182,8 @@ fn canonical_path(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
-/// Newest-per-target queue, the shape `PendingScaleRequests` already gives the
-/// resampling lane.
+/// Newest-per-target queue, the shape the resampling share keeps at its door
+/// (`computation_lane`).
 ///
 /// Reading a directory twice because it was folded and unfolded while a slow
 /// share was still answering is work nobody is waiting for, and worse, the older
@@ -1226,7 +1226,7 @@ impl PendingDirRequests {
 /// Serve directory reads, newest question per target first.
 ///
 /// Split from [`FilesWorker::spawn`] so the coalescing can be tested without a
-/// filesystem or an event loop, exactly as `run_scale_worker` is.
+/// filesystem or an event loop.
 fn run_dir_worker(receiver: mpsc::Receiver<DirRequest>, mut execute: impl FnMut(DirRequest)) {
     let mut pending = PendingDirRequests::default();
     while let Ok(request) = receiver.recv() {
@@ -1249,7 +1249,7 @@ pub struct FilesWorker {
 }
 
 impl FilesWorker {
-    pub fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
+    pub fn spawn(proxy: LoopProxy) -> Result<Self> {
         let (request_tx, request_rx) = mpsc::channel::<DirRequest>();
         let (response_tx, response_rx) = mpsc::channel::<DirResponse>();
         bt_platform::spawn_at_priority(
@@ -1468,6 +1468,7 @@ mod tests {
             git_expanded: None,
             git_sel: None,
             git_remotes_open: false,
+            folder_unknown: false,
         }
     }
 
@@ -1825,6 +1826,42 @@ mod tests {
             Some(files_worker_stopped_notice())
         );
         assert_eq!(take_files_worker_notice(&mut pending), None);
+    }
+
+    /// RED on Windows (T-ANSWER-AFTER-THE-FILE-IS-CLOSED; on Unix an unlocked descriptor is not
+    /// seen by `bt_testpath::nobody_holds`, so there the release is stated, not proven) — **a
+    /// listing's answer arrives with its directory already let go**: the real `bt-files-worker`
+    /// lists a real folder, and the moment its answer is in the channel nobody holds the folder
+    /// (`bt_testpath::nobody_holds`) — a rename or a removal the person makes next is not refused
+    /// by a read the column has finished with.
+    ///
+    /// MUTATION: leak a handle on the folder in `read_directory`
+    /// (`std::mem::forget(std::fs::read_dir(path))`) — the answer arrives while the directory is
+    /// held, and the exclusive open is refused.
+    #[test]
+    fn a_listings_answer_arrives_with_its_directory_let_go() {
+        let dir = bt_testpath::temp_path("bt-files-answered");
+        std::fs::create_dir_all(dir.join("子 sub")).expect("a scratch directory");
+        std::fs::write(dir.join("a.txt"), b"a").expect("a file in it");
+        let events = crate::headless::LoopEvents::default();
+        let worker = FilesWorker::spawn(events.proxy()).expect("the worker starts");
+        assert!(worker.request(DirRequest {
+            window: winit::window::WindowId::from(1_u64),
+            host: FilesHost::Docked(LeafId {
+                tab: crate::TabId(1),
+                seat: crate::SeatId(1),
+            }),
+            key: String::new(),
+            path: dir.clone(),
+        }));
+        let answer = crate::lane::receive(&worker.responses, "the listing's answer");
+        let free = bt_testpath::nobody_holds(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(answer.outcome, DirOutcome::Listed(_)),
+            "the folder lists"
+        );
+        assert!(free, "and nobody holds it when the answer is in");
     }
 
     #[test]

@@ -40,8 +40,9 @@
 //! comparison: a change the store holds but has not written is not undone by a
 //! read of the older file. The pass re-reads every stamped document: all four
 //! are followed live (R33; owner ruling Q3, 2026-10-11) —
-//! `settings.json` merged through its rows' doors, `keybindings.json` held for
-//! its merge, `profiles.json` and `pins.json` taken.
+//! `settings.json` merged through its rows' doors, `keybindings.json` merged
+//! by action and chord into the one shortcut table, `profiles.json` and
+//! `pins.json` merged by row and by pin, their tables put in force after.
 //!
 //! # Arming, failure and silence
 //!
@@ -63,8 +64,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
+use crate::window_seam::LoopProxy;
 use bt_platform::DirChange;
-use winit::event_loop::EventLoopProxy;
 
 use crate::watch_clock::WatchClock;
 use crate::watch_steward::{Depth, EarHandle, Listener, MemberReport};
@@ -131,7 +132,7 @@ impl DocumentSet {
         self.0 & document.bit() != 0
     }
 
-    const fn is_empty(self) -> bool {
+    pub(crate) const fn is_empty(self) -> bool {
         self.0 == 0
     }
 }
@@ -216,7 +217,7 @@ pub struct StorageWatch {
 impl StorageWatch {
     /// Open the folder's ear, once, after the four stores have opened.
     /// `write_generations` are the stores' generations at that moment.
-    pub fn arm(&mut self, proxy: &EventLoopProxy<AppEvent>, write_generations: [u64; 4]) {
+    pub fn arm(&mut self, proxy: &LoopProxy, write_generations: [u64; 4]) {
         let directory = persist::storage_dir();
         let news = Arc::clone(&self.news);
         let proxy = proxy.clone();
@@ -337,6 +338,18 @@ impl StorageWatch {
     #[must_use]
     pub fn is_armed(&self) -> bool {
         self.heard == Some(true)
+    }
+
+    /// **The listener this watch's ear is opened with**, its clock handed in —
+    /// for a test outside this module that names documents on the watcher
+    /// thread's side of the mailbox and drives the folder's one clock without a
+    /// steward.
+    #[cfg(test)]
+    pub(crate) fn listener_on(
+        &self,
+        now: impl Fn() -> Instant + Send + Sync + 'static,
+    ) -> Listener {
+        listener_at(&self.news, || {}, now)
     }
 }
 

@@ -60,8 +60,8 @@ use std::sync::{Condvar, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::window_seam::LoopProxy;
 use anyhow::{Context, Result};
-use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
 use crate::{AppEvent, LeafId};
@@ -148,11 +148,61 @@ pub fn git_not_found() -> &'static str {
 /// [`GitHost`] is minted by a counter that starts again in every window — a
 /// `TabId` on its own, one inside a [`crate::LeafId`], a float's epoch — so none
 /// of them names one surface across the process. The pair does.
+///
+/// **And the cache that asked** ([`GitCacheId`]): the place is where the
+/// question was asked *from*; the cache is who its answer is owed to. A Files
+/// view can move between the two — a float docked into a column, a column
+/// popped out into a float, a pane carried into another tab — and its cache
+/// moves with it, so the answer is filed wherever that cache stands when the
+/// answer is taken (`git_mutation_lane::OpenPages::resolve`), not where it
+/// stood when it asked.
+///
+/// **And, for a document, the buffer opened for it** ([`Self::buffer`]): a
+/// diff, a file at a commit or a diff between two commits is not the page's —
+/// the page has no slot for one — but the preview buffer's that the press
+/// opened, so that buffer is who waits for it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitRequest {
     pub window: WindowId,
     pub host: GitHost,
+    pub asker: GitCacheId,
+    /// **The preview buffer this question is asked for**, when it is a
+    /// document's (T-GIT-DOCUMENT-GATED-BY-POOL): its answer is filed into that
+    /// buffer wherever it is kept when the answer is taken — whichever tab's
+    /// pool holds it by then, or the hover card's slot — and nowhere else
+    /// (`git_mutation_lane::OpenPages::file`). `None` for a page's question.
+    pub buffer: Option<crate::preview::BufferId>,
     pub question: GitQuestion,
+}
+
+/// **The identity of one [`GitCache`]** — who a repository question is asked
+/// by, and so who its answer is owed to.
+///
+/// Minted when the cache is made, from one count for the whole process (a
+/// page can be carried into another window, so two windows' counts could meet),
+/// and carried by the cache wherever it goes: a float's `DOCK` moves its cache
+/// into a column, a pop-out moves a column's into a float, a pane carried into
+/// another tab takes its own. Nothing about a move re-addresses an answer,
+/// because no answer to a page is addressed by its place. A copy of a cache is
+/// a frame's snapshot of a page and is never stood on a surface, so no two
+/// surfaces hold one identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct GitCacheId(u64);
+
+impl GitCacheId {
+    /// A new identity, never handed out before in this process.
+    #[must_use]
+    pub fn mint() -> Self {
+        static MINTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(MINTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl Default for GitCacheId {
+    /// A cache made by default is a new asker, so it is a new identity.
+    fn default() -> Self {
+        Self::mint()
+    }
 }
 
 /// **Who is asking**, and therefore where the answer is filed.
@@ -188,11 +238,12 @@ pub enum GitHost {
     /// there. `live_mut` finds the window that asked, and two windows on one
     /// folder never fill in with each other's answers.
     ///
-    /// `tab` is here for the *other* kind of answer this host can receive. Two
-    /// of git's six questions come back as **documents**, and a document goes
-    /// into a pool, which is a tab's (§7.1.3) — so the window records which tab
-    /// was in front when it opened one, because that is the pool the reader is
-    /// looking at it in. It is unused by the five answers that make the page.
+    /// `tab` is the tab that was in front when the window asked: a checkout or
+    /// a ref verb the window ran moves the repository under that tab's columns
+    /// and graph too, and they are read again (`Runtime::apply_git_results`).
+    /// A **document** the window asks for is not filed by it: it goes to the
+    /// preview buffer opened for it ([`GitRequest::buffer`]), in whichever
+    /// tab's pool that buffer is kept by then.
     Float { id: u64, tab: crate::TabId },
 }
 
@@ -927,8 +978,9 @@ impl GitQuestion {
             // because a newer answer makes an older one worthless; a write has no
             // answer to make worthless, it has an *effect*, and dropping the
             // older of two staging requests because a newer one arrived would
-            // silently not stage a file the user asked for. The queue may
-            // reorder work; it may not decline to do it.
+            // silently not stage a file the user asked for. Writes and checkouts
+            // are not asked of this queue at all — they run on the git mutation
+            // lane (`crate::git_mutation_lane`), which coalesces nothing either.
             //
             // A checkout is the same kind of thing and gets the same answer, for
             // one extra reason of its own: two checkouts in flight are two
@@ -940,43 +992,146 @@ impl GitQuestion {
     }
 }
 
+impl GitQuestion {
+    /// **The folder git is run in** (`git -C <folder>`): the repository's root
+    /// for every question but the probe, whose folder is the one it asks about.
+    /// The key a question waits its turn behind that folder's mutations by
+    /// (`crate::git_mutation_lane::RepoTurns`), and the key a mutation's lane
+    /// share is found by.
+    #[must_use]
+    pub fn folder(&self) -> &Path {
+        match self {
+            Self::RepoProbe { dir } => dir,
+            Self::Status { root }
+            | Self::Refs { root }
+            | Self::Log { root, .. }
+            | Self::Search { root, .. }
+            | Self::Diff { root, .. }
+            | Self::Show { root, .. }
+            | Self::DiffRange { root, .. }
+            | Self::CommitFiles { root, .. }
+            | Self::CompareFiles { root, .. }
+            | Self::Write { root, .. }
+            | Self::Checkout { root, .. } => root,
+        }
+    }
+}
+
 impl GitRequest {
+    /// The same question from the same cache, for the same buffer: the newer
+    /// answer makes the older worthless. Two caches are two askers wherever they
+    /// stand — the cache, not its place, is who is waiting — and two buffers
+    /// are two documents waiting even on one question (a floating Files view
+    /// opening one diff in two tabs' pools): replacing one's question with the
+    /// other's would leave the first buffer waiting for an answer never asked.
     fn same_target(&self, other: &Self) -> bool {
-        self.window == other.window
-            && self.host == other.host
+        self.asker == other.asker
+            && self.buffer == other.buffer
             && self.question.same_target(&other.question)
+    }
+
+    /// **This question's answer, addressed as the question was** — to the
+    /// window, the place, the cache and the buffer it was asked from.
+    #[must_use]
+    pub fn answered(&self, answer: GitAnswer) -> GitResponse {
+        GitResponse {
+            window: self.window,
+            host: self.host.clone(),
+            asker: self.asker,
+            buffer: self.buffer,
+            answer,
+        }
     }
 }
 
 // ── The answers ────────────────────────────────────────────────────────────
 
 /// What the worker learned, addressed back to the seat that asked.
+///
+/// `window` and `host` say where the asking cache stood when it asked until the
+/// drain takes the answer; the drain then addresses a page's answer to where
+/// that cache stands now (`git_mutation_lane::OpenPages::address`), so when a
+/// window files it they name the cache's place in that turn. A document's
+/// answer ([`Self::buffer`]) is not filed as a `GitResponse` at all: the drain
+/// turns it into a [`GitDocumentAnswer`] addressed to the buffer it was asked for.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitResponse {
     /// The window the asking surface was in — see [`GitRequest::window`].
     pub window: WindowId,
     pub host: GitHost,
+    /// The cache that asked — see [`GitRequest::asker`].
+    pub asker: GitCacheId,
+    /// The buffer a document was asked for — see [`GitRequest::buffer`].
+    pub buffer: Option<crate::preview::BufferId>,
     pub answer: GitAnswer,
 }
 
 impl GitResponse {
-    /// **Who this answer belongs to** (F1b).
+    /// **Who this answer belongs to** (F1b) — a page's answer; a document's is
+    /// a [`GitDocumentAnswer`], whose owner is where its buffer is kept.
     ///
     /// A column and a graph belong to their tab and travel with it between
     /// windows. A **float** belongs to the window that minted its epoch, which is
     /// `codex-final.md` §2's instruction read literally: a host that is not a tab
     /// keeps the window routing it already had rather than being pressed into the
-    /// `TabId` branch. That is also what the applying end already checks first —
-    /// "is this float still live in me" — and it holds for the float's two
-    /// *document* answers too, even though those land in a tab's pool: a diff
-    /// asked from a float and answered after the tab it recorded has been carried
-    /// into another window is dropped, which is the same cancellation a float
-    /// dismissed mid-read already was.
+    /// `TabId` branch.
+    ///
+    /// Read off the address the drain gave the answer
+    /// (`git_mutation_lane::OpenPages::address`): a page's answer names where
+    /// its cache stands now, so a Files view docked or popped out while git ran
+    /// is claimed by the window or the tab it stands in. Whether the asker is
+    /// still there at all — a float dismissed mid-read, a column closed — is
+    /// the drain's to decide, by the cache's identity, before any window is
+    /// asked; an answer whose cache is gone never reaches one.
     pub fn owner(&self) -> crate::AnswerOwner {
-        match self.host {
-            GitHost::Column(leaf) => crate::AnswerOwner::Tab(leaf.tab),
-            GitHost::Graph { tab, .. } => crate::AnswerOwner::Tab(tab),
-            GitHost::Float { .. } => crate::AnswerOwner::Window(self.window),
+        owner_of(self.window, &self.host)
+    }
+}
+
+/// [`GitResponse::owner`]'s rule, for a request or its answer alike.
+fn owner_of(window: WindowId, host: &GitHost) -> crate::AnswerOwner {
+    match host {
+        GitHost::Column(leaf) => crate::AnswerOwner::Tab(leaf.tab),
+        GitHost::Graph { tab, .. } => crate::AnswerOwner::Tab(*tab),
+        GitHost::Float { .. } => crate::AnswerOwner::Window(window),
+    }
+}
+
+/// **Where a preview buffer is kept** — the two keepers a git document's buffer
+/// can be in when its answer is taken.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Shelf {
+    /// One tab's pool (§7.1.3). The tab is named and not the window: a tab
+    /// carried into another window takes its pool with it.
+    Pool(crate::TabId),
+    /// One window's hover card ([`crate::preview::GlanceSlot`]): a glance over
+    /// a commit's file never enters a pool.
+    Glance(WindowId),
+}
+
+/// **A document's answer, addressed to the buffer it was asked for**
+/// (T-GIT-DOCUMENT-GATED-BY-POOL) — made by the drain from a [`GitResponse`]
+/// whose [`GitResponse::buffer`] is kept somewhere this turn
+/// (`git_mutation_lane::OpenPages::file`).
+///
+/// The page that asked is not consulted: it may have closed, and the buffer
+/// that was opened for the document is still waiting. A buffer nothing keeps
+/// any more — evicted, its tab closed, its card gone — takes nothing, and the
+/// answer goes to the drain's sink instead.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitDocumentAnswer {
+    pub shelf: Shelf,
+    pub buffer: crate::preview::BufferId,
+    pub answer: GitAnswer,
+}
+
+impl GitDocumentAnswer {
+    /// **Who takes it**: the window whose strip holds the tab whose pool keeps
+    /// the buffer, or the window whose hover card does.
+    pub fn owner(&self) -> crate::AnswerOwner {
+        match self.shelf {
+            Shelf::Pool(tab) => crate::AnswerOwner::Tab(tab),
+            Shelf::Glance(window) => crate::AnswerOwner::Window(window),
         }
     }
 }
@@ -1103,6 +1258,42 @@ pub enum GitFault {
     Refused(String),
     /// git did not finish inside [`GIT_COMMAND_TIMEOUT`] and was killed.
     TimedOut,
+    /// **Folio never ran the verb** (`crate::git_mutation_lane`): git was not
+    /// started for it — the repository's mutation lane was full, its worker
+    /// ended with the verb still in line, or the worker could not be started.
+    /// Only a write or a checkout ends this way; the rows it dimmed undim on it,
+    /// nothing changed in the repository, and nothing is tried again until the
+    /// next press.
+    NotRun(NotRun),
+    /// **The verb's work failed inside Folio, and git may have run it**
+    /// (`crate::git_mutation_lane`: a panic in the verb's task, which may come
+    /// after the child exited). The rows undim and — unlike [`Self::NotRun`] —
+    /// the page reads the repository again, because what is there now is git's
+    /// to say.
+    Unfinished,
+}
+
+/// Why Folio never ran a git verb ([`GitFault::NotRun`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotRun {
+    /// The repository's mutation lane already owed as many verbs as it holds;
+    /// refused at the press.
+    Full,
+    /// The worker that runs this repository's verbs ended with this one still
+    /// in line, or had ended when it was pressed.
+    WorkerGone,
+    /// The worker that would run it could not be started.
+    NotStarted,
+}
+
+impl GitFault {
+    /// Whether the repository may have changed although the verb did not
+    /// answer `Ok` — what a write's or a checkout's receipt asks before it reads
+    /// the repository again.
+    #[must_use]
+    pub fn may_have_run(&self) -> bool {
+        matches!(self, Self::Unfinished)
+    }
 }
 
 // ── The model ──────────────────────────────────────────────────────────────
@@ -2265,6 +2456,19 @@ impl GitChild {
         }
     }
 
+    /// **Whether a killed child's pipe readers are at their end once it is reaped**
+    /// (T-ANSWER-AFTER-THE-FILE-IS-CLOSED): a contained child's whole tree ends with it, so every
+    /// writer of both pipes is closed and the readers are joined before its fault is answered. A
+    /// child whose hooks may outlive it is the exception its policy names: a hook it started may
+    /// still hold the pipes it inherited, for as long as that hook lives, and waiting for it is the
+    /// wait the timeout exists to refuse; its readers are let go, and end when the last hook does.
+    fn readers_end_with_it(&self) -> bool {
+        match self {
+            Self::Contained(_) => true,
+            Self::HooksMayOutlive(_) => false,
+        }
+    }
+
     fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
         match self {
             Self::Contained(child) => child.wait(),
@@ -2304,6 +2508,20 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8
     // out a thread; the behaviour is kept rather than turned into a quiet
     // half-drained pipe, which is a deadlock wearing a shrug.
     .expect("spawn a git pipe reader")
+}
+
+/// One pipe as [`drain`] reads it. The product's is the pipe itself; under test, a pipe whose end
+/// the thread that started the child asked to hear of says so when its reader drops it
+/// (`tests::observed`) — which is how a test sees that the readers let go before the answer.
+fn observed(pipe: Option<Box<dyn Read + Send>>) -> Option<Box<dyn Read + Send>> {
+    #[cfg(test)]
+    {
+        tests::observed(pipe)
+    }
+    #[cfg(not(test))]
+    {
+        pipe
+    }
 }
 
 /// The name of the program `command` starts, as a [`GitFault::GitMissing`]
@@ -2404,25 +2622,18 @@ fn run_git_with_input(
         )
         .expect("spawn a git stdin writer");
     }
-    let out = drain(child.take_stdout());
-    let err = drain(child.take_stderr());
+    let out = drain(observed(child.take_stdout()));
+    let err = drain(observed(child.take_stderr()));
     let deadline = Instant::now() + timeout;
-    loop {
+    let ended = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = out.join().unwrap_or_default();
-                let stderr = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
-                return Ok(GitRun {
-                    ok: status.success(),
-                    code: status.code(),
-                    stdout,
-                    stderr,
-                });
-            }
+            Ok(Some(status)) => break Ok(status),
             Ok(None) => {}
             Err(error) => {
+                // Ended and reaped like a child past its time, before the fault is answered.
                 let _ = child.kill();
-                return Err(GitFault::GitMissing(format!(
+                let _ = child.wait();
+                break Err(GitFault::GitMissing(format!(
                     "{} could not be waited for: {error}",
                     program_name(&command)
                 )));
@@ -2433,15 +2644,34 @@ fn run_git_with_input(
             // read back from it. A killed child does exit, and exit is what
             // `try_wait` reports — so a guard that went round the loop once more
             // after the kill would find the process finished and hand its half of
-            // an answer back as though it had merely failed. The pipes close with
-            // the child, so the two reader threads end on their own; their
-            // buffers are what is being thrown away here, deliberately.
+            // an answer back as though it had merely failed. What the readers
+            // read is thrown away, deliberately.
             let _ = child.kill();
             let _ = child.wait();
-            return Err(GitFault::TimedOut);
+            break Err(GitFault::TimedOut);
         }
         thread::sleep(GIT_POLL_INTERVAL);
-    }
+    };
+    // **The readers are let go before the answer leaves** (T-ANSWER-AFTER-THE-FILE-IS-CLOSED):
+    // joined for a child that ended on its own and for a killed one whose tree ended with it
+    // (`GitChild::readers_end_with_it`); a killed child whose hooks may outlive it leaves them to
+    // the hook that holds its pipes. A pipe reader's panic is not an empty stream: under the
+    // resident panic hook it ends the process before this join (the reader is not contained), and
+    // where no fatal hook is installed the join carries it on.
+    let ended = match ended {
+        Err(fault) if !child.readers_end_with_it() => return Err(fault),
+        ended => ended,
+    };
+    let stdout = out.join().expect("a git pipe reader panicked");
+    let stderr =
+        String::from_utf8_lossy(&err.join().expect("a git pipe reader panicked")).into_owned();
+    let status = ended?;
+    Ok(GitRun {
+        ok: status.success(),
+        code: status.code(),
+        stdout,
+        stderr,
+    })
 }
 
 /// Every question, wearing one fault.
@@ -2449,7 +2679,7 @@ fn run_git_with_input(
 /// A fault is about the machine or the repository rather than about the question,
 /// so one function can dress any of them in it — which is what lets "there is no
 /// git here" be answered without a single command being built.
-fn faulted(question: &GitQuestion, fault: GitFault) -> GitAnswer {
+pub(crate) fn faulted(question: &GitQuestion, fault: GitFault) -> GitAnswer {
     match question {
         GitQuestion::RepoProbe { dir } => GitAnswer::Repo {
             dir: dir.clone(),
@@ -3007,14 +3237,6 @@ pub enum GitSlot<T> {
 }
 
 impl<T> GitSlot<T> {
-    /// **A question that was asked and will never be answered was not asked**
-    /// (F1b) — see [`GitCache::forget_pending`], the one caller.
-    fn forget_pending(&mut self) {
-        if matches!(self, Self::Pending) {
-            *self = Self::Idle;
-        }
-    }
-
     #[must_use]
     pub fn ready(&self) -> Option<&T> {
         match self {
@@ -3147,6 +3369,9 @@ pub struct GitCache {
     checkout: Option<String>,
     /// What this cache is for, and therefore what it asks (R31).
     role: GitRole,
+    /// **Who this cache is** ([`GitCacheId`]) — what every question it asks is
+    /// owed back to, wherever the page carrying it is moved.
+    id: GitCacheId,
 }
 
 /// Which surface a cache feeds, and therefore which questions it owes.
@@ -3241,6 +3466,13 @@ impl GitCache {
             ..Self::default()
         }
     }
+
+    /// Who this cache is: what its questions are asked as.
+    #[must_use]
+    pub fn id(&self) -> GitCacheId {
+        self.id
+    }
+
     /// Point this cache at a folder, forgetting everything if it is a different
     /// one. Answers whether anything was forgotten.
     pub fn retarget(&mut self, dir: &Path) -> bool {
@@ -3252,6 +3484,9 @@ impl GitCache {
             // What a cache is *for* survives what it is *about*: a column that
             // moves to another folder is still a page.
             role: self.role,
+            // And it is still the same asker: an answer about the folder it left
+            // comes back to it, and is refused by its subject.
+            id: self.id,
             ..Self::default()
         };
         true
@@ -3701,29 +3936,6 @@ impl GitCache {
     }
 
     /// Record that a question has been sent, so that it is not sent again.
-    /// **Give up on every question that is still out** (F1b, `plan.md` v4 增补
-    /// ②) — [`crate::files::DirCache::forget_pending`]'s twin, for the same
-    /// reason and at the same moment.
-    ///
-    /// The pane this cache belongs to has been given a new [`crate::LeafId`], so
-    /// every answer in flight is addressed to a surface that no longer exists and
-    /// will be dropped where it lands. `Pending` therefore goes back to `Idle`,
-    /// which is what [`Self::pending_questions`] reads as "owed", and the three
-    /// one-shot ledgers are cleared so the rows they dim can be pressed again.
-    ///
-    /// **Only the pending slots.** An answer already in hand stays: a column that
-    /// merely changed tabs must not blink back to "Loading …" and re-run the
-    /// `git status` that told it where it is standing.
-    pub fn forget_pending(&mut self) {
-        self.repo.forget_pending();
-        self.status.forget_pending();
-        self.refs.forget_pending();
-        self.log.forget_pending();
-        self.pending_writes.clear();
-        self.pending_refs.clear();
-        self.checkout = None;
-    }
-
     pub fn mark_pending(&mut self, question: &GitQuestion) {
         match question {
             GitQuestion::RepoProbe { .. } => self.repo = GitSlot::Pending,
@@ -3842,10 +4054,12 @@ impl GitCache {
                 true
             }
             // **The receipt** (R13). Two things happen and their order is the
-            // point: the rows stop being dimmed, and — only on success —
+            // point: the rows stop being dimmed, and — on success —
             // everything is asked again. Re-asking on a *failure* would be
             // spending three subprocesses to re-learn a status that by definition
-            // did not change.
+            // did not change. The one failure that *is* re-asked is
+            // `GitFault::Unfinished`: Folio's own work failed after git may have
+            // run the verb, so what the repository holds now is git's to say.
             //
             // The refusal itself is no longer filed here (toast ruling,
             // 2026-08-16). It used to be kept as `write_error` until the *next*
@@ -3872,7 +4086,7 @@ impl GitCache {
                 if let Some(name) = verb.ref_subject() {
                     self.pending_refs.remove(name);
                 }
-                if outcome.is_ok() {
+                if outcome.as_ref().err().is_none_or(GitFault::may_have_run) {
                     self.refresh();
                 }
                 true
@@ -3925,7 +4139,9 @@ impl GitCache {
             // status and the whole history the page is drawn from, so everything
             // is asked again; one that git refused changed *nothing at all* —
             // that is what "refused" means here — so the page it was asked from
-            // is still true, and all that is added to it is git's sentence.
+            // is still true, and all that is added to it is git's sentence. A
+            // checkout Folio could not finish (`GitFault::Unfinished`) may have
+            // moved the tree, so it is asked again like a success.
             GitAnswer::Checkout {
                 root,
                 target,
@@ -3938,7 +4154,7 @@ impl GitCache {
                     return false;
                 }
                 self.checkout = None;
-                if outcome.is_ok() {
+                if outcome.as_ref().err().is_none_or(GitFault::may_have_run) {
                     self.refresh();
                 }
                 true
@@ -3976,23 +4192,48 @@ pub fn fault_sentence_in(fault: &GitFault, lang: crate::i18n::Lang) -> String {
         GitFault::NotARepository => crate::i18n::Text::GitNotARepository
             .in_lang(lang)
             .to_owned(),
+        GitFault::NotRun(NotRun::Full) => crate::i18n::Text::GitNotRunFull.in_lang(lang).to_owned(),
+        GitFault::NotRun(NotRun::WorkerGone) => crate::i18n::Text::GitNotRunWorkerGone
+            .in_lang(lang)
+            .to_owned(),
+        GitFault::NotRun(NotRun::NotStarted) => crate::i18n::Text::GitNotRunNotStarted
+            .in_lang(lang)
+            .to_owned(),
+        GitFault::Unfinished => crate::i18n::Text::GitUnfinished.in_lang(lang).to_owned(),
     }
 }
 
 // ── The worker ─────────────────────────────────────────────────────────────
 
-/// Newest-per-target queue, the shape [`crate::files::DirRequest`] already gives
-/// the directory lane.
+/// **What the read worker's channel carries**: a question asked, or a nudge to look at the reads
+/// parked in its line again ([`read_inbox`]).
+pub(crate) enum GitMail {
+    Ask(GitRequest),
+    LookAgain,
+}
+
+/// **The read worker's line**: the questions not yet asked of the turnstile, newest per target —
+/// the shape [`crate::files::DirRequest`] already gives the directory lane — and the reads asked
+/// whose turn had not come, parked in the order they were, each with its ticket
+/// ([`crate::git_mutation_lane::ReadTicket`]).
 ///
 /// Asking the repository twice because a page was opened, closed and opened
 /// again while a cold `status` was still running is work nobody is waiting for,
-/// and the older answer can only ever be the staler one.
+/// and the older answer can only ever be the staler one — whether the older one
+/// is still in line or parked behind its repository's verbs.
 #[derive(Default)]
 struct PendingGitRequests {
     requests: std::collections::VecDeque<GitRequest>,
+    waiting: std::collections::VecDeque<(GitRequest, crate::git_mutation_lane::ReadTicket)>,
+    /// Called after every look at the parked line that began nothing — where a test makes
+    /// something happen between that look and the next question's ask.
+    #[cfg(test)]
+    swept: Option<Box<dyn FnMut()>>,
 }
 
 impl PendingGitRequests {
+    /// `request` joins the back of the line; an older one of the same target — in line, or parked
+    /// (its ticket dropped, so no verb waits on it) — is replaced.
     fn push_latest(&mut self, request: GitRequest) {
         if let Some(index) = self
             .requests
@@ -4001,11 +4242,9 @@ impl PendingGitRequests {
         {
             self.requests.remove(index);
         }
+        self.waiting
+            .retain(|(parked, _)| !parked.same_target(&request));
         self.requests.push_back(request);
-    }
-
-    fn pop_front(&mut self) -> Option<GitRequest> {
-        self.requests.pop_front()
     }
 
     fn contains_target(&self, request: &GitRequest) -> bool {
@@ -4014,30 +4253,112 @@ impl PendingGitRequests {
             .any(|queued| queued.same_target(request))
     }
 
-    fn drain_channel(&mut self, receiver: &mpsc::Receiver<GitRequest>) {
-        while let Ok(request) = receiver.try_recv() {
-            self.push_latest(request);
+    fn post(&mut self, mail: GitMail) {
+        match mail {
+            GitMail::Ask(request) => self.push_latest(request),
+            // The parked line is looked at after every drain before the worker waits for mail
+            // (`next_turn`'s loop), so the nudge has only to wake it.
+            GitMail::LookAgain => {}
+        }
+    }
+
+    fn drain_channel(&mut self, receiver: &mpsc::Receiver<GitMail>) {
+        while let Ok(mail) = receiver.try_recv() {
+            self.post(mail);
+        }
+    }
+
+    /// **The next question whose turn has come**, with its folder marked as being read: a parked
+    /// read whose turn has come, the earliest parked first; else the next question not yet asked,
+    /// asked of the turnstile as it is taken and parked when its turn has not come — and then the
+    /// parked line is looked at again. Never waits.
+    ///
+    /// **No nudge is lost**: the channel is drained only between a look at the parked line and
+    /// the next one, so `None` is answered only straight after a look that began nothing with
+    /// no question left and nothing drained since — a nudge that came after that look is still
+    /// in the channel, where the worker's `recv` finds it.
+    fn next_turn(
+        &mut self,
+        turns: &std::sync::Arc<crate::git_mutation_lane::RepoTurns>,
+        receiver: &mpsc::Receiver<GitMail>,
+    ) -> Option<(GitRequest, crate::git_mutation_lane::Reading)> {
+        loop {
+            for at in 0..self.waiting.len() {
+                let (request, ticket) = self
+                    .waiting
+                    .remove(at)
+                    .expect("`at` is below the line's length, which the look does not change");
+                match ticket.begin() {
+                    Ok(reading) => return Some((request, reading)),
+                    Err(ticket) => self.waiting.insert(at, (request, ticket)),
+                }
+            }
+            #[cfg(test)]
+            if let Some(swept) = self.swept.as_mut() {
+                swept();
+            }
+            let request = self.requests.pop_front()?;
+            self.drain_channel(receiver);
+            if self.contains_target(&request) {
+                continue;
+            }
+            match turns.ask(request.question.folder()).begin() {
+                Ok(reading) => return Some((request, reading)),
+                Err(ticket) => self.waiting.push_back((request, ticket)),
+            }
         }
     }
 }
 
-/// Serve git questions, newest question per target first.
+/// **Serve git questions**, newest question per target first, each in its
+/// repository's turn (`turns`): `execute` runs a question and sends its answer
+/// while its folder is marked as being read. A question whose turn has not come
+/// is parked, and the worker answers the others meanwhile — it never waits for a
+/// turn, only for mail; the turnstile's nudge ([`read_inbox`]) wakes it when a
+/// parked read's turn may have come. Between every two questions the channel is
+/// drained, so asks keep coalescing while a read is parked. The parked reads
+/// end with the worker (their tickets dropped), when every sender has gone.
 ///
-/// Split from [`GitWorker::spawn`] so the coalescing can be tested without a
-/// repository or an event loop, exactly as `run_dir_worker` is.
-fn run_git_worker(receiver: mpsc::Receiver<GitRequest>, mut execute: impl FnMut(GitRequest)) {
+/// Split from [`GitWorker::spawn`] so the coalescing and the turns can be tested
+/// without a repository or an event loop, exactly as `run_dir_worker` is.
+pub(crate) fn run_git_worker(
+    receiver: mpsc::Receiver<GitMail>,
+    turns: &std::sync::Arc<crate::git_mutation_lane::RepoTurns>,
+    mut execute: impl FnMut(GitRequest),
+) {
     let mut pending = PendingGitRequests::default();
-    while let Ok(request) = receiver.recv() {
-        pending.push_latest(request);
+    loop {
         pending.drain_channel(&receiver);
-        while let Some(request) = pending.pop_front() {
-            pending.drain_channel(&receiver);
-            if pending.contains_target(&request) {
-                continue;
-            }
+        if let Some((request, reading)) = pending.next_turn(turns, &receiver) {
             execute(request);
+            drop(reading);
+            continue;
+        }
+        match receiver.recv() {
+            Ok(mail) => pending.post(mail),
+            Err(_) => return,
         }
     }
+}
+
+/// **The read worker's channel**, its nudge given to `turns`: the sender the worker is asked
+/// through, and its receiving end. The nudge holds the sender weakly, so the worker still ends
+/// when the last asker lets its sender go.
+pub(crate) fn read_inbox(
+    turns: &crate::git_mutation_lane::RepoTurns,
+) -> (
+    std::sync::Arc<mpsc::Sender<GitMail>>,
+    mpsc::Receiver<GitMail>,
+) {
+    let (sender, inbox) = mpsc::channel();
+    let sender = std::sync::Arc::new(sender);
+    let nudged = std::sync::Arc::downgrade(&sender);
+    turns.nudge_with(move || {
+        if let Some(sender) = nudged.upgrade() {
+            let _ = sender.send(GitMail::LookAgain);
+        }
+    });
+    (sender, inbox)
 }
 
 /// Seconds since the epoch, for the relative-time table.
@@ -4126,40 +4447,99 @@ pub static GIT_LOCATION: GitLocation = GitLocation::new();
 
 /// The thread, and the two ends of the conversation with it.
 pub struct GitWorker {
-    requests: mpsc::Sender<GitRequest>,
+    requests: std::sync::Arc<mpsc::Sender<GitMail>>,
     pub responses: mpsc::Receiver<GitResponse>,
 }
 
+/// **Ask git one question on a worker** (`ctx`, the capability the thread door
+/// lent it): where git is, from [`GIT_LOCATION`] — read at every question,
+/// since the program walk keeps it current — then [`answer`]. The one road the
+/// read worker and the mutation lane (`crate::git_mutation_lane`) both take, so
+/// a write is located and run exactly as a read is.
+pub(crate) fn ask_git(
+    ctx: &bt_platform::admission::WorkerCtx,
+    question: &GitQuestion,
+) -> GitAnswer {
+    match GIT_LOCATION.located(ctx).as_deref() {
+        Some(program) => answer(program, question, GIT_COMMAND_TIMEOUT, now_unix()),
+        None => faulted(question, GitFault::GitMissing(git_not_found().to_owned())),
+    }
+}
+
+/// **The read worker's end of its answers, and its wake** — which the worker
+/// rings after every answer and once more when it ends
+/// (T-GIT-DOCUMENT-GATED-BY-POOL round 2).
+///
+/// The last ring is what makes a worker's end an event: let go when the
+/// worker's body returns or unwinds, it closes the answer channel first and
+/// then wakes the loop, so the drain that wake brings finds the channel
+/// disconnected, turns git reading off once, and every window then settles
+/// the documents still waiting on it (`Runtime::settle_unanswered_git_documents`)
+/// — without waiting for some other answer to wake it. The request channel's
+/// receiver is spent inside the body, before this is let go, so a press that
+/// reached no worker has been refused by the time the windows settle.
+struct AnswerOut<W: Fn()> {
+    answers: Option<mpsc::Sender<GitResponse>>,
+    wake: W,
+}
+
+impl<W: Fn()> AnswerOut<W> {
+    fn new(answers: mpsc::Sender<GitResponse>, wake: W) -> Self {
+        Self {
+            answers: Some(answers),
+            wake,
+        }
+    }
+
+    /// Send one answer and wake the loop to take it.
+    fn send(&self, response: GitResponse) {
+        if self
+            .answers
+            .as_ref()
+            .is_some_and(|answers| answers.send(response).is_ok())
+        {
+            (self.wake)();
+        }
+    }
+}
+
+impl<W: Fn()> Drop for AnswerOut<W> {
+    /// The channel closes, and then the loop hears of it.
+    fn drop(&mut self) {
+        drop(self.answers.take());
+        (self.wake)();
+    }
+}
+
 impl GitWorker {
-    /// Start the thread. **Where git is, is read at every question** from
-    /// [`GIT_LOCATION`], which the program walk keeps current.
-    pub fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
-        let (request_tx, request_rx) = mpsc::channel::<GitRequest>();
+    /// Start the thread. **Where git is, is read at every question**
+    /// ([`ask_git`]). A question takes its turn with the mutations of the
+    /// folder it is run in (`turns`, `crate::git_mutation_lane::RepoTurns`): it
+    /// runs after the mutations the folder's share had minted when it was taken
+    /// from the line — a press after it does not lengthen the wait — and after a
+    /// mutation running there, and its answer is sent with the folder marked as
+    /// being read, so a read asked after a press is never a reading taken in the
+    /// middle of it, and its answer is in the channel before a later mutation
+    /// there can start. The waiting is the line's, not the thread's
+    /// ([`run_git_worker`]): another folder's questions are answered meanwhile.
+    pub fn spawn(
+        proxy: LoopProxy,
+        turns: std::sync::Arc<crate::git_mutation_lane::RepoTurns>,
+    ) -> Result<Self> {
+        let (request_tx, request_rx) = read_inbox(&turns);
         let (response_tx, response_rx) = mpsc::channel::<GitResponse>();
         bt_platform::spawn_at_priority(
             "bt-git-worker",
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| {
-                run_git_worker(request_rx, |request| {
-                    let answer = match GIT_LOCATION.located(ctx).as_deref() {
-                        Some(program) => {
-                            answer(program, &request.question, GIT_COMMAND_TIMEOUT, now_unix())
-                        }
-                        None => faulted(
-                            &request.question,
-                            GitFault::GitMissing(git_not_found().to_owned()),
-                        ),
-                    };
-                    if response_tx
-                        .send(GitResponse {
-                            window: request.window,
-                            host: request.host,
-                            answer,
-                        })
-                        .is_ok()
-                    {
-                        let _ = proxy.send_event(AppEvent::GitReady);
-                    }
+                // Made before the requests are served, so it is let go after
+                // the request channel: see [`AnswerOut`].
+                let out = AnswerOut::new(response_tx, move || {
+                    let _ = proxy.send_event(AppEvent::GitReady);
+                });
+                run_git_worker(request_rx, &turns, |request| {
+                    let answer = ask_git(ctx, &request.question);
+                    out.send(request.answered(answer));
                 });
             },
         )
@@ -4173,7 +4553,7 @@ impl GitWorker {
     /// Ask, reporting whether the worker was still there to be asked.
     #[must_use]
     pub fn request(&self, request: GitRequest) -> bool {
-        self.requests.send(request).is_ok()
+        self.requests.send(GitMail::Ask(request)).is_ok()
     }
 }
 
@@ -4204,6 +4584,37 @@ pub fn take_git_worker_notice(notice_pending: &mut bool) -> Option<&'static str>
 mod tests {
     use super::*;
     use crate::test_support::host_path;
+
+    thread_local! {
+        /// Where the pipes of a child this thread starts say they were let go, when a test asks.
+        static PIPES_LET_GO: std::cell::RefCell<Option<mpsc::Sender<()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// A pipe that says, to the sender this thread's test set (`PIPES_LET_GO`), when its reader
+    /// lets it go.
+    struct Observed(Box<dyn Read + Send>, mpsc::Sender<()>);
+
+    impl Read for Observed {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    impl Drop for Observed {
+        fn drop(&mut self) {
+            let _ = self.1.send(());
+        }
+    }
+
+    /// [`super::observed`]'s test arm: the pipe, observed when this thread's test asked.
+    pub(super) fn observed(pipe: Option<Box<dyn Read + Send>>) -> Option<Box<dyn Read + Send>> {
+        let heard = PIPES_LET_GO.with(|heard| heard.borrow().clone());
+        match (pipe, heard) {
+            (Some(pipe), Some(heard)) => Some(Box::new(Observed(pipe, heard))),
+            (pipe, _) => pipe,
+        }
+    }
 
     /// RED mutation: classify `checkout` as contained; the hook-capable set no
     /// longer matches the reviewed command inventory.
@@ -4769,9 +5180,12 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     #[test]
     fn a_staged_diff_and_an_unstaged_diff_are_not_the_same_question() {
         let (tx, rx) = mpsc::channel();
+        let asker = GitCacheId::mint();
         let diff = |against: crate::preview::GitDiffAgainst| GitRequest {
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
+            asker,
+            buffer: None,
             question: GitQuestion::Diff {
                 root: PathBuf::from(r"D:\repo"),
                 path: "src/main.rs".to_owned(),
@@ -4779,15 +5193,21 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
                 renamed_from: None,
             },
         };
-        tx.send(diff(crate::preview::GitDiffAgainst::WorkingTree))
+        tx.send(GitMail::Ask(diff(
+            crate::preview::GitDiffAgainst::WorkingTree,
+        )))
+        .unwrap();
+        tx.send(GitMail::Ask(diff(crate::preview::GitDiffAgainst::Index)))
             .unwrap();
-        tx.send(diff(crate::preview::GitDiffAgainst::Index))
-            .unwrap();
-        tx.send(diff(crate::preview::GitDiffAgainst::WorkingTree))
-            .unwrap();
+        tx.send(GitMail::Ask(diff(
+            crate::preview::GitDiffAgainst::WorkingTree,
+        )))
+        .unwrap();
         drop(tx);
         let mut served = Vec::new();
-        run_git_worker(rx, |request| served.push(request));
+        run_git_worker(rx, &crate::git_mutation_lane::RepoTurns::new(), |request| {
+            served.push(request)
+        });
         assert_eq!(
             served.len(),
             2,
@@ -4801,9 +5221,12 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     #[test]
     fn two_pages_of_history_are_two_questions_and_one_page_asked_twice_is_one() {
         let (tx, rx) = mpsc::channel();
+        let asker = GitCacheId::mint();
         let page = |skip: usize, count: usize| GitRequest {
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
+            asker,
+            buffer: None,
             question: GitQuestion::Log {
                 root: PathBuf::from(r"D:\repo"),
                 refs: Vec::new(),
@@ -4811,14 +5234,16 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
                 count,
             },
         };
-        tx.send(page(0, 50)).unwrap();
-        tx.send(page(50, 50)).unwrap();
+        tx.send(GitMail::Ask(page(0, 50))).unwrap();
+        tx.send(GitMail::Ask(page(50, 50))).unwrap();
         // The same page again, asked for a different number of commits: still the
         // same page, and the newer request is the one that should win.
-        tx.send(page(0, 20)).unwrap();
+        tx.send(GitMail::Ask(page(0, 20))).unwrap();
         drop(tx);
         let mut served = Vec::new();
-        run_git_worker(rx, |request| served.push(request));
+        run_git_worker(rx, &crate::git_mutation_lane::RepoTurns::new(), |request| {
+            served.push(request)
+        });
         assert_eq!(served, vec![page(50, 50), page(0, 20)]);
     }
 
@@ -4826,19 +5251,196 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     #[test]
     fn two_columns_asking_the_same_thing_both_get_answered() {
         let (tx, rx) = mpsc::channel();
+        // Each column asks as its own cache.
         let ask = |host: LeafId| GitRequest {
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(host),
+            asker: GitCacheId::mint(),
+            buffer: None,
             question: GitQuestion::Status {
                 root: PathBuf::from(r"D:\repo"),
             },
         };
-        tx.send(ask(seat(1))).unwrap();
-        tx.send(ask(seat(2))).unwrap();
+        tx.send(GitMail::Ask(ask(seat(1)))).unwrap();
+        tx.send(GitMail::Ask(ask(seat(2)))).unwrap();
         drop(tx);
         let mut served = Vec::new();
-        run_git_worker(rx, |request| served.push(request));
+        run_git_worker(rx, &crate::git_mutation_lane::RepoTurns::new(), |request| {
+            served.push(request)
+        });
         assert_eq!(served.len(), 2, "an answer is addressed, not broadcast");
+    }
+
+    /// Two buffers waiting on the diff of `说明 notes.md`, in two tabs' pools, and
+    /// that diff asked by one floating Files view (one asker) for `buffer`.
+    fn two_buffers_one_document() -> (
+        [Option<crate::preview::BufferId>; 2],
+        impl Fn(Option<crate::preview::BufferId>) -> GitRequest,
+    ) {
+        let asker = GitCacheId::mint();
+        let buffer_in = || {
+            let source = crate::preview::PreviewSource::GitDiff {
+                root: PathBuf::from("仓库 repo"),
+                path: "说明 notes.md".to_owned(),
+                against: crate::preview::GitDiffAgainst::WorkingTree,
+            };
+            let mut pool = crate::preview::PreviewPool::default();
+            pool.open(source.clone(), "说明 notes.md".to_owned(), &[]);
+            pool.ask_composer(&source)
+        };
+        let buffers = [buffer_in(), buffer_in()];
+        let ask = move |buffer| GitRequest {
+            window: winit::window::WindowId::from(1_u64),
+            host: GitHost::Float {
+                id: 7,
+                tab: crate::TabId(1),
+            },
+            asker,
+            buffer,
+            question: GitQuestion::Diff {
+                root: PathBuf::from("仓库 repo"),
+                path: "说明 notes.md".to_owned(),
+                against: crate::preview::GitDiffAgainst::WorkingTree,
+                renamed_from: None,
+            },
+        };
+        (buffers, ask)
+    }
+
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL) — **one document asked for two
+    /// buffers is two questions; asked twice for one buffer, it is one.**
+    ///
+    /// A floating Files view opens the diff of `说明 notes.md` while tab 1 is in
+    /// front and again after switching to tab 2: one asker, one question, but a
+    /// buffer in each tab's pool, and each buffer waits for its answer. Were the
+    /// second to replace the first while it waited in line, tab 1's buffer
+    /// would say "Loading …" for an answer nobody asks. The same buffer asking
+    /// twice is still coalesced.
+    ///
+    /// MUTATION: leave the buffer out of `GitRequest::same_target` — tab 1's
+    /// question is replaced, and one question is served instead of two.
+    #[test]
+    fn one_document_asked_for_two_buffers_is_two_questions() {
+        let ([first, second], ask) = two_buffers_one_document();
+        let (tx, rx) = mpsc::channel();
+        tx.send(GitMail::Ask(ask(first))).unwrap();
+        tx.send(GitMail::Ask(ask(second))).unwrap();
+        tx.send(GitMail::Ask(ask(second))).unwrap();
+        drop(tx);
+        let mut served = Vec::new();
+        run_git_worker(rx, &crate::git_mutation_lane::RepoTurns::new(), |request| {
+            served.push(request)
+        });
+        assert_eq!(
+            served,
+            vec![ask(first), ask(second)],
+            "each buffer's question is served; the repeat for one buffer collapses"
+        );
+    }
+
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL, stacked on T-GIT-READS-PER-REPOSITORY)
+    /// — **one document asked for two buffers while it is parked behind a verb
+    /// is two questions, both served, in the order they were asked.**
+    ///
+    /// A stage of `仓库 repo` stands in git. The floating view asks the diff for
+    /// tab 1's buffer — it is parked behind the stage — and then for tab 2's.
+    /// The second ask must not replace the parked first (a newer ask of a parked
+    /// question replaces it only for the same buffer). The stage ends just after
+    /// the worker looks at its parked line; both questions' turns have come, and
+    /// tab 1's begins first, as it was asked first.
+    ///
+    /// MUTATION: leave the buffer out of `GitRequest::same_target` — the second
+    /// ask replaces the parked first, and tab 2's question is served first and
+    /// alone.
+    #[test]
+    fn one_document_parked_for_two_buffers_is_served_for_both_in_ask_order() {
+        let ([first, second], ask) = two_buffers_one_document();
+        let turns = crate::git_mutation_lane::RepoTurns::new();
+        let (_asks, inbox) = read_inbox(&turns);
+        let hold = std::sync::Arc::new(crate::lane::Hold::default());
+        hold.hold();
+        let (lane, wakes) = standing_verbs(&turns);
+        let stage = press(&lane, &hold, stage_in("仓库 repo", "一 one.md"));
+        hold.wait_standing("the stage running");
+        let mut pending = PendingGitRequests::default();
+        pending.post(GitMail::Ask(ask(first)));
+        assert!(
+            pending.next_turn(&turns, &inbox).is_none(),
+            "tab 1's diff waits behind the stage"
+        );
+        pending.post(GitMail::Ask(ask(second)));
+        pending.swept = Some(ends_after_the_look(
+            std::sync::Arc::clone(&lane),
+            wakes,
+            std::sync::Arc::clone(&hold),
+            stage,
+        ));
+        let (request, reading) = pending
+            .next_turn(&turns, &inbox)
+            .expect("the stage has ended; tab 1's diff is not replaced");
+        assert_eq!(request, ask(first), "tab 1's buffer first, as it was asked");
+        drop(reading);
+        let (request, reading) = pending
+            .next_turn(&turns, &inbox)
+            .expect("tab 2's diff's turn has come");
+        assert_eq!(request, ask(second), "then tab 2's buffer");
+        drop(reading);
+    }
+
+    /// RED (T-GIT-DOCUMENT-GATED-BY-POOL round 2) — **a read worker that ends
+    /// wakes the loop after its answers have closed, so every window's waiting
+    /// document says it was not loaded with no other event.**
+    ///
+    /// Two windows each wait on the diff of `说明 notes.md`. The worker's body
+    /// ends; nothing else happens. Its answer end ([`AnswerOut`]) closes the
+    /// channel and wakes the loop; the drain that wake brings finds the channel
+    /// disconnected and turns git reading off, once; and each window, finding
+    /// git reading off (`Runtime::apply_git_results`), settles its document.
+    ///
+    /// MUTATION: drop the wake from `AnswerOut`'s `drop` — no wake comes, and
+    /// the test runs out of the suite's patience. (Waking before the channel
+    /// closes instead: the drain finds the channel open, and the assertion on
+    /// it is red.)
+    #[test]
+    fn a_read_worker_that_ends_settles_every_waiting_document_with_no_other_event() {
+        let source = crate::preview::PreviewSource::GitDiff {
+            root: PathBuf::from("仓库 repo"),
+            path: "说明 notes.md".to_owned(),
+            against: crate::preview::GitDiffAgainst::WorkingTree,
+        };
+        let mut windows = [
+            crate::preview::PreviewPool::default(),
+            crate::preview::PreviewPool::default(),
+        ];
+        for pool in &mut windows {
+            pool.open(source.clone(), "说明 notes.md".to_owned(), &[]);
+            pool.ask_composer(&source)
+                .expect("a diff not read is asked for");
+        }
+        let (answers, responses) = mpsc::channel::<GitResponse>();
+        let (wake, wakes) = crate::lane::wake_channel();
+        let worker = std::thread::spawn(move || {
+            let _out = AnswerOut::new(answers, wake);
+            // The worker's body ends here: its requests are spent.
+        });
+        crate::lane::wait_for_a_wake(&wakes, "the ended read worker's wake");
+        assert!(
+            matches!(responses.try_recv(), Err(mpsc::TryRecvError::Disconnected)),
+            "the drain the wake brings finds git reading gone"
+        );
+        let (mut running, mut notice) = (true, false);
+        assert!(
+            disable_git_worker_state(&mut running, &mut notice),
+            "git reading is turned off, once"
+        );
+        for pool in &mut windows {
+            assert!(pool.settle_unanswered(), "each window settles its document");
+            assert_eq!(
+                *pool.get(&source).expect("kept").load(),
+                crate::preview::PreviewLoad::Unanswered
+            );
+        }
+        worker.join().expect("the worker's body returned");
     }
 
     /// PIN — a question superseded *while an earlier one is running* is dropped
@@ -4846,26 +5448,29 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     #[test]
     fn a_status_superseded_during_a_slow_read_is_never_run() {
         let (tx, rx) = mpsc::channel();
+        let asker = GitCacheId::mint();
         let ask = |root: &str| GitRequest {
             window: winit::window::WindowId::from(1_u64),
             host: GitHost::Column(seat(1)),
+            asker,
+            buffer: None,
             question: GitQuestion::Status {
                 root: PathBuf::from(root),
             },
         };
-        tx.send(ask("slow")).unwrap();
-        tx.send(ask("target")).unwrap();
+        tx.send(GitMail::Ask(ask("slow"))).unwrap();
+        tx.send(GitMail::Ask(ask("target"))).unwrap();
         let mut late = Some(tx.clone());
         drop(tx);
         let mut served = Vec::new();
-        run_git_worker(rx, |request| {
+        run_git_worker(rx, &crate::git_mutation_lane::RepoTurns::new(), |request| {
             if request.question
                 == (GitQuestion::Status {
                     root: PathBuf::from("slow"),
                 })
                 && let Some(sender) = late.take()
             {
-                sender.send(ask("target")).unwrap();
+                sender.send(GitMail::Ask(ask("target"))).unwrap();
             }
             served.push(request);
         });
@@ -4931,6 +5536,92 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
              this child would be waiting still",
         );
         assert_eq!(fault, Some(GitFault::TimedOut));
+    }
+
+    /// PIN (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a git question's answer comes back with git
+    /// gone from the repository**: the work `bt-git-worker` runs for one question ([`answer`],
+    /// whose return is what the worker sends) asks a real git the status of a real repository,
+    /// and when it returns the child is reaped — no `index.lock` is left for the person's own git
+    /// to trip over, and nobody holds the index. The worker itself is not started here: it waits
+    /// for the process's program walk to say where git is (`GIT_LOCATION`), a slot the whole test
+    /// binary shares.
+    ///
+    /// No mutation turns this red at will: git's own exit is what removes its lock, and the
+    /// child is waited for before any answer is built (`run_git_with_input`).
+    #[test]
+    fn a_git_questions_answer_comes_back_with_git_gone_from_the_repository() {
+        let git = real_git();
+        let root = bt_testpath::temp_path("folio-git-answered");
+        std::fs::create_dir_all(&root).expect("a scratch folder can be made");
+        let run = |arguments: &[&str]| {
+            let owned: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+            run_git(git_command(&git, &root, &owned), GIT_COMMAND_TIMEOUT)
+                .expect("the scratch repository is built with the same git under test")
+        };
+        run(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("改动 change.txt"), b"one").expect("a file to stage");
+        run(&["add", "--", "改动 change.txt"]);
+        std::fs::write(root.join("改动 change.txt"), b"two").expect("a change to report");
+        let answer = answer(
+            &git,
+            &GitQuestion::Status { root: root.clone() },
+            GIT_COMMAND_TIMEOUT,
+            RECORDED_AT,
+        );
+        let index = root.join(".git").join("index");
+        let held = [
+            index.with_extension("lock").exists(),
+            !bt_testpath::nobody_holds(&index),
+        ];
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            matches!(answer, GitAnswer::Status { outcome: Ok(_), .. }),
+            "the status is answered"
+        );
+        assert_eq!(
+            held,
+            [false, false],
+            "no lock left and nobody holds the index"
+        );
+    }
+
+    /// PIN (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a contained child killed past its time has
+    /// had both its pipes let go when the fault is answered**: its tree ended with it, so every
+    /// writer is closed, and the readers are joined before `TimedOut` leaves — no reader still
+    /// holds a pipe of a question that is over.
+    ///
+    /// No mutation turns this red at will: without the join the readers still reach their end
+    /// while the child is reaped on this machine (measured three runs of three with the contained
+    /// arm letting its readers go), so the join is what makes the order a fact rather than a race
+    /// the reaping usually wins; this states the fact.
+    #[test]
+    fn a_child_killed_past_its_time_has_let_go_of_its_pipes_when_the_fault_is_answered() {
+        let (program, arguments) = match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => (
+                bt_platform::program_on_path(Path::new("ping")).expect("ping is on PATH"),
+                ["-t", "127.0.0.1"],
+            ),
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+                (PathBuf::from("tail"), ["-f", "/dev/null"])
+            }
+        };
+        let mut command = bt_platform::quiet_command(program);
+        command.args(arguments);
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (let_go, heard) = mpsc::channel();
+            PIPES_LET_GO.with(|slot| *slot.borrow_mut() = Some(let_go));
+            let fault = run_git(command, Duration::from_millis(150)).err();
+            // Asked at once, with no wait: what has let go by now let go before the answer.
+            let pipes = heard.try_iter().count();
+            let _ = tx.send((fault, pipes));
+        });
+        let (fault, pipes) = crate::lane::receive(&rx, "the guard's fault");
+        assert_eq!(fault, Some(GitFault::TimedOut));
+        assert_eq!(
+            pipes, 2,
+            "both pipes were let go before the fault was answered"
+        );
     }
 
     // ── ⑧ The two soft landings ────────────────────────────────────────────
@@ -7343,6 +8034,48 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         );
     }
 
+    /// RED (T-GIT-MUTATIONS round 2) — **a verb Folio could not finish reads the repository again;
+    /// a verb Folio never ran does not.**
+    ///
+    /// A stage of `说明 notes.md` whose task panicked after git may have run it comes back
+    /// `GitFault::Unfinished`: its row undims and the page asks for the status again, because what
+    /// the index holds now is git's to say. A stage that never ran (`NotRun::WorkerGone`) undims
+    /// too and asks nothing: nothing in the repository changed.
+    ///
+    /// MUTATION: have `GitFault::may_have_run` answer `false` — the unfinished stage leaves the
+    /// page on its old status.
+    #[test]
+    fn a_verb_folio_could_not_finish_reads_the_repository_again_and_one_never_run_does_not() {
+        let root = PathBuf::from(r"D:\repo");
+        let path = "说明 notes.md".to_owned();
+        for (fault, reads_again) in [
+            (GitFault::Unfinished, true),
+            (GitFault::NotRun(NotRun::WorkerGone), false),
+        ] {
+            let mut cache = rooted_cache(&root);
+            for question in cache.pending_questions() {
+                cache.mark_pending(&question);
+            }
+            cache
+                .begin_write(GitWriteVerb::Stage, vec![path.clone()])
+                .expect("a rooted cache takes the write");
+            assert!(cache.accept(GitAnswer::Write {
+                root: root.clone(),
+                verb: GitWriteVerb::Stage,
+                paths: vec![path.clone()],
+                outcome: Err(fault.clone()),
+            }));
+            assert!(!cache.write_pending(&path), "{fault:?}: the row undims");
+            assert_eq!(
+                cache
+                    .pending_questions()
+                    .contains(&GitQuestion::Status { root: root.clone() }),
+                reads_again,
+                "{fault:?}: whether the page asks for the status again"
+            );
+        }
+    }
+
     /// PIN (v2 ④) — **a refusal changes nothing and unpends anyway.**
     ///
     /// `git branch -d` on an unmerged branch is the case this whole design is
@@ -7492,5 +8225,197 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
             Text::GitFaultTimedOut.in_lang(Lang::English),
             "the two languages differ, so the Chinese row can tell the tables apart"
         );
+    }
+
+    // ── ⑧ The read worker's line and the verbs' turns ─────────────────────
+
+    /// A question about `root` from a cache of its own.
+    fn asked(question: GitQuestion) -> GitRequest {
+        GitRequest {
+            window: winit::window::WindowId::from(1_u64),
+            host: GitHost::Column(seat(1)),
+            asker: GitCacheId::mint(),
+            buffer: None,
+            question,
+        }
+    }
+
+    /// **A git mutation lane** taking turns with the reads through `turns`, its executor
+    /// scripted; and the receiving end of its wake.
+    fn standing_verbs(
+        turns: &std::sync::Arc<crate::git_mutation_lane::RepoTurns>,
+    ) -> (
+        std::sync::Arc<crate::git_mutation_lane::GitMutationLane>,
+        mpsc::Receiver<()>,
+    ) {
+        let (wake, wakes) = crate::lane::wake_channel();
+        let lane = crate::git_mutation_lane::GitMutationLane::start_with(
+            crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default())),
+            std::sync::Arc::clone(turns),
+            wake,
+            |_| {},
+            |_, _| {},
+        );
+        (std::sync::Arc::new(lane), wakes)
+    }
+
+    /// Press `question` on `lane`, its verb standing in `hold` when it runs.
+    fn press(
+        lane: &crate::git_mutation_lane::GitMutationLane,
+        hold: &std::sync::Arc<crate::lane::Hold>,
+        question: GitQuestion,
+    ) -> crate::git_mutation_lane::MutationId {
+        let hold = std::sync::Arc::clone(hold);
+        lane.ask_through(asked(question), move |_| {
+            Box::new(
+                move |_: &bt_platform::admission::WorkerCtx, question: &GitQuestion| {
+                    hold.pass();
+                    crate::git_mutation_lane::went_through(question)
+                },
+            )
+        })
+        .expect("the press is admitted")
+    }
+
+    /// **The verb `id` ends while the read worker is between its look at the parked line and its
+    /// next question**: the hold is let go, and the verb's terminal awaited — published, and the
+    /// turnstile told, so its nudge is in the worker's channel — within the lane suite's patience.
+    fn ends_after_the_look(
+        lane: std::sync::Arc<crate::git_mutation_lane::GitMutationLane>,
+        wakes: mpsc::Receiver<()>,
+        hold: std::sync::Arc<crate::lane::Hold>,
+        id: crate::git_mutation_lane::MutationId,
+    ) -> Box<dyn FnMut()> {
+        let mut ended = false;
+        Box::new(move || {
+            if std::mem::replace(&mut ended, true) {
+                return;
+            }
+            hold.release();
+            while !lane.ended(|_| false).iter().any(|(taken, ..)| *taken == id) {
+                crate::lane::wait_for_a_wake(&wakes, "the first verb's terminal");
+            }
+        })
+    }
+
+    fn stage_in(root: &str, path: &str) -> GitQuestion {
+        GitQuestion::Write {
+            root: PathBuf::from(root),
+            verb: GitWriteVerb::Stage,
+            paths: vec![path.to_owned()],
+        }
+    }
+
+    /// RED (T-GIT-READS-PER-REPOSITORY round 2, B1) — **A nudge the read worker drains after it
+    /// looked at its parked reads is not lost.**
+    ///
+    /// The status of `仓库 repo` is parked behind a stage that stands in git; a checkout is pressed
+    /// after it, and the refs of the repository are asked. The worker looks at its parked line
+    /// (the stage still stands) — and the stage ends there, its nudge reaching the channel — then
+    /// takes the refs, draining the channel (and with it the nudge) as it does; the refs wait
+    /// their turn. The worker must look at its line again before it would wait for mail: the
+    /// status's turn has come, and the checkout waits on it.
+    ///
+    /// MUTATION: `PendingGitRequests::next_turn` looks at the parked line once, before the
+    /// questions not yet asked, and answers `None` once they have all been parked (round 1's
+    /// shape) — the worker would block in `recv` with the status ready and the checkout waiting
+    /// on it.
+    #[test]
+    fn a_nudge_drained_after_the_look_at_the_parked_reads_is_not_lost() {
+        let turns = crate::git_mutation_lane::RepoTurns::new();
+        let (_asks, inbox) = read_inbox(&turns);
+        let hold = std::sync::Arc::new(crate::lane::Hold::default());
+        hold.hold();
+        let (lane, wakes) = standing_verbs(&turns);
+        let root = "仓库 repo";
+        let first = press(&lane, &hold, stage_in(root, "一 one.md"));
+        hold.wait_standing("the stage running");
+        let status = GitQuestion::Status {
+            root: PathBuf::from(root),
+        };
+        let mut pending = PendingGitRequests::default();
+        pending.post(GitMail::Ask(asked(status.clone())));
+        assert!(
+            pending.next_turn(&turns, &inbox).is_none(),
+            "the status waits behind the stage"
+        );
+        press(
+            &lane,
+            &hold,
+            GitQuestion::Checkout {
+                root: PathBuf::from(root),
+                target: "功能/feature".to_owned(),
+                detach: false,
+            },
+        );
+        pending.post(GitMail::Ask(asked(GitQuestion::Refs {
+            root: PathBuf::from(root),
+        })));
+        pending.swept = Some(ends_after_the_look(
+            std::sync::Arc::clone(&lane),
+            wakes,
+            std::sync::Arc::clone(&hold),
+            first,
+        ));
+        let (request, reading) = pending
+            .next_turn(&turns, &inbox)
+            .expect("the status's turn came while the worker took the refs; it is not left parked");
+        assert_eq!(request.question, status);
+        drop(reading);
+    }
+
+    /// RED (T-GIT-READS-PER-REPOSITORY round 2, B2) — **A repository's reads begin in the order
+    /// they were asked, whenever its verbs end.**
+    ///
+    /// The status of `仓库 repo` is parked behind a stage that stands in git; the refs of the
+    /// repository are asked after it. The stage ends just after the worker looked at its parked
+    /// line, before it asks the refs' turn — both reads may now run — and the status runs first,
+    /// then the refs. (A history page asked after its base page is likewise never answered before
+    /// it.)
+    ///
+    /// MUTATION: have `TurnState::read_waits` let a read begin while a read of its folder asked
+    /// before it still waits (drop its `asked_before` clause) — the refs begin first.
+    #[test]
+    fn a_repositorys_reads_begin_in_the_order_they_were_asked() {
+        let turns = crate::git_mutation_lane::RepoTurns::new();
+        let (_asks, inbox) = read_inbox(&turns);
+        let hold = std::sync::Arc::new(crate::lane::Hold::default());
+        hold.hold();
+        let (lane, wakes) = standing_verbs(&turns);
+        let root = "仓库 repo";
+        let first = press(&lane, &hold, stage_in(root, "一 one.md"));
+        hold.wait_standing("the stage running");
+        let status = GitQuestion::Status {
+            root: PathBuf::from(root),
+        };
+        let refs = GitQuestion::Refs {
+            root: PathBuf::from(root),
+        };
+        let mut pending = PendingGitRequests::default();
+        pending.post(GitMail::Ask(asked(status.clone())));
+        assert!(
+            pending.next_turn(&turns, &inbox).is_none(),
+            "the status waits behind the stage"
+        );
+        pending.post(GitMail::Ask(asked(refs.clone())));
+        pending.swept = Some(ends_after_the_look(
+            std::sync::Arc::clone(&lane),
+            wakes,
+            std::sync::Arc::clone(&hold),
+            first,
+        ));
+        let (request, reading) = pending
+            .next_turn(&turns, &inbox)
+            .expect("both reads' turns have come");
+        assert_eq!(
+            request.question, status,
+            "the status first, as it was asked"
+        );
+        drop(reading);
+        let (request, reading) = pending
+            .next_turn(&turns, &inbox)
+            .expect("the refs' turn has come");
+        assert_eq!(request.question, refs, "then the refs");
+        drop(reading);
     }
 }

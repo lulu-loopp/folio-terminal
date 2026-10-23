@@ -3009,13 +3009,23 @@ fn a_long_path_is_cut_and_the_phrase_beside_it_is_not() {
 /// and pressing it flashes "Revealed" over a file whose read-only phrase is
 /// standing right there.
 ///
+/// The sentence of a save by an ordinary write (T-PREVIEW-NO-EXCHANGE-RULING)
+/// is flashed in the same slot, and the slot cuts from the front
+/// (`LeadCut::Front`), so it must fit the strip whole or lose its "Saved".
+///
 /// MUTATION: drop the `flashing` guard in `dress_foot` and both the empty
 /// assertion and the full-width assertion go red at once — the confirmation
 /// shares its strip with a warning.
+/// MUTATION: the round-1 sentence ("…, so this save was an ordinary write",
+/// 87 characters) — the lead is cut and the equality goes red.
 #[test]
 fn a_flashing_foot_gives_the_whole_strip_to_the_word_it_is_flashing() {
     let run = [0.0, 0.0, 300.0, 28.0];
-    for flash in [foot_revealed_label(), preview::preview_saved_notice()] {
+    for flash in [
+        foot_revealed_label(),
+        preview::preview_saved_notice(),
+        preview::preview_saved_ordinarily_notice(),
+    ] {
         let words = seats::dress_foot(
             seats::FootDress {
                 dissolved: 0.0,

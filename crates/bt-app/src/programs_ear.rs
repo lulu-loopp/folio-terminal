@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
+use crate::window_seam::LoopProxy;
 use bt_platform::DirChange;
-use winit::event_loop::EventLoopProxy;
 
 use crate::AppEvent;
 use crate::programs_lane::ProgramEnvironmentSnapshot;
@@ -36,11 +36,7 @@ pub struct ProgramsEar {
 impl ProgramsEar {
     /// Bring the steward's wanted set level with a completed walk and retry members whose last
     /// start failed. The steward owns every start and stop; this method only posts its request.
-    pub fn sync(
-        &mut self,
-        snapshot: &ProgramEnvironmentSnapshot,
-        proxy: &EventLoopProxy<AppEvent>,
-    ) {
+    pub fn sync(&mut self, snapshot: &ProgramEnvironmentSnapshot, proxy: &LoopProxy) {
         let news = Arc::clone(&self.news);
         let extensions = Arc::clone(&self.extensions);
         let proxy = proxy.clone();
@@ -132,7 +128,7 @@ impl ProgramsEar {
 fn listener(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
     extensions: &Arc<Mutex<NameRule>>,
-    proxy: &EventLoopProxy<AppEvent>,
+    proxy: &LoopProxy,
 ) -> Listener {
     let news = Arc::clone(news);
     let extensions = Arc::clone(extensions);

@@ -1778,6 +1778,18 @@ pub(crate) fn a_decode(content: &str, native: (u32, u32), bytes: usize) -> PeekC
     }
 }
 
+/// **A read of a file's pixels out under an identity of its own**, as the computation lane admits
+/// each request — the record a surface's ask files, for the tests whose subject is not which read
+/// an answer is for. No two calls in the process share one.
+pub(crate) fn a_read_out() -> PeekCacheEntry {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    PeekCacheEntry::Pending {
+        asked: computation_lane::ComputationId::from(
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ),
+    }
+}
+
 /// One exact-size raster, in the shape a picture surface holds it.
 pub(crate) fn a_held_raster(content: &str, (width_px, height_px): (u32, u32)) -> PeekThumbnail {
     PeekThumbnail {
@@ -1837,10 +1849,7 @@ pub(crate) fn resolve_sharpening_page(
             );
             if needs_pixels {
                 *reads += 1;
-                peek.insert(
-                    bt_term::normalized_local_image_path_key(path),
-                    PeekCacheEntry::Pending,
-                );
+                peek.insert(bt_term::normalized_local_image_path_key(path), a_read_out());
             }
             answer
         },
@@ -2072,6 +2081,235 @@ pub(crate) fn ruler(text: &str, size: f32) -> f32 {
 
 // ── slice 3: quick edit ─────────────────────────────────────────────────
 
+/// The surface a test's save is pressed on — any one will do: the answer is
+/// said wherever the press was made.
+pub(crate) const PRESSED_ON: PreviewSurface = PreviewSurface::Peek;
+
+/// **One preview save on the request road, waited for** (S-6a): the press
+/// (`PreviewBuffer::request_save`), the storage worker's answer within the
+/// suite's patience (`PreviewSaves::settle`), and the answer heard by the
+/// buffer — what `Ctrl+S` and the `DocumentsAnswered` turn after it do.
+/// Answers what the pane that pressed is told; `None` for a press that was the
+/// pending slot.
+pub(crate) fn save_through(
+    buffer: &mut preview::PreviewBuffer,
+    saves: &mut preview::PreviewSaves,
+) -> Option<preview::SaveOutcome> {
+    match buffer.request_save(saves, PRESSED_ON) {
+        preview::SaveAsked::Sent => {}
+        preview::SaveAsked::Pending => return None,
+        preview::SaveAsked::Refused(why) => return Some(preview::SaveOutcome::Failed(why)),
+    }
+    let mut said = None;
+    for answer in saves.settle() {
+        said = buffer.hear_save_answer(answer, saves);
+    }
+    said
+}
+
+/// **Every dirty buffer of `pool` saved as `Save all`, the quit and a stop hand it over** (S-6b,
+/// S-6c): `PreviewPool::save_for_a_shut` on a storage lane the test holds, each job served by
+/// the worker's own step, the answers heard by the buffers; what each buffer a close would lose
+/// came to, by name (`PreviewPool::at_the_close`).
+pub(crate) fn the_saves_of(pool: &mut preview::PreviewPool) -> Vec<(String, preview::AtTheClose)> {
+    let (lane, jobs) = persist::StorageLane::scripted();
+    let mut saves = preview::PreviewSaves::on(lane);
+    let _ = pool.save_for_a_shut(&mut saves, |_| PRESSED_ON);
+    let awaited = pool.close_awaited();
+    while let Some(persist::ScriptedJob::Document(job)) = jobs.next() {
+        let _ = serve_on_a_worker(job, None);
+    }
+    let mut answers = saves.take_answers();
+    let _ = saves.deliver(&mut answers, &mut [&mut *pool]);
+    awaited
+        .into_iter()
+        .filter_map(|awaited| {
+            pool.at_the_close(awaited)
+                .map(|(name, at)| (name.to_owned(), at))
+        })
+        .collect()
+}
+
+/// **A stop that cannot ask, over `pool`** (S-6c): every dirty buffer's save handed to a
+/// storage lane the test holds, as the stop hands it (`PreviewPool::save_for_a_shut`, held in
+/// `preview::StopKeeps` with what it waits for); each queued job then served by the worker's
+/// own step, `crossings[n]` written into the file under the `n`th — the worker draining its
+/// queue before its end — and a job past the list left unanswered, as one a worker let go at
+/// its bound never answers; then what no file took kept in `recovered`
+/// (`preview::StopKeeps::keep`). On a clone of `pool`, which the stop holds as its own.
+pub(crate) fn the_stops_keep(
+    pool: &preview::PreviewPool,
+    recovered: &std::path::Path,
+    at: std::time::SystemTime,
+    crossings: &[Option<&[u8]>],
+) -> Vec<preview::Kept> {
+    the_stops_keep_and_its_pool(pool, recovered, at, crossings).0
+}
+
+/// [`the_stops_keep`], with the pool the stop held as it stands after the answers: the
+/// buffers a test asks about once the stop has kept what it kept.
+pub(crate) fn the_stops_keep_and_its_pool(
+    pool: &preview::PreviewPool,
+    recovered: &std::path::Path,
+    at: std::time::SystemTime,
+    crossings: &[Option<&[u8]>],
+) -> (Vec<preview::Kept>, preview::PreviewPool) {
+    let (lane, jobs) = persist::StorageLane::scripted();
+    let mut saves = preview::PreviewSaves::on(lane);
+    let mut held = pool.clone();
+    let refused = held.save_for_a_shut(&mut saves, |_| PRESSED_ON);
+    let mut keeps = preview::StopKeeps::default();
+    keeps.handed(
+        recovered,
+        preview::HandedOver {
+            awaited: held.close_awaited(),
+            refused: refused
+                .into_iter()
+                .map(|(_, source, why)| (source, why))
+                .collect(),
+        },
+    );
+    keeps.hold(held);
+    for crossing in crossings {
+        let Some(persist::ScriptedJob::Document(job)) = jobs.next() else {
+            break;
+        };
+        let _ = serve_on_a_worker(job, crossing.map(<[u8]>::to_vec));
+    }
+    let kept = keeps.keep(&mut saves, at);
+    drop(jobs);
+    let held = keeps
+        .held()
+        .first()
+        .cloned()
+        .expect("the stop held the pool");
+    (kept, held)
+}
+
+/// **Serve one document request on a thread the thread door started** — the
+/// storage worker's own step (`document_request::serve_document_between`) —
+/// with `crossing` written into the file between the precondition read and the
+/// exchange: a writer that crosses the save. Answers the role of the thread the
+/// write ran on — this helper's own thread, a worker by construction, so the
+/// answer says where the test ran the step and proves nothing about the
+/// product's thread. Waits within the suite's patience.
+pub(crate) fn serve_on_a_worker(
+    job: document_request::DocumentJob,
+    crossing: Option<Vec<u8>>,
+) -> bt_platform::admission::Role {
+    serve_on_a_volume(job, document_request::TheVolume, crossing)
+}
+
+/// **A drive without the exchange, as a test scripts it**
+/// (T-PREVIEW-NO-EXCHANGE-RULING): its exchange answers `ERROR_NOT_SUPPORTED`
+/// (50), the code a Windows volume without `ReplaceFileW`'s operation gives,
+/// classified by the platform's own rule (`bt_platform::volume_cannot_replace`),
+/// and touches nothing; it names itself drive `drive`. The plain road's rename
+/// is the disk's own (`bt_persist::commit_staged`). `seen` records the staged
+/// copy each refused exchange was handed and the copy each rename put in place,
+/// so a test sees whether the copy staged before the check is what went in.
+/// Every other call is the disk's own.
+pub(crate) struct NoExchangeDrive {
+    pub(crate) drive: u64,
+    pub(crate) seen: std::sync::Arc<std::sync::Mutex<StagedCopies>>,
+}
+
+/// What a [`NoExchangeDrive`] was handed, in order.
+#[derive(Debug, Default)]
+pub(crate) struct StagedCopies {
+    /// The staged copy each exchange was asked to put in place.
+    pub(crate) exchanged: Vec<std::path::PathBuf>,
+    /// The staged copy each plain rename put in place.
+    pub(crate) committed: Vec<std::path::PathBuf>,
+}
+
+impl NoExchangeDrive {
+    /// Drive `drive`, no rename made on it yet.
+    pub(crate) fn new(drive: u64) -> Self {
+        Self {
+            drive,
+            seen: std::sync::Arc::default(),
+        }
+    }
+}
+
+impl document_request::Volume for NoExchangeDrive {
+    fn exchange(
+        &self,
+        _worker: &bt_platform::admission::WorkerCtx,
+        temp: &std::path::Path,
+        _target: &std::path::Path,
+    ) -> Result<bt_platform::Displaced, bt_platform::ExchangeRefusal> {
+        self.seen
+            .lock()
+            .expect("the drive's record")
+            .exchanged
+            .push(temp.to_path_buf());
+        let answer = std::io::Error::from_raw_os_error(50);
+        Err(
+            if bt_platform::volume_cannot_replace(answer.raw_os_error()) {
+                bt_platform::ExchangeRefusal::ExchangeUnavailable(answer)
+            } else {
+                bt_platform::ExchangeRefusal::Failed(answer)
+            },
+        )
+    }
+
+    fn drive(&self, _file: &std::path::Path) -> document_request::Drive {
+        document_request::Drive(Some(self.drive))
+    }
+
+    fn commit(&self, staged: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+        self.seen
+            .lock()
+            .expect("the drive's record")
+            .committed
+            .push(staged.to_path_buf());
+        bt_persist::commit_staged(staged, target).map_err(|error| error.to_string())
+    }
+}
+
+/// [`serve_on_a_worker`] on `volume` — the product's ([`document_request::TheVolume`])
+/// or one a test scripts ([`NoExchangeDrive`]).
+pub(crate) fn serve_on_a_volume(
+    job: document_request::DocumentJob,
+    volume: impl document_request::Volume + Send + 'static,
+    crossing: Option<Vec<u8>>,
+) -> bt_platform::admission::Role {
+    let path = job.which.clone();
+    let (done, served) = std::sync::mpsc::channel();
+    bt_platform::spawn_at_priority(
+        "bt-preview-save-test",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |worker| {
+            document_request::serve_document_on(worker, &volume, &job, &mut |step| {
+                if step == document_request::Step::Read
+                    && let Some(crossing) = &crossing
+                {
+                    std::fs::write(&path, crossing).expect("the crossing writer writes");
+                }
+            });
+            let _ = done.send(bt_platform::admission::role());
+        },
+    )
+    .expect("the thread door starts a thread");
+    lane::receive(&served, "the storage worker's write")
+}
+
+/// The next request a scripted storage lane holds, which must be a document's
+/// write.
+pub(crate) fn next_document(jobs: &persist::ScriptedJobs) -> document_request::DocumentJob {
+    let Some(persist::ScriptedJob::Document(job)) = jobs.next() else {
+        panic!("a document's write is on the lane");
+    };
+    job
+}
+
+/// A desk for preview saves on a storage worker of its own.
+pub(crate) fn a_save_desk() -> preview::PreviewSaves {
+    preview::PreviewSaves::on(persist::StorageLane::of_its_own())
+}
+
 /// A buffer with a body, for the document tests below.
 pub(crate) fn text_buffer(name: &str, body: &str) -> preview::PreviewBuffer {
     let mut buffer = preview::PreviewBuffer::new(
@@ -2082,6 +2320,7 @@ pub(crate) fn text_buffer(name: &str, body: &str) -> preview::PreviewBuffer {
         text: body.to_owned(),
         truncated: false,
         mtime: None,
+        bytes: Some(std::sync::Arc::from(body.as_bytes())),
         content_says_text: true,
         encoding: preview::HeadEncoding::Utf8,
         lossy: false,
@@ -2119,6 +2358,7 @@ pub(crate) fn buffer_saying(path: &str, name: &str, body: &str) -> preview::Prev
         text: body.to_owned(),
         truncated: false,
         mtime: None,
+        bytes: Some(std::sync::Arc::from(body.as_bytes())),
         content_says_text: true,
         encoding: preview::HeadEncoding::Utf8,
         lossy: false,
@@ -2416,6 +2656,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         birth_death_kept: false,
         spawn_fallback: None,
         foreground_program_cadence: foreground_program::Cadence::default(),
+        process_folder: crate::pane_folder::ProcessFolderMemo::default(),
         // No ConPTY, so no reader thread, so nothing to wake — see the field.
         wake: None,
         // Aimed at the tail, like every shell that has not been aimed.
@@ -2426,6 +2667,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         profile: profiles::fallback_profile_id().to_owned(),
         paste_recipient: profiles::paste_recipient(
             profiles::fallback_profile(),
+            &profiles::ShellProgram::Native,
             &bt_pty::SystemShellEnvironment,
         ),
         // And the door that profile is served through, which is the one the
@@ -2435,6 +2677,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // And no program either, which is the honest shape of the same
         // fact: nothing was started, so nothing can have announced itself.
         program: None,
+        program_kind: profiles::ShellProgram::Native,
         // Nor a place: a fixture was never put down anywhere.
         spawn_place: None,
         born_named: false,
@@ -2471,6 +2714,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // be owed an answer about.
         // Nothing has been pasted into a fixture.
         pending_paste: None,
+        paste_hold: None,
         // A fixture is not a restore, so nothing is owed to its prompt.
         pending_typing: None,
         // Nor a shell being born: it was never going to have one.
@@ -2831,10 +3075,72 @@ pub(crate) fn engines_settling_to(target: u64) -> u64 {
     assert_eq!(
         reached,
         target,
-        "the engine ledger did not reach {target} within the lane suite's patience ({:?});          {reached} engines stood",
+        "the engine ledger did not reach {target} within the lane suite's patience ({:?}); \
+         {reached} engines stood",
         crate::lane::PATIENCE
     );
     reached
+}
+
+/// One picture's bytes, `width` × `height` of one colour, as a PNG this process wrote.
+pub(crate) fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+    let picture = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        width,
+        height,
+        image::Rgba([0x2a, 0x6f, 0xd0, 0xff]),
+    ));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    picture
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("a PNG this process wrote");
+    bytes.into_inner()
+}
+
+/// A scratch `.png` of this test's own under the build directory, named by `bt_testpath`. The
+/// path is spelled with no `..` in it, as a page resolving a picture beside it spells it.
+pub(crate) fn scratch_png_named(tag: &str) -> PathBuf {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("the crate stands two folders below the workspace")
+        .join("target")
+        .join("peek-tests");
+    std::fs::create_dir_all(&directory).expect("a scratch directory under the build directory");
+    directory.join(format!("{}.png", bt_testpath::unique_name(tag)))
+}
+
+/// **A scratch file a test wrote, removed when the test lets go of it** — on a red as on a green.
+pub(crate) struct ScratchFile(pub(crate) PathBuf);
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// A glance card over `file`, raised from a row of `host`, on `clock`, naming the file by its own
+/// name.
+pub(crate) fn card_over(host: RowHost, file: &Path, clock: PeekClock) -> FilePeek {
+    FilePeek {
+        host,
+        source: preview::PreviewSource::file(file.display().to_string()),
+        key: file.display().to_string(),
+        name: file
+            .file_name()
+            .expect("the card's file has a name")
+            .to_string_lossy()
+            .into_owned(),
+        rect: [10.0, 10.0, 200.0, 30.0],
+        clock,
+        frame: None,
+        body: None,
+        head: None,
+        foot: None,
+        foot_lit: false,
+        column: None,
+        closing_at: None,
+        dwell: None,
+    }
 }
 
 /// A real folder with a real file in it, for the glance-foot tests: the path
@@ -2958,7 +3264,7 @@ pub(crate) fn paste_text_into_on(
 ) -> StagedPaste {
     let recipient = tab.sessions[&target.seat].paste_recipient.clone();
     let prepared = prepare_clipboard_paste(
-        Ok(bt_platform::ClipboardPayload::Text(text.to_owned())),
+        bt_platform::ClipboardPayload::Text(text.to_owned()),
         &recipient,
         false,
     );
@@ -3085,4 +3391,330 @@ pub(crate) fn alone_in_a_process(selector: &str, stdin: &[u8]) -> bool {
         String::from_utf8_lossy(&output.stderr)
     );
     false
+}
+
+// ── the storage pass's window, over the four real stores (T-STORE-NOTICE)
+
+/// **A window for the storage pass, with the four real stores on one scripted
+/// lane and a toast host of its own.** A real `Runtime` needs a window, which a
+/// test may not open, so the pass's seams are driven here with doors that do
+/// what the real ones do to the stores: a setting the file gave is stored as it
+/// came (the door that took it), the shortcut table's departures are told to
+/// the keybindings store, and the profile and pin tables are what their stores'
+/// readers read. The batch's notice is held here as the application holds it,
+/// and its card is the product's own ([`merge_notice_card`]), raised as
+/// `Runtime::toast` raises it.
+pub(crate) struct StoragePassRig {
+    pub(crate) settings: persist::SettingsStore,
+    pub(crate) keybindings: persist::KeybindingsStore,
+    pub(crate) profiles: persist::ProfilesStore,
+    pub(crate) pins: pins::PinsStore,
+    /// The storage worker's queue, which the test serves.
+    pub(crate) jobs: persist::ScriptedJobs,
+    pub(crate) toasts: toast::ToastHost,
+    /// The batch's notice, until its card is raised (`App::merge_notice`).
+    pending: document_request::MergeNotice,
+    /// Each pass's `diagnostics.log` line, in order.
+    pub(crate) said: Vec<String>,
+    /// Each notice a card was raised for, in order.
+    pub(crate) raised: Vec<document_request::MergeNotice>,
+    /// How many presentations the turns made.
+    pub(crate) presented: usize,
+    /// Whether the one presentation after the passes fails.
+    pub(crate) presentation_fails: bool,
+}
+
+impl StoragePassRig {
+    /// The four stores over the files in `root`, as they stand now.
+    pub(crate) fn open(root: PathBuf) -> Self {
+        let (lane, jobs) = persist::StorageLane::scripted();
+        Self {
+            settings: persist::SettingsStore::at_on(
+                root.join(persist::SETTINGS_FILE_NAME),
+                lane.clone(),
+            ),
+            keybindings: persist::KeybindingsStore::at_on(
+                root.join(persist::KEYBINDINGS_FILE_NAME),
+                lane.clone(),
+            ),
+            profiles: persist::ProfilesStore::at_on(
+                root.join(persist::PROFILES_FILE_NAME),
+                lane.clone(),
+            ),
+            pins: pins::PinsStore::at_on(root.join(pins::PINS_FILE_NAME), lane),
+            jobs,
+            toasts: toast::ToastHost::default(),
+            pending: document_request::MergeNotice::default(),
+            said: Vec::new(),
+            raised: Vec::new(),
+            presented: 0,
+            presentation_fails: false,
+        }
+    }
+
+    /// **A private storage folder** for `case`.
+    pub(crate) fn scratch(case: &str) -> PathBuf {
+        let root = bt_testpath::temp_path(&format!("bt-app-storage-pass-{case}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private storage folder for this test");
+        root
+    }
+
+    /// Write `document` to `file` in `root`, as an editor does.
+    pub(crate) fn write<T: document_request::StoredDocument>(
+        root: &Path,
+        file: &str,
+        document: &T,
+    ) {
+        std::fs::write(
+            root.join(file),
+            document.to_bytes().expect("the document serializes"),
+        )
+        .expect("the file is written");
+    }
+
+    /// **The disk refuses every write queued now**: what Folio set stays owed,
+    /// in memory and not in its file.
+    pub(crate) fn refuse_writes(&mut self) {
+        while let Some(job) = self.jobs.next() {
+            if let persist::ScriptedJob::Document(job) = job {
+                let _ = job.answer.send(document_request::DocumentAnswer {
+                    generation: job.generation,
+                    version: job.version,
+                    asker: job.asker,
+                    outcome: document_request::Outcome::Refused {
+                        cause: document_request::Refusal::Disk(
+                            "磁盘已满 the disk is full".to_owned(),
+                        ),
+                    },
+                    not_durable: None,
+                    retired: Vec::new(),
+                    left: None,
+                });
+            }
+        }
+    }
+
+    /// **Every read the stores have asked of the worker, in the order asked**;
+    /// a write queued among them stays unanswered.
+    pub(crate) fn reads(&mut self) -> Vec<document_request::ReadJob> {
+        let mut reads = Vec::new();
+        while let Some(job) = self.jobs.next() {
+            if let persist::ScriptedJob::Read(read) = job {
+                reads.push(read);
+            }
+        }
+        reads
+    }
+
+    /// **The worker serves one read**: the file's bytes as they stand on disk.
+    pub(crate) fn serve(read: document_request::ReadJob) {
+        let bytes = std::fs::read(&read.which).expect("the file is there");
+        (read.answer)(
+            read.generation,
+            bt_persist::StableRead::Bytes(std::sync::Arc::from(bytes)),
+        );
+    }
+
+    /// **One `DocumentsAnswered` turn**, as `Runtime::take_document_answers`
+    /// takes it: every store takes its answers, then the storage pass runs.
+    pub(crate) fn turn(&mut self) -> anyhow::Result<()> {
+        let _ = persist::hear_documents(
+            &mut self.settings,
+            &mut self.keybindings,
+            &mut self.profiles,
+            &mut self.pins,
+        );
+        storage_pass::take_merges(self)
+    }
+
+    /// The cards raised, oldest first.
+    pub(crate) fn cards(&self) -> &[toast::Toast] {
+        self.toasts.toasts()
+    }
+}
+
+impl settings_merge::MergeWindow for StoragePassRig {
+    fn merge_begin(&mut self) -> Option<settings_merge::SettingsPass> {
+        self.settings.begin_merge(bt_platform::host_platform())
+    }
+
+    fn merge_in_force(&self) -> &bt_persist::SettingsV1 {
+        self.settings.loaded()
+    }
+
+    fn merge_door(&mut self, change: &settings_bundle::SettingChange) -> anyhow::Result<()> {
+        self.merge_store_as_it_came(change);
+        Ok(())
+    }
+
+    fn merge_store_as_it_came(&mut self, change: &settings_bundle::SettingChange) {
+        let mut settings = self.settings.loaded().clone();
+        change.write_into(&mut settings);
+        self.settings.store(settings);
+    }
+
+    fn merge_end(&mut self) {
+        self.settings.end_merge();
+    }
+
+    fn merge_say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+
+    fn merge_present(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl keybindings_merge::KeybindingsWindow for StoragePassRig {
+    fn keybindings_merge_begin(&mut self) -> Option<keybindings_merge::KeybindingsPass> {
+        self.keybindings.begin_merge(bt_platform::host_platform())
+    }
+
+    fn keybindings_put_in_force(&mut self, table: shortcuts::Shortcuts) {
+        self.keybindings.project(
+            table
+                .overrides()
+                .into_iter()
+                .map(|entry| bt_persist::BindingOverrideV1 {
+                    action: entry.id,
+                    chord: entry.chord,
+                })
+                .collect(),
+        );
+    }
+
+    fn keybindings_merge_end(&mut self) {
+        self.keybindings.end_merge();
+    }
+
+    fn keybindings_say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+
+    fn keybindings_present(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+impl table_merge::TableMergeWindow for StoragePassRig {
+    fn table_merge_begin(&mut self, table: table_merge::Table) -> Option<table_merge::MergePass> {
+        match table {
+            table_merge::Table::Profiles => self.profiles.begin_merge(),
+            table_merge::Table::Pins => self.pins.begin_merge(),
+        }
+    }
+
+    fn table_door(&mut self, _: table_merge::Table) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn table_merge_end(&mut self, table: table_merge::Table) {
+        match table {
+            table_merge::Table::Profiles => self.profiles.end_merge(),
+            table_merge::Table::Pins => self.pins.end_merge(),
+        }
+    }
+
+    fn table_merge_say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+}
+
+impl storage_pass::StoragePassWindow for StoragePassRig {
+    fn present_merges(&mut self) -> anyhow::Result<()> {
+        self.presented += 1;
+        if self.presentation_fails {
+            anyhow::bail!("呈现失败 the chrome could not be presented");
+        }
+        Ok(())
+    }
+
+    fn merge_notice_due(
+        &mut self,
+        turn: document_request::MergeNotice,
+    ) -> Option<document_request::MergeNotice> {
+        storage_pass::notice_due(
+            &mut self.pending,
+            turn,
+            &self.settings,
+            &self.keybindings,
+            &self.profiles,
+            &self.pins,
+        )
+    }
+
+    fn raise_merge_notice(&mut self, notice: &document_request::MergeNotice) -> anyhow::Result<()> {
+        // `Runtime::raise_merge_notice`'s card, raised as `Runtime::toast` raises
+        // one: no title, no verb.
+        if let Some((kind, anchor, body)) = merge_notice_card(notice) {
+            self.toasts
+                .raise(kind, anchor, None, body, None, Motion::Full, Instant::now());
+            self.raised.push(notice.clone());
+        }
+        Ok(())
+    }
+}
+
+/// **One file shown on a surface of its own and its open answered**, the way the window files an
+/// answer: a walk names the file on seat `seat` of [`TAB_ONE`] and asks for it, and the worker's
+/// answer comes home ([`AnimationCache::opened`] files nothing for a file no surface names). `key`
+/// is already in the form the window keys files by (lower case, back slashes), so the walk names
+/// exactly it. For the tests whose subject is a playback rather than the open.
+pub(crate) fn shown_and_opened(
+    cache: &mut AnimationCache,
+    seat: u64,
+    key: &str,
+    serial: u64,
+    frames: Result<animation::Animation, animation::AnimationRefusal>,
+) {
+    let path = PathBuf::from(key);
+    assert_eq!(
+        normalized_local_image_path_key(&path),
+        key,
+        "a key the walk names as it is"
+    );
+    cache.ask_for_showing(&[(seat_of(TAB_ONE, SeatId(seat)), Some(path))], |_| {
+        admitted()
+    });
+    answer_awaited(cache, key, serial, frames);
+}
+
+/// **An animation open admitted under an identity of its own**, as the computation lane admits
+/// each request — for a walk a test answers by hand. No two calls in the process share one.
+pub(crate) fn admitted() -> OpenAsked {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    OpenAsked::Asked(computation_lane::ComputationId::from(
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    ))
+}
+
+/// **The worker's answer to the open the window awaits for `key`**, filed as the drain files it
+/// ([`AnimationCache::opened`]) — for the tests whose subject is not which open an answer is for.
+/// Answers whether it was filed.
+pub(crate) fn answer_awaited(
+    cache: &mut AnimationCache,
+    key: &str,
+    serial: u64,
+    frames: Result<animation::Animation, animation::AnimationRefusal>,
+) -> bool {
+    let asked = cache
+        .awaited(key)
+        .expect("the window awaits a decode of the file");
+    cache.opened(key.to_owned(), asked, serial, frames)
+}
+
+/// **The open the window awaits for `path`, failed on the worker** and settled down the road the
+/// window's settlement takes it (`settle_failure` → [`AnimationCache::settle`]).
+pub(crate) fn fail_awaited(cache: &mut AnimationCache, path: &Path) {
+    let asked = cache
+        .awaited(&normalized_local_image_path_key(path))
+        .expect("the window awaits a decode of the file");
+    cache.settle(crate::settle_failure(
+        asked,
+        crate::Asked::Animation {
+            path: path.to_path_buf(),
+        },
+    ));
 }

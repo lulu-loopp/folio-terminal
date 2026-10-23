@@ -56,7 +56,7 @@ use std::{
     time::Instant,
 };
 
-use winit::event_loop::EventLoopProxy;
+use crate::window_seam::LoopProxy;
 
 use crate::{
     AppEvent,
@@ -169,7 +169,7 @@ impl<W: Ord + Copy> GitWatch<W> {
     /// the next one — a window nobody is looking at, holding a core at full tilt
     /// for as long as it stays open. So the clone is taken once, in
     /// [`listener`], when the application's git ear opens, and never per turn.
-    pub fn want(&mut self, window: W, wanted: BTreeSet<PathBuf>, proxy: &EventLoopProxy<AppEvent>) {
+    pub fn want(&mut self, window: W, wanted: BTreeSet<PathBuf>, proxy: &LoopProxy) {
         if !self.want_with(window, wanted, paths_of) {
             return;
         }
@@ -415,7 +415,7 @@ fn all_paths(watched: &BTreeMap<PathBuf, Watched>) -> BTreeSet<PathBuf> {
 fn listener(
     news: &Arc<Mutex<BTreeMap<PathBuf, Instant>>>,
     routes: &Routes,
-    proxy: &EventLoopProxy<AppEvent>,
+    proxy: &LoopProxy,
 ) -> Listener {
     let news = Arc::clone(news);
     let routes = Arc::clone(routes);
@@ -481,7 +481,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// button and still re-reads when the window comes back. Set-but-empty is off,
 /// on `BT_PERF_TRACE`'s own rule.
 fn trace(message: &str) {
-    if std::env::var_os("BT_GIT_TRACE").is_some_and(|value| !value.is_empty()) {
+    if crate::entry_doors::installed().git {
         eprintln!("git watch: {message}");
     }
 }

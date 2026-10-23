@@ -268,6 +268,51 @@ const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
 /// anything typed at a password prompt; for a diagnosis you run yourself, never to be shared unread.
 const PTY_INPUT_DUMP_ENV: &str = "BT_PTY_INPUT_DUMP";
 
+/// **Which of a pane's two streams are recorded, and where** — the request a spawn is handed, never
+/// a variable this crate reads (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY).
+///
+/// `BT_PTY_DUMP` and `BT_PTY_INPUT_DUMP` are read once, by the program's entry, and the answer
+/// travels down to [`PtySession::spawn`] on the [`PtyCommand`] as one of these. A library that read
+/// them at the moment of use honoured them in every binary that reached a real pane — a test binary
+/// as readily as the product — so a shell that had the switch set for a diagnosis recorded every
+/// test's pane into the diagnosis's file. [`PtyRecording::none`] is what every caller that was not
+/// asked for a recording passes; a test that wants one names a file of its own.
+///
+/// The paths are taken as given: the entry has already said which values mean "off" (set but empty
+/// is off), and a path here is a recording asked for. The output path is the run's first
+/// recording's and later ones take `<path>.2`, `<path>.3`; the input path is recorded to
+/// `<path>.in`, `<path>.in.2`, … beside it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PtyRecording {
+    output: Option<PathBuf>,
+    input: Option<PathBuf>,
+}
+
+impl PtyRecording {
+    /// Record nothing — the answer for every pane nobody asked to record.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            output: None,
+            input: None,
+        }
+    }
+
+    /// Record the received bytes to `output` and the queued input to `input`, either of them
+    /// `None` for a stream that is not recorded. **Recording input records keystrokes, including
+    /// anything typed at a password prompt.**
+    #[must_use]
+    pub const fn new(output: Option<PathBuf>, input: Option<PathBuf>) -> Self {
+        Self { output, input }
+    }
+
+    /// Whether this asks for no recording at all.
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        self.output.is_none() && self.input.is_none()
+    }
+}
+
 /// The name this terminal announces itself under, in `TERM_PROGRAM`.
 ///
 /// **Public because it is half of a handshake, not a private label.** The value
@@ -348,12 +393,12 @@ const PTY_DUMP_PUBLISH_INTERVAL: Duration = Duration::from_millis(200);
 static PTY_DUMP_RECORDINGS: AtomicU64 = AtomicU64::new(0);
 
 impl PtyDump {
-    /// This pane's recordings, as `BT_PTY_DUMP` and `BT_PTY_INPUT_DUMP` ask for them; a recording
-    /// that cannot be opened is said on standard error and left out (G-SWEEP-048).
-    fn from_environment() -> (Option<Self>, Option<Self>) {
+    /// This pane's recordings, as its spawn's [`PtyRecording`] asks for them; a recording that
+    /// cannot be opened is said on standard error and left out (G-SWEEP-048).
+    fn for_request(recording: &PtyRecording) -> (Option<Self>, Option<Self>) {
         Self::from_paths(
-            pty_dump_path(std::env::var_os(PTY_DUMP_ENV)),
-            pty_dump_path(std::env::var_os(PTY_INPUT_DUMP_ENV)),
+            recording.output.clone(),
+            recording.input.clone(),
             || (Instant::now(), unix_millis()),
             &mut |line| eprintln!("{line}"),
         )
@@ -568,27 +613,6 @@ fn unix_millis() -> u128 {
         .unwrap_or_default()
 }
 
-/// What `BT_PTY_DUMP` names, if it names anything.
-///
-/// **An empty value is off, and this is the same word every other diagnostic
-/// variable in this program uses** (user ruling 2026-08-25). `BT_MOUSE_TRACE`,
-/// `BT_ATTENTION_TRACE`, `BT_GIT_TRACE` and `BT_PERF_TRACE` all read an empty
-/// string as "not set"; this one alone used to hand the empty string on as a
-/// path, and a truncating create against `""` fails, so `BT_PTY_DUMP=` did not
-/// turn recording off — it stopped the pane from starting at all. That is the
-/// shape a shell leaves behind when it clears a variable rather than removing
-/// it (`$env:BT_PTY_DUMP = ""`, a `.env` line with nothing after the `=`, a
-/// script that unsets by assigning empty), so the failure landed on exactly the
-/// people who thought they had switched the diagnostic off.
-///
-/// Whitespace is *not* trimmed: a value of `" "` is a real, if strange, relative
-/// filename on Windows' rules as this crate is entitled to read them, and a
-/// diagnostic that silently reinterprets the path it was given is the same
-/// class of surprise in the other direction.
-fn pty_dump_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    value.filter(|value| !value.is_empty()).map(PathBuf::from)
-}
-
 /// Which file this process's `ordinal`-th recording writes to.
 ///
 /// The first one is the named path itself: `BT_PTY_DUMP=<file>` means that file, every probe and
@@ -643,12 +667,16 @@ const READER_EXIT_BUDGET: Duration = Duration::from_secs(2);
 const READER_EXIT_POLL: Duration = Duration::from_millis(2);
 
 /// What a bounded join found.
+///
+/// **A reader's panic is not one of the answers** (T-JOINED-PANIC-VALUES). The reader's body is
+/// not contained — the shipped `bt-pty` has no edge to `bt-platform`'s `contained_panic`, and the
+/// reader pushes into the ring the window thread reads — so under the resident panic hook its
+/// panic ends the process from inside the hook, before this join could see it. Where no fatal
+/// hook is installed (a test) the join carries the panic on rather than naming a value for it.
 #[derive(Debug, Eq, PartialEq)]
 enum ReaderExit {
     /// It ended.
     Ended,
-    /// It ended by panicking, which is a fact about this session the caller answers for.
-    Panicked,
     /// It had not ended when the budget ran out, and has been let go.
     StillReading,
 }
@@ -665,10 +693,10 @@ fn join_within(budget: Duration, reader: JoinHandle<()>) -> ReaderExit {
     let deadline = Instant::now() + budget;
     loop {
         if reader.is_finished() {
-            return match reader.join() {
-                Ok(()) => ReaderExit::Ended,
-                Err(_) => ReaderExit::Panicked,
-            };
+            reader
+                .join()
+                .expect("the PTY reader panicked, which no fatal panic hook ended here");
+            return ReaderExit::Ended;
         }
         if Instant::now() >= deadline {
             return ReaderExit::StillReading;
@@ -765,10 +793,15 @@ impl Retirements {
 /// already out of its window's map by then — that is the caller's half of this, and it is what
 /// makes the hand-over safe: nothing on the window thread can reach a session that is being
 /// taken apart, because nothing on the window thread still has it.
+///
+/// **This is the door a shell is taken apart through** (T-DROP-DOORS, D-81): *a shell is taken
+/// apart only through `retire_within`, never by a drop on the window thread.* Every road that
+/// ends a pane in `bt-app` takes the session out of its leaf and hands it here; the session's
+/// `Drop` waits for nothing.
 pub fn retire_session(session: PtySession) {
     retire_within(RETIREMENT_BUDGET, move || {
         let mut session = session;
-        if let Err(error) = session.shutdown() {
+        if let Err(error) = session.take_apart() {
             eprintln!("a closing pane's child did not go quietly: {error}");
         }
     });
@@ -777,11 +810,12 @@ pub fn retire_session(session: PtySession) {
 /// The hand-over itself, as a function of what to run rather than of a session, so that "the
 /// window thread does not wait for this" can be tested with an ordinary closure and no PTY.
 ///
-/// A thread that will not start is the one case this cannot honour, and the teardown then runs
-/// here: `spawn` drops the closure it could not take, which drops the session inside it, and
-/// [`PtySession`]'s `Drop` *is* `shutdown`. So the close costs what it used to cost rather than
-/// leaking a child nobody can see — which [`PtySession::shutdown`]'s own callers already call
-/// the one outcome worse than a slow close.
+/// A thread that will not start is the one case this cannot honour, and nothing waits for the
+/// teardown then either: `spawn` drops the closure it could not take, which drops the session
+/// inside it, and [`PtySession`]'s `Drop` does only the part of a teardown that needs no wait —
+/// the child killed, the rings closed, the threads let go, the pseudoconsole left to the end of
+/// the process — and says so once. A child nobody can see is not left running; a close that
+/// would wait on a host is not made on the caller's thread.
 fn retire_within(budget: Duration, teardown: impl FnOnce() + Send + 'static) {
     let outstanding = retirements();
     outstanding.begin();
@@ -987,6 +1021,8 @@ pub struct PtyCommand {
     /// every program that reads argv, which is all of them but a command
     /// interpreter.
     interpreter_line: Option<OsString>,
+    /// Which of this child's streams are recorded ([`PtyRecording`]); none unless the caller asks.
+    recording: PtyRecording,
 }
 
 impl PtyCommand {
@@ -1000,7 +1036,16 @@ impl PtyCommand {
             environment_refresh: None,
             declare_color_support: false,
             interpreter_line: None,
+            recording: PtyRecording::none(),
         }
+    }
+
+    /// Record this child's streams as `recording` asks — the one way a pane is recorded. A command
+    /// nobody calls this on records nothing, whatever the process's environment says.
+    #[must_use]
+    pub fn recorded(mut self, recording: PtyRecording) -> Self {
+        self.recording = recording;
+        self
     }
 
     pub fn arg(mut self, argument: impl Into<OsString>) -> Self {
@@ -1282,8 +1327,6 @@ pub enum PtyError {
     },
     #[error("PTY backend reported a zero cell dimension")]
     ZeroBackendDimension,
-    #[error("PTY reader thread panicked")]
-    ReaderPanicked,
 }
 
 fn backend(error: impl std::fmt::Display) -> PtyError {
@@ -1835,6 +1878,13 @@ impl ShellProcessId {
     pub const fn get(self) -> u32 {
         self.0
     }
+
+    /// An address for a test whose door is scripted and never reaches a process.
+    #[cfg(any(test, feature = "test-shell"))]
+    #[must_use]
+    pub const fn for_test(pid: u32) -> Self {
+        Self(pid)
+    }
 }
 
 /// What happened, for the window to say it in its own words.
@@ -2092,8 +2142,22 @@ impl PtySession {
     /// arm, because `BT_SHELL` exists to pick *which* PowerShell-family build runs rather than to
     /// swap in an unrelated shell; off Windows it is empty for every arm, because a shell whose
     /// standard input is a terminal is already interactive.
-    pub fn spawn_default(size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
-        Self::spawn_default_with(size, wake, None, &SystemShellEnvironment, Self::spawn)
+    ///
+    /// `recording` is which of the pane's streams are recorded ([`PtyRecording::none`] for a pane
+    /// nobody asked to record).
+    pub fn spawn_default(
+        size: PtySize,
+        wake: OutputWake,
+        recording: &PtyRecording,
+    ) -> Result<Self, PtyError> {
+        Self::spawn_default_with(
+            size,
+            wake,
+            None,
+            &SystemShellEnvironment,
+            recording,
+            Self::spawn,
+        )
     }
 
     /// [`spawn_default`](Self::spawn_default), started in `working_directory`
@@ -2108,12 +2172,14 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        recording: &PtyRecording,
     ) -> Result<Self, PtyError> {
         Self::spawn_default_with(
             size,
             wake,
             working_directory,
             &SystemShellEnvironment,
+            recording,
             Self::spawn,
         )
     }
@@ -2147,6 +2213,10 @@ impl PtySession {
     /// start, but an argument the caller adds to *every* PowerShell it starts belongs to the retry
     /// too. The birth worker asks once and retains the resulting command when the first shell
     /// starts, because that same command is the pane's one fallback if the child dies at birth.
+    ///
+    /// `recording` is which of the pane's streams are recorded, the retry's included
+    /// ([`PtyRecording::none`] for a pane nobody asked to record).
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_shell_in(
         program: impl Into<OsString>,
         args: &[OsString],
@@ -2155,6 +2225,7 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        recording: &PtyRecording,
     ) -> Result<Self, PtyError> {
         Self::spawn_shell_in_with(
             program,
@@ -2164,6 +2235,7 @@ impl PtySession {
             size,
             wake,
             working_directory,
+            recording,
             Self::spawn,
         )
     }
@@ -2180,6 +2252,7 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        recording: &PtyRecording,
         spawn: impl FnMut(PtyCommand, PtySize, OutputWake) -> Result<Self, PtyError>,
     ) -> Result<Self, PtyError> {
         let program = program.into();
@@ -2193,6 +2266,7 @@ impl PtySession {
             size,
             wake,
             working_directory,
+            recording,
             fall_back,
             spawn,
         )
@@ -2213,6 +2287,7 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        recording: &PtyRecording,
     ) -> Result<Self, PtyError> {
         let program = program.into();
         let fall_back = (!program_is_the_last_resort_shell(&program)).then_some(fallback_args);
@@ -2225,6 +2300,7 @@ impl PtySession {
             size,
             wake,
             working_directory,
+            recording,
             fall_back,
         )
     }
@@ -2239,6 +2315,7 @@ impl PtySession {
         wake: OutputWake,
         working_directory: Option<PathBuf>,
         environment: &dyn ShellEnvironment,
+        recording: &PtyRecording,
         spawn: impl FnMut(PtyCommand, PtySize, OutputWake) -> Result<Self, PtyError>,
     ) -> Result<Self, PtyError> {
         let resolved = resolve_default_shell(environment);
@@ -2255,6 +2332,7 @@ impl PtySession {
             size,
             wake,
             working_directory,
+            recording,
             shell_spawn_failure_should_fall_back(resolved.choice)
                 .then_some(&last_resort_arguments as &dyn Fn() -> Vec<OsString>),
             spawn,
@@ -2277,6 +2355,7 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        recording: &PtyRecording,
         fall_back: Option<&dyn Fn() -> Vec<OsString>>,
     ) -> Result<Self, PtyError> {
         Self::spawn_interactive_with(
@@ -2288,6 +2367,7 @@ impl PtySession {
             size,
             wake,
             working_directory,
+            recording,
             fall_back,
             Self::spawn,
         )
@@ -2305,6 +2385,8 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
+        // Which streams are recorded: the first attempt's and the retry's alike.
+        recording: &PtyRecording,
         // The retry's complete argument list when a failure is recoverable, `None` when it is not.
         fall_back: Option<&dyn Fn() -> Vec<OsString>>,
         mut spawn: impl FnMut(PtyCommand, PtySize, OutputWake) -> Result<Self, PtyError>,
@@ -2335,7 +2417,8 @@ impl PtySession {
         };
         let command = command
             .layered(folio_environment, profile_environment)
-            .working_directory(working_directory.clone());
+            .working_directory(working_directory.clone())
+            .recorded(recording.clone());
         let command = match environment_refresh.clone() {
             Some(refresh) => command.refresh_environment(refresh),
             None => command,
@@ -2343,7 +2426,8 @@ impl PtySession {
         match (spawn(command, size, wake.clone()), fall_back) {
             (Ok(mut session), Some(fallback_args)) => {
                 let fallback = PtyCommand::last_resort_shell(&fallback_args())
-                    .working_directory(working_directory);
+                    .working_directory(working_directory)
+                    .recorded(recording.clone());
                 let fallback = match environment_refresh {
                     Some(refresh) => fallback.refresh_environment(refresh),
                     None => fallback,
@@ -2358,7 +2442,8 @@ impl PtySession {
             (Ok(session), None) => Ok(session),
             (Err(spawn_error), Some(fallback_args)) => {
                 let fallback = PtyCommand::last_resort_shell(&fallback_args())
-                    .working_directory(working_directory);
+                    .working_directory(working_directory)
+                    .recorded(recording.clone());
                 let fallback = match environment_refresh {
                     Some(refresh) => fallback.refresh_environment(refresh),
                     None => fallback,
@@ -2392,8 +2477,11 @@ impl PtySession {
         self.birth_fallback.is_some()
     }
 
+    /// Start `command` in a pseudoconsole of `size`. Its streams are recorded exactly as its
+    /// [`PtyCommand::recorded`] request says, and not at all without one: this crate reads no
+    /// environment variable to decide (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY).
     pub fn spawn(command: PtyCommand, size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
-        let (dump, input_dump) = PtyDump::from_environment();
+        let (dump, input_dump) = PtyDump::for_request(&command.recording);
         let dump = dump.map(|dump| Arc::new(Mutex::new(dump)));
         let input_dump = input_dump.map(Mutex::new);
         let conpty_source = conpty_source();
@@ -2662,6 +2750,48 @@ impl PtySession {
         now.saturating_duration_since(self.born_at)
     }
 
+    /// **The whole teardown, on the thread [`retire_session`] hands it to**: the input recording
+    /// finished (one line and two `sync_data`), then [`Self::shutdown`] (a bounded reap, a bounded
+    /// join). The waiting body of the session's door, and of a test shell's end
+    /// (`test_shell::TestShell`); after it the session's `Drop` finds nothing left and says
+    /// nothing.
+    pub(crate) fn take_apart(&mut self) -> Result<Option<ExitStatus>, PtyError> {
+        if let Some(dump) = self.input_dump.take() {
+            let mut dump = dump
+                .into_inner()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Err(error) = dump.finish() {
+                eprintln!("BT_PTY_INPUT_DUMP finish failed: {error}");
+            }
+        }
+        self.shutdown()
+    }
+
+    /// **The part of a teardown that needs no wait**, for a session dropped without its door:
+    /// the input ring closed and the writer let go, the child killed without a reap, the output
+    /// ring closed, the reader let go, and the pseudoconsole **not** closed — `ClosePseudoConsole`
+    /// returns only when the host has let go, which is a wait — but left, with the unfinished input
+    /// recording, to the end of the process. Answers whether anything was left to let go.
+    fn let_go(&mut self) -> bool {
+        let held = self.child.is_some()
+            || self.master.is_some()
+            || self.reader.is_some()
+            || self.writer.is_some()
+            || self.input_dump.is_some();
+        self.input.close();
+        self.writer.take();
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+        }
+        self.output.close();
+        self.reader.take();
+        if let Some(master) = self.master.take() {
+            std::mem::forget(master);
+        }
+        self.input_dump.take();
+        held
+    }
+
     pub fn shutdown(&mut self) -> Result<Option<ExitStatus>, PtyError> {
         // Closing the input ring releases the writer thread: it discards whatever is still queued
         // and drops the pipe handle on its way out, which is exactly what taking the writer used
@@ -2740,9 +2870,6 @@ impl PtySession {
         if let Some(reader) = self.reader.take() {
             match join_within(READER_EXIT_BUDGET, reader) {
                 ReaderExit::Ended => {}
-                ReaderExit::Panicked => {
-                    failure.get_or_insert(PtyError::ReaderPanicked);
-                }
                 ReaderExit::StillReading => {
                     eprintln!(
                         "a pane closed while its reader was still inside a read on the \
@@ -2759,17 +2886,56 @@ impl PtySession {
 }
 
 impl Drop for PtySession {
+    /// Waits for nothing. After [`retire_session`] — or a [`PtySession::shutdown`] that took
+    /// everything apart — there is nothing left; otherwise the part that needs no wait is done
+    /// ([`PtySession::let_go`]) and the drop says so once.
     fn drop(&mut self) {
-        if let Some(dump) = self.input_dump.take() {
-            let mut dump = dump
-                .into_inner()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Err(error) = dump.finish() {
-                eprintln!("BT_PTY_INPUT_DUMP finish failed: {error}");
-            }
+        if self.let_go() {
+            door_skipped(
+                "a pane's shell (`PtySession`)",
+                "`retire_session`",
+                "its child was killed without a reap, its threads let go, and its pseudoconsole \
+                 and recording are left to the end of the process",
+            );
         }
-        let _ = self.shutdown();
     }
+}
+
+thread_local! {
+    /// The drops on this thread that found their door uncalled ([`door_skipped`]).
+    static DOORS_SKIPPED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Where a skipped door is said: the application's diagnostics, once it installs its road
+/// ([`say_skipped_doors_through`]).
+static SKIPPED_DOOR_ROAD: OnceLock<fn(&str)> = OnceLock::new();
+
+/// **Where this crate's skipped-door line goes from here on** — the same installed-sink shape as
+/// `bt_platform::door_skipped::install`, which this crate cannot name (it has no edge to
+/// `bt-platform`). `bt-app`'s `main` installs `diagnostics::note`, so the line never takes the
+/// console's `Stderr` lock on the window thread — a refused `pty-retirement` thread drops its
+/// session on the caller, which can be the window thread (X-7). Installed once; a second install
+/// is ignored.
+pub fn say_skipped_doors_through(say: fn(&str)) {
+    let _ = SKIPPED_DOOR_ROAD.set(say);
+}
+
+/// **Say once that `what` was dropped without `door`, and what that leaves behind**, through the
+/// installed road ([`say_skipped_doors_through`]) — standard error only before one is installed
+/// (a test, a probe) — and count it on the dropping thread. Never a wait.
+fn door_skipped(what: &str, door: &str, left: &str) {
+    let _ = DOORS_SKIPPED.try_with(|skipped| skipped.set(skipped.get() + 1));
+    let line = format!("{what} was dropped without {door}, and did not wait: {left}");
+    match SKIPPED_DOOR_ROAD.get() {
+        Some(say) => say(&line),
+        None => eprintln!("{line}"),
+    }
+}
+
+/// How many values dropped on this thread found their door uncalled.
+#[cfg(test)]
+fn doors_skipped_on_this_thread() -> u64 {
+    DOORS_SKIPPED.try_with(std::cell::Cell::get).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -3557,7 +3723,7 @@ mod tests {
     /// autoload its own `Microsoft.PowerShell.Utility`. The build script unpacks the sidecar in
     /// Rust now and starts no shell at all (`docs/DESIGN.md`, 2026-09-26).
     fn declare_probe_module_path(command: PtyCommand) -> PtyCommand {
-        // Set-but-empty is unset ([`pty_dump_path`]'s rule): declaring
+        // Set-but-empty is unset (the rule every `BT_` door is read with): declaring
         // `PSModulePath=` would hand the child a module path that finds nothing,
         // which is a stronger statement than the one a cleared variable makes.
         match std::env::var("BT_PSREADLINE_MODULE_PATH") {
@@ -3897,7 +4063,6 @@ mod tests {
         );
         assert!(output.is_none());
         assert!(input.is_none());
-        assert!(pty_dump_path(Some(std::ffi::OsString::new())).is_none());
     }
 
     /// RED (mutation: a recording that cannot be opened fails the pane's spawn, the 0.4.7 road —
@@ -4026,7 +4191,8 @@ mod tests {
                     .is_ok()
             );
         }
-        drop(session);
+        let mut session = session;
+        session.take_apart().unwrap();
         assert!(
             std::fs::read_to_string(pty_dump_chunks_path(&path))
                 .unwrap()
@@ -4118,34 +4284,6 @@ mod tests {
         assert_eq!(pty_dump_session_path(&base, 7), beside(".8"));
     }
 
-    /// Clearing a diagnostic variable turns the diagnostic off, and never takes the pane with it.
-    ///
-    /// `BT_PTY_DUMP=` used to be handed on as a path; `File::create("")` fails, and the failure was
-    /// spent on the spawn rather than on the recording — so a value that reads as "off" everywhere
-    /// else in this program was the one value that stopped a shell from starting.
-    #[test]
-    fn an_emptied_dump_variable_is_off_and_not_a_nameless_file() {
-        use std::ffi::OsString;
-
-        assert_eq!(pty_dump_path(None), None, "unset is off");
-        assert_eq!(
-            pty_dump_path(Some(OsString::new())),
-            None,
-            "and emptied is off too — the same word BT_MOUSE_TRACE reads"
-        );
-        let named = std::env::temp_dir().join("bt-pty-dump-named.vt");
-        assert_eq!(
-            pty_dump_path(Some(named.as_os_str().to_os_string())),
-            Some(named),
-            "a named file is still that file, byte for byte"
-        );
-        assert_eq!(
-            pty_dump_path(Some(OsString::from(" "))),
-            Some(PathBuf::from(" ")),
-            "and a value that is only strange is not a value that is empty"
-        );
-    }
-
     /// The defect this is here for: `BT_PTY_DUMP` is one path, every `PtySession::spawn` opened it
     /// with a truncating create, and so the moment a run's second pane started, the first pane's
     /// recording was cut to nothing under a reader that went on writing past the hole.
@@ -4183,6 +4321,125 @@ mod tests {
             std::fs::remove_file(pty_dump_chunks_path(&path)).unwrap();
             std::fs::remove_file(path).unwrap();
         }
+    }
+
+    /// The marker a recording test sets on the copy of this test binary that starts its panes: the
+    /// folder that test owns. Only that test's child half reads it.
+    const RECORDING_TEST_CHILD: &str = "BT_PTY_RECORDING_TEST_CHILD";
+
+    /// Run `selector` — the calling test — again in a copy of this binary of its own, with
+    /// `BT_PTY_DUMP` and `BT_PTY_INPUT_DUMP` **set** to files in `folder`, the way a shell that a
+    /// diagnosis left them in would hand them on; the child half is told `folder` through
+    /// [`RECORDING_TEST_CHILD`]. A process of its own because the environment is the process's, a
+    /// test may not write it (`set_var` races every other test of the binary), and the recording
+    /// ordinal is the process's too, so the child's first recording is its ordinal 0.
+    fn in_a_child_with_the_dump_variables_set(selector: &str, folder: &Path) {
+        let listing = bt_platform::quiet_command(std::env::current_exe().unwrap())
+            .args(["--exact", selector, "--list"])
+            .output()
+            .expect("the harness can list its own tests");
+        let listed = String::from_utf8_lossy(&listing.stdout);
+        let named: Vec<&str> = listed
+            .lines()
+            .filter_map(|line| line.trim_end().strip_suffix(": test"))
+            .collect();
+        assert_eq!(
+            named,
+            [selector],
+            "the child selector names one test: {listed}"
+        );
+        let child = bt_platform::quiet_command(std::env::current_exe().unwrap())
+            .args(["--exact", selector, "--nocapture", "--test-threads=1"])
+            .env(PTY_DUMP_ENV, folder.join("environment-output.vt"))
+            .env(PTY_INPUT_DUMP_ENV, folder.join("environment-input.vt"))
+            .env(RECORDING_TEST_CHILD, folder)
+            .output()
+            .expect("the child half starts");
+        assert!(
+            child.status.success(),
+            "the child half failed: {}\n{}",
+            String::from_utf8_lossy(&child.stdout),
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
+
+    /// Every file in `folder`, by name, sorted.
+    fn files_in(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// RED (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; before it, `PtySession::spawn` read `BT_PTY_DUMP`
+    /// and `BT_PTY_INPUT_DUMP` itself and this child left `environment-output.vt`,
+    /// `environment-output.vt.chunks`, `environment-input.vt.in` and its `.chunks` in the folder)
+    /// — **a real pane nobody asked to record records nothing, whatever the environment says.**
+    /// The child starts a real shell with both variables set to files of this test's folder and
+    /// no request; the folder stays empty.
+    #[test]
+    fn a_real_pane_nobody_asked_to_record_records_nothing_whatever_the_environment_says() {
+        const SELECTOR: &str = "tests::a_real_pane_nobody_asked_to_record_records_nothing_whatever_the_environment_says";
+        if let Some(folder) = std::env::var_os(RECORDING_TEST_CHILD) {
+            assert!(Path::new(&folder).is_dir());
+            let mut shell = TestShell::spawn_default(size(40, 8)).expect("a real shell");
+            shell.shutdown().expect("the shell shuts down");
+            return;
+        }
+        let folder = bt_testpath::temp_path("bt-pty-unasked");
+        std::fs::create_dir_all(&folder).unwrap();
+        in_a_child_with_the_dump_variables_set(SELECTOR, &folder);
+        assert_eq!(files_in(&folder), Vec::<String>::new());
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// RED (mutation: drop `.recorded(recording.clone())` from `spawn_interactive_with`'s first
+    /// attempt, or have `PtySession::spawn` open its dumps from `PtyRecording::none()` — the
+    /// folder holds no `asked.vt`) — **a real pane asked to record records to the files it was
+    /// handed, a second one beside the first as `.2`, and the environment's files stay absent.**
+    /// The naming (`pty_dump_session_path`) and the manifest are the ones a recording always had.
+    #[test]
+    fn a_real_pane_asked_to_record_records_to_its_own_files_and_the_second_takes_dot_two() {
+        const SELECTOR: &str = "tests::a_real_pane_asked_to_record_records_to_its_own_files_and_the_second_takes_dot_two";
+        if let Some(folder) = std::env::var_os(RECORDING_TEST_CHILD) {
+            let folder = PathBuf::from(folder);
+            let recording = PtyRecording::new(
+                Some(folder.join("asked.vt")),
+                Some(folder.join("asked-input.vt")),
+            );
+            for _ in 0..2 {
+                let mut shell = TestShell::spawn_default_recorded(size(40, 8), &recording)
+                    .expect("a real shell");
+                shell.shutdown().expect("the shell shuts down");
+            }
+            return;
+        }
+        let folder = bt_testpath::temp_path("bt-pty-asked");
+        std::fs::create_dir_all(&folder).unwrap();
+        in_a_child_with_the_dump_variables_set(SELECTOR, &folder);
+        assert_eq!(
+            files_in(&folder),
+            [
+                "asked-input.vt.in",
+                "asked-input.vt.in.2",
+                "asked-input.vt.in.2.chunks",
+                "asked-input.vt.in.chunks",
+                "asked.vt",
+                "asked.vt.2",
+                "asked.vt.2.chunks",
+                "asked.vt.chunks",
+            ]
+        );
+        for (manifest, ordinal) in [("asked.vt.chunks", 0), ("asked.vt.2.chunks", 1)] {
+            let manifest = std::fs::read_to_string(folder.join(manifest)).unwrap();
+            assert!(
+                manifest.contains(&format!("# SESSION ordinal={ordinal} ")),
+                "{manifest}"
+            );
+        }
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     /// A recording that caught nothing is a legal outcome — a pane nobody typed in, a shell that
@@ -5091,6 +5348,179 @@ mod tests {
         );
     }
 
+    /// RED (T-JOINED-PANIC-VALUES) — **a reader's panic is no answer of the bounded join: the
+    /// join carries it on.**
+    ///
+    /// Under the resident panic hook the reader's panic ends the process before any join (its
+    /// body is not contained, see [`ReaderExit`]), so a value for it would be a claim Folio does
+    /// not keep. Where no fatal hook is installed — here — the thread that joins a panicked reader
+    /// panics in turn, and that thread's own join is where this test reads it.
+    ///
+    /// MUTATION: give the join a value arm again (`Err(_) => ReaderExit::Ended` in `join_within`)
+    /// — the joining thread returns that value and `expect_err` goes red.
+    #[test]
+    fn a_reader_panic_is_carried_on_by_the_join_not_named() {
+        let reader = std::thread::spawn(|| {
+            std::panic::panic_any("scripted: 读取线程 panicked");
+        });
+        let joiner = std::thread::spawn(move || join_within(Duration::from_secs(30), reader));
+        let carried = joiner
+            .join()
+            .expect_err("a panicked reader is no `ReaderExit`; the join carries the panic on");
+        let said = carried
+            .downcast_ref::<String>()
+            .expect("`expect` panics with its message and the reader's payload");
+        assert!(
+            said.contains("the PTY reader panicked"),
+            "the carried panic says what panicked: {said}"
+        );
+    }
+
+    /// **A child that counts what is asked of it**: every `try_wait` (a reap's question) and every
+    /// `kill`. It has ended once it has been killed, as a real child ends at a `TerminateProcess`.
+    #[derive(Clone, Debug, Default)]
+    struct CountedChild {
+        asked: Arc<std::sync::atomic::AtomicUsize>,
+        killed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl portable_pty::ChildKiller for CountedChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl portable_pty::Child for CountedChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((self.killed.load(std::sync::atomic::Ordering::SeqCst) > 0)
+                .then(|| ExitStatus::with_exit_code(1)))
+        }
+
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            Err(std::io::Error::other("a counted child is never waited on"))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    /// A session holding only `child`: no pseudoconsole, no threads.
+    fn a_session_of(child: CountedChild) -> PtySession {
+        PtySession {
+            master: None,
+            child: Some(Box::new(child)),
+            born_at: Instant::now(),
+            exited: None,
+            output: Arc::new(OutputRing::new(NonZeroUsize::new(32).unwrap())),
+            input: Arc::new(InputRing::new(NonZeroUsize::new(32).unwrap())),
+            reader: None,
+            writer: None,
+            conpty_source: conpty_source(),
+            dump: None,
+            input_dump: None,
+            shell_fallback: None,
+            birth_fallback: None,
+        }
+    }
+
+    /// What a thread of its own did with `body`, within this suite's patience (ten seconds): its
+    /// answer and the skipped doors it said.
+    fn alone<T: Send + 'static>(body: impl FnOnce() -> T + Send + 'static) -> (T, u64) {
+        let (said, heard) = mpsc::channel();
+        std::thread::spawn(move || {
+            let answer = body();
+            let _ = said.send((answer, doors_skipped_on_this_thread()));
+        });
+        heard
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the thread answered within the suite's patience")
+    }
+
+    /// RED (T-DROP-DOORS, D-81) — **a shell dropped without its door reaps nothing, and says so
+    /// once.**
+    ///
+    /// The child is a counting stand-in that has not ended: a drop that took the session apart
+    /// would ask it (the reap's `try_wait`) until it answered or `CHILD_EXIT_BUDGET` ran out. The
+    /// drop kills it — no wait — asks it nothing, and says its skipped door once.
+    ///
+    /// MUTATION: put `let _ = self.shutdown();` back in `Drop` and the child is asked; take the
+    /// saying out and the count is zero.
+    #[test]
+    fn a_shell_dropped_without_its_door_reaps_nothing_and_says_so_once() {
+        let child = CountedChild::default();
+        let session = a_session_of(child.clone());
+        let ((), skipped) = alone(move || drop(session));
+        assert_eq!(
+            child.asked.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the drop reaped: it asked the child whether it had ended"
+        );
+        assert_eq!(
+            child.killed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the drop kills the child, which needs no wait"
+        );
+        assert_eq!(skipped, 1, "the drop says its skipped door once");
+    }
+
+    /// RED (T-DROP-DOORS, D-81) — **the door's body takes the shell apart — a reap — and the drop
+    /// after it says nothing.**
+    ///
+    /// MUTATION: skip `shutdown` in `take_apart` and the child is never asked and the drop says a
+    /// skipped door.
+    #[test]
+    fn the_door_takes_a_shell_apart_and_its_drop_then_says_nothing() {
+        let child = CountedChild::default();
+        let session = a_session_of(child.clone());
+        let (ended, skipped) = alone(move || {
+            let mut session = session;
+            let ended = session.take_apart().map(|status| status.is_some());
+            drop(session);
+            ended
+        });
+        assert!(matches!(ended, Ok(true)), "the reap found the child ended");
+        assert!(child.asked.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        assert_eq!(child.killed.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            skipped, 0,
+            "a shell taken apart through its door says nothing at its drop"
+        );
+    }
+
+    /// RED (T-DROP-DOORS, D-81) — **`retire_session` is the road: it takes the shell apart — a
+    /// reap — on its own thread.**
+    ///
+    /// MUTATION: make `retire_session` drop the session instead of taking it apart and the child is
+    /// killed but never asked.
+    #[test]
+    fn retiring_a_shell_reaps_it_on_a_thread_of_its_own() {
+        let child = CountedChild::default();
+        let ((), _) = alone({
+            let child = child.clone();
+            move || retire_session(a_session_of(child))
+        });
+        let asked = Arc::clone(&child.asked);
+        let ((), _) = alone(move || {
+            while asked.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                std::thread::yield_now();
+            }
+        });
+        assert_eq!(child.killed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     /// RED (T-PANE-CLOSE-OFF-THREAD) — **closing a pane does not cost the window thread the
     /// teardown, and two closes do not queue behind each other on it.**
     ///
@@ -5230,6 +5660,10 @@ mod tests {
             OsString::from("folio 'load'"),
         ];
         let mut attempts = Vec::new();
+        let recording = PtyRecording::new(
+            Some(PathBuf::from("asked-output")),
+            Some(PathBuf::from("asked-input")),
+        );
         let result = PtySession::spawn_interactive_with(
             OsString::from("missing-shell.exe"),
             &[OsString::from("--own")],
@@ -5239,6 +5673,7 @@ mod tests {
             PtySize::cells(NonZeroU16::new(80).unwrap(), NonZeroU16::new(24).unwrap()),
             Arc::new(|| {}),
             None,
+            &recording,
             Some(&|| fallback_args.to_vec()),
             |command, _, _| {
                 attempts.push(command);
@@ -5252,6 +5687,12 @@ mod tests {
         assert_eq!(attempts[1].program, OsString::from(LAST_RESORT_SHELL));
         assert_eq!(attempts[1].arguments, fallback_args);
         assert!(attempts[1].environment.is_empty());
+        // The request travels with the pane, to the retry as well as the first attempt.
+        assert!(
+            attempts
+                .iter()
+                .all(|attempt| attempt.recording == recording)
+        );
 
         // A failure the caller says is not recoverable is not retried at all.
         let mut tries = 0;
@@ -5264,6 +5705,7 @@ mod tests {
             PtySize::cells(NonZeroU16::new(80).unwrap(), NonZeroU16::new(24).unwrap()),
             Arc::new(|| {}),
             None,
+            &PtyRecording::none(),
             None,
             |_, _, _| {
                 tries += 1;
@@ -5305,6 +5747,7 @@ mod tests {
                 PtySize::cells(NonZeroU16::new(80).unwrap(), NonZeroU16::new(24).unwrap()),
                 Arc::new(|| {}),
                 None,
+                &PtyRecording::none(),
                 None,
                 |command, _, _| {
                     spawned.push(command);

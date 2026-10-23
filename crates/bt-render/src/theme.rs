@@ -3853,7 +3853,8 @@ mod tests {
             assert_ne!(
                 background_is_light(search_current_for_background(canvas)),
                 background_is_light(canvas),
-                "`--termbg` as the current hit's ink only works if the accent is on the other                  side of the threshold from it",
+                "`--termbg` as the current hit's ink only works if the accent is on the other \
+                 side of the threshold from it",
             );
         }
         // The switch is the terminal ink's switch, taken at the same threshold as the selection's

@@ -182,3 +182,142 @@ tracked, then runs `cargo clippy -p bt-lint-probe --all-targets --
 --force-warn clippy::disallowed_methods` and requires one report per vocabulary
 entry assigned to the runner's platform. `bt-lint-probe` is on `logic`'s fmt
 line.
+
+## Job budgets (T-CI-LOGIC-JOB-BUDGET, T-CI-JOB-BUDGETS-REDERIVE, 2026-10-17)
+
+A job's `timeout-minutes` is derived, and the derivation sits in a comment
+above the line with the runs it came from: the largest total seen with a cold
+cache (nothing restored, everything compiled: the toolchain step's log says
+`No cache found.`), times 1.36, rounded up. A job that restores no cache
+(`release-script-tests`, `cask-audit`) takes the largest total of every run in
+the window instead. Network-bound jobs get a 10-minute floor: a stall, not a
+hang, is what trips them, and a budget a stall trips first is a false cancel.
+`cask-audit` is one (the online strict audit downloads the DMG);
+`release-script-tests` runs offline steps (no network, a `gh` stand-in) but is
+short enough that a stall in its checkout or the runner's start would trip a
+derived 4 first, so it takes the same floor. When a cold total nears the
+budget divided by 1.36, the number is derived again from new runs, not raised
+by hand.
+
+Measured on 2026-10-17 over every completed run of 2026-10-15 to 10-17
+(38658095635 to 39032766393, 58 runs, and the first attempt of each of the
+three reruns): a
+job's cold runs are all of its green runs in that window whose cache did not
+restore; "restored" is the ten green runs on `main` (39032766393 back to
+38691455267) where the job's cache did restore, in full or by its prefix.
+Minutes.
+
+| job | runner | restored p50 / max | cold p50 / max (run) | budget | was |
+|---|---|---|---|---|---|
+| `logic` | Windows | 43.9 / 47.45 | 61.9 / 77.17 (39014647034) | 105 | 104 |
+| `logic`'s `test` step | Windows | - | 47.8 (38842728496) | 65 | 65 |
+| `core-macos` | macOS | 37.1 / 41.27 | 41.1 / 50.63 (39020858358) | 69 | 60 |
+| `gpu` | Windows | 5.0 / 5.57 | 19.4 / 20.95 (38708586878) | 29 | 40 |
+| `conpty` | Windows | 6.4 / 7.08 | 10.7 / 11.80 (38714746975) | 17 | 30 |
+| `smoke` | Windows | 4.2 / 5.47 | 10.1 / 11.05 (39014776542) | 16 | 60 |
+| `core-linux` | Linux | 7.8 / 8.53 | 10.4 / 10.82 (39010930188) | 15 | 45 |
+| `gates-can-fail` | Windows | 6.4 / 7.4 | 8.1 / 10.15 (38693069271) | 14 | 20 |
+| `licensing` | Windows | 2.9 / 3.35 | 6.3 / 7.92 (39014776542) | 11 | 16 |
+| `wasm-lib-check` | Windows | 1.3 / 2.5 | 3.8 / 4.77 (38720519586) | 7 | 30 |
+| `release-script-tests` | Windows | no cache: 1.8 / 2.53 (38687157155) | - | 10 (floor; the rule gives 4) | 10 |
+| `cask-audit` | macOS | no cache: 1.1 / 1.80 (38665182697) | - | 10 (floor; the rule gives 3) | 10 |
+
+The 1.36 was, when `logic`'s budget was first derived, the slowest cold `test`
+step over the fastest (47.8 / 35.1 min; cause unknown: the fast ones were
+mostly branch dispatches, the slow ones main pushes), and every job uses that
+one factor. Over this window the same ratio, each job's longest step, cold, is
+larger on every runner: `logic`'s `test` 47.8 / 29.8 = 1.60; `core-macos`'s
+`test the application` 27.4 / 8.5 = 3.22 (two speeds of runner on the same
+image: run 38842728496 ran the application's tests in 128 s, run 38830428679
+the same tests in 250 s); `gpu` 1.62, `conpty` 1.71, `smoke` 1.73,
+`core-linux` 1.68, `gates-can-fail` 1.99, `licensing` 1.68, `wasm-lib-check`
+1.39. Those ratios measure the distance from the fastest runner to the slowest,
+which the largest total already sits at; what the factor is for is how much
+slower than the slowest seen the next runner may be, and no run here measures
+that. The factor stays 1.36 until a run says otherwise.
+
+The `test` step carries a budget of its own below the job's, so a run past it
+fails on that step with a line naming the budget instead of being cancelled
+without a reason wherever the job's clock stopped. The licensing gates
+(`check-notices.ps1`, `check-machine-paths.ps1`, `check-doc-words.ps1`,
+`check-vendor-notices.ps1`, with `cargo fetch` and the pinned `cargo-about`
+before them) are the `licensing` job rather than the tail of `logic`: none of
+them reads a build, and as the tail they were what a slow suite cancelled.
+
+The cold regime is the one that sets the budget because a cache-key change
+puts every run in it: rust-cache hashes every installed toolchain into the
+key's prefix, and as the runner image's own `stable` 1.99.0 (in place of
+1.98.1) rolled out across runners from 2026-10-15 (38671015245 already on it at
+02:26; 38691455267 and 38693259445 still warm on 1.98.1 at 06:16 and 06:34), no
+key matched on the new runners, the cold `logic` ran past its old 75 minutes,
+and a cancelled job saves no cache, so `main`'s runs there stayed cold. The toolchain action
+now removes every toolchain but the pinned one before the cache step, so the key
+follows `rust-toolchain.toml` and not the image.
+
+An evicted cache puts runs in it too: the store was full, and branch runs
+pushed `main`'s entries out (`core-macos` in 39017771237 restored `main`'s cache
+at 08:57, and in 39019651600, seven minutes later, found none; the sizes, the
+rule that stops it and what it still leaves are in "Cache store" below). A run
+that starts before the previous push's save has landed is cold as well
+(`logic` in 39017771237 looked at 08:35; 39014647034's `logic` saved at 09:00).
+
+## Cache store (T-CI-CACHE-STORE-BUDGET, 2026-10-17)
+
+GitHub keeps 10 GB of caches per repository; past that it evicts the entries
+read least recently, and an entry nobody reads for seven days goes anyway. A
+run restores what its own ref saved or what the default branch saved (a pull
+request's run also what its base branch saved), never a sibling branch's: an entry saved by a branch dispatch, a pull request or a tag
+is readable by that ref alone. rust-cache keys an entry
+`v0-rust-<job>-<os>-<arch>-<environment hash>-<dependency hash>` (the
+dependency hash covers the manifests' dependency sections, `Cargo.lock`,
+`rust-toolchain(.toml)` and `.cargo/config.toml`) and restores
+by the key without the dependency hash when the full key is missing, taking the
+newest entry with that prefix; before saving it removes the workspace's own
+crates from `target/`, so an entry is the compiled dependencies and the
+registry files they came from (`licensing`, which compiles nothing into
+`target/`, saves 0.14 GB, the most the registry part of any entry can be).
+
+The store on 2026-10-17 (`gh cache list`), 9.97 GB in 11 entries:
+
+| job | ref | size (GB) | state |
+|---|---|---|---|
+| `logic` | `main` | 1.82 | current |
+| `core-macos` | `main` | 1.02 | current |
+| `smoke` | `main` | 0.92 | current |
+| `gpu` | `main` | 0.76 | current |
+| `core-linux` | `main` | 0.50 | current |
+| `gates-can-fail` | `main` | 0.41 | current |
+| `conpty` | `main` | 0.38 | current |
+| `wasm-lib-check` | `main` | 0.38 | current |
+| `licensing` | `main` | 0.14 | current |
+| `logic` | `main` | 1.82 | superseded (the previous `Cargo.lock`) |
+| `logic` | a branch | 1.82 | readable by that branch only |
+
+Over the 58 `ci.yml` runs of 2026-10-15..17 branch runs saved 157 entries
+(113.7 GB) and `main` 37 (25.0 GB); the branch entries were read back by their
+own branch 18 times. After the toolchain pin, 12 of `main`'s 90 job runs found
+no entry although `main` had saved that job's entry under the same prefix
+minutes to an hour earlier: branch bursts had evicted it.
+
+The rule: **only `main` saves** (`save-if` in `.github/actions/toolchain`);
+every other run restores `main`'s entry and saves nothing. The store then
+holds `main`'s set, S = 6.34 GB, and superseded entries, which nothing reads
+and which are therefore evicted first. The bound that keeps `main` warm is
+S + the largest entry <= 10 GB (today 6.34 + 1.82 = 8.16): one job whose key
+moved re-saves without evicting a sibling. A dependency change moves every key
+at once and needs 2 S = 12.67 GB for a moment; up to 2 S - 10 = 2.67 GB of the
+outgoing set can be evicted before the incoming set is saved, so a second
+`main` run started before that landing's last job has saved (`logic`, up to
+about 77 minutes in) can find some jobs cold. When S + the largest entry passes 10 GB, the job sizes are measured
+again and the set is made smaller before anything else is cached. A branch
+whose dependency hash matches `main`'s restores the full key; one that changed it
+restores `main`'s entry by prefix and compiles its difference on every
+dispatch (before this rule only its first dispatch did).
+
+Not taken: `cache-targets: false` (an entry would be the registry alone, about
+0.14 GB, and every job would compile its dependencies cold: `logic` 61.9 min
+p50 against 43.9 restored); one `shared-key` for several jobs (rust-cache
+saves only when the full key was missing, so the first job to finish would
+write the shared entry with its own artefacts and the others would never add
+theirs); a workflow deleting branch entries (with branches no longer saving
+there is nothing to delete after the last such entry ages out).

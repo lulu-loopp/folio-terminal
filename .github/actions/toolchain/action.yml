@@ -42,7 +42,8 @@ runs:
     # `RUSTUP_TOOLCHAIN` is exported for the rest of the job — without it every
     # later `cargo` reads `rust-toolchain.toml` again and asks for the Windows
     # channel a second time.
-    - shell: pwsh
+    - id: install
+      shell: pwsh
       env:
         EXTRA_TARGETS: ${{ inputs.targets }}
       run: |
@@ -58,9 +59,74 @@ runs:
         rustup toolchain install $channel --component rustfmt --component clippy --no-self-update
         $targets = @($env:EXTRA_TARGETS -split '\s+' | Where-Object { $_ })
         if ($targets.Count -gt 0) { rustup target add --toolchain $channel @targets }
+        "channel=$channel" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+    # **The cache key names the compiler the build uses, and only that one.**
+    # rust-cache hashes `rustc -vV` of every toolchain `rustup toolchain list`
+    # prints into the key's prefix, the part with no fallback, and the runner
+    # image brings a `stable` of its own that nothing here compiles with. The
+    # image's stable 1.99.0 (in place of 1.98.1) rolled out across runners from
+    # 2026-10-15: run 38671015245 (02:26) was already on 1.99.0 while
+    # 38691455267 and 38693259445 (06:16, 06:34) were still warm on 1.98.1. On
+    # a 1.99.0 runner every job's key changed and every restore said "No cache
+    # found"; the cold `logic` job then ran past its budget, a cancelled job
+    # saves no cache, and `main`'s `logic` runs on those runners stayed cold
+    # for two days (T-CI-LOGIC-JOB-BUDGET). With the
+    # pinned channel the only toolchain left, the key moves when
+    # `rust-toolchain.toml` moves and not when the image does. The pinned
+    # channel becomes the default first, so a cargo started outside the
+    # workspace gets the same compiler rather than none.
+    - if: ${{ inputs.cache == 'true' }}
+      shell: pwsh
+      env:
+        CHANNEL: ${{ steps.install.outputs.channel }}
+      run: |
+        rustup default $env:CHANNEL
+        if ($LASTEXITCODE -ne 0) { throw "rustup could not make $($env:CHANNEL) the default" }
+        foreach ($other in @(rustup toolchain list --quiet | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -ne $env:CHANNEL })) {
+          Write-Host "removing $other, which this repository does not build with"
+          rustup toolchain uninstall $other
+          if ($LASTEXITCODE -ne 0) { throw "rustup could not uninstall $other" }
+        }
+        $left = @(rustup toolchain list --quiet | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($left.Count -ne 1 -or $left[0] -ne $env:CHANNEL) {
+          throw "the cache key would hash these toolchains, not $($env:CHANNEL) alone: $($left -join ', ')"
+        }
 
     # Third-party, so pinned to a commit rather than to a tag its owner can
     # repoint. This action itself is referenced by path, which is this
     # repository's own file at the same commit as the workflow calling it.
+    #
+    # **Only `main` writes the store; every other run only reads it.** GitHub
+    # keeps 10 GB of caches per repository and, past that, evicts the entries
+    # read least recently. A run may restore what its own ref saved or what
+    # the default branch saved (a pull request's run also what its base
+    # branch saved), never a sibling branch's, so an entry a branch dispatch
+    # (or a pull request, or a tag) saves is readable by that ref alone, and
+    # every byte of it pushes `main`'s entries towards eviction.
+    # `gh cache list` on 2026-10-17: 9.97 GB in 11 entries; `main`'s current
+    # set, one entry per job that comes here with the cache, is 6.34 GB
+    # (logic 1.82, core-macos 1.02, smoke 0.92, gpu 0.76, core-linux 0.50,
+    # gates-can-fail 0.41, conpty 0.38, wasm-lib-check 0.38, licensing 0.14).
+    # Over the 58 `ci.yml` runs of 2026-10-15..17 branch runs wrote 157
+    # entries (113.7 GB) against `main`'s 37 (25.0 GB), and those branch
+    # entries were read back by their own branch 18 times; meanwhile 12 of
+    # the 90 `main` job runs after the toolchain pin found nothing although
+    # `main` had saved that job's entry minutes to an hour earlier (evicted).
+    # With branches only reading, the store holds `main`'s set (6.34) plus
+    # superseded entries nothing reads any more, which are therefore the
+    # first evicted: one job re-saving after its key moved needs the set plus
+    # its own entry, 6.34 + 1.82 = 8.16 <= 10. A change to the dependencies
+    # moves every key at once and needs the outgoing and incoming sets
+    # together, 2 x 6.34 = 12.67 > 10; up to 2.67 GB of the outgoing set can
+    # go before the incoming one is saved, so a second `main` run started
+    # before that landing's last job has saved (logic, up to ~77 minutes in)
+    # can find some jobs cold (docs/WINDOWS-CI-RELEASE.md, "Cache store"). A
+    # branch run restores `main`'s entry by the key's prefix (the restore key
+    # stops before the dependency hash: the manifests' dependency sections,
+    # Cargo.lock, rust-toolchain(.toml) and .cargo/config.toml) and compiles
+    # its own difference on every dispatch.
     - if: ${{ inputs.cache == 'true' }}
       uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      with:
+        save-if: ${{ github.ref == 'refs/heads/main' }}

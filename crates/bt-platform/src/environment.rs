@@ -23,6 +23,26 @@ pub fn fresh_logon_environment(worker: &WorkerCtx) -> io::Result<Option<Environm
     Ok(None)
 }
 
+/// **The machine's own value of the environment variable `name`**, as the system
+/// environment block stores it (`HKLM\SYSTEM\CurrentControlSet\Control\Session
+/// Manager\Environment`), expanded the way a process reads it; `None` when the machine sets
+/// none, and on a platform with no such block.
+///
+/// Windows PowerShell 5.1 keys one decision on it (T-INTEGRATION-INJECT-2-BUILD): a session whose
+/// inherited `PSModulePath` equals the machine's value is given the account's Documents modules
+/// folder in front of it, and any other inherited value is kept as it is. Folio's composition of
+/// a pane's module path asks the same question so it adds that folder only where 5.1 would have.
+#[cfg(windows)]
+pub fn machine_variable(name: &str) -> Option<OsString> {
+    platform::machine_variable(name)
+}
+
+#[cfg(not(windows))]
+pub fn machine_variable(name: &str) -> Option<OsString> {
+    let _ = name;
+    None
+}
+
 #[cfg(windows)]
 mod platform {
     use super::Environment;
@@ -51,6 +71,64 @@ mod platform {
             // SAFETY: CreateEnvironmentBlock returned this pointer and this guard owns it.
             let _ = unsafe { DestroyEnvironmentBlock(self.0) };
         }
+    }
+
+    pub(super) fn machine_variable(name: &str) -> Option<OsString> {
+        use windows::Win32::Foundation::ERROR_SUCCESS;
+        use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+        use windows::core::PCWSTR;
+
+        let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let key = wide(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment");
+        let value = wide(name);
+        // `RRF_RT_REG_SZ` without `RRF_NOEXPAND`: a `REG_EXPAND_SZ` value — which is how Windows
+        // stores `PSModulePath` — comes back expanded, as a process sees it.
+        let mut size = 0u32;
+        // SAFETY: the key and value names are live and NUL-terminated; a null buffer asks only
+        // for the size, written to `size`.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                PCWSTR(key.as_ptr()),
+                PCWSTR(value.as_ptr()),
+                RRF_RT_REG_SZ,
+                None,
+                None,
+                Some(&raw mut size),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return None;
+        }
+        // An expanded value can be longer than the stored one the first answer measured; the
+        // second call says so, and is asked again at the size it reports.
+        for _ in 0..4 {
+            let mut buffer = vec![0u16; (size as usize).div_ceil(2).max(1)];
+            let mut length = u32::try_from(buffer.len() * 2).ok()?;
+            // SAFETY: as above, with a live buffer of `length` bytes.
+            let status = unsafe {
+                RegGetValueW(
+                    HKEY_LOCAL_MACHINE,
+                    PCWSTR(key.as_ptr()),
+                    PCWSTR(value.as_ptr()),
+                    RRF_RT_REG_SZ,
+                    None,
+                    Some(buffer.as_mut_ptr().cast()),
+                    Some(&raw mut length),
+                )
+            };
+            if status == ERROR_SUCCESS {
+                let units = (length as usize / 2).min(buffer.len());
+                let text = &buffer[..units];
+                let text = text.split(|unit| *unit == 0).next().unwrap_or_default();
+                return Some(OsString::from_wide(text));
+            }
+            if status != windows::Win32::Foundation::ERROR_MORE_DATA {
+                return None;
+            }
+            size = length;
+        }
+        None
     }
 
     pub(super) fn fresh_logon_environment() -> io::Result<Environment> {
@@ -104,8 +182,28 @@ mod platform {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::fresh_logon_environment;
+    use super::{fresh_logon_environment, machine_variable};
     use crate::ThreadPriority;
+
+    /// The machine block names `OS` and `windir`, as every Windows does: the one a plain string,
+    /// the other stored as `%SystemRoot%` and answered expanded, as a process sees it. A name no
+    /// machine sets is `None`.
+    ///
+    /// RED (mutation: pass `RRF_NOEXPAND`) — `windir` comes back as `%SystemRoot%`.
+    #[test]
+    fn the_machine_block_answers_a_variable_it_sets_and_not_one_it_does_not() {
+        assert_eq!(
+            machine_variable("OS").as_deref(),
+            Some(std::ffi::OsStr::new("Windows_NT"))
+        );
+        let windir = machine_variable("windir").expect("the machine block names windir");
+        assert!(!windir.is_empty());
+        assert!(
+            !windir.to_string_lossy().contains('%'),
+            "expanded: {windir:?}"
+        );
+        assert_eq!(machine_variable("FOLIO_NO_MACHINE_SETS_THIS_NAME"), None);
+    }
 
     #[test]
     fn the_windows_logon_block_contains_system_root() {

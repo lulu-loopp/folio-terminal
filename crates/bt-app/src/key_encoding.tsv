@@ -17,7 +17,9 @@
 ##   mode      `legacy` (no program asked), `kitty` (flag 1 in force), `mok1` / `mok2` (modifyOtherKeys),
 ##             `records` (on Windows, no program asked and ConPTY has win32-input-mode set: the chords
 ##             VT cannot express are win32-input-mode key records `CSI Vk;Sc;Uc;Kd;Cs;Rc _`, down then
-##             up — T-KEYBOARD-RECORDS; every other chord is its legacy bytes)
+##             up — T-KEYBOARD-RECORDS; so are the chords whose legacy bytes ConPTY holds once it
+##             has read a record, a lone ESC or ESC with `[ ] O P X ^ _` — T-ESC-UNDER-KITTY-ON-CONPTY;
+##             every other chord is its legacy bytes)
 ##   bytes     `CSI ` stands for ESC [; `\e` ESC, `\r` CR, `\t` HT, `\xNN` one byte; `—` sends
 ##             nothing; `(table)` is a chord Folio's shortcut table claims on Windows, so the
 ##             encoder is never asked
@@ -159,7 +161,7 @@ Escape	standard	-	off	legacy	\e
 Escape	standard	-	off	kitty	CSI 27u	
 Escape	standard	-	off	mok1	\e	
 Escape	standard	-	off	mok2	\e	
-Escape	standard	-	off	records	\e	
+Escape	standard	-	off	records	CSI 27;1;27;1;0;1_CSI 27;1;27;0;0;1_	
 Escape	standard	S	off	legacy	\e	
 Escape	standard	S	off	kitty	CSI 27;2u	
 Escape	standard	S	off	mok1	\e	
@@ -369,7 +371,7 @@ m	standard	SAC	off	records	CSI 77;50;0;1;26;1_CSI 77;50;0;0;26;1_
 [	standard	A	off	kitty	CSI 91;3u	
 [	standard	A	off	mok1	CSI 27;3;91~	
 [	standard	A	off	mok2	CSI 27;3;91~	
-[	standard	A	off	records	\e[	
+[	standard	A	off	records	CSI 219;26;91;1;2;1_CSI 219;26;91;0;2;1_	
 [	standard	SA	off	legacy	\e{	
 [	standard	SA	off	kitty	CSI 91;4u	
 [	standard	SA	off	mok1	CSI 27;4;123~	
@@ -379,7 +381,7 @@ m	standard	SAC	off	records	CSI 77;50;0;1;26;1_CSI 77;50;0;0;26;1_
 [	standard	C	off	kitty	CSI 91;5u	
 [	standard	C	off	mok1	\e	
 [	standard	C	off	mok2	CSI 27;5;91~	
-[	standard	C	off	records	\e	
+[	standard	C	off	records	CSI 219;26;27;1;8;1_CSI 219;26;27;0;8;1_	
 [	standard	SC	off	legacy	—	
 [	standard	SC	off	kitty	CSI 91;6u	
 [	standard	SC	off	mok1	—	

@@ -171,20 +171,48 @@ pub fn started() -> bool {
 /// happens to inherit. A test binary and `bt-replay` never call it, so their
 /// lines are written where they are made, synchronously, the way they always
 /// were; nothing in a test has to wait for a thread it did not start.
-pub struct Shutdown;
+///
+/// **The writer is retired through its admitted flush door, never by a drop**
+/// (T-DROP-DOORS, D-78): `main` calls [`Shutdown::flush_through_its_door`] on
+/// each of its two ways out — the tail, and the early return from a loop that
+/// could not be built — and that is the only road on which the trace is waited
+/// for. The value's `Drop` waits for nothing: one that finds the door was never
+/// called says so once and leaves what is still queued to the process's end.
+#[must_use = "the trace writer is retired through `Shutdown::flush_through_its_door`, never by a drop"]
+pub struct Shutdown {
+    /// Whether [`Shutdown::flush_through_its_door`] has been asked — admitted or refused.
+    retired: bool,
+}
+
+impl Shutdown {
+    /// **The door: the trace's one bounded flush, admitted on the way out** (`doors::TraceFlush`,
+    /// §5.3 row 17). Consumes the writer's token, so no road can flush twice. A refusal — a
+    /// thread that is not the window thread, or one not yet `Exiting` — loses what is still
+    /// queued, as the flush's own timeout does, and is counted by the admission, which is where
+    /// it is said.
+    pub fn flush_through_its_door(mut self) -> Result<(), bt_platform::admission::Refused> {
+        self.retired = true;
+        admitted::<doors::TraceFlush, _>(flush)
+    }
+}
 
 impl Drop for Shutdown {
-    /// Reached only on `main`'s early return from a loop that could not be built, which says
-    /// `exiting()` first (the design note's revision (c)5), so the flush is admitted there. A
-    /// refusal loses what is still queued, as the flush's own timeout does.
+    /// Waits for nothing. A writer whose door was never asked says so once; what is still queued
+    /// goes with the process.
     fn drop(&mut self) {
-        let _ = admitted::<doors::TraceFlush, _>(flush);
+        if !self.retired {
+            bt_platform::door_skipped::say(
+                "the trace writer (`trace_sink::Shutdown`)",
+                "its flush door",
+                "what is still queued is left to the end of the process",
+            );
+        }
     }
 }
 
 pub fn start() -> Shutdown {
     let _ = SINK.get_or_init(open);
-    Shutdown
+    Shutdown { retired: false }
 }
 
 /// One line for `stderr`, queued or written here.
@@ -226,7 +254,7 @@ pub fn file_line(file: Arc<TraceFile>, text: String) {
 /// that happened, and not whatever the queue happened to be holding.
 ///
 /// **An owner-thread door** (`doors::TraceFlush`, §5.3 row 17): a bounded wait, admitted only on
-/// the way out, minted in `main` and in [`Shutdown`]'s drop.
+/// the way out, minted in [`Shutdown::flush_through_its_door`] — `main`'s two ways out.
 pub fn flush(token: WaitToken<'_, doors::TraceFlush>) {
     let _ = token;
     let Some(sink) = SINK.get().and_then(Option::as_ref) else {
@@ -289,10 +317,12 @@ fn sink() -> Option<&'static Sink> {
 }
 
 fn open() -> Option<Sink> {
+    // The names the entry read with a value (`entry_doors`): empty values are already out.
     if !a_trace_was_asked_for(
-        std::env::vars_os()
-            .filter(|(_, value)| !value.is_empty())
-            .map(|(name, _)| name),
+        crate::entry_doors::installed()
+            .named_with_a_value
+            .iter()
+            .cloned(),
     ) {
         return None;
     }
@@ -434,7 +464,7 @@ fn put(batch: &mut String, stderr: &mut impl std::io::Write) {
 /// Trace switches plus the focus-thumbnail file dump use this sink. Other
 /// dumps, such as the PTY byte capture, have their own writers and need no idle
 /// sink thread. Names are supplied separately so tests never mutate the process
-/// environment; `open` removes empty values before calling this function.
+/// environment; `open` hands it the names the entry read with a value.
 fn a_trace_was_asked_for<I: IntoIterator<Item = std::ffi::OsString>>(names: I) -> bool {
     names.into_iter().any(|name| {
         let name = name.to_string_lossy().to_ascii_uppercase();
@@ -516,8 +546,14 @@ impl Drop for StalledWriter {
         // still in its write would leave this thread waiting for a `join` on a
         // thread that cannot return, which is the hang the tests are about.
         drop(self.release.take());
-        while !self.queue.close() {
-            std::thread::yield_now();
+        // A writer that never leaves its write is this helper's red, said by name; while a test
+        // is already failing, its own panic is the red and the writer is left where it stands.
+        if !crate::lane::within_patience(|| self.queue.close()) {
+            assert!(
+                std::thread::panicking(),
+                "the stalled writer was released and never left its write within the lane suite's patience"
+            );
+            return;
         }
         if let Some(writer) = self.writer.take() {
             let _ = writer.join();
@@ -918,34 +954,78 @@ mod tests {
         assert!(!a_trace_was_asked_for(names(&["PATH", "APPDATA", "BT_BG"])));
     }
 
-    /// RED (A1d, row 17) — **the trace's flush is one admitted `TraceFlush` on the way out, and
-    /// is not waited for anywhere else.**
+    /// RED (A1d, row 17; T-DROP-DOORS, D-78) — **the trace's flush is one admitted `TraceFlush`
+    /// on the way out, through the writer's own door, and is not waited for anywhere else.**
     ///
-    /// Through the real road `main`'s early return takes: `Shutdown`'s drop. On a test thread
-    /// entered as the window thread and on its way out it is admitted once; on the same kind of
-    /// thread still running it is refused, and nothing is admitted.
+    /// On a test thread entered as the window thread and still running, the door is refused and
+    /// nothing is admitted; on the same kind of thread on its way out, it is one admission. Neither
+    /// is a drop without the door: the refusal is the admission's to count, and said nowhere else.
     ///
-    /// MUTATION: call `flush` from the drop outside its admission (a token cannot be had there,
-    /// so: skip the admission and do nothing) and the first list is empty; give the door
-    /// `Running` and the second is not.
+    /// MUTATION: skip the admission in `flush_through_its_door` and the second list is empty;
+    /// give the door `Running` and the first is not; leave `retired` unset there and the refused
+    /// door's drop says a skipped line.
     #[test]
     fn the_trace_is_flushed_through_its_door_only_on_the_way_out() {
-        std::thread::spawn(|| {
+        let (said, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
             crate::test_support::on_the_window_thread();
-            drop(Shutdown);
-            assert!(
-                crate::hang_watch::admissions_on_this_thread().is_empty(),
-                "a running window thread does not wait for the trace"
-            );
+            let refused = Shutdown { retired: false }.flush_through_its_door();
+            let running = crate::hang_watch::admissions_on_this_thread();
             assert!(bt_platform::admission::exiting());
-            drop(Shutdown);
-            assert_eq!(
+            let admitted = Shutdown { retired: false }.flush_through_its_door();
+            let _ = said.send((
+                refused.is_err(),
+                running,
+                admitted.is_ok(),
                 crate::hang_watch::admissions_on_this_thread(),
-                ["TraceFlush"],
-                "on the way out, the drop's flush is one admission"
-            );
-        })
-        .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                bt_platform::door_skipped::skipped_on_this_thread(),
+            ));
+        });
+        let (refused, running, admitted, exiting, skipped) =
+            crate::lane::receive(&heard, "the writer's door on the window thread");
+        assert!(refused, "a running window thread's door is refused");
+        assert!(
+            running.is_empty(),
+            "a running window thread does not wait for the trace"
+        );
+        assert!(admitted, "on the way out, the door is admitted");
+        assert_eq!(
+            exiting,
+            ["TraceFlush"],
+            "on the way out, the door's flush is one admission"
+        );
+        assert_eq!(
+            skipped, 0,
+            "a door asked, admitted or refused, is no skipped door"
+        );
+    }
+
+    /// RED (T-DROP-DOORS, D-78) — **a writer dropped without its door waits for nothing and says
+    /// so once.**
+    ///
+    /// On the window thread on its way out — the one place the flush could be admitted — a drop
+    /// admits no `TraceFlush` (so nothing on it waited) and says its line once; the thread that
+    /// dropped it ends within the lane suite's patience.
+    ///
+    /// MUTATION: put the old body back in `Drop` (`let _ = admitted::<doors::TraceFlush, _>(flush)`)
+    /// and the admissions read `["TraceFlush"]`; drop the saying and the count is zero.
+    #[test]
+    fn a_writer_dropped_without_its_door_waits_for_nothing_and_says_so_once() {
+        let (said, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            crate::test_support::on_the_window_thread();
+            assert!(bt_platform::admission::exiting());
+            drop(Shutdown { retired: false });
+            let _ = said.send((
+                crate::hang_watch::admissions_on_this_thread(),
+                bt_platform::door_skipped::skipped_on_this_thread(),
+            ));
+        });
+        let (admissions, skipped) = crate::lane::receive(&heard, "the writer's drop");
+        assert!(
+            admissions.is_empty(),
+            "a drop admits no flush, so it waited for nothing: {admissions:?}"
+        );
+        assert_eq!(skipped, 1, "the drop says its skipped door once");
     }
 }

@@ -396,6 +396,15 @@ pin 变化、切 tab 等触发计时器重置,静默窗口到了才写一次),�
 原因"这件事。规则:进入失败状态时告警一次;此后同一原因的连续失败不再重复告警;下一次写入
 成功后重置计数,若后续又失败则视为新的失败段,重新告警一次。
 
+> **【批注 2026-10-14 · 已落地,本节"反复重试"的前提被推翻】**(T-SESSION-WRITER-NO-TIMER-RETRY;
+> `docs/plans/design/side-effects-contract-2026-10-11.md` C5,用户裁决 Q3 2026-10-11)
+>
+> 写失败后 debounce **不再**自行重新计时重试:被拒的那次写入就此结束,文档记为"欠写",只由下一次
+> 有意义的变更、下一次存储目录监听的检查(storage pass)或退出时的写入再写一次。告警节奏不变:
+> 同一失败段只告警一次,在连续第五次被拒时(`persist::REFUSALS_BEFORE_TOLD`),以界面卡片说出;
+> 只有一次成功写入才结束失败段,新的变更不重置计数。代价如实记下:写失败后若再无变更,最新布局
+> 直到下次变更或退出前都不在磁盘上,此间崩溃会丢失自上次成功写入以来的改动。
+
 ### 5.4 读失败
 
 三类读失败,统一**不崩溃、回退默认值**:
@@ -437,6 +446,21 @@ the loop's next turn writes it through the quit's writer and bounded wait and re
 `session.lock` once it has landed (a write past the budget leaves it standing). `WM_ENDSESSION(FALSE)`
 lets the document go and re-creates the sentinel. macOS: the system's end is
 `applicationShouldTerminate:`, already the quit transaction (M3-1).
+
+**Addendum 2026-10-21 (0.4.8, T-ENDSESSION-SAVES): the edits go ahead of the document.** On the
+first `WM_QUERYENDSESSION` of a span, before the held document is written, every owed hand-editable
+document and every dirty preview buffer's save are handed to the one storage worker; the document
+follows them, always as a new generation, so its one bounded wait (`SESSION_SAVE_BUDGET`, 3 s,
+counted from the question's turn) is the drain of everything ahead of it. The window thread spends
+at most those 3 s plus the hand-overs' CPU, one preview repaint per window and one durable
+create-new per item that did not land (the disk's own time); Windows' five seconds start when it
+sends `WM_ENDSESSION`, which can be while this turn runs, and the budget fits either way. What did
+not land is copied into `recovered`, never over a file, before the shutdown screen's line comes
+down; after a shutdown taken back the copies stay there, beside the live edits, and the next start
+offers them. A quit in its documents or recovery phase keeps the four documents to itself. The contract above stands: the one writer, the one bounded wait, `session.lock`
+dropped once the document has landed, nothing torn down, and a session taken back finds every
+window as it was — a buffer dirty where its save did not land. A shutdown taken back after the
+wait ran out leaves the writer waited on again (`wait_again_after_the_systems_end`).
 
 ## 6. 与既有裁决的一致性检查
 

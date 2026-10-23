@@ -50,14 +50,17 @@ mod attention_words;
 mod card_trace;
 mod cardhint;
 mod cli;
+mod clipboard_lane;
 mod clipboard_picture;
 mod cmdrail;
 mod coalesce;
+mod computation_lane;
 mod context_menu;
 mod diagnostics;
 mod dir_news;
 mod document_request;
 mod elevated_host;
+mod entry_doors;
 mod exit_diagnostics;
 mod explorer_menu;
 mod favicon;
@@ -74,12 +77,17 @@ mod foreground_program;
 mod formula_tools;
 mod git;
 mod git_graph;
+mod git_mutation_lane;
 mod git_panel;
 mod git_watch;
 mod glyph_trace;
 mod gpu_door;
 mod handoff_lane;
 mod hang_watch;
+/// **The headless backend** (T-HEADLESS-RUNTIME-SEAM): `App`, `WindowRuntime`, `Runtime` and
+/// `FolioApp` over doors that record what a window would have done, for the tests.
+#[cfg(test)]
+mod headless;
 mod hex_peek;
 mod highlight;
 mod host_answers;
@@ -97,6 +105,7 @@ mod install_channel;
 #[cfg(test)]
 #[path = "journeys_tests.rs"]
 mod journeys_tests;
+mod keybindings_merge;
 mod keyhint;
 /// **The lane contract** (D-33, `docs/ARCHITECTURE.md` §5.1; the side-effects contract, S-3): the
 /// seam a lane is built on — its `Executor`, its request `Ledger` and their hooks — and, with the
@@ -116,13 +125,16 @@ mod notice;
 mod notify;
 mod owner_door;
 mod pace;
+mod packaged_turns;
 mod palette;
 mod palette_index;
 mod pane_content;
+mod pane_folder;
 mod pdf;
 mod peek_strip;
 mod persist;
 mod pins;
+mod pins_merge;
 mod present_diagnostics;
 mod present_gate;
 mod preview;
@@ -141,9 +153,15 @@ mod preview_viewport;
 mod preview_watch;
 mod preview_wrap;
 mod profiles;
+mod profiles_merge;
 mod programs_ear;
 mod programs_lane;
 mod psreadline;
+// The build script's PSReadLine package reader and its pins (T-INTEGRATION-INJECT-2-BUILD),
+// compiled here only so its tests run: `build.rs` reaches the same file by `#[path]`, and what
+// ships is the container it writes (`psreadline::module_files`).
+#[cfg(test)]
+mod psreadline_artefact;
 mod pty_door;
 mod quake;
 mod quit;
@@ -169,8 +187,11 @@ mod shortcuts;
 /// the product at all.
 #[cfg(test)]
 mod source_pin;
+mod startup;
+mod storage_pass;
 mod storage_watch;
 mod table_block;
+mod table_merge;
 mod taskbar_lane;
 mod termscroll;
 mod text_field;
@@ -218,6 +239,7 @@ mod update_trial;
 mod update_txn;
 mod version;
 mod video_seat;
+mod wake_owner;
 mod watch_clock;
 mod watch_steward;
 mod web_spare;
@@ -228,6 +250,7 @@ mod webhost;
 mod webnav;
 mod websheet;
 mod window_news;
+mod window_seam;
 mod wsl;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -242,7 +265,17 @@ use bt_persist::{
     SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, TabV1,
     TermLeafV1, ThemeModeV1, WindowBoundsV1,
 };
+use input::Keystroke;
 use text_scale::{TextScale, TextStep};
+use wake_owner::WakeOwner;
+use window_seam::prelude::*;
+use window_seam::{LoopProxy, Native};
+// `main`'s event-loop builder methods, at module level: `main` is on the window-seam native list,
+// and a listed body introduces no names (bt-source's `window_seam` guard).
+#[cfg(target_os = "macos")]
+use winit::platform::macos::EventLoopBuilderExtMacOS;
+#[cfg(windows)]
+use winit::platform::windows::EventLoopBuilderExtWindows;
 // Step 2a moved these two names' last non-test users into `runtime/` (the
 // `peek` and `windows` topics), which import them themselves; the root keeps
 // them for the root's test modules, which read them through `use super::*`.
@@ -262,9 +295,9 @@ use bt_render::{
     ThemeChange, Travel, WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
     WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_FADE_MS, WINDOW_TAB_PIN_REVEAL_MS,
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
-    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, WindowRenderer, background_rgb, current_cursor_style,
-    foreground_rgb, frame_content_digest, frame_is_alternate_screen, gpu_power_request,
-    scheme_in_force, set_cursor_style, set_theme, theme_revision,
+    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb, current_cursor_style, foreground_rgb,
+    frame_content_digest, frame_is_alternate_screen, gpu_power_request, scheme_in_force,
+    set_cursor_style, set_theme, theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
@@ -286,13 +319,9 @@ use winit::raw_window_handle::RawWindowHandle;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
-    event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
+    event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
-    // Windows reports what a key means with Shift and what it means without, and a shortcut table
-    // needs the second: `Ctrl+Shift+1` produces `!` on a US keyboard and `1` on layouts that put
-    // the digit behind Shift, and the binding is meant to be the digit either way.
-    platform::modifier_supplement::KeyEventExtModifierSupplement,
     raw_window_handle::HasWindowHandle,
     window::{Theme as OsTheme, Window, WindowAttributes, WindowId},
 };
@@ -311,7 +340,12 @@ const INITIAL_HEIGHT: f64 = 600.0;
 ///
 /// It is not `CARGO_PKG_NAME`: the crate is `bt-app` and stays `bt-app`, because
 /// a crate name is a thing other Rust code says and this is a thing people say.
-pub(crate) const APP_NAME: &str = "Folio";
+///
+/// **And it is typed once** (T-NATIVE-LABELS-FROM-THE-CALLER): the name this
+/// terminal announces to its children is the same word, so the constant is
+/// `bt_pty`'s rather than a second literal; `bt-platform`, which cannot depend
+/// on either crate, is handed it where it names the product (the toast sender).
+pub(crate) const APP_NAME: &str = bt_pty::TERM_PROGRAM;
 
 /// **How long a quit waits for the panes it has told to go**
 /// (T-PANE-CLOSE-OFF-THREAD).
@@ -552,24 +586,14 @@ enum AppEvent {
     /// must wake only the seat that asked rather than every tree, every preview
     /// and every formula in the tab.
     GitReady,
-    /// **The PSReadLine probe answered** (§7.1.6c-5).
-    ///
-    /// The fifth of the same family and separate for the same reason, read from
-    /// the other end: it is the only one whose answer can land while a *modal*
-    /// is up. A dialog standing on the Terminal page draws a row that says
-    /// "Checking this machine's PSReadLine", and while it is up there is no
-    /// shell output, no hover and no keystroke to produce the frame that would
-    /// replace that line — so the probe has to ask for one itself.
-    PsReadLineProbed,
     /// **A PowerShell has said where its own `$PROFILE` is** (§7.1.6j).
     ///
-    /// The sixth of the same family, and separate from `PsReadLineProbed` for
-    /// the reason that one is separate from `GitReady`: the answers arrive from
-    /// two different processes at two different moments, and one variant would
-    /// mean a probe that finished first waking the window a second time when the
-    /// other did. Its own wake is owed for the reason that one's is: a pane that
-    /// has printed its prompt and gone quiet produces no further frame, so an
-    /// answer landing after that frame would sit unread until somebody typed.
+    /// The fifth of the same family. Its own wake is owed: a pane that has printed its prompt
+    /// and gone quiet produces no further frame, so an answer landing after that frame would sit
+    /// unread until somebody typed. It also carries the earlier Folio's PSReadLine copy's
+    /// observation and removal (`psreadline::begin_legacy_observation`,
+    /// `psreadline::begin_legacy_removal`; T-INTEGRATION-INJECT-2-BUILD), which are answers
+    /// about the same family of legacy PowerShell artefacts for the same Terminal page.
     PowerShellProfileProbed,
     /// **The copilot version probe answered** (`attention_copilot`).
     ///
@@ -735,7 +759,10 @@ enum AppEvent {
     /// **The storage worker answered a hand-editable document's request**
     /// (T-STORAGE-WORKER-REQUEST, `document_request`): a conditional write or a
     /// re-read of `settings.json`, `keybindings.json`, `profiles.json` or
-    /// `pins.json`.
+    /// `pins.json` — **or the session's own** (T-SESSION-RECEIPTS-ON-THE-WAKE):
+    /// a write of `session.json` (its receipt, taken by
+    /// `SessionStore::take_receipts`) or an update's hand-over at quit (read by
+    /// `FolioApp::hand_the_update_over` on the turn this brings).
     ///
     /// Carries nothing: each answer is already in the asking store's own
     /// channel when this is sent — the answer first, the wake after — and the
@@ -849,6 +876,13 @@ enum AppEvent {
     /// window's own picture mailbox by the time this is sent, and this says only
     /// that there is one.
     ClipboardPictureReady,
+    /// **The clipboard has answered a window's request** (`clipboard_lane`, `docs/DESIGN.md`
+    /// 2026-10-17 — *the clipboard is asked on its own lane*).
+    ///
+    /// [`Self::HandoffAnswered`]'s family: a paste's text, a copy landed, or a refusal, answered on
+    /// the lane's worker after the press that asked was handled. Carries nothing: the answers are
+    /// in the lane's ledger, held by the window that asked, and this says only that there is one.
+    ClipboardAnswered,
     /// **A hand-off to the system has been answered** (`handoff_lane`, `docs/DESIGN.md`
     /// 2026-09-22 — *a hand-off to the system runs on its own lane*).
     ///
@@ -913,10 +947,12 @@ impl AppEvent {
             // The station the acquisition opened, charged again for the half of
             // the same gesture that finishes it.
             Self::ClipboardPictureReady => Station::ClipboardRead,
+            // The station the clipboard's gestures were charged to while they waited on this
+            // thread, charged now for the turn that spends what the lane answered.
+            Self::ClipboardAnswered => Station::ClipboardRead,
             Self::FileIndexReady => Station::FileIndex,
             Self::WebPageSpoke => Station::WebSpoke,
-            Self::PsReadLineProbed
-            | Self::PowerShellProfileProbed
+            Self::PowerShellProfileProbed
             | Self::CopilotProbed
             | Self::UpdateChecked
             | Self::ExplorerPackageChanged
@@ -1117,8 +1153,9 @@ struct PasteTarget {
 /// **Which road one prepared paste takes into one pane** (0.4.4 tickets 02 and 03).
 ///
 /// The answer of [`paste_road`], which is the **one** place the window decides whether a paste
-/// asks: all four paste doors reach it through `Runtime::deliver_paste`, and nothing else in the
-/// tree asks the question (the design note's §1, "four doors, one road").
+/// asks: every paste gesture reaches it through `Runtime::deliver_paste` — the clipboard's road
+/// and the road of paths in hand both end there — and nothing else in the tree asks the question
+/// (the design note's §1, "four doors, one road", written when there were four gestures).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PasteRoad {
     /// Today's bytes, now: [`paste_text`], bracketed if the program asked for it.
@@ -1859,12 +1896,311 @@ struct PathWorkerRequest {
     path: PathBuf,
 }
 
+/// **What one computation-lane request asked, kept beside it** (`computation_lane`) — so that a
+/// request whose work failed (`Failed`, a panic its task caught) can be settled: nothing on screen
+/// changes, and the question is asked again only by new input to the surface that asked
+/// (side-effects contract revision (b)5, rule 1), never on its own and never by an unrelated
+/// redraw.
+///
+/// A pane's task is kept as the session's own task (a formula's scan, a path, a resample's shared
+/// pixels), so the pane can hold it for its next new input. A window surface's request is
+/// settled down the road its own error already takes: its failure is answered as the error answer
+/// that surface knows ([`settle_failure`]), so the surface keeps its "asked, and failed" mark and
+/// asks again on its own new input — a new hover, a newly opened file, a new size, new formula
+/// content.
+#[derive(Clone, Debug)]
+enum Asked {
+    /// A pane's task: held by its session until new input that could change its answer.
+    Pane {
+        leaf: ShellAddress,
+        task: SessionDecorationTask,
+    },
+    /// A pasted picture's decode: its bytes went with the request, so it is a failed decode.
+    Pasted {
+        leaf: ShellAddress,
+        occurrence_id: u64,
+    },
+    /// A file's pixels for the window's decode cache (the glance, a preview, a page's picture).
+    Pixels { leaf: ShellAddress, path: PathBuf },
+    /// An animation opened.
+    Animation { path: PathBuf },
+    /// An animation's next frames: its decoder went with the request.
+    AnimationFill { path: PathBuf, serial: u64 },
+    /// One page of the glance card: it stays counted as asked while the card is up; the card
+    /// coming down lets go of its asked pages (`hide_file_peek`), so the next hover asks again.
+    Page,
+    /// A preview's formula.
+    PreviewMath {
+        leaf: ShellAddress,
+        key: Box<PreviewMathKey>,
+    },
+    /// A resample for the glance, a preview or a markdown page: its pending target stays, so the
+    /// surface asks again for a new size (a refit, a resize); the card coming down and the flyout's
+    /// dismissal let go of theirs, so the next hover asks again.
+    WindowScale,
+}
+
+/// **What a failed request comes to** ([`settle_failure`]).
+enum Settled {
+    /// The error answer the asking surface already knows, delivered as an answer.
+    Answer(MathWorkerResult),
+    /// A pane's task, to be held by its session until new input that could change its answer.
+    Hold {
+        leaf: ShellAddress,
+        task: SessionDecorationTask,
+    },
+    /// An animation's fill: its reservation released, the animation standing on its last frame.
+    FillLost { path: PathBuf, serial: u64 },
+    /// An animation's open — the request `asked`: asked and unanswered, until the file's next
+    /// open asks again.
+    AnimationUnanswered {
+        path: PathBuf,
+        asked: computation_lane::ComputationId,
+    },
+    /// Nothing to do: the surface's mark stays and its own new input asks again.
+    Nothing,
+}
+
+/// What a decode that failed on the worker says, in the decode error's own words.
+const DECODE_FAULT: &str = "the decode stopped on a fault";
+
+/// What a decode whose thread could not be started says, in the decode error's own words.
+const DECODE_UNSTARTED: &str = "the decoder could not be started";
+
+/// **A failed request, settled as its surface's own failure** — pure, so the mapping is the one
+/// the tests read:
+///
+/// - a pane's task is held by its session ([`Settled::Hold`]);
+/// - a pasted picture is a failed decode (`InlineImageDecodeError::Decode`);
+/// - a file's pixels are a failed decode filed in the window's cache (`PeekCacheEntry::Failed`,
+///   the waiting preview panes refusing the picture), which the flyout's next settled hover reads
+///   again and the card's coming down lets go of, so its next hover asks again;
+/// - an animation's open is unanswered (`AnimationEntry::Unanswered`): no redraw asks again, and
+///   the file's next open lets go of it and asks;
+/// - an animation's fill releases its reservation, and the animation stands on its last frame;
+/// - a preview formula is refused (`MathRenderError::Aborted`): the page draws its source text,
+///   and new content is a new formula, asked anew;
+/// - a card page and a resample keep their marks until the surface's next hover (or a new size).
+///
+/// `id` is the failed request's identity, which an animation's open is settled under: the window
+/// files the failure only for the open it awaits ([`AnimationCache::open_unanswered`]).
+fn settle_failure(id: computation_lane::ComputationId, asked: Asked) -> Settled {
+    match asked {
+        Asked::Pane { leaf, task } => Settled::Hold { leaf, task },
+        Asked::Pasted {
+            leaf,
+            occurrence_id,
+        } => Settled::Answer(MathWorkerResult {
+            leaf,
+            completion: DecorationWorkerCompletion::InlineImage {
+                task: bt_term::InlineImageTask {
+                    occurrence_id,
+                    source: bt_term::InlineImageSource::Osc1337(Vec::new()),
+                },
+                result: Err(bt_term::InlineImageDecodeError::Decode(
+                    DECODE_FAULT.to_owned(),
+                )),
+            },
+        }),
+        Asked::Pixels { leaf, path } => Settled::Answer(MathWorkerResult {
+            leaf,
+            completion: DecorationWorkerCompletion::PeekImage {
+                path,
+                result: Err(bt_term::InlineImageDecodeError::Decode(
+                    DECODE_FAULT.to_owned(),
+                )),
+            },
+        }),
+        Asked::Animation { path } => Settled::AnimationUnanswered { path, asked: id },
+        Asked::AnimationFill { path, serial } => Settled::FillLost { path, serial },
+        Asked::PreviewMath { leaf, key } => Settled::Answer(MathWorkerResult {
+            leaf,
+            completion: DecorationWorkerCompletion::PreviewMath {
+                key,
+                result: Err(MathRenderError::Aborted),
+            },
+        }),
+        Asked::Page | Asked::WindowScale => Settled::Nothing,
+    }
+}
+
+impl PathWorkerRequest {
+    /// What this request asked ([`Asked`]).
+    fn asked(&self) -> Asked {
+        Asked::Pane {
+            leaf: self.leaf,
+            task: SessionDecorationTask::VerifyPath(self.path.clone()),
+        }
+    }
+
+    /// **Who asked** — the tab whose pane printed the path, as its answer's
+    /// [`MathWorkerResult::owner`] says.
+    fn owner(&self) -> AnswerOwner {
+        AnswerOwner::Tab(self.leaf.leaf.tab)
+    }
+}
+
+impl MathWorkerRequest {
+    /// **How a request asked of the formula and picture share relates to one waiting there**
+    /// (`lane::Queue::ask`; T-ANIMATION-ANSWER-IDENTITY). One case is not [`lane::Relation::Other`]:
+    /// a newer open of the same animated file for the same window **displaces** the open waiting
+    /// for it (`Superseded { by }`). A window asks a file it awaits a decode for only after it let
+    /// that decode go — the file changed under it ([`AnimationCache::let_go_changed_file`]) — and
+    /// its record then awaits exactly one id, the newer one. A waiting open has read no bytes, so
+    /// running it would answer the same question; it is still superseded rather than joined
+    /// (revision (b)4's `Joined { with }`), because a joined request's answer is delivered under
+    /// the id it joined, and the drain hands the window each answer under its own request's id
+    /// only — the record would await an id whose answer never comes. The cost: the newer open
+    /// takes the back of the line instead of the older one's place. Another window's open of the
+    /// same file is its own question and waits its turn.
+    ///
+    /// **A read of a file's pixels is the same case** (T-PEEK-ANSWER-IDENTITY): a newer read of
+    /// the same file — a picture's decode or a video's frame, the two roads of one record in the
+    /// window's peek cache ([`ask_for_peek_pixels`]) — for the same window displaces the read
+    /// waiting for it, on the same three grounds: the window asks a file whose read is out only
+    /// after the file-change news let that read go ([`forget_a_picture`]), its record then awaits
+    /// the newer id alone ([`peek_awaits`]), and a joined read would leave it awaiting an answer
+    /// that never comes. Everything else waits behind what is in line: nothing else on this share
+    /// is coalesced.
+    fn relate(waiting: &Self, asked: &Self) -> lane::Relation {
+        let same_file_for_the_same_window =
+            |waiting_leaf: &ShellAddress, waiting_path: &Path, leaf: &ShellAddress, path: &Path| {
+                waiting_leaf.window == leaf.window
+                    && normalized_local_image_path_key(waiting_path)
+                        == normalized_local_image_path_key(path)
+            };
+        match (waiting, asked) {
+            (
+                Self::PeekAnimation {
+                    leaf: waiting_leaf,
+                    path: waiting_path,
+                },
+                Self::PeekAnimation { leaf, path },
+            )
+            | (
+                Self::PeekImage {
+                    leaf: waiting_leaf,
+                    path: waiting_path,
+                }
+                | Self::PeekVideoFrame {
+                    leaf: waiting_leaf,
+                    path: waiting_path,
+                },
+                Self::PeekImage { leaf, path } | Self::PeekVideoFrame { leaf, path },
+            ) if same_file_for_the_same_window(waiting_leaf, waiting_path, leaf, path) => {
+                lane::Relation::Displaces
+            }
+            _ => lane::Relation::Other,
+        }
+    }
+
+    /// What this request asked ([`Asked`]).
+    fn asked(&self) -> Asked {
+        match self {
+            Self::Math { leaf, task, .. } => Asked::Pane {
+                leaf: *leaf,
+                task: SessionDecorationTask::Math(task.clone()),
+            },
+            Self::InlineImage { leaf, task } => match &task.source {
+                bt_term::InlineImageSource::LocalPath(_) => Asked::Pane {
+                    leaf: *leaf,
+                    task: SessionDecorationTask::InlineImage(task.clone()),
+                },
+                bt_term::InlineImageSource::Osc1337(_) => Asked::Pasted {
+                    leaf: *leaf,
+                    occurrence_id: task.occurrence_id,
+                },
+            },
+            Self::PeekImage { leaf, path } | Self::PeekVideoFrame { leaf, path } => Asked::Pixels {
+                leaf: *leaf,
+                path: path.clone(),
+            },
+            Self::PeekAnimation { path, .. } => Asked::Animation { path: path.clone() },
+            Self::AnimationFill { path, serial, .. } => Asked::AnimationFill {
+                path: path.clone(),
+                serial: *serial,
+            },
+            Self::PeekPage { .. } => Asked::Page,
+            Self::PreviewMath { leaf, key } => Asked::PreviewMath {
+                leaf: *leaf,
+                key: key.clone(),
+            },
+        }
+    }
+
+    /// **Who asked**: the owner its answer will name ([`MathWorkerResult::owner`]) — a pane's
+    /// formula and decode are its tab's; every glance, animation, page and preview formula is the
+    /// window's.
+    fn owner(&self) -> AnswerOwner {
+        match self {
+            Self::Math { leaf, .. } | Self::InlineImage { leaf, .. } => {
+                AnswerOwner::Tab(leaf.leaf.tab)
+            }
+            Self::PeekImage { leaf, .. }
+            | Self::PeekVideoFrame { leaf, .. }
+            | Self::PeekAnimation { leaf, .. }
+            | Self::AnimationFill { leaf, .. }
+            | Self::PeekPage { leaf, .. }
+            | Self::PreviewMath { leaf, .. } => AnswerOwner::Window(leaf.window),
+        }
+    }
+}
+
+/// **What a resample is for, and for whom** — with the leaf and the content key, the address
+/// [`ScaleWorkerRequest::same_target`] coalesces by. Every variant names its asker down to the
+/// slot that takes the answer (T-SCALE-ADDRESS-PER-ASKER; CONVENTIONS「共享队列上的地址必须一路唯一到取答案的那一层」):
+/// a pane's printed picture by its occurrence, a glance by its surface, a preview's picture by
+/// its own number, and a page's picture by the size the window's raster cache files it under.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScalePurpose {
     InlineImage(u64),
-    Peek,
-    Preview,
-    MarkdownImage,
+    Peek(PeekSurface),
+    Preview(PictureAsker),
+    /// The size is the address because the window's cache is: one entry per content key per size
+    /// ([`MarkdownRasterKey`]), which every page of the window reads. Two sizes of one picture are
+    /// two entries waiting, and one displacing the other left the older `Pending` for good — a
+    /// `Pending` entry is never asked again.
+    MarkdownImage((u32, u32)),
+}
+
+/// **Which preview picture asked for a resample** (T-SCALE-ADDRESS-PER-ASKER): one number per
+/// picture a preview surface shows, minted when the surface starts showing it
+/// ([`PreviewImageState::new`]), written on its question and carried home on the answer.
+///
+/// Every preview surface of a tab asks under the tab's focused shell, so without it two panes over
+/// one picture asked one question. At two sizes the newer displaced the older, and the older pane
+/// waited for an answer that was never coming; at one size the two joined, the one answer went to
+/// whichever pane was found first, and the other waited for good. The number is the picture's
+/// and not its host's for the reason [`PreviewPanes::awaiting_scale`] gives: the picture travels
+/// with its pane into a torn-off window and back, and its number travels with it. Process-wide,
+/// like [`next_incarnation`], so no two pictures in any window hold the same one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PictureAsker(u64);
+
+impl PictureAsker {
+    fn mint() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// **Which of the window's two glances asked for a peek resample**
+/// (T-PEEK-SCALE-ADDRESS-BY-SURFACE).
+///
+/// The terminal's flyout and the glance card both ask the scale share for one
+/// decoded picture at a display size, and each keeps its own pending slot and
+/// its own raster (`peek_thumbnail_pending` / `peek_card_pending`). The surface
+/// is part of the address for the reason [`ScaleWorkerRequest::same_target`]
+/// gives about leaves: without it, a card over the file the flyout is waiting
+/// on asked "the same question" and its request superseded the flyout's, whose
+/// slot then waited for an answer that was never coming. It travels back on
+/// the answer, so each surface is told only its own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeekSurface {
+    /// The terminal's inline-image flyout, sized against the pane it was raised in.
+    Flyout,
+    /// The glance card, sized to the card's own picture box.
+    Card,
 }
 
 enum ScaleWorkerRequest {
@@ -1874,10 +2210,14 @@ enum ScaleWorkerRequest {
     },
     Peek {
         leaf: ShellAddress,
+        surface: PeekSurface,
         task: bt_term::InlineImageScaleTask,
     },
+    /// A preview surface's picture, at the size its pane draws it, asked by that picture
+    /// ([`PictureAsker`]).
     Preview {
         leaf: ShellAddress,
+        asker: PictureAsker,
         task: bt_term::InlineImageScaleTask,
     },
     /// One picture in a markdown page, at the size the page draws it
@@ -1894,9 +2234,9 @@ impl ScaleWorkerRequest {
     fn purpose(&self) -> ScalePurpose {
         match self {
             Self::InlineImage { task, .. } => ScalePurpose::InlineImage(task.occurrence_id),
-            Self::Peek { .. } => ScalePurpose::Peek,
-            Self::Preview { .. } => ScalePurpose::Preview,
-            Self::MarkdownImage { .. } => ScalePurpose::MarkdownImage,
+            Self::Peek { surface, .. } => ScalePurpose::Peek(*surface),
+            Self::Preview { asker, .. } => ScalePurpose::Preview(*asker),
+            Self::MarkdownImage { .. } => ScalePurpose::MarkdownImage(self.size()),
         }
     }
 
@@ -1918,9 +2258,46 @@ impl ScaleWorkerRequest {
         }
     }
 
+    /// **Who asked**: the owner its answer will name ([`MathWorkerResult::owner`]) — a pane's
+    /// picture and a preview's are their tab's; the glance and a markdown page's are the window's.
+    fn owner(&self) -> AnswerOwner {
+        match self {
+            Self::InlineImage { leaf, .. } | Self::Preview { leaf, .. } => {
+                AnswerOwner::Tab(leaf.leaf.tab)
+            }
+            Self::Peek { leaf, .. } | Self::MarkdownImage { leaf, .. } => {
+                AnswerOwner::Window(leaf.window)
+            }
+        }
+    }
+
+    /// What this request asked ([`Asked`]).
+    fn asked(&self) -> Asked {
+        match self {
+            Self::InlineImage { leaf, task } => Asked::Pane {
+                leaf: *leaf,
+                task: SessionDecorationTask::ScaleInlineImage(task.clone()),
+            },
+            Self::Peek { .. } | Self::Preview { .. } | Self::MarkdownImage { .. } => {
+                Asked::WindowScale
+            }
+        }
+    }
+
+    /// The size it asks the picture to be drawn at.
+    fn size(&self) -> (u32, u32) {
+        let task = self.task();
+        (task.display_width_px, task.display_height_px)
+    }
+
     /// Coalescing is per leaf: two panes asking for the same picture at the same size are two
     /// answers owed, and letting one stand in for the other is how a pane ends up waiting forever
-    /// for a raster that was delivered next door.
+    /// for a raster that was delivered next door. The purpose names the asker below the leaf on
+    /// the same terms ([`ScalePurpose`]): the flyout and the glance card over one file are two
+    /// slots waiting ([`PeekSurface`]), two preview panes over one picture are two pictures
+    /// waiting ([`PictureAsker`]), and a page's picture at two sizes is two cache entries waiting.
+    /// One superseding the other left the older one waiting for nothing, so a newer request
+    /// supersedes or joins only its own asker's.
     fn same_target(&self, other: &Self) -> bool {
         self.leaf() == other.leaf()
             && self.purpose() == other.purpose()
@@ -1935,15 +2312,21 @@ impl ScaleWorkerRequest {
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
-            Self::Peek { leaf, task } => (
+            Self::Peek {
+                leaf,
+                surface,
+                task,
+            } => (
                 leaf,
                 DecorationWorkerCompletion::PeekScaledImage {
+                    surface,
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
-            Self::Preview { leaf, task } => (
+            Self::Preview { leaf, asker, task } => (
                 leaf,
                 DecorationWorkerCompletion::PreviewScaledImage {
+                    asker,
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
@@ -1953,61 +2336,6 @@ impl ScaleWorkerRequest {
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
-        }
-    }
-}
-
-#[derive(Default)]
-struct PendingScaleRequests {
-    requests: std::collections::VecDeque<ScaleWorkerRequest>,
-}
-
-impl PendingScaleRequests {
-    fn push_latest(&mut self, request: ScaleWorkerRequest) {
-        if let Some(index) = self
-            .requests
-            .iter()
-            .position(|queued| queued.same_target(&request))
-        {
-            self.requests.remove(index);
-        }
-        self.requests.push_back(request);
-    }
-
-    fn pop_front(&mut self) -> Option<ScaleWorkerRequest> {
-        self.requests.pop_front()
-    }
-
-    fn contains_target(&self, request: &ScaleWorkerRequest) -> bool {
-        self.requests
-            .iter()
-            .any(|queued| queued.same_target(request))
-    }
-
-    fn drain_channel(&mut self, receiver: &mpsc::Receiver<ScaleWorkerRequest>) {
-        while let Ok(request) = receiver.try_recv() {
-            self.push_latest(request);
-        }
-    }
-}
-
-/// Run the CPU-heavy resample lane. Before each Lanczos3 pass, absorb every request already in the
-/// channel and discard a dequeued question if a newer size for the same content/purpose exists.
-/// A request that arrives after the pass begins is a new question and will be serviced next.
-fn run_scale_worker(
-    receiver: mpsc::Receiver<ScaleWorkerRequest>,
-    mut execute: impl FnMut(ScaleWorkerRequest),
-) {
-    let mut pending = PendingScaleRequests::default();
-    while let Ok(request) = receiver.recv() {
-        pending.push_latest(request);
-        pending.drain_channel(&receiver);
-        while let Some(request) = pending.pop_front() {
-            pending.drain_channel(&receiver);
-            if pending.contains_target(&request) {
-                continue;
-            }
-            execute(request);
         }
     }
 }
@@ -2024,18 +2352,13 @@ enum DecorationWorkerCompletion {
     /// A decoded image resampled into the display box a band shows it in. Resampling a
     /// wallpaper-sized decode is tens of milliseconds, so it belongs here and never on the event
     /// thread.
-    ScaleInlineImage {
-        scaled: bt_term::ScaledInlineImage,
-    },
+    ScaleInlineImage { scaled: bt_term::ScaledInlineImage },
     PeekImage {
         path: PathBuf,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     },
     /// One video's frame and the facts that came out of the same open — see [`VideoGlance`].
-    PeekVideoFrame {
-        path: PathBuf,
-        glance: VideoGlance,
-    },
+    PeekVideoFrame { path: PathBuf, glance: VideoGlance },
     /// The head of one animated picture's frames, or the reason there are none —
     /// see [`animation::decode`].
     PeekAnimation {
@@ -2062,10 +2385,14 @@ enum DecorationWorkerCompletion {
         fit: (u32, u32),
         outcome: PeekPageOutcome,
     },
+    /// A peek resample, and the surface that asked for it ([`PeekSurface`]).
     PeekScaledImage {
+        surface: PeekSurface,
         scaled: bt_term::ScaledInlineImage,
     },
+    /// A preview's resample, and the picture that asked for it ([`PictureAsker`]).
     PreviewScaledImage {
+        asker: PictureAsker,
         scaled: bt_term::ScaledInlineImage,
     },
     /// What the disk said about one printed path (§7.1.5j) — all of it, because since audit 3 C-2
@@ -2086,9 +2413,7 @@ enum DecorationWorkerCompletion {
     /// One picture of a markdown page, resampled to the size that page draws it
     /// at (§7.1.3k). It is filed by content and size, which is the whole of the
     /// key — see [`MarkdownRasterKey`].
-    MarkdownScaledImage {
-        scaled: bt_term::ScaledInlineImage,
-    },
+    MarkdownScaledImage { scaled: bt_term::ScaledInlineImage },
 }
 
 /// **What the page lane found** — two shapes rather than one optional picture, because a re-hover
@@ -2283,233 +2608,161 @@ fn peek_pixels(
     )
 }
 
-struct MathWorker {
-    tasks: mpsc::Sender<MathWorkerRequest>,
-    scale_tasks: mpsc::Sender<ScaleWorkerRequest>,
-    /// The path-verification lane — see [`PathWorkerRequest`] for why it is not the queue above.
-    path_tasks: mpsc::Sender<PathWorkerRequest>,
-    results: mpsc::Receiver<MathWorkerResult>,
+/// **The resample share's door** (`computation_lane`, `bt-image-scale-worker`): one Lanczos3 pass
+/// per request. A newer size for the same picture on the same pane and surface replaces one still
+/// waiting at the lane's door (`ComputationLane::scale`), so a divider drag runs the size it ends
+/// at, not every size it passed through.
+fn scale_door(
+    _ctx: &bt_platform::admission::WorkerCtx,
+) -> computation_lane::Door<ScaleWorkerRequest> {
+    // The entry's answer, taken here rather than handed down: the lane is made before there is a
+    // `Runtime` to own the flag, and this is the answer [`Runtime::trace_perf`] holds.
+    let trace_perf = entry_doors::installed().perf;
+    Box::new(
+        move |_ctx: &bt_platform::admission::WorkerCtx, request: ScaleWorkerRequest| {
+            // **What a Lanczos3 pass actually costs on this machine**, beside the size that provoked
+            // it. The lane is the one suspect in a sticky zoom that the event thread cannot time for
+            // itself, because it runs on another thread and answers whenever it answers.
+            let started = trace_perf.then(Instant::now);
+            let purpose = request.purpose();
+            let (width, height) = request.size();
+            let (leaf, completion) = request.completion();
+            if let Some(started) = started {
+                trace_sink::stderr_line(format!(
+                    "BT_PERF_TRACE image_scale purpose={purpose:?} size={width}x{height} lanczos_us={}",
+                    started.elapsed().as_micros(),
+                ));
+            }
+            MathWorkerResult { leaf, completion }
+        },
+    )
 }
 
-impl MathWorker {
-    /// **Start the three threads** and return their senders and the one answer channel.
-    ///
-    /// `wake` brings the event loop round after an answer is published; the product's sends
-    /// `AppEvent::MathReady`. It is a parameter rather than the proxy so that the lane contract's
-    /// computation adapter (`lane_contract_tests`) runs these very threads, with the answer sender
-    /// shared the way the product shares it.
-    fn spawn(wake: impl Fn() + Clone + Send + 'static) -> Result<Self> {
-        let (task_tx, task_rx) = mpsc::channel::<MathWorkerRequest>();
-        let (scale_tx, scale_rx) = mpsc::channel::<ScaleWorkerRequest>();
-        let (path_tx, path_rx) = mpsc::channel::<PathWorkerRequest>();
-        let (result_tx, result_rx) = mpsc::channel::<MathWorkerResult>();
-        let scale_result_tx = result_tx.clone();
-        let scale_wake = wake.clone();
-        let path_result_tx = result_tx.clone();
-        let path_wake = wake.clone();
-        bt_platform::spawn_at_priority(
-            "bt-path-verify-worker",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| {
-                run_path_verify_worker(path_rx, path_result_tx, path_wake);
-            },
-        )
-        .context("spawn path verification worker")?;
-        // Read here rather than handed down: the lane is spawned before there is
-        // a `Runtime` to own the flag, and this is the same question
-        // [`Runtime::trace_perf`] asks of the same variable.
-        let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
-        bt_platform::spawn_at_priority(
-            "bt-image-scale-worker",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| {
-                run_scale_worker(scale_rx, |request| {
-                    // **What a Lanczos3 pass actually costs on this machine**,
-                    // beside the size that provoked it. The lane is the one
-                    // suspect in a sticky zoom that the event thread cannot time
-                    // for itself, because it runs on another thread and answers
-                    // whenever it answers.
-                    let started = trace_perf.then(Instant::now);
-                    let purpose = request.purpose();
-                    let (width, height) = {
-                        let task = request.task();
-                        (task.display_width_px, task.display_height_px)
-                    };
-                    let (leaf, completion) = request.completion();
-                    if let Some(started) = started {
-                        trace_sink::stderr_line(format!(
-                            "BT_PERF_TRACE image_scale purpose={purpose:?} size={width}x{height} lanczos_us={}",
-                            started.elapsed().as_micros(),
-                        ));
-                    }
-                    if scale_result_tx
-                        .send(MathWorkerResult { leaf, completion })
-                        .is_ok()
-                    {
-                        scale_wake();
-                    }
-                });
-            },
-        )
-        .context("spawn image resampling worker")?;
-        // **This thread says how much stack it wants** (`bt_math::MATH_WORKER_STACK_BYTES`). One
-        // formula's render descends through a LaTeX parser, then a LaTeX-to-Typst converter, then
-        // Typst's parser, math layout and SVG writer, all over text a program printed into a
-        // terminal; a stack overflow is not a panic and would take the window with it, so the depth
-        // that is refused and the stack it is refused against are chosen together, in `bt-math`, and
-        // this is where the second half of that pair is spent.
-        bt_platform::spawn_at_priority_with_stack(
-            "bt-math-worker",
-            bt_platform::ThreadPriority::BelowNormal,
-            Some(bt_math::MATH_WORKER_STACK_BYTES),
-            move |ctx| {
-                run_decoration_worker(ctx, task_rx, result_tx, wake);
-            },
-        )
-        .context("spawn math rendering worker")?;
-        Ok(Self {
-            tasks: task_tx,
-            scale_tasks: scale_tx,
-            path_tasks: path_tx,
-            results: result_rx,
-        })
-    }
-}
-
-/// **The path-verification lane** (audit 3 C-2).
+/// **The path-verification share's door** (audit 3 C-2; `computation_lane`,
+/// `bt-path-verify-worker`).
 ///
-/// One question, one call, one answer, and nothing else runs here — which is the whole of the
-/// design: a `verify_path` that blocks inside the SMB redirector holds up nothing but the next
-/// path question, and the window thread was never waiting on either.
+/// One question, one call, one answer, and nothing else runs on its thread — which is the whole
+/// of the design: a `verify_path` that blocks inside the SMB redirector holds up nothing but the
+/// next path question, and the window thread was never waiting on either.
+fn path_door(
+    _ctx: &bt_platform::admission::WorkerCtx,
+) -> computation_lane::Door<PathWorkerRequest> {
+    Box::new(run_path_verify_worker)
+}
+
+/// One path question, answered.
 fn run_path_verify_worker(
-    task_rx: mpsc::Receiver<PathWorkerRequest>,
-    result_tx: mpsc::Sender<MathWorkerResult>,
-    mut wake: impl FnMut(),
-) {
-    while let Ok(PathWorkerRequest { leaf, path }) = task_rx.recv() {
-        let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
-        if result_tx
-            .send(MathWorkerResult {
-                leaf,
-                completion: DecorationWorkerCompletion::VerifiedPath { path, verdict },
-            })
-            .is_err()
-        {
-            return;
-        }
-        wake();
+    _ctx: &bt_platform::admission::WorkerCtx,
+    PathWorkerRequest { leaf, path }: PathWorkerRequest,
+) -> MathWorkerResult {
+    let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
+    MathWorkerResult {
+        leaf,
+        completion: DecorationWorkerCompletion::VerifiedPath { path, verdict },
     }
 }
 
-/// The production decoration queue, also exercised without a window by regression tests.
+/// **The formula and picture worker** (`computation_lane`, `bt-math-worker`): the engine and the
+/// decoder are made once, on the worker, and the door it returns answers each request — the
+/// production decoration work, also exercised without a window by regression tests.
 fn run_decoration_worker(
     worker: &bt_platform::admission::WorkerCtx,
-    task_rx: mpsc::Receiver<MathWorkerRequest>,
-    result_tx: mpsc::Sender<MathWorkerResult>,
-    mut wake: impl FnMut(),
-) {
+) -> computation_lane::Door<MathWorkerRequest> {
+    // The door is made on the worker; each request is handed the same capability again.
+    let _ = worker;
     let engine = MathEngine::new();
     let mut image_decoder = InlineImageDecoder::default();
-    while let Ok(work) = task_rx.recv() {
-        let completion = match work {
-            MathWorkerRequest::Math {
-                leaf,
-                mut task,
-                foreground_rgb,
-            } => {
-                let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
-                (leaf, DecorationWorkerCompletion::Math { task, result })
-            }
-            MathWorkerRequest::InlineImage { leaf, task } => {
-                let result = image_decoder.decode(task.clone());
-                (
+    Box::new(
+        move |worker: &bt_platform::admission::WorkerCtx, work: MathWorkerRequest| {
+            let (leaf, completion) = match work {
+                MathWorkerRequest::Math {
                     leaf,
-                    DecorationWorkerCompletion::InlineImage { task, result },
-                )
-            }
-            MathWorkerRequest::PreviewMath { leaf, key } => {
-                let result = bt_math::key_for_em_px(
-                    key.em_milli_px as f32 / 1000.0,
-                    key.foreground_rgb,
-                    key.mode,
-                )
-                .ok_or(MathRenderError::InvalidDimensions)
-                .and_then(|render_key| engine.render(&key.source, render_key));
-                (
+                    mut task,
+                    foreground_rgb,
+                } => {
+                    let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
+                    (leaf, DecorationWorkerCompletion::Math { task, result })
+                }
+                MathWorkerRequest::InlineImage { leaf, task } => {
+                    let result = image_decoder.decode(task.clone());
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::InlineImage { task, result },
+                    )
+                }
+                MathWorkerRequest::PreviewMath { leaf, key } => {
+                    let result = bt_math::key_for_em_px(
+                        key.em_milli_px as f32 / 1000.0,
+                        key.foreground_rgb,
+                        key.mode,
+                    )
+                    .ok_or(MathRenderError::InvalidDimensions)
+                    .and_then(|render_key| engine.render(&key.source, render_key));
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PreviewMath { key, result },
+                    )
+                }
+                MathWorkerRequest::PeekImage { leaf, path } => {
+                    let result = peek_pixels(&mut image_decoder, &path);
+                    (leaf, DecorationWorkerCompletion::PeekImage { path, result })
+                }
+                MathWorkerRequest::PeekVideoFrame { leaf, path } => {
+                    let glance = read_video_glance(worker, &path);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekVideoFrame { path, glance },
+                    )
+                }
+                MathWorkerRequest::PeekAnimation { leaf, path } => {
+                    let frames = animation::decode(&path);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekAnimation { path, frames },
+                    )
+                }
+                // **This is the thread `AnimationCursor::next_frames` exists for.** Composing a frame is
+                // the whole logical screen, and the window has one thread that must not spend that.
+                MathWorkerRequest::AnimationFill {
                     leaf,
-                    DecorationWorkerCompletion::PreviewMath { key, result },
-                )
-            }
-            MathWorkerRequest::PeekImage { leaf, path } => {
-                let result = peek_pixels(&mut image_decoder, &path);
-                (leaf, DecorationWorkerCompletion::PeekImage { path, result })
-            }
-            MathWorkerRequest::PeekVideoFrame { leaf, path } => {
-                let glance = read_video_glance(worker, &path);
-                (
+                    path,
+                    serial,
+                    mut cursor,
+                    want,
+                } => {
+                    let frames = cursor.next_frames(want);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::AnimationFill {
+                            path,
+                            serial,
+                            cursor,
+                            frames,
+                        },
+                    )
+                }
+                MathWorkerRequest::PeekPage {
                     leaf,
-                    DecorationWorkerCompletion::PeekVideoFrame { path, glance },
-                )
-            }
-            MathWorkerRequest::PeekAnimation { leaf, path } => {
-                let frames = animation::decode(&path);
-                (
-                    leaf,
-                    DecorationWorkerCompletion::PeekAnimation { path, frames },
-                )
-            }
-            // **This is the thread `AnimationCursor::next_frames`
-            // exists for.** Composing a frame is the whole logical
-            // screen, and the window has one thread that must not
-            // spend that.
-            MathWorkerRequest::AnimationFill {
-                leaf,
-                path,
-                serial,
-                mut cursor,
-                want,
-            } => {
-                let frames = cursor.next_frames(want);
-                (
-                    leaf,
-                    DecorationWorkerCompletion::AnimationFill {
-                        path,
-                        serial,
-                        cursor,
-                        frames,
-                    },
-                )
-            }
-            MathWorkerRequest::PeekPage {
-                leaf,
-                path,
-                page,
-                fit,
-                known,
-            } => {
-                let outcome = raster_peek_page(&path, page, fit, known);
-                (
-                    leaf,
-                    DecorationWorkerCompletion::PeekPage {
-                        path,
-                        page,
-                        fit,
-                        outcome,
-                    },
-                )
-            }
-        };
-        if result_tx
-            .send(MathWorkerResult {
-                leaf: completion.0,
-                completion: completion.1,
-            })
-            .is_err()
-        {
-            break;
-        }
-        wake();
-    }
+                    path,
+                    page,
+                    fit,
+                    known,
+                } => {
+                    let outcome = raster_peek_page(&path, page, fit, known);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekPage {
+                            path,
+                            page,
+                            fit,
+                            outcome,
+                        },
+                    )
+                }
+            };
+            MathWorkerResult { leaf, completion }
+        },
+    )
 }
 
 /// What a press on one node of a files tree does to that column's durable state.
@@ -2551,6 +2804,8 @@ fn reroot_files_state(state: &mut seats::FilesLeafState, root: &str) -> bool {
         return false;
     }
     state.root = root.to_owned();
+    // A root someone chose is a folder they named, not the home folder standing in for one.
+    state.folder_unknown = false;
     // A `/src` left open under the old root is not the `/src` of the new one.
     // Honouring it would unfold whatever happens to be called that, which is a
     // tree opening itself at a folder you have never seen.
@@ -3813,7 +4068,10 @@ fn answer_one_picture(
     // the page *draws* — that is the answer below — and everything about whether
     // this pass is the one that must ask: the store's own `Pending` is the latch
     // that keeps one read from becoming one read per frame.
-    let read_is_out = matches!(peek_cache.get(&cache_key), Some(PeekCacheEntry::Pending));
+    let read_is_out = matches!(
+        peek_cache.get(&cache_key),
+        Some(PeekCacheEntry::Pending { .. })
+    );
     // What this window is holding, and what it has merely been told. The decode
     // cache is the first; the answer the page is standing on is the second, and
     // it outlives the pixels.
@@ -3831,7 +4089,7 @@ fn answer_one_picture(
         // keeps drawing what it was drawing rather than going blank, and it goes
         // on down this function either way, because what it is drawing may still
         // be the soft raster the decode is wanted to sharpen.
-        Some(PeekCacheEntry::Pending) | None => match standing {
+        Some(PeekCacheEntry::Pending { .. }) | None => match standing {
             // Answered once, and the cache has since let the pixels go. The
             // decode's own size and its content key are the whole of what the
             // passes below need; `rgba` is the decode's own pixels only while
@@ -5610,9 +5868,13 @@ impl PreviewPanes {
     /// **Which surface's picture asked this exact question of the scale
     /// worker**, if one of them did.
     ///
-    /// The request ledger read back the way it was written: by the target tuple
-    /// (`content key, width, height`) that the asking picture recorded on itself
-    /// before sending. Because the ledger entry lives on the *pane*, it travels
+    /// The request ledger read back the way it was written: by the picture's own
+    /// number ([`PictureAsker`]) and the target tuple (`content key, width,
+    /// height`) that the asking picture recorded on itself before sending. The
+    /// number is what keeps two panes over one picture at one size from taking
+    /// each other's answers (T-SCALE-ADDRESS-PER-ASKER): each asked under its
+    /// own address, so each is owed its own. Because the ledger entry lives on
+    /// the *pane*, it travels
     /// with the pane — into a torn-off window, back into a docked pane — and the
     /// answer finds its asker across either move. Routing the answer by "whoever
     /// holds the texture lane now" instead is the 2026-08-17 report: in exactly
@@ -5622,12 +5884,17 @@ impl PreviewPanes {
     /// An entry cannot outlive its host, and that is by construction rather than
     /// by a sweep: it *is* a field of the pane, so [`Self::remove`] takes it away
     /// with everything else the surface was holding.
-    fn awaiting_scale(&self, target: &PeekThumbnailTarget) -> Option<PreviewSurface> {
+    fn awaiting_scale(
+        &self,
+        asker: PictureAsker,
+        target: &PeekThumbnailTarget,
+    ) -> Option<PreviewSurface> {
         self.panes
             .iter()
             .find(|(_, pane)| {
-                pane.image()
-                    .is_some_and(|picture| picture.pending.as_ref() == Some(target))
+                pane.image().is_some_and(|picture| {
+                    picture.asker == asker && picture.pending.as_ref() == Some(target)
+                })
             })
             .map(|(surface, _)| *surface)
     }
@@ -8829,9 +9096,9 @@ fn preview_press_opens_its_link(latch: &DragLatch) -> bool {
 /// the ground drawn round it is what a reader sees and therefore what a reader
 /// aims at, and one rectangle answering the paint, the press and the hover card
 /// is the same discipline [`markdown_image_extent`] states for a picture.
-fn measure_preview_links(
-    gpu: &mut GpuContext,
-    renderer: &mut WindowRenderer,
+fn measure_preview_links<G: Glass>(
+    gpu: &mut G::Device,
+    renderer: &mut G,
     body: &bt_render::PreviewBody,
     sites: &[PreviewLinkSite],
     scale: f32,
@@ -8954,9 +9221,9 @@ fn markdown_chip_ground(
 /// A run that wrapped is reported once per visual line, and only the first is
 /// used: an inline box is one glyph, so it cannot really be split — the second
 /// report would be the shaper describing the same indivisible thing twice.
-fn place_preview_math(
-    gpu: &mut GpuContext,
-    renderer: &mut WindowRenderer,
+fn place_preview_math<G: Glass>(
+    gpu: &mut G::Device,
+    renderer: &mut G,
     body: &mut bt_render::PreviewBody,
     sites: &[PreviewMathSite],
 ) {
@@ -9956,13 +10223,15 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
 ///   what "同一 seat 反复重启永远用同一个可执行文件" asks for; reading
 ///   `settings.default_profile` here would turn a Git Bash pane into a
 ///   PowerShell the first time somebody changed that setting.
-/// * **The directory is §1.1's ladder**: the last trusted OSC 7 report, else
-///   the seat's initial cwd — [`LeafSession::place_for_a_new_shell`], read by
-///   the caller. The contract is explicit that this is 「最后已知」 and not
-///   「当前」: a `cd` the old shell performed without announcing it is a `cd`
-///   the restart cannot see. Until 2026-10-04 only the first rung was read, so
-///   a pane opened in a chosen folder whose shell never reported restarted at
-///   its profile's default instead of where it was born.
+/// * **The directory is where the pane stands**, read by the caller through
+///   [`LeafSession::seed_place_for_a_new_shell`]: the last trusted OSC 7 report,
+///   else the shell process's current folder, else the seat's initial cwd.
+///   Since T-CWD-FROM-PROCESS (2026-10-17) a `cd` the old shell performed
+///   without announcing it *is* seen when its process can be read — that
+///   supersedes §1.1's 「最后已知」 and not 「当前」 for this verb; a process
+///   that cannot be read leaves the old ladder. Until 2026-10-04 only the first
+///   rung was read, so a pane opened in a chosen folder whose shell never
+///   reported restarted at its profile's default instead of where it was born.
 /// * **No folder at all is an absence, not a fallback.** `None` (a pane whose
 ///   spawn could name no place, or one put down at its shell's own `~`) reaches
 ///   `profiles::spawn_place`, which answers it with the profile's own starting
@@ -11748,55 +12017,207 @@ fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
     }
 }
 
+/// **The computation lane's request door for a pane's decoration work** (C1): the task goes to
+/// the share that runs its kind — a formula or a decode to `bt-math-worker`, a resample to
+/// `bt-image-scale-worker`, a printed path to `bt-path-verify-worker` — and is admitted there, or
+/// refused at that share's door and handed back as the task it was.
 fn dispatch_decoration_task(
     leaf: ShellAddress,
     task: SessionDecorationTask,
-    tasks: &mpsc::Sender<MathWorkerRequest>,
-    scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
-    path_tasks: &mpsc::Sender<PathWorkerRequest>,
-) -> bool {
+    lane: &computation_lane::ComputationLane,
+) -> std::result::Result<(), (lane::Refused, SessionDecorationTask)> {
     match task {
-        SessionDecorationTask::Math(task) => tasks
-            .send(MathWorkerRequest::Math {
+        SessionDecorationTask::Math(task) => lane
+            .decorate(MathWorkerRequest::Math {
                 leaf,
                 task,
                 foreground_rgb: foreground_rgb(),
             })
-            .is_ok(),
-        SessionDecorationTask::InlineImage(task) => tasks
-            .send(MathWorkerRequest::InlineImage { leaf, task })
-            .is_ok(),
-        SessionDecorationTask::ScaleInlineImage(task) => scale_tasks
-            .send(ScaleWorkerRequest::InlineImage { leaf, task })
-            .is_ok(),
-        // **Its own lane** — see [`PathWorkerRequest`]. A stat that blocks for the redirector's
+            .map(|_| ())
+            .map_err(|(refused, request)| (refused, session_task_of(request))),
+        SessionDecorationTask::InlineImage(task) => lane
+            .decorate(MathWorkerRequest::InlineImage { leaf, task })
+            .map(|_| ())
+            .map_err(|(refused, request)| (refused, session_task_of(request))),
+        SessionDecorationTask::ScaleInlineImage(task) => lane
+            .scale(ScaleWorkerRequest::InlineImage { leaf, task })
+            .map(|_| ())
+            .map_err(|(refused, request)| match request {
+                ScaleWorkerRequest::InlineImage { task, .. } => {
+                    (refused, SessionDecorationTask::ScaleInlineImage(task))
+                }
+                _ => unreachable!("the door hands back the request it was given"),
+            }),
+        // **Its own share** — see [`PathWorkerRequest`]. A stat that blocks for the redirector's
         // timeout must not stand in front of a formula the reader is waiting on.
-        SessionDecorationTask::VerifyPath(path) => {
-            path_tasks.send(PathWorkerRequest { leaf, path }).is_ok()
-        }
+        SessionDecorationTask::VerifyPath(path) => lane
+            .verify(PathWorkerRequest { leaf, path })
+            .map(|_| ())
+            .map_err(|(refused, request)| {
+                (refused, SessionDecorationTask::VerifyPath(request.path))
+            }),
     }
 }
 
-/// Drain the real session queue into the renderer channel. A dead optional-decoration worker is
-/// a one-way feature downgrade, never a terminal/runtime error.
+/// The session's task a pane's formula or decode request was made of, handed back.
+fn session_task_of(request: MathWorkerRequest) -> SessionDecorationTask {
+    match request {
+        MathWorkerRequest::Math { task, .. } => SessionDecorationTask::Math(task),
+        MathWorkerRequest::InlineImage { task, .. } => SessionDecorationTask::InlineImage(task),
+        _ => unreachable!("the door hands back the request it was given"),
+    }
+}
+
+/// **What one drain of the computation lane hands the windows**: the answers, each under the
+/// identity of the request it answers — a failed window request's settled as its surface's own
+/// error answer among them ([`settle_failure`]) — the failed pane tasks to hold and the animation
+/// fills to release, each with who asked (each window settles its own,
+/// [`Runtime::settle_failed_requests`]), and whether a worker has ended.
+#[derive(Default)]
+struct MathAnswers {
+    done: Vec<(computation_lane::ComputationId, MathWorkerResult)>,
+    failed: Vec<(AnswerOwner, Settled)>,
+    lane_gone: bool,
+}
+
+/// **What the repository lanes' drain hands the windows** ([`FolioApp::drain_git_answers`]): the
+/// pages' answers and receipts, each addressed to where its cache stands; the documents' answers,
+/// each addressed to where its buffer is kept; and whether the read worker was found gone on this
+/// turn.
+#[derive(Default)]
+struct GitAnswers {
+    pages: Vec<git::GitResponse>,
+    documents: Vec<git::GitDocumentAnswer>,
+    gone: bool,
+}
+
+/// **The terminals one drain took, sorted for the windows**: an answer joins `done`; a failed
+/// request — its own failure, or the one it joined — is settled ([`settle_failure`]): an error
+/// answer joins `done`, a pane task or an animation fill joins `failed` for the window that holds
+/// its asker (the ledger has said the failure); a superseded request, or one joined to an answer,
+/// leaves the answer to the request that ended it; `WorkerGone` says the lane has lost a worker.
+fn sort_math_terminals(ended: Vec<computation_lane::Ended>) -> MathAnswers {
+    let mut answers = MathAnswers::default();
+    for (_, id, terminal, (owner, asked)) in ended {
+        let failed = match terminal {
+            lane::Terminal::Done(answer) => {
+                answers
+                    .done
+                    .extend(answer.take().map(|result| (id, result)));
+                false
+            }
+            lane::Terminal::Failed(_) => true,
+            lane::Terminal::Joined { outcome, .. } => {
+                matches!(*outcome, lane::Terminal::Failed(_))
+            }
+            lane::Terminal::WorkerGone => {
+                answers.lane_gone = true;
+                false
+            }
+            lane::Terminal::Superseded { .. } => false,
+            lane::Terminal::Cancelled => unreachable!("the computation lane cancels nothing"),
+        };
+        if failed {
+            match settle_failure(id, asked) {
+                Settled::Answer(answer) => answers.done.push((id, answer)),
+                Settled::Nothing => {}
+                settled @ (Settled::Hold { .. }
+                | Settled::FillLost { .. }
+                | Settled::AnimationUnanswered { .. }) => {
+                    answers.failed.push((owner, settled));
+                }
+            }
+        }
+    }
+    answers
+}
+
+/// **Hold a failed pane task in the pane that asked**, if that pane is still there: its session
+/// holds it until new input that could change its answer. Answers whether a pane took it.
+fn hold_failed_in_tabs(
+    tabs: &mut [TabState],
+    leaf: ShellAddress,
+    task: SessionDecorationTask,
+) -> bool {
+    let Some(index) = tabs.iter().position(|tab| tab.id == leaf.leaf.tab) else {
+        return false;
+    };
+    let Some(session) = leaf_session_mut(tabs, index, leaf.leaf.seat) else {
+        return false;
+    };
+    session.hold_decoration_task_until_new_input(task);
+    true
+}
+
+/// **Which of the computation lane's shares a pane's task goes to.**
+fn share_of(task: &SessionDecorationTask) -> computation_lane::Share {
+    match task {
+        SessionDecorationTask::Math(_) | SessionDecorationTask::InlineImage(_) => {
+            computation_lane::Share::Decoration
+        }
+        SessionDecorationTask::ScaleInlineImage(_) => computation_lane::Share::Scale,
+        SessionDecorationTask::VerifyPath(_) => computation_lane::Share::Path,
+    }
+}
+
+/// **Hand a pane's queued decoration work to the computation lane.**
+///
+/// - A share that refuses because it is full stops only its own work for this hand-out: the
+///   rest of the pane's tasks for that share are kept in the pane, and the other two shares are
+///   still handed theirs — the three bounds exist so that the shares do not block each other.
+///   What a full share refused waits at the head of the pane's queues for the next hand-out (the
+///   next output, frame or answer).
+/// - A share whose thread the door could not start refuses the task, which goes back to the
+///   pane, and the pane hands nothing more out until its next new input
+///   (`DualPlaneSession::pause_hand_out_until_new_input`): the start is tried again by new input,
+///   once, never by every hand-out that finds the queues as they were.
+/// - A share whose worker has ended turns the lane off: a one-way feature downgrade, never a
+///   terminal/runtime error.
 fn dispatch_pending_math_tasks(
     leaf: ShellAddress,
     session: &mut DualPlaneSession,
-    tasks: &mpsc::Sender<MathWorkerRequest>,
-    scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
-    path_tasks: &mpsc::Sender<PathWorkerRequest>,
+    lane: &computation_lane::ComputationLane,
     running: &mut bool,
     notice_pending: &mut bool,
 ) -> bool {
     if !*running {
         return false;
     }
+    let mut full = BTreeSet::new();
+    let mut kept = Vec::new();
+    let mut disabled = false;
     while let Some(task) = session.take_decoration_worker_task() {
-        if !dispatch_decoration_task(leaf, task, tasks, scale_tasks, path_tasks) {
-            return disable_math_worker_state(running, notice_pending);
+        let share = share_of(&task);
+        if full.contains(&share) {
+            kept.push(task);
+            continue;
+        }
+        match dispatch_decoration_task(leaf, task, lane) {
+            Ok(()) => {}
+            Err((lane::Refused::Full { .. }, task)) => {
+                full.insert(share);
+                kept.push(task);
+            }
+            Err((lane::Refused::NotStarted(_), task)) => {
+                kept.push(task);
+                session.pause_hand_out_until_new_input();
+                break;
+            }
+            Err((lane::Refused::Faulted(_), task)) => {
+                kept.push(task);
+                disabled = disable_math_worker_state(running, notice_pending);
+                break;
+            }
+            Err((lane::Refused::TwinEnded, _)) => {
+                unreachable!("a request joins only one still waiting in line")
+            }
         }
     }
-    false
+    // Back at the head of their queues, in the order they were taken.
+    for task in kept.into_iter().rev() {
+        session.give_back_decoration_worker_task(task);
+    }
+    disabled
 }
 
 /// The session filed under one seat of one tab, or nothing if that pane has since closed.
@@ -11814,9 +12235,7 @@ fn leaf_session_mut(
 /// The worker lanes a tab's decoration dispatch hands work to, cloned out of [`App`] so the
 /// dispatch can borrow the tab and the worker flags mutably at the same time.
 struct DecorationSenders {
-    math: mpsc::Sender<MathWorkerRequest>,
-    scale: mpsc::Sender<ScaleWorkerRequest>,
-    path: mpsc::Sender<PathWorkerRequest>,
+    computation: Arc<computation_lane::ComputationLane>,
     foreground: mpsc::Sender<foreground_program::Request>,
 }
 
@@ -11850,9 +12269,7 @@ fn dispatch_tab_decoration_tasks(
         disabled |= dispatch_pending_math_tasks(
             address,
             &mut leaf.session,
-            &senders.math,
-            &senders.scale,
-            &senders.path,
+            &senders.computation,
             running,
             notice_pending,
         );
@@ -11919,6 +12336,10 @@ struct LeafSession {
     /// every pane not being restarted.
     successor: Option<Box<LeafSession>>,
     foreground_program_cadence: foreground_program::Cadence,
+    /// **This shell's last process folder read** (T-CWD-FROM-PROCESS), and the moment it was made
+    /// at — read on an ask when the shell has reported no folder, and asked again only after the
+    /// shell has written something. See [`pane_folder`].
+    process_folder: pane_folder::ProcessFolderMemo,
     /// **Which shell this is, told apart from the one that stood here before**
     /// (review X-1).
     ///
@@ -12002,6 +12423,9 @@ struct LeafSession {
     /// `None` for a leaf with no process behind it (the probe path), where there
     /// is no program and therefore nothing for a title to be repeating.
     program: Option<PathBuf>,
+    /// What kind of program [`Self::program`] is, beside it for its reason: only the spawn knew
+    /// it (`profiles::ShellProgram::Native` for a leaf with no process behind it).
+    program_kind: profiles::ShellProgram,
     /// **Where this shell was put down**, in its own profile's namespace —
     /// [`profiles::SpawnPlace::directory`], kept because only the spawn knew it.
     ///
@@ -12266,6 +12690,11 @@ struct LeafSession {
     /// with the shell it was about. Written by `stage_paste`; read by the card's layout, draw and
     /// hit; taken by the card's answer.
     pending_paste: Option<PendingPaste>,
+    /// **The person's input to this pane, held behind a paste it is owed** (`clipboard_lane`):
+    /// `Some` from the paste's press until its answer is spent — or, when the answer raised the
+    /// paste card, until the card is answered — and released to the shell then, in its order.
+    /// On the leaf for [`Self::pending_paste`]'s reason: a closed pane takes it with it.
+    paste_hold: Option<clipboard_lane::PasteHold>,
 }
 
 /// **What a pane in birth holds until its shell exists** — one road with two triggers: the walk
@@ -12337,6 +12766,7 @@ impl BirthDeathFallback {
                     at_shell_home: leaf.session.spawn_at_shell_home(),
                     named: leaf.born_named,
                     program: leaf.program.clone(),
+                    program_kind: leaf.program_kind.clone(),
                     unless_gone: None,
                 },
                 born_grid: leaf.conpty_grid,
@@ -12357,6 +12787,9 @@ struct BirthDecision {
     at_shell_home: bool,
     named: bool,
     program: Option<PathBuf>,
+    /// What kind of program `program` is (`profiles::ProfilePrograms::shell`): what the pane's
+    /// shell prints is read off it.
+    program_kind: profiles::ShellProgram,
     /// The folder the birth asks the disk about, and where the pane stands when it is gone
     /// (G-SWEEP-048, #29).
     unless_gone: Option<Box<profiles::GoneFolder>>,
@@ -12429,7 +12862,8 @@ fn deliver_held_input(
     birth.deliver(|held| match target {
         PtyTarget::Nowhere => {
             note(&format!(
-                "a pane born with no shell (no program here, or its shell did not start) dropped                  the {} byte(s) typed into it while it waited",
+                "a pane born with no shell (no program here, or its shell did not start) dropped \
+                 the {} byte(s) typed into it while it waited",
                 held.len()
             ));
             Ok(())
@@ -12754,12 +13188,12 @@ struct TabState {
 /// nudges and one nudge say the same sentence.
 #[derive(Clone)]
 struct PtyWakeSignal {
-    proxy: EventLoopProxy<AppEvent>,
+    proxy: LoopProxy,
     raised: Arc<AtomicBool>,
 }
 
 impl PtyWakeSignal {
-    fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
+    fn new(proxy: LoopProxy) -> Self {
         Self {
             proxy,
             raised: Arc::new(AtomicBool::new(false)),
@@ -12887,7 +13321,7 @@ enum Announce {
 /// files fighting over one `session.json`", which is exactly the defect slice D
 /// exists to fix; keeping the arrow out of the window is what stops it being
 /// written in the first place.
-struct App {
+struct App<B: Backend = Native> {
     ime_first_focus_seen: bool,
     /// **The device layer, one for the process** (§2.2, multiwindow slice C).
     ///
@@ -12901,7 +13335,7 @@ struct App {
     /// there was an `App` there was nowhere for it to live but the first
     /// window — which would have made every later window's device the property
     /// of whichever window happened to open first.
-    gpu: GpuContext,
+    gpu: B::Device,
     /// **Who decides what a lost device costs** (§7.1.3m ⑤′).
     ///
     /// On the application layer for the reason the device is: there is one
@@ -12955,16 +13389,22 @@ struct App {
     /// window kept for itself would hand two windows the same name for two
     /// different pictures. A number minted here is unique wherever it is read.
     animation_serials: u64,
-    event_proxy: EventLoopProxy<AppEvent>,
+    event_proxy: LoopProxy,
     /// **The OS hand-off lane** — the one thread every hand-off that leaves a window runs on
     /// (`handoff_lane`). On the application, like the workers beside it: the ids it mints have to
     /// be unique across windows, because an answer finds its window by id.
     handoff_lane: handoff_lane::HandoffLane,
+    /// **The clipboard lane** — the one thread every read and write of the clipboard runs on
+    /// (`clipboard_lane`). On the application for the hand-off lane's reason: one clipboard, one
+    /// worker, and ids unique across windows.
+    clipboard_lane: clipboard_lane::ClipboardLane,
     /// The process's per-HKL Shift tables and their dedicated worker road.
     /// Registry reads and layout-DLL loads happen only on that worker; key
     /// events read this map and never wait.
     layout_tables: layout_tables::LayoutTables,
-    math_worker: MathWorker,
+    /// The computation lane (`computation_lane`): formulas, decodes, glances, resamples and
+    /// printed paths.
+    math_worker: Arc<computation_lane::ComputationLane>,
     foreground_program_worker: foreground_program::Worker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
@@ -13011,6 +13451,16 @@ struct App {
     /// two `AppEvent`s are separate: a directory read and a file read are both
     /// disk questions but they are not each other's queue, and a preview of a
     /// large file must not be what a tree waits behind to draw its next row.
+    /// **The preview's saves on the storage worker**, each owed its answer
+    /// (S-6a): every interactive save is a request on the one storage worker the
+    /// four hand-editable documents write through, heard on
+    /// `AppEvent::DocumentsAnswered` by the buffer that asked, in whichever
+    /// window its tab now stands.
+    preview_saves: preview::PreviewSaves,
+    /// **The buffers a stop that cannot ask handed to the storage worker**, held past their
+    /// windows until the worker has ended (S-6c; [`preview::StopKeeps`]). Empty on every
+    /// other road.
+    stop_keeps: preview::StopKeeps,
     preview_worker: preview::PreviewWorker,
     preview_worker_running: bool,
     preview_worker_notice_pending: bool,
@@ -13023,6 +13473,11 @@ struct App {
     git_worker: git::GitWorker,
     git_worker_running: bool,
     git_worker_notice_pending: bool,
+    /// **The Git pages' writes and checkouts** (`git_mutation_lane`): a worker
+    /// per repository with verbs owed, each verb run after the one pressed
+    /// before it, and the repository's reads on `git_worker` waiting their turn
+    /// behind them.
+    git_mutations: git_mutation_lane::GitMutationLane,
     /// Whether this Windows knows what a system backdrop is, asked once
     /// (`bt_platform::system_backdrop_available`).
     acrylic_available: bool,
@@ -13103,25 +13558,6 @@ struct App {
     // whatever this machine has registered for it, which is very often that same
     // editor. A start-up probe kept for a row nobody draws is a filesystem walk
     // answering a question the product no longer asks.
-    /// This user's Documents folder, asked of Windows once.
-    ///
-    /// Once because it cannot move under a running process, and stored rather
-    /// than re-asked because both the row and the dialog need it and a known
-    /// folder lookup is a COM call.
-    psreadline_documents: Option<PathBuf>,
-    /// Last observed Folio module: `None` is unread; `Some(InstalledCopy::None)`
-    /// is a completed reading that found no Folio copy.
-    ///
-    /// Cached because it is nine file reads and a version-resource walk, and the
-    /// settings dialog asks on every frame it draws. Read once when the probe
-    /// lands, after an install/removal, and on opening the Terminal page. The
-    /// App owns the slot, so additional windows do not repeat the first read.
-    ///
-    /// **Three answers since 2026-08-18**, and the middle one is why: a module an
-    /// older Folio wrote is neither "ours" nor "somebody else's", and a `bool`
-    /// made it the second, which is how it became a module this product had
-    /// installed and would not remove.
-    psreadline_installed: Option<psreadline::InstalledCopy>,
     /// Whether the ready first-run attempt has been consumed, even if no card
     /// could open. This is an edge latch, not another agent-availability cache.
     first_run_attempted: bool,
@@ -13134,9 +13570,8 @@ struct App {
     first_run_waited_for_agent_folders: bool,
     /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
     ///
-    /// Cached for [`Self::psreadline_installed`]'s reason and no other: the
-    /// settings dialog asks on every frame it draws, and the answer is four
-    /// registry opens. It is refreshed at the three moments it can change — the
+    /// Cached for one reason and no other: the settings dialog asks on every
+    /// frame it draws, and the answer is four registry opens. It is refreshed at the three moments it can change — the
     /// launch, an install and a removal — and at no other, because nothing else
     /// in this process can move it.
     ///
@@ -13273,6 +13708,13 @@ struct App {
     /// not parse, so that it is said once — [`Self::profiles_file_broken`]'s
     /// rule.
     keybindings_file_broken: bool,
+    /// **What the storage passes of one batch of re-reads replaced and could
+    /// not apply, until its one card is raised** (T-STORE-NOTICE; design note
+    /// 2026-10-11 §3.6). The four documents' reads are answered on separate
+    /// wakes, so one `git checkout` can merge over several turns: each turn's
+    /// notice joins this one, and the card is raised once no store is still
+    /// reading. One writer, `MergeNotice::gather`, on the window thread.
+    merge_notice: document_request::MergeNotice,
     /// **What the two documents this window is made of owe the reader** (review
     /// rows R4-3, R4-5, R4-9 and R4-10).
     ///
@@ -13413,14 +13855,15 @@ struct App {
     /// gesture that holds the pointer, in whichever window latched it. See
     /// [`runtime::pointer::PointerCapture`].
     pointer_capture: Option<runtime::pointer::PointerCapture>,
-    /// **Legacy other-button overlaps, until cut 4 rules on them.** Cut 3 may
-    /// not change A·b or B21: a different button can still begin a gesture
-    /// beside the slot's gesture, as the independent legacy fields allowed.
-    /// One record per `(window, owner kind)` bounds the list to the live
-    /// gestures the removed fields could have represented. A write to the same
-    /// field replaces its prior record, and releases keep the fields' old
-    /// release-road order rather than the records' latch order.
-    pointer_capture_overlaps: Vec<runtime::pointer::PointerCapture>,
+    /// **The buttons pressed while a capture was held** (T-POINTER-CAPTURE
+    /// R-5 rule 3, R-8): each went nowhere, and its release goes nowhere too,
+    /// in whichever window it arrives and even after the capture has ended.
+    /// See [`runtime::pointer::ButtonSet`].
+    swallowed: runtime::pointer::ButtonSet,
+    /// Every capture a lifecycle door ended (T-POINTER-CAPTURE R-9), by its owner's name and the
+    /// ending's, for a test to read which ending each door ran.
+    #[cfg(test)]
+    capture_endings: Vec<(&'static str, &'static str)>,
     /// **A cross-window release that has been decided and not yet performed**
     /// (multiwindow slice F2).
     ///
@@ -13520,7 +13963,234 @@ struct App {
     quit_reason: quit::Reason,
     /// **The hand-over's answer**, while the quit's way out waits for it (U-21): the storage
     /// worker writes `Handoff` and starts the applier, and this thread looks on its turns.
-    handoff_answer: Option<std::sync::mpsc::Receiver<update_handoff::HandedOff>>,
+    handoff_answer: Option<persist::OnTheWorker<update_handoff::HandedOff>>,
+    /// **How long the quit waits for the panes it told to go** — [`PANE_RETIREMENT_DEADLINE`] in
+    /// every application the product builds; an instance's own so that a test drives the quit
+    /// with the suite's patience (`lane::PATIENCE`) rather than the product's four seconds.
+    pane_retirement_deadline: std::time::Duration,
+}
+
+/// **What an [`App`] is built from**: every field its builder computes — the device, the workers it
+/// started, the stores it read, the facts it measured — by the name and type the field has on
+/// `App`. Everything else `App` holds starts the same way in every application and is written once,
+/// in [`App::assemble`], which both builders call: the product's (`Runtime::create`) and the test
+/// suite's headless one (`headless::headless_app`). A field added to `App` is added here or there,
+/// and either way both builders get it (T-HEADLESS-RUNTIME-SEAM round 2).
+struct AppParts<B: Backend> {
+    gpu: B::Device,
+    tab_ids: TabIds,
+    event_proxy: LoopProxy,
+    handoff_lane: handoff_lane::HandoffLane,
+    clipboard_lane: clipboard_lane::ClipboardLane,
+    layout_tables: layout_tables::LayoutTables,
+    math_worker: Arc<computation_lane::ComputationLane>,
+    foreground_program_worker: foreground_program::Worker,
+    files_worker: files::FilesWorker,
+    file_index_worker: palette_index::IndexWorker,
+    preview_worker: preview::PreviewWorker,
+    git_worker: git::GitWorker,
+    acrylic_available: bool,
+    startup_started: Instant,
+    trace_startup: bool,
+    trace_resize: bool,
+    trace_layout_events: bool,
+    trace_perf: bool,
+    motion: Motion,
+    profile_programs: profiles::ProfilePrograms,
+    startup_shells: Option<StartupShells>,
+    context_menu_installed: bool,
+    claude_hooks_installed: bool,
+    codex_notify_installed: bool,
+    copilot_hooks_installed: bool,
+    agent_config_refusals: [Option<&'static str>; 3],
+    copilot_readiness: attention_copilot::Readiness,
+    notifications: NotificationDesk,
+    session_store: persist::SessionStore,
+    settings_store: persist::SettingsStore,
+    shortcuts: shortcuts::Shortcuts,
+    keybindings_store: persist::KeybindingsStore,
+    keybindings_fault: Option<String>,
+    cli_refusals: Vec<cli::CliRefusal>,
+    cli_preview: Option<PathBuf>,
+    profiles_store: persist::ProfilesStore,
+    profiles_fault: Option<String>,
+    pins_store: pins::PinsStore,
+    pins_fault: Option<String>,
+    settings_fault: Option<String>,
+    session_fault: Option<String>,
+    recent: seed::SeedVault,
+    recent_folders: recent_folders::RecentFolders,
+    window_pictures: Vec<(WindowId, SessionWindowV1)>,
+    update_job: update_job::Job<WindowId>,
+    preview_saves: preview::PreviewSaves,
+    git_mutations: git_mutation_lane::GitMutationLane,
+}
+
+impl<B: Backend> App<B> {
+    /// **The application, from what its builder computed** — the one place `App`'s fields are
+    /// written. See [`AppParts`].
+    fn assemble(parts: AppParts<B>) -> Self {
+        let AppParts {
+            gpu,
+            tab_ids,
+            event_proxy,
+            handoff_lane,
+            clipboard_lane,
+            layout_tables,
+            math_worker,
+            foreground_program_worker,
+            files_worker,
+            file_index_worker,
+            preview_worker,
+            git_worker,
+            acrylic_available,
+            startup_started,
+            trace_startup,
+            trace_resize,
+            trace_layout_events,
+            trace_perf,
+            motion,
+            profile_programs,
+            startup_shells,
+            context_menu_installed,
+            claude_hooks_installed,
+            codex_notify_installed,
+            copilot_hooks_installed,
+            agent_config_refusals,
+            copilot_readiness,
+            notifications,
+            session_store,
+            settings_store,
+            shortcuts,
+            keybindings_store,
+            keybindings_fault,
+            cli_refusals,
+            cli_preview,
+            profiles_store,
+            profiles_fault,
+            pins_store,
+            pins_fault,
+            settings_fault,
+            session_fault,
+            recent,
+            recent_folders,
+            window_pictures,
+            update_job,
+            preview_saves,
+            git_mutations,
+        } = parts;
+        Self {
+            preview_saves,
+            stop_keeps: preview::StopKeeps::default(),
+            git_mutations,
+            gpu,
+            tab_ids,
+            event_proxy,
+            handoff_lane,
+            clipboard_lane,
+            layout_tables,
+            math_worker,
+            foreground_program_worker,
+            files_worker,
+            file_index_worker,
+            preview_worker,
+            git_worker,
+            acrylic_available,
+            startup_started,
+            trace_startup,
+            trace_resize,
+            trace_layout_events,
+            trace_perf,
+            motion,
+            profile_programs,
+            startup_shells,
+            context_menu_installed,
+            claude_hooks_installed,
+            codex_notify_installed,
+            copilot_hooks_installed,
+            agent_config_refusals,
+            copilot_readiness,
+            notifications,
+            session_store,
+            settings_store,
+            shortcuts,
+            keybindings_store,
+            keybindings_fault,
+            cli_refusals,
+            cli_preview,
+            profiles_store,
+            profiles_fault,
+            pins_store,
+            pins_fault,
+            settings_fault,
+            session_fault,
+            recent,
+            recent_folders,
+            window_pictures,
+            update_job,
+            ime_first_focus_seen: false,
+            device_loss_pilot: DeviceLossPilot::new(),
+            favicons: Rc::new(RefCell::new(favicon::Favicons::default())),
+            favicons_changed: false,
+            animation_serials: 0,
+            git_watch: git_watch::GitWatch::default(),
+            programs_ear: programs_ear::ProgramsEar::default(),
+            index_ear: index_ear::IndexEar::default(),
+            math_worker_running: true,
+            math_worker_notice_pending: false,
+            files_worker_running: true,
+            files_worker_notice_pending: false,
+            file_indexes: palette_index::FileIndexes::default(),
+            preview_worker_running: true,
+            preview_worker_notice_pending: false,
+            git_worker_running: true,
+            git_worker_notice_pending: false,
+            scheme_watch: scheme_watch::SchemeWatch::default(),
+            storage_watch: storage_watch::StorageWatch::default(),
+            scheme_fault: None,
+            scheme_source: [None, None],
+            program_news: window_news::WindowSeats::default(),
+            first_run_attempted: false,
+            first_run_waited_for_channel: false,
+            first_run_waited_for_agent_folders: false,
+            explorer_package_asked_by: None,
+            explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
+            explorer_package_announce: Announce::Everything,
+            agent_takeovers: Default::default(),
+            profiles_file_broken: false,
+            pins_file_broken: false,
+            settings_file_broken: false,
+            keybindings_file_broken: false,
+            merge_notice: document_request::MergeNotice::default(),
+            restore_question: Vec::new(),
+            web_warmup: web_warmup::WebWarmup::default(),
+            web_spare: web_spare::WebSpare::default(),
+            run_retiring_until: None,
+            web_pages_open: false,
+            pending_restore_windows: Vec::new(),
+            pending_restore_answer: None,
+            pending_application_change: None,
+            pending_new_windows: Vec::new(),
+            drag_broker: None,
+            pointer_capture: None,
+            swallowed: runtime::pointer::ButtonSet::default(),
+            #[cfg(test)]
+            capture_endings: Vec::new(),
+            pending_handover: None,
+            quit_requested: false,
+            quit: None,
+            windows_open: Vec::new(),
+            activated: Vec::new(),
+            window_ring: None,
+            window_ring_shown: None,
+            quake: quake::Quake::default(),
+            update_shown: update_card::Shown::default(),
+            quit_reason: quit::Reason::Asked,
+            leave_without: None,
+            handoff_answer: None,
+            pane_retirement_deadline: PANE_RETIREMENT_DEADLINE,
+        }
+    }
 }
 
 /// **The way a message from outside every window asks for a turn.**
@@ -13789,7 +14459,7 @@ impl NewWindowPlan {
 /// There is still exactly one of these. Slice C is what turns [`Runtime`]'s one
 /// field into a map keyed by `WindowId`; this slice only makes that sentence
 /// something the type system can express.
-struct WindowRuntime {
+struct WindowRuntime<B: Backend = Native> {
     ime_report: ime_report::Report,
     ime_report_due: Option<Instant>,
     /// **When this window gives up waiting for its pages to let go** (§7.35).
@@ -13809,7 +14479,7 @@ struct WindowRuntime {
     /// [`quit::PAGE_TEARDOWN_DEADLINE`], which is the same bound the quit spends
     /// and is spent here for the same reason.
     leaving: Option<Instant>,
-    renderer: WindowRenderer,
+    renderer: B::Glass,
     /// This window's ear for `WM_SETTINGCHANGE`, held only so that dropping the
     /// window takes the subclass off the HWND (§7.18).
     ///
@@ -13990,9 +14660,9 @@ struct WindowRuntime {
     /// [`input::pressed_button_of_gesture`], which is the only reader and the
     /// only writer. `false` on Windows always.
     secondary_press: bool,
-    math_context_menu: bt_platform::MathContextMenu,
+    math_context_menu: B::MathMenu,
     /// The system folder chooser behind the root menu's `Browse…` (E55).
-    folder_picker: bt_platform::FolderPicker,
+    folder_picker: B::FolderPicker,
     /// **What the answer is for**, so it knows where to land.
     ///
     /// Beside the picker rather than inside it, because the picker is a bridge
@@ -14007,13 +14677,13 @@ struct WindowRuntime {
     /// Its own bridge and not a mode on [`Self::folder_picker`]: the deferral's
     /// contract is one gesture in flight, and a wallpaper request coalesced into
     /// a pending folder request would answer the wrong row.
-    image_picker: bt_platform::ImagePicker,
+    image_picker: B::ImagePicker,
     /// The system's save dialog behind the About page's `Export…` (0.4.4 ticket
     /// 05). Its own bridge, for [`Self::image_picker`]'s reason: one gesture in
     /// flight per bridge, and the answer is a place to write, not a file to read.
     /// `None` when it could not be installed, which is not a reason for the
     /// window not to open.
-    save_picker: Option<bt_platform::SaveFilePicker>,
+    save_picker: Option<B::SavePicker>,
     /// Whether a picture chooser is out. A `bool` and not a
     /// [`FolderPick`]-shaped enum, because there is exactly one row that opens
     /// this one and the answer has nowhere else to go.
@@ -14038,6 +14708,9 @@ struct WindowRuntime {
     background_decode: BackgroundDecodeMailbox,
     /// Where the clipboard picture worker leaves its one answer (§7.61).
     clipboard_picture: ClipboardPictureMailbox,
+    /// **What this window owes the clipboard's answers** (`clipboard_lane`): one paste and one
+    /// copy at most. On the window for the hand-offs' reason: a closed window takes them with it.
+    clipboard: clipboard_lane::ClipboardAsks,
     /// **The profile a standing card can put back** — which card it belongs to,
     /// the row itself, and where it was (§7.1.6c-6b).
     ///
@@ -14090,14 +14763,14 @@ struct WindowRuntime {
     /// Whether this window's surface really is composited with premultiplied
     /// alpha, read off the renderer's own `alpha_report` rather than assumed.
     translucency_available: bool,
-    custom_window_frame: bt_platform::CustomWindowFrame,
+    custom_window_frame: B::Frame,
     /// This window's taskbar button, and what it was last told (Windows landing
     /// block slice 1).
     ///
     /// On the window and not on `App` for the reason every other Win32 bridge
     /// here is: a button belongs to an HWND, and a second window would need a
     /// second of these, not a share of this one.
-    taskbar: TaskbarMirror,
+    taskbar: TaskbarMirror<<B::Window as WindowHost>::Taskbar>,
     /// The DirectComposition tree this window's picture is published through
     /// (multiwindow slice A2 / web-preview slice 1).
     ///
@@ -14106,7 +14779,7 @@ struct WindowRuntime {
     /// [`bt_platform::Compositor::commit`] — has to happen after every present
     /// and wgpu will never do it. See [`Self::present_seats_and_commit`], which
     /// is the only place in this program that presents a frame.
-    compositor: bt_platform::Compositor,
+    compositor: B::Compositor,
     /// **This window's hosted web pages, one per seat** (web preview slice ③).
     ///
     /// Slice ① held one, and said in this comment that "slice 3 gives the page a
@@ -14224,22 +14897,6 @@ struct WindowRuntime {
     /// tween that has landed cannot become live again, and an idle window still
     /// hands over nothing.
     picture_boxes_were_moving: bool,
-    /// **What each surface is showing, so that opening a file can be told from
-    /// revealing one** (adversarial review 2026-09-11, B8).
-    ///
-    /// The ruling is two sentences and the difference between them is this map:
-    /// a file **opened** — picked in the files column, or a pane handed another
-    /// document — starts at its first frame, and a pane merely **obscured and
-    /// revealed** resumes where it was. Drawn-ness cannot tell those apart: a
-    /// pane in a background tab is not drawn and neither is one whose file just
-    /// changed.
-    ///
-    /// So the entry is about the *subject*, not about the glass. It is written
-    /// and cleared only for surfaces this window can currently see the subject
-    /// of, which is why a background tab's pane keeps its entry and resumes: no
-    /// walk touched it. A surface that stops existing loses its entry in
-    /// [`Runtime::sweep_preview_panes`], beside the view it is retired with.
-    animation_presence: BTreeMap<PreviewSurface, String>,
     /// **The files this window's preview seats are showing, watched** (W2 slice
     /// 5, `preview_watch`).
     ///
@@ -14297,7 +14954,7 @@ struct WindowRuntime {
     /// The edge and not the level: `SetFocus` on every frame would fight
     /// anything inside this window that wanted the keys.
     web_keyboard: Option<LeafId>,
-    window: Arc<Window>,
+    window: B::Window,
     /// The geometry changes the most recent layout commit produced (T230).
     ///
     /// An outbox, replaced whole at each commit rather than appended to, because
@@ -14586,8 +15243,9 @@ struct WindowRuntime {
     taskbar_reading: bt_platform::TaskbarReading,
     /// **The taskbar flash running on this window's button, and what it is
     /// about** (ticket 62) — written by [`Runtime::raise_attention`], retired
-    /// when the window comes to the foreground (the flash ends there) or when
-    /// [`Runtime::replace_contradicted_flash`] re-places it.
+    /// when the window comes to the foreground (the flash ends there:
+    /// [`Runtime::window_focused`]) or when [`Runtime::replace_contradicted_flash`]
+    /// re-places it.
     taskbar_flash: Option<TaskbarFlash>,
     /// **The last reading of where this window is, whole** (ticket 48): the
     /// four facts [`sample_window_place`] answered, focus included, as the pass
@@ -14598,7 +15256,7 @@ struct WindowRuntime {
     /// across two**: the next turn's head replaces it before anything reads it.
     observed_place: notify::WindowPlace,
     ime_outbound: ime_outbound::State,
-    ime_system_caret: bt_platform::ImeSystemCaret,
+    ime_system_caret: B::ImeCaret,
     pointer_position: Option<PhysicalPosition<f64>>,
     /// **Where the pointer was last seen, kept after it has gone.**
     ///
@@ -15446,12 +16104,17 @@ struct WindowRuntime {
     pane_head_clicks: MultiClicks<SeatId>,
     /// Which files column has its root menu up (E53-E61).
     root_menu: profiles::RootMenu,
+    /// **The shells' folders the open root menu offers**, read once as it opened
+    /// (`Runtime::shell_folders_for_the_root_menu`, T-CWD-FROM-PROCESS) and replaced at its next
+    /// opening; read only while it is open. The menu is laid out every frame it is up, and a
+    /// pane's folder is read on an ask.
+    root_menu_shell_folders: Vec<String>,
     /// The dirty-buffer gate, when one of the three doors has stopped to ask
     /// (P123-P125).
     dirty_gate: restore::DirtyGate,
-    /// The PSReadLine invitation, when the probe has found a shell that would
-    /// benefit (§7.1.6c-3b).
-    psreadline_invite: psreadline::Invite,
+    /// **The ended tabs whose close waits for saves on their way** (S-6b), kept
+    /// by the loop's cleanup (`Runtime::reap_exited_tabs`).
+    exited_tab_waits: ExitedTabWaits,
     /// **What the pointer is over on the multi-line paste card** (0.4.4 ticket 02) — the card's
     /// only state of its own. Whether it is up at all is not stored here: it is
     /// [`LeafSession::pending_paste`], read through `Runtime::paste_card_seat`.
@@ -15470,12 +16133,6 @@ struct WindowRuntime {
     /// its own. The state that says "once, ever" is in `settings.json`; this is
     /// only the surface.
     first_run: first_run::Card,
-    /// Whether the size row has been answered since the invitation was refused.
-    ///
-    /// The one exception in the trigger table, and it is deliberately *not*
-    /// persisted: it is a fact about this sitting, and a file that remembered it
-    /// would let a refusal from last month be re-opened by a font change today.
-    psreadline_size_changed: bool,
     /// **Which window the gate's confirmed answer has asked to go**, if it has —
     /// this window after its own shut, or the run's last ordinary window after
     /// the run's end was answered here, in the summoned terminal
@@ -15484,6 +16141,7 @@ struct WindowRuntime {
     /// A request rather than a call, because the close belongs to the event
     /// loop: [`FolioApp::close`] is what performs it, and the gate re-requests it
     /// rather than performing half of it here (see [`Runtime::answer_dirty_gate`]).
+    /// The loop takes it through [`Runtime::take_close_request`].
     window_close_requested: Option<WindowId>,
     /// The final tab asked the native close because its last shell exited.
     ///
@@ -15899,7 +16557,7 @@ struct PresentIntent {
     signature: present_gate::PresentSignature,
 }
 
-impl WindowRuntime {
+impl<B: Backend> WindowRuntime<B> {
     /// **Whether a frame that did not reach the glass whole is worth asking for
     /// again**, and the place the textless run is counted.
     ///
@@ -16038,9 +16696,9 @@ fn host_screen_after(answer: Result<bool, bt_pty::PtyError>) -> bt_term::HostScr
     }
 }
 
-struct Runtime<'a> {
-    app: &'a mut App,
-    window: &'a mut WindowRuntime,
+struct Runtime<'a, B: Backend = Native> {
+    app: &'a mut App<B>,
+    window: &'a mut WindowRuntime<B>,
 }
 
 /// PIN — **the facade is two layers and nothing else.**
@@ -16212,11 +16870,11 @@ mod layer_shape_tests {
     #[test]
     fn the_device_is_the_applications_and_the_surface_is_the_windows() {
         assert!(
-            field_declaration("App", "gpu").ends_with("gpu: GpuContext"),
+            field_declaration("App", "gpu").ends_with("gpu: B::Device"),
             "one device, one atlas, one font database, for the whole process"
         );
         assert!(
-            field_declaration("WindowRuntime", "renderer").ends_with("renderer: WindowRenderer"),
+            field_declaration("WindowRuntime", "renderer").ends_with("renderer: B::Glass"),
             "a surface and the caches keyed by its pixel sizes are one window's"
         );
         assert!(
@@ -16282,6 +16940,9 @@ mod layer_shape_tests {
             // renderer move, and a `WindowRenderer` there would be the first
             // window's surface owning every later window's.
             Pattern::identifier("WindowRenderer"),
+            // And the window's glass as the window seam names it (`B::Glass`), on whatever
+            // backend the layers are written over.
+            Pattern::identifier("Glass"),
             // **Two of these are asked wider than they used to be written**
             // (§4.2 rule 3: a changed selector carries its own mutation). They
             // were `Arc<Window>` and `Vec<TabState>`, spellings of a type
@@ -16941,6 +17602,8 @@ mod worker_answer_routing_tests {
         let column = git::GitResponse {
             window: window_a(),
             host: git::GitHost::Column(leaf),
+            asker: git::GitCacheId::mint(),
+            buffer: None,
             answer: git::GitAnswer::Repo {
                 dir: PathBuf::from("/repo"),
                 outcome: Ok(PathBuf::from("/repo")),
@@ -16960,6 +17623,26 @@ mod worker_answer_routing_tests {
             ..column.clone()
         };
         assert_eq!(popped_out.owner(), AnswerOwner::Window(window_a()));
+        // A document's answer belongs where its buffer is kept: a pool travels
+        // inside its tab, and the hover card is its window's.
+        let mut pool = preview::PreviewPool::default();
+        let diff = preview::PreviewSource::GitDiff {
+            root: PathBuf::from("/repo"),
+            path: "说明 notes.md".to_owned(),
+            against: preview::GitDiffAgainst::Index,
+        };
+        pool.open(diff.clone(), "说明 notes.md".to_owned(), &[]);
+        let pooled = git::GitDocumentAnswer {
+            shelf: git::Shelf::Pool(tab),
+            buffer: pool.ask_composer(&diff).expect("a diff waits on git"),
+            answer: column.answer.clone(),
+        };
+        assert_eq!(pooled.owner(), AnswerOwner::Tab(tab));
+        let glanced = git::GitDocumentAnswer {
+            shelf: git::Shelf::Glance(window_a()),
+            ..pooled.clone()
+        };
+        assert_eq!(glanced.owner(), AnswerOwner::Window(window_a()));
 
         let head = preview::PreviewResponse {
             window: window_a(),
@@ -16989,6 +17672,7 @@ mod worker_answer_routing_tests {
         let peeked = MathWorkerResult {
             leaf: address,
             completion: DecorationWorkerCompletion::PeekScaledImage {
+                surface: PeekSurface::Flyout,
                 scaled: bt_term::ScaledInlineImage {
                     occurrence_id: 0,
                     content_key: String::new(),
@@ -17322,15 +18006,19 @@ mod tab_identity_tests {
         let layer = method_body("Runtime", "preview_float_layer");
         assert!(
             layer.contains("let footless = !geometry.wears_a_foot();"),
-            "the chassis is asked whether there is a strip, rather than a second              reader working it out from the rail"
+            "the chassis is asked whether there is a strip, rather than a second \
+             reader working it out from the rail"
         );
         assert!(
             layer.contains("let rail = self.dress_preview_rail(surface, scale);"),
-            "the window's row is dressed somewhere other than the one dressing both              hosts go through, so a pane and the window torn off it can say two              things about one file"
+            "the window's row is dressed somewhere other than the one dressing both \
+             hosts go through, so a pane and the window torn off it can say two \
+             things about one file"
         );
         assert!(
             !layer.contains("seats::push_corner_tag("),
-            "the window flashes its confirmation in a corner of its own as well as in              the pill, which is the same word twice"
+            "the window flashes its confirmation in a corner of its own as well as in \
+             the pill, which is the same word twice"
         );
         assert!(
             layer.contains("seats::dress_foot("),
@@ -18201,10 +18889,10 @@ fn earliest_deadline<const N: usize>(deadlines: [Option<Instant>; N]) -> Option<
 /// Keeping the names beside the fold, rather than reconstructing them after the
 /// fact, makes the idle probe report evidence: ties retain the first entry, just
 /// as [`Iterator::min`] did before the entries were named.
-fn earliest_named_deadline<const N: usize>(
-    names: [&'static str; N],
+fn earliest_named_deadline<T: Copy, const N: usize>(
+    names: [T; N],
     deadlines: [Option<Instant>; N],
-) -> Option<(&'static str, Instant)> {
+) -> Option<(T, Instant)> {
     names
         .into_iter()
         .zip(deadlines)
@@ -18755,43 +19443,25 @@ fn dirty_gate_names(
     // of the three, because a reader looking at a card does not know which
     // question raised it and a name that carries its room in one card and
     // not in another is two cards.
+    // **And a clean buffer whose save has not landed** (S-6b, the coordinator's
+    // ruling on R1): the close would leave nobody to say how that save ended.
     let one_tab = |tab: &TabState| {
         let where_ = tab.display_title();
         tab.preview_pool
-            .dirty_names(None)
+            .close_names()
             .map(|name| unsaved_line(name, &where_))
             .collect::<Vec<_>>()
     };
     match request {
-        // **Only the tab's LAST preview pane.** "The pool outlives any ONE
-        // pane — only the LAST preview pane's close would strand it" (P123),
-        // so closing one of two asks nothing at all.
-        restore::GateRequest::ClosePane(seat) => {
-            let tab = active_item(tabs, active_tab);
-            let previews = tab
-                .seats
-                .tree()
-                .seats_in_order()
-                .into_iter()
-                .filter(|found| found.kind == bt_layout::SeatKind::Preview)
-                .count();
-            let closing_a_preview = tab
-                .seats
-                .tree()
-                .find_seat(*seat)
-                .is_some_and(|found| found.kind == bt_layout::SeatKind::Preview);
-            if closing_this_pane_strands_the_pool(closing_a_preview, previews) {
-                one_tab(tab)
-            } else {
-                Vec::new()
-            }
-        }
-        restore::GateRequest::CloseTab(index) => tabs.get(*index).map(one_tab).unwrap_or_default(),
-        // The run's end, asked in the summoned terminal, loses what its shut
-        // would: every tab's dirty buffers.
-        restore::GateRequest::Shut | restore::GateRequest::ShutWithTheRun(_) => {
-            tabs.iter().flat_map(one_tab).collect()
-        }
+        // The pane's tab, the tab, or every tab: the pools the close would lose.
+        restore::GateRequest::ClosePane(_)
+        | restore::GateRequest::CloseTab(_)
+        | restore::GateRequest::Shut
+        | restore::GateRequest::ShutWithTheRun(_) => tabs_a_close_loses(tabs, active_tab, request)
+            .into_iter()
+            .flatten()
+            .flat_map(one_tab)
+            .collect(),
         // A discard names one file, and it is never empty — which matters,
         // because `raise_dirty_gate` treats an empty list as "there is
         // nothing to ask about" and lets the verb through. There is always
@@ -18826,12 +19496,79 @@ fn dirty_gate_names(
     }
 }
 
+/// **The tabs whose pools one close would lose** — `None` for a request that is
+/// not a close of a pane, a tab or a window.
+fn tabs_a_close_loses<'t>(
+    tabs: &'t [TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+) -> Option<Vec<&'t TabState>> {
+    match request {
+        // **Only the tab's LAST preview pane.** "The pool outlives any ONE
+        // pane — only the LAST preview pane's close would strand it" (P123),
+        // so closing one of two asks nothing at all.
+        restore::GateRequest::ClosePane(seat) => {
+            let tab = active_item(tabs, active_tab);
+            let previews = tab
+                .seats
+                .tree()
+                .seats_in_order()
+                .into_iter()
+                .filter(|found| found.kind == bt_layout::SeatKind::Preview)
+                .count();
+            let closing_a_preview = tab
+                .seats
+                .tree()
+                .find_seat(*seat)
+                .is_some_and(|found| found.kind == bt_layout::SeatKind::Preview);
+            Some(
+                if closing_this_pane_strands_the_pool(closing_a_preview, previews) {
+                    vec![tab]
+                } else {
+                    Vec::new()
+                },
+            )
+        }
+        restore::GateRequest::CloseTab(index) => Some(tabs.get(*index).into_iter().collect()),
+        // The run's end, asked in the summoned terminal, loses what its shut
+        // would: every tab's dirty buffers.
+        restore::GateRequest::Shut | restore::GateRequest::ShutWithTheRun(_) => {
+            Some(tabs.iter().collect())
+        }
+        _ => None,
+    }
+}
+
+/// **The title of the question a gate puts over these tabs** — the request's own
+/// ([`restore::GateRequest::title`]), but for a close that would lose no edits,
+/// only saves that have not landed (S-6b): its words are then that, since
+/// "discard unsaved changes" would not be true of a clean buffer.
+fn gate_title_over(
+    tabs: &[TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+) -> &'static str {
+    match tabs_a_close_loses(tabs, active_tab, request) {
+        Some(losing)
+            if !losing
+                .iter()
+                .any(|tab| tab.preview_pool.a_close_loses_edits()) =>
+        {
+            restore::gate_save_not_landed_title()
+        }
+        _ => request.title(),
+    }
+}
+
 /// **Put `request` to a window's gate over that window's tabs** (ticket 58) —
 /// the whole of [`Runtime::raise_dirty_gate`] except the repaint.
 ///
 /// What the request would lose is read off the tabs, and the gate answers with
-/// it: [`restore::GateRaise::Busy`] while another question is up (its request
-/// kept), [`restore::GateRaise::NothingToAsk`] when nothing is at risk, and
+/// it: [`restore::GateRaise::Busy`] while another question is up or a close
+/// waits (its request kept), [`restore::GateRaise::NothingToAsk`] when nothing
+/// is at risk, [`restore::GateRaise::Waiting`] when the request is a close and
+/// a save of every dirty buffer it would lose is already on its way — the close
+/// waits for their answers instead of asking ([`close_wait_over`], S-6b) — and
 /// otherwise [`restore::GateRaise::Raised`] with the gate now holding this one.
 fn raise_dirty_gate_over(
     gate: &mut restore::DirtyGate,
@@ -18840,23 +19577,112 @@ fn raise_dirty_gate_over(
     request: restore::GateRequest,
 ) -> restore::GateRaise {
     let at_risk = dirty_gate_names(tabs, active_tab, &request);
+    if gate.verdict(&at_risk) == restore::GateRaise::Raised
+        && let Some(wait) = close_wait_over(tabs, active_tab, &request, Instant::now())
+    {
+        gate.wait(wait);
+        return restore::GateRaise::Waiting;
+    }
     gate.raise(request, &at_risk)
 }
 
-/// **Keep every dirty preview buffer of these tabs before a stop that cannot ask**
-/// (D-4, 0.4.8 G7) — the whole of [`Runtime::keep_unsaved_edits`] except its
-/// diagnostics lines. Every tab's pool and not the active tab's, on the quit
-/// gate's own reasoning: a dirty buffer on a tab nobody is looking at is still a
-/// dirty buffer. Each pool keeps its own through
-/// [`preview::PreviewPool::keep_dirty`].
-fn keep_unsaved_edits_over(
-    tabs: &mut [TabState],
-    recovery: &Path,
-    at: SystemTime,
-) -> Vec<preview::Kept> {
-    tabs.iter_mut()
-        .flat_map(|tab| tab.preview_pool.keep_dirty(recovery, at))
+/// **The wait a close is held in, when everything it would lose is on its way to
+/// the disk** (S-6b) — `None` when the request is not a close, or one dirty
+/// buffer it would lose has no save of its body on the way
+/// ([`preview::PreviewPool::saves_a_close_awaits`]): that close asks now, as it
+/// always did. The wait names the tab a pane's or a tab's close is about by its
+/// identity, and ends [`restore::CLOSE_WAITS_FOR_A_SAVE`] after `now`.
+fn close_wait_over(
+    tabs: &[TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+    now: Instant,
+) -> Option<restore::CloseWait> {
+    let mut awaited = Vec::new();
+    for tab in tabs_a_close_loses(tabs, active_tab, request)? {
+        awaited.extend(tab.preview_pool.saves_a_close_awaits()?);
+    }
+    let tab = match request {
+        restore::GateRequest::ClosePane(_) => Some(active_item(tabs, active_tab).id),
+        restore::GateRequest::CloseTab(index) => tabs.get(*index).map(|tab| tab.id),
+        _ => None,
+    };
+    Some(restore::CloseWait {
+        request: request.clone(),
+        tab,
+        awaited,
+        until: now + restore::CLOSE_WAITS_FOR_A_SAVE,
+        saving: false,
+    })
+}
+
+/// **What has become of every buffer a close waits for**, by name, read off the
+/// window's tabs (S-6b): a buffer no pool here holds any more — its tab gone, or
+/// discarded — loses nothing, and is read as saved.
+fn what_a_close_wait_found(
+    tabs: &[TabState],
+    wait: &restore::CloseWait,
+) -> Vec<(String, preview::AtTheClose)> {
+    wait.awaited
+        .iter()
+        .map(|awaited| {
+            where_a_save_stands(tabs, *awaited).map_or_else(
+                || (String::new(), preview::AtTheClose::Saved),
+                |(name, found)| (name.to_owned(), found),
+            )
+        })
         .collect()
+}
+
+/// **What has become of one buffer a wait for saves is about**, with its name, if one of
+/// these tabs' pools holds it ([`preview::PreviewPool::at_the_close`]) — a close's wait reads
+/// its own window's tabs ([`what_a_close_wait_found`]), a quit's every window's
+/// (`FolioApp::settle_the_quits_saves`, S-6c), because a tab may move between windows
+/// while the quit waits.
+fn where_a_save_stands(
+    tabs: &[TabState],
+    awaited: preview::Awaited,
+) -> Option<(&str, preview::AtTheClose)> {
+    tabs.iter()
+        .find_map(|tab| tab.preview_pool.at_the_close(awaited))
+}
+
+/// **Buffer names by the window that holds them** (S-6c): what the quit's save step says on
+/// each window's card, in the order each window was first named.
+#[derive(Debug, Default)]
+struct ByWindow(Vec<(WindowId, Vec<String>)>);
+
+impl ByWindow {
+    fn add(&mut self, window: WindowId, name: String) {
+        match self.0.iter_mut().find(|(id, _)| *id == window) {
+            Some((_, names)) => names.push(name),
+            None => self.0.push((window, vec![name])),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The windows named, in order.
+    fn windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.0.iter().map(|(id, _)| *id)
+    }
+
+    /// The names in `window`.
+    fn of(&self, window: WindowId) -> &[String] {
+        self.0
+            .iter()
+            .find(|(id, _)| *id == window)
+            .map_or(&[], |(_, names)| names.as_slice())
+    }
+
+    /// Every name, window by window.
+    fn names(&self) -> impl Iterator<Item = &str> {
+        self.0
+            .iter()
+            .flat_map(|(_, names)| names.iter().map(String::as_str))
+    }
 }
 
 /// **The stores a trial's release writes through** (T-QUIT-DOCUMENTS round 3): the
@@ -18887,7 +19713,9 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::Profiles => stores.profiles.release_trial(),
         Writer::Pins => stores.pins.release_trial(),
         Writer::UpdateCheck => update::release_trial(),
-        Writer::ProfileMigration => shell_integration::begin_startup_migration(),
+        Writer::ProfileMigration => {
+            shell_integration::begin_startup_migration();
+        }
         Writer::BashScript => {
             let _ = shell_integration::script_path();
         }
@@ -18895,21 +19723,17 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
             let _ = shell_integration::zdotdir_path();
         }
         // On a worker: the window thread waits for no disk here either.
-        Writer::PowerShellScript => shell_integration::begin_powershell_script_preparation(),
-        Writer::PsReadLineUpgrade => {
-            if let Some(documents) = psreadline::documents_directory()
-                && let Some(replacement) = psreadline::upgrade_recorded(
-                    &documents,
-                    &persist::storage_dir(),
-                    stores.settings.loaded().psreadline_invite,
-                )
-            {
-                eprintln!("{}", replacement.log_line());
-            }
+        Writer::PowerShellScript => {
+            shell_integration::begin_powershell_script_preparation();
+        }
+        // The same worker: the durable module is a birth's to write, and the artefacts the old
+        // build left are removed now that nothing of the old build is running.
+        Writer::PsReadLineModule => {
+            shell_integration::begin_powershell_script_preparation();
         }
         Writer::ExplorerRepair => explorer_menu::begin_probe(),
         Writer::ToastIdentity => {
-            if let Err(error) = bt_platform::Notifier::register_identity() {
+            if let Err(error) = bt_platform::Notifier::register_identity(APP_NAME) {
                 eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
             }
         }
@@ -18986,6 +19810,27 @@ fn raise_cancelled_quit_card_on(
         motion,
         now,
     )
+}
+
+/// **The storage pass's card** (T-STORE-NOTICE; design note 2026-10-11 §3.6,
+/// (b)11): its kind, its anchor and its statement — one Info card anchored to the
+/// window, its body one line per file naming what the file's values replaced and
+/// what was not applied ([`i18n::merge_notice`]). It is raised through
+/// `Runtime::toast`, which gives it no title and no verb: the file has already
+/// won, and nothing is owed. `None` for an empty notice: a clean hand edit says
+/// nothing. The full list, with every name a card cuts, is each pass's line in
+/// `diagnostics.log` (`settings_merge::Account::said`).
+fn merge_notice_card(
+    notice: &document_request::MergeNotice,
+) -> Option<(toast::ToastKind, toast::ToastAnchor, String)> {
+    if notice.files.is_empty() {
+        return None;
+    }
+    Some((
+        toast::ToastKind::Info,
+        toast::ToastAnchor::Window,
+        i18n::merge_notice(notice),
+    ))
 }
 
 /// **What became of one owed hand-editable document on a stop that cannot ask**
@@ -19078,6 +19923,17 @@ impl NativeSay for SystemBox {
     }
 }
 
+/// **The system's end of the session says a lost change in `diagnostics.log` only**
+/// (T-ENDSESSION-SAVES): the shutdown screen is up, and a box of the system's own would be one
+/// more window standing in the way of the shutdown, ended with the process before anybody read it.
+struct IntoTheLog;
+
+impl NativeSay for IntoTheLog {
+    fn say(&mut self, text: &str) {
+        diagnostics::note(text);
+    }
+}
+
 /// **Keep every owed hand-editable document on a stop that cannot ask**
 /// (T-QUIT-DOCUMENTS; revisions (c)2 and (d)3): each store's owed `desired`
 /// document is written into `folder` — the data directory's `recovered` folder,
@@ -19127,8 +19983,9 @@ fn keep_owed_documents_over(
 /// to re-run — `closes`, the window itself for a shut and the run's last ordinary
 /// window for [`restore::GateRequest::ShutWithTheRun`] — or `None` when nothing
 /// closes. The whole of [`Runtime::answer_exit`] but the write, which `Save all`
-/// has already made through [`Runtime::quit_save`] (`saved_all`: whether all of
-/// it landed).
+/// hands to the storage worker and waits for across turns (S-6b): its answer is
+/// spent here once the saves have answered (`Runtime::settle_close_wait`;
+/// `saved_all`: whether all of them landed).
 ///
 /// `Cancel` touches nothing and closes nothing. `Save all` closes only when every
 /// write landed ([`quit::Quit::saved`]'s rule one surface down). `Discard` drops
@@ -19179,7 +20036,87 @@ fn exited_tabs_the_loop_may_close(
         .collect()
 }
 
-impl Deref for Runtime<'_> {
+/// **The ended tabs whose close waits for saves on their way** (S-6b, the
+/// coordinator's ruling on R1): a tab whose shells have all exited, which the
+/// loop would close but for saves still on the storage worker, is not torn down
+/// until they land — then it has nothing to ask and closes as any ended tab does
+/// — or until its wait's bound ([`restore::CLOSE_WAITS_FOR_A_SAVE`] from the first
+/// turn it was found waiting). No question can be asked of a tab that closes
+/// itself, so at the bound a tab that waits only for clean buffers' saves closes
+/// with its pool let go: each late answer reaches the sink, which says a save
+/// that did not land once in `diagnostics.log`. A tab still waiting for a dirty
+/// body's save at the bound stands, as an ended tab with unsaved edits always
+/// has: whether those go is the reader's turn. A tab whose close loses something
+/// no save is on its way for — a save that did not land, a conflict — stands
+/// too, its pane saying why.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ExitedTabWaits {
+    /// Each waiting tab's bound; `None` once the bound has passed and the tab
+    /// stands.
+    until: BTreeMap<TabId, Option<Instant>>,
+}
+
+impl ExitedTabWaits {
+    /// **The ended tabs whose wait ran out, to be closed now with their pools
+    /// let go** — of `ended`, those not already `closing` — and every other wait
+    /// brought level with the tabs as they stand at `now`. Nothing moves while
+    /// a question is up or a close waits on the gate (ticket 58).
+    fn ran_out(
+        &mut self,
+        gate: &restore::DirtyGate,
+        tabs: &[TabState],
+        active_tab: usize,
+        ended: &[usize],
+        closing: &[usize],
+        now: Instant,
+    ) -> Vec<usize> {
+        if gate.is_busy() {
+            return Vec::new();
+        }
+        let mut ran_out = Vec::new();
+        let mut until = BTreeMap::new();
+        for &index in ended.iter().filter(|index| !closing.contains(index)) {
+            let Some(tab) = tabs.get(index) else {
+                continue;
+            };
+            let Some(wait) = close_wait_over(
+                tabs,
+                active_tab,
+                &restore::GateRequest::CloseTab(index),
+                now,
+            ) else {
+                continue;
+            };
+            match self.until.get(&tab.id).copied().unwrap_or(Some(wait.until)) {
+                Some(bound) if now >= bound => {
+                    if wait.awaited.iter().any(|awaited| awaited.was_dirty()) {
+                        until.insert(tab.id, None);
+                    } else {
+                        ran_out.push(index);
+                    }
+                }
+                standing => {
+                    until.insert(tab.id, standing);
+                }
+            }
+        }
+        self.until = until;
+        ran_out
+    }
+
+    /// When the loop must come back to end a wait, if one is still to end after
+    /// `now` — a bound, never a look: each landing wakes the loop itself.
+    fn next_after(&self, now: Instant) -> Option<Instant> {
+        self.until
+            .values()
+            .flatten()
+            .copied()
+            .filter(|bound| *bound > now)
+            .min()
+    }
+}
+
+impl<B: Backend> Deref for Runtime<'_, B> {
     type Target = TabState;
 
     fn deref(&self) -> &Self::Target {
@@ -19187,7 +20124,7 @@ impl Deref for Runtime<'_> {
     }
 }
 
-impl DerefMut for Runtime<'_> {
+impl<B: Backend> DerefMut for Runtime<'_, B> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         active_item_mut(&mut self.window.tabs, self.window.active_tab)
     }
@@ -19468,6 +20405,9 @@ impl TabState {
                         // with nothing to say it had been.
                         foot_path: String::new(),
                         foot_revealed: false,
+                        // Filled by the caller with the path, for the path's reason.
+                        foot_notice: String::new(),
+                        foot_notice_width: 0.0,
                     },
                     view.wanted,
                 ),
@@ -19923,8 +20863,9 @@ impl LeafSession {
     /// folder…` or split off into a folder, whose shell never reported, is started again in that
     /// folder rather than at its profile's default.
     ///
-    /// The session save (`TabState::term_leaf`) writes this same ladder, so a restored pane and a
-    /// Recent row stand where a restart would.
+    /// The session save (`TabState::term_leaf`) writes this ladder. The verbs that start a shell
+    /// read [`Self::place_where_the_pane_stands`], which puts the shell process's folder between
+    /// the two rungs (T-CWD-FROM-PROCESS): a save is no person's ask, so it reads no process.
     ///
     /// A WSL pane put down at its shell's own home holds the mark `~` as its place and hands `~`
     /// on; `profiles::place_for` reads a place equal to the profile's home mark as the shell's
@@ -19938,21 +20879,61 @@ impl LeafSession {
             .or_else(|| self.spawn_place.clone())
     }
 
-    /// **What the `+` and a picker row carry from this pane**: its reported folder, always
-    /// **carried** — a new tab beside a pane keeps the profile's starting rule whatever the pane
-    /// was born in (coordinator's ruling 2026-10-05). Only the verbs that start a shell *in this
-    /// pane's place* read [`Self::seed_place_for_a_new_shell`].
-    fn place_for_a_new_tab_beside(&self) -> Option<profiles::SeedPlace> {
-        self.session
-            .working_directory()
-            .map(|cwd| profiles::SeedPlace::Carried(cwd.to_path_buf()))
+    /// **Where this pane stands for a verb that starts a shell from it** (T-CWD-FROM-PROCESS):
+    /// [`Self::folder`]'s answer when it is the shell's report or its process's folder — read
+    /// once, for this one action — and otherwise what [`Self::place_for_a_new_shell`] answered
+    /// before: the folder the shell was put down in. An unknown folder says nothing new here; the
+    /// verb starts where it always did.
+    fn place_where_the_pane_stands(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Option<PathBuf> {
+        match self.folder(door) {
+            pane_folder::PaneFolder::Reported(folder)
+            | pane_folder::PaneFolder::Process(folder) => Some(folder),
+            pane_folder::PaneFolder::Opened(_) | pane_folder::PaneFolder::Unknown(_) => {
+                self.place_for_a_new_shell()
+            }
+        }
     }
 
-    /// [`Self::place_for_a_new_shell`] with the kind a spawn weighs it by: **named** for a pane
-    /// born in a named folder ([`Self::born_named`]), **carried** otherwise. Restart shell,
+    /// **What the `+` and a picker row carry from this pane**: where it stands — its reported
+    /// folder, else its shell process's folder — always **carried**: a new tab beside a pane keeps
+    /// the profile's starting rule whatever the pane was born in (coordinator's ruling
+    /// 2026-10-05), and a pane whose folder nobody can say carries none, as one that never
+    /// reported always did. Only the verbs that start a shell *in this pane's place* read
+    /// [`Self::seed_place_for_a_new_shell`].
+    fn place_for_a_new_tab_beside(&self) -> Option<profiles::SeedPlace> {
+        self.place_for_a_new_tab_beside_through(&pane_folder::SystemProcessFolders)
+    }
+
+    /// [`Self::place_for_a_new_tab_beside`], its process read through `door`.
+    fn place_for_a_new_tab_beside_through(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Option<profiles::SeedPlace> {
+        match self.folder(door) {
+            pane_folder::PaneFolder::Reported(folder)
+            | pane_folder::PaneFolder::Process(folder) => {
+                Some(profiles::SeedPlace::Carried(folder))
+            }
+            pane_folder::PaneFolder::Opened(_) | pane_folder::PaneFolder::Unknown(_) => None,
+        }
+    }
+
+    /// [`Self::place_where_the_pane_stands`] with the kind a spawn weighs it by: **named** for a
+    /// pane born in a named folder ([`Self::born_named`]), **carried** otherwise. Restart shell,
     /// Duplicate tab, Duplicate pane and the splits read this; `profiles::place_for` decides.
     fn seed_place_for_a_new_shell(&self) -> Option<profiles::SeedPlace> {
-        self.place_for_a_new_shell().map(|path| {
+        self.seed_place_for_a_new_shell_through(&pane_folder::SystemProcessFolders)
+    }
+
+    /// [`Self::seed_place_for_a_new_shell`], its process read through `door`.
+    fn seed_place_for_a_new_shell_through(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Option<profiles::SeedPlace> {
+        self.place_where_the_pane_stands(door).map(|path| {
             if self.born_named {
                 profiles::SeedPlace::Named(path)
             } else {
@@ -20081,6 +21062,23 @@ impl LeafSession {
     /// ladder that answers "what is this tab called".
     fn standing_in(&self) -> Option<&Path> {
         self.session.reference_directory()
+    }
+
+    /// **The folder a door that opens a folder from this pane opens** (T-CWD-FROM-PROCESS): the
+    /// shell's report, else its process's folder, else — with no process yet — where the pane
+    /// was opened ([`pane_folder::pane_folder`]'s ladder). Read on the ask; the process is asked
+    /// again only once the shell has written something since the last read, or its exit has been
+    /// seen.
+    fn folder(&self, door: &dyn pane_folder::ProcessFolders) -> pane_folder::PaneFolder {
+        let shell = self.pty.as_ref().and_then(|pty| {
+            pty.shell_process_id()
+                .map(|shell| pane_folder::ShellMoment {
+                    shell,
+                    output: pty.output_bytes_received(),
+                    exited: self.shell_exit_age.is_some(),
+                })
+        });
+        pane_folder::pane_folder(&self.session, shell, &self.process_folder, door)
     }
 
     /// Everything the name stack reads off this shell, for deciding whether the
@@ -20232,23 +21230,6 @@ struct DividerDrag {
     /// split, and theorem N says every ratio outside a focus set is bit-identical
     /// before and after.
     grip: DividerGrip,
-    /// **Which window held the pointer when this gesture began** — the fact that ends it when the
-    /// system takes the pointer away (Codex review 2026-09-17; the same reading `DragGuard` makes
-    /// for a cross-window drag).
-    ///
-    /// A divider drag is torn down by the button coming up, by `Esc`, by the layout being
-    /// re-solved, and by the window losing focus. None of those is capture loss: Windows announces
-    /// it with `WM_CAPTURECHANGED`, winit 0.30.13 answers that message by zeroing its own capture
-    /// count and emitting nothing, and a steal need not blur this window. Left holding a button
-    /// nobody will report the release of, `divider_drag` stays `Some` forever —
-    /// `flush_pending_pty_resize` reads that as a hand still on the geometry, so from that moment
-    /// no resize of this window's panes can ever be released or settled. Sampled, not subscribed,
-    /// for `DragGuard`'s reason and at the one moment anybody asks.
-    ///
-    /// On macOS this is `None` at the press and `None` at every turn after it, which is the right
-    /// answer rather than a missing one: AppKit has no per-thread capture to lose, and the mouse-up
-    /// that ends a drag is delivered to the window that received the mouse-down.
-    capture: Option<bt_platform::NativeWindow>,
 }
 
 /// **What a divider drag is actually moving** — §3.4's two kinds of seam.
@@ -20668,13 +21649,23 @@ enum TextFieldSeat {
 }
 
 /// What a clipboard write should say once the platform's clipboard path has
-/// accepted it.
+/// accepted it — applied on the turn the clipboard lane's answer is taken, and
+/// only for a write that landed (owner ruling 2026-09-14 ②).
+#[derive(Clone, Debug, PartialEq)]
 enum ClipboardWriteEffect {
     None,
     Toast {
         anchor: toast::ToastAnchor,
         text: String,
     },
+    /// `Ctrl+C`'s own rule: the selection that was copied goes away — in the pane
+    /// it was made in, and only while it is still the text that was copied.
+    ClearSelection {
+        target: PasteTarget,
+        copied: String,
+    },
+    /// The formula's tick: the block's LaTeX has landed.
+    MathCopied(MathBlockAnchor),
 }
 
 /// **Which text field holds the keyboard**, read off the rung the ladder
@@ -21380,8 +22371,10 @@ fn coalesce_pty_resize_on_grid_change(
 ///
 /// The user's 2026-08-06 ruling turned it off on sight — freezing the reflow and cropping the old
 /// width read worse than the artefact it prevented — kept the machine as a policy bit at `false`,
-/// and ordered the root cause fixed instead. That fix shipped: the patched PSReadLine re-anchors
-/// itself, and `scripts/shell-integration/folio.ps1` needs no reflection repair at ≥ 2.4.6. The
+/// and ordered the root cause fixed instead. That fix shipped, as the patched PSReadLine that
+/// re-anchored itself; since T-INTEGRATION-INJECT-2-BUILD the root cause is repaired on Microsoft's
+/// own 2.4.5 — every pane's, Windows PowerShell's included — by `folio.ps1`'s reflection repair on
+/// the resize chord. The
 /// same ruling ends 「修好后扣留政策位永久退役」, and this is that retirement. A bit nailed to
 /// `false` in front of a state machine nothing can reach is not an option the product has; it is a
 /// second reading of the resize path that no test of the shipping one covers.
@@ -21539,6 +22532,8 @@ fn write_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Resu
 enum PtyTarget<'a> {
     Shell(&'a PtySession),
     Birth(&'a PaneBirth),
+    /// Held behind a paste the pane is owed (`clipboard_lane::PasteHold`).
+    BehindAPaste(&'a clipboard_lane::PasteHold),
     Nowhere,
 }
 
@@ -21557,6 +22552,17 @@ impl LeafSession {
     /// Where bytes offered to this pane go — see [`PtyTarget`].
     fn input_target(&self) -> PtyTarget<'_> {
         PtyTarget::of(self.pty.as_ref(), self.birth.as_ref())
+    }
+
+    /// **Where the person's input to this pane goes** — keys, input-method commits, mouse
+    /// reports, a pasted or dropped path: behind the paste this pane is owed while one is
+    /// ([`Self::paste_hold`]), else where [`Self::input_target`] says. A program's own replies
+    /// and the window's repairs are not the person's, and never wait behind a paste.
+    fn person_input_target(&self) -> PtyTarget<'_> {
+        match &self.paste_hold {
+            Some(hold) => PtyTarget::BehindAPaste(hold),
+            None => self.input_target(),
+        }
     }
 
     /// Whether this pane is in birth for its shell and the shell has answered — the landing is
@@ -21599,6 +22605,10 @@ fn offer_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Resu
                 }
             };
         }
+        PtyTarget::BehindAPaste(hold) => {
+            hold.hold(bytes);
+            return Ok(PtyInput::HeldForPaste);
+        }
         PtyTarget::Nowhere => return Ok(PtyInput::NoChild),
     };
     match hang_watch::during(hang_watch::Station::PtyInput, || {
@@ -21637,31 +22647,35 @@ enum PtyInput {
     /// Kept for a shell being born, which receives them first, in order — the part the
     /// pseudoconsole's input ring plays for a shell that exists.
     HeldForBirth,
+    /// Kept behind a paste the pane is owed, and released to it, in order, right after the
+    /// paste's own bytes (`clipboard_lane::PasteHold`).
+    HeldForPaste,
 }
 
 impl PtyInput {
     /// Whether this window actually sent the bytes.
     const fn queued(self) -> bool {
-        matches!(self, Self::Queued | Self::HeldForBirth)
+        matches!(self, Self::Queued | Self::HeldForBirth | Self::HeldForPaste)
     }
 }
 
-/// **Whether the hand that began a divider drag is still on it** (Codex review 2026-09-17).
+/// **Whether the hand that began a gesture is still on it** (Codex review 2026-09-17, for the
+/// divider; T-POINTER-CAPTURE cut 5, R-9, for every gesture).
 ///
 /// Two samples of one platform fact — which window of this thread holds the pointer — taken at the
 /// press and now. Equality is the whole predicate, and it has to be equality rather than "this
 /// window holds it": on macOS the answer is `None` at both ends, because AppKit has no per-thread
-/// capture to report, and a rule phrased as "we hold it" would cancel every divider drag on that
+/// capture to report, and a rule phrased as "we hold it" would cancel every gesture on that
 /// platform on its first turn. Two `None`s mean nothing was taken away, which is the truth there.
 ///
 /// The gesture this ends is the one no event reports. Windows says capture loss with
 /// `WM_CAPTURECHANGED`; winit 0.30.13 answers it by zeroing its own capture count and emitting
 /// nothing, and a steal need not blur this window, so `Focused(false)` — the path that already
-/// ends a drag — may never come. What is left is a `divider_drag` that stays `Some` for the rest
-/// of the window's life, which `flush_pending_pty_resize` reads as a hand still on the geometry:
-/// after that no pane of this window can release a resize to its child or settle the transaction
-/// its own reflow opened.
-fn divider_drag_still_holds_its_pointer(
+/// ends a gesture — may never come. What is left is a capture that stays held for the rest of the
+/// window's life: a divider that `flush_pending_pty_resize` reads as a hand still on the geometry,
+/// so that no pane of this window can release a resize to its child, and a thumb, a selection or a
+/// press that goes on following a hand nobody is holding down.
+fn a_capture_still_holds_its_pointer(
     at_the_press: Option<bt_platform::NativeWindow>,
     now: Option<bt_platform::NativeWindow>,
 ) -> bool {
@@ -24148,23 +25162,17 @@ impl TabRename {
 /// selection on the clipboard (the cut then takes it), `Ctrl+V` puts one line of
 /// the clipboard in, `Ctrl+←`/`Ctrl+→` and `Ctrl+Backspace` walk and eat by
 /// word, and `Shift` with any motion drags the selection's far end along.
-/// **The clipboard, as one key press can reach it** (0.3).
+/// **The clipboard, as one key press can reach it** (0.3): what the press wants put on it, read
+/// back by the caller ([`Self::copied`]). A paste is not here: the window asks the clipboard lane
+/// for it when the chord is one ([`rename_pastes`], T-CLIPBOARD-LANE) and never hands the chord to
+/// [`rename_key`]; the line lands through the editor's own insert door (`Runtime::rename_ime`) on
+/// the turn the clipboard answers.
 ///
-/// Handed in rather than read here, on `settings_field_key`'s own arrangement:
-/// asking the system what it is holding is a call into another process, and a
-/// field that made it on every keystroke would pay for a paste it was not being
-/// asked for. The caller reads the clipboard only when the chord *is* a paste
-/// ([`rename_pastes`]), and reads [`Self::copied`] back afterwards to learn
-/// whether this press wants anything put there.
-///
-/// A struct rather than two parameters because it keeps [`rename_key`] pure: the
-/// whole editor stays testable without a window handle, which is what the tests
-/// this migration is pinned by depend on.
+/// A struct rather than a bare return because it keeps [`rename_key`] pure: the whole editor
+/// stays testable without a window handle, which is what the tests this migration is pinned by
+/// depend on.
 #[derive(Debug, Default)]
-struct RenameClipboard<'a> {
-    /// What the clipboard holds, already cut to one line — empty unless this
-    /// press was a paste.
-    paste: &'a str,
+struct RenameClipboard {
     /// What this press wants put on the clipboard, if anything.
     copied: Option<String>,
 }
@@ -24185,7 +25193,7 @@ fn rename_key(
     editor: &mut TabRename,
     key: &Key,
     modifiers: ModifiersState,
-    clipboard: &mut RenameClipboard<'_>,
+    clipboard: &mut RenameClipboard,
 ) -> RenameVerdict {
     use text_field::TextMove;
     // A chord is not text: an Alt- or Win-modified key is swallowed unhandled,
@@ -24241,9 +25249,6 @@ fn rename_key(
                 editor.field.delete();
                 editor.clamp_scroll();
             }
-        }
-        _ if rename_pastes(key, modifiers) => {
-            editor.insert(clipboard.paste);
         }
         // Every other `Ctrl`-letter chord: swallowed, for the reason the whole
         // ladder is ordered by — the thing underneath this editor is a shell.
@@ -24393,8 +25398,15 @@ enum LinkRefusal {
     /// The text is not an address: its host does not parse, it has no host, it holds a control
     /// character — or, for a reference, it names nothing this machine can name.
     Invalid,
-    /// The system took the hand-off and had nothing to open it with.
+    /// The system has no program to open it ([`bt_platform::HandOffRefusal::NoHandler`]).
     NoProgram,
+    /// The hand-off's target is not there ([`bt_platform::HandOffRefusal::NotFound`]).
+    NotFound,
+    /// The system refused access to the target ([`bt_platform::HandOffRefusal::AccessDenied`]).
+    AccessDenied,
+    /// The door or the system refused it for a reason of no named kind
+    /// ([`bt_platform::HandOffRefusal::Other`]); its words are the stderr line's.
+    NotOpened,
     /// An address the door will not go to: a scheme, userinfo, a page asking for a window.
     Door,
     /// The hand-off failed on the OS hand-off lane: nothing declined it (S-5).
@@ -24419,11 +25431,24 @@ impl LinkRefusal {
         }
     }
 
+    /// The refusal a hand-off door's answer is, by its kind (T-HANDOFF-DOOR-REASON).
+    fn of_door(refusal: &bt_platform::HandOffRefusal) -> Self {
+        match refusal {
+            bt_platform::HandOffRefusal::NoHandler(_) => Self::NoProgram,
+            bt_platform::HandOffRefusal::NotFound(_) => Self::NotFound,
+            bt_platform::HandOffRefusal::AccessDenied(_) => Self::AccessDenied,
+            bt_platform::HandOffRefusal::Other(_) => Self::NotOpened,
+        }
+    }
+
     /// The suffix, separator included.
     fn suffix(self, lang: i18n::Lang) -> &'static str {
         match self {
             Self::Invalid => i18n::Text::HyperlinkInvalidSuffix.in_lang(lang),
             Self::NoProgram => i18n::Text::HyperlinkNoProgramSuffix.in_lang(lang),
+            Self::NotFound => i18n::Text::HandoffNotFoundSuffix.in_lang(lang),
+            Self::AccessDenied => i18n::Text::HandoffAccessDeniedSuffix.in_lang(lang),
+            Self::NotOpened => i18n::Text::HandoffNotOpenedSuffix.in_lang(lang),
             Self::Door => i18n::Text::HyperlinkBlockedSuffix.in_lang(lang),
             Self::CouldNotRun => i18n::Text::HandoffCouldNotRunSuffix.in_lang(lang),
             Self::WorkerStopped => i18n::Text::HandoffsStoppedSuffix.in_lang(lang),
@@ -24436,6 +25461,9 @@ impl LinkRefusal {
         match self {
             Self::Invalid => i18n::Text::HyperlinkInvalid.in_lang(lang),
             Self::NoProgram => i18n::Text::HyperlinkNoProgram.in_lang(lang),
+            Self::NotFound => i18n::Text::HandoffNotFound.in_lang(lang),
+            Self::AccessDenied => i18n::Text::HandoffAccessDenied.in_lang(lang),
+            Self::NotOpened => i18n::Text::HandoffNotOpened.in_lang(lang),
             Self::Door => i18n::Text::HyperlinkBlocked.in_lang(lang),
             Self::CouldNotRun => i18n::Text::HandoffCouldNotRun.in_lang(lang),
             Self::WorkerStopped => i18n::Text::HandoffsStopped.in_lang(lang),
@@ -24756,7 +25784,14 @@ impl PeekHover {
 /// `Ready` holds the *native* decode. It is CPU memory the worker's decoder already retains, and
 /// it is what a resample at any later display size is computed from — it never reaches the GPU.
 enum PeekCacheEntry {
-    Pending,
+    /// **A read is out, and the answer awaited is the one to the request `asked`** — the identity
+    /// the computation lane minted for it (T-PEEK-ANSWER-IDENTITY). An answer is filed only for
+    /// the read that asked it: one that comes home under another identity answers a question this
+    /// window no longer asks — the file changed under the read, and a surface asked again — and is
+    /// set aside, never filed ([`peek_awaits`]).
+    Pending {
+        asked: computation_lane::ComputationId,
+    },
     /// **And why it failed** (owner's ruling 2026-09-12). The entry used to be a
     /// bare word, so the only surface that ever heard the reason was one that
     /// happened to be on the glass at the moment the answer landed; a pane that
@@ -24788,16 +25823,257 @@ fn peek_reads_the_file(entry: Option<&PeekCacheEntry>, readable: bool, settled: 
         && match entry {
             None => true,
             Some(PeekCacheEntry::Failed(_)) => settled,
-            Some(PeekCacheEntry::Pending | PeekCacheEntry::Ready { .. }) => false,
+            Some(PeekCacheEntry::Pending { .. } | PeekCacheEntry::Ready { .. }) => false,
         }
 }
 
+/// **What an entry weighs, and which entries weight pressure may take** (T-PEEK-CACHE-QUESTION-RECORDS).
+///
+/// A `Ready` weighs its native decode's pixels and is the one thing eviction chooses: the cost of
+/// having let it go is one worker read of a file that is still on the disk, and the surfaces
+/// drawing it keep the answer they were given (§7.1.3u). A `Pending` and a `Failed` — the
+/// unstarted record ([`DECODE_UNSTARTED`]) is a `Failed` — hold no pixels: each counts only the
+/// map's flat overhead per entry (`bt_term::BoundedCache`'s `ENTRY_OVERHEAD_BYTES`, 128 B), and
+/// neither is ever evicted, because each is the record of a question and an evicted record
+/// reads as *never asked*: the pane's, the page's and the flyout's next resolve would ask the
+/// worker again with no new input. A `Pending` leaves by its answer; a `Failed` leaves with the
+/// last surface that names its file ([`let_go_unnamed_peek_records`]), by
+/// the file-change road ([`forget_a_picture`]), or by a new peek over its file — a hover that
+/// settles ([`peek_reads_the_file`]) or a glance card that opens ([`peek_card_opened`]).
 impl bt_term::Weighed for PeekCacheEntry {
     fn bytes_held(&self) -> u64 {
         match self {
-            Self::Pending | Self::Failed(_) => 0,
+            Self::Pending { .. } | Self::Failed(_) => 0,
             Self::Ready { rgba, .. } => rgba.len() as u64,
         }
+    }
+
+    fn evictable(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+}
+
+/// **Every file a surface of this window names to the peek cache** (T-PEEK-CACHE-QUESTION-RECORDS),
+/// by the key the cache files it under.
+///
+/// The surfaces whose resolve files a record of a question are four, and each names its file in
+/// the state it already keeps: a picture pane — a seat or a float of any tab, in the background as
+/// much as on the glass — by the picture it holds ([`PreviewPane::image`]); a markdown page, on
+/// any of those panes or on the card, by every picture in reach it asked about
+/// ([`DocumentPictures::files`]); the glance card by its file (`card_file`); and the hover flyout
+/// by its subject while it is up (`flyout`). A free function over the tabs for
+/// [`animation_surface_exists`]' reason: the set is derived from what the window holds, rather
+/// than kept beside it as a second record that could disagree, and tabs are what a test can build.
+fn peek_files_named(
+    tabs: &[TabState],
+    peek_pane: &PreviewPane,
+    card_file: Option<&Path>,
+    flyout: Option<&str>,
+) -> BTreeSet<String> {
+    let mut named = BTreeSet::new();
+    for pane in documents_held_in(tabs, peek_pane) {
+        if let Some(picture) = pane.image() {
+            named.insert(bt_term::normalized_local_image_path_key(&picture.path));
+        }
+        if let PreviewDocument::Markdown { pictures, .. } = pane.doc() {
+            named.extend(
+                pictures
+                    .files
+                    .iter()
+                    .map(|file| bt_term::normalized_local_image_path_key(file)),
+            );
+        }
+    }
+    named.extend(card_file.map(bt_term::normalized_local_image_path_key));
+    named.extend(flyout.map(str::to_owned));
+    named
+}
+
+/// **A failed peek no surface names any more is let go of** (T-PEEK-CACHE-QUESTION-RECORDS) —
+/// [`AnimationCache::let_go_unnamed`]'s rule, for the peek cache.
+///
+/// A `Failed` record is kept exactly as long as some surface names its file (`named`, from
+/// [`peek_files_named`]): while one does, its redraws read the failure and ask nothing; when the
+/// last one has gone, the file's next showing is new input and asks. A decode in flight is kept
+/// until its answer, which [`file_peek_answer`] files nowhere if the file is unnamed by then. A
+/// decode is weight, which the budget governs.
+fn let_go_unnamed_peek_records(peek_cache: &mut PeekCache, named: &BTreeSet<String>) {
+    let unnamed: Vec<String> = peek_cache
+        .iter()
+        .filter(|(key, entry)| {
+            matches!(entry, PeekCacheEntry::Failed(_)) && !named.contains(key.as_str())
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in &unnamed {
+        peek_cache.remove(key);
+    }
+}
+
+/// **Whether the file's read in flight awaits the answer to the request `asked`**
+/// (T-PEEK-ANSWER-IDENTITY; [`AnimationCache::awaits`]'s rule, for the peek cache) — the one
+/// question a peek answer may be filed for. An answer under any other identity is set aside: its
+/// read was let go of — the file changed under it ([`forget_a_picture`]) — and a newer one asked
+/// in its place, or none.
+fn peek_awaits(peek_cache: &PeekCache, key: &str, asked: computation_lane::ComputationId) -> bool {
+    matches!(
+        peek_cache.peek(key),
+        Some(PeekCacheEntry::Pending { asked: awaited }) if *awaited == asked
+    )
+}
+
+/// **The worker's answer to the peek read `asked`, filed** (T-PEEK-ANSWER-IDENTITY) — a file's
+/// decode or a video's frame (`Ok`, the `Ready` entry it makes), or the failure that came home
+/// for it: its decode's, or a video's with no frame (`Err`).
+///
+/// Filed only for the read in flight that awaits `asked` ([`peek_awaits`]): the answer to a read
+/// the window has let go of is set aside — it was read from bytes the file no longer holds, and
+/// the window's newer read is the one filed. A failure is filed only for a file some surface
+/// names (T-PEEK-CACHE-QUESTION-RECORDS; [`AnimationCache::answered_for_nobody`]'s rule): for a
+/// file no surface names by the time it lands, its read in flight is let go of and nothing is
+/// filed, since a record nobody is showing would be one [`let_go_unnamed_peek_records`] exists to
+/// end. Pixels are filed either way: they are weight, which the budget governs. `true` when the
+/// answer was the awaited one — the one case in which the surfaces standing on the file are told.
+fn file_peek_answer(
+    peek_cache: &mut PeekCache,
+    named: &BTreeSet<String>,
+    key: String,
+    asked: computation_lane::ComputationId,
+    answer: Result<PeekCacheEntry, bt_term::InlineImageDecodeError>,
+) -> bool {
+    if !peek_awaits(peek_cache, &key, asked) {
+        return false;
+    }
+    match answer {
+        Ok(pixels) => peek_cache.insert(key, pixels),
+        Err(failure) if named.contains(&key) => {
+            peek_cache.insert(key, PeekCacheEntry::Failed(failure));
+        }
+        Err(_) => {
+            peek_cache.remove(&key);
+        }
+    }
+    true
+}
+
+/// **A decode the session's own worker made, remembered for the peek** — a pasted picture under
+/// its content key, a printed path's picture under its normalized path
+/// ([`peek_cache_key_for_decode`]; `Runtime::remember_decode_for_peek` says why).
+///
+/// **Never over a read in flight** (T-PEEK-ANSWER-IDENTITY round 2): a `Pending` is the record of
+/// a surface's question, and its answer is the one road that tells the surfaces waiting on it — the
+/// flyout's re-entry, a page's sharpening and re-flow, the panes' and card's redraw. Pixels filed
+/// over it would leave that answer awaited by no record and set aside ([`peek_awaits`]), and the
+/// surfaces waiting would hear nothing. The read's own answer files the same file's pixels.
+fn remember_decode(
+    peek_cache: &mut PeekCache,
+    source: &bt_term::InlineImageSource,
+    decoded: &bt_term::DecodedInlineImage,
+) {
+    let key = peek_cache_key_for_decode(source, decoded);
+    if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Pending { .. })) {
+        return;
+    }
+    peek_cache.insert(
+        key,
+        PeekCacheEntry::Ready {
+            key: decoded.key.clone(),
+            rgba: Arc::clone(&decoded.rgba),
+            width_px: decoded.width_px,
+            height_px: decoded.height_px,
+            native_size: decoded.native_size,
+        },
+    );
+}
+
+/// **What became of a request for a file's pixels** ([`ask_for_peek_pixels`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeekAsk {
+    /// The computation lane admitted it under this identity: the file is `Pending` until the
+    /// answer to it.
+    Asked(computation_lane::ComputationId),
+    /// The lane was full: nothing is out, and the surface's next resolve asks again (the answers
+    /// that free the lane are the next hand-out).
+    NotNow,
+    /// The lane's thread could not be started: the file is filed as failed
+    /// ([`unstarted_pixels`]), so it is asked again only by new input to the surface — a new
+    /// hover, the file opened again.
+    Unstarted,
+    /// It was not asked and will not be: a file this window does not open, or a lane that has
+    /// stopped.
+    Refused,
+}
+
+/// **What a file's pixels are filed as when the lane's thread could not be started**: a failed
+/// decode, in the decoder error's words, so every surface reading the window's cache agrees and
+/// asks again only on its own new input.
+fn unstarted_pixels() -> PeekCacheEntry {
+    PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
+        DECODE_UNSTARTED.to_owned(),
+    ))
+}
+
+/// **Ask the computation lane for one file's native pixels for the window at `leaf`, and file
+/// the record of the question** (user ruling 2026-08-27, §7.23; T-PEEK-ANSWER-IDENTITY) — the one
+/// door every surface that shows a file's pixels asks through: the picture pane's refit, a
+/// markdown page's pictures, the glance card and the hover flyout, by way of
+/// `Runtime::request_peek_pixels`.
+///
+/// **The door itself asks whether this is a file to read** (routes A and E of the untrusted-path
+/// audit, 2026-09-08): what goes out of here is a request to open a file, and a request nobody
+/// may make is one this window does not send. **It is the one place the fork between the picture
+/// decoder and the video decoder is written**, read with [`preview::path_names_a_video`] — the
+/// predicate the preview's open forks on, so a file that opened as a video is decoded as one —
+/// because both fill the same record under the same key and a second reading of the name at the
+/// delivery end is how a `.png` and a `.mp4` would come to disagree about who owns it.
+///
+/// **And it files what it asked**: a read admitted is `Pending` under the identity the lane
+/// minted, which its answer is filed by ([`file_peek_answer`]); a thread that could not be
+/// started is the unstarted record. A full lane or a refusal files nothing.
+fn ask_for_peek_pixels(
+    peek_cache: &mut PeekCache,
+    computation: &computation_lane::ComputationLane,
+    leaf: ShellAddress,
+    path: &Path,
+) -> PeekAsk {
+    if !preview::is_readable_unasked(path) {
+        return PeekAsk::Refused;
+    }
+    let request = if preview::path_names_a_video(path) {
+        MathWorkerRequest::PeekVideoFrame {
+            leaf,
+            path: path.to_owned(),
+        }
+    } else {
+        MathWorkerRequest::PeekImage {
+            leaf,
+            path: path.to_owned(),
+        }
+    };
+    let asked = match computation.decorate(request) {
+        Ok(asked) => PeekAsk::Asked(asked),
+        Err((lane::Refused::Full { .. }, _)) => PeekAsk::NotNow,
+        Err((lane::Refused::NotStarted(_), _)) => PeekAsk::Unstarted,
+        Err(_) => PeekAsk::Refused,
+    };
+    let key = bt_term::normalized_local_image_path_key(path);
+    match asked {
+        PeekAsk::Asked(asked) => peek_cache.insert(key, PeekCacheEntry::Pending { asked }),
+        PeekAsk::Unstarted => peek_cache.insert(key, unstarted_pixels()),
+        PeekAsk::NotNow | PeekAsk::Refused => {}
+    }
+    asked
+}
+
+/// **A glance card opening over a file** (T-PEEK-CACHE-QUESTION-RECORDS round 2): a new card is
+/// the card's own new input, so a failure filed for its file is let go of and the card's body
+/// asks again — [`peek_reads_the_file`]'s rule for a hover that settles, said for the card. The
+/// moment is the opening and not the teardown: a card coming down is a surface leaving, which
+/// lets a failure go only when no other surface names the file ([`let_go_unnamed_peek_records`]).
+fn peek_card_opened(peek_cache: &mut PeekCache, card_file: &Path) {
+    let key = bt_term::normalized_local_image_path_key(card_file);
+    if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Failed(_))) {
+        peek_cache.remove(&key);
     }
 }
 
@@ -25054,6 +26330,9 @@ impl PictureRefusal {
 /// display-sized raster and the question currently in flight for the solver's body rectangle.
 struct PreviewImageState {
     path: PathBuf,
+    /// **The number this picture asks the scale share under** ([`PictureAsker`]), and the one its
+    /// answers come home to.
+    asker: PictureAsker,
     pending: Option<PeekThumbnailTarget>,
     raster: Option<PeekThumbnail>,
     /// **Why there is no picture here**, and what may still be done about it.
@@ -25127,6 +26406,7 @@ impl PreviewImageState {
     fn new(path: PathBuf) -> Self {
         Self {
             path,
+            asker: PictureAsker::mint(),
             pending: None,
             raster: None,
             failure: None,
@@ -26560,7 +27840,7 @@ fn surface_pixels(
         Some(PeekCacheEntry::Failed(reason)) => SurfacePixels::Failed(reason.clone()),
         // A read is out. What this surface is holding stays on the glass while
         // the answer travels, rather than the picture vanishing and coming back.
-        Some(PeekCacheEntry::Pending) => match held {
+        Some(PeekCacheEntry::Pending { .. }) => match held {
             Some((content, native)) => SurfacePixels::Standing {
                 content,
                 native,
@@ -28522,12 +29802,9 @@ fn next_attention_stop<T: Copy>(queue: &[(T, u64)], standing_on: Option<u64>) ->
 ///
 /// **An owner-thread door** (`doors::PlaceHidden`, row 13's residue), minted only in
 /// [`sample_window_place`].
-fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &Window) -> bool {
+fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &impl WindowHost) -> bool {
     let _ = token;
-    let Ok(native) = native_window(window) else {
-        return false;
-    };
-    bt_platform::is_window_minimized(native) || bt_platform::is_window_cloaked(native)
+    window.is_iconic() || window.is_cloaked()
 }
 
 /// **Ask the desktop where this window is, on the turn that is about to decide what the reader is
@@ -28555,7 +29832,7 @@ fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &Window) -
 /// residue): admitted where it is asked, and a refused probe keeps the answer of `previous`, the
 /// place this window last observed.
 fn sample_window_place(
-    window: &Window,
+    window: &impl WindowHost,
     focused: bool,
     previous: notify::WindowPlace,
 ) -> (notify::WindowPlace, bt_platform::TaskbarReading) {
@@ -28608,12 +29885,9 @@ fn sample_window_place(
 ///
 /// **An owner-thread door** (`doors::PlaceExposure`, row 13's residue), minted only in
 /// [`sample_window_place`].
-fn window_is_exposed(token: WaitToken<'_, doors::PlaceExposure>, window: &Window) -> bool {
+fn window_is_exposed(token: WaitToken<'_, doors::PlaceExposure>, window: &impl WindowHost) -> bool {
     let _ = token;
-    let Ok(native) = native_window(window) else {
-        return true;
-    };
-    bt_platform::window_is_exposed(native)
+    window.is_exposed()
 }
 
 /// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
@@ -28920,13 +30194,6 @@ fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
     tabs.iter()
         .flat_map(|tab| tab.leaves())
         .filter_map(|(_, leaf)| leaf.attention_clock.deadline())
-        .min()
-}
-
-fn foreground_program_deadline(tabs: &[TabState]) -> Option<Instant> {
-    tabs.iter()
-        .flat_map(TabState::leaves)
-        .filter_map(|(_, leaf)| foreground_program::deadline(leaf))
         .min()
 }
 
@@ -30027,9 +31294,9 @@ fn window_taskbar_progress(
 /// progress. That is what makes the COM object **lazy**: a window that never
 /// sees an `OSC 9;4` never creates one, because the first reading is equal to
 /// the one already on screen.
-struct TaskbarMirror {
+struct TaskbarMirror<T> {
     /// Created on the first reading that is not `CLEARED`, and never before.
-    button: Option<bt_platform::Taskbar>,
+    button: Option<T>,
     /// What the button has been told. Not `Option`: see above.
     told: bt_platform::TaskbarProgress,
     /// Set once the shell has refused, so a machine with no taskbar to talk to
@@ -30039,7 +31306,7 @@ struct TaskbarMirror {
     refused: bool,
 }
 
-impl Default for TaskbarMirror {
+impl<T> Default for TaskbarMirror<T> {
     fn default() -> Self {
         Self {
             button: None,
@@ -30049,7 +31316,7 @@ impl Default for TaskbarMirror {
     }
 }
 
-impl TaskbarMirror {
+impl<T: TaskbarDoor> TaskbarMirror<T> {
     /// What the button has to be told for it to say `wanted`, or `None` when it
     /// already says it.
     ///
@@ -30072,7 +31339,11 @@ impl TaskbarMirror {
     /// mirror its own sessions onto its own button with no change here — the
     /// mirror is a `WindowRuntime` field precisely so there is one per window
     /// the day `window` becomes a map.
-    fn show(&mut self, window: &Window, wanted: bt_platform::TaskbarProgress) {
+    fn show(
+        &mut self,
+        window: &impl WindowHost<Taskbar = T>,
+        wanted: bt_platform::TaskbarProgress,
+    ) {
         let Some(sending) = self.diff(wanted) else {
             return;
         };
@@ -30080,10 +31351,7 @@ impl TaskbarMirror {
             return;
         }
         if self.button.is_none() {
-            let built = native_window(window)
-                .map_err(|error| error.to_string())
-                .and_then(bt_platform::Taskbar::new);
-            match built {
+            match window.taskbar() {
                 Ok(button) => self.button = Some(button),
                 Err(error) => {
                     eprintln!("taskbar progress unavailable: {error}");
@@ -30121,11 +31389,11 @@ struct NotificationDesk {
     /// How the activation callback — which runs on whatever thread the platform delivers a click
     /// on — gets the loop to come round and read the queue. Held rather than taken from `App`
     /// at construction time because the desk is built lazily and the proxy is not.
-    proxy: EventLoopProxy<AppEvent>,
+    proxy: LoopProxy,
 }
 
 impl NotificationDesk {
-    fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
+    fn new(proxy: LoopProxy) -> Self {
         Self {
             voice: None,
             refused: false,
@@ -30162,7 +31430,7 @@ impl NotificationDesk {
             let opened = if update_trial::defer(update_trial::Writer::ToastIdentity) {
                 bt_platform::Notifier::without_registration(wake)
             } else {
-                bt_platform::Notifier::new(wake)
+                bt_platform::Notifier::new(APP_NAME, wake)
             };
             match opened {
                 Ok(voice) => self.voice = Some(voice),
@@ -30528,7 +31796,7 @@ mod taskbar_progress_tests {
     /// `explorer.exe`. The recorder is what a shell would have received.
     #[test]
     fn only_a_changed_reading_reaches_the_shell() {
-        let mut mirror = TaskbarMirror::default();
+        let mut mirror = TaskbarMirror::<bt_platform::Taskbar>::default();
         let mut sent = Vec::new();
         for wanted in [
             // A window that has never seen a progress report must not create a
@@ -30569,7 +31837,7 @@ mod taskbar_progress_tests {
         // And the colour alone is a change even when the number is not: the two
         // `Error` readings above differ from `normal(31)` only in state, and the
         // gate has to notice the state.
-        let mut mirror = TaskbarMirror::default();
+        let mut mirror = TaskbarMirror::<bt_platform::Taskbar>::default();
         assert!(mirror.diff(normal(31)).is_some());
         assert!(
             mirror
@@ -31785,7 +33053,14 @@ fn hole_for(
 /// things with, and an `Option` would make the second one indistinguishable from
 /// "never asked" — which is how a refused decode gets re-sent on every frame.
 enum AnimationEntry {
-    Pending,
+    /// **Asked, and the answer awaited is the one to the request `asked`** — the identity the
+    /// computation lane minted for the open (T-ANIMATION-ANSWER-IDENTITY). An answer is filed only
+    /// for the question that asked it: one that comes home under another identity answers a
+    /// question this window no longer asks — the file changed under the decode, and the open
+    /// asked again — and is superseded, never filed ([`AnimationCache::awaits`]).
+    Pending {
+        asked: computation_lane::ComputationId,
+    },
     /// **One playback of one file, and the number that says which playback it
     /// is** (adversarial review 2026-09-11, B3).
     ///
@@ -31823,15 +33098,30 @@ enum AnimationEntry {
     /// work. The picture is still the same picture; what the reason buys is the
     /// line in the foot of the pane — see [`Runtime::preview_standing_fact`] and
     /// [`animation::AnimationRefusal::is_worth_saying`].
+    ///
+    /// A refusal is a fact about the file's bytes: it is kept while some surface of the window
+    /// names the file, and let go of when the file changes on disk
+    /// ([`AnimationCache::let_go_changed_file`]), so the next showing asks about the new bytes.
     Refused(animation::AnimationRefusal),
+    /// **Asked, and no answer came**: the open's work failed on the worker, or its thread could
+    /// not be started. Drawn as a refusal is (the picture lane's still, no notice), and — unlike a
+    /// refusal, which is a fact about the file — let go of by the file's next open
+    /// ([`animations_opened`]), which asks again, or when no surface names the file any more.
+    Unanswered,
 }
 
 impl bt_term::Weighed for AnimationEntry {
     fn bytes_held(&self) -> u64 {
         match self {
-            Self::Pending | Self::Refused(_) => 0,
+            Self::Pending { .. } | Self::Refused(_) | Self::Unanswered => 0,
             Self::Ready { animation, .. } => animation.bytes_held(),
         }
+    }
+
+    /// Only a playback is let go of by weight: the other three are the records of questions —
+    /// see [`AnimationCache`] for why one evicted would be asked again with no open to ask it.
+    fn evictable(&self) -> bool {
+        matches!(self, Self::Ready { .. })
     }
 }
 
@@ -31865,8 +33155,581 @@ fn animation_refusal_notice(refusal: animation::AnimationRefusal) -> Option<&'st
     })
 }
 
-/// **What this window's animations live in** — see [`MAX_ANIMATION_CACHE_BYTES`].
-type AnimationCache = bt_term::BoundedCache<String, AnimationEntry>;
+/// **What this window's animations live in** — see [`MAX_ANIMATION_CACHE_BYTES`] — **and every
+/// door to them** (S-8 round 6).
+///
+/// A type of its own rather than the bare map, so that each change an entry can go through is one
+/// method here and no caller lends the map out or writes an entry by hand. One writer per state,
+/// and every remover named:
+///
+/// | state | its one writer | removed by |
+/// |---|---|---|
+/// | `Pending` | [`Self::ask_for_showing`], under the identity of the request it awaits | the answer to that request ([`Self::opened`], [`Self::open_unanswered`]), which files nothing for a file no surface names ([`Self::answered_for_nobody`]); [`Self::let_go_changed_file`] |
+/// | `Unanswered` | [`Self::open_unanswered`] — an open whose work failed, or whose thread could not be started ([`Self::ask_for_showing`]) | [`Self::let_go_on_open`], the file's next open; [`Self::let_go_unnamed`] |
+/// | `Refused` | [`Self::opened`] | [`Self::let_go_unnamed`]; [`Self::let_go_changed_file`] |
+/// | `Ready` | [`Self::opened`] | [`Self::let_go_on_open`]; [`Self::let_go_unnamed`]; [`Self::let_go_changed_file`]; [`Self::adopt_fill`], when the cursor finds the file changed; weight |
+///
+/// A playback is reached into only by the fill, advance and present doors, each of which takes the
+/// entry out and puts it back, so the map re-weighs it.
+///
+/// **An entry that holds no pixels is never let go of by weight.** A request in flight, a refusal
+/// and an open that never answered are the records of questions: each still counts its entry's
+/// overhead toward the budget, but none is ever chosen by eviction
+/// ([`bt_term::Weighed::evictable`]), because a walk asks the worker for every file shown that
+/// this map holds nothing for — an evicted record would be asked again on the next redraw, with no
+/// open to ask it.
+///
+/// **What this window holds for a file is kept exactly as long as some surface names the file**
+/// (`presence`). When the last surface naming the file leaves — it stops existing, or it is
+/// handed another subject — its refusal, its unanswered open and its playback are let go of
+/// ([`Self::let_go_unnamed`]); its decode in flight is kept until the answer, which is then filed
+/// nowhere. The next showing of that file is an open, whose ask is new input and not a re-ask. So
+/// the records number at most one per file `presence` names, plus the decodes in flight (which the
+/// computation lane bounds), and weight pressure past the budget is reached only by playbacks,
+/// which it governs.
+///
+/// **An answer is filed only for the question that asked it** (T-ANIMATION-ANSWER-IDENTITY;
+/// ARCHITECTURE §4.2, asynchronous publication). A decode in flight is recorded under the identity
+/// the computation lane minted for its request, and an answer — a playback, a refusal, a failed
+/// open — is taken only under that identity ([`Self::awaits`]). Any other answer for the file is
+/// superseded: the question it answers was let go of — the file changed under the decode
+/// ([`Self::let_go_changed_file`]) and the next walk asked about the bytes there now — and it is
+/// never filed, so no frame of it reaches the glass. Identity decides, not the order answers come
+/// home in.
+struct AnimationCache {
+    playbacks: bt_term::BoundedCache<String, AnimationEntry>,
+    /// **What each surface is showing, so that opening a file can be told from
+    /// revealing one** (adversarial review 2026-09-11, B8).
+    ///
+    /// The ruling is two sentences and the difference between them is this map:
+    /// a file **opened** — picked in the files column, or a pane handed another
+    /// document — starts at its first frame, and a pane merely **obscured and
+    /// revealed** resumes where it was. Drawn-ness cannot tell those apart: a
+    /// pane in a background tab is not drawn and neither is one whose file just
+    /// changed.
+    ///
+    /// So the entry is about the *subject*, not about the glass. It is written
+    /// and cleared only for surfaces this window can currently see the subject
+    /// of, which is why a background tab's pane keeps its entry and resumes: no
+    /// walk touched it. A surface that stops existing loses its entry
+    /// ([`Self::forget_surface`]), beside the view it is retired with.
+    presence: BTreeMap<PreviewSurface, String>,
+}
+
+/// **What asking the worker to open one file came to** — see [`AnimationCache::ask_for_showing`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenAsked {
+    /// In the lane under this identity: the file is `Pending` until the answer to it.
+    Asked(computation_lane::ComputationId),
+    /// Its thread could not be started: asked, and unanswered until the file's next open.
+    Unstarted,
+    /// Turned away at the door (the lane is full): nothing is filed, so the next walk asks again.
+    TurnedAway,
+}
+
+/// **Ask the computation lane to open one animated file for the window at `leaf`** — what
+/// [`AnimationCache::ask_for_showing`] hears of each file it asks: admitted under the identity the
+/// lane minted, which the decode in flight is recorded under and its answer is filed by; its thread
+/// not started; or turned away at the door.
+fn ask_to_open(
+    computation: &computation_lane::ComputationLane,
+    leaf: ShellAddress,
+    path: &Path,
+) -> OpenAsked {
+    match computation.decorate(MathWorkerRequest::PeekAnimation {
+        leaf,
+        path: path.to_owned(),
+    }) {
+        Ok(asked) => OpenAsked::Asked(asked),
+        Err((lane::Refused::NotStarted(_), _)) => OpenAsked::Unstarted,
+        Err(_) => OpenAsked::TurnedAway,
+    }
+}
+
+/// **What sending one fill came to** — see [`AnimationCache::send_fill`].
+enum FillSent {
+    /// In the lane: the cursor is away until the fill comes home.
+    Sent,
+    /// Turned away at the door (the lane is full): the cursor comes home with no frames, and the
+    /// next frame that draws the animation asks again.
+    TurnedAway(Box<animation::AnimationCursor>),
+    /// Its thread could not be started: the fill is lost as a failed one is — the reservation
+    /// released, the animation on its last frame until a surface begins showing the file again.
+    Lost,
+}
+
+impl AnimationCache {
+    fn with_budget(budget: u64) -> Self {
+        Self {
+            playbacks: bt_term::BoundedCache::with_budget(budget),
+            presence: BTreeMap::new(),
+        }
+    }
+
+    /// One file's entry. A reading is a use — see [`bt_term::BoundedCache::get`].
+    fn get(&self, key: &str) -> Option<&AnimationEntry> {
+        self.playbacks.get(key)
+    }
+
+    /// Whether this window holds anything for the file, **without** counting a use.
+    #[cfg(test)]
+    fn contains_key(&self, key: &str) -> bool {
+        self.playbacks.contains_key(key)
+    }
+
+    /// The identity of the open the file's decode in flight awaits, if one is in flight — without
+    /// counting a use.
+    #[cfg(test)]
+    fn awaited(&self, key: &str) -> Option<computation_lane::ComputationId> {
+        match self.playbacks.peek(key) {
+            Some(AnimationEntry::Pending { asked }) => Some(*asked),
+            _ => None,
+        }
+    }
+
+    /// Whether this window holds nothing for any file.
+    fn is_empty(&self) -> bool {
+        self.playbacks.is_empty()
+    }
+
+    /// What the map is holding, counted as it was inserted.
+    #[cfg(test)]
+    fn bytes_held(&self) -> u64 {
+        self.playbacks.bytes_held()
+    }
+
+    /// The ceiling the map was built with.
+    #[cfg(test)]
+    fn budget(&self) -> u64 {
+        self.playbacks.budget()
+    }
+
+    /// **One walk of the surfaces this window can see the subject of**, and the opens it asks for
+    /// (adversarial review 2026-09-11, B8; S-8 rounds 4 and 6).
+    ///
+    /// What each surface is showing is brought up to date ([`animations_opened`]). A file a surface
+    /// has just begun showing is let go of ([`Self::let_go_on_open`]) — its playback, so the open
+    /// starts again on frame zero, and an open that never answered, so the open asks again. A file
+    /// a surface has stopped showing is let go of if no surface names it any more
+    /// ([`Self::let_go_unnamed`]). Then
+    /// each file shown that this window holds nothing for is asked of the worker through `ask`,
+    /// once however many surfaces show it. A file this window holds anything for — a playback, a
+    /// decode in flight, a refusal, an open that never answered — is not asked again by a walk: a
+    /// redraw is no new input.
+    fn ask_for_showing(
+        &mut self,
+        showing: &[(PreviewSurface, Option<PathBuf>)],
+        mut ask: impl FnMut(&Path) -> OpenAsked,
+    ) {
+        let named: Vec<(PreviewSurface, Option<String>)> = showing
+            .iter()
+            .map(|(surface, path)| {
+                (
+                    *surface,
+                    path.as_deref().map(normalized_local_image_path_key),
+                )
+            })
+            .collect();
+        // What each surface named before this walk, where the walk hands it another subject: the
+        // file it leaves may now be named by no surface.
+        let replaced: Vec<String> = named
+            .iter()
+            .filter_map(|(surface, key)| {
+                self.presence
+                    .get(surface)
+                    .filter(|standing| key.as_ref() != Some(*standing))
+                    .cloned()
+            })
+            .collect();
+        for key in animations_opened(&mut self.presence, &named) {
+            self.let_go_on_open(&key);
+        }
+        for key in replaced {
+            self.let_go_unnamed(&key);
+        }
+        for (_, path) in showing {
+            let Some(path) = path else {
+                continue;
+            };
+            let key = normalized_local_image_path_key(path);
+            if self.playbacks.contains_key(&key) {
+                continue;
+            }
+            match ask(path) {
+                OpenAsked::Asked(asked) => {
+                    self.playbacks
+                        .insert(key, AnimationEntry::Pending { asked });
+                }
+                // Asked, and no request was admitted to answer it.
+                OpenAsked::Unstarted => self.open_unanswered(key, None),
+                OpenAsked::TurnedAway => {}
+            }
+        }
+    }
+
+    /// **A surface that has stopped existing**: what it was showing is forgotten, and what this
+    /// window holds for that file with it when no other surface names the file
+    /// ([`Self::let_go_unnamed`]). The entry is deliberately kept while a surface is merely not
+    /// drawn — that is how a tab switch resumes rather than restarts — so the one moment it may be
+    /// dropped is the moment the surface goes.
+    fn forget_surface(&mut self, surface: PreviewSurface) {
+        if let Some(key) = self.presence.remove(&surface) {
+            self.let_go_unnamed(&key);
+        }
+    }
+
+    /// **Every surface that has stopped existing by a road that does not name it** — a tab closed,
+    /// carried to another window or folded into another tab takes its surfaces with it, and none
+    /// of those roads passes through [`Self::forget_surface`]. `exists` answers whether the window
+    /// still has the surface; each one it does not is forgotten as [`Self::forget_surface`] forgets.
+    fn forget_surfaces_gone(&mut self, exists: impl Fn(PreviewSurface) -> bool) {
+        let gone: Vec<PreviewSurface> = self
+            .presence
+            .keys()
+            .copied()
+            .filter(|surface| !exists(*surface))
+            .collect();
+        for surface in gone {
+            self.forget_surface(surface);
+        }
+    }
+
+    /// Whether some surface of this window names the file.
+    fn names(&self, key: &str) -> bool {
+        self.presence.values().any(|named| named == key)
+    }
+
+    /// **A file no surface names any more**: whatever this window holds for it is let go of — a
+    /// refusal or an open that never answered, so the file's next showing is an open and asks, and
+    /// a playback, which can never be resumed: a surface that names the file again does so by an
+    /// open ([`animations_opened`]), and an open lets go of the playback anyway
+    /// ([`Self::let_go_on_open`]), so keeping it would only hold frames and push out a playback
+    /// that a background tab can resume. A decode in flight is kept until its answer, which is
+    /// filed only if a surface names the file by then ([`Self::opened`]) — so a surface that goes
+    /// to another file and back during one decode asks for it once.
+    fn let_go_unnamed(&mut self, key: &str) {
+        if self.names(key) {
+            return;
+        }
+        if matches!(
+            self.playbacks.peek(key),
+            Some(
+                AnimationEntry::Ready { .. }
+                    | AnimationEntry::Unanswered
+                    | AnimationEntry::Refused(_)
+            )
+        ) {
+            self.playbacks.remove(key);
+        }
+    }
+
+    /// **Whether the file's decode in flight awaits the answer to the request `asked`** — the
+    /// one question an answer may be filed for. An answer under any other identity is superseded:
+    /// its question was let go of, and a newer one asked in its place, or none.
+    fn awaits(&self, key: &str, asked: computation_lane::ComputationId) -> bool {
+        matches!(
+            self.playbacks.peek(key),
+            Some(AnimationEntry::Pending { asked: awaited }) if *awaited == asked
+        )
+    }
+
+    /// **The awaited answer, come home for a file no surface names**: its decode in flight is let
+    /// go of and nothing is filed — a record nobody is showing, or frames nobody can resume
+    /// ([`Self::let_go_unnamed`]'s rule, for the decode it keeps). `true` when the file is unnamed
+    /// and the answer is therefore for nobody.
+    fn answered_for_nobody(&mut self, key: &str) -> bool {
+        if self.names(key) {
+            return false;
+        }
+        self.playbacks.remove(key);
+        true
+    }
+
+    /// **A file that changed on disk** — the preview's file-change news
+    /// ([`Runtime::refresh_preview_file`]): its playback, its refusal and its decode in flight are
+    /// let go of, so the next walk that shows the file asks about the bytes there now. A refusal is
+    /// a fact about the bytes, and new bytes are a new question; so is a decode that may have read
+    /// the old ones — its answer, when it comes, is awaited by no record and is superseded
+    /// ([`Self::awaits`]), and the walk's new open is the one filed. `true` when anything was let
+    /// go of. An open that never answered is no fact about the bytes and waits for the file's next
+    /// open as before.
+    fn let_go_changed_file(&mut self, key: &str) -> bool {
+        let changed = matches!(
+            self.playbacks.peek(key),
+            Some(
+                AnimationEntry::Ready { .. }
+                    | AnimationEntry::Refused(_)
+                    | AnimationEntry::Pending { .. }
+            )
+        );
+        if changed {
+            self.playbacks.remove(key);
+        }
+        changed
+    }
+
+    /// **A file a surface has just begun showing**: its playback is let go of, so the open starts
+    /// again on frame zero, and so is an open that never answered, so the open asks again. A
+    /// refusal is kept, because whether a file can be animated is a fact about the file, and so is
+    /// a decode already in flight, which is this open's answer.
+    fn let_go_on_open(&mut self, key: &str) {
+        if matches!(
+            self.playbacks.get(key),
+            Some(AnimationEntry::Ready { .. } | AnimationEntry::Unanswered)
+        ) {
+            self.playbacks.remove(key);
+        }
+    }
+
+    /// **An open that was asked and not answered** — the one writer of
+    /// [`AnimationEntry::Unanswered`], which no walk asks again and the file's next open lets go
+    /// of. `asked` is the request whose work failed on the worker, filed only for the decode in
+    /// flight that awaits it ([`Self::awaits`]): the failure of a superseded open changes nothing.
+    /// `None` is an open no request was admitted for — its thread could not be started — filed
+    /// for a file the walk holds nothing for. Either way a failure for a file no surface names
+    /// files nothing ([`Self::answered_for_nobody`]).
+    fn open_unanswered(&mut self, key: String, asked: Option<computation_lane::ComputationId>) {
+        let answers_this_open = match asked {
+            Some(asked) => self.awaits(&key, asked),
+            None => self.playbacks.peek(&key).is_none(),
+        };
+        if !answers_this_open || self.answered_for_nobody(&key) {
+            return;
+        }
+        self.playbacks.insert(key, AnimationEntry::Unanswered);
+    }
+
+    /// **The worker's answer to the open `asked`**, filed whether or not it decoded: a playback
+    /// under the serial minted for it ([`AnimationEntry::Ready`]), or the refusal with its reason
+    /// ([`AnimationEntry::Refused`]) — a refusal is an answer. Filed only for the decode in flight
+    /// that awaits `asked` ([`Self::awaits`]): the answer to a superseded open is never filed, and
+    /// an answer for a file no surface names any more is filed nowhere
+    /// ([`Self::answered_for_nobody`]). `true` when it was filed — the one case that changes what
+    /// the glass shows.
+    fn opened(
+        &mut self,
+        key: String,
+        asked: computation_lane::ComputationId,
+        serial: u64,
+        frames: Result<animation::Animation, animation::AnimationRefusal>,
+    ) -> bool {
+        if !self.awaits(&key, asked) || self.answered_for_nobody(&key) {
+            return false;
+        }
+        self.playbacks.insert(
+            key,
+            match frames {
+                Ok(animation) => AnimationEntry::Ready {
+                    serial,
+                    animation: Box::new(animation),
+                },
+                Err(refusal) => AnimationEntry::Refused(refusal),
+            },
+        );
+        true
+    }
+
+    /// **A failed request of this window's animations, settled** ([`settle_failure`]): an open is
+    /// unanswered ([`Self::open_unanswered`]), a fill is lost ([`Self::release_failed_fill`]). The
+    /// other settlements are not this map's.
+    fn settle(&mut self, settled: Settled) {
+        match settled {
+            Settled::AnimationUnanswered { path, asked } => {
+                self.open_unanswered(normalized_local_image_path_key(&path), Some(asked));
+            }
+            Settled::FillLost { path, serial } => {
+                self.release_failed_fill(&normalized_local_image_path_key(&path), serial);
+            }
+            Settled::Hold { .. } | Settled::Answer(_) | Settled::Nothing => {}
+        }
+    }
+
+    /// **An animation fill that failed**: its reservation is released (the bytes it stood for will
+    /// never come), re-weighed by taking the entry out and putting it back; the decoder went with
+    /// the request, so the animation stands on its last frame until a surface begins showing the
+    /// file again. A fill for a playback the window has moved on from changes nothing.
+    fn release_failed_fill(&mut self, key: &str, serial: u64) {
+        let answers_this_playback = matches!(
+            self.playbacks.get(key),
+            Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
+        );
+        if !answers_this_playback {
+            return;
+        }
+        if let Some(AnimationEntry::Ready {
+            serial,
+            mut animation,
+        }) = self.playbacks.remove(key)
+        {
+            animation.fill_lost();
+            self.playbacks
+                .insert(key.to_owned(), AnimationEntry::Ready { serial, animation });
+        }
+    }
+
+    /// **Send one playing animation's decoder for as many frames as its ring has room for** —
+    /// through `send`, which answers what became of it; see `Runtime::request_animation_fill` for
+    /// when.
+    ///
+    /// Nothing happens for an animation that wants nothing, and that needs no flag: the cursor *is*
+    /// the record that a fill is in flight, so an animation whose cursor is away wants no frames.
+    /// The entry is taken out and put back once, after `send` has answered, so the map weighs the
+    /// reservation `take_cursor` made — or, for a fill turned away or lost, the cursor home again
+    /// or the reservation released.
+    fn send_fill(
+        &mut self,
+        key: &str,
+        send: impl FnOnce(u64, Box<animation::AnimationCursor>, usize) -> FillSent,
+    ) {
+        let wants = matches!(
+            self.playbacks.get(key),
+            Some(AnimationEntry::Ready { animation, .. }) if animation.frames_wanted() > 0
+        );
+        if !wants {
+            return;
+        }
+        let Some(AnimationEntry::Ready {
+            serial,
+            mut animation,
+        }) = self.playbacks.remove(key)
+        else {
+            return;
+        };
+        if let Some((cursor, want)) = animation.take_cursor() {
+            match send(serial, cursor, want) {
+                FillSent::Sent => {}
+                FillSent::TurnedAway(cursor) => animation.park_cursor(cursor, Vec::new()),
+                FillSent::Lost => animation.fill_lost(),
+            }
+        }
+        self.playbacks
+            .insert(key.to_owned(), AnimationEntry::Ready { serial, animation });
+    }
+
+    /// **Move the animations that are on the glass to the frame that is due**, and
+    /// say whether any of them changed (adversarial review 2026-09-11, B8).
+    ///
+    /// `drawn` is what was actually presented last frame, by key and playback. An
+    /// animation outside it is one no surface is drawing: it does not advance,
+    /// because the refills that keep a ring full are asked only for what is drawn,
+    /// and a clock running where no decoder follows it is how a `.gif` in a
+    /// background tab drained its ring and resumed mid-file.
+    ///
+    /// The entry goes out of the map and back rather than being reached into, for
+    /// `bt_term::BoundedCache`'s own reason: `advance` **pops** frames, so an
+    /// animation advanced under the map leaves the ceiling counting pixels that have
+    /// been let go of.
+    fn advance_drawn(&mut self, drawn: &BTreeMap<String, u64>, now: Instant) -> bool {
+        let mut moved = false;
+        for key in drawn.keys() {
+            // **Asked before it is taken.** A key in last frame's drawn set may hold
+            // `Pending` by now — a surface that opened the file again let go of the
+            // playback and asked the worker for it — and a `remove` that ran anyway
+            // would throw that ledger entry away, which is this window asking for the
+            // same decode on every frame until one of them lands.
+            if !matches!(self.playbacks.get(key), Some(AnimationEntry::Ready { .. })) {
+                continue;
+            }
+            let Some(AnimationEntry::Ready {
+                serial,
+                mut animation,
+            }) = self.playbacks.remove(key)
+            else {
+                continue;
+            };
+            moved |= animation.advance(now);
+            self.playbacks
+                .insert(key.clone(), AnimationEntry::Ready { serial, animation });
+        }
+        moved
+    }
+
+    /// **Start the clock of every animation that has just come onto the glass**
+    /// (adversarial review 2026-09-11, B8) — see [`animation::Animation::present`]
+    /// for the two defects that one sentence closes.
+    ///
+    /// A playback already in `was_drawn` under the same serial has been on the glass
+    /// since last frame and keeps the clock its own delays built; anything else is
+    /// arriving, and its next frame is due a delay from now.
+    fn present_drawn(
+        &mut self,
+        was_drawn: &BTreeMap<String, u64>,
+        drawn: &BTreeMap<String, u64>,
+        now: Instant,
+    ) {
+        for (key, serial) in drawn {
+            if was_drawn.get(key) == Some(serial) {
+                continue;
+            }
+            // Asked before it is taken, for [`AnimationCache::advance_drawn`]'s reason: a
+            // `Pending` lifted out of the map and dropped is a request this window
+            // has forgotten it made.
+            if !matches!(self.playbacks.get(key), Some(AnimationEntry::Ready { .. })) {
+                continue;
+            }
+            let Some(AnimationEntry::Ready {
+                serial,
+                mut animation,
+            }) = self.playbacks.remove(key)
+            else {
+                continue;
+            };
+            animation.present(now);
+            self.playbacks
+                .insert(key.clone(), AnimationEntry::Ready { serial, animation });
+        }
+    }
+
+    /// **Take one fill home, or drop it** — `true` when the frames were adopted
+    /// (adversarial review 2026-09-11, B10).
+    ///
+    /// Two ways a fill can arrive for nobody, and both end the same way. The key may
+    /// be gone, which is an animation the map has evicted: re-inserting it would be
+    /// an eviction undone by its own answer. Or the key may hold a **different
+    /// playback** — since B8 a surface that begins showing a file opens it again, so
+    /// the entry under that name can be a second playback standing on frame zero,
+    /// and parking the old cursor into it would hand a fresh animation a decoder
+    /// halfway through the file and a ring of frames from the middle of it. The
+    /// serial is what makes those two answers distinguishable at all; the key names
+    /// the file, and the file is not the playback.
+    ///
+    /// **And a third way, which is not "for nobody" but "of nothing"** (user report
+    /// 2026-09-12): the file was rewritten under the loop. The cursor noticed it at
+    /// the moment the loop came round, which is the only moment a change can be
+    /// acted on rather than decoded into the middle of a picture; this window's part
+    /// is to let the playback go, key and all, so that the next pass over the drawn
+    /// animations opens the file again down the ordinary path and shows whatever is
+    /// there now.
+    fn adopt_fill(
+        &mut self,
+        key: String,
+        serial: u64,
+        cursor: Box<animation::AnimationCursor>,
+        frames: Vec<animation::AnimationFrame>,
+    ) -> AnimationFillOutcome {
+        let answers_this_playback = matches!(
+            self.playbacks.get(&key),
+            Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
+        );
+        if !answers_this_playback {
+            return AnimationFillOutcome::ForNobody;
+        }
+        let Some(AnimationEntry::Ready {
+            serial,
+            mut animation,
+        }) = self.playbacks.remove(&key)
+        else {
+            return AnimationFillOutcome::ForNobody;
+        };
+        animation.park_cursor(cursor, frames);
+        if animation.file_changed() {
+            return AnimationFillOutcome::FileChanged;
+        }
+        self.playbacks
+            .insert(key, AnimationEntry::Ready { serial, animation });
+        AnimationFillOutcome::Parked
+    }
+}
 
 /// **What the renderer is to call one animation's picture** (adversarial review
 /// 2026-09-11, B3).
@@ -31885,82 +33748,6 @@ type AnimationCache = bt_term::BoundedCache<String, AnimationEntry>;
 /// spell it differently there.
 fn animation_layer_key(surface: PreviewSurface, serial: u64) -> String {
     format!("gif:{surface:?}:{serial}")
-}
-
-/// **Move the animations that are on the glass to the frame that is due**, and
-/// say whether any of them changed (adversarial review 2026-09-11, B8).
-///
-/// `drawn` is what was actually presented last frame, by key and playback. An
-/// animation outside it is one no surface is drawing: it does not advance,
-/// because the refills that keep a ring full are asked only for what is drawn,
-/// and a clock running where no decoder follows it is how a `.gif` in a
-/// background tab drained its ring and resumed mid-file.
-///
-/// The entry goes out of the map and back rather than being reached into, for
-/// `bt_term::BoundedCache`'s own reason: `advance` **pops** frames, so an
-/// animation advanced under the map leaves the ceiling counting pixels that have
-/// been let go of.
-fn advance_drawn_animations(
-    animations: &mut AnimationCache,
-    drawn: &BTreeMap<String, u64>,
-    now: Instant,
-) -> bool {
-    let mut moved = false;
-    for key in drawn.keys() {
-        // **Asked before it is taken.** A key in last frame's drawn set may hold
-        // `Pending` by now — a surface that opened the file again let go of the
-        // playback and asked the worker for it — and a `remove` that ran anyway
-        // would throw that ledger entry away, which is this window asking for the
-        // same decode on every frame until one of them lands.
-        if !matches!(animations.get(key), Some(AnimationEntry::Ready { .. })) {
-            continue;
-        }
-        let Some(AnimationEntry::Ready {
-            serial,
-            mut animation,
-        }) = animations.remove(key)
-        else {
-            continue;
-        };
-        moved |= animation.advance(now);
-        animations.insert(key.clone(), AnimationEntry::Ready { serial, animation });
-    }
-    moved
-}
-
-/// **Start the clock of every animation that has just come onto the glass**
-/// (adversarial review 2026-09-11, B8) — see [`animation::Animation::present`]
-/// for the two defects that one sentence closes.
-///
-/// A playback already in `was_drawn` under the same serial has been on the glass
-/// since last frame and keeps the clock its own delays built; anything else is
-/// arriving, and its next frame is due a delay from now.
-fn present_drawn_animations(
-    animations: &mut AnimationCache,
-    was_drawn: &BTreeMap<String, u64>,
-    drawn: &BTreeMap<String, u64>,
-    now: Instant,
-) {
-    for (key, serial) in drawn {
-        if was_drawn.get(key) == Some(serial) {
-            continue;
-        }
-        // Asked before it is taken, for [`advance_drawn_animations`]'s reason: a
-        // `Pending` lifted out of the map and dropped is a request this window
-        // has forgotten it made.
-        if !matches!(animations.get(key), Some(AnimationEntry::Ready { .. })) {
-            continue;
-        }
-        let Some(AnimationEntry::Ready {
-            serial,
-            mut animation,
-        }) = animations.remove(key)
-        else {
-            continue;
-        };
-        animation.present(now);
-        animations.insert(key.clone(), AnimationEntry::Ready { serial, animation });
-    }
 }
 
 /// **Which animated files this walk of the surfaces has just opened**, and the
@@ -31998,56 +33785,22 @@ fn animations_opened(
     opened
 }
 
-/// **Take one fill home, or drop it** — `true` when the frames were adopted
-/// (adversarial review 2026-09-11, B10).
+/// **Whether a surface is still in the window**, for [`AnimationCache::forget_surfaces_gone`].
 ///
-/// Two ways a fill can arrive for nobody, and both end the same way. The key may
-/// be gone, which is an animation the map has evicted: re-inserting it would be
-/// an eviction undone by its own answer. Or the key may hold a **different
-/// playback** — since B8 a surface that begins showing a file opens it again, so
-/// the entry under that name can be a second playback standing on frame zero,
-/// and parking the old cursor into it would hand a fresh animation a decoder
-/// halfway through the file and a ring of frames from the middle of it. The
-/// serial is what makes those two answers distinguishable at all; the key names
-/// the file, and the file is not the playback.
-///
-/// **And a third way, which is not "for nobody" but "of nothing"** (user report
-/// 2026-09-12): the file was rewritten under the loop. The cursor noticed it at
-/// the moment the loop came round, which is the only moment a change can be
-/// acted on rather than decoded into the middle of a picture; this window's part
-/// is to let the playback go, key and all, so that the next pass over the drawn
-/// animations opens the file again down the ordinary path and shows whatever is
-/// there now.
-fn adopt_animation_fill(
-    animations: &mut AnimationCache,
-    key: String,
-    serial: u64,
-    cursor: Box<animation::AnimationCursor>,
-    frames: Vec<animation::AnimationFrame>,
-) -> AnimationFillOutcome {
-    let answers_this_playback = matches!(
-        animations.get(&key),
-        Some(AnimationEntry::Ready { serial: held, .. }) if *held == serial
-    );
-    if !answers_this_playback {
-        return AnimationFillOutcome::ForNobody;
-    }
-    let Some(AnimationEntry::Ready {
-        serial,
-        mut animation,
-    }) = animations.remove(&key)
-    else {
-        return AnimationFillOutcome::ForNobody;
-    };
-    animation.park_cursor(cursor, frames);
-    if animation.file_changed() {
-        return AnimationFillOutcome::FileChanged;
-    }
-    animations.insert(key, AnimationEntry::Ready { serial, animation });
-    AnimationFillOutcome::Parked
+/// A surface is in the window while some tab holds its view — a seat of a tab in the background
+/// as much as one on the glass, and a float filed under whichever tab it was torn from — and the
+/// card is the window's own. Asked of every tab and not of the tree on the glass, because a
+/// background tab's panes are exactly the ones that resume, and a surface the walk wrongly
+/// thought gone would make every walk an open. A free function over the tabs for
+/// [`files_a_tab_stands_on`]'s reason: it is the rule, and tabs are what a test can build.
+fn animation_surface_exists(tabs: &[TabState], surface: PreviewSurface) -> bool {
+    surface == PreviewSurface::Peek
+        || tabs
+            .iter()
+            .any(|tab| tab.preview_panes.get(surface).is_some())
 }
 
-/// **What became of one fill coming home** — see [`adopt_animation_fill`].
+/// **What became of one fill coming home** — see [`AnimationCache::adopt_fill`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AnimationFillOutcome {
     /// The frames went into the ring they were decoded for.
@@ -32943,7 +34696,7 @@ fn files_float_content_height(
 /// swallowed whole: a diagnostic that can take the window down with it is a
 /// second bug wearing the first one's clothes.
 fn dump_chrome_frame(chrome: &seats::ChromeGroup) {
-    let Some(path) = diagnostics::named_file(std::env::var_os("BT_CHROME_DUMP")) else {
+    let Some(path) = entry_doors::installed().chrome_dump.clone() else {
         return;
     };
     use std::fmt::Write as _;
@@ -33019,7 +34772,7 @@ fn dump_focus_thumb_frame(
     // projection counters and the capture counters against one another: a
     // `captures` that never moves beside a `hidden` that climbs is the whole
     // story of a column full of background tabs, and two files could not say it.
-    static FOCUS_THUMB_DUMP: trace::Dump = trace::Dump::new("BT_FOCUS_THUMB_DUMP");
+    static FOCUS_THUMB_DUMP: trace::Dump = trace::Dump::new(|files| files.focus_thumb.as_deref());
     FOCUS_THUMB_DUMP.line(|| {
         format!(
             "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={} \
@@ -33052,7 +34805,7 @@ fn dump_focus_thumb_frame(
 /// the second, and reading one file with both in it settles that without a second
 /// run.
 fn dump_overlay_frame(band: &marks::Band) {
-    let Some(path) = diagnostics::named_file(std::env::var_os("BT_CHROME_DUMP")) else {
+    let Some(path) = entry_doors::installed().chrome_dump.clone() else {
         return;
     };
     use std::fmt::Write as _;
@@ -36696,6 +38449,9 @@ fn revive_plan(
                     git_sel: None,
                     // The fifth fact, and durable like `view` above it (T9).
                     git_remotes_open: leaf.remotes_open,
+                    // Not durable: a restored root is the root it was left on, a folder
+                    // somebody had (see the field).
+                    folder_unknown: false,
                 },
             )
         })
@@ -39235,9 +40991,9 @@ impl FormulaSwitches {
 /// one place is what stops the two from diverging — a startup that resolved the
 /// family differently from the hot path would draw one face until the row was
 /// touched and another one after.
-fn apply_stored_terminal_font(
-    gpu: &mut GpuContext,
-    renderer: &mut WindowRenderer,
+fn apply_stored_terminal_font<G: Glass>(
+    gpu: &mut G::Device,
+    renderer: &mut G,
     settings: &bt_persist::SettingsV1,
 ) -> Result<bt_render::CellMetrics> {
     let family = settings.terminal_font_family.as_str();
@@ -39258,7 +41014,7 @@ fn apply_stored_terminal_font(
     let files = hang_watch::during(hang_watch::Station::FontLookup, || {
         settings::monospace_family_files(family)
     });
-    if !family.is_empty() && diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE")) {
+    if !family.is_empty() && entry_doors::installed().perf {
         trace_sink::stderr_line(format!(
             "BT_PERF_TRACE monospace_family_files_us={} files={}",
             started.elapsed().as_micros(),
@@ -39520,7 +41276,7 @@ fn adopt_program_answers(
 /// and the program walk's adopter's when the folders the files live in moved (T-FRESH-FACTS). The
 /// copilot readiness is read again with them: whether its hooks are switched off is a file in the
 /// same folder.
-fn read_the_agent_rows_again(app: &mut App) {
+fn read_the_agent_rows_again<B: Backend>(app: &mut App<B>) {
     (app.claude_hooks_installed, app.agent_config_refusals[0]) = attention_hooks::row_state();
     (app.codex_notify_installed, app.agent_config_refusals[1]) = attention_codex::row_state();
     (app.copilot_hooks_installed, app.agent_config_refusals[2]) = attention_copilot::row_state();
@@ -39991,7 +41747,54 @@ mod shell_birth_tests {
             at_shell_home: false,
             named: false,
             program: Some(PathBuf::from("外壳")),
+            program_kind: profiles::ShellProgram::Native,
             unless_gone: None,
+        }
+    }
+
+    /// PIN (T-WINDOWS-SHELL-NAMESPACES, 2026-10-12) — **a pane reads the spelling of the shell
+    /// that started in it**: the kind of program its decision carries, and the row it fell back
+    /// to rather than the row it was asked for. Both the session's namespace and the paste
+    /// recipient's are the table's answer for that pair.
+    ///
+    /// MUTATION: `place_leaf` reading the namespace off `seed.profile` (the asked `gitbash`) —
+    /// RED on Windows (`Msys` for the PowerShell it fell back to). MUTATION: `place_leaf` handing
+    /// the table `ShellProgram::Native` — RED on Windows (`Windows` for the Cygwin program).
+    #[test]
+    fn a_pane_reads_the_spelling_of_the_shell_that_started_in_it() {
+        let asked = "gitbash";
+        let environment = bt_pty::SystemShellEnvironment;
+        for (started, shell, profile) in [
+            (
+                Started::FellBack(profiles::fallback_profile_id().to_owned()),
+                profiles::ShellProgram::Native,
+                profiles::fallback_profile_id(),
+            ),
+            (Started::AsAsked, profiles::ShellProgram::Cygwin, asked),
+        ] {
+            let decision = BirthDecision {
+                spawn_profile: profile.to_owned(),
+                program_kind: shell.clone(),
+                ..decided(started.clone())
+            };
+            let seed = seed_of(asked);
+            let mut leaf = bare(&decision, &seed);
+            finish_leaf_birth(&mut leaf, None, &decision, &seed, None, false)
+                .expect("a pane with no shell behind it is finished");
+            let expected = profiles::printed_path_namespace(
+                profiles::index_of_id(profile),
+                &shell,
+                &environment,
+            );
+            assert_eq!(
+                leaf.session.printed_path_namespace(),
+                expected,
+                "{started:?}: the pane reads its shell's spelling"
+            );
+            assert_eq!(
+                leaf.paste_recipient.namespace, expected,
+                "{started:?}: and a path pasted into it is written in that spelling"
+            );
         }
     }
 
@@ -40006,6 +41809,7 @@ mod shell_birth_tests {
             FormulaSwitches::from_settings(&bt_persist::SettingsV1::default()),
             NonZeroUsize::new(1_000).unwrap(),
             true,
+            &bt_pty::SystemShellEnvironment,
         )
     }
 
@@ -40192,6 +41996,7 @@ mod shell_birth_tests {
             at_shell_home: decided.place.at_shell_home,
             named: decided.place.named,
             program: Some(PathBuf::from("外壳")),
+            program_kind: profiles::ShellProgram::Native,
             unless_gone: decided.unless_gone.clone().map(Box::new),
         };
         let seed = LeafSeed {
@@ -40792,6 +42597,9 @@ fn create_leaf_session(
     // is a `settings.json` answer a new pane must be born obeying, and a pane split off a
     // neighbour that read the file for itself would be a second place for the answer to live.
     line_wrapping: bool,
+    // **The machine a shell is composed for**: its variables and its files, as the place, the
+    // command line and the paste recipient read them — the system's own in the product.
+    environment: &dyn bt_pty::ShellEnvironment,
 ) -> Result<LeafSession> {
     // **Born without a rail**: a shell that has not started has sent no mark, and
     // [`LeafSession::has_rail`] is turned on only by one (owner, 2026-09-23).
@@ -40840,18 +42648,10 @@ fn create_leaf_session(
     let locale_waits = !rows_wait
         && probe_input.is_none()
         && programs.program(spawn_profile).is_some()
-        && profiles::row_of(spawn_profile).is_some_and(|row| {
-            shell_integration::listens_for_a_locale(&bt_pty::SystemShellEnvironment, &row.env)
-        })
+        && profiles::row_of(spawn_profile)
+            .is_some_and(|row| shell_integration::listens_for_a_locale(environment, &row.env))
         && locale_declaration::at_birth() == locale_declaration::AtBirth::Waiting;
     let in_birth = rows_wait || locale_waits;
-    // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
-    // this process, because the module that is broken is the one `Windows
-    // PowerShell 5.1` ships and nothing else on this machine is affected by it.
-    // Idempotent — see `psreadline::begin_probe`.
-    if !in_birth && spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
-        psreadline::begin_probe(psreadline::ProbeTrigger::Birth);
-    }
     // There used to be a second trigger here (§7.40 ③): a `wsl.exe` started
     // beside this spawn to ask the default distribution which shell it logs
     // into. It is gone as of 2026-09-07, because nothing waited for it and so
@@ -40888,7 +42688,7 @@ fn create_leaf_session(
     let profiles::BirthPlace { place, unless_gone } = profiles::spawn_place(
         profiles::index_of_id(spawn_profile),
         seed.cwd.clone(),
-        &bt_pty::SystemShellEnvironment,
+        environment,
     );
     let spawn_place = place.directory.clone();
     let wake = LeafWake::bound_to(wake);
@@ -40897,6 +42697,7 @@ fn create_leaf_session(
     // leaf — there is no table to prune, because the value lives on the thing it names.
     let capability = attention_wire::mint_capability();
     let mut resolved_program = None;
+    let mut resolved_shell = profiles::ShellProgram::Native;
     // **The two facts the spawn is made of, both read by id and both able to say
     // no** (T-PROFILE-TABLE-MOVE).
     //
@@ -40932,12 +42733,16 @@ fn create_leaf_session(
         // **The whole row and not its index** (§7.1.6c-6c): the profile's own
         // environment is one of the things the spawn now lays down, and a
         // function that asked this module five separate questions about one
-        // index is a function no test can put a profile in front of.
+        // index is a function no test can put a profile in front of. **And the kind of program
+        // the walk found**, because the door follows it: a launcher into WSL that is not
+        // `wsl.exe` is served by no door (`profiles::door_of`).
+        let program_kind = programs.shell(spawn_profile);
         let mut command = shell_integration::shell_command(
             row,
+            &program_kind,
             &place.arguments,
             shell_integration::Scripts::installed(),
-            &bt_pty::SystemShellEnvironment,
+            environment,
         );
         // The same row composed for the place the pane opens in when its folder is gone: the
         // birth worker takes this command line and working directory instead, having asked.
@@ -40945,9 +42750,10 @@ fn create_leaf_session(
             folder: gone.folder.clone(),
             arguments: shell_integration::shell_command(
                 row,
+                &program_kind,
                 &gone.place.arguments,
                 shell_integration::Scripts::installed(),
-                &bt_pty::SystemShellEnvironment,
+                environment,
             )
             .arguments,
             working_directory: gone.place.working_directory.clone(),
@@ -40976,6 +42782,7 @@ fn create_leaf_session(
             .map(|(name, value)| (std::ffi::OsString::from(name), value)),
         );
         resolved_program = Some(PathBuf::from(&program));
+        resolved_shell = program_kind;
         // **The shell is asked for, never waited for** (T-BIRTH-OFF-WINDOW). Its pseudoconsole and
         // process are made on a `bt-pty-birth` worker of its own (`pty_door::request_shell`); this
         // pane is made in birth around the request, holds what is typed into it, and lands when the
@@ -40994,6 +42801,7 @@ fn create_leaf_session(
                     size: pty_size(grid, PhysicalSize::new(body.width, body.height)),
                     working_directory: place.working_directory,
                     unless_gone: gone_spec,
+                    recording: entry_doors::installed().recording.clone(),
                 },
                 wake.output(),
             )
@@ -41014,6 +42822,7 @@ fn create_leaf_session(
         at_shell_home: place.at_shell_home,
         named: place.named,
         program: resolved_program,
+        program_kind: resolved_shell,
         unless_gone: unless_gone.map(Box::new),
     };
     let mut leaf = bare_leaf(
@@ -41032,6 +42841,7 @@ fn create_leaf_session(
         formulas,
         scrollback,
         line_wrapping,
+        environment,
     );
     match shell {
         // **Born later, standing where its shell will stand.** The place is said now, from the
@@ -41076,6 +42886,7 @@ fn bare_leaf(
     formulas: FormulaSwitches,
     scrollback: NonZeroUsize,
     line_wrapping: bool,
+    environment: &dyn bt_pty::ShellEnvironment,
 ) -> LeafSession {
     let LeafView {
         text_scale,
@@ -41122,14 +42933,19 @@ fn bare_leaf(
         birth_death_kept: false,
         spawn_fallback: None,
         foreground_program_cadence: foreground_program::Cadence::default(),
+        process_folder: pane_folder::ProcessFolderMemo::default(),
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&decision.spawn_profile),
-            &bt_pty::SystemShellEnvironment,
+            &decision.program_kind,
+            environment,
         ),
         integration: profiles::row_of(&decision.spawn_profile)
-            .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
+            .map_or(profiles::Integration::None, |row| {
+                profiles::door_of(&row, &decision.program_kind)
+            }),
         profile: decision.spawn_profile.clone(),
         program: decision.program.clone(),
+        program_kind: decision.program_kind.clone(),
         born_named: false,
         spawn_place: None,
         // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
@@ -41165,6 +42981,7 @@ fn bare_leaf(
         frame_image_references: FrameImageReferences::default(),
         // Nothing has been pasted into a shell that has just started.
         pending_paste: None,
+        paste_hold: None,
         birth: None,
         successor: None,
     }
@@ -41180,7 +42997,7 @@ fn await_shell(
     seed: &LeafSeed,
 ) {
     let spawn_profile = decision.spawn_profile.clone();
-    place_leaf(leaf, &decision, seed, &spawn_profile, false);
+    place_leaf(leaf, &decision, &spawn_profile, false);
     leaf.birth = Some(PaneBirth {
         seed: seed.clone(),
         probe_input: None,
@@ -41224,6 +43041,7 @@ fn finish_leaf_birth(
         ));
     }
     let mut resolved_program = decision.program.clone();
+    let mut resolved_shell = decision.program_kind.clone();
     // **A pane is the shell it is actually running.** When the profile's own
     // program would not start, `bt-pty` falls back once to `powershell.exe` and
     // hands back the notice that says so — so what this leaf *is*, from here on,
@@ -41247,6 +43065,9 @@ fn finish_leaf_birth(
         // one fact that field exists to answer is "what is behind this pane", so
         // it follows the swap the same way the profile does.
         resolved_program = Some(PathBuf::from(fallback.started));
+        // `bt-pty`'s last resort is Windows PowerShell, which is no WSL launcher and no Cygwin
+        // program.
+        resolved_shell = profiles::ShellProgram::Native;
         profiles::fallback_profile_id().to_owned()
     } else {
         // **The profile that was started, not the one that was asked for**
@@ -41258,6 +43079,8 @@ fn finish_leaf_birth(
         // meet the same missing program and say the same thing again, for ever.
         decision.spawn_profile.clone()
     };
+    // Before the place: the namespace `place_leaf` tells the session is read off it.
+    leaf.program_kind = resolved_shell;
     let session = &mut leaf.session;
     // **The other way into the same degradation**, and the half that used to be
     // silent. A saved leaf naming a profile this build does not have resolves to
@@ -41307,7 +43130,7 @@ fn finish_leaf_birth(
             .feed(bytes)
             .context("feed BT_PROBE_INPUT bytes directly into terminal")?;
     }
-    place_leaf(leaf, decision, seed, &profile, in_birth);
+    place_leaf(leaf, decision, &profile, in_birth);
     // Which modes the carrier itself keeps on, for the two roads that reset a dead program's
     // modes without a byte to the child: the person's verb and the session's own return from a
     // stranded alternate screen. The pane's pseudoconsole is fixed here, at its birth.
@@ -41330,13 +43153,15 @@ fn finish_leaf_birth(
     }
     leaf.paste_recipient = profiles::paste_recipient(
         profiles::index_of_id(&profile),
+        &leaf.program_kind,
         &bt_pty::SystemShellEnvironment,
     );
     // The door of the profile this pane actually came up as, read once,
     // here, where that profile is finally known — after both fallbacks. See
     // the field for why it is not read again later.
-    leaf.integration = profiles::row_of(&profile)
-        .map_or(profiles::Integration::None, |row| profiles::served_by(&row));
+    leaf.integration = profiles::row_of(&profile).map_or(profiles::Integration::None, |row| {
+        profiles::door_of(&row, &leaf.program_kind)
+    });
     leaf.profile = profile;
     leaf.program = resolved_program;
     leaf.pty = pty;
@@ -41399,13 +43224,7 @@ fn apply_owed_shell_resize(
 /// crossed into `profile`'s namespace after a fallback (`birth_place_of_the_started_shell`), told
 /// to the session as the second rung of §7.1.4's ladder, and kept on the leaf. A pane still waiting
 /// on a row was never put down anywhere; its seed says where it will be.
-fn place_leaf(
-    leaf: &mut LeafSession,
-    decision: &BirthDecision,
-    seed: &LeafSeed,
-    profile: &str,
-    in_birth: bool,
-) {
+fn place_leaf(leaf: &mut LeafSession, decision: &BirthDecision, profile: &str, in_birth: bool) {
     // **And the place it was born in is said in the namespace of the shell that started**
     // (T-RESTART-CWD round 2): `spawn_place` was resolved for `spawn_profile`, and after the swap
     // this leaf is `profile`.
@@ -41424,12 +43243,14 @@ fn place_leaf(
     // the pane's first `OSC 7` report (§7.30, 2026-09-07).
     leaf.session.set_spawn_at_shell_home(at_shell_home);
     // T-3, and it arrives beside the rung above for the same reason: which spelling of an absolute
-    // path this pane's shell prints is a fact about the profile, and `seed.profile` is the last
-    // place that holds it. A Git Bash prints `/d/Demo/report.md` and a WSL bash prints
-    // `/mnt/d/Demo/report.md` for files that are really on this disk.
+    // path this pane's shell prints is a fact about the shell that started — the program it ran
+    // (`leaf.program_kind`) and the row it was started for (`profile`, after any fallback). A Git Bash
+    // prints `/d/Demo/report.md` and a WSL bash prints `/mnt/d/Demo/report.md` for files that are
+    // really on this disk.
     leaf.session
         .set_path_namespace(profiles::printed_path_namespace(
-            profiles::index_of_id(&seed.profile),
+            profiles::index_of_id(profile),
+            &leaf.program_kind,
             &bt_pty::SystemShellEnvironment,
         ));
     // Named only while the started shell stands in the named folder: a fallback profile that
@@ -41633,7 +43454,7 @@ struct LeafView {
 
 impl LeafView {
     /// The view `text_scale` asks for, measured for `renderer`'s window.
-    fn at(gpu: &mut GpuContext, renderer: &WindowRenderer, text_scale: TextScale) -> Result<Self> {
+    fn at<G: Glass>(gpu: &mut G::Device, renderer: &G, text_scale: TextScale) -> Result<Self> {
         Ok(Self {
             text_scale,
             metrics: pane_cell_metrics(gpu, renderer, text_scale)?,
@@ -41648,9 +43469,9 @@ impl LeafView {
 ///
 /// Nothing stores its product: a Settings change, a display change and a size step each call this
 /// again, so the order they arrive in cannot matter.
-fn pane_cell_metrics(
-    gpu: &mut GpuContext,
-    renderer: &WindowRenderer,
+fn pane_cell_metrics<G: Glass>(
+    gpu: &mut G::Device,
+    renderer: &G,
     text_scale: TextScale,
 ) -> Result<bt_render::CellMetrics> {
     let effective = text_scale.effective_logical_px(gpu.terminal_font_size_logical_px());
@@ -41761,13 +43582,13 @@ fn apply_leaf_metrics(leaf: &mut LeafSession, metrics: bt_render::CellMetrics) -
 /// including its own fallback for a window too small to place anything.
 // them into a struct would move the argument list rather than shorten it.
 #[allow(clippy::too_many_arguments)]
-fn create_tab_state(
+fn create_tab_state<G: Glass>(
     id: TabId,
     seats: seats::Seats,
     // What each of this tab's terminal views is born with: 100 %, measured for this window
     // (ticket 37) — see the loop below.
     born: LeafView,
-    renderer: &WindowRenderer,
+    renderer: &G,
     render_physical: PhysicalSize<u32>,
     // The window this tab's shells are born in — see [`create_leaf_session`].
     wake: &PtyWakeSignal,
@@ -41863,6 +43684,7 @@ fn create_tab_state(
             formulas,
             scrollback,
             line_wrapping,
+            &bt_pty::SystemShellEnvironment,
         )?;
         sessions.insert(seat, leaf);
     }
@@ -42502,12 +44324,17 @@ fn move_seat_content(
 /// another one, so the tab it left is still open, still drawing, and the answers
 /// it drops are silently gone.
 ///
-/// **Liveness** is this. Four ledgers say "already asked" and all four travel
-/// with the pane — a `Pending` directory node, a `Pending` git slot, a claimed
-/// head read, and a session's own in-flight sets — so each of them would go on
-/// suppressing the question that would have been re-asked, for the rest of the
-/// session. Cleared here, at the one moment the address changes, they let the
-/// ordinary per-frame asking ask again under the leaf the pane now is.
+/// **Liveness** is this. Three ledgers say "already asked" and all three travel
+/// with the pane — a `Pending` directory node, a claimed head read, and a
+/// session's own in-flight sets — so each of them would go on suppressing the
+/// question that would have been re-asked, for the rest of the session. Cleared
+/// here, at the one moment the address changes, they let the ordinary per-frame
+/// asking ask again under the leaf the pane now is.
+///
+/// **The pane's repository cache is not among them.** Its questions are owed to
+/// the cache's own identity ([`git::GitCacheId`]), never to the leaf, so they
+/// reach it under the leaf it lands under and its dimmed rows and its running
+/// checkout stay held until git's receipt says otherwise.
 ///
 /// **The seat given here is the one it landed under**, never the one it left:
 /// the whole point is to reach the tables *after* they have been re-keyed.
@@ -42516,9 +44343,6 @@ fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
         leaf.session.forget_work_in_flight();
     }
     if let Some(cache) = tab.file_trees.get_mut(&seat) {
-        cache.forget_pending();
-    }
-    if let Some(cache) = tab.git_trees.get_mut(&seat) {
         cache.forget_pending();
     }
     // A preview pane's question is held by the *buffer* it is showing, which is
@@ -43432,6 +45256,11 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         for line in leaf.session.take_keyboard_protocol_notes() {
             diagnostics::note(&line);
         }
+        // **A pane whose PSReadLine is not Folio's after its profile ran** says so once, in the
+        // log and nowhere else (T-INTEGRATION-INJECT-2-BUILD round 2), on the same road.
+        for line in leaf.session.take_line_editor_notes() {
+            diagnostics::note(&line);
+        }
         Ok(DrainOutcome {
             // Taken here because this is the one place every leaf of every tab
             // passes through on every turn, which is the same sentence
@@ -43793,7 +45622,7 @@ fn drain_tab_pty(
 /// doors that open a window differ in exactly the seventeen answers below, and
 /// a field added to the window layer gets its resting value in one place
 /// instead of drifting between a launch and a `New window`.
-struct NewWindowParts {
+struct NewWindowParts<B: Backend = Native> {
     ime_report: ime_report::Report,
     /// Where this window's touch door parks the pans the system recognised —
     /// see [`WindowRuntime::parked_pans`]. Made where the door is opened,
@@ -43803,19 +45632,19 @@ struct NewWindowParts {
     /// so that a page drawn here wears what any window in the process learned
     /// about its site — see [`App::favicons`].
     favicons: Rc<RefCell<favicon::Favicons>>,
-    renderer: WindowRenderer,
+    renderer: B::Glass,
     tabs: Vec<TabState>,
     active_tab: usize,
     pty_wake: PtyWakeSignal,
     translucency_available: bool,
-    custom_window_frame: bt_platform::CustomWindowFrame,
-    compositor: bt_platform::Compositor,
-    window: Arc<Window>,
-    math_context_menu: bt_platform::MathContextMenu,
-    folder_picker: bt_platform::FolderPicker,
-    image_picker: bt_platform::ImagePicker,
-    save_picker: Option<bt_platform::SaveFilePicker>,
-    ime_system_caret: bt_platform::ImeSystemCaret,
+    custom_window_frame: B::Frame,
+    compositor: B::Compositor,
+    window: B::Window,
+    math_context_menu: B::MathMenu,
+    folder_picker: B::FolderPicker,
+    image_picker: B::ImagePicker,
+    save_picker: Option<B::SavePicker>,
+    ime_system_caret: B::ImeCaret,
     rail: seats::RailState,
     seat_viewport: LogicalRect,
     /// The tabs a restore prompt has still to ask about **in this window** —
@@ -43841,7 +45670,7 @@ struct NewWindowParts {
     motion: Motion,
     /// How this window asks the loop to re-read that preference when Windows
     /// says it has moved.
-    event_proxy: EventLoopProxy<AppEvent>,
+    event_proxy: LoopProxy,
 }
 
 /// Assemble a window's runtime from [`NewWindowParts`] and the resting value of
@@ -43863,7 +45692,7 @@ fn display_frame_rate_millihertz(window: &Window) -> Option<u32> {
         .and_then(|monitor| monitor.refresh_rate_millihertz())
 }
 
-fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
+fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> {
     let NewWindowParts {
         ime_report,
         parked_pans,
@@ -43896,39 +45725,33 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
     // that was going to happen. Best-effort, like the taskbar's own subclass — a
     // window that cannot install it keeps exactly the behaviour this window had
     // before there was one.
-    let system_settings_watch = native_window(&window).ok().and_then(|native| {
+    let system_settings_watch = {
         let proxy = event_proxy.clone();
-        bt_platform::SystemSettingsWatch::install(
-            native,
-            Box::new(move |news| {
-                let _ = proxy.send_event(AppEvent::of_system_news(news));
-            }),
-        )
-        .ok()
-    });
+        window.watch_system_settings(Box::new(move |news| {
+            let _ = proxy.send_event(AppEvent::of_system_news(news));
+        }))
+    };
     // **The window's ear for the system ending the session** (B-ENDSESSION). The procedure the
     // system sends the question to holds the document and parks the news; the wake brings the
     // turn that writes it. One per window because the question is sent to every top-level window,
     // and one answer is as good as another: the hold is set once and the write is idempotent.
-    let session_end_watch = native_window(&window).ok().and_then(|native| {
+    let session_end_watch = {
         let proxy = event_proxy.clone();
-        bt_platform::session_end::SessionEndWatch::install(
-            native,
+        window.watch_session_end(
             Box::new(move |end| {
                 session_end::hear(end);
                 let _ = proxy.send_event(AppEvent::SessionEnding);
             }),
-            Box::new(|| i18n::Text::ShutdownSavingLayout.text().to_owned()),
+            Box::new(|| i18n::Text::ShutdownSavingWork.text().to_owned()),
         )
-        .ok()
-    });
+    };
     // **A window is born knowing its display's rate**, before it has drawn
     // anything: the first journey a reader starts can be in the first second,
     // and a window that had to wait for a move or a scale change to find out
     // would pace that journey to the 60 Hz fallback on a 144 Hz panel.
     let frame_clock = {
         let mut clock = pace::FrameClock::default();
-        clock.follow(display_frame_rate_millihertz(&window));
+        clock.follow(window.frame_rate_millihertz());
         clock
     };
     WindowRuntime {
@@ -43976,6 +45799,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         background_picture: None,
         background_decode: BackgroundDecodeMailbox::default(),
         clipboard_picture: ClipboardPictureMailbox::default(),
+        clipboard: clipboard_lane::ClipboardAsks::default(),
         dwm_dark_mode: None,
         translucency_available,
         custom_window_frame,
@@ -43987,7 +45811,6 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         animations_drawn: BTreeMap::new(),
         pictures_owe_a_frame: false,
         picture_boxes_were_moving: false,
-        animation_presence: BTreeMap::new(),
         preview_watch: preview_watch::PreviewWatch::default(),
         files_watch: files_watch::FilesWatch::default(),
         web_cursor: None,
@@ -44180,12 +46003,12 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         preview_crumb_clicks: MultiClicks::default(),
         pane_head_clicks: MultiClicks::default(),
         root_menu: profiles::RootMenu::default(),
+        root_menu_shell_folders: Vec::new(),
         dirty_gate: restore::DirtyGate::default(),
-        psreadline_invite: psreadline::Invite::default(),
+        exited_tab_waits: ExitedTabWaits::default(),
         paste_card_hover: None,
         update_card: update_card::Card::default(),
         first_run: first_run::Card::default(),
-        psreadline_size_changed: false,
         window_close_requested: None,
         shell_exit_close_requested: false,
         preview_menu: profiles::PreviewMenu::default(),
@@ -44428,7 +46251,7 @@ fn forget_standing_answers<'a>(holders: impl Iterator<Item = &'a mut PreviewPane
     }
 }
 
-impl settings::geometry::PointerHost for Runtime<'_> {
+impl<B: Backend> settings::geometry::PointerHost for Runtime<'_, B> {
     fn settings_geometry(&mut self) -> Option<Arc<settings::SettingsLayout>> {
         self.settings_layout()
     }
@@ -44507,7 +46330,7 @@ impl settings::geometry::PointerHost for Runtime<'_> {
 /// something weaker: no attention endpoint means hooks cannot reach this window,
 /// no launch endpoint means a second launch opens its own, and both are where
 /// every machine was before these slices existed.
-fn open_the_data_directorys_endpoints(proxy: &EventLoopProxy<AppEvent>) {
+fn open_the_data_directorys_endpoints(proxy: &LoopProxy) {
     if !persist::is_storage_writer() {
         // The claim is already taken and held by another live Folio, which is
         // the process these names belong to. Saying so is `main`'s — the
@@ -44638,7 +46461,53 @@ mod endpoint_claim_tests {
     }
 }
 
-impl Runtime<'_> {
+/// **What the first window's opening step hands the steps after it** (`startup::FirstWindow`'s
+/// `window`): the native window and everything built on it before its first tab, which
+/// `Runtime::create` assembles the window's runtime from.
+struct OpenedWindow {
+    // **The fields stand in the reverse of the order they were built in**, because a struct drops
+    // its fields in declaration order: when the first tab fails and the opened window is dropped
+    // unassembled, everything built on the window — the renderer and the device, the composition
+    // tree, the pickers, the menu, the caret and the frame, each of which lets go of the window
+    // handle when it drops — goes before the window itself, as the locals they were went in
+    // reverse. The window and its placement drop last.
+    /// When the panes' phase began, for the startup trace.
+    phase_started: Instant,
+    pty_wake: PtyWakeSignal,
+    probe_input: Option<Vec<u8>>,
+    render_physical: PhysicalSize<u32>,
+    renderer_time: Duration,
+    translucency_available: bool,
+    renderer: bt_render::WindowRenderer,
+    gpu: bt_render::GpuContext,
+    compositor: bt_platform::Compositor,
+    window_time: Duration,
+    acrylic_available: bool,
+    save_picker: Option<bt_platform::SaveFilePicker>,
+    image_picker: bt_platform::ImagePicker,
+    folder_picker: bt_platform::FolderPicker,
+    math_context_menu: bt_platform::MathContextMenu,
+    ime_system_caret: bt_platform::ImeSystemCaret,
+    platform_chrome: bt_platform::PlatformChrome,
+    parked_pans: runtime::pointer::touch::ParkedPans,
+    custom_window_frame: bt_platform::CustomWindowFrame,
+    ime_report: ime_report::Report,
+    window: Arc<Window>,
+    restored: Option<RestoredPlacement>,
+}
+
+/// **What the first window's first-tab step made** (`startup::FirstWindow`'s `first_tab`): the
+/// launch's plan and the tabs built from it.
+struct FirstTabs {
+    cli_plan: cli::CliPlan,
+    plan: LaunchPlan,
+    cli_slot: Option<usize>,
+    tab_ids: TabIds,
+    tabs: Vec<TabState>,
+    conpty_sources: Vec<String>,
+}
+
+impl Runtime<'_, Native> {
     /// Open the process's device layer, its `App`, and its first window.
     ///
     /// Returns the two layers rather than a `Runtime` (multiwindow slice C):
@@ -44647,19 +46516,19 @@ impl Runtime<'_> {
     /// window it belongs to.
     fn create(
         event_loop: &ActiveEventLoop,
-        proxy: EventLoopProxy<AppEvent>,
+        proxy: LoopProxy,
         startup_started: Instant,
         cli: &cli::CliRequest,
     ) -> Result<(App, WindowRuntime)> {
-        // Set-but-empty is off, not on ([`diagnostics::switched_on`]).
+        // The four switches as `main` read them (`entry_doors`), set-but-empty off.
         // `BT_PERF_TRACE=` is how a shell says "not this run", and taking it as
         // on turned a profiling session into a measurement of its own
         // `eprintln!`s — the per-frame trace dominated the profile that was
         // supposed to be reading the frames.
-        let trace_startup = diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE"));
-        let trace_resize = diagnostics::switched_on(std::env::var_os("BT_RESIZE_TRACE"));
-        let trace_layout_events = diagnostics::switched_on(std::env::var_os("BT_LAYOUT_EVENTS"));
-        let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
+        let trace_startup = entry_doors::installed().startup;
+        let trace_resize = entry_doors::installed().resize;
+        let trace_layout_events = entry_doors::installed().layout_events;
+        let trace_perf = entry_doors::installed().perf;
         let phase_started = Instant::now();
         // Read the previous session before the window exists, so its bounds can
         // be the window's opening bounds rather than a correction applied after
@@ -44695,22 +46564,8 @@ impl Runtime<'_> {
             eprintln!("BT_PERSIST another Folio holds this data directory; nothing here is saved");
             settings_fault.get_or_insert_with(crate::i18n::second_instance_notice);
         }
-        // Before the first pane can start a probe of its own. A no-op unless
-        // `BT_PSREADLINE_PROBE` is set — see `psreadline::probe_override_from_env`
-        // for why the door exists and what it deliberately does not override.
-        psreadline::install_probe_override();
-        // And how the answer gets back to a window that may be sitting on a
-        // modal when it lands (§7.1.6c-5). Installed here, once, because the
-        // wake belongs to this process's event loop rather than to whichever of
-        // the probe's two triggers fires first — the pane starts it, the dialog
-        // needs the repaint, and they are not the same call.
-        {
-            let proxy = proxy.clone();
-            psreadline::install_wake(move || {
-                let _ = proxy.send_event(AppEvent::PsReadLineProbed);
-            });
-        }
-        // And the second probe's, beside it and for its argument (§7.1.6j).
+        // The `$PROFILE` probe's wake (§7.1.6j), installed here, once, because the wake belongs to
+        // this process's event loop; the earlier Folio's PSReadLine copy's answers ride it too.
         {
             let proxy = proxy.clone();
             shell_integration::install_wake(move || {
@@ -44932,17 +46787,15 @@ impl Runtime<'_> {
         // own words and a build that silently rewrote one it could not read
         // would destroy the copy they could have fixed by hand.
         let mut keybindings_store = persist::KeybindingsStore::open(session_store.lane());
-        let mut shortcuts = shortcuts::Shortcuts::defaults();
-        let overrides: Vec<shortcuts::Override> = keybindings_store
-            .loaded()
-            .iter()
-            .map(|entry| shortcuts::Override {
-                id: entry.action.clone(),
-                chord: entry.chord.clone(),
-            })
-            .collect();
         let mut keybindings_fault = keybindings_store.take_fault();
-        for fault in shortcuts.apply_overrides(&overrides) {
+        // Read in the file's own dialect and carried to this one, the rule an import and a
+        // merge read with; a line naming an action this build has no row for is carried in the
+        // file, never written out of it by a press on another row.
+        let (shortcuts, refused) = settings_bundle::shortcuts_at_start(
+            &mut keybindings_store,
+            bt_platform::host_platform(),
+        );
+        for fault in refused {
             eprintln!(
                 "BT_PERSIST {} refused {}: {}",
                 persist::KEYBINDINGS_FILE_NAME,
@@ -44958,18 +46811,6 @@ impl Runtime<'_> {
                 )
             });
         }
-        // The same for the shortcut table: a line naming an action this build has no row for is
-        // carried in the file, never written out of it by a press on another row.
-        keybindings_store.project(
-            shortcuts
-                .overrides()
-                .into_iter()
-                .map(|entry| bt_persist::BindingOverrideV1 {
-                    action: entry.id,
-                    chord: entry.chord,
-                })
-                .collect(),
-        );
         let theme_mode = startup_theme_mode(settings_store.loaded(), session_store.loaded());
         shell_integration::set_powershell_integration(settings_store.loaded().shell_integration);
         // **The carry-forward's own write, and the only one it ever makes.**
@@ -45011,419 +46852,532 @@ impl Runtime<'_> {
         let focus_mode = settings_store.loaded().focus_mode;
         // Every row unknown until the walk asked for above has answered it.
         let mut profile_programs = profiles::ProfilePrograms::unknown();
-        // **Folio's own older PSReadLine is replaced here, without asking**
-        // (ruling 2026-09-21, option A; ticket 56). At the launch and before the
-        // first window, because a pane of this Folio starting a PowerShell is
-        // what would hold the old DLL open and make the write fail; and before
-        // the profile migration's worker, which takes the same marks lock. Only
-        // a build Folio recorded installing and older than the bundled one is
-        // touched (`psreadline::upgrade_decision`); a failure is one line here
-        // and the next launch tries again. On this thread, as the Settings
-        // row's own install is (RULES §38's debt).
-        let psreadline_documents = psreadline::documents_directory();
-        if let Some(documents) = psreadline_documents.as_deref()
-            && let Some(replacement) = psreadline::upgrade_recorded(
-                documents,
-                &persist::storage_dir(),
-                settings_store.loaded().psreadline_invite,
-            )
-        {
-            eprintln!("{}", replacement.log_line());
-        }
-        shell_integration::begin_startup_migration();
-        // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
-        // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
-        // The parser questions about the PowerShell rows follow when the walk has answered them.
-        shell_integration::begin_powershell_script_preparation();
-        // **The canvas, settled before there is a window to paint one in**
-        // (§7.46 ②). Everything below this point — the first frame, the first
-        // pane, and the `OSC 11` that pane answers — happens on the canvas
-        // decided here, and there is no earlier one for anything to be painted
-        // in by mistake.
-        //
-        // **Before `set_theme`**, which is the whole of why it is here: the
-        // theme's own atomic caches the background it resolves to, and that
-        // background is now a colour of the scheme rather than a constant. A
-        // pair adopted afterwards would leave the first frame painted on the
-        // canvas of whichever scheme the process was born with.
-        adopt_stored_schemes(settings_store.loaded());
-        // Beside the schemes and for their reason: the floor is read on every cell of the
-        // first frame, so a file that asks for one must be obeyed before that frame is drawn
-        // rather than at the first press of the row.
-        install_minimum_contrast(settings_store.loaded().minimum_contrast);
-        let resolved_theme = resolve_theme_mode(theme_mode, system_os_theme());
-        if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
-            eprintln!(
-                "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
-            );
-        }
-        let restored = restore_window_placement(event_loop, &opening);
-        // Titled from whatever the walk has answered so far; the active tab's own title replaces
-        // it before the first paint either way.
-        adopt_program_answers(&mut profile_programs, programs_lane::take());
-        let attributes = opening_window_attributes(
-            profiles::identity_title(&profiles::default_profile_identity(
-                &settings_store.loaded().default_profile,
-                &profile_programs,
-            )),
-            restored
-                .map(|placement| placement.size)
-                .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
-        );
-        let attributes = match restored.and_then(|placement| placement.position) {
-            Some(position) => attributes.with_position(position),
-            None => attributes,
-        };
-        let window = Arc::new(
-            event_loop
-                .create_window(attributes)
-                .context("create native window")?,
-        );
-        let mut ime_report = ime_report::Report::default();
-        ime_report.created(ime_report::now_ms());
-        ime_report.trace_order(window.id(), "created");
-        install_theme_class_background(&window);
-        hang_watch::during(hang_watch::Station::ImeAllowed, || {
-            ime_outbound::line(|| {
-                format!(
-                    "window={} {}",
-                    u64::from(window.id()),
-                    ime_outbound::allowed_line(true, "window_construction")
-                )
-            });
-            window.set_ime_allowed(true)
-        });
-        ime_report.allowed(true, ime_report::now_ms());
-        ime_report.trace_order(window.id(), "allowed");
-        // Beside `set_ime_allowed` because it is the other half of the same
-        // sentence — what this window does with the keys that are not plain
-        // letters — and the stored answer rather than the shipped one, so a
-        // reader who turned the row on does not watch their first `⌥a` compose
-        // an `å` before the setting is read.
-        set_option_as_alt(&window, settings_store.loaded().option_sends_alt);
-        let native = native_window(&window)?;
-        // **The clipboard's owner window, told once here and never carried by a
-        // caller again** (M1-9). `OpenClipboard` wants a window and
-        // `NSPasteboard` does not, so the handle used to be a parameter on a
-        // door that has to have one signature on every platform; the backend
-        // keeps the list of this process's windows instead, and
-        // `bt_platform::clipboard_text`, `set_clipboard_text` and
-        // `cancel_composition` ask it rather than their callers.
-        bt_platform::register_clipboard_owner(native);
-        // The frame's own measurement travels with the install, from the crate
-        // that paints it (spike Q5 item 2): the title bar the pointer is tested
-        // against and the title bar the renderer draws are literally the same
-        // number instead of two constants in two crates that happened to agree.
-        // The caption run's width left this pair with the drag boundary
-        // (§13.11 ⑥): what is clicked in that bar arrives as boxes now.
-        let custom_window_frame = bt_platform::CustomWindowFrame::install(
-            native,
-            bt_platform::CustomFrameGeometry {
-                title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
+        // **An earlier Folio's PSReadLine in Documents is looked for, never written**
+        // (T-INTEGRATION-INJECT-2-BUILD, owner ruling Q4): Folio's own panes run Folio's own
+        // module from its local data folder, so the launch replaces nothing; it only finds out,
+        // on a worker, whether the Terminal page owes the copy's removal row.
+        psreadline::begin_legacy_observation();
+        // **The first window, in `startup::resume`'s order**: Windows PowerShell's language
+        // question, the startup migration and the script's preparation, the window, the
+        // PowerShell questions, the first tab. What the
+        // steps share is the program walk's answers, adopted by the window's title and by the
+        // questions, and read by the first tab.
+        let (opened, first) = startup::resume(
+            &mut profile_programs,
+            startup::FirstWindow {
+                // Only with the Shell integration switch on: a launch with it off starts no
+                // Windows PowerShell; a birth after it is turned on asks for itself.
+                language: || {
+                    shell_integration::begin_language_question(
+                        settings_store.loaded().shell_integration,
+                    )
+                },
+                migration: shell_integration::begin_startup_migration,
+                script: || {
+                    // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
+                    // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
+                    // The parser questions about the PowerShell rows follow when the walk has answered them.
+                    shell_integration::begin_powershell_script_preparation()
+                },
+                window: |profile_programs: &mut profiles::ProfilePrograms| -> Result<OpenedWindow> {
+                    // **The canvas, settled before there is a window to paint one in**
+                    // (§7.46 ②). Everything below this point — the first frame, the first
+                    // pane, and the `OSC 11` that pane answers — happens on the canvas
+                    // decided here, and there is no earlier one for anything to be painted
+                    // in by mistake.
+                    //
+                    // **Before `set_theme`**, which is the whole of why it is here: the
+                    // theme's own atomic caches the background it resolves to, and that
+                    // background is now a colour of the scheme rather than a constant. A
+                    // pair adopted afterwards would leave the first frame painted on the
+                    // canvas of whichever scheme the process was born with.
+                    adopt_stored_schemes(settings_store.loaded());
+                    // Beside the schemes and for their reason: the floor is read on every cell of the
+                    // first frame, so a file that asks for one must be obeyed before that frame is drawn
+                    // rather than at the first press of the row.
+                    install_minimum_contrast(settings_store.loaded().minimum_contrast);
+                    let resolved_theme = resolve_theme_mode(theme_mode, system_os_theme());
+                    if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
+                        eprintln!(
+                            "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
+                        );
+                    }
+                    let restored = restore_window_placement(event_loop, &opening);
+                    // Titled from whatever the walk has answered so far; the active tab's own title replaces
+                    // it before the first paint either way.
+                    adopt_program_answers(profile_programs, programs_lane::take());
+                    let attributes = opening_window_attributes(
+                        profiles::identity_title(&profiles::default_profile_identity(
+                            &settings_store.loaded().default_profile,
+                            profile_programs,
+                        )),
+                        restored
+                            .map(|placement| placement.size)
+                            .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
+                    );
+                    let attributes = match restored.and_then(|placement| placement.position) {
+                        Some(position) => attributes.with_position(position),
+                        None => attributes,
+                    };
+                    let window = Arc::new(
+                        event_loop
+                            .create_window(attributes)
+                            .context("create native window")?,
+                    );
+                    let mut ime_report = ime_report::Report::default();
+                    ime_report.created(ime_report::now_ms());
+                    ime_report.trace_order(window.id(), "created");
+                    install_theme_class_background(&window);
+                    hang_watch::during(hang_watch::Station::ImeAllowed, || {
+                        ime_outbound::line(|| {
+                            format!(
+                                "window={} {}",
+                                u64::from(window.id()),
+                                ime_outbound::allowed_line(true, "window_construction")
+                            )
+                        });
+                        window.set_ime_allowed(true)
+                    });
+                    ime_report.allowed(true, ime_report::now_ms());
+                    ime_report.trace_order(window.id(), "allowed");
+                    // Beside `set_ime_allowed` because it is the other half of the same
+                    // sentence — what this window does with the keys that are not plain
+                    // letters — and the stored answer rather than the shipped one, so a
+                    // reader who turned the row on does not watch their first `⌥a` compose
+                    // an `å` before the setting is read.
+                    set_option_as_alt(&window, settings_store.loaded().option_sends_alt);
+                    let native = native_window_of(&window)?;
+                    // **The clipboard's owner window, told once here and never carried by a
+                    // caller again** (M1-9). `OpenClipboard` wants a window and
+                    // `NSPasteboard` does not, so the handle used to be a parameter on a
+                    // door that has to have one signature on every platform; the backend
+                    // keeps the list of this process's windows instead, and
+                    // `bt_platform::clipboard_text`, `set_clipboard_text` and
+                    // `cancel_composition` ask it rather than their callers.
+                    bt_platform::register_clipboard_owner(native);
+                    // The frame's own measurement travels with the install, from the crate
+                    // that paints it (spike Q5 item 2): the title bar the pointer is tested
+                    // against and the title bar the renderer draws are literally the same
+                    // number instead of two constants in two crates that happened to agree.
+                    // The caption run's width left this pair with the drag boundary
+                    // (§13.11 ⑥): what is clicked in that bar arrives as boxes now.
+                    let custom_window_frame = bt_platform::CustomWindowFrame::install(
+                        native,
+                        bt_platform::CustomFrameGeometry {
+                            title_bar_logical_px: bt_render::WINDOW_TITLE_BAR_LOGICAL_PX as u32,
+                        },
+                        // **And how the frame asks for a turn when what it measured moves**
+                        // (§13.48) — the shape `SystemSettingsWatch` already has, for its
+                        // reason: a window whose platform takes its own buttons away has had
+                        // nothing happen to it that this loop would otherwise notice.
+                        {
+                            let proxy = proxy.clone();
+                            Box::new(move || {
+                                let _ = proxy.send_event(AppEvent::WindowChromeChanged);
+                            })
+                        },
+                    )
+                    .map_err(|error| anyhow!(error))
+                    .context("install self-drawn Win32 window frame")?;
+                    // **Touch is the system's to translate, and this window says so**
+                    // (owner ruling 2026-09-21). Beside the frame because it is the same
+                    // kind of statement about the same native window, and after it because
+                    // winit made the registration this undoes when it built the window.
+                    // Reported and never propagated: a window that answers nothing to a
+                    // finger is a window, and a launch that died instead is not.
+                    let parked_pans =
+                        runtime::pointer::touch::let_the_system_translate_touch(native, &proxy);
+                    // **This window's own chrome, read where it was measured** (M3-3;
+                    // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
+                    // where the platform is asked what it still draws in this bar, and the
+                    // tabs this constructor is about to build are solved against a stage
+                    // whose top edge that answer decides — so it is read here, once, and
+                    // handed down. Every reader after the window exists asks the window
+                    // (`Runtime::platform_chrome`); there is no window to ask yet.
+                    let platform_chrome = custom_window_frame.platform_chrome();
+                    let ime_system_caret = bt_platform::ImeSystemCaret::new(native);
+                    let math_context_menu = bt_platform::MathContextMenu::new(native)
+                        .map_err(|error| anyhow!(error))
+                        .context("install deferred formula context menu")?;
+                    let folder_picker = bt_platform::FolderPicker::new(native)
+                        .map_err(|error| anyhow!(error))
+                        .context("install deferred folder chooser")?;
+                    let image_picker = bt_platform::ImagePicker::new(native)
+                        .map_err(|error| anyhow!(error))
+                        .context("install deferred picture chooser")?;
+                    // **Reported, not propagated** (`the_m1_startup_path_has_no_fatal_platform_call_off_windows`):
+                    // the export's dialog is not a reason for a window not to open. A window
+                    // without one says so when `Export…` is pressed.
+                    let save_picker = bt_platform::SaveFilePicker::new(native)
+                        .inspect_err(|error| {
+                            eprintln!("recoverable save dialog install failure: {error}")
+                        })
+                        .ok();
+                    // Asked of DWM once, before anything reads the Acrylic row, by writing
+                    // the attribute's own default: a Windows that has never heard of
+                    // `DWMWA_SYSTEMBACKDROP_TYPE` refuses it, and one that has is unchanged.
+                    // A build-number table would be this program maintaining a list of which
+                    // Windows has which feature, which is a list that is wrong the first time
+                    // anybody backports anything.
+                    let acrylic_available = bt_platform::system_backdrop_available(native);
+                    // Only now, with the self-drawn frame owning WM_NCCALCSIZE, does "the
+                    // window's rectangle" mean one thing instead of two. Restate the geometry
+                    // as that one rectangle: what winit built is the saved size plus a native
+                    // frame margin (26x71 physical at 192 DPI) that this window does not
+                    // wear, and left alone it would be saved, re-inflated and re-saved on
+                    // every restart. The window is still hidden, so this costs no flicker.
+                    //
+                    // # Note for the second window (multiwindow spike Q5, item 3)
+                    //
+                    // This is not first-window startup housekeeping — it is what every
+                    // window this process ever opens owes itself, and the spike deliberately
+                    // left its second window unfixed as evidence: it asked for 720x420
+                    // logical and got a 1466x911 client, because winit sizes by client and
+                    // `WM_NCCALCSIZE` then makes the client the whole outer rectangle. A
+                    // torn-out window that skips this line opens one native frame margin
+                    // larger than the one it was torn from, and grows again on every
+                    // restart. Left as a note rather than as a helper because the slice that
+                    // opens a second window is the one that will have somewhere to put it.
+                    let opened_at = dpi_snapshot(&window)?;
+                    stand_the_window_at(
+                        native,
+                        startup_window_rect(
+                            restored,
+                            opened_at.rect,
+                            opened_at.authoritative_scale,
+                        ),
+                        "restore the first window's outer rectangle",
+                    );
+                    let window_time = phase_started.elapsed();
+                    let startup_dpi = dpi_snapshot(&window)?;
+                    let physical = window.inner_size();
+                    let startup_scale_factor = startup_dpi.authoritative_scale;
+                    let phase_started = Instant::now();
+                    // The visual tree first, because the swapchain hangs off it. Its
+                    // `topmost = true` target composes above this window's own painting, so
+                    // anywhere the swapchain has not reached yet — before the first present,
+                    // and in the band a resize opens up — shows the class background brush
+                    // installed a few lines above, exactly as it did when the swapchain was
+                    // the window's own. An owner-thread door (`doors::CompositorBirth`): a refusal is this
+                    // road's own error.
+                    let compositor = bt_platform::admission::admitted::<
+                        bt_platform::admission::doors::CompositorBirth,
+                        _,
+                    >(|token| {
+                        bt_platform::Compositor::new(token, native)
+                    })
+                    .unwrap_or_else(|refused| Err(refused.to_string()))
+                    .map_err(|error| anyhow!(error))
+                    .context("open the window's DirectComposition visual tree")?;
+                    // The floor's colour is settled with the tree and not with the first
+                    // page: a page can be born at launch (`BT_WEB_DEV`, a restored session),
+                    // and a floor that learned its colour only from the *next* theme flip
+                    // would be black under the first one.
+                    install_page_ground_color(&compositor);
+                    // Row 23's wait, admitted as its owner-thread door (`doors::GpuOpen`); a refusal is this
+                    // road's own error.
+                    let (mut gpu, mut renderer) = bt_platform::admission::admitted::<
+                        bt_platform::admission::doors::GpuOpen,
+                        _,
+                    >(|token| {
+                        gpu_door::open_first_window(
+                            token,
+                            window_surface_target(&window, &compositor),
+                            physical.width,
+                            physical.height,
+                            startup_scale_factor,
+                        )
+                        .map_err(anyhow::Error::from)
+                    })
+                    .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
+                    .context("initialize wgpu renderer")?;
+                    note_gpu_adapter(&gpu);
+                    if trace_startup && let Some(alpha) = renderer.alpha_report() {
+                        // The spike printed exactly these two lines, and they are what a
+                        // machine that goes wrong here will be asked for: the chosen mode
+                        // alone leaves "why not the other one" unanswerable.
+                        trace_sink::stderr_line(format!(
+                            "BT_STARTUP alpha target={:?}",
+                            alpha.target
+                        ));
+                        trace_sink::stderr_line(format!(
+                            "BT_STARTUP alpha offered={:?}",
+                            alpha.offered
+                        ));
+                        trace_sink::stderr_line(format!(
+                            "BT_STARTUP alpha chosen={:?}",
+                            alpha.chosen
+                        ));
+                    }
+                    // What the Background opacity row is allowed to offer, taken from the
+                    // surface that was actually configured rather than assumed (§7.1.6c-4b).
+                    // Today `Compositor::new` and `choose_alpha_mode` between them mean a
+                    // window that opened at all opened premultiplied — but the row's state
+                    // has to be a *reading* and not a restatement of that argument, because
+                    // the day a second window target exists is the day an assumption here
+                    // draws a slider that moves and changes nothing.
+                    let translucency_available = renderer
+                        .alpha_report()
+                        .is_some_and(bt_render::SurfaceAlphaReport::is_premultiplied);
+                    // **Before the first grid is measured**, which is the whole of why it is
+                    // here and not after the seats are solved: every rectangle below is
+                    // derived from `renderer.metrics()`, so a face applied afterwards would
+                    // put a window on screen whose columns were counted for a different
+                    // cell. The hot path (`apply_terminal_font`) re-solves all of that; this
+                    // one has nothing to re-solve yet.
+                    apply_stored_terminal_font(&mut gpu, &mut renderer, settings_store.loaded())?;
+                    ensure_metrics_match_authoritative_scale(
+                        renderer.scale_factor(),
+                        startup_scale_factor,
+                    )?;
+                    trace_surface_size_clamp(
+                        trace_startup || trace_resize,
+                        "BT_STARTUP",
+                        physical,
+                        renderer.presentation_geometry(),
+                    );
+                    ensure_swapchain_matches_inner(&renderer, physical)?;
+                    log_dpi_snapshot(
+                        "create",
+                        startup_dpi,
+                        None,
+                        renderer.presentation_geometry(),
+                        physical,
+                    );
+                    let renderer_time = phase_started.elapsed();
+                    let render_physical =
+                        presentation_physical_size(renderer.presentation_geometry());
+                    // The seam of §4.2, in the one order it is allowed to run: window
+                    // geometry -> viewport -> solve -> seat rects -> the terminal seat's
+                    // cols/rows. The persisted tree is layout *intent* (L11); the rectangle
+                    // it produces here is computed fresh against this machine's DPI.
+                    let probe_input = load_probe_input()?;
+                    let pty_wake = PtyWakeSignal::new(proxy.clone());
+                    let phase_started = Instant::now();
+                    Ok(OpenedWindow {
+                        restored,
+                        window,
+                        ime_report,
+                        custom_window_frame,
+                        parked_pans,
+                        platform_chrome,
+                        ime_system_caret,
+                        math_context_menu,
+                        folder_picker,
+                        image_picker,
+                        save_picker,
+                        acrylic_available,
+                        window_time,
+                        compositor,
+                        gpu,
+                        renderer,
+                        translucency_available,
+                        renderer_time,
+                        render_physical,
+                        probe_input,
+                        pty_wake,
+                        phase_started,
+                    })
+                },
+                questions: |profile_programs: &mut profiles::ProfilePrograms| {
+                    // **The walk's answers, read as late as the launch can read them** — right before the
+                    // panes are made, without waiting. Everything below decides from these exactly as it
+                    // always did from the probe that stood here; a row still unanswered is decided by nobody.
+                    adopt_program_answers(profile_programs, programs_lane::take());
+                    shell_integration::begin_powershell_preparation_for(profile_programs)
+                },
+                first_tab: |profile_programs: &mut profiles::ProfilePrograms,
+                            opened: &mut OpenedWindow|
+                 -> Result<FirstTabs> {
+                    let OpenedWindow {
+                        gpu,
+                        renderer,
+                        render_physical,
+                        probe_input,
+                        pty_wake,
+                        platform_chrome,
+                        ..
+                    } = opened;
+                    let (render_physical, platform_chrome) = (*render_physical, *platform_chrome);
+                    let wake = &*pty_wake;
+                    let default_profile = profiles::default_profile(
+                        &settings_store.loaded().default_profile,
+                        profile_programs,
+                    );
+                    // The same answer as a seed spells it — see `Runtime::default_profile_id`.
+                    let default_profile_id = profiles::default_profile_identity(
+                        &settings_store.loaded().default_profile,
+                        profile_programs,
+                    );
+                    // The command line, put to this machine: the folder asked about, the
+                    // profile looked up in this build's table, and the crossing into that
+                    // profile's namespace. Everything it could not honour comes back in the
+                    // plan's own list and is said on a card once the window is up.
+                    let mut cli_plan: cli::CliPlan =
+                        cli::resolve(cli, default_profile, cli::machine_path_kind);
+                    // **`--with-environment` reads this process's environment, which on a first launch is
+                    // the launcher's** (owner ruling 2026-10-05: the one explicit way to carry it).
+                    cli_plan.carried_environment = cli
+                        .with_environment
+                        .then(cli::CarriedEnvironment::of_this_process);
+                    // Pinned tabs are an answer already given, so they simply open; the rest
+                    // become a question the prompt will ask over a window that already works.
+                    let plan = if probe_input.is_some() {
+                        LaunchPlan::default()
+                    } else {
+                        plan_launch(
+                            &opening.tabs,
+                            opening.active_tab as usize,
+                            cli_plan.wants_pane,
+                        )
+                    };
+                    // **The tab the command line asked for, in front of the revived ones**
+                    // (§7.2). It is built here rather than by `revive_plan` because it comes
+                    // from a command line and not from a file: there is no tree to rebuild,
+                    // no files column to re-root and no pool to refill — one terminal seat,
+                    // one seed, and the seed is the whole of what was asked for.
+                    let cli_root = cli_plan.wants_pane.then(|| {
+                        let seats = seats::Seats::lone_terminal();
+                        let leaves = seats
+                            .terminals()
+                            .into_iter()
+                            .map(|seat| (seat, cli_leaf_seed(&cli_plan)))
+                            .collect();
+                        (
+                            seats,
+                            TabSeed {
+                                // The command-line tab owns what `--with-environment` carried.
+                                carried_environment: cli_plan.carried_environment.clone(),
+                                ..TabSeed::default()
+                            },
+                            leaves,
+                            BTreeMap::new(),
+                            PreviewRestore::default(),
+                        )
+                    });
+                    // **The one slot both the strip and the seat are read off** — see
+                    // [`cli_tab_slot`] for why it is not `0`. Computed from the *plan* and
+                    // not from the built tabs, because it is also what `launch_active_tab`
+                    // is told, and a number derived twice is a number that can differ twice.
+                    let cli_slot = cli_root.is_some().then(|| {
+                        cli_tab_slot(&plan.open.iter().map(|tab| tab.pinned).collect::<Vec<_>>())
+                    });
+                    let restored_roots: Vec<_> = if plan.open.is_empty() && cli_root.is_none() {
+                        vec![(
+                            seats::Seats::lone_terminal(),
+                            TabSeed::default(),
+                            BTreeMap::new(),
+                            BTreeMap::new(),
+                            PreviewRestore::default(),
+                        )]
+                    } else {
+                        let mut roots: Vec<_> = plan.open.iter().map(revive_plan).collect();
+                        if let (Some(cli_root), Some(slot)) = (cli_root, cli_slot) {
+                            roots.insert(slot, cli_root);
+                        }
+                        roots
+                    };
+                    // **The process's tab numbering starts here, once** (F1b). Built before
+                    // the `App` it will live in, because the first window's tabs are numbered
+                    // before there is an `App` to ask — and numbered by the same allocator
+                    // every later window asks, which is the whole of the A case.
+                    let mut tab_ids = TabIds::new();
+                    let mut tabs = Vec::with_capacity(restored_roots.len());
+                    let mut conpty_sources = Vec::with_capacity(restored_roots.len());
+                    for (index, (seats, seed, leaves, files, preview)) in
+                        restored_roots.into_iter().enumerate()
+                    {
+                        let (tab, conpty_source) = create_tab_state(
+                            tab_ids.mint(),
+                            seats,
+                            LeafView::at(gpu, &*renderer, TextScale::ACTUAL)?,
+                            &*renderer,
+                            render_physical,
+                            wake,
+                            if index == 0 {
+                                probe_input.as_deref()
+                            } else {
+                                None
+                            },
+                            // A revived tab stands where its seed says, not where some other
+                            // tab happens to be — that address IS what a seed is for, and
+                            // now there is one per pane.
+                            &leaves,
+                            // And every files column comes back rooted where it was left,
+                            // which before this slice was nowhere at all.
+                            &files,
+                            // And every preview pane comes back on the file it was showing,
+                            // out of a pool that comes back as the list of names it was.
+                            &preview,
+                            seed,
+                            profile_programs,
+                            &default_profile_id,
+                            &settings_store.loaded().default_profile,
+                            // Startup: the opening rectangle is the program's own.
+                            SizePolicy::Lawful,
+                            // **The panel this window is opening with, both halves of it.**
+                            // `RailState::default()` stood here and was a horizontal window
+                            // with no panel at all, which every later solve corrected on the
+                            // first resize — so the cost was one frame, and with §7.1.6b′ that
+                            // frame is a card column standing on top of the panes. The stage's
+                            // left edge is a fact about the window, and it is known here: the
+                            // restored `Tab layout`/`Sidebar` pair, joined to the focus bit
+                            // `settings.json` opens the window in.
+                            seats::RailState {
+                                focus: focus_mode,
+                                ..rail
+                            },
+                            platform_chrome,
+                            FormulaSwitches::from_settings(settings_store.loaded()),
+                            scrollback_quota(settings_store.loaded().scrollback_lines),
+                            settings_store.loaded().line_wrapping,
+                        )?;
+                        tabs.push(tab);
+                        conpty_sources.push(conpty_source);
+                    }
+                    Ok(FirstTabs {
+                        cli_plan,
+                        plan,
+                        cli_slot,
+                        tab_ids,
+                        tabs,
+                        conpty_sources,
+                    })
+                },
             },
-            // **And how the frame asks for a turn when what it measured moves**
-            // (§13.48) — the shape `SystemSettingsWatch` already has, for its
-            // reason: a window whose platform takes its own buttons away has had
-            // nothing happen to it that this loop would otherwise notice.
-            {
-                let proxy = proxy.clone();
-                Box::new(move || {
-                    let _ = proxy.send_event(AppEvent::WindowChromeChanged);
-                })
-            },
-        )
-        .map_err(|error| anyhow!(error))
-        .context("install self-drawn Win32 window frame")?;
-        // **Touch is the system's to translate, and this window says so**
-        // (owner ruling 2026-09-21). Beside the frame because it is the same
-        // kind of statement about the same native window, and after it because
-        // winit made the registration this undoes when it built the window.
-        // Reported and never propagated: a window that answers nothing to a
-        // finger is a window, and a launch that died instead is not.
-        let parked_pans = runtime::pointer::touch::let_the_system_translate_touch(native, &proxy);
-        // **This window's own chrome, read where it was measured** (M3-3;
-        // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
-        // where the platform is asked what it still draws in this bar, and the
-        // tabs this constructor is about to build are solved against a stage
-        // whose top edge that answer decides — so it is read here, once, and
-        // handed down. Every reader after the window exists asks the window
-        // (`Runtime::platform_chrome`); there is no window to ask yet.
-        let platform_chrome = custom_window_frame.platform_chrome();
-        let ime_system_caret = bt_platform::ImeSystemCaret::new(native);
-        let math_context_menu = bt_platform::MathContextMenu::new(native)
-            .map_err(|error| anyhow!(error))
-            .context("install deferred formula context menu")?;
-        let folder_picker = bt_platform::FolderPicker::new(native)
-            .map_err(|error| anyhow!(error))
-            .context("install deferred folder chooser")?;
-        let image_picker = bt_platform::ImagePicker::new(native)
-            .map_err(|error| anyhow!(error))
-            .context("install deferred picture chooser")?;
-        // **Reported, not propagated** (`the_m1_startup_path_has_no_fatal_platform_call_off_windows`):
-        // the export's dialog is not a reason for a window not to open. A window
-        // without one says so when `Export…` is pressed.
-        let save_picker = bt_platform::SaveFilePicker::new(native)
-            .inspect_err(|error| eprintln!("recoverable save dialog install failure: {error}"))
-            .ok();
-        // Asked of DWM once, before anything reads the Acrylic row, by writing
-        // the attribute's own default: a Windows that has never heard of
-        // `DWMWA_SYSTEMBACKDROP_TYPE` refuses it, and one that has is unchanged.
-        // A build-number table would be this program maintaining a list of which
-        // Windows has which feature, which is a list that is wrong the first time
-        // anybody backports anything.
-        let acrylic_available = bt_platform::system_backdrop_available(native);
-        // Only now, with the self-drawn frame owning WM_NCCALCSIZE, does "the
-        // window's rectangle" mean one thing instead of two. Restate the geometry
-        // as that one rectangle: what winit built is the saved size plus a native
-        // frame margin (26x71 physical at 192 DPI) that this window does not
-        // wear, and left alone it would be saved, re-inflated and re-saved on
-        // every restart. The window is still hidden, so this costs no flicker.
-        //
-        // # Note for the second window (multiwindow spike Q5, item 3)
-        //
-        // This is not first-window startup housekeeping — it is what every
-        // window this process ever opens owes itself, and the spike deliberately
-        // left its second window unfixed as evidence: it asked for 720x420
-        // logical and got a 1466x911 client, because winit sizes by client and
-        // `WM_NCCALCSIZE` then makes the client the whole outer rectangle. A
-        // torn-out window that skips this line opens one native frame margin
-        // larger than the one it was torn from, and grows again on every
-        // restart. Left as a note rather than as a helper because the slice that
-        // opens a second window is the one that will have somewhere to put it.
-        let opened_at = dpi_snapshot(&window)?;
-        stand_the_window_at(
-            native,
-            startup_window_rect(restored, opened_at.rect, opened_at.authoritative_scale),
-            "restore the first window's outer rectangle",
-        );
-        let window_time = phase_started.elapsed();
-        let startup_dpi = dpi_snapshot(&window)?;
-        let physical = window.inner_size();
-        let startup_scale_factor = startup_dpi.authoritative_scale;
-        let phase_started = Instant::now();
-        // The visual tree first, because the swapchain hangs off it. Its
-        // `topmost = true` target composes above this window's own painting, so
-        // anywhere the swapchain has not reached yet — before the first present,
-        // and in the band a resize opens up — shows the class background brush
-        // installed a few lines above, exactly as it did when the swapchain was
-        // the window's own. An owner-thread door (`doors::CompositorBirth`): a refusal is this
-        // road's own error.
-        let compositor = bt_platform::admission::admitted::<
-            bt_platform::admission::doors::CompositorBirth,
-            _,
-        >(|token| bt_platform::Compositor::new(token, native))
-        .unwrap_or_else(|refused| Err(refused.to_string()))
-        .map_err(|error| anyhow!(error))
-        .context("open the window's DirectComposition visual tree")?;
-        // The floor's colour is settled with the tree and not with the first
-        // page: a page can be born at launch (`BT_WEB_DEV`, a restored session),
-        // and a floor that learned its colour only from the *next* theme flip
-        // would be black under the first one.
-        install_page_ground_color(&compositor);
-        // Row 23's wait, admitted as its owner-thread door (`doors::GpuOpen`); a refusal is this
-        // road's own error.
-        let (mut gpu, mut renderer) = bt_platform::admission::admitted::<
-            bt_platform::admission::doors::GpuOpen,
-            _,
-        >(|token| {
-            gpu_door::open_first_window(
-                token,
-                window_surface_target(&window, &compositor),
-                physical.width,
-                physical.height,
-                startup_scale_factor,
-            )
-            .map_err(anyhow::Error::from)
-        })
-        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
-        .context("initialize wgpu renderer")?;
-        note_gpu_adapter(&gpu);
-        if trace_startup && let Some(alpha) = renderer.alpha_report() {
-            // The spike printed exactly these two lines, and they are what a
-            // machine that goes wrong here will be asked for: the chosen mode
-            // alone leaves "why not the other one" unanswerable.
-            trace_sink::stderr_line(format!("BT_STARTUP alpha target={:?}", alpha.target));
-            trace_sink::stderr_line(format!("BT_STARTUP alpha offered={:?}", alpha.offered));
-            trace_sink::stderr_line(format!("BT_STARTUP alpha chosen={:?}", alpha.chosen));
-        }
-        // What the Background opacity row is allowed to offer, taken from the
-        // surface that was actually configured rather than assumed (§7.1.6c-4b).
-        // Today `Compositor::new` and `choose_alpha_mode` between them mean a
-        // window that opened at all opened premultiplied — but the row's state
-        // has to be a *reading* and not a restatement of that argument, because
-        // the day a second window target exists is the day an assumption here
-        // draws a slider that moves and changes nothing.
-        let translucency_available = renderer
-            .alpha_report()
-            .is_some_and(bt_render::SurfaceAlphaReport::is_premultiplied);
-        // **Before the first grid is measured**, which is the whole of why it is
-        // here and not after the seats are solved: every rectangle below is
-        // derived from `renderer.metrics()`, so a face applied afterwards would
-        // put a window on screen whose columns were counted for a different
-        // cell. The hot path (`apply_terminal_font`) re-solves all of that; this
-        // one has nothing to re-solve yet.
-        apply_stored_terminal_font(&mut gpu, &mut renderer, settings_store.loaded())?;
-        ensure_metrics_match_authoritative_scale(renderer.scale_factor(), startup_scale_factor)?;
-        trace_surface_size_clamp(
-            trace_startup || trace_resize,
-            "BT_STARTUP",
-            physical,
-            renderer.presentation_geometry(),
-        );
-        ensure_swapchain_matches_inner(&renderer, physical)?;
-        log_dpi_snapshot(
-            "create",
-            startup_dpi,
-            None,
-            renderer.presentation_geometry(),
-            physical,
-        );
-        let renderer_time = phase_started.elapsed();
-        let render_physical = presentation_physical_size(renderer.presentation_geometry());
-        // The seam of §4.2, in the one order it is allowed to run: window
-        // geometry -> viewport -> solve -> seat rects -> the terminal seat's
-        // cols/rows. The persisted tree is layout *intent* (L11); the rectangle
-        // it produces here is computed fresh against this machine's DPI.
-        let probe_input = load_probe_input()?;
-        let pty_wake = PtyWakeSignal::new(proxy.clone());
-        let wake = &pty_wake;
-        let phase_started = Instant::now();
-        // **The walk's answers, read as late as the launch can read them** — right before the
-        // panes are made, without waiting. Everything below decides from these exactly as it
-        // always did from the probe that stood here; a row still unanswered is decided by nobody.
-        adopt_program_answers(&mut profile_programs, programs_lane::take());
-        shell_integration::begin_powershell_preparation_for(&profile_programs);
-        let default_profile =
-            profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
-        // The same answer as a seed spells it — see `Runtime::default_profile_id`.
-        let default_profile_id = profiles::default_profile_identity(
-            &settings_store.loaded().default_profile,
-            &profile_programs,
-        );
-        // The command line, put to this machine: the folder asked about, the
-        // profile looked up in this build's table, and the crossing into that
-        // profile's namespace. Everything it could not honour comes back in the
-        // plan's own list and is said on a card once the window is up.
-        let mut cli_plan: cli::CliPlan = cli::resolve(cli, default_profile, cli::machine_path_kind);
-        // **`--with-environment` reads this process's environment, which on a first launch is
-        // the launcher's** (owner ruling 2026-10-05: the one explicit way to carry it).
-        cli_plan.carried_environment = cli
-            .with_environment
-            .then(cli::CarriedEnvironment::of_this_process);
-        // Pinned tabs are an answer already given, so they simply open; the rest
-        // become a question the prompt will ask over a window that already works.
-        let plan = if probe_input.is_some() {
-            LaunchPlan::default()
-        } else {
-            plan_launch(
-                &opening.tabs,
-                opening.active_tab as usize,
-                cli_plan.wants_pane,
-            )
-        };
-        // **The tab the command line asked for, in front of the revived ones**
-        // (§7.2). It is built here rather than by `revive_plan` because it comes
-        // from a command line and not from a file: there is no tree to rebuild,
-        // no files column to re-root and no pool to refill — one terminal seat,
-        // one seed, and the seed is the whole of what was asked for.
-        let cli_root = cli_plan.wants_pane.then(|| {
-            let seats = seats::Seats::lone_terminal();
-            let leaves = seats
-                .terminals()
-                .into_iter()
-                .map(|seat| (seat, cli_leaf_seed(&cli_plan)))
-                .collect();
-            (
-                seats,
-                TabSeed {
-                    // The command-line tab owns what `--with-environment` carried.
-                    carried_environment: cli_plan.carried_environment.clone(),
-                    ..TabSeed::default()
-                },
-                leaves,
-                BTreeMap::new(),
-                PreviewRestore::default(),
-            )
-        });
-        // **The one slot both the strip and the seat are read off** — see
-        // [`cli_tab_slot`] for why it is not `0`. Computed from the *plan* and
-        // not from the built tabs, because it is also what `launch_active_tab`
-        // is told, and a number derived twice is a number that can differ twice.
-        let cli_slot = cli_root
-            .is_some()
-            .then(|| cli_tab_slot(&plan.open.iter().map(|tab| tab.pinned).collect::<Vec<_>>()));
-        let restored_roots: Vec<_> = if plan.open.is_empty() && cli_root.is_none() {
-            vec![(
-                seats::Seats::lone_terminal(),
-                TabSeed::default(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                PreviewRestore::default(),
-            )]
-        } else {
-            let mut roots: Vec<_> = plan.open.iter().map(revive_plan).collect();
-            if let (Some(cli_root), Some(slot)) = (cli_root, cli_slot) {
-                roots.insert(slot, cli_root);
-            }
-            roots
-        };
-        // **The process's tab numbering starts here, once** (F1b). Built before
-        // the `App` it will live in, because the first window's tabs are numbered
-        // before there is an `App` to ask — and numbered by the same allocator
-        // every later window asks, which is the whole of the A case.
-        let mut tab_ids = TabIds::new();
-        let mut tabs = Vec::with_capacity(restored_roots.len());
-        let mut conpty_sources = Vec::with_capacity(restored_roots.len());
-        for (index, (seats, seed, leaves, files, preview)) in restored_roots.into_iter().enumerate()
-        {
-            let (tab, conpty_source) = create_tab_state(
-                tab_ids.mint(),
-                seats,
-                LeafView::at(&mut gpu, &renderer, TextScale::ACTUAL)?,
-                &renderer,
-                render_physical,
-                wake,
-                if index == 0 {
-                    probe_input.as_deref()
-                } else {
-                    None
-                },
-                // A revived tab stands where its seed says, not where some other
-                // tab happens to be — that address IS what a seed is for, and
-                // now there is one per pane.
-                &leaves,
-                // And every files column comes back rooted where it was left,
-                // which before this slice was nowhere at all.
-                &files,
-                // And every preview pane comes back on the file it was showing,
-                // out of a pool that comes back as the list of names it was.
-                &preview,
-                seed,
-                &profile_programs,
-                &default_profile_id,
-                &settings_store.loaded().default_profile,
-                // Startup: the opening rectangle is the program's own.
-                SizePolicy::Lawful,
-                // **The panel this window is opening with, both halves of it.**
-                // `RailState::default()` stood here and was a horizontal window
-                // with no panel at all, which every later solve corrected on the
-                // first resize — so the cost was one frame, and with §7.1.6b′ that
-                // frame is a card column standing on top of the panes. The stage's
-                // left edge is a fact about the window, and it is known here: the
-                // restored `Tab layout`/`Sidebar` pair, joined to the focus bit
-                // `settings.json` opens the window in.
-                seats::RailState {
-                    focus: focus_mode,
-                    ..rail
-                },
-                platform_chrome,
-                FormulaSwitches::from_settings(settings_store.loaded()),
-                scrollback_quota(settings_store.loaded().scrollback_lines),
-                settings_store.loaded().line_wrapping,
-            )?;
-            tabs.push(tab);
-            conpty_sources.push(conpty_source);
-        }
+        )?;
+        let OpenedWindow {
+            restored,
+            window,
+            ime_report,
+            custom_window_frame,
+            parked_pans,
+            platform_chrome,
+            ime_system_caret,
+            math_context_menu,
+            folder_picker,
+            image_picker,
+            save_picker,
+            acrylic_available,
+            window_time,
+            compositor,
+            gpu,
+            mut renderer,
+            translucency_available,
+            renderer_time,
+            render_physical,
+            probe_input,
+            pty_wake,
+            phase_started,
+        } = opened;
+        let FirstTabs {
+            mut cli_plan,
+            plan,
+            cli_slot,
+            tab_ids,
+            tabs,
+            conpty_sources,
+        } = first;
         // The tab you were on comes back on top, if it was one of the ones that
         // came back. A placeholder shell is index 0 either way, and so is a tab
         // the command line asked for.
@@ -45482,12 +47436,12 @@ impl Runtime<'_> {
             trace_sink::stderr_line(format!("BT_CONPTY_SOURCE sources={conpty_sources:?}"));
         }
         let pty_time = phase_started.elapsed();
-        let math_worker = MathWorker::spawn({
+        let math_worker = Arc::new(computation_lane::ComputationLane::new({
             let proxy = proxy.clone();
             move || {
                 let _ = proxy.send_event(AppEvent::MathReady);
             }
-        })?;
+        }));
         let foreground_program_worker = foreground_program::Worker::spawn({
             let proxy = proxy.clone();
             move || {
@@ -45500,6 +47454,12 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::HandoffAnswered);
             }
         })?;
+        let clipboard_lane = clipboard_lane::ClipboardLane::spawn({
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(AppEvent::ClipboardAnswered);
+            }
+        });
         // This observation has no refusal: off Windows it is the empty list,
         // and an empty list starts no layout-table worker at all.
         let keyboard_layouts = bt_platform::keyboard_layouts();
@@ -45507,42 +47467,35 @@ impl Runtime<'_> {
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;
         let file_index_worker = palette_index::IndexWorker::spawn(proxy.clone())?;
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
-        let git_worker = git::GitWorker::spawn(proxy.clone())?;
+        let git_mutations =
+            git_mutation_lane::GitMutationLane::new(git_mutation_lane::RepoTurns::new(), {
+                let proxy = proxy.clone();
+                move || {
+                    let _ = proxy.send_event(AppEvent::GitReady);
+                }
+            });
+        let git_worker = git::GitWorker::spawn(proxy.clone(), Arc::clone(git_mutations.turns()))?;
         // **One read per family, and both of the row's facts come out of it**: whether this copy's
         // marks are in that file, and — when the file is one this build will not edit — the reason
         // the row has to say instead of `Off` (closure review R1).
         let claude_row = attention_hooks::row_state();
         let codex_row = attention_codex::row_state();
         let copilot_row = attention_copilot::row_state();
-        let mut app = App {
-            ime_first_focus_seen: false,
+        let mut app = App::assemble(AppParts {
             gpu,
-            device_loss_pilot: DeviceLossPilot::new(),
-            favicons: Rc::new(RefCell::new(favicon::Favicons::default())),
-            favicons_changed: false,
             tab_ids,
-            animation_serials: 0,
             event_proxy: proxy.clone(),
-            git_watch: git_watch::GitWatch::default(),
-            programs_ear: programs_ear::ProgramsEar::default(),
-            index_ear: index_ear::IndexEar::default(),
             handoff_lane,
+            clipboard_lane,
             layout_tables,
             math_worker,
             foreground_program_worker,
-            math_worker_running: true,
-            math_worker_notice_pending: false,
             files_worker,
-            files_worker_running: true,
-            files_worker_notice_pending: false,
             file_index_worker,
-            file_indexes: palette_index::FileIndexes::default(),
+            preview_saves: preview::PreviewSaves::on(session_store.lane()),
             preview_worker,
-            preview_worker_running: true,
-            preview_worker_notice_pending: false,
             git_worker,
-            git_worker_running: true,
-            git_worker_notice_pending: false,
+            git_mutations,
             acrylic_available,
             startup_started,
             trace_startup,
@@ -45550,26 +47503,11 @@ impl Runtime<'_> {
             trace_layout_events,
             trace_perf,
             motion: read_motion_preference(),
-            scheme_watch: scheme_watch::SchemeWatch::default(),
-            storage_watch: storage_watch::StorageWatch::default(),
-            scheme_fault: None,
-            scheme_source: [None, None],
             profile_programs,
-            program_news: window_news::WindowSeats::default(),
             startup_shells,
-            psreadline_documents,
-            psreadline_installed: None,
-            first_run_attempted: false,
-            first_run_waited_for_channel: false,
-            first_run_waited_for_agent_folders: false,
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
-            explorer_package_asked_by: None,
-            explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
-            explorer_package_announce: Announce::Everything,
-            // Read once, and *only* read: see the field for why this one is not repaired.
-            agent_takeovers: Default::default(),
             claude_hooks_installed: claude_row.0,
             // The same, over codex's own file — see the field above's note, which holds word for
             // word for this one.
@@ -45592,14 +47530,10 @@ impl Runtime<'_> {
             cli_preview: cli_plan.preview.take(),
             profiles_store,
             profiles_fault,
-            profiles_file_broken: false,
             pins_store,
             pins_fault,
             settings_fault: settings_fault.take(),
             session_fault: session_fault.take(),
-            pins_file_broken: false,
-            settings_file_broken: false,
-            keybindings_file_broken: false,
             recent,
             recent_folders,
             // **The document is assembled from these, and the first window's
@@ -45609,32 +47543,8 @@ impl Runtime<'_> {
             // — minimized, maximized — have the rectangle the file gave them to
             // fall back to before this window has measured itself once.
             window_pictures: vec![(window.id(), opening.clone())],
-            restore_question: Vec::new(),
-            web_warmup: web_warmup::WebWarmup::default(),
-            web_spare: web_spare::WebSpare::default(),
-            run_retiring_until: None,
-            web_pages_open: false,
-            pending_restore_windows: Vec::new(),
-            pending_restore_answer: None,
-            pending_application_change: None,
-            pending_new_windows: Vec::new(),
-            drag_broker: None,
-            pointer_capture: None,
-            pointer_capture_overlaps: Vec::new(),
-            pending_handover: None,
-            quit_requested: false,
-            quit: None,
-            windows_open: Vec::new(),
-            activated: Vec::new(),
-            window_ring: None,
-            window_ring_shown: None,
-            quake: quake::Quake::default(),
             update_job: the_update_job,
-            update_shown: update_card::Shown::default(),
-            quit_reason: quit::Reason::Asked,
-            leave_without: None,
-            handoff_answer: None,
-        };
+        });
         // **The rest of the file's windows, queued at the door.** A window that
         // held a pinned tab opens straight away, through the very same door
         // `Ctrl+Shift+M` goes through; a window that held none is a question, and
@@ -45685,7 +47595,7 @@ impl Runtime<'_> {
                     )
                     .collect();
         }
-        let mut window = new_window_runtime(NewWindowParts {
+        let mut window = new_window_runtime::<Native>(NewWindowParts {
             ime_report,
             parked_pans,
             favicons: Rc::clone(&app.favicons),
@@ -45729,9 +47639,12 @@ impl Runtime<'_> {
             app: &mut app,
             window: &mut window,
         };
-        runtime.dress_new_window(native)?;
+        runtime.dress_new_window()?;
         if trace_startup {
-            let renderer_phases = runtime.window.renderer.init_timings(&runtime.app.gpu);
+            // Named as what it is: this block is the native backend's, and the timings are the
+            // native renderer's own.
+            let renderer: &bt_render::WindowRenderer = &runtime.window.renderer;
+            let renderer_phases = renderer.init_timings(&runtime.app.gpu);
             let line = StartupLine {
                 window: window_time,
                 adapter: renderer_phases.adapter,
@@ -45796,7 +47709,9 @@ impl Runtime<'_> {
         // hands back is the layers themselves.
         Ok((app, window))
     }
+}
 
+impl<B: Backend> Runtime<'_, B> {
     /// **Put something in front of this window's focused shell**, to be typed when it next has a
     /// prompt (§7.54e ⑤).
     ///
@@ -46143,26 +48058,6 @@ impl Runtime<'_> {
         let content =
             self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
         let content_us = trace_start.map_or(0, |start| start.elapsed().as_micros());
-        // **The probe's second trigger** (§7.1.6c-5), and it is here because this
-        // is the one place that knows which page is being shown *and* is reached
-        // by every road to showing it — the gear, a press on the rail, an arrow
-        // walking it, and a page the dialog fell back to because the one it was
-        // on lost its rows. A trigger hung off those four separately is a
-        // trigger with a fifth door somebody will add later.
-        let psreadline_opened = self
-            .window
-            .settings
-            .take_psreadline_open_edge(content.probes_psreadline(self.window.settings.category()));
-        if psreadline_opened {
-            // Asked at every visit (T-PROBE-NO-CACHED-FAILURE): a module installed or updated
-            // while Folio runs is seen here, and a failed check is asked again. One probe per
-            // visit, never per frame while this page is open.
-            psreadline::begin_probe(psreadline::ProbeTrigger::TerminalPage);
-            // An out-of-band module change becomes visible when the reader
-            // opens its page. A redraw or hover on the open page is not an edge.
-            self.psreadline_documents();
-            self.refresh_psreadline_installed();
-        }
         // **The agent rows' own edge**, and it is not a convenience: their switches are inert
         // while the file they name is one this build will not edit, so a press cannot be what
         // notices that the reader has unpicked the link or cleared the read-only bit. Opening the
@@ -46192,21 +48087,12 @@ impl Runtime<'_> {
             self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
         // Use the refreshed fact on this very layout, including its geometry.
-        let refreshed_values = (psreadline_opened || agents_opened).then(|| {
-            let state = self.psreadline_row_state();
-            settings::SettingsValues {
-                psreadline: state,
-                psreadline_install_available: psreadline::install_available(
-                    psreadline::probe(),
-                    state,
-                ) && self.app.psreadline_documents.is_some(),
-                psreadline_remove_available: psreadline::remove_available(state),
-                claude_hooks: self.app.claude_hooks_installed,
-                codex_notify: self.app.codex_notify_installed,
-                copilot_hooks: self.app.copilot_hooks_installed,
-                agent_config_refusals: self.app.agent_config_refusals,
-                ..values.clone()
-            }
+        let refreshed_values = agents_opened.then(|| settings::SettingsValues {
+            claude_hooks: self.app.claude_hooks_installed,
+            codex_notify: self.app.codex_notify_installed,
+            copilot_hooks: self.app.copilot_hooks_installed,
+            agent_config_refusals: self.app.agent_config_refusals,
+            ..values.clone()
         });
         let content = settings::SettingsContent {
             values: refreshed_values.as_ref().unwrap_or(&values),
@@ -46318,6 +48204,10 @@ impl Runtime<'_> {
                 settings::retain_powershell_profile_remover(
                     &mut rows,
                     shell_integration::powershell_profile_line_present(),
+                );
+                settings::retain_legacy_psreadline_remover(
+                    &mut rows,
+                    psreadline::legacy_copy_present(),
                 );
                 rows
             },
@@ -46468,7 +48358,14 @@ impl Runtime<'_> {
             // **The editor's own length of the same sentence**: this row has the
             // page's whole width, where the list's third line shares its row
             // with an action run.
-            capability: profiles::capability_in_editor(index).text(),
+            capability: profiles::capability_in_editor(
+                index,
+                self.app
+                    .profile_programs
+                    .known_shell(&profiles::id(index))
+                    .as_ref(),
+            )
+            .text(),
             // The ghosts are not the reader's and are not counted: they are what
             // this terminal says to a session of this profile.
             env_rows: editor.env.len(),
@@ -46476,7 +48373,13 @@ impl Runtime<'_> {
                 .iter()
                 .position(|choice| *choice == profiles::integration_choice(index))
                 .unwrap_or_default(),
-            integration_auto: profiles::integration_auto_label(index),
+            integration_auto: profiles::integration_auto_label(
+                index,
+                self.app
+                    .profile_programs
+                    .known_shell(&profiles::id(index))
+                    .as_ref(),
+            ),
             // **Every variable this terminal sets for a session of this profile,
             // less whatever this profile has already said** (owner ruling
             // 2026-10-11 on H2 Q4): read off the launch's own composition, so a
@@ -46487,14 +48390,18 @@ impl Runtime<'_> {
             // not a duplication.
             //
             // Composed from the environment the next pane would be born from — the account's
-            // current one, asked for as the page opens — and empty while that request is out
-            // (`shell_integration::page_environment`).
+            // current one, asked for as the page opens — for the kind of program the walk found,
+            // and empty while either is still being asked (`shell_integration::page_environment`,
+            // `ProfilePrograms::known_shell`), as the sentence and the `Auto` label say
+            // "checking" until the kind is known.
             ghosts: settings::held_ghosts(
                 &profiles::row_of(&profiles::id(index))
                     .zip(shell_integration::page_environment())
-                    .map(|(row, before_folio)| {
+                    .zip(self.app.profile_programs.known_shell(&profiles::id(index)))
+                    .map(|((row, before_folio), program_kind)| {
                         shell_integration::declared_environment(
                             &row,
+                            &program_kind,
                             shell_integration::Scripts::installed(),
                             &before_folio,
                             attention_wire::endpoint_name(),
@@ -46633,12 +48540,6 @@ impl Runtime<'_> {
             // so the row has to report what it can see: the window it is standing
             // in. See `settings::SettingsValues::focus_mode`.
             focus_mode: self.window.focus_mode,
-            psreadline: self.psreadline_row_state(),
-            psreadline_install_available: psreadline::install_available(
-                psreadline::probe(),
-                self.psreadline_row_state(),
-            ) && self.app.psreadline_documents.is_some(),
-            psreadline_remove_available: psreadline::remove_available(self.psreadline_row_state()),
             profile_available: (0..profiles::count())
                 .map(|index| self.app.profile_programs.row_is_available(index))
                 .collect(),
@@ -47096,6 +48997,9 @@ impl Runtime<'_> {
             &self.app.settings_store.loaded().terminal_cjk_font_family,
         );
         let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        if self.window.settings.is_open() {
+            self.settings_closed();
+        }
         self.window.settings.toggle(self.settings_dialog(
             &rows,
             &shortcuts,
@@ -47129,6 +49033,17 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **The settings sheet closes** — a lifecycle door (T-POINTER-CAPTURE R-9, owner gone):
+    /// a slider or the menu bar held on it is let go of, so a hand that pressed `Esc` mid-drag
+    /// leaves nothing latched behind a sheet that is no longer there. Asked by every road that
+    /// shuts the sheet: the gear's toggle, the sheet's own `Esc` and its own close press, and a
+    /// verb that hands the reader a document instead.
+    fn settings_closed(&mut self) {
+        self.end_capture(runtime::pointer::OwnerGone(
+            runtime::pointer::Gone::SettingsSheet,
+        ));
     }
 
     /// **Take a picker item** — everything choosing one does to the process.
@@ -47318,21 +49233,13 @@ impl Runtime<'_> {
                 .loaded()
                 .terminal_cjk_font_family
                 .clone();
-            if self.apply_terminal_font(family, cjk_family, size)? {
-                // S110's one exception to "asked once": the row whose visible
-                // consequence on an unpatched 5.1 *is* the bug the module fixes.
-                // See `psreadline::invite_decision`.
-                self.window.psreadline_size_changed = true;
-            }
+            self.apply_terminal_font(family, cjk_family, size)?;
         }
         if let Some(name) = settings::light_scheme_requested(target) {
             self.apply_scheme(Some(name.to_owned()), None)?;
         }
         if let Some(name) = settings::dark_scheme_requested(target) {
             self.apply_scheme(None, Some(name.to_owned()))?;
-        }
-        if let Some(install) = settings::psreadline_requested(target) {
-            self.apply_psreadline(install)?;
         }
         // Both rail combos go through the one constructor: the layout choice
         // keeps the sidebar mode standing and the sidebar choice keeps the
@@ -47440,6 +49347,9 @@ impl Runtime<'_> {
                 }
                 None if row == settings::SettingsRow::PowerShellProfileLine => {
                     shell_integration::begin_removal();
+                }
+                None if row == settings::SettingsRow::LegacyPsReadLine => {
+                    psreadline::begin_legacy_removal(self.window_id());
                 }
                 None => {}
             },
@@ -47653,7 +49563,6 @@ impl Runtime<'_> {
             // somebody moves it, and this is the one row in the dialog whose
             // reset would switch a network request back on.
             | Row::AutoCheck
-            | Row::PsReadLine
             | Row::Scrollback
             | Row::LineWrapping
             | Row::CopyOnSelect
@@ -47696,6 +49605,7 @@ impl Runtime<'_> {
             | Row::ImportSettings
             | Row::SettingsFolder
             | Row::PowerShellProfileLine
+            | Row::LegacyPsReadLine
             // And the uninstaller's rows (T-UNINSTALL-UX): a door, a switch that
             // lives for one visit, and a fact about who installed this copy.
             | Row::Uninstall
@@ -47745,7 +49655,6 @@ impl Runtime<'_> {
         let card_above = self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
-            || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
             || self.uninstall_card_is_up();
@@ -47799,7 +49708,7 @@ impl Runtime<'_> {
     /// Every edit is written straight through to the table
     /// ([`Self::write_editor_field`]), because this dialog has no commit: what
     /// you typed is what is stored, at the keystroke.
-    fn settings_field_key(&mut self, event: &KeyEvent) -> Result<bool> {
+    fn settings_field_key(&mut self, event: &Keystroke) -> Result<bool> {
         use text_field::TextMove;
         let Some(target) = self.window.settings.focus() else {
             return Ok(false);
@@ -48195,11 +50104,11 @@ impl Runtime<'_> {
             .map(|editor| PathBuf::from(editor.program.text()))
             .and_then(|path| path.parent().map(Path::to_path_buf))
             .filter(|parent| parent.as_os_str().len() > 1);
-        match self
-            .window
-            .image_picker
-            .request(bt_platform::FilePickKind::Program, start.as_deref())
-        {
+        match self.window.image_picker.request(
+            bt_platform::FilePickKind::Program,
+            start.as_deref(),
+            crate::i18n::Text::ImageFileType.text(),
+        ) {
             Ok(true) => self.window.image_pick_pending = Some(FilePick::ProfileProgram),
             // Already queued or already open: a second press while one is up is
             // one dialog, not two, and whoever asked first keeps the answer.
@@ -48333,7 +50242,7 @@ impl Runtime<'_> {
     /// logical key (Q6), so what comes back is the glyph printed on the key that
     /// was pressed rather than the one Shift made of it — which is what makes
     /// the caps the panel draws afterwards the caps on the user's own board.
-    fn record_settings_key(&mut self, event: &KeyEvent) -> Result<()> {
+    fn record_settings_key(&mut self, event: &Keystroke) -> Result<()> {
         let Some(row) = self.window.settings.recording_row() else {
             return Ok(());
         };
@@ -48529,6 +50438,8 @@ impl Runtime<'_> {
             (_, settings::SettingsKeyVerdict::Chose(target)) => {
                 self.apply_settings_choice(target)?
             }
+            // The sheet's own close press shut it.
+            (_, settings::SettingsKeyVerdict::Closed) => self.settings_closed(),
             _ => {}
         }
         if let Some(position) = self.window.pointer_position {
@@ -48773,8 +50684,7 @@ impl Runtime<'_> {
         if !self.app.acrylic_available {
             return Ok(false);
         }
-        let native = native_window(&self.window.window)?;
-        if let Err(error) = bt_platform::set_system_backdrop(native, enabled) {
+        if let Err(error) = self.window.window.set_backdrop(enabled) {
             eprintln!("recoverable system backdrop failure: {error}");
             return Ok(false);
         }
@@ -48793,7 +50703,6 @@ impl Runtime<'_> {
     /// activates: switching the row on while another window has the keyboard
     /// must not steal it.
     fn apply_always_on_top(&mut self, enabled: bool) -> Result<bool> {
-        let native = native_window(&self.window.window)?;
         // **The one window the row does not reach** (§7.54). The preference is
         // still written — it is the application's, and every other window of this
         // process wears it — but the summoned terminal's own posture is not a
@@ -48802,7 +50711,7 @@ impl Runtime<'_> {
         // arrives. Said here rather than by greying the row, because the row is
         // true of the program and this is one window declining to be its example.
         if !self.is_quake_window()
-            && let Err(error) = bt_platform::set_window_topmost(native, enabled)
+            && let Err(error) = self.window.window.set_topmost(enabled)
         {
             eprintln!("recoverable always-on-top failure: {error}");
             return Ok(false);
@@ -48905,6 +50814,7 @@ impl Runtime<'_> {
         // **The dialog goes.** It is the one verb in it whose answer is a
         // document, and a modal standing over the document it just handed you is
         // a modal in the way.
+        self.settings_closed();
         self.window.settings.close();
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
@@ -48962,13 +50872,18 @@ impl Runtime<'_> {
     /// all is indistinguishable from a page that opened behind us.
     ///
     /// **Handed to the OS hand-off lane** (2026-09-22), so the card arrives when the lane answers
-    /// rather than while the press is still being handled — with the door's words, as before.
+    /// rather than while the press is still being handled — in the words of the refusal's kind
+    /// (T-HANDOFF-DOOR-REASON: "no program to open it" only when there is none).
     fn open_font_settings(&mut self) -> Result<()> {
         self.hand_off(
             handoff_lane::Ask::new(
                 bt_platform::Handoff::FontsPage,
                 handoff_lane::Refusal {
-                    stderr: None,
+                    // The card says the refusal's kind; its own words are this line's.
+                    stderr: Some((
+                        "recoverable font settings hand-off failure",
+                        "open the system font settings",
+                    )),
                     program_notice: false,
                 },
             )
@@ -49291,6 +51206,11 @@ impl Runtime<'_> {
         if documents.contains(storage_watch::Document::Pins) {
             self.app.pins_store.ask_reread();
         }
+        // **A pass is an ear event for the session too** (the side-effects contract's C5): a
+        // session document a refusal left owed is handed over once more.
+        if !documents.is_empty() {
+            self.app.session_store.hear_the_storage_pass();
+        }
         Ok(())
     }
 
@@ -49303,8 +51223,10 @@ impl Runtime<'_> {
     /// that cannot exchange at once, a disk's refusal at the fifth in a row.
     /// Then what the re-reads put in force: a file that will not parse is said
     /// once, `settings.json`'s changes are merged and put in force through
-    /// their rows' doors (`Self::merge_documents`), and the profiles and pins
-    /// news is taken.
+    /// their rows' doors and `keybindings.json`'s through the one shortcut
+    /// table (`Self::merge_documents`), what the files' values replaced is named
+    /// on the batch's one card once no store is still reading, and the profiles
+    /// and pins news is taken.
     pub(crate) fn take_document_answers(&mut self) -> Result<()> {
         let heard = persist::hear_documents(
             &mut self.app.settings_store,
@@ -49321,20 +51243,16 @@ impl Runtime<'_> {
             )?;
         }
         self.take_kept_news(heard.settings, heard.keybindings)?;
-        // The data of the pass's one card, made whatever the presentation after
-        // the merge answers; T-STORE-NOTICE raises it.
-        let (_replaced, presented) = self.merge_documents();
-        presented?;
+        self.merge_documents()?;
         self.take_profiles_news(heard.profiles)?;
         self.take_pins_news(heard.pins)
     }
 
-    /// Put in force what a re-read of `pins.json` changed.
-    ///
-    /// [`Self::take_profiles_news`]'s answers, and what follows each is the
-    /// same shape: the two PINNED sections are derived from the store every time
-    /// a menu is built, never held, so installing a new table *is* refreshing
-    /// them — what is owed is a frame.
+    /// **What a re-read of `pins.json` says** — [`Self::take_profiles_news`]'s
+    /// shape: a file that will not parse leaves the pins in force and raises one
+    /// card. A file that changed is the storage pass's merge; the two PINNED
+    /// sections are derived from the store every time a menu is built, never
+    /// held, so the merged table is in force once the store holds it.
     fn take_pins_news(&mut self, news: document_request::ReadNews) -> Result<()> {
         match news.unreadable {
             Some(true) => {
@@ -49349,9 +51267,6 @@ impl Runtime<'_> {
             }
             Some(false) => self.app.pins_file_broken = false,
             None => {}
-        }
-        if news.taken && self.refresh_chrome() {
-            self.present_chrome_change()?;
         }
         Ok(())
     }
@@ -50846,7 +52761,7 @@ fn measure_markdown_block(
     }
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **The play button, rasterised, for the lane that draws over a picture**
     /// (user ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
     ///
@@ -50993,10 +52908,14 @@ impl Runtime<'_> {
         // the same commit again draws its files without a second subprocess.
         if let Some(hash) = opened
             && let Some(cache) = self.window.tabs[active].git_trees.get_mut(&seat)
-            && let Some(question) = cache.begin_commit_files(&hash)
+            && let Some((asker, question)) = cache
+                .begin_commit_files(&hash)
+                .map(|question| (cache.id(), question))
             && !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+                asker,
+                buffer: None,
                 question,
             })
         {
@@ -51023,12 +52942,15 @@ impl Runtime<'_> {
         let Some(cache) = self.window.tabs[active].git_trees.get(&seat) else {
             return Ok(());
         };
+        let asker = cache.id();
         let Some(question) = cache.more_commits() else {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
             window: self.window_id(),
             host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+            asker,
+            buffer: None,
             question,
         }) {
             self.disable_git_worker();
@@ -51294,23 +53216,37 @@ impl Runtime<'_> {
 
     // ── P143-P150: the glance card ──────────────────────────────────────────
 
-    /// The places this column could be pointed at (E54).
+    /// **The folders the root menu offers as "a terminal is here"**, read once as it opens
+    /// (T-CWD-FROM-PROCESS): every terminal pane of the tab in front of you, each through
+    /// [`LeafSession::folder`] — its report, else its shell process's folder, else where it was
+    /// opened.
     ///
-    /// The shells' folders are read here rather than in `profiles` because that
-    /// is where the sessions are: red line L1's argument, one layer up. Every
-    /// pane of the tab in front of you gets a say, not only the focused one —
-    /// "a terminal is here" is true of all of them, and the whole point of the
-    /// list is to name the places you are already standing.
-    fn root_choices(&self, seat: SeatId) -> Vec<profiles::RootChoice> {
+    /// The shells' folders are read here rather than in `profiles` because that is where the
+    /// sessions are: red line L1's argument, one layer up. Every pane of the tab in front of you
+    /// gets a say, not only the focused one — "a terminal is here" is true of all of them, and the
+    /// whole point of the list is to name the places you are already standing.
+    fn shell_folders_for_the_root_menu(
+        &self,
+        door: &dyn pane_folder::ProcessFolders,
+    ) -> Vec<String> {
         let tab = &self.window.tabs[self.window.active_tab];
-        let cwds: Vec<String> = tab
-            .seats
+        tab.seats
             .terminals()
             .iter()
             .filter_map(|seat| tab.sessions.get(seat))
-            .filter_map(|leaf: &LeafSession| leaf.session.standing_folder())
+            .filter_map(|leaf: &LeafSession| leaf.folder(door).into_folder())
             .map(|cwd| cwd.display().to_string())
-            .collect();
+            .collect()
+    }
+
+    /// The places this column could be pointed at (E54): its own root, the home folder, the
+    /// shells' folders the menu took as it opened ([`Self::shell_folders_for_the_root_menu`]) and
+    /// the remembered folders, the kept ones first.
+    fn root_choices(&self, seat: SeatId) -> Vec<profiles::RootChoice> {
+        let tab = &self.window.tabs[self.window.active_tab];
+        // Taken when the menu opened ([`Self::shell_folders_for_the_root_menu`]): the menu is
+        // laid out every frame it is up, and a pane's folder is read on an ask, not per frame.
+        let cwds = &self.window.root_menu_shell_folders;
         let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
             .map(|home| home.display().to_string());
         // The remembered folders come from the application and not from this
@@ -51319,7 +53255,7 @@ impl Runtime<'_> {
         let found = profiles::root_choices(
             &tab.files_state(seat).root,
             home.as_deref(),
-            &cwds,
+            cwds,
             self.app.recent_folders.entries(),
         );
         // **What the user said to keep goes on top** (user ruling 2026-08-19).
@@ -51982,7 +53918,7 @@ impl Runtime<'_> {
     /// the cwd of the terminal the trigger belongs to *at summon time*, and the
     /// float then stays there. A tree that re-roots itself as you `cd` is, in
     /// this design's own words, 整个生态独立判定最惊吓的行为.
-    fn trigger_root(&self, trigger: float::FloatTrigger) -> String {
+    fn trigger_root(&self, trigger: float::FloatTrigger) -> FilesRoot {
         // **A reference names its own folder**, so it does not go through the
         // cwd below at all: the two buttons speak for a *terminal* and borrow
         // the place that terminal is standing in, while this one speaks for a
@@ -51997,7 +53933,7 @@ impl Runtime<'_> {
                 ..
             }) = self.terminal_reference_at(leaf.seat, cell)
         {
-            return path.display().to_string();
+            return FilesRoot::known(path.display().to_string());
         }
         let seat = match trigger {
             float::FloatTrigger::Tab(id) => self
@@ -52016,7 +53952,7 @@ impl Runtime<'_> {
         };
         files_root_of(
             seat.and_then(|(tab, seat)| tab.sessions.get(&seat))
-                .map(|leaf| &leaf.session),
+                .map(|leaf| leaf.folder(&pane_folder::SystemProcessFolders)),
             &bt_pty::SystemShellEnvironment,
         )
     }
@@ -52255,7 +54191,7 @@ impl Runtime<'_> {
     /// moved is on the display it was on. A rate that cannot be believed leaves
     /// the window on the one it already had; see [`pace::FrameClock::follow`].
     fn follow_the_display(&mut self) {
-        let millihertz = display_frame_rate_millihertz(&self.window.window);
+        let millihertz = self.window.window.frame_rate_millihertz();
         if !self.window.frame_clock.follow(millihertz) {
             return;
         }
@@ -52556,7 +54492,7 @@ impl Runtime<'_> {
         // panic is not.
         write_pty_input(
             self.focused()
-                .map_or(PtyTarget::Nowhere, |leaf| leaf.input_target()),
+                .map_or(PtyTarget::Nowhere, |leaf| leaf.person_input_target()),
             bytes,
             context,
         )?;
@@ -52690,14 +54626,9 @@ impl Runtime<'_> {
         let Some((x, y)) = self.to_screen(position) else {
             return GlassHere::Unknown;
         };
-        let Ok(mine) = native_window(&self.window.window) else {
-            return GlassHere::Unknown;
-        };
-        match bt_platform::top_level_window_at(x.round() as i32, y.round() as i32) {
-            Some(under) if under == mine => GlassHere::Ours,
-            Some(_) => GlassHere::Theirs,
-            None => GlassHere::Unknown,
-        }
+        self.window
+            .window
+            .glass_at(x.round() as i32, y.round() as i32)
     }
 
     /// **Open the broker for a payload that is allowed to leave this window**
@@ -53361,8 +55292,8 @@ impl Runtime<'_> {
                     .terminal_name(*seat)
                     .unwrap_or_else(|| tab.display_title());
                 let hint = leaf
-                    .session
-                    .standing_folder()
+                    .folder(&pane_folder::SystemProcessFolders)
+                    .folder()
                     .map(|cwd| cwd.display().to_string())
                     .or_else(|| {
                         leaf.program
@@ -54294,7 +56225,7 @@ impl Runtime<'_> {
     }
 }
 
-impl App {
+impl<B: Backend> App<B> {
     /// **The four hand-editable documents' write generations**, in
     /// `storage_watch::Document` order — what the storage watch reads to learn
     /// that the reader asked for a document write.
@@ -54309,9 +56240,7 @@ impl App {
 
     fn decoration_senders(&self) -> DecorationSenders {
         DecorationSenders {
-            math: self.math_worker.tasks.clone(),
-            scale: self.math_worker.scale_tasks.clone(),
-            path: self.math_worker.path_tasks.clone(),
+            computation: Arc::clone(&self.math_worker),
             foreground: self.foreground_program_worker.requests.clone(),
         }
     }
@@ -54446,6 +56375,11 @@ impl App {
         // doors (§5.3 rows 16 and 16b).
         bt_platform::admission::exiting();
         self.session_store.close();
+        // **And, after a stop that cannot ask, what no file took** (S-6c): the storage worker
+        // has served what was queued before its end, the preview's saves among it, inside the
+        // close's one bound; the buffers the stop held hear the answers, and what did not land
+        // is copied into `recovered` (§5.3 row 20b). Nothing is held on any other road.
+        self.keep_what_the_stop_did_not_save(SystemTime::now());
     }
 
     /// **Ask for the quit transaction**, from whichever of the three doors the
@@ -54521,10 +56455,11 @@ impl App {
     }
 
     /// **One turn of the quit's documents phase** over the four stores
-    /// ([`quit::Quit::documents_turn`]); `None` without a quit.
+    /// ([`quit::Quit::documents_turn`]), and what it merged said in
+    /// `diagnostics.log`; `None` without a quit.
     fn quit_documents_turn(&mut self, now: Instant) -> Option<quit::QuitStep> {
         let quit = self.quit.as_mut()?;
-        Some(quit.documents_turn(
+        let step = quit.documents_turn(
             &mut [
                 &mut self.settings_store,
                 &mut self.keybindings_store,
@@ -54532,7 +56467,11 @@ impl App {
                 &mut self.pins_store,
             ],
             now,
-        ))
+        );
+        for line in quit.take_merged_lines() {
+            diagnostics::note(&line);
+        }
+        Some(step)
     }
 
     /// **One turn of the quit's recovery phase** over the four stores, the copies
@@ -54694,6 +56633,13 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
     /// Every window, in no particular order: for a question whose answer does not depend on it.
     fn values(&self) -> impl Iterator<Item = &W> {
         self.open.values()
+    }
+
+    /// Every window with its key, in the opening order.
+    fn in_order(&self) -> impl Iterator<Item = (K, &W)> {
+        self.order
+            .iter()
+            .filter_map(|key| self.open.get(key).map(|window| (*key, window)))
     }
 
     /// The key of the window at `index` in the opening order.
@@ -55277,22 +57223,10 @@ mod launch_landing_tests {
             "a tab opens and the window it opened in stays behind whatever the \
              reader was looking at:\n{landing}"
         );
+        // What raising does to the window — restored, then given the foreground — is
+        // `runtime::windows::tests::a_raised_window_is_restored_before_it_takes_the_foreground`.
         let raise = method_body("FolioApp", "raise_for_a_launch");
         assert!(raise.contains("bring_owned_window_forward(&runtime.window.window)"));
-        let forward = item_body(&ItemQuery::function("bring_owned_window_forward"));
-        let restore = forward
-            .find("restore_minimized_window(window)?")
-            .unwrap_or(usize::MAX);
-        let front = forward
-            .find("give_foreground_to(native_window(window)?)")
-            .unwrap_or(0);
-        assert!(
-            restore < front,
-            "an iconified window is asked to the front before it is restored, \
-             which on some configurations is a click answered twice and seen \
-             never:\n{forward}"
-        );
-        assert!(forward.contains("give_foreground_to(native_window(window)?)"));
     }
 
     /// **RED (U-36) — every launch the wire carries tells the update job what
@@ -55355,7 +57289,8 @@ mod launch_landing_tests {
         let tear_out = door.find("self.settle_tear_out(errand, id)?");
         assert!(
             matches!((insert, publish, tear_out), (Some(i), Some(p), Some(t)) if i < p && p < t),
-            "a window opened this turn is missing from the directory the doors              after it read:
+            "a window opened this turn is missing from the directory the doors \
+             after it read:
 {door}"
         );
         let first =
@@ -55364,7 +57299,8 @@ mod launch_landing_tests {
         let publish = first.find("self.publish_window_directory();");
         assert!(
             matches!((insert, publish), (Some(i), Some(p)) if i < p),
-            "the first window is missing from the directory until the turn's              head walks it:
+            "the first window is missing from the directory until the turn's \
+             head walks it:
 {first}"
         );
         let tell = method_body("FolioApp", "tell_the_update_job");
@@ -56011,7 +57947,7 @@ mod mouse_trace_station_tests {
         // at=in-pane` line above it. 26 → 27 the same day: a notch on a band
         // painted above the panes that does not scroll is swallowed, with its
         // own `wheel_route taken=overlay at=over-pane` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 27);
+        assert_every_exit_is_traced("mouse_wheel", 28);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
@@ -56394,7 +58330,10 @@ mod hold_station_tests {
         // (the station, the first call it claims) — in the order `turn` runs them.
         let run = [
             ("Station::DpiSettle", "self.settle_deferred_dpi()?;"),
-            ("Station::Pickers", "self.apply_math_context_menu_result();"),
+            (
+                "Station::Pickers",
+                "self.apply_math_context_menu_result()?;",
+            ),
             ("Station::PaneRows", "self.settle_pane_notices()?;"),
             ("Station::Clocks", "self.raise_first_run_if_due()"),
             (
@@ -56467,7 +58406,7 @@ mod hold_station_tests {
         // And the one door that must *not* be scoped: `window_event`'s own
         // station is the event, and the handler under it is what it names. It is
         // a trait method, so it is asked for as one.
-        let event = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let event = method_body("FolioApp", "on_window_event");
         assert!(
             event.contains("hang_watch::at(hang_watch::Station::Event);"),
             "the event's own name has left the door it is about"
@@ -56521,7 +58460,7 @@ mod hold_station_tests {
                 "WebVisual",
                 "compositor.attach_web_visual(",
             ),
-            ("WebSeat", "step", "WebInstall", "self.host.install("),
+            ("WebSeat", "step", "WebInstall", "tree.install("),
             ("WebSeat", "step", "WebFloor", "self.stand_on_the_floor("),
             ("WebSeat", "step", "WebNavigate", "self.host.navigate("),
         ] {
@@ -56575,8 +58514,16 @@ mod hold_station_tests {
     /// foot of `window_event`.
     #[test]
     fn a_handler_that_has_returned_hands_the_thread_to_the_pump() {
-        for name in ["window_event", "user_event"] {
-            let body = trait_method_body("FolioApp", "ApplicationHandler", name);
+        for (name, body) in [
+            (
+                "on_window_event",
+                method_body("FolioApp", "on_window_event"),
+            ),
+            (
+                "user_event",
+                trait_method_body("FolioApp", "ApplicationHandler", "user_event"),
+            ),
+        ] {
             let pump = "hang_watch::at(hang_watch::Station::Pump);";
             assert_eq!(body.matches(pump).count(), 1, "{name} never names the pump");
             let after = body[first_at(body, pump) + pump.len()..].trim();
@@ -56599,7 +58546,7 @@ mod hold_station_tests {
     /// everything. That is the decay this pin is here to catch.
     #[test]
     fn every_event_kind_the_dispatcher_answers_names_its_own_handler() {
-        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let dispatch = method_body("FolioApp", "on_window_event");
         let naming = free_fn_body("window_event_station");
         let mut kinds = arms(dispatch);
         assert!(
@@ -56764,7 +58711,8 @@ mod files_locate_door_tests {
         // other acknowledgement in this window is.
         assert!(
             method_body("Runtime", "turn").contains("self.preview_refusal_deadline(),"),
-            "nothing wakes the window when the reason is due to go, so the pill stands until              something else happens to repaint"
+            "nothing wakes the window when the reason is due to go, so the pill stands until \
+             something else happens to repaint"
         );
         // ④ The way out, first among what the pill can say.
         let say = method_body("Runtime", "preview_pill_say");
@@ -56859,7 +58807,7 @@ mod files_locate_door_tests {
         );
         assert!(
             say.contains("self.preview_save_notice(surface, now)")
-                && say.contains("preview::preview_saved_notice()"),
+                && say.contains("preview::is_a_save_acknowledgement(notice)"),
             "the confirmation is not read off the clock that expires it:\n{say}"
         );
         // And it is taken down by being answered, through the one door both
@@ -57864,7 +59812,8 @@ mod file_peek_fade_tests {
         );
         assert!(
             !layer.contains(".opacity *=") && !layer.contains(".opacity ="),
-            "and no layer wears it in its own opacity: a layer faded for a reason              of its own keeps that reason as a surface inside this one"
+            "and no layer wears it in its own opacity: a layer faded for a reason \
+             of its own keeps that reason as a surface inside this one"
         );
 
         assert!(
@@ -58637,7 +60586,7 @@ mod formula_tool_seat_tests {
         let copy = method_body("Runtime", "copy_math_latex");
         assert!(
             copy.find("self.live_paste_target(target)").unwrap()
-                < copy.find("bt_platform::set_clipboard_text").unwrap()
+                < copy.find("self.submit_clipboard_write(").unwrap()
         );
         let validate = method_body("Runtime", "live_paste_target");
         assert!(validate.contains("tab.sessions.get(&target.seat)"));
@@ -58760,139 +60709,6 @@ mod formula_tool_seat_tests {
         assert!(
             inner.contains("wheel_view_moved.is_some()"),
             "and `skip_unchanged` is exactly that verdict's presence:\n{inner}"
-        );
-    }
-
-    /// RED — **a frame composed for any reason carries every journey that is running, and a
-    /// journey's end is never paced** (review 2026-09-18, P1).
-    ///
-    /// The gate admits an animation's own turn only when no picture has reached the glass for a
-    /// display frame. That is an economy and not a defect — a picture reached the glass a moment
-    /// ago, so the animation does not need one of its own — **provided that picture carried it**.
-    /// It did not: the band's travelling height was cached in the session by the flight's tick and
-    /// projected from there, so a neighbouring pane printing every five milliseconds composed frame
-    /// after frame from a sample the tick had left behind, and the gate refused the tick for as long
-    /// as the printing lasted. The review measured zero admissions in a thousand turns.
-    ///
-    /// Two lines answer it, and both are pinned here because both are placements rather than
-    /// values. **The carry stands at the head of the compose**, above everything that reads a
-    /// height, a layer or a quad. **The landing stands above the gate** in the flight's own
-    /// advancer: what lands is owed to the document, not to the glass, and behind the gate it was a
-    /// change of face a busy neighbour could postpone for ever.
-    ///
-    /// MUTATIONS: move the carry below the projection and the frame is built from the previous
-    /// sample; put the landing back under the gate and `settle_math_toggle` becomes unreachable
-    /// under a flood; drop `sample_math_toggle` from the carry and the one animation this window
-    /// caches is the one that freezes.
-    #[test]
-    fn a_frame_composed_for_any_reason_carries_the_journeys_and_the_landing_is_never_paced() {
-        let compose = method_body("Runtime", "publish_frame_inner");
-        let carried = compose
-            .find("self.carry_live_journeys(Instant::now());")
-            .expect("every compose carries the journeys that are running");
-        let projected = compose
-            .find("bt_compose::project(bt_compose::Pane {")
-            .expect("and the projection is what reads the band's height");
-        assert!(
-            carried < projected,
-            "a frame built before its journeys are carried is a frame built from the last tick's \
-             sample:\n{compose}"
-        );
-
-        let carry = method_body("Runtime", "carry_live_journeys");
-        assert!(
-            carry.contains("self.sample_math_toggle(now);"),
-            "the one animation this window caches is sampled on every frame:\n{carry}"
-        );
-        assert!(
-            carry
-                .find("self.sample_math_toggle(now);")
-                .unwrap_or(usize::MAX)
-                < carry.find("if !running.any() {").unwrap_or(0),
-            "a flight in hand is carried whether or not the last turn saw one:\n{carry}"
-        );
-        assert!(
-            !carry.contains("self.sync_math_tools(now)")
-                && !carry.contains("self.math_tool_placement"),
-            "the carry has no frame to hand to either formula lane:\n{carry}"
-        );
-        // **The formula rebuild moves to the present; it is not added here.**
-        // The ordinary overlay lane is refused while a formula is lit or in
-        // flight, because `redraw` will rebuild the whole stack after projection.
-        assert!(
-            carry.contains("let formula_present =")
-                && carry.contains("running.overlay && !formula_present"),
-            "a formula journey pays for its overlay once, at the present door:\n{carry}"
-        );
-        // The older chrome/overlay exclusivity remains: a chrome rebuild still
-        // ends in the overlay, so the ordinary overlay arm is an `else`.
-        assert!(
-            carry.contains("self.refresh_chrome_without_overlay();")
-                && carry.contains("self.refresh_chrome();")
-                && carry.contains("} else if running.overlay"),
-            "chrome and the ordinary overlay lane stay exclusive:\n{carry}"
-        );
-        let chrome = method_body("Runtime", "refresh_chrome_with_overlay");
-        assert!(
-            chrome.contains("include_overlay && self.refresh_overlay()"),
-            "ordinary chrome ends in the overlay while formula presents defer it:\n{chrome}"
-        );
-        // **And nothing is inferred from asking the gate** (review 2026-09-18
-        // round 2, P1). Liveness is reported once a turn from the journeys' own
-        // "am I moving" predicates — never from their deadlines, several of
-        // which also carry a wait: a tip's 380ms, a notice's life, a card's
-        // grace. Waiting is not moving, and a window that treated it as moving
-        // would rebuild its whole interface for the length of every wait.
-        let gate = method_body("Runtime", "animation_frame_is_due");
-        assert!(
-            !gate.contains("note_running"),
-            "asking the gate is a question and never evidence:\n{gate}"
-        );
-        let turning = method_body("Runtime", "turn");
-        assert!(
-            turning.contains("self.window.frame_clock.note_running(running);"),
-            "the window reports what is mid-flight once a turn:\n{turning}"
-        );
-        let report = method_body("Runtime", "running_journeys");
-        for waiting in ["tooltip_deadline", "toast_deadline", "file_peek_deadline"] {
-            assert!(
-                !report.contains(waiting),
-                "{waiting} answers a wait as well as a tween:\n{report}"
-            );
-        }
-        for moving in [
-            "is_fading(now, motion)",
-            "nudge_moving(now, motion)",
-            "is_animating(now, motion)",
-            "self.command_rails_are_moving(now)",
-            "self.math_tools_owe_frames(now)",
-        ] {
-            assert!(
-                report.contains(moving),
-                "a journey's own predicate is what says it is running: {moving}\n{report}"
-            );
-        }
-
-        let advance = method_body("Runtime", "advance_math_toggle_if_due");
-        let settles = advance
-            .find("if landed || !still_measures {")
-            .expect("a journey that has arrived is settled");
-        let gate = advance
-            .find("if !self.animation_frame_is_due() {")
-            .expect("and only a frame of its own is paced");
-        assert!(
-            settles < gate,
-            "the landing is owed to the document and waits for no display:\n{advance}"
-        );
-
-        let wake = method_body("Runtime", "math_toggle_deadline");
-        assert!(
-            wake.contains("flight.lands_at()"),
-            "and the loop is woken for that landing on its own clock:\n{wake}"
-        );
-        assert!(
-            wake.contains("frame.min(landing)"),
-            "whichever of the two comes first:\n{wake}"
         );
     }
 
@@ -59203,11 +61019,9 @@ mod focus_mode_door_tests {
     // stays a line reading, over every file this package compiles rather than
     // over this one.
     //
-    // **Two owners, not one.** Seven pins are methods of `Runtime`;
-    // `mini_source` is `TabState`'s. The deleted finder took the first
-    // `    fn mini_source` in this file, which is a method of whatever `impl`
-    // happens to come first, and the equivalence commit is what established the
-    // owner rather than assumed it.
+    // The pins here are methods of `Runtime`. `TabState::mini_source`'s red line
+    // is driven, not read: `app_focus_tests::
+    // a_card_quotes_a_body_already_in_memory_and_asks_nothing_of_a_disk`.
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
 
     /// **This crate, indexed once per process** — the workspace read, this
@@ -59475,41 +61289,6 @@ mod focus_mode_door_tests {
             "the pane whose picture the stand-in wears is the one the tear-out \
              is aiming to place"
         );
-    }
-
-    /// **The projection layer did not move an inch.**
-    ///
-    /// §7.1.6b′'s red line — a thumbnail takes text only out of a buffer already
-    /// in memory and never goes looking — is right, and the ruling that made a
-    /// card arm a read left it alone on purpose: the projection does not fetch,
-    /// *somebody else* puts the body in memory and the next projection finds it
-    /// there. `Runtime::mini_source` is where that line is drawn, and it names no
-    /// worker.
-    #[test]
-    fn the_projection_still_takes_its_text_only_from_memory() {
-        // The signature carries a lifetime since W2 slice 6 handed the page's
-        // last frame in, so the needle stops at the name: a pin that matched the
-        // parenthesis would fall through to this very literal further down the
-        // file and read a body that is not the one it means to.
-        let source = item_body(&ItemQuery::method("TabState", "mini_source"));
-        assert!(
-            source.contains("buffer.content().is_some()"),
-            "the red line is 'is there text here already, without asking a disk'"
-        );
-        // And the page arm, added by W2 slice 6, is under the same line: a
-        // picture is *handed in*, and nothing here starts a capture.
-        for fetch in [
-            "claim_head_read",
-            "preview_worker",
-            "files_worker",
-            "capture_page",
-            "web_thumbs",
-        ] {
-            assert!(
-                !source.contains(fetch),
-                "the projection reached for {fetch}, which is it going looking"
-            );
-        }
     }
 
     /// RED (§7.21, user ruling 2026-08-27) — **the offer is written in exactly
@@ -60493,8 +62272,10 @@ mod page_under_a_laden_hand_tests {
         let asked = web_page_at
             .find("self.a_gesture_holds_the_pointer()")
             .expect("the page's door subtracts a hand that is already carrying");
+        // The scan is the page layer's own question since T-POINTER-CAPTURE cut 6, which the
+        // wheel asks without the hand's subtraction.
         let scan = web_page_at
-            .find("self.web_page_shown_at(position)")
+            .find("self.page_under_the_hand(position)")
             .expect("the page's door scans the pages it knows about");
         assert!(
             asked < scan,
@@ -60568,7 +62349,9 @@ mod page_under_the_tab_list_tests {
     /// already given away.
     #[test]
     fn the_tab_list_is_asked_before_any_page_is() {
-        let web_page_at = method_body("Runtime", "web_page_at");
+        // The page layer's own question since T-POINTER-CAPTURE cut 6 (`web_page_at` is it with
+        // a held gesture subtracted).
+        let web_page_at = method_body("Runtime", "page_under_the_hand");
         let asked = web_page_at
             .find("tab_list_target_at")
             .expect("the page's door subtracts the tab list");
@@ -61309,7 +63092,7 @@ mod quit_transaction_tests {
             .find("app.record_window(")
             .expect("the door puts this window's opening rectangle in the vault");
         let built = door
-            .find("new_window_runtime(NewWindowParts {")
+            .find("new_window_runtime::<Native>(NewWindowParts {")
             .expect("and then builds the window runtime around it");
         let photographed = door
             .find("runtime.mark_session_dirty(")
@@ -61489,37 +63272,6 @@ mod quit_transaction_tests {
         assert!(
             method_body("TabState", "retire_all_shells").contains(handed),
             "and the hand-over is what it does instead"
-        );
-    }
-
-    /// PIN (方案 ③) — **the quit judges the write, and the ordinary paths do
-    /// not have to.**
-    ///
-    /// `flush_judged` exists for exactly one caller and this is the check that it
-    /// still is that caller: the `Write` arm hands its answer to
-    /// `Quit::written`, which is where "a document that did not reach the disk
-    /// keeps the windows open" is decided (pinned in `quit.rs`).
-    ///
-    /// Red gate: swallow the result with `let _ =` and this goes red one line
-    /// before the process starts hiding windows over a file it never wrote.
-    #[test]
-    fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
-        let settle = method_body("FolioApp", "settle_quit");
-        assert!(
-            settle.contains("app.session_store.flush_for_quit(until, now)"),
-            "the quit's write is the judged one"
-        );
-        assert!(
-            settle.contains("quit.written(verdict)"),
-            "and the answer is what the transaction is told"
-        );
-        assert!(
-            settle.contains("refusal.quit_may_proceed()"),
-            "and a save that ran out of its budget is not read as one that was refused"
-        );
-        assert!(
-            settle.contains("i18n::Text::QuitSessionNotWritten"),
-            "a write that was refused is said out loud on every window"
         );
     }
 
@@ -62741,58 +64493,6 @@ mod pty_drain_budget_tests {
         );
     }
 
-    /// RED (review row R5-4) — **every pane the reader can see settles its rows and typesets what
-    /// it printed.**
-    ///
-    /// A `$$…$$` block becomes a picture in two steps and both were asked of the pane holding the
-    /// keyboard alone: the stability window that decides a row has stopped moving, and the
-    /// scheduler that turns a settled block into work for the typesetting engine. A reader who
-    /// splits a pane, runs the command on the right and clicks back into the left is looking at a
-    /// pane that will never typeset anything — the "formula in the other pane never renders"
-    /// report.
-    ///
-    /// The road that already visits the other panes is the one that projects them for the present,
-    /// so that is where the scheduling belongs; the settle belongs beside the deadline that wakes
-    /// the loop for it, and that deadline has to come from the same walk or the window sleeps
-    /// through the window it owes.
-    ///
-    /// Mutation: put `self.shell_mut()` or `self.focused()` back into either and the sibling is
-    /// back to showing its own LaTeX.
-    #[test]
-    fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
-        let deadline = method_body("Runtime", "live_stability_deadline");
-        assert!(
-            deadline.contains("leaves()"),
-            "the window wakes at the earliest settle any pane on screen owes"
-        );
-        let due = method_body("Runtime", "advance_live_math_if_due");
-        assert!(
-            due.contains("leaves_mut()"),
-            "and when it wakes, every pane of the tab on screen settles"
-        );
-        assert!(
-            due.contains("bt_compose::advance_live_stability("),
-            "each through the crate's advance, the step a live row settles at"
-        );
-        for focused_only in ["self.shell_mut()", "self.shell()", "self.focused()"] {
-            assert!(
-                !deadline.contains(focused_only) && !due.contains(focused_only),
-                "`{focused_only}` is the keyboard's pane, and a block prints in whichever pane \
-                 ran the command"
-            );
-        }
-        let redraw = method_body("Runtime", "redraw");
-        assert!(
-            redraw.contains("bt_compose::schedule("),
-            "and the pass that projects the panes nobody is typing in is the pass that schedules \
-             the artifacts it just found in them"
-        );
-        assert!(
-            redraw.contains("dispatch_tab_decoration_tasks("),
-            "scheduling work nobody dispatches is a block that stays LaTeX"
-        );
-    }
-
     /// RED (review row R5-5) — **a metric that moved re-keys every pane, not the focused one.**
     ///
     /// A DPI change, a font change, a theme swap and a language switch all hand every leaf of
@@ -63040,11 +64740,6 @@ mod textless_present_tests {
         item_body(&bt_source::ItemQuery::method(owner, name))
     }
 
-    /// The body of one method written in a `impl <trait> for <owner>` block.
-    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
-        item_body(&bt_source::ItemQuery::method(owner, name).of_trait(trait_name))
-    }
-
     /// PIN — **a picture that lost its characters is re-filed and asked for
     /// again, not recorded as delivered.**
     ///
@@ -63159,7 +64854,7 @@ mod textless_present_tests {
         // spelled seven times in `main.rs` and once in `hang_watch.rs`, so
         // "the next one" only means this dispatch's while the reading is the
         // item's. The needle stays in two pieces for P18 to join.
-        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let dispatch = method_body("FolioApp", "on_window_event");
         let woken = dispatch
             .find(concat!(
                 "WindowEvent::Occluded(false) => runtime.",
@@ -63431,7 +65126,7 @@ mod application_change_tests {
             .find("settle_application_change")
             .expect("the loop settles what the application changed");
         let waited = door
-            .find("wake_deadline")
+            .find("let mut wake = ")
             .expect("the loop asks every window for its next wake-up");
         assert!(
             settled < waited,
@@ -63451,16 +65146,16 @@ mod application_change_tests {
 /// "which window is this about" is answered by looking the id up rather than by
 /// assuming — which is what the single-window loop did, in the only way a
 /// single-window loop can.
-struct FolioApp {
+struct FolioApp<B: Backend = Native> {
     /// The application, from the moment its first window opened it.
     ///
     /// `Option` because there is no `App` before `resumed`: everything in it is
     /// read off disk or spawned, and both need an event loop to have started.
-    app: Option<App>,
+    app: Option<App<B>>,
     /// Every open window, under the id its events arrive with, in the order
     /// they opened.
-    windows: Windows<WindowId, WindowRuntime>,
-    proxy: EventLoopProxy<AppEvent>,
+    windows: Windows<WindowId, WindowRuntime<B>>,
+    proxy: LoopProxy,
     startup_started: Instant,
     /// What the process was started with, held until there is a window to honour
     /// it in. Parsed in `main` and resolved in [`Runtime::create`], because
@@ -63488,6 +65183,10 @@ struct FolioApp {
     /// Inputs from which the installed macOS menu was derived. Compared before
     /// allocating a fresh plan or crossing into AppKit.
     main_menu_inputs: Option<MainMenuInputs>,
+    /// **The clock the standing `ControlFlow::WaitUntil` is owed to**
+    /// (T-WINDOW-THREAD-UNDER-LOAD), set beside it by [`Self::park_until`] on every road that
+    /// sets one; `None` with `Wait`.
+    wake_owner: Option<WakeOwner>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63523,12 +65222,12 @@ impl MainMenuInputs {
 /// [`bt_render::WindowTarget::CompositionVisual`], whose whole contract is that
 /// the visual must be live at the instant the surface is made and that the
 /// `Compositor` the caller is holding is what makes it so.
-struct TheDeviceAndItsWindows<'a> {
-    gpu: &'a mut GpuContext,
-    windows: &'a mut Windows<WindowId, WindowRuntime>,
+struct TheDeviceAndItsWindows<'a, B: Backend> {
+    gpu: &'a mut B::Device,
+    windows: &'a mut Windows<WindowId, WindowRuntime<B>>,
 }
 
-impl LostDevice for TheDeviceAndItsWindows<'_> {
+impl<B: Backend> LostDevice for TheDeviceAndItsWindows<'_, B> {
     type Error = RenderError;
 
     fn is_lost(&self) -> bool {
@@ -63536,33 +65235,40 @@ impl LostDevice for TheDeviceAndItsWindows<'_> {
     }
 
     fn rebuild(&mut self) -> std::result::Result<(), RenderError> {
-        let rebuilt: Vec<RebuiltWindow<'_>> = self
-            .windows
-            .in_order_mut()
-            .into_iter()
-            .map(|window| {
-                // **Built before the renderer is borrowed**, out of a
-                // `Compositor` and a `Window` this entry goes on owning, and
-                // never stored — see [`window_surface_target`], which is the
-                // one place any platform's door is named. Its contract is what
-                // makes that the only sound arrangement: on Windows the visual
-                // has to be live at the instant the surface is made, and on
-                // macOS the view has to have been emptied of the layer the old
-                // surface left on it. Both happen in there, for all three
-                // callers, and this one is the caller they happen *for*.
-                let target = window_surface_target(&window.window, &window.compositor);
-                RebuiltWindow::OnScreen(&mut window.renderer, target)
-            })
-            .collect();
-        pollster::block_on(self.gpu.rebuild_after_device_loss(rebuilt))?;
-        note_gpu_adapter(self.gpu);
-        Ok(())
+        B::rebuild_every_surface(self.gpu, self.windows.in_order_mut())
     }
 }
 
-impl FolioApp {
+/// **Every window's swapchain, built again on the device layer** — [`Backend::rebuild_every_surface`]
+/// for the product's windows.
+fn rebuild_every_native_surface(
+    gpu: &mut GpuContext,
+    windows: Vec<&mut WindowRuntime>,
+) -> std::result::Result<(), RenderError> {
+    let rebuilt: Vec<RebuiltWindow<'_>> = windows
+        .into_iter()
+        .map(|window: &mut WindowRuntime| {
+            // **Built before the renderer is borrowed**, out of a
+            // `Compositor` and a `Window` this entry goes on owning, and
+            // never stored — see [`window_surface_target`], which is the
+            // one place any platform's door is named. Its contract is what
+            // makes that the only sound arrangement: on Windows the visual
+            // has to be live at the instant the surface is made, and on
+            // macOS the view has to have been emptied of the layer the old
+            // surface left on it. Both happen in there, for all three
+            // callers, and this one is the caller they happen *for*.
+            let target = window_surface_target(&window.window, &window.compositor);
+            RebuiltWindow::OnScreen(&mut window.renderer, target)
+        })
+        .collect();
+    pollster::block_on(gpu.rebuild_after_device_loss(rebuilt))?;
+    note_gpu_adapter(gpu);
+    Ok(())
+}
+
+impl<B: Backend> FolioApp<B> {
     fn new(
-        proxy: EventLoopProxy<AppEvent>,
+        proxy: LoopProxy,
         cli: cli::CliRequest,
         delegate: Option<bt_platform::AppDelegate>,
     ) -> Self {
@@ -63575,6 +65281,7 @@ impl FolioApp {
             delegate,
             termination: None,
             main_menu_inputs: None,
+            wake_owner: None,
         }
     }
 
@@ -63587,14 +65294,14 @@ impl FolioApp {
     /// `None` for an id that is not open, which is not a defect to guard
     /// against but a race the platform is entitled to: an event posted for a
     /// window can arrive after that window has been removed.
-    fn runtime(&mut self, id: WindowId) -> Option<Runtime<'_>> {
+    fn runtime(&mut self, id: WindowId) -> Option<Runtime<'_, B>> {
         let app = self.app.as_mut()?;
         let window = self.windows.get_mut(id)?;
         Some(Runtime { app, window })
     }
 
     /// The window at `index` in the opening order.
-    fn runtime_at(&mut self, index: usize) -> Option<Runtime<'_>> {
+    fn runtime_at(&mut self, index: usize) -> Option<Runtime<'_, B>> {
         let id = self.windows.key_at(index)?;
         self.runtime(id)
     }
@@ -63643,28 +65350,12 @@ impl FolioApp {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
-        // A walk that died never published its facts: one walk is asked for in its place
-        // (T-FRESH-FACTS round 2), so nothing waiting on them waits for an unrelated trigger.
-        if let Some(died) = answers.died {
-            let line = match programs_lane::request_after_death(
-                died,
-                &app.settings_store.loaded().default_profile,
-            ) {
-                Some(again) => {
-                    format!(
-                        "program walk {died} ended early; walk {again} is asked for in its place"
-                    )
-                }
-                None => format!(
-                    "program walk {died} ended early; it was itself asked for after a death, so \
-                     the next trigger walks again"
-                ),
-            };
-            diagnostics::note(&line);
-        }
+        // A walk that failed — or a worker that ended — was said once by the lane's ledger, and
+        // nothing is asked again on its own (the side-effects contract's C5, revision (b)5): the
+        // next new trigger walks again, and only a walk that ran to its end is news below.
         // A walk's end is news to a pane in birth even when no answer moved: a pane left in birth
         // to say something at its landing (`birth_here`) waits on rows that were already known.
-        let ended = answers.finished.is_some();
+        let ended = answers.finished().is_some();
         let news = adopt_program_answers(&mut app.profile_programs, answers);
         if let Some(snapshot) = program_environment {
             let proxy = app.event_proxy.clone();
@@ -63694,7 +65385,7 @@ impl FolioApp {
 
     fn for_each_window(
         &mut self,
-        mut answer: impl FnMut(&mut Runtime<'_>) -> Result<()>,
+        mut answer: impl FnMut(&mut Runtime<'_, B>) -> Result<()>,
     ) -> Result<()> {
         for index in 0..self.windows.len() {
             if let Some(mut runtime) = self.runtime_at(index)
@@ -63715,7 +65406,7 @@ impl FolioApp {
     /// moment it truly can.
     fn for_every_window_engines_included(
         &mut self,
-        mut answer: impl FnMut(&mut Runtime<'_>) -> Result<()>,
+        mut answer: impl FnMut(&mut Runtime<'_, B>) -> Result<()>,
     ) -> Result<()> {
         for index in 0..self.windows.len() {
             if let Some(mut runtime) = self.runtime_at(index) {
@@ -63832,13 +65523,6 @@ impl FolioApp {
                 into,
             )));
         }
-        let target_window = {
-            let target = self
-                .windows
-                .get_mut(into)
-                .expect("checked open one line above");
-            native_window(&target.window)?
-        };
         let Some((source, target)) = self.windows.two_mut(from, into) else {
             // `from != into`, both were open a statement ago, and nothing between
             // here and there can close a window.
@@ -63876,10 +65560,29 @@ impl FolioApp {
             .copied()
             .filter(|leaf| hosted_in_source.contains(leaf))
             .collect();
+        // **Each page's place on both sides, asked before anything moves**: the page's own name in
+        // the target window and, for the way home, in the source. A window that cannot name a place
+        // refuses the move here, where nothing has been touched.
+        let addressed: Vec<(LeafId, webhost::SeatAddress, webhost::SeatAddress)> = carrying
+            .iter()
+            .map(|leaf| {
+                // The tab travels whole and keeps its id, so the page's name in the target
+                // window is the name it already had.
+                let page = bt_platform::PageVisual {
+                    tab: leaf.tab.0,
+                    seat: leaf.seat.0,
+                };
+                Ok((
+                    *leaf,
+                    target.window.page_address(page)?,
+                    source.window.page_address(page)?,
+                ))
+            })
+            .collect::<Result<_, String>>()
+            .map_err(|error| anyhow!(error))?;
         let mut moved: Vec<(LeafId, webhost::RehostReport)> = Vec::new();
         let mut outcomes = Vec::new();
         let mut refused = None;
-        let source_window = native_window(&source.window)?;
         let front = source.tabs[index].seats.identity();
         // Two disjoint fields of one window, borrowed apart, because the page
         // being handed over and the tree it is being handed out of are both the
@@ -63889,22 +65592,15 @@ impl FolioApp {
             compositor: source_compositor,
             ..
         } = &mut *source;
-        for leaf in carrying {
+        let mut homes: Vec<webhost::SeatAddress> = Vec::new();
+        for &(leaf, there, home) in &addressed {
             let Some(page) = source_web.get_mut(&leaf) else {
                 continue;
             };
             let report = page.rehost(
                 source_compositor,
                 &target.compositor,
-                webhost::SeatAddress {
-                    // The tab travels whole and keeps its id, so the page's name
-                    // in the target window is the name it already had.
-                    page: bt_platform::PageVisual {
-                        tab: leaf.tab.0,
-                        seat: leaf.seat.0,
-                    },
-                    window: target_window,
-                },
+                there,
                 // **The keyboard goes with the tab**, and only for the pane the
                 // tab is standing on: a page in a background pane of a moved tab
                 // has not been pointed at by anybody.
@@ -63916,7 +65612,10 @@ impl FolioApp {
                     refused = Some(TransferRefusal::PageKept(leaf.seat, why));
                     break;
                 }
-                report => moved.push((leaf, report)),
+                report => {
+                    moved.push((leaf, report));
+                    homes.push(home);
+                }
             }
         }
         if let Some(refusal) = refused {
@@ -63928,18 +65627,12 @@ impl FolioApp {
             // and there is nothing further to do about it here: the tab is not
             // moving, and a page that ends up rebuilding rebuilds on the window
             // its tab is still in, which is where this puts its address.
-            for (leaf, _) in moved.iter().rev() {
+            for ((leaf, _), home) in moved.iter().zip(&homes).rev() {
                 if let Some(page) = source_web.get_mut(leaf) {
                     let _ = page.rehost(
                         &target.compositor,
                         source_compositor,
-                        webhost::SeatAddress {
-                            page: bt_platform::PageVisual {
-                                tab: leaf.tab.0,
-                                seat: leaf.seat.0,
-                            },
-                            window: source_window,
-                        },
+                        *home,
                         false,
                         &mut outcomes,
                     );
@@ -64180,19 +65873,91 @@ impl FolioApp {
         (batch, gone)
     }
 
-    /// [`Self::drain_preview_answers`] for the repository lane.
-    fn drain_git_answers(&mut self) -> (Vec<git::GitResponse>, bool) {
-        let mut batch = Vec::new();
+    /// [`Self::drain_preview_answers`] for the repository lanes — the read
+    /// worker's answers and the mutation lane's receipts, in one batch, and the
+    /// answers to git documents beside it.
+    ///
+    /// **The receipts are taken first and filed last.** A read of a repository
+    /// sends its answer before any later mutation of it can start
+    /// (`git_mutation_lane::RepoTurns`), so every read answer older than a
+    /// receipt taken here is already in the channel when the channel is drained
+    /// after it — and filing the receipts after the answers means a reading
+    /// taken before a verb never lands after the verb's receipt has asked the
+    /// repository again.
+    ///
+    /// **Every page's answer is owed to the cache that asked** (`git::GitCacheId`),
+    /// found where it stands now among the caches the open windows hold
+    /// (`git_mutation_lane::OpenPages`): a page's answer is addressed there, so a
+    /// Files view docked into a column or popped out into a float while git ran
+    /// still receives it. A receipt whose cache no open window holds is let go
+    /// first, and ends in the lane's sink; a read answer whose cache is gone is
+    /// dropped.
+    ///
+    /// **Every document's answer is owed to the buffer opened for it**
+    /// (`preview::BufferId`), found where it is kept now — in whichever tab's pool,
+    /// or on a window's hover card — whether or not the page whose row was pressed
+    /// is still open. One whose buffer nothing keeps any more reaches the sink,
+    /// which ignores it: nobody is waiting for it.
+    fn drain_git_answers(&mut self) -> GitAnswers {
+        let mut answers = GitAnswers::default();
+        let mut open = git_mutation_lane::OpenPages::default();
+        for window in self.windows.values() {
+            if window.leaving.is_none() {
+                let id = window.window.id();
+                for tab in &window.tabs {
+                    for (seat, cache) in &tab.git_trees {
+                        let leaf = LeafId {
+                            tab: tab.id,
+                            seat: *seat,
+                        };
+                        open.stand(cache.id(), id, git_mutation_lane::Place::Column(leaf));
+                    }
+                    for (root, graph) in &tab.git_graphs {
+                        let place = git_mutation_lane::Place::Graph {
+                            tab: tab.id,
+                            root: root.clone(),
+                        };
+                        open.stand(graph.cache.id(), id, place);
+                    }
+                    open.keep_pool(tab.id, &tab.preview_pool);
+                }
+                for win in window.float.live_windows() {
+                    if let Some(files) = win.files() {
+                        open.stand(
+                            files.git.id(),
+                            id,
+                            git_mutation_lane::Place::Float(win.epoch),
+                        );
+                    }
+                }
+                open.keep_glance(id, &window.peek_buffer);
+            }
+        }
         let Some(app) = self.app.as_mut() else {
-            return (batch, false);
+            return answers;
         };
-        let mut gone = false;
+        let receipts: Vec<git::GitResponse> = app
+            .git_mutations
+            .ended(|request| open.gone(request))
+            .into_iter()
+            .filter_map(|(_, terminal, request)| {
+                open.address(git_mutation_lane::receipt(terminal, request))
+            })
+            .collect();
+        // The sink for a document whose buffer is gone (C6): nobody waits for it.
+        let mut sink = |_unkept: git::GitResponse| {};
         loop {
             match app.git_worker.responses.try_recv() {
-                Ok(response) => batch.push(response),
+                Ok(response) => match open.file(response, &mut sink) {
+                    Some(git_mutation_lane::Filed::Page(page)) => answers.pages.push(page),
+                    Some(git_mutation_lane::Filed::Document(document)) => {
+                        answers.documents.push(document);
+                    }
+                    None => {}
+                },
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    gone = git::disable_git_worker_state(
+                    answers.gone = git::disable_git_worker_state(
                         &mut app.git_worker_running,
                         &mut app.git_worker_notice_pending,
                     );
@@ -64200,31 +65965,46 @@ impl FolioApp {
                 }
             }
         }
-        (batch, gone)
+        answers.pages.extend(receipts);
+        answers
     }
 
-    /// [`Self::drain_preview_answers`] for the decoration lane — the formulas,
+    /// [`Self::drain_preview_answers`] for the computation lane — the formulas,
     /// the decoded pictures, the resampled rasters and the verified paths.
-    fn drain_math_answers(&mut self) -> (Vec<MathWorkerResult>, bool) {
-        let mut batch = Vec::new();
-        let Some(app) = self.app.as_mut() else {
-            return (batch, false);
-        };
-        let mut gone = false;
-        loop {
-            match app.math_worker.results.try_recv() {
-                Ok(result) => batch.push(result),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    gone = disable_math_worker_state(
-                        &mut app.math_worker_running,
-                        &mut app.math_worker_notice_pending,
-                    );
-                    break;
-                }
+    ///
+    /// **Every request the lane admitted ends here, by its identity**
+    /// (`computation_lane`). A request whose asker no open window holds — a
+    /// closed tab, a closed window — is let go first, and its terminal reaches
+    /// the lane's sink, which ignores it. Of the rest, each share's terminals
+    /// below its drain mark are taken (and a superseded one wherever it stands),
+    /// and sorted ([`sort_math_terminals`]): an answer joins the batch the
+    /// windows take theirs from; a superseded or joined request leaves the
+    /// answer to the request that ended it; a failure — said once by the lane —
+    /// is settled as its surface's own error answer, or as a pane task held for
+    /// new input that could change its answer, or an animation fill released;
+    /// and a worker that has ended turns the lane off, once, with its notice.
+    fn drain_math_answers(&mut self) -> MathAnswers {
+        let mut windows = BTreeSet::new();
+        let mut tabs = BTreeSet::new();
+        for window in self.windows.values() {
+            if window.leaving.is_none() {
+                windows.insert(window.window.id());
+                tabs.extend(window.tabs.iter().map(|tab| tab.id));
             }
         }
-        (batch, gone)
+        let Some(app) = self.app.as_mut() else {
+            return MathAnswers::default();
+        };
+        let mut answers = sort_math_terminals(app.math_worker.ended(|owner| match owner {
+            AnswerOwner::Tab(tab) => !tabs.contains(&tab),
+            AnswerOwner::Window(window) => !windows.contains(&window),
+        }));
+        answers.lane_gone = answers.lane_gone
+            && disable_math_worker_state(
+                &mut app.math_worker_running,
+                &mut app.math_worker_notice_pending,
+            );
+        answers
     }
 
     fn drain_foreground_program_answers(&mut self) -> Vec<foreground_program::Answer> {
@@ -64649,7 +66429,7 @@ impl FolioApp {
     /// is still leaving.
     fn reap_leaving_windows(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &B::Loop,
         now: Instant,
     ) -> Result<Option<Instant>> {
         let mut done: Vec<WindowId> = Vec::new();
@@ -64997,7 +66777,7 @@ impl FolioApp {
         Ok(())
     }
 
-    fn open_pending_window(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    fn open_pending_window(&mut self, event_loop: &B::Loop) -> Result<()> {
         let plans = match self.app.as_mut() {
             Some(app) => std::mem::take(&mut app.pending_new_windows),
             None => return Ok(()),
@@ -65019,7 +66799,7 @@ impl FolioApp {
                 return Ok(());
             };
             let opened_at = Instant::now();
-            let (id, window) = Runtime::open_window(event_loop, app, &plan, like)?;
+            let (id, window) = B::open_window(event_loop, app, &plan, like)?;
             let door = opened_at.elapsed();
             self.windows.insert(id, window);
             // **The directory names the window from the moment it exists**: the
@@ -65093,7 +66873,7 @@ impl FolioApp {
     /// spent its own foreground rights on this one before it exited — see
     /// `bt_platform::launch_pipe`'s four steps — and it is asked for through the
     /// recipe §7.54 already uses rather than a second one.
-    fn settle_launch_requests(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    fn settle_launch_requests(&mut self, event_loop: &B::Loop) -> Result<()> {
         // **Not while a quit has fixed the document** (0.4.6 U-21, §C.3): from the photograph on
         // `launch_wire` refuses, and a request parked a moment before that is left where it is —
         // spent if the quit is abandoned, gone with the process if it is not, as a request parked
@@ -65159,7 +66939,7 @@ impl FolioApp {
     /// through here.
     fn land_one_launch_request(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &B::Loop,
         request: &launch_wire::LaunchRequest,
     ) -> Result<Option<WindowId>> {
         let target = self.app.as_ref().and_then(|app| {
@@ -65228,7 +67008,7 @@ impl FolioApp {
     /// delegate called was `app_delegate_wire::park`, which pushes and returns;
     /// this runs a turn later with AppKit's stack unwound, which is the whole of
     /// X-4's first rule.
-    fn settle_app_delegate_events(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    fn settle_app_delegate_events(&mut self, event_loop: &B::Loop) -> Result<()> {
         for event in app_delegate_wire::take() {
             if !matches!(
                 event.kind,
@@ -65338,7 +67118,7 @@ impl FolioApp {
     ///   just opened.
     fn answer_a_menu_row(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &B::Loop,
         origin: bt_platform::AppDelegateOrigin,
         choice: bt_platform::menu::MenuChoice,
     ) -> Result<()> {
@@ -65498,10 +67278,7 @@ impl FolioApp {
     ///
     /// `None` only where a window could not be opened at all, which is the same
     /// answer [`Self::open_a_window_for_a_launch`] gives and for the same reason.
-    fn a_window_for_the_delegate(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-    ) -> Result<Option<WindowId>> {
+    fn a_window_for_the_delegate(&mut self, event_loop: &B::Loop) -> Result<Option<WindowId>> {
         let id = match self.the_window_the_reader_was_last_in() {
             Some(id) => id,
             // A request that names no place: the window opens holding the
@@ -65529,7 +67306,7 @@ impl FolioApp {
     /// One path Finder, the Dock or (M4-9) a Service handed over.
     fn open_one_path_for_the_delegate(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &B::Loop,
         path: PathBuf,
     ) -> Result<()> {
         match cli::machine_path_kind(&path) {
@@ -65599,11 +67376,7 @@ impl FolioApp {
     /// launch socket as, through the same function, for
     /// [`Self::open_one_path_for_the_delegate`]'s reason word for word: this is
     /// not somebody starting Folio, it is somebody handing Folio a place.
-    fn open_one_place_for_a_service(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        path: &Path,
-    ) -> Result<()> {
+    fn open_one_place_for_a_service(&mut self, event_loop: &B::Loop, path: &Path) -> Result<()> {
         let Some(folder) = explorer_menu::folder_for(path, cli::machine_path_kind(path)) else {
             eprintln!(
                 "{APP_NAME} was asked to open {} and there is nothing there",
@@ -65670,7 +67443,7 @@ impl FolioApp {
     }
 
     /// **The system is ending the session, or took the end back: settle what it said**
-    /// (B-ENDSESSION; `docs/M2-persistence-schema-v1.md` §5.5).
+    /// (B-ENDSESSION, T-ENDSESSION-SAVES; `docs/M2-persistence-schema-v1.md` §5.5).
     ///
     /// Windows' side of what [`Self::begin_the_systems_quit`] is on macOS, and a different shape
     /// for a reason the platform gives: AppKit waits for an answer the application gives when it
@@ -65684,22 +67457,55 @@ impl FolioApp {
     /// A save that did not land leaves the sentinel standing and the disk holding the last
     /// completed save, which is still whole because the hold kept every later change off it; the
     /// system is not kept waiting for it.
+    ///
+    /// [`Self::settle_session_end_keeping_in`], what no file takes kept in the data directory's
+    /// `recovered` folder.
     fn settle_session_end(&mut self) {
+        let _ = self
+            .settle_session_end_keeping_in(&persist::storage_dir().join(preview::RECOVERED_FOLDER));
+    }
+
+    /// [`Self::settle_session_end`], what no file takes kept in `recovery` — a test's own folder
+    /// in a test. Answers what became of every dirty preview buffer.
+    ///
+    /// **The edits go ahead of the document** (T-ENDSESSION-SAVES, ruled 2026-10-21). On the
+    /// first question of a span ([`session_end::owes_the_write`]), before the document is written:
+    /// every owed hand-editable document is handed to the storage worker once more, then every
+    /// dirty preview buffer's save, as a press hands it ([`Self::hand_over_for_the_systems_end`]).
+    /// The document follows them onto the same worker, which serves its queue in order, so its one
+    /// bounded wait (§5.3 row 16, `SESSION_SAVE_BUDGET`) is the drain of everything ahead of it —
+    /// one budget, counted from this turn's start (`asked_at`), which fits the five seconds
+    /// Windows allows from when it sends `WM_ENDSESSION` — possibly while this turn runs. Then the answers
+    /// are heard as the loop's own turn hears them, every buffer staying in its tab, and whatever
+    /// did not land is copied into `recovery` (§5.3 row 20c) before the line comes down. A save
+    /// stalled on the disk delays the document behind it: the sentinel stays, and the next start
+    /// offers the layout back — the edits are worth more than the last moments of layout.
+    fn settle_session_end_keeping_in(&mut self, recovery: &Path) -> Vec<preview::Kept> {
         let heard = session_end::take();
-        if heard.is_empty() {
-            return;
+        let mut kept = Vec::new();
+        if heard.is_empty() || self.app.is_none() {
+            return kept;
         }
-        let Some(app) = self.app.as_mut() else {
-            return;
-        };
+        // The one budget counts from here: the hand-overs ahead of the document spend it.
+        let asked_at = Instant::now();
         let mut lines_down = false;
         for end in heard {
-            let a_quit_holds_it = app
-                .quit
-                .as_ref()
-                .is_some_and(quit::Quit::document_is_frozen);
-            match session_end::settle(end, &mut app.session_store, a_quit_holds_it) {
-                session_end::Settled::Saved(Ok(())) | session_end::Settled::LeftToTheQuit => {
+            let quit = self.app.as_ref().and_then(|app| app.quit.as_ref());
+            let a_quit_holds_it = quit.is_some_and(quit::Quit::document_is_frozen);
+            // **A quit in its documents or recovery phase owns the four documents** and their
+            // copies, as one past its photograph owns everything (`LeftToTheQuit`): this road
+            // neither retries them — `quit_begin` would reset the quit's own recovery — nor
+            // copies them.
+            let documents = !quit.is_some_and(quit::Quit::holds_the_storage_worker);
+            let handed = session_end::owes_the_write(end, a_quit_holds_it)
+                .then(|| self.hand_over_for_the_systems_end(documents));
+            let Some(app) = self.app.as_mut() else {
+                return kept;
+            };
+            match session_end::settle(end, &mut app.session_store, a_quit_holds_it, asked_at) {
+                session_end::Settled::Saved(Ok(()))
+                | session_end::Settled::LeftToTheQuit
+                | session_end::Settled::AlreadySaved => {
                     lines_down = true;
                 }
                 session_end::Settled::Saved(Err(refusal)) => {
@@ -65713,6 +67519,14 @@ impl FolioApp {
                 // they stand are the layout again.
                 session_end::Settled::TakenBack => app.record_session(Instant::now()),
             }
+            if let Some(handed) = handed {
+                kept.extend(self.keep_what_the_systems_end_did_not_save(
+                    &handed,
+                    documents,
+                    recovery,
+                    SystemTime::now(),
+                ));
+            }
         }
         if lines_down {
             for window in self.windows.values() {
@@ -65721,6 +67535,87 @@ impl FolioApp {
                 }
             }
         }
+        kept
+    }
+
+    /// **Everything the system's end of the session would lose, handed to the storage worker,
+    /// and nothing taken from any window** (T-ENDSESSION-SAVES): first every owed hand-editable
+    /// document, once more (`QuitDocument::quit_begin`: the end is a trigger an owed edit is
+    /// retried on, §4.1), then each standing window's dirty preview buffers
+    /// ([`Runtime::hand_over_for_the_systems_end`]) — all of it ahead of the session document,
+    /// which the caller writes next. Answers what each window handed over, by window.
+    ///
+    /// `documents` is false while a quit holds the storage worker for its documents and their
+    /// copies: those are the quit's, and are left to it.
+    fn hand_over_for_the_systems_end(
+        &mut self,
+        documents: bool,
+    ) -> Vec<(WindowId, preview::HandedOver)> {
+        if documents && let Some(app) = self.app.as_mut() {
+            app.with_documents(|documents| {
+                for document in documents.iter_mut() {
+                    document.quit_begin();
+                }
+            });
+        }
+        let mut handed = Vec::new();
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
+                let id = runtime.window.window.id();
+                handed.push((id, runtime.hand_over_for_the_systems_end()));
+            }
+        }
+        handed
+    }
+
+    /// **After the document's wait: what landed heard, and what did not kept**
+    /// (T-ENDSESSION-SAVES). The answers the worker gave are taken as the loop's turn takes them
+    /// — the session's receipts, each buffer its own, each document store its own — and **all of
+    /// them before anything that failed on the way is said**: a window whose repaint refused does
+    /// not keep the document stores from hearing theirs. Then each window's buffers that a save
+    /// did not clean are copied into `recovery` ([`Runtime::keep_what_the_systems_end_did_not_save`],
+    /// each line naming why its file did not take the edit — the disk's own reason where it
+    /// refused) — the buffers stay in their tabs as they now stand, dirty where the save did not
+    /// land — and, unless a quit holds them (`documents` false), each document still owed is
+    /// copied beside them, a loss said in `diagnostics.log` alone ([`IntoTheLog`]). Every line
+    /// is offered to `diagnostics.log`.
+    fn keep_what_the_systems_end_did_not_save(
+        &mut self,
+        handed: &[(WindowId, preview::HandedOver)],
+        documents: bool,
+        recovery: &Path,
+        at: SystemTime,
+    ) -> Vec<preview::Kept> {
+        if let Some(app) = self.app.as_mut() {
+            app.session_store.take_receipts();
+        }
+        let (said, previews) = self.hear_preview_save_answers();
+        let heard = self.take_the_documents_answers();
+        for error in [previews.err(), heard.err()].into_iter().flatten() {
+            diagnostics::note(&format!(
+                "{APP_NAME}: the session is ending and an answer from the disk was not heard: \
+                 {error:#}"
+            ));
+        }
+        let mut kept = Vec::new();
+        for (id, handed) in handed {
+            if let Some(mut runtime) = self.runtime(*id) {
+                kept.extend(
+                    runtime.keep_what_the_systems_end_did_not_save(handed, &said, recovery, at),
+                );
+            }
+        }
+        for one in &kept {
+            diagnostics::note(&one.line());
+        }
+        if documents && let Some(app) = self.app.as_mut() {
+            app.with_documents(|documents| {
+                keep_owed_documents_over(documents, recovery, at, &mut TheDisk, &mut IntoTheLog)
+            });
+        }
+        kept
     }
 
     /// One launch's tab, in a window that is already standing.
@@ -65754,7 +67649,7 @@ impl FolioApp {
     /// asked for, and nothing further happens to it.
     fn open_a_window_for_a_launch(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &B::Loop,
         like: Option<WindowId>,
         request: &launch_wire::LaunchRequest,
     ) -> Result<Option<WindowId>> {
@@ -65846,7 +67741,24 @@ impl FolioApp {
     /// opening order — the one that turns the application's clocks, whose cards
     /// the storage pass's are. With no window standing the answers wait in their
     /// channels for the next wake.
+    ///
+    /// **The session's receipts first, and always** (T-SESSION-RECEIPTS-ON-THE-WAKE): the
+    /// session store is the application's, not a window's, so its receipts are taken whether
+    /// or not a window stands or a quit holds the worker; an update's quit then reads the one it
+    /// waits for, and the hand-over's answer, on the turn this wake brings
+    /// (`Self::settle_quit`).
     fn take_document_answers(&mut self) -> Result<()> {
+        if let Some(app) = self.app.as_mut() {
+            app.session_store.take_receipts();
+        }
+        self.take_preview_save_answers()?;
+        self.take_the_documents_answers()
+    }
+
+    /// **What the storage worker answered the four documents, heard by the first standing
+    /// window** — [`Self::take_document_answers`]'s second half, on its own for the system's end
+    /// of the session, which hears every answer before it says any failure.
+    fn take_the_documents_answers(&mut self) -> Result<()> {
         // **Not while a quit holds the storage worker** (T-QUIT-DOCUMENTS): its documents and
         // recovery phases take the answers themselves, on the turn this wake brings, and merge
         // without the doors.
@@ -65866,6 +67778,114 @@ impl FolioApp {
                 continue;
             }
             return runtime.take_document_answers();
+        }
+        Ok(())
+    }
+
+    /// **The storage worker's answers about preview saves** (S-6a): each heard by
+    /// the buffer that asked, in whichever standing window its tab is in now
+    /// (`Runtime::hear_preview_saves`); an answer no buffer is waiting for — its
+    /// tab, pane or edits gone, or its window leaving — goes to the sink,
+    /// recorded and then ignored (C6). Not held back by a quit: these answers are
+    /// the buffers', and the quit's documents phase takes only the stores'.
+    fn take_preview_save_answers(&mut self) -> Result<()> {
+        self.hear_preview_save_answers().1
+    }
+
+    /// [`Self::take_preview_save_answers`], answering also every refusal the answers gave, by
+    /// the file each was for ([`Runtime::hear_preview_saves`]) — gathered whatever a window's
+    /// repaint answered.
+    fn hear_preview_save_answers(&mut self) -> (Vec<(preview::PreviewSource, String)>, Result<()>) {
+        let mut refused = Vec::new();
+        let Some(mut answers) = self.app.as_mut().map(App::take_preview_save_answers) else {
+            return (refused, Ok(()));
+        };
+        if answers.is_empty() {
+            return (refused, Ok(()));
+        }
+        // Every standing window hears its buffers' answers whatever another
+        // window's repaint answered, and every answer taken is ended — heard,
+        // or sunk — before the first error is passed on (C6).
+        let mut first_error = None;
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+                && let Err(error) = runtime.hear_preview_saves(&mut answers, &mut refused)
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(app) = self.app.as_mut() {
+            app.sink_preview_save_answers(answers);
+        }
+        (refused, first_error.map_or(Ok(()), Err))
+    }
+
+    /// **Every window's close that waits for its saves, looked at** (S-6b) — once
+    /// a turn, which the saves' answers wake (`AppEvent::DocumentsAnswered`, heard
+    /// by the buffers first: [`Self::take_preview_save_answers`]) and the waits'
+    /// bound ends (`restore::DirtyGate::waits_until`, in the turn's wake-up).
+    ///
+    /// Each window decides its own (`Runtime::settle_close_wait`); a pane's or a
+    /// tab's close is re-run there. The two closes that are the loop's are re-run
+    /// here, from the top, through the doors they always came through: a
+    /// window's shut as the OS close it was (`WindowEvent::CloseRequested`, which
+    /// puts the gate again and now finds nothing to ask — or asks), the run's end
+    /// as the close of the ordinary window that ends it (`Self::close`, which
+    /// asks the summoned terminal again). A close a `Save all` wait re-requested
+    /// is taken as the dispatcher takes one.
+    /// **When the loop must come back to end a close's wait** (S-6b): the soonest bound of a
+    /// close waiting on a gate, or of an ended tab waiting for its saves, after `now`. A leaving
+    /// window's waits are not decided (`Self::settle_close_waits` skips it), and no close's wait
+    /// is decided while a quit is under way, so neither joins the wake-up: their bounds would be
+    /// a wake-up in the past on every turn. The answers themselves wake the loop.
+    fn close_waits_wake(&self, now: Instant) -> Option<Instant> {
+        if self.app.as_ref().is_some_and(|app| app.quit.is_some()) {
+            return None;
+        }
+        self.windows
+            .values()
+            .filter(|window| window.leaving.is_none())
+            .flat_map(|window| {
+                [
+                    window.dirty_gate.waits_until(),
+                    window.exited_tab_waits.next_after(now),
+                ]
+            })
+            .flatten()
+            .min()
+    }
+
+    fn settle_close_waits(&mut self, event_loop: &B::Loop, now: Instant) -> Result<()> {
+        // **Not while a quit is under way** (round 3): the quit's card is the one question,
+        // and a wait decided under it would close a pane or a tab mid-quit, or put the gate's
+        // question beneath the card. The waits stand; a quit that is cancelled leaves them to
+        // be looked at on the next turn, and one that goes on takes their windows with it.
+        if self.app.as_ref().is_some_and(|app| app.quit.is_some()) {
+            return Ok(());
+        }
+        for index in 0..self.windows.len() {
+            let Some(id) = self.windows.key_at(index) else {
+                continue;
+            };
+            let Some(mut runtime) = self.runtime_at(index) else {
+                continue;
+            };
+            if runtime.window.leaving.is_some() {
+                continue;
+            }
+            let after = runtime.settle_close_wait(now)?;
+            let requested = runtime.take_close_request();
+            match after {
+                runtime::AfterTheWait::Nothing => {}
+                runtime::AfterTheWait::Shut => {
+                    self.on_window_event(event_loop, id, WindowEvent::CloseRequested);
+                }
+                runtime::AfterTheWait::EndTheRunWith(closing) => self.close(closing)?,
+            }
+            if let Some(closing) = requested {
+                self.close(closing)?;
+            }
         }
         Ok(())
     }
@@ -66004,7 +68024,7 @@ impl FolioApp {
     /// [`quake::Quake::reconcile`]. Three doors can move this chord (the
     /// recorder, a hand-edited `keybindings.json`, and `Restore all defaults`)
     /// and a turn that reads the table is one statement that covers all three.
-    fn settle_quake(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    fn settle_quake(&mut self, event_loop: &B::Loop) -> Result<()> {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
@@ -66080,7 +68100,8 @@ impl FolioApp {
             return Ok(());
         };
         runtime.show_quake_window()?;
-        let native = native_window(&runtime.window.window).ok();
+        let ours =
+            previous.is_some_and(|before| runtime.window.window.holds_the_foreground(before));
         if let Some(app) = self.app.as_mut() {
             // The window this one came down over is not remembered when it *is*
             // this one: a summon pressed while the window already had the
@@ -66092,8 +68113,7 @@ impl FolioApp {
             // the holder is an application, this same case is refused one step
             // earlier by `foreground_holder` answering `None` for ourselves, and
             // `Foreground::is_window` says so.
-            let previous =
-                previous.filter(|before| !native.is_some_and(|window| before.is_window(window)));
+            let previous = previous.filter(|_| !ours);
             app.quake.shown_over(previous);
         }
         if let Some(runtime) = self.runtime(id)
@@ -66134,7 +68154,7 @@ impl FolioApp {
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
-        let owed = runtime.hide_quake_window();
+        let owed = runtime.hide_quake_window()?;
         // **After the window is off the screen, never before.** Windows gives the
         // foreground to *something* the moment a foreground window is hidden, and
         // a handover made first would be undone by that. macOS does the same
@@ -66214,12 +68234,13 @@ impl FolioApp {
         Ok(())
     }
 
-    /// **Which window this HWND is** (multiwindow slice F2).
+    /// **Which window owns the glass at this screen point** (multiwindow slice F2): the one that
+    /// answers it is its own ([`WindowHost::glass_at`]).
     ///
     /// [`Self::owner_of`]'s shape and its reason: linear over a handful of
     /// windows, on a lane that runs while a hand is actually crossing a boundary,
     /// and no second table to be kept in step with the first.
-    fn window_holding(&mut self, native: bt_platform::NativeWindow) -> Option<WindowId> {
+    fn window_at(&mut self, x: i32, y: i32) -> Option<WindowId> {
         (0..self.windows.len()).find_map(|index| {
             let id = self.windows.key_at(index)?;
             let window = self.windows.get_mut(id)?;
@@ -66228,7 +68249,7 @@ impl FolioApp {
             if window.leaving.is_some() {
                 return None;
             }
-            (native_window(&window.window).ok() == Some(native)).then_some(id)
+            (window.window.glass_at(x, y) == GlassHere::Ours).then_some(id)
         })
     }
 
@@ -66317,9 +68338,7 @@ impl FolioApp {
         {
             broker.cargo_pane = cargo_pane.clone();
         }
-        let under =
-            bt_platform::top_level_window_at(pointer.0.round() as i32, pointer.1.round() as i32)
-                .and_then(|native| self.window_holding(native));
+        let under = self.window_at(pointer.0.round() as i32, pointer.1.round() as i32);
         let aim = match under {
             Some(window) if window == source => BrokerAim::Home,
             Some(window) => {
@@ -66676,7 +68695,11 @@ impl FolioApp {
     /// Spent at the loop's two doors, exactly as the pending window is and for
     /// the same reason: it needs the `ActiveEventLoop` and every window at once,
     /// and a `Runtime` has never held either.
-    fn settle_quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    ///
+    /// `now` is the turn's instant: the save step's bound is read against it
+    /// (S-6c), as a close's wait is read against the instant
+    /// [`Self::settle_close_waits`] is handed.
+    fn settle_quit(&mut self, event_loop: &B::Loop, now: Instant) -> Result<()> {
         self.begin_quit_if_asked()?;
         loop {
             self.deliver_the_quits_update_report();
@@ -66692,15 +68715,27 @@ impl FolioApp {
                 // Both of these are waits, and the loop has to go back round for
                 // them: one for a press, one for a browser process.
                 quit::QuitStep::Ask | quit::QuitStep::WaitForPages => return Ok(()),
+                // **The saves on the storage worker, and the quit waits for them** (S-6c): handed
+                // over once, as `Ctrl+S` hands one, then looked at on every turn their answers wake
+                // (`AppEvent::DocumentsAnswered`) until all have answered or the bound
+                // (`Quit::deadline`) has passed — never a wait on this thread.
                 quit::QuitStep::Save => {
-                    let mut report = quit::SaveReport::default();
-                    self.for_each_window(|runtime| {
-                        let theirs = runtime.quit_save()?;
-                        report.saved.extend(theirs.saved);
-                        report.failed.extend(theirs.failed);
-                        Ok(())
-                    })?;
-                    self.report_to_quit(|quit| quit.saved(&report));
+                    let handed = self
+                        .app
+                        .as_ref()
+                        .and_then(|app| app.quit.as_ref())
+                        .is_some_and(|quit| quit.saves_awaited().is_some());
+                    if !handed {
+                        let mut awaited = Vec::new();
+                        self.for_each_window(|runtime| {
+                            awaited.extend(runtime.hand_over_every_save()?);
+                            Ok(())
+                        })?;
+                        self.report_to_quit(|quit| quit.saves_handed_over(awaited, now));
+                    }
+                    if !self.settle_the_quits_saves(now)? {
+                        return Ok(());
+                    }
                 }
                 quit::QuitStep::Discard => {
                     self.for_each_window(|runtime| runtime.quit_discard())?;
@@ -66758,7 +68793,8 @@ impl FolioApp {
                         // **An update's quit does not stand still for its write** (0.4.6 U-21,
                         // §C.3): the photograph goes to the writer as a named generation, the
                         // loop keeps turning, and the receipt for that generation is looked for
-                        // on each turn under `quit::UPDATE_RECEIPT_DEADLINE` — a clock, not a
+                        // on the turn the writer's wake brings (`AppEvent::DocumentsAnswered`),
+                        // under `quit::UPDATE_RECEIPT_DEADLINE` — a bound read on the turn, not a
                         // wait. Only a verdict that leaves begins the way out.
                         let Some(landed) = self.update_session_answer(Instant::now()) else {
                             return Ok(());
@@ -66854,8 +68890,12 @@ impl FolioApp {
                     // An owner-thread door (`doors::PaneRetirementWait`, row 15), admitted only
                     // on the way out. A refusal did not wait: the count is unknown, said so, and
                     // the quit goes on as it does when the budget runs out.
+                    let deadline = self
+                        .app
+                        .as_ref()
+                        .map_or(PANE_RETIREMENT_DEADLINE, |app| app.pane_retirement_deadline);
                     match bt_platform::admission::admitted::<doors::PaneRetirementWait, _>(
-                        |token| pty_door::wait_for_retirements(token, PANE_RETIREMENT_DEADLINE),
+                        |token| pty_door::wait_for_retirements(token, deadline),
                     ) {
                         Ok(0) => {}
                         Ok(still_going) => eprintln!(
@@ -66951,6 +68991,122 @@ impl FolioApp {
                 }
             }
         }
+    }
+
+    /// **The quit's saves, looked at** (S-6c) — on each turn of its save step, once every
+    /// save has been handed to the storage worker. Answers whether the step is decided: the
+    /// quit gone on to its documents, or withdrawn; `false` while it waits.
+    ///
+    /// Each buffer it waits for is found in whichever standing window holds it now
+    /// (`where_a_save_stands`: a tab may have moved), and what they came to is read as a
+    /// close's wait reads it ([`restore::SavesFound`]). First match:
+    ///
+    /// | found | what happens |
+    /// |---|---|
+    /// | a body edited (or reloaded) since its save was handed over | withdrawn; the window's card names it, once ("Not saved: …"): the new body is a new save, and the next quit asks again |
+    /// | a save still on its way, before the bound | the quit goes on waiting |
+    /// | a save still on its way at the bound | withdrawn; the window's card names it in true words ("Still on its way to the disk: …"), beside any that did not land; its late answer is its buffer's, or the sink's |
+    /// | every save landed, and no window holds anything a quit would lose | the quit goes on, to its documents |
+    /// | a conflict, a save that did not land (refused, failed, the worker gone), or a buffer still owed | withdrawn; the panes said why (a conflict: nothing was written over the other writer's bytes); the window's card names them |
+    fn settle_the_quits_saves(&mut self, now: Instant) -> Result<bool> {
+        let Some((awaited, until)) = self
+            .app
+            .as_ref()
+            .and_then(|app| app.quit.as_ref())
+            .and_then(quit::Quit::saves_awaited)
+            .map(|(awaited, until)| (awaited.to_vec(), until))
+        else {
+            return Ok(true);
+        };
+        // Each buffer, where it stands now: its window, its name, what it came to. One no
+        // standing window holds any more — its tab closed, its window gone — loses nothing.
+        let mut found: Vec<(WindowId, String, preview::AtTheClose)> = Vec::new();
+        for awaited in awaited {
+            let place = self
+                .windows
+                .in_order()
+                .filter(|(_, window)| window.leaving.is_none())
+                .find_map(|(id, window)| {
+                    where_a_save_stands(&window.tabs, awaited)
+                        .map(|(name, at)| (id, name.to_owned(), at))
+                });
+            found.extend(place);
+        }
+        let read: Vec<(String, preview::AtTheClose)> = found
+            .iter()
+            .map(|(_, name, at)| (name.clone(), *at))
+            .collect();
+        let named = |what: &[preview::AtTheClose]| {
+            let mut by_window = ByWindow::default();
+            for (window, name, at) in &found {
+                if what.contains(at) {
+                    by_window.add(*window, name.clone());
+                }
+            }
+            by_window
+        };
+        let (not_saved, on_its_way) = match restore::SavesFound::of(&read, now, until) {
+            restore::SavesFound::OnTheirWay => return Ok(false),
+            // **Superseded** — the body handed over is not the body any more: the quit is
+            // withdrawn and says which, once; the new body is a new save, which the next quit
+            // asks the card about.
+            restore::SavesFound::Edited => {
+                (named(&[preview::AtTheClose::Edited]), ByWindow::default())
+            }
+            // **At the bound** — what is still on its way is said as that, and whatever has
+            // answered without landing is named beside it.
+            restore::SavesFound::PastTheBound => (
+                named(&[preview::AtTheClose::Conflict, preview::AtTheClose::NotSaved]),
+                named(&[preview::AtTheClose::OnItsWay]),
+            ),
+            // **Every save has answered**: what each window still holds that a quit would lose
+            // (`quit_names`) — a conflict, a save that did not land, a body owed (R1) or typed
+            // into since — is what did not get saved.
+            restore::SavesFound::Answered => {
+                let mut left = ByWindow::default();
+                for (id, window) in self.windows.in_order() {
+                    if window.leaving.is_some() {
+                        continue;
+                    }
+                    for tab in &window.tabs {
+                        for name in tab.preview_pool.quit_names() {
+                            left.add(id, name.to_owned());
+                        }
+                    }
+                }
+                if left.is_empty() {
+                    // **Every save landed**: the quit goes on through the doors it always did.
+                    self.report_to_quit(|quit| quit.saved(&quit::SaveReport::default()));
+                    return Ok(true);
+                }
+                (left, ByWindow::default())
+            }
+        };
+        let mut said: Vec<WindowId> = Vec::new();
+        for id in not_saved.windows().chain(on_its_way.windows()) {
+            if said.contains(&id) {
+                continue;
+            }
+            said.push(id);
+            if let Some(mut runtime) = self.runtime(id) {
+                runtime.say_the_quits_saves(not_saved.of(id), on_its_way.of(id))?;
+            }
+        }
+        // Each with what its window's card said of it.
+        let report = quit::SaveReport {
+            saved: Vec::new(),
+            failed: not_saved
+                .names()
+                .map(|name| (name.to_owned(), i18n::quit_not_saved(name)))
+                .chain(
+                    on_its_way
+                        .names()
+                        .map(|name| (name.to_owned(), i18n::quit_save_on_its_way(name))),
+                )
+                .collect(),
+        };
+        self.report_to_quit(|quit| quit.saved(&report));
+        Ok(true)
     }
 
     /// Open the transaction, if a chord asked for one and none is under way.
@@ -67080,7 +69236,7 @@ impl FolioApp {
             if until <= now {
                 return Some(app.session_store.flush_for_quit(until, now));
             }
-            return match app.session_store.hand_over_final(now) {
+            return match app.session_store.hand_over_final() {
                 Ok(Some(generation)) => {
                     quit.requested(generation, now);
                     None
@@ -67089,10 +69245,10 @@ impl FolioApp {
                 Err(refusal) => Some(Err(refusal)),
             };
         };
-        match app.session_store.landing_of(generation, now) {
+        match app.session_store.landing_of(generation) {
             Some(answer) => Some(answer),
             None if quit.receipt_is_overdue(now) => {
-                Some(Err(app.session_store.receipt_overdue(generation, now)))
+                Some(Err(app.session_store.receipt_overdue(generation)))
             }
             None => None,
         }
@@ -67157,7 +69313,7 @@ impl FolioApp {
             }
             quit::Handoff::Sent { .. } => {
                 match update_handoff::look(
-                    app.handoff_answer.as_ref(),
+                    app.handoff_answer.as_mut(),
                     txn,
                     quit.handoff_is_overdue(now),
                 ) {
@@ -67322,7 +69478,7 @@ impl FolioApp {
     #[cfg(not(debug_assertions))]
     fn surface_selftest_if_due(&mut self) {}
 
-    fn fail(&mut self, event_loop: &ActiveEventLoop, error: anyhow::Error) {
+    fn fail(&mut self, event_loop: &B::Loop, error: anyhow::Error) {
         if self.recovered_from_a_lost_device() {
             return;
         }
@@ -67358,14 +69514,20 @@ impl FolioApp {
     /// controlled failure ([`Self::fail`], twelve sites) and a loop stopped by
     /// something that is not a window closing (`exiting`).
     ///
-    /// First every window keeps what it would lose ([`Runtime::keep_unsaved_edits`]):
-    /// each dirty preview buffer written back through the quit's judged write, or,
-    /// where the file refuses or has changed on disk, copied into the data
-    /// directory's [`preview::RECOVERED_FOLDER`] — with one diagnostics line each
-    /// saying where the edit is. The writes are made on this thread and are done
-    /// when the call returns, as the quit's are; nothing waits for anything else.
-    /// Then every window, because the stop is the process's: a shell left running
-    /// behind a window nobody can see is the one outcome worse than stopping.
+    /// First the four hand-editable documents' owed changes are copied into the data
+    /// directory's [`preview::RECOVERED_FOLDER`]. Then every window, because the stop is the
+    /// process's: a shell left running behind a window nobody can see is the one outcome
+    /// worse than stopping. **Then every window keeps what it would lose**
+    /// ([`Runtime::keep_unsaved_edits`], S-6c): each dirty preview buffer's save is handed to
+    /// the storage worker as a press hands it — the window thread writes nothing over a file
+    /// — and the buffers are held past their windows; `App::finish`, which follows on both
+    /// roads, waits for the session's last write (§5.3 row 16, queued behind those saves) and
+    /// the worker's end (row 16b), each within the writer's budget, and what did
+    /// not land is copied into `recovered` then, with one diagnostics line each saying where
+    /// the edit is. Every window keeps its edits whatever another window's close answered,
+    /// and after it has been photographed and let go: its open editor is committed by the
+    /// close before its saves are handed over, and the pools it is photographed with are
+    /// still in its tabs.
     /// `ending` for every one of them, and that is the point: this is the process
     /// stopping, not somebody closing five windows, so what was open stays in the
     /// file and nothing is filed away as "closed".
@@ -67374,19 +69536,20 @@ impl FolioApp {
     /// `ending` to this road or a row of its table, and the twelve `fail` sites to
     /// theirs.
     fn stop_every_window(&mut self) -> Result<()> {
-        let recovery = persist::storage_dir().join(preview::RECOVERED_FOLDER);
-        self.for_each_window(|runtime| {
-            runtime.keep_unsaved_edits(&recovery);
-            Ok(())
-        })?;
-        // **And the four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
+        self.stop_every_window_keeping_in(&persist::storage_dir().join(preview::RECOVERED_FOLDER))
+    }
+
+    /// [`Self::stop_every_window`], what no file takes kept in `recovery` — the data
+    /// directory's `recovered` folder on both roads, a test's own folder in a test.
+    fn stop_every_window_keeping_in(&mut self, recovery: &Path) -> Result<()> {
+        // **The four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
         // revisions (c)2 and (d)3), into the same folder — and every one that could be kept
         // nowhere said through the system's own box, before a window closes.
         if let Some(app) = self.app.as_mut() {
             app.with_documents(|documents| {
                 keep_owed_documents_over(
                     documents,
-                    &recovery,
+                    recovery,
                     SystemTime::now(),
                     &mut TheDisk,
                     &mut SystemBox,
@@ -67395,10 +69558,21 @@ impl FolioApp {
             // **And a trial release a quit held, disposed of** (T-QUIT-DOCUMENTS round 4).
             dispose_of_a_held_release_on_a_stop(app.quit.as_mut(), &mut app.session_store);
         }
-        self.for_each_window(|runtime| runtime.close_window(true))
+        let closed = self.for_each_window(|runtime| runtime.close_window(true));
+        // Every window `for_each_window` walks, whatever another's close answered — and not a
+        // window already leaving: it left through its own gate, which asked about every edit
+        // it held (discarded, or saved before it went), and its close has run.
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
+                runtime.keep_unsaved_edits(recovery);
+            }
+        }
+        closed
     }
 
-    fn about_to_wait_inner(&mut self, event_loop: &ActiveEventLoop) {
+    fn about_to_wait_inner(&mut self, event_loop: &B::Loop) {
         if self.app.is_none() {
             return;
         }
@@ -67451,7 +69625,7 @@ impl FolioApp {
             };
             let gone = self.every_page_has_gone();
             self.report_to_quit(|quit| quit.pages(gone, now));
-            if let Err(error) = self.settle_quit(event_loop) {
+            if let Err(error) = self.settle_quit(event_loop, now) {
                 self.fail(event_loop, error);
                 return;
             }
@@ -67459,10 +69633,13 @@ impl FolioApp {
                 .app
                 .as_ref()
                 .and_then(|app| app.quit.as_ref())
-                .and_then(|quit| quit.wake_at(now));
-            event_loop.set_control_flow(
-                earliest_deadline([waking, bound])
-                    .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+                .and_then(quit::Quit::deadline);
+            self.park_until(
+                event_loop,
+                wake_owner::earliest_wake([
+                    wake_owner::owned(WakeOwner::Retirement, waking),
+                    wake_owner::owned(WakeOwner::QuitBound, bound),
+                ]),
             );
             return;
         }
@@ -67480,8 +69657,11 @@ impl FolioApp {
         if let Some(app) = self.app.as_mut() {
             app.web_pages_open = pages_open;
         }
+        // **A close waiting for its saves, first** (S-6b): what it closes is settled
+        // by the rest of this turn, as an event's close is.
         if let Err(error) = self
-            .settle_window_ring()
+            .settle_close_waits(event_loop, Instant::now())
+            .and_then(|()| self.settle_window_ring())
             .and_then(|()| self.settle_update_card())
             .and_then(|()| self.settle_application_change())
             .and_then(|()| self.settle_restore_answer())
@@ -67511,7 +69691,7 @@ impl FolioApp {
             // line, exactly as the drag handover above does, so that the press,
             // the window and the frame it appears in are all one turn.
             .and_then(|()| self.settle_quake(event_loop))
-            .and_then(|()| self.settle_quit(event_loop))
+            .and_then(|()| self.settle_quit(event_loop, Instant::now()))
         {
             self.fail(event_loop, error);
             return;
@@ -67528,8 +69708,8 @@ impl FolioApp {
         // deadline joins the same fold every window's clocks reach through, which
         // is what lets a spring come due over a window that will hear nothing
         // else at all.
-        let mut wake_deadline = match self.drive_drag_broker(now) {
-            Ok(deadline) => deadline,
+        let mut wake = match self.drive_drag_broker(now) {
+            Ok(deadline) => wake_owner::owned(WakeOwner::DragBroker, deadline),
             Err(error) => {
                 self.fail(event_loop, error);
                 return;
@@ -67540,16 +69720,24 @@ impl FolioApp {
         // leaving — and a sweep that turned thirty clocks over a hidden window
         // first would be drawing frames for a reader who has already closed it.
         match self.reap_leaving_windows(event_loop, now) {
-            Ok(deadline) => wake_deadline = earliest_deadline([wake_deadline, deadline]),
+            Ok(deadline) => {
+                wake = wake_owner::earliest_wake([
+                    wake,
+                    wake_owner::owned(WakeOwner::WindowReap, deadline),
+                ]);
+            }
             Err(error) => {
                 self.fail(event_loop, error);
                 return;
             }
         }
         let programs_deadline = self.advance_programs_ear(now);
-        wake_deadline = earliest_deadline([wake_deadline, programs_deadline]);
         let index_deadline = self.advance_index_ear(now);
-        wake_deadline = earliest_deadline([wake_deadline, index_deadline]);
+        wake = wake_owner::earliest_wake([
+            wake,
+            wake_owner::owned(WakeOwner::ProgramsEar, programs_deadline),
+            wake_owner::owned(WakeOwner::IndexEar, index_deadline),
+        ]);
         if self.windows.is_empty() {
             // **An application with no windows waits, and waits properly**
             // (M3-1). Until this ticket an empty registry was a loop that had
@@ -67562,10 +69750,11 @@ impl FolioApp {
             // and both of those wake the loop themselves — **and the spare web
             // controller, while it lets go** (ticket 60, SW-2): no window is left to
             // wake the loop for its browser-exit wait, so its instant is the one kept.
-            event_loop.set_control_flow(match self.run_end(wake_deadline) {
-                web_spare::RunControl::WaitUntil(at) => ControlFlow::WaitUntil(at),
-                web_spare::RunControl::Exit | web_spare::RunControl::Wait => ControlFlow::Wait,
-            });
+            let run_end = match self.run_end(Option::map(wake, |(_, at)| at)) {
+                web_spare::RunControl::WaitUntil(at) => Some((WakeOwner::RunEnd, at)),
+                web_spare::RunControl::Exit | web_spare::RunControl::Wait => None,
+            };
+            self.park_until(event_loop, run_end);
             return;
         }
         // **The kernel's news about repositories, filed under every window that
@@ -67593,28 +69782,434 @@ impl FolioApp {
             // `Runtime::turn` — it is the opening order, and a closed window at
             // the head of it must not take the job away from the rest.
             let ime_deadline = runtime.service_ime_report(now);
-            wake_deadline = earliest_deadline([wake_deadline, ime_deadline]);
+            wake = wake_owner::earliest_wake([
+                wake,
+                wake_owner::owned(WakeOwner::ImeReport, ime_deadline),
+            ]);
             let turn = runtime.turn(now, application_clocks);
             application_clocks = false;
             match turn {
-                Ok(deadline) => wake_deadline = earliest_deadline([wake_deadline, deadline]),
+                Ok(window_wake) => wake = wake_owner::earliest_wake([wake, window_wake]),
                 Err(error) => {
                     self.fail(event_loop, error);
                     return;
                 }
             }
         }
-        // **And the quit's, while it waits for an answer across turns** (0.4.6 U-21): an update's
-        // quit looks for its session's receipt with the windows still up, and neither the writer
-        // nor anything else wakes the loop when it comes.
+        // **And the quit's bound, while it waits for an answer across turns** (0.4.6 U-21): an
+        // update's quit looks for its session's receipt with the windows still up. The answer
+        // itself wakes the loop (`AppEvent::DocumentsAnswered`); the clock is only the bound.
         let quit_wake = self
             .app
             .as_ref()
             .and_then(|app| app.quit.as_ref())
-            .and_then(|quit| quit.wake_at(now));
-        let wake_deadline = earliest_deadline([wake_deadline, quit_wake]);
+            .and_then(quit::Quit::deadline);
+        // **And every close's bound, while it waits for its saves** (S-6b): the answers
+        // wake the loop themselves; the clock is only the bound.
+        let close_wake = self.close_waits_wake(now);
+        let wake = wake_owner::earliest_wake([
+            wake,
+            wake_owner::owned(WakeOwner::QuitBound, quit_wake),
+            wake_owner::owned(WakeOwner::CloseWait, close_wake),
+        ]);
+        self.park_until(event_loop, wake);
+    }
+
+    /// **The loop's control flow for this turn, and the clock that set it**
+    /// (T-WINDOW-THREAD-UNDER-LOAD): `WaitUntil` the wake's instant, or `Wait` when no clock
+    /// asked for one. The owner is kept beside the control flow it chose, so the parking
+    /// [`Self::about_to_wait`] records names the clock it is owed — and a turn that leaves early,
+    /// setting nothing, leaves both standing together.
+    fn park_until(&mut self, event_loop: &B::Loop, wake: Option<(WakeOwner, Instant)>) {
+        self.wake_owner = wake.map(|(owner, _)| owner);
         event_loop
-            .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+            .set_control_flow(wake.map_or(ControlFlow::Wait, |(_, at)| ControlFlow::WaitUntil(at)));
+    }
+
+    /// **One window event, dispatched** — `ApplicationHandler::window_event`'s whole answer,
+    /// written over the backend so a headless application can be handed an event too.
+    fn on_window_event(&mut self, event_loop: &B::Loop, window_id: WindowId, event: WindowEvent) {
+        if file_reads::is_user_input(&event) {
+            bt_platform::file_reads::input();
+        }
+        // **A gesture is a stir for the web engine's warm-up** (ticket 54): the
+        // same classifier the file-read ledger asks, so "the reader did
+        // something" is one judgement in this program and not two — and a window
+        // resized, moved or carried to another scale (ticket 60, F1), which is the
+        // reader doing something too.
+        if web_warmup::event_stirs(&event)
+            && let Some(app) = self.app.as_mut()
+        {
+            app.web_warmup.stir(Instant::now());
+        }
+        present_diagnostics::event();
+        hang_watch::at(hang_watch::Station::Event);
+        hang_watch::during(window_event_station(&event), || {
+            // **The one line the whole slice is about.** winit stamps the id of the
+            // window the event happened to; before this, the loop compared it against
+            // the only window there was and dropped anything else. Now it is a
+            // lookup, and an id that is not open is a window that has already gone.
+            if !self.windows.contains(window_id) {
+                return;
+            }
+            // **A retiring window answers nothing** (multiwindow slice E2 phase ④).
+            // It is hidden, its shells are shut and its picture is written; whatever
+            // the platform still has queued for it is about a window that is on its
+            // way out, and running a redraw or a key through it would be this process
+            // doing work on behalf of something that no longer exists.
+            if self
+                .app
+                .as_ref()
+                .and_then(|app| app.quit.as_ref())
+                .is_some_and(quit::Quit::is_retiring)
+            {
+                return;
+            }
+            // **And a window that has been closed answers nothing either** (§7.35),
+            // on the retirement's own reasoning one window down: it is off the
+            // screen, its shells are shut and its controllers have been told to go,
+            // so every message still addressed to it — a stray `WM_CLOSE`, a focus
+            // change as the window under it comes forward — is about a window the
+            // reader has already let go of.
+            if self.is_leaving(window_id) {
+                return;
+            }
+            match self.capture_before_pointer_event(window_id, &event) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
+            }
+            let Some(mut runtime): Option<Runtime<'_, B>> =
+                hang_watch::during(hang_watch::Station::EventLookup, || self.runtime(window_id))
+            else {
+                return;
+            };
+            // **A burst of notches is spent before anything that is not a notch.**
+            // See [`WheelBurst`]: the wheel accumulates so that a run of detents
+            // costs one frame instead of one frame each, and this is the line that
+            // keeps that from being a reordering — whatever arrives next answers the
+            // window the wheel has already moved.
+            if !runtime::pointer::is_wheel_event(&event)
+                && let Err(error) = runtime.flush_wheel()
+            {
+                self.fail(event_loop, error);
+                return;
+            }
+            // **And a drop is spent before anything that is not another file of the
+            // same drop**, on the line above's own reasoning (GitHub issue #1 ②).
+            // The batch is one command line going into a shell, so an event that
+            // reaches the same shell — a keystroke, most of all — must not overtake
+            // it. It is also what makes the drop's routing honest: the pointer
+            // position the batch is hit-tested against cannot have moved between the
+            // drop and this flush, because the event that would have moved it is the
+            // event that flushes first.
+            if !matches!(event, WindowEvent::DroppedFile(_))
+                && let Err(error) = runtime.flush_dropped_files()
+            {
+                self.fail(event_loop, error);
+                return;
+            }
+            // Whether this event asked the window to shut, answered before the
+            // borrow is given back: `raise_dirty_gate` is the one gate that has to be
+            // able to *stop* the event, which is why it is asked here rather than
+            // inside the close — past that line the window is gone, and a question
+            // asked after the answer is worthless.
+            let mut shutting = false;
+            // **The handler this event is about to be given to, named before it is
+            // given** — see [`window_event_station`]. Opened here and not at the
+            // door above, so the lookup, the three gates and the wheel burst stay
+            // the event's own; handed back at the foot of the match, on
+            // [`hang_watch::enter`]'s rule, so the four application doors under it
+            // belong to the dispatch and not to the handler.
+            let result = match event {
+                // **The summoned terminal's `×` means hide, and it means it by
+                // setting the chord's own bit** (§7.54e ②, user ruling 2026-09-05:
+                // 「窗上只留一个 ×,语义 = 隐藏,和热键完全一致…合并后必须同一条代码
+                // 路径」).
+                //
+                // Not "the same behaviour" and not "a call to the same function":
+                // **the same bit**. `quake.press()` is what a `WM_HOTKEY` leaves
+                // behind, and `settle_quake` on the next turn reads it, sees the
+                // window is up, and dismisses — hiding it, handing the keyboard back
+                // to whatever it came down over. There is no second road for the two
+                // to drift apart on, which is the whole of what the ruling asks for.
+                //
+                // **The dirty gate is not raised, and that is correct rather than
+                // skipped**: gate ③ exists because a *shut* loses unsaved preview
+                // buffers, and this window is not shutting. Its tabs, its shells and
+                // its buffers are all still there a chord away. Ending the session is
+                // `exit` in the shell or `Close tab` on the tab, and both of those
+                // raise every gate they always did.
+                //
+                // **Only while it is on the screen.** A `WM_CLOSE` delivered to the
+                // hidden summon is not a reader pressing its `×` — there is no `×` to
+                // press — it is the run ending, and it closes exactly as it did.
+                WindowEvent::CloseRequested
+                    if runtime.is_quake_window() && runtime.app.quake.is_showing() =>
+                {
+                    runtime.app.quake.press();
+                    Ok(())
+                }
+                WindowEvent::CloseRequested => {
+                    // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
+                    // — plans carry paths, never content — so shutting asks, the same
+                    // honesty as closing a tab."
+                    //
+                    // **Only "nothing to ask" shuts** (ticket 58). A gate raised by
+                    // this close stands; so does one that was already up — a tab's
+                    // close still being asked about, or this same shut asked a
+                    // second time — and this request is dropped: the card is the
+                    // one surface that answers, and its answer re-runs the verb.
+                    runtime
+                        .raise_dirty_gate(restore::GateRequest::Shut)
+                        .map(|raised| shutting = raised.proceeds())
+                }
+                // **`is_synthetic` is read and not discarded** (§7.54d). It is the
+                // one bit that separates a key the reader pressed at this window
+                // from winit's report of what their hand was already holding when
+                // the window took the keyboard, and a window this program can summon
+                // *under a hand still on the chord* is a window that receives the
+                // second kind.
+                WindowEvent::KeyboardInput {
+                    event,
+                    is_synthetic,
+                    ..
+                } => {
+                    // What the handlers read of it, taken once (`input::Keystroke`).
+                    let event = input::Keystroke::from(&event);
+                    runtime.observe_ime_key(&event, is_synthetic);
+                    runtime.keyboard_input(&event, is_synthetic)
+                }
+                WindowEvent::Ime(event) => runtime.ime_input(event),
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    // **The one door every modifier state in this process comes
+                    // through**, which is why Q9's ruling is applied here and
+                    // nowhere else (M1-7). With Option ruled to be text, an Option
+                    // that winit reports as `Alt` is a modifier nobody is holding —
+                    // see `input::effective_modifiers`, which says the whole of it.
+                    // **And the reported state is kept beside it**, because the
+                    // sentence above is about text and one reader is not asking
+                    // about text (§13.33 ①). Written first and from the same
+                    // argument, so the two can never be a turn apart.
+                    runtime.window.modifiers_held = modifiers.state();
+                    runtime.window.modifiers = input::effective_modifiers(
+                        modifiers.state(),
+                        runtime.app.settings_store.loaded().option_sends_alt,
+                        bt_platform::host_platform(),
+                    );
+                    // The pointing hand over a link is a statement about `Ctrl` as
+                    // much as about where the pointer is (§7.1.5g), and `Ctrl` moves
+                    // while the pointer does not. Without this the shape would only
+                    // ever catch up on the next mouse move, which is to say: after
+                    // the hand had already decided whether to press.
+                    // **And the modifier asks what a pointer move asks** (closure review B-1).
+                    // The finger below is a promise about a press, and a press on a link nobody
+                    // has asked the disk about answers nothing — so the key going down is a
+                    // gesture that meets a reference, and it asks through the same one door.
+                    runtime.ask_about_the_link_under_the_pointer();
+                    runtime.apply_pointer_cursor();
+                    // **The hint card's one input** (§7.1.5e′). winit reports the
+                    // whole modifier state on every press and release of one, so
+                    // this is the only line in the window that has to tell the card
+                    // anything about the keys — there is no hook, no second opinion
+                    // about what is down, and nothing to keep level with
+                    // `window.modifiers` because it is read from it one statement
+                    // after it is written.
+                    runtime.note_key_hint(Instant::now())
+                }
+                // **Every pointer event goes through one door** (T-POINTER-CAPTURE
+                // cut 1): the pointer module names the kinds and owns their
+                // answers, so this dispatcher reads no pointer field.
+                event if runtime::pointer::is_pointer_event(&event) => runtime.pointer_event(event),
+                // **A file let go of over this window** (GitHub issue #1 ②). One
+                // event per file and no marker between drops, so the path is
+                // written down here and the batch is spent at the turn boundary —
+                // [`Runtime::flush_dropped_files`], and [`WheelBurst`]'s reasoning
+                // one gesture over.
+                //
+                // **And the cursor is read here too, on the file that opens the
+                // batch** (release review 0.4.2 X-10): this arm runs inside the
+                // platform's delivery of the release, which is the only instant at
+                // which where the cursor is and where the file was let go of are the
+                // same point. See [`Runtime::collect_dropped_file`].
+                //
+                // `HoveredFile` and `HoveredFileCancelled` are not answered at all.
+                // They would be the drop affordance, and what an external drag
+                // should light up is a question nobody has answered. §7.1.1's
+                // 2026-09-16 revision answered it for the *internal* drag and for
+                // that one alone — an edge band that draws the split preview, a
+                // middle that writes `Paste path` on the box — and it is precisely
+                // the feedback that carries the ruling. Inventing a second set of
+                // zones here, for a gesture winit reports without a position, would
+                // be this window answering the harder half for itself.
+                WindowEvent::DroppedFile(path) => {
+                    runtime.collect_dropped_file(path);
+                    Ok(())
+                }
+                WindowEvent::Resized(size) => runtime.resized(size),
+                // **The engine is told the window moved** (§7.7 ⑩, user report
+                // 2026-08-25). The pages are drawn through DirectComposition and
+                // get no window messages of their own, so the only thing that knows
+                // where a page's own menus and dialogs belong on screen is the
+                // parent window's position — and the only way the engine learns it
+                // has changed is this call. Said on the window's own move rather
+                // than on a page's clock: a window can be dragged with nothing on
+                // the glass but a shell, and the engine still has to be right the
+                // next time a page is opened in it.
+                WindowEvent::Moved(_) => runtime.window_moved(),
+                WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
+                // The payload is deliberately dropped: `os_theme_changed` asks the
+                // one reader this process trusts rather than taking a second
+                // opinion off the event (§7.46 ②).
+                WindowEvent::ThemeChanged(_) => runtime.os_theme_changed().map(|_| ()),
+                WindowEvent::RedrawRequested => runtime.redraw(),
+                // **Losing the window is one lifecycle door** (T-POINTER-CAPTURE R-9): the gesture
+                // a held button was making ends with it, and everything else a blur says follows.
+                WindowEvent::Focused(false) => runtime.window_blurred(),
+                WindowEvent::Focused(true) => {
+                    runtime.observe_ime_focus(true);
+                    // **A taskbar flash ends here** (`FLASHW_TIMERNOFG`: until the window comes to
+                    // the foreground; on macOS activation ends the bounce), so the record of what
+                    // it was about ends with it (ticket 62) — attention's own door.
+                    runtime.window_focused();
+                    // **R31's third invalidation moment, B: the window came back.**
+                    // Whatever happened while it was away happened in another process
+                    // — an editor saving, a `git` run in another terminal, a
+                    // checkout by a build script — and left no cwd and no marker for
+                    // this window to have noticed. Coming back is the moment a reader
+                    // looks at the page again, so it is the moment the page is
+                    // entitled to be true; it is a gesture at the window and not a
+                    // timer, which is the whole of what R31 forbids.
+                    //
+                    // On the transition and not on the event: this is asked before
+                    // `set_cursor_focus`, which is where `window_focused` is written,
+                    // so a platform that re-announced a focus this window already had
+                    // would not spend a `git status` on it. No debounce beyond that —
+                    // there is no observed flap to debounce, and a timer put in
+                    // against one would be exactly the machine this rule is about.
+                    let regained = !runtime.window.window_focused;
+                    // **The one place the visit order is written** (§7.59). On the
+                    // transition and not on the event, which is `regained`'s own
+                    // rule read one line down: a platform that re-announced a focus
+                    // this window already had must not move it up the list, because
+                    // then "most recently active" would mean "most recently
+                    // re-announced" on the machines that do that.
+                    if regained {
+                        runtime.note_this_window_was_visited();
+                    }
+                    runtime.set_cursor_focus(true, Instant::now());
+                    let reread = if regained {
+                        // And the documents whose folders no kernel would speak for
+                        // (user ruling 2026-08-29). The same sentence as the line
+                        // below it, about the same moment, for the same reason —
+                        // and it costs nothing at all on a window whose files are
+                        // all on a disk this process could subscribe to.
+                        runtime
+                            .ask_the_unwatched_preview_files()
+                            .and_then(|()| runtime.reread_git_surfaces(None))
+                    } else {
+                        Ok(())
+                    };
+                    reread.and_then(|()| {
+                        runtime.publish_frame(FrameTrigger {
+                            occurred_at: Instant::now(),
+                            source: FrameSource::Expose,
+                        })
+                    })
+                }
+                // **The window is on screen again, and this is the one turn that
+                // owes it a picture** (GitHub issue #5).
+                //
+                // It always composed and published one frame here — `publish_frame`
+                // requests exactly one redraw — and since a skip caused by occlusion
+                // stopped asking for turns of its own ([`ask_again_after`]), this is
+                // the event that pays whatever the window went dark owing. winit
+                // raises it from `windowDidChangeOcclusionState:`, off the same
+                // `NSWindowOcclusionState::Visible` bit that `wgpu-hal`'s Metal
+                // surface tests before it refuses an acquire, so the moment it
+                // arrives is exactly the moment the acquire starts succeeding.
+                //
+                // `Occluded(true)` is deliberately not handled: a window does not
+                // need to be told it has gone dark. The frame path finds out by
+                // being refused, which is the only reading that cannot be stale.
+                WindowEvent::Occluded(false) => runtime.publish_frame(FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                }),
+                _ => Ok(()),
+            };
+            // The gate's own `Discard`, spent here rather than inside the answer: the
+            // shut belongs to the event loop, and re-requesting it means closing goes
+            // through the one door it always went through instead of a second one
+            // opened for the gate.
+            let requested = runtime.take_close_request();
+            shutting |= requested == Some(window_id);
+            let result = if shutting {
+                result.and(hang_watch::during(hang_watch::Station::EventShut, || {
+                    self.close(window_id)
+                }))
+            } else {
+                result
+            };
+            // **And the window another window's answer closes**
+            // (T-SUMMON-DIRTY-PREVIEW): the run's end, answered in the summoned
+            // terminal, re-runs the close of the ordinary window that ends the run
+            // — through the same door, which asks again and now finds nothing.
+            let result = match requested.filter(|closing| *closing != window_id) {
+                Some(closing) => result
+                    .and(hang_watch::during(hang_watch::Station::EventShut, || {
+                        self.close(closing)
+                    })),
+                None => result,
+            };
+            // Whatever this event changed about the *application*, handed to the
+            // windows that were not this one. Before the door below, because a window
+            // opened after a settings row was pressed reads that row's stored value
+            // when it is built and would then be handed the same change twice.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventSettleApplication, || {
+                    self.settle_application_change()
+                })
+            });
+            // The prompt's one answer, if this event was it — before the door below,
+            // because accepting is one of the three things that queues a window.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventRestore, || {
+                    self.settle_restore_answer()
+                })
+            });
+            // And the door the other way round: a window this window's keyboard asked
+            // for. After the shut, because a chord cannot both close this window and
+            // open another, and asking in this order means a failure to open never
+            // leaves a window that should have been shut standing.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventOpen, || {
+                    self.open_pending_window(event_loop)
+                })
+            });
+            // And the whole application's own door, last: `Ctrl+Shift+Q` records a
+            // debt inside one window and what it starts belongs to the process.
+            // After the shut above, on that door's own reasoning — a chord cannot
+            // both close this window and quit — and after the open, so that a window
+            // queued by the same turn is in the registry before it is photographed.
+            let result = result.and_then(|()| {
+                hang_watch::during(hang_watch::Station::EventQuit, || {
+                    self.settle_quit(event_loop, Instant::now())
+                })
+            });
+            if let Err(error) = result {
+                self.fail(event_loop, error);
+            }
+        });
+        // **And the pump's from here until the next handler** (ticket 43). The
+        // event has been answered; what the thread does before winit hands it
+        // anything else is the platform's own loop and whatever runs on it —
+        // WebView2's callbacks and its in-process half among them. Left at
+        // `Event`, that time read as `window_event` on the 2026-09-23 report.
+        hang_watch::at(hang_watch::Station::Pump);
     }
 }
 
@@ -67631,11 +70226,15 @@ impl FolioApp {
 ///   Silence well past it is a promise that was not kept.
 /// * `Poll` — nothing is handed over at all; the loop comes straight back
 ///   round, so it is judged as a thread holding control.
-fn parking(control_flow: ControlFlow, heart: &hang_watch::Heartbeat) -> hang_watch::Park {
+fn parking(
+    control_flow: ControlFlow,
+    owner: Option<WakeOwner>,
+    heart: &hang_watch::Heartbeat,
+) -> hang_watch::Park {
     match control_flow {
         ControlFlow::Poll => hang_watch::Park::Running,
         ControlFlow::Wait => hang_watch::Park::Indefinite,
-        ControlFlow::WaitUntil(deadline) => heart.until(deadline),
+        ControlFlow::WaitUntil(deadline) => heart.until(deadline, owner),
     }
 }
 
@@ -67709,18 +70308,19 @@ mod resident_run_tests {
     fn every_control_flow_says_what_it_owes_the_window_thread() {
         let heart = hang_watch::Heartbeat::new();
         assert_eq!(
-            parking(ControlFlow::Wait, &heart),
+            parking(ControlFlow::Wait, None, &heart),
             hang_watch::Park::Indefinite,
             "an idle window is owed nothing at all, and that is what stops the \
              watchdog reading its silence as a fault"
         );
         assert_eq!(
-            parking(ControlFlow::Poll, &heart),
+            parking(ControlFlow::Poll, None, &heart),
             hang_watch::Park::Running,
             "a loop that hands nothing over is judged as one holding control"
         );
         let hang_watch::Park::Until(deadline) = parking(
             ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5)),
+            None,
             &heart,
         ) else {
             panic!("a deadline is a deadline");
@@ -67733,7 +70333,8 @@ mod resident_run_tests {
         let past = Instant::now()
             .checked_sub(Duration::from_secs(1))
             .unwrap_or_else(Instant::now);
-        let hang_watch::Park::Until(already) = parking(ControlFlow::WaitUntil(past), &heart) else {
+        let hang_watch::Park::Until(already) = parking(ControlFlow::WaitUntil(past), None, &heart)
+        else {
             panic!("a deadline is a deadline");
         };
         assert!(
@@ -68005,9 +70606,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 if let Some(door) = self.delegate.as_ref() {
                     door.ready();
                 }
-                event_loop.set_control_flow(ControlFlow::WaitUntil(
-                    Instant::now() + STARTUP_PTY_POLL_INTERVAL,
-                ));
+                self.park_until(
+                    event_loop,
+                    Some((
+                        WakeOwner::StartupPoll,
+                        Instant::now() + STARTUP_PTY_POLL_INTERVAL,
+                    )),
+                );
             }
             Err(error) => self.fail(event_loop, error),
         }
@@ -68135,9 +70740,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 Ok(())
             }
             AppEvent::MathReady => {
-                let (mut batch, gone) = self.drain_math_answers();
+                let MathAnswers {
+                    done: mut batch,
+                    mut failed,
+                    lane_gone: gone,
+                } = self.drain_math_answers();
                 let mut foreground = self.drain_foreground_program_answers();
                 self.for_each_window(|runtime| {
+                    runtime.settle_failed_requests(&mut failed);
                     runtime.apply_math_results(&mut batch, gone)?;
                     runtime.apply_foreground_program_results(&mut foreground)
                 })
@@ -68152,8 +70762,14 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }
             AppEvent::FileIndexReady => self.apply_file_index_results(),
             AppEvent::GitReady => {
-                let (mut batch, gone) = self.drain_git_answers();
-                self.for_each_window(|runtime| runtime.apply_git_results(&mut batch, gone))
+                let mut answers = self.drain_git_answers();
+                self.for_each_window(|runtime| {
+                    runtime.apply_git_results(
+                        &mut answers.pages,
+                        &mut answers.documents,
+                        answers.gone,
+                    )
+                })
             }
             // Nothing is done here. The news has already been stamped into the
             // watcher's own mailbox by the thread that heard it; this only
@@ -68173,19 +70789,6 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // order the worker served them, in the window that turns the application's clocks —
             // the window the storage pass's cards belong to.
             AppEvent::DocumentsAnswered => self.take_document_answers(),
-            // The answer is already in `psreadline::probe()`; what is owed is a
-            // frame that reads it. `refresh_chrome` rebuilds the row's sentence
-            // from scratch — `SettingsRow::description` asks `row_state` afresh
-            // every time — so there is nothing to apply, only something to draw.
-            // On every window, because the row is a fact about this machine and
-            // any of them may be showing it.
-            AppEvent::PsReadLineProbed => self.for_each_window(|runtime| {
-                if runtime.refresh_chrome() {
-                    runtime.present_chrome_change()
-                } else {
-                    Ok(())
-                }
-            }),
             // The answer is already in the legacy-profile observation or
             // removal report. What is owed is a frame that reveals or hides the
             // conditional Settings cleanup verb, plus any removal result.
@@ -68195,15 +70798,28 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // here. A removal that found nothing to remove changed nothing,
                 // so it says nothing.
                 let mut removal = shell_integration::take_removal();
-                // Each answer is addressed to the window whose click asked for it; an answer
-                // for a window that has since closed is delivered nowhere.
+                // Each answer below is addressed to the window whose click asked for it; an answer
+                // for a window that has since closed is delivered nowhere. The earlier Folio's
+                // PSReadLine copy's removal is said as the report is
+                // (`psreadline::LegacyRemoval::window_text`): a copy gone since the row was drawn
+                // says nothing.
+                let legacy = psreadline::take_legacy_removals();
                 let installs = shell_integration::take_profile_installs();
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()?;
                     }
-                    if let Some((refused, text)) =
-                        removal.take().and_then(|report| report.window_text())
+                    let window = runtime.window_id();
+                    for (refused, text) in removal
+                        .take()
+                        .and_then(|report| report.window_text())
+                        .into_iter()
+                        .chain(
+                            legacy
+                                .iter()
+                                .filter(|(asked_by, _)| *asked_by == window)
+                                .filter_map(|(_, answer)| answer.window_text()),
+                        )
                     {
                         runtime.toast(
                             if refused {
@@ -68219,31 +70835,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     for outcome in
                         shell_integration::profile_installs_for(&installs, runtime.window_id())
                     {
-                        match outcome.clone() {
-                            shell_integration::ProfileInstallOutcome::Installed {
-                                program,
-                                edit,
-                            } => {
-                                let id = runtime.toast_with_verb(
-                                    toast::ToastKind::Info,
-                                    toast::ToastAnchor::Window,
-                                    i18n::Text::ShellProfileAddedToast.text(),
-                                    i18n::Text::ProfilesUndo.text(),
-                                )?;
-                                runtime.window.powershell_profile_undo = Some((id, program, edit));
-                            }
-                            shell_integration::ProfileInstallOutcome::Refused(reason)
-                            | shell_integration::ProfileInstallOutcome::UndoRefused(reason) => {
-                                runtime.toast(
-                                    toast::ToastKind::Error,
-                                    toast::ToastAnchor::Window,
-                                    Some(i18n::Text::ShellProfileRefused.text().to_owned()),
-                                    reason,
-                                )?;
-                            }
-                            shell_integration::ProfileInstallOutcome::Present
-                            | shell_integration::ProfileInstallOutcome::Undone => {}
-                        }
+                        runtime.deliver_profile_install(outcome.clone())?;
                     }
                     Ok(())
                 })
@@ -68305,6 +70897,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // list is a fact about the machine and any of them may be showing a
             // picker drawn from it.
             AppEvent::HandoffAnswered => self.answer_handoffs(),
+            // **Every window takes what the clipboard answered it** (`clipboard_lane`): each
+            // request is held by the window that asked, so a window with nothing owed costs a
+            // look at two empty slots.
+            AppEvent::ClipboardAnswered => {
+                self.for_each_window(|runtime| runtime.settle_clipboard(Instant::now()))
+            }
             //
             // An answer older than the list on screen is dropped inside
             // `adopt_scanned_families` (ticket 50) and reads here as "nothing
@@ -68554,461 +71152,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        if file_reads::is_user_input(&event) {
-            bt_platform::file_reads::input();
-        }
-        // **A gesture is a stir for the web engine's warm-up** (ticket 54): the
-        // same classifier the file-read ledger asks, so "the reader did
-        // something" is one judgement in this program and not two — and a window
-        // resized, moved or carried to another scale (ticket 60, F1), which is the
-        // reader doing something too.
-        if web_warmup::event_stirs(&event)
-            && let Some(app) = self.app.as_mut()
-        {
-            app.web_warmup.stir(Instant::now());
-        }
-        present_diagnostics::event();
-        hang_watch::at(hang_watch::Station::Event);
-        hang_watch::during(window_event_station(&event), || {
-            // **The one line the whole slice is about.** winit stamps the id of the
-            // window the event happened to; before this, the loop compared it against
-            // the only window there was and dropped anything else. Now it is a
-            // lookup, and an id that is not open is a window that has already gone.
-            if !self.windows.contains(window_id) {
-                return;
-            }
-            // **A retiring window answers nothing** (multiwindow slice E2 phase ④).
-            // It is hidden, its shells are shut and its picture is written; whatever
-            // the platform still has queued for it is about a window that is on its
-            // way out, and running a redraw or a key through it would be this process
-            // doing work on behalf of something that no longer exists.
-            if self
-                .app
-                .as_ref()
-                .and_then(|app| app.quit.as_ref())
-                .is_some_and(quit::Quit::is_retiring)
-            {
-                return;
-            }
-            // **And a window that has been closed answers nothing either** (§7.35),
-            // on the retirement's own reasoning one window down: it is off the
-            // screen, its shells are shut and its controllers have been told to go,
-            // so every message still addressed to it — a stray `WM_CLOSE`, a focus
-            // change as the window under it comes forward — is about a window the
-            // reader has already let go of.
-            if self.is_leaving(window_id) {
-                return;
-            }
-            match self.capture_before_pointer_event(window_id, &event) {
-                Ok(true) => return,
-                Ok(false) => {}
-                Err(error) => {
-                    self.fail(event_loop, error);
-                    return;
-                }
-            }
-            let Some(mut runtime) =
-                hang_watch::during(hang_watch::Station::EventLookup, || self.runtime(window_id))
-            else {
-                return;
-            };
-            // **A burst of notches is spent before anything that is not a notch.**
-            // See [`WheelBurst`]: the wheel accumulates so that a run of detents
-            // costs one frame instead of one frame each, and this is the line that
-            // keeps that from being a reordering — whatever arrives next answers the
-            // window the wheel has already moved.
-            if !runtime::pointer::is_wheel_event(&event)
-                && let Err(error) = runtime.flush_wheel()
-            {
-                self.fail(event_loop, error);
-                return;
-            }
-            // **And a drop is spent before anything that is not another file of the
-            // same drop**, on the line above's own reasoning (GitHub issue #1 ②).
-            // The batch is one command line going into a shell, so an event that
-            // reaches the same shell — a keystroke, most of all — must not overtake
-            // it. It is also what makes the drop's routing honest: the pointer
-            // position the batch is hit-tested against cannot have moved between the
-            // drop and this flush, because the event that would have moved it is the
-            // event that flushes first.
-            if !matches!(event, WindowEvent::DroppedFile(_))
-                && let Err(error) = runtime.flush_dropped_files()
-            {
-                self.fail(event_loop, error);
-                return;
-            }
-            // Whether this event asked the window to shut, answered before the
-            // borrow is given back: `raise_dirty_gate` is the one gate that has to be
-            // able to *stop* the event, which is why it is asked here rather than
-            // inside the close — past that line the window is gone, and a question
-            // asked after the answer is worthless.
-            let mut shutting = false;
-            // **The handler this event is about to be given to, named before it is
-            // given** — see [`window_event_station`]. Opened here and not at the
-            // door above, so the lookup, the three gates and the wheel burst stay
-            // the event's own; handed back at the foot of the match, on
-            // [`hang_watch::enter`]'s rule, so the four application doors under it
-            // belong to the dispatch and not to the handler.
-            let result = match event {
-                // **The summoned terminal's `×` means hide, and it means it by
-                // setting the chord's own bit** (§7.54e ②, user ruling 2026-09-05:
-                // 「窗上只留一个 ×,语义 = 隐藏,和热键完全一致…合并后必须同一条代码
-                // 路径」).
-                //
-                // Not "the same behaviour" and not "a call to the same function":
-                // **the same bit**. `quake.press()` is what a `WM_HOTKEY` leaves
-                // behind, and `settle_quake` on the next turn reads it, sees the
-                // window is up, and dismisses — hiding it, handing the keyboard back
-                // to whatever it came down over. There is no second road for the two
-                // to drift apart on, which is the whole of what the ruling asks for.
-                //
-                // **The dirty gate is not raised, and that is correct rather than
-                // skipped**: gate ③ exists because a *shut* loses unsaved preview
-                // buffers, and this window is not shutting. Its tabs, its shells and
-                // its buffers are all still there a chord away. Ending the session is
-                // `exit` in the shell or `Close tab` on the tab, and both of those
-                // raise every gate they always did.
-                //
-                // **Only while it is on the screen.** A `WM_CLOSE` delivered to the
-                // hidden summon is not a reader pressing its `×` — there is no `×` to
-                // press — it is the run ending, and it closes exactly as it did.
-                WindowEvent::CloseRequested
-                    if runtime.is_quake_window() && runtime.app.quake.is_showing() =>
-                {
-                    runtime.app.quake.press();
-                    Ok(())
-                }
-                WindowEvent::CloseRequested => {
-                    // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
-                    // — plans carry paths, never content — so shutting asks, the same
-                    // honesty as closing a tab."
-                    //
-                    // **Only "nothing to ask" shuts** (ticket 58). A gate raised by
-                    // this close stands; so does one that was already up — a tab's
-                    // close still being asked about, or this same shut asked a
-                    // second time — and this request is dropped: the card is the
-                    // one surface that answers, and its answer re-runs the verb.
-                    runtime
-                        .raise_dirty_gate(restore::GateRequest::Shut)
-                        .map(|raised| shutting = raised.proceeds())
-                }
-                // **`is_synthetic` is read and not discarded** (§7.54d). It is the
-                // one bit that separates a key the reader pressed at this window
-                // from winit's report of what their hand was already holding when
-                // the window took the keyboard, and a window this program can summon
-                // *under a hand still on the chord* is a window that receives the
-                // second kind.
-                WindowEvent::KeyboardInput {
-                    event,
-                    is_synthetic,
-                    ..
-                } => {
-                    runtime.observe_ime_key(&event, is_synthetic);
-                    runtime.keyboard_input(&event, is_synthetic)
-                }
-                WindowEvent::Ime(event) => runtime.ime_input(event),
-                WindowEvent::ModifiersChanged(modifiers) => {
-                    // **The one door every modifier state in this process comes
-                    // through**, which is why Q9's ruling is applied here and
-                    // nowhere else (M1-7). With Option ruled to be text, an Option
-                    // that winit reports as `Alt` is a modifier nobody is holding —
-                    // see `input::effective_modifiers`, which says the whole of it.
-                    // **And the reported state is kept beside it**, because the
-                    // sentence above is about text and one reader is not asking
-                    // about text (§13.33 ①). Written first and from the same
-                    // argument, so the two can never be a turn apart.
-                    runtime.window.modifiers_held = modifiers.state();
-                    runtime.window.modifiers = input::effective_modifiers(
-                        modifiers.state(),
-                        runtime.app.settings_store.loaded().option_sends_alt,
-                        bt_platform::host_platform(),
-                    );
-                    // The pointing hand over a link is a statement about `Ctrl` as
-                    // much as about where the pointer is (§7.1.5g), and `Ctrl` moves
-                    // while the pointer does not. Without this the shape would only
-                    // ever catch up on the next mouse move, which is to say: after
-                    // the hand had already decided whether to press.
-                    // **And the modifier asks what a pointer move asks** (closure review B-1).
-                    // The finger below is a promise about a press, and a press on a link nobody
-                    // has asked the disk about answers nothing — so the key going down is a
-                    // gesture that meets a reference, and it asks through the same one door.
-                    runtime.ask_about_the_link_under_the_pointer();
-                    runtime.apply_pointer_cursor();
-                    // **The hint card's one input** (§7.1.5e′). winit reports the
-                    // whole modifier state on every press and release of one, so
-                    // this is the only line in the window that has to tell the card
-                    // anything about the keys — there is no hook, no second opinion
-                    // about what is down, and nothing to keep level with
-                    // `window.modifiers` because it is read from it one statement
-                    // after it is written.
-                    runtime.note_key_hint(Instant::now())
-                }
-                // **Every pointer event goes through one door** (T-POINTER-CAPTURE
-                // cut 1): the pointer module names the kinds and owns their
-                // answers, so this dispatcher reads no pointer field.
-                event if runtime::pointer::is_pointer_event(&event) => runtime.pointer_event(event),
-                // **A file let go of over this window** (GitHub issue #1 ②). One
-                // event per file and no marker between drops, so the path is
-                // written down here and the batch is spent at the turn boundary —
-                // [`Runtime::flush_dropped_files`], and [`WheelBurst`]'s reasoning
-                // one gesture over.
-                //
-                // **And the cursor is read here too, on the file that opens the
-                // batch** (release review 0.4.2 X-10): this arm runs inside the
-                // platform's delivery of the release, which is the only instant at
-                // which where the cursor is and where the file was let go of are the
-                // same point. See [`Runtime::collect_dropped_file`].
-                //
-                // `HoveredFile` and `HoveredFileCancelled` are not answered at all.
-                // They would be the drop affordance, and what an external drag
-                // should light up is a question nobody has answered. §7.1.1's
-                // 2026-09-16 revision answered it for the *internal* drag and for
-                // that one alone — an edge band that draws the split preview, a
-                // middle that writes `Paste path` on the box — and it is precisely
-                // the feedback that carries the ruling. Inventing a second set of
-                // zones here, for a gesture winit reports without a position, would
-                // be this window answering the harder half for itself.
-                WindowEvent::DroppedFile(path) => {
-                    runtime.collect_dropped_file(path);
-                    Ok(())
-                }
-                WindowEvent::Resized(size) => runtime.resized(size),
-                // **The engine is told the window moved** (§7.7 ⑩, user report
-                // 2026-08-25). The pages are drawn through DirectComposition and
-                // get no window messages of their own, so the only thing that knows
-                // where a page's own menus and dialogs belong on screen is the
-                // parent window's position — and the only way the engine learns it
-                // has changed is this call. Said on the window's own move rather
-                // than on a page's clock: a window can be dragged with nothing on
-                // the glass but a shell, and the engine still has to be right the
-                // next time a page is opened in it.
-                WindowEvent::Moved(_) => runtime.window_moved(),
-                WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
-                // The payload is deliberately dropped: `os_theme_changed` asks the
-                // one reader this process trusts rather than taking a second
-                // opinion off the event (§7.46 ②).
-                WindowEvent::ThemeChanged(_) => runtime.os_theme_changed().map(|_| ()),
-                WindowEvent::RedrawRequested => runtime.redraw(),
-                WindowEvent::Focused(false) => {
-                    runtime.observe_ime_focus(false);
-                    // Losing the window is a blur, and blur commits (J102). The
-                    // mock-up's editor is a real focusable element and gets this
-                    // from the DOM; here it has to be said. A press that was still
-                    // being held goes with it — the button-up will arrive to a
-                    // window that is no longer listening.
-                    let committed = runtime.finish_rename(RenameExit::Blur);
-                    // K129. Losing the window is losing the Win32 mouse capture, and
-                    // capture loss is this platform's `pointercancel`: the pointer
-                    // stream ends with no button-up to end it. It is the only such
-                    // signal winit surfaces — there is no `WM_CAPTURECHANGED` event —
-                    // and an un-torn-down drag would leave a tab floating over a strip
-                    // nobody is holding any more. Same path as Esc: never mind.
-                    // F72: the same capture loss ends a divider drag, and ends it
-                    // the same way — restoring the one ratio it had been moving.
-                    // Left holding the button over a window that is no longer
-                    // listening, the gesture was never finished, and a drag nobody
-                    // finished did not choose a ratio.
-                    let cancelled = runtime
-                        .cancel_drag()
-                        .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
-                    // And a drag across a rendered page, which is holding the
-                    // span it began on until a release that will not come
-                    // (owner's ruling 2026-09-23).
-                    let cancelled = cancelled
-                        .and_then(|either| runtime.cancel_preview_text_drag().map(|()| either));
-                    runtime.drop_tab_press();
-                    runtime.drop_pane_press();
-                    runtime.drop_row_press();
-                    // P149's `window blur`: a glance is about where the pointer is,
-                    // and a window that is not listening has no pointer.
-                    runtime.hide_file_peek();
-                    // And §7.1.5e′'s: a card about the keys under your hands is a
-                    // card about a keyboard this window no longer has. `hide` and
-                    // not `spend` — nothing was pressed, so a hand that comes back
-                    // still holding `Ctrl` is answered again.
-                    runtime.window.key_hint.hide();
-                    // **And the command palette** (DESIGN.md §7.55): 失焦即收. It is
-                    // a box for aiming at something *now*, and a window the reader
-                    // has left is a window they are not aiming at — coming back to
-                    // a half-typed query over a stale list would be this product
-                    // holding a question nobody is still asking. It is the one
-                    // popup that goes here, and the difference is real: every other
-                    // one is anchored to a control the reader can see and come back
-                    // to, while this one is anchored to an intent.
-                    let _ = runtime.close_command_palette();
-                    runtime.window.tab_clicks.interrupt();
-                    // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
-                    // Commit during this transition, and the product decision is to accept it.
-                    runtime.window.ime_active = false;
-                    runtime.window.ime_cursor.reset();
-                    hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
-                        runtime.destroy_ime_caret("window_blur")
-                    });
-                    runtime.set_cursor_focus(false, Instant::now());
-                    // **The summoned terminal goes when the keyboard does** (§7.54),
-                    // and it goes on the *next* turn: hiding a window inside the
-                    // event that says it lost the focus is asking Windows to move the
-                    // focus while it is telling you about the focus. A bit and a turn
-                    // — see `FolioApp::settle_quake`, where every other thing this
-                    // window does out of the ordinary is also spent.
-                    //
-                    // The switch is read there and not here for the same reason the
-                    // hide is: what this arm knows is that the keyboard left, which
-                    // is true whatever the row says. Only a window that is actually
-                    // on the screen leaves a bit, because a blur that arrives after
-                    // it has gone is a blur about nothing - hiding it is what moved
-                    // the focus in the first place.
-                    if runtime.is_quake_window() && runtime.app.quake.is_showing() {
-                        runtime.app.quake.note_blur();
-                    }
-                    committed.and(cancelled.map(|_| ())).and_then(|()| {
-                        runtime.publish_frame(FrameTrigger {
-                            occurred_at: Instant::now(),
-                            source: FrameSource::Expose,
-                        })
-                    })
-                }
-                WindowEvent::Focused(true) => {
-                    runtime.observe_ime_focus(true);
-                    // **A taskbar flash ends here** (`FLASHW_TIMERNOFG`: until the window comes to
-                    // the foreground; on macOS activation ends the bounce), so the record of what
-                    // it was about ends with it (ticket 62).
-                    runtime.window.taskbar_flash = None;
-                    // **R31's third invalidation moment, B: the window came back.**
-                    // Whatever happened while it was away happened in another process
-                    // — an editor saving, a `git` run in another terminal, a
-                    // checkout by a build script — and left no cwd and no marker for
-                    // this window to have noticed. Coming back is the moment a reader
-                    // looks at the page again, so it is the moment the page is
-                    // entitled to be true; it is a gesture at the window and not a
-                    // timer, which is the whole of what R31 forbids.
-                    //
-                    // On the transition and not on the event: this is asked before
-                    // `set_cursor_focus`, which is where `window_focused` is written,
-                    // so a platform that re-announced a focus this window already had
-                    // would not spend a `git status` on it. No debounce beyond that —
-                    // there is no observed flap to debounce, and a timer put in
-                    // against one would be exactly the machine this rule is about.
-                    let regained = !runtime.window.window_focused;
-                    // **The one place the visit order is written** (§7.59). On the
-                    // transition and not on the event, which is `regained`'s own
-                    // rule read one line down: a platform that re-announced a focus
-                    // this window already had must not move it up the list, because
-                    // then "most recently active" would mean "most recently
-                    // re-announced" on the machines that do that.
-                    if regained {
-                        runtime.note_this_window_was_visited();
-                    }
-                    runtime.set_cursor_focus(true, Instant::now());
-                    let reread = if regained {
-                        // And the documents whose folders no kernel would speak for
-                        // (user ruling 2026-08-29). The same sentence as the line
-                        // below it, about the same moment, for the same reason —
-                        // and it costs nothing at all on a window whose files are
-                        // all on a disk this process could subscribe to.
-                        runtime
-                            .ask_the_unwatched_preview_files()
-                            .and_then(|()| runtime.reread_git_surfaces(None))
-                    } else {
-                        Ok(())
-                    };
-                    reread.and_then(|()| {
-                        runtime.publish_frame(FrameTrigger {
-                            occurred_at: Instant::now(),
-                            source: FrameSource::Expose,
-                        })
-                    })
-                }
-                // **The window is on screen again, and this is the one turn that
-                // owes it a picture** (GitHub issue #5).
-                //
-                // It always composed and published one frame here — `publish_frame`
-                // requests exactly one redraw — and since a skip caused by occlusion
-                // stopped asking for turns of its own ([`ask_again_after`]), this is
-                // the event that pays whatever the window went dark owing. winit
-                // raises it from `windowDidChangeOcclusionState:`, off the same
-                // `NSWindowOcclusionState::Visible` bit that `wgpu-hal`'s Metal
-                // surface tests before it refuses an acquire, so the moment it
-                // arrives is exactly the moment the acquire starts succeeding.
-                //
-                // `Occluded(true)` is deliberately not handled: a window does not
-                // need to be told it has gone dark. The frame path finds out by
-                // being refused, which is the only reading that cannot be stale.
-                WindowEvent::Occluded(false) => runtime.publish_frame(FrameTrigger {
-                    occurred_at: Instant::now(),
-                    source: FrameSource::Expose,
-                }),
-                _ => Ok(()),
-            };
-            // The gate's own `Discard`, spent here rather than inside the answer: the
-            // shut belongs to the event loop, and re-requesting it means closing goes
-            // through the one door it always went through instead of a second one
-            // opened for the gate.
-            let requested = std::mem::take(&mut runtime.window.window_close_requested);
-            shutting |= requested == Some(window_id);
-            let result = if shutting {
-                result.and(hang_watch::during(hang_watch::Station::EventShut, || {
-                    self.close(window_id)
-                }))
-            } else {
-                result
-            };
-            // **And the window another window's answer closes**
-            // (T-SUMMON-DIRTY-PREVIEW): the run's end, answered in the summoned
-            // terminal, re-runs the close of the ordinary window that ends the run
-            // — through the same door, which asks again and now finds nothing.
-            let result = match requested.filter(|closing| *closing != window_id) {
-                Some(closing) => result
-                    .and(hang_watch::during(hang_watch::Station::EventShut, || {
-                        self.close(closing)
-                    })),
-                None => result,
-            };
-            // Whatever this event changed about the *application*, handed to the
-            // windows that were not this one. Before the door below, because a window
-            // opened after a settings row was pressed reads that row's stored value
-            // when it is built and would then be handed the same change twice.
-            let result = result.and_then(|()| {
-                hang_watch::during(hang_watch::Station::EventSettleApplication, || {
-                    self.settle_application_change()
-                })
-            });
-            // The prompt's one answer, if this event was it — before the door below,
-            // because accepting is one of the three things that queues a window.
-            let result = result.and_then(|()| {
-                hang_watch::during(hang_watch::Station::EventRestore, || {
-                    self.settle_restore_answer()
-                })
-            });
-            // And the door the other way round: a window this window's keyboard asked
-            // for. After the shut, because a chord cannot both close this window and
-            // open another, and asking in this order means a failure to open never
-            // leaves a window that should have been shut standing.
-            let result = result.and_then(|()| {
-                hang_watch::during(hang_watch::Station::EventOpen, || {
-                    self.open_pending_window(event_loop)
-                })
-            });
-            // And the whole application's own door, last: `Ctrl+Shift+Q` records a
-            // debt inside one window and what it starts belongs to the process.
-            // After the shut above, on that door's own reasoning — a chord cannot
-            // both close this window and quit — and after the open, so that a window
-            // queued by the same turn is in the registry before it is photographed.
-            let result = result.and_then(|()| {
-                hang_watch::during(hang_watch::Station::EventQuit, || {
-                    self.settle_quit(event_loop)
-                })
-            });
-            if let Err(error) = result {
-                self.fail(event_loop, error);
-            }
-        });
-        // **And the pump's from here until the next handler** (ticket 43). The
-        // event has been answered; what the thread does before winit hands it
-        // anything else is the platform's own loop and whatever runs on it —
-        // WebView2's callbacks and its in-process half among them. Left at
-        // `Event`, that time read as `window_event` on the 2026-09-23 report.
-        hang_watch::at(hang_watch::Station::Pump);
+        self.on_window_event(event_loop, window_id, event);
     }
 
     /// **The pulse, the turn, and the note of where this thread is going.**
@@ -69036,7 +71180,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         panic_selftest_if_due();
         self.surface_selftest_if_due();
         self.about_to_wait_inner(event_loop);
-        hang_watch::park(parking(event_loop.control_flow(), hang_watch::heartbeat()));
+        let (owner, heart) = (self.wake_owner, hang_watch::heartbeat());
+        hang_watch::park(parking(event_loop.control_flow(), owner, heart));
     }
 
     /// **The platform woke this thread.** See [`hang_watch::Heartbeat::woke`].
@@ -69219,42 +71364,29 @@ fn ime_commit_bytes(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
 
-fn copy_selection(
+/// **The text a copy of this pane's selection puts on the clipboard**, or `None` when there is no
+/// selection — or, for copy-on-select (`ignore_empty`), when it is empty. `Ctrl+C` writes an
+/// empty selection as the empty text it is.
+fn selection_to_copy(session: &DualPlaneSession, ignore_empty: bool) -> Option<String> {
+    session
+        .selection_text()
+        .filter(|text| !(ignore_empty && text.is_empty()))
+}
+
+/// **`Ctrl+C`'s selection, taken down once its copy has landed** — only while the selection is
+/// still the text that was copied: a selection made again between the press and the clipboard's
+/// answer is the person's newer one, and stays. Answers whether it was taken down.
+fn clear_copied_selection(
     session: &mut DualPlaneSession,
     projection: &mut ViewportProjection,
-    write: impl FnOnce(&str) -> Result<()>,
+    copied: &str,
 ) -> bool {
-    if !write_selection_text(session, false, write) {
+    if session.selection_text().as_deref() != Some(copied) {
         return false;
     }
     session.set_view_selection(None);
     projection.set_selection(None);
     true
-}
-
-fn write_selection_text(
-    session: &DualPlaneSession,
-    ignore_empty: bool,
-    write: impl FnOnce(&str) -> Result<()>,
-) -> bool {
-    let Some(text) = session.selection_text() else {
-        return false;
-    };
-    if ignore_empty && text.is_empty() {
-        return false;
-    }
-    if !recoverable_clipboard_write(write(&text), "copy") {
-        return false;
-    }
-    true
-}
-
-fn write_terminal_clipboard_text(text: &str) -> Result<()> {
-    hang_watch::during(hang_watch::Station::ClipboardWrite, || {
-        bt_platform::set_clipboard_text(text)
-    })
-    .map_err(|error| anyhow!(error))
-    .context("write terminal selection to clipboard")
 }
 
 /// **The copy tick's own clock, read in one place** (audit 2026-09-15, RB-1).
@@ -69290,16 +71422,6 @@ fn retire_spent_math_copy(said: &mut Option<(MathBlockAnchor, Instant)>, now: In
     false
 }
 
-fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
-    match result {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!("clipboard is temporarily unavailable; {action} ignored: {error:#}");
-            false
-        }
-    }
-}
-
 /// The payload and later path refusals are separate causes, both delivered to the app's toast host.
 #[derive(Default)]
 struct PreparedClipboardPaste {
@@ -69319,14 +71441,17 @@ struct PreparedClipboardPaste {
     picture: Vec<bt_platform::PictureBytes>,
 }
 
+/// **What a paste does with what the clipboard answered** — the clipboard lane's `Done` for a
+/// terminal paste. A read that failed never reaches here: it is its request's `Failed`, said once by
+/// the lane's ledger, and its notice is the window's (`Runtime::spend_paste`).
 fn prepare_clipboard_paste(
-    payload: std::result::Result<bt_platform::ClipboardPayload, String>,
+    payload: bt_platform::ClipboardPayload,
     recipient: &shell_literal::Recipient,
     leading_space: bool,
 ) -> PreparedClipboardPaste {
     use bt_platform::ClipboardPayload;
     match payload {
-        Ok(ClipboardPayload::Files(paths)) => {
+        ClipboardPayload::Files(paths) => {
             let insertion = shell_literal::paths_text(&paths, recipient, leading_space);
             PreparedClipboardPaste {
                 text: (!insertion.text.is_empty()).then_some(insertion.text),
@@ -69334,7 +71459,7 @@ fn prepare_clipboard_paste(
                 ..PreparedClipboardPaste::default()
             }
         }
-        Ok(ClipboardPayload::Text(text)) => PreparedClipboardPaste {
+        ClipboardPayload::Text(text) => PreparedClipboardPaste {
             text: Some(text),
             clipboard_text: true,
             ..PreparedClipboardPaste::default()
@@ -69344,22 +71469,14 @@ fn prepare_clipboard_paste(
         // every browser does — is a text paste, and a source that puts a file
         // beside a thumbnail of it is a path paste. This arm is what is left:
         // a picture and nothing else.
-        Ok(ClipboardPayload::Picture(offered)) => PreparedClipboardPaste {
+        ClipboardPayload::Picture(offered) => PreparedClipboardPaste {
             picture: offered,
             ..PreparedClipboardPaste::default()
         },
-        Ok(ClipboardPayload::Nothing) => PreparedClipboardPaste::default(),
-        Ok(ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise)) => {
+        ClipboardPayload::Nothing => PreparedClipboardPaste::default(),
+        ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise) => {
             PreparedClipboardPaste {
                 notice: Some(i18n::Text::PasteClipboardPromise.text().to_owned()),
-                ..PreparedClipboardPaste::default()
-            }
-        }
-        Err(_) => {
-            // Native error strings never need to carry the source's names or text into diagnostics.
-            eprintln!("clipboard acquisition failed; paste ignored");
-            PreparedClipboardPaste {
-                notice: Some(i18n::Text::PasteClipboardRead.text().to_owned()),
                 ..PreparedClipboardPaste::default()
             }
         }
@@ -69433,7 +71550,7 @@ fn prepare_dropped_paste(
     leading_space: bool,
 ) -> PreparedClipboardPaste {
     prepare_clipboard_paste(
-        Ok(bt_platform::ClipboardPayload::Files(paths)),
+        bt_platform::ClipboardPayload::Files(paths),
         recipient,
         leading_space,
     )
@@ -70901,25 +73018,56 @@ fn session_title(
         })
 }
 
-/// **The folder a files card or a files column taken from a pane is rooted at** (issue #28): the
-/// folder the pane is standing in ([`DualPlaneSession::standing_folder`] — its shell's last report,
-/// else the folder it was opened in), and the account's home only for a pane that has neither.
+/// **The folder a files card or a files column taken from a pane is rooted at** (issue #28,
+/// T-CWD-FROM-PROCESS): the folder the pane is standing in ([`LeafSession::folder`] — its shell's
+/// last report, else its shell process's folder, else the folder it was opened in), and the
+/// account's home only when none of those can be said — which the root carries, so the card and
+/// the column say "Folder unknown" rather than showing a home folder as the pane's.
 ///
 /// One reader for both doors, the folder button's card ([`Runtime::trigger_root`]) and
-/// `Ctrl+Shift+B` ([`Runtime::files_root_for_new_pane`]). The report alone is not enough: a pane
-/// opened in a profile's fixed folder has none until its shell's first prompt, and none for its
-/// whole life when the shell does not report, while its own tab is already named after the folder
-/// it stands in.
+/// `Ctrl+Shift+B` ([`Runtime::files_root_for_new_pane`]). `None` is no pane to ask.
 fn files_root_of(
-    session: Option<&DualPlaneSession>,
+    folder: Option<pane_folder::PaneFolder>,
     environment: &dyn bt_pty::ShellEnvironment,
-) -> String {
-    session
-        .and_then(DualPlaneSession::standing_folder)
-        .map(Path::to_path_buf)
-        .or_else(|| profiles::home_directory(environment))
-        .map(|folder| folder.display().to_string())
-        .unwrap_or_default()
+) -> FilesRoot {
+    match folder.and_then(pane_folder::PaneFolder::into_folder) {
+        Some(folder) => FilesRoot::known(folder.display().to_string()),
+        None => FilesRoot {
+            root: profiles::home_directory(environment)
+                .map(|home| home.display().to_string())
+                .unwrap_or_default(),
+            folder_unknown: true,
+        },
+    }
+}
+
+/// **What a files foot hangs on its right hand for `state`'s root**: "Folder unknown" while the
+/// root is the account's home standing in for a pane's folder nobody could say
+/// ([`seats::FilesLeafState::folder_unknown`]), else nothing — a tree has no other standing fact.
+fn folder_foot_notice(state: &seats::FilesLeafState) -> &'static str {
+    if state.folder_unknown {
+        i18n::Text::FilesFolderUnknown.text()
+    } else {
+        ""
+    }
+}
+
+/// Where a files card or column opens, and whether that is the account's home standing in for a
+/// folder nobody could say ([`files_root_of`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FilesRoot {
+    root: String,
+    folder_unknown: bool,
+}
+
+impl FilesRoot {
+    /// A folder the caller knows — a printed folder, a pane's own.
+    fn known(root: String) -> Self {
+        Self {
+            root,
+            folder_unknown: false,
+        }
+    }
 }
 
 /// The folder layer on its own: the working directory as one reader writes it,
@@ -71089,8 +73237,14 @@ fn ensure_metrics_match_authoritative_scale(
 /// back on Windows once `WM_NCCALCSIZE` has made the client the whole window.
 /// A window that has not been placed yet has no outer position, and an empty
 /// rectangle is what `startup_window_rect` already treats as "nothing known".
-fn dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
-    let native = native_window(window)?;
+fn dpi_snapshot(window: &impl WindowHost) -> Result<DpiSnapshot> {
+    window.dpi_snapshot()
+}
+
+/// [`WindowHost::dpi_snapshot`] for winit's window: the platform's answer, and winit's where the
+/// platform will not give one.
+fn native_dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
+    let native = native_window_of(window)?;
     let winit_scale = window.scale_factor();
     let (win32_dpi, authoritative_scale) = match bt_platform::get_dpi_for_window(native) {
         Ok(dpi) => (dpi, f64::from(dpi) / WIN32_DEFAULT_DPI),
@@ -71178,8 +73332,8 @@ fn log_dpi_snapshot(
     });
 }
 
-fn ensure_swapchain_matches_inner(
-    renderer: &WindowRenderer,
+fn ensure_swapchain_matches_inner<G: Glass>(
+    renderer: &G,
     inner_size: PhysicalSize<u32>,
 ) -> Result<()> {
     let presentation = renderer.presentation_geometry();
@@ -71354,7 +73508,12 @@ fn opening_window_attributes(title: &'static str, size: LogicalSize<f64>) -> Win
 ///
 /// Off macOS this is nothing at all, and it says so where the compiler can see
 /// it: there is no Option key on the other keyboards and `Alt` is already Alt.
-fn set_option_as_alt(window: &Window, option_sends_alt: bool) {
+fn set_option_as_alt(window: &impl WindowHost, option_sends_alt: bool) {
+    window.set_option_as_alt(option_sends_alt);
+}
+
+/// [`WindowHost::set_option_as_alt`] for winit's window.
+fn option_as_alt(window: &Window, option_sends_alt: bool) {
     #[cfg(target_os = "macos")]
     {
         use winit::platform::macos::{OptionAsAlt, WindowExtMacOS};
@@ -71664,13 +73823,15 @@ mod floated_page_tests {
         assert_eq!(
             chrome_over(&stack, None, Some(body)),
             vec![over],
-            "a docked page's hole stands under the whole stack, so a layer over              it covers it and a layer beside it does not"
+            "a docked page's hole stands under the whole stack, so a layer over \
+             it covers it and a layer beside it does not"
         );
         let nothing: Vec<[f32; 4]> = Vec::new();
         assert_eq!(
             chrome_over(&stack, Some(0), Some(body)),
             nothing,
-            "a float's page is drawn over its own float's face, so that layer is              not something standing on it"
+            "a float's page is drawn over its own float's face, so that layer is \
+             not something standing on it"
         );
         assert_eq!(
             chrome_over(&[Some(beside)], None, Some(body)),
@@ -71865,8 +74026,8 @@ mod floated_page_tests {
     /// false; }` back at the top of `preview_is_editable` and the source-reading
     /// assertion fails — which on screen is the defect verbatim. RED GATE ②:
     /// drop the same question from `page_with_the_keyboard` and block ② fails.
-    /// RED GATE ③: make `PreviewBuffer::save` write in place instead of
-    /// atomically, or stop `refresh_preview_file` reloading pages, and block ③
+    /// RED GATE ③: make the save's request (`PreviewBuffer::request_save`) write
+    /// nothing, or stop `refresh_preview_file` reloading pages, and block ③
     /// fails.
     #[test]
     fn the_source_face_of_a_page_is_the_editor_and_a_save_reloads_the_page() {
@@ -71903,7 +74064,11 @@ mod floated_page_tests {
             text.push_str("<p>two</p>\n");
             true
         }));
-        assert_eq!(buffer.save(), SaveOutcome::Saved);
+        let mut saves = crate::test_support::a_save_desk();
+        assert_eq!(
+            crate::test_support::save_through(&mut buffer, &mut saves),
+            Some(SaveOutcome::Saved)
+        );
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "<p>one</p>\n<p>two</p>\n",
@@ -72336,7 +74501,7 @@ mod floated_page_tests {
         // not allowed to overrule.
         assert!(
             summon.contains("self.app.quake.placement(&screen, settings)")
-                && summon.contains("stand_window_at("),
+                && summon.contains("self.window.window.stand_at(rect)"),
             "a summon does not state its own rectangle, or states it the one way \
              that a dpi seam is allowed to overrule:\n{summon}"
         );
@@ -72349,7 +74514,7 @@ mod floated_page_tests {
              another dpi lands at the ratio of the two:\n{summon}"
         );
         assert!(
-            summon.contains("set_window_topmost(native, true)"),
+            summon.contains("self.window.window.set_topmost(true)"),
             "the posture is not re-stated, so a window that has been hidden and \
              shown again may arrive behind what it was called over:\n{summon}"
         );
@@ -72396,7 +74561,7 @@ mod floated_page_tests {
         // Spelled in two halves because it was written before `needle!`, which
         // now records where the needle was written and excludes that
         // construction; the assembly is belt and braces until P18 unpicks it.
-        let dressed = concat!("dress_new_window", "(native)?;");
+        let dressed = concat!("dress_new_window", "()?;");
         assert_eq!(
             found(needle!(Pattern::text(dressed)), View::Raw).len(),
             2,
@@ -72504,11 +74669,8 @@ mod floated_page_tests {
             runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"),
             "the runtime focus helper does not use its owned-window path: {runtime_focus}"
         );
-        let foreground = item_body(&ItemQuery::function("take_owned_keyboard_focus"));
-        assert!(
-            foreground.contains("bt_platform::hotkey::give_foreground_to(native_window(window)?)"),
-            "the foreground helper no longer uses the platform foreground door: {foreground}"
-        );
+        // That the helper gives the window the foreground through its door is
+        // `runtime::windows::tests::the_keyboard_is_taken_through_the_foreground_door`.
 
         let down = method_body("FolioApp", "dismiss_quake");
         let hide = down
@@ -72604,9 +74766,7 @@ mod floated_page_tests {
         // a file — and the cut itself is what it always was. The deleted reading
         // split the whole of `main.rs`, whose separators include this very test's
         // own string literals; a body cannot contain them.
-        let door = item_body(
-            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
-        );
+        let door = item_body(&ItemQuery::method("FolioApp", "on_window_event"));
         let arm = door
             .split("WindowEvent::CloseRequested")
             .nth(1)
@@ -73504,7 +75664,7 @@ mod background_mailbox_tests {
 /// is a defect and not a reason to refuse a theme change; and the two callers
 /// are a window opening and a person pressing a combo, neither of which has
 /// anywhere to put the error.
-fn install_page_ground_color(compositor: &bt_platform::Compositor) {
+fn install_page_ground_color(compositor: &impl CompositorDoor) {
     if let Err(error) =
         compositor.set_page_ground_color(bt_render::window_ground_premultiplied_srgb())
     {
@@ -73615,9 +75775,12 @@ fn window_surface_target(
 /// layer X-1 measured. A line saying anything but `cleared=1` there is the
 /// defect this ticket exists to make impossible, stated in the log rather than
 /// left to a screenshot.
+///
+/// **Native construction**: the surface target is chosen for winit's own window, by the two
+/// constructors and the device-loss rebuild, so the handle is winit's ([`native_window_of`]).
 #[cfg(target_os = "macos")]
 fn folios_own_metal_view(window: &Window) -> Result<*mut std::ffi::c_void> {
-    let native = native_window(window)?;
+    let native = native_window_of(window)?;
     let view = bt_platform::surface_view(native).map_err(|error| anyhow!(error))?;
     let cleared = bt_platform::clear_surface_layers(native).map_err(|error| anyhow!(error))?;
     if cleared > 0 {
@@ -73652,14 +75815,10 @@ fn stand_the_window_at(
     }
 }
 
-fn install_theme_class_background(window: &Window) {
+fn install_theme_class_background(window: &impl WindowHost) {
     let opaque = bt_render::window_ground().alpha >= 1.0;
-    let installed = native_window(window).and_then(|native| {
-        bt_platform::install_window_class_background(native, opaque.then(background_rgb))
-            .map_err(|error| anyhow!(error))
-    });
-    if let Err(error) = installed {
-        eprintln!("BT_WINDOW backing colour: {error:#}");
+    if let Err(error) = window.set_class_background(opaque.then(background_rgb)) {
+        eprintln!("BT_WINDOW backing colour: {error}");
     }
 }
 
@@ -73747,8 +75906,8 @@ fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> 
 /// nothing would look wrong here without it.
 ///
 /// The other half of the rope is
-/// `bt_platform::macos_window_backend_tests::dark_mode_changes_arrive_on_the_window_thread_through_winit`:
-/// the watch's callback does nothing but nudge this loop.
+/// `bt_platform`'s `macos_impl::tests::the_appearance_callback_only_nudges_the_loop`: the
+/// watch's callback does nothing but nudge this loop.
 #[cfg(test)]
 mod system_preference_wiring_tests {
     use super::run_for_volume_arrival;
@@ -73910,8 +76069,11 @@ fn session_sidebar_mode(mode: seats::RailMode) -> SessionSidebarModeV1 {
 /// **The native window behind a winit window, named without naming a
 /// platform** (M1-1).
 ///
-/// The hinge of the whole startup path: fifty call sites reach
-/// `bt-platform` through this one function, and until M1-1 it answered an
+/// The hinge of the whole startup path: the native backend's doors
+/// (`window_seam`'s `impl WindowHost for Arc<Window>`) and the two native
+/// constructors reach `bt-platform` through this one function, and no door
+/// hands what it answers to the runtime (`docs/ARCHITECTURE.md` §4.5). Until
+/// M1-1 it answered an
 /// `HWND` or nothing at all — `RawWindowHandle::Win32` was the only arm, so on
 /// macOS, where `window_handle()` answers `RawWindowHandle::AppKit`, it refused
 /// every window this process could ever open
@@ -73928,7 +76090,7 @@ fn session_sidebar_mode(mode: seats::RailMode) -> SessionSidebarModeV1 {
 /// The third arm is not a defect to guard against but the honest answer for a
 /// platform with no window backend written yet: an error the caller reports,
 /// on exactly the path that already reports one.
-fn native_window(window: &Window) -> Result<bt_platform::NativeWindow> {
+fn native_window_of(window: &Window) -> Result<bt_platform::NativeWindow> {
     let handle = window
         .window_handle()
         .context("get the native window handle")?;
@@ -73945,39 +76107,39 @@ fn native_window(window: &Window) -> Result<bt_platform::NativeWindow> {
     }
 }
 
-fn take_owned_keyboard_focus(window: &Window) -> Result<()> {
-    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+fn take_owned_keyboard_focus(window: &impl WindowHost) -> Result<()> {
+    if window.take_foreground() {
         Ok(())
     } else {
         Err(anyhow!("the window could not take the keyboard"))
     }
 }
-fn restore_minimized_window(window: &Window) -> Result<()> {
+fn restore_minimized_window(window: &impl WindowHost) -> Result<()> {
     if window.is_minimized() == Some(true) {
         window.set_minimized(false);
     }
     Ok(())
 }
 
-fn bring_owned_window_forward(window: &Window) -> Result<()> {
+fn bring_owned_window_forward(window: &impl WindowHost) -> Result<()> {
     restore_minimized_window(window)?;
-    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+    if window.take_foreground() {
         Ok(())
     } else {
         Err(anyhow!("the window could not take the keyboard"))
     }
 }
 
-fn request_owned_window_close(window: &Window) -> Result<()> {
-    bt_platform::request_window_close(native_window(window)?).map_err(|error| anyhow!(error))
+fn request_owned_window_close(window: &impl WindowHost) -> Result<()> {
+    window.request_close().map_err(|error| anyhow!(error))
 }
 
-fn minimize_owned_window(window: &Window) -> Result<()> {
+fn minimize_owned_window(window: &impl WindowHost) -> Result<()> {
     window.set_minimized(true);
     Ok(())
 }
 
-fn press_owned_title_bar(frame: &bt_platform::CustomWindowFrame) -> Result<(), String> {
+fn press_owned_title_bar(frame: &impl FrameDoor) -> Result<(), String> {
     frame.press_title_bar()
 }
 
@@ -74232,7 +76394,7 @@ fn card_picture_in<'a>(cache: &'a PeekCache, path: &Path) -> Option<focus_thumb:
             width_px: *width_px,
             height_px: *height_px,
         }),
-        PeekCacheEntry::Pending | PeekCacheEntry::Failed(_) => None,
+        PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_) => None,
     }
 }
 
@@ -74666,9 +76828,9 @@ fn solve_tree(
 /// `O(seats)`, so calling it on every resize and every frame of a divider drag
 /// is the preferred implementation rather than something to optimise away
 /// (§4.4) — one geometry beats a cached one.
-fn solve_seats(
+fn solve_seats<G: Glass>(
     seats: &seats::Seats,
-    renderer: &WindowRenderer,
+    renderer: &G,
     render_physical: PhysicalSize<u32>,
     policy: SizePolicy,
     rail: seats::RailState,
@@ -74766,6 +76928,18 @@ fn window_ime_cursor_area(seat: SeatViewport, area: ImeCursorArea) -> ImeCursorA
         y: area.y.saturating_add_unsigned(seat.y),
         ..area
     }
+}
+
+/// The terminal caret the input method is told, in the window's pixels: the composed frame's cursor
+/// cell measured by the glass at the focused pane's own `metrics` (ticket 37), carried from the
+/// glass's seat to the window's axis. The one measurement both the IME offer and its `IME_DRAW`
+/// trace make.
+fn terminal_ime_cursor_area<G: Glass>(
+    glass: &G,
+    metrics: bt_render::CellMetrics,
+    frame: &ViewportFrame,
+) -> ImeCursorArea {
+    window_ime_cursor_area(glass.seat_viewport(), glass.ime_cursor_area(metrics, frame))
 }
 
 /// What the OS is currently doing with the window, as far as its rectangle is
@@ -75641,7 +77815,48 @@ fn report_frame_shape_stop(error: &anyhow::Error, path: &Path, announce: impl Fn
     announce(path);
 }
 
+/// **The stale claim files' sweep** (0.4.7 U-43), started by `executor` on a worker of its own;
+/// `true` when it started. Nobody waits on it: a sweep's only answer is its one line in
+/// diagnostics.log, and the files it would have taken are left for the next start's sweep. **A
+/// start the door refuses, or a sweep that panics, is said once in `say`**
+/// (T-PROFILE-INSTALL-REFUSED-START) — before, a refused start was thrown away unsaid.
+fn start_claim_sweep(
+    executor: &lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+) -> bool {
+    executor
+        .start_worker(
+            "folio-claim-sweep",
+            lane::Answered::new("the stale claim sweep", say, |_| ()),
+            |worker| {
+                let swept = bt_platform::instance::sweep_stale_claims(worker);
+                if swept > 0 {
+                    diagnostics::note(&format!(
+                        "Folio: {swept} stale claim files were swept from the runtime folder"
+                    ));
+                }
+            },
+        )
+        .is_ok()
+}
+
+/// **The media platform's one-time warm-up** (§7.23), started by `prewarm`. Nobody waits on it:
+/// the first video hover starts the platform itself when the warm-up has not, and pays the cost
+/// then. **A start the thread door refuses is said once in `say`**
+/// (T-PROFILE-INSTALL-REFUSED-START) — before, it was thrown away unsaid.
+fn start_video_prewarm(prewarm: fn() -> std::io::Result<()>, say: impl Fn(&str)) {
+    if let Err(error) = prewarm() {
+        say(&format!(
+            "the media platform's warm-up could not be started: {error}; the first video hover starts it"
+        ));
+    }
+}
+
 fn main() -> Result<()> {
+    // **Every diagnostic door, read once, here** (`entry_doors`, T-DIAGNOSTIC-DOORS-AT-THE-ENTRY):
+    // the recordings and traces this run was asked for, handed to each library that writes one
+    // before any station can be reached. Nothing below reads them from the environment again.
+    let doors = entry_doors::EntryDoors::at_the_entry().install();
     // **What this process was handed is passed on only by name**, before any door can start a
     // child: the uninstaller removes the data folder, and a `diagnostics.log` handle inherited
     // down a chain of Folio processes is a holder there its probe refuses on.
@@ -75727,179 +77942,199 @@ fn main() -> Result<()> {
     if cli::explorer_command(std::env::args_os().skip(1)) {
         std::process::exit(explorer_menu::serve());
     }
-    // **And the door that undoes what the other two registered**: somebody
-    // taking Folio back out of Explorer's menu, which is the one thing this
-    // program can be asked to do that has to work while the rest of it is being
-    // deleted.
-    //
-    // Above the parse for the two doorbells' reason — this launch is not opening
-    // a window and everything below would build one — and above everything the
-    // parse leads to for a reason of its own. A package manager's uninstall hook
-    // is not a person: it must not be handed over to a Folio that is already
-    // running (which would change *that* copy's idea of what is registered, in a
-    // process the hook is not waiting on), it must not write a settings file for
-    // a folder about to disappear, and it must not be met by a first-run card. It
-    // is one line of log text and an exit code.
-    //
-    // The line goes to standard output through the console door and **never to a
-    // message box**: this answer is for a transcript, and an uninstall that
-    // stopped to raise a modal nobody is in front of would be worse than an
-    // uninstall that said nothing at all.
-    if cli::remove_shell_integration(std::env::args_os().skip(1)) {
-        let report = shell_integration::remove_shell_integration(
-            shell_integration::profile_marks::Asker::Door,
-            &shell_integration::ProbeEnvironment::Inherited,
-        );
-        let done = report.text(false);
-        if done.is_empty() && report.exit_code() == 0 {
-            bt_platform::write_to_console(&format!("{}\n", i18n::Text::ShellProfileNothing.text()));
-        } else {
-            bt_platform::write_to_console(&done);
-        }
-        bt_platform::write_std_error(report.text(true).as_bytes());
-        std::process::exit(report.exit_code());
-    }
-    if cli::remove_explorer_menu(std::env::args_os().skip(1)) {
-        let report = explorer_menu::remove_from_explorer_menu();
-        bt_platform::write_to_console(&format!("{}\n", report.line));
-        std::process::exit(report.exit_code);
-    }
-    // **The rescue build's two doors** (`--update-recover`, `--update-apply`;
-    // `docs/plans/design/self-update-2026-09-16.md` (b).2). Headless like the
-    // doors above, and above the admission below for a reason of their own:
-    // the rescue build is the one process that must never hold the admission
-    // shared — it takes it exclusive to move files. `--update-recover` is the
-    // recovery door (`update_recover`, U-22; on Windows it recovers what a dead
-    // applier left, U-23); `--update-apply` is the applier — macOS
-    // (`update_apply_macos`, U-28) and Windows (`update_apply_windows`, U-23) —
-    // and is answered with one line where there is none.
-    // **A road process's panic unwinds** (0.4.6 U-34), and its hook is in place
-    // before anything of the door's line is parsed (round 2, blocker 3): the
-    // first word alone says it is a door.
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|word| word == cli::UPDATE_APPLY_FLAG || word == cli::UPDATE_RECOVER_FLAG)
-    {
-        install_update_door_panic_hook_at(panic_log_path());
-    }
-    if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
-        let usage = match door {
-            Ok(cli::UpdateDoor::Recover {
-                home,
-                then_launch,
-                handed_back,
-            }) => std::process::exit(update_recover::run_here(home, then_launch, handed_back)),
-            Ok(cli::UpdateDoor::Apply { home, txn, nonce }) => match bt_platform::host_platform() {
-                bt_platform::HostPlatform::MacOs => {
-                    std::process::exit(update_apply_macos::run_here(&home, &txn, &nonce))
+    // **The process's half of the start, in `startup::begin`'s order**: a removal verb, the
+    // command line, the hand-over. What the hand-over keeps — the parsed request, the data
+    // directory, and the two lines a hand-over that did not happen owes the log — comes back.
+    let (request, storage, gave_up, stood_down) = startup::begin(startup::FrontDoor {
+        removal: || {
+            // **And the door that undoes what the other two registered**: somebody
+            // taking Folio back out of Explorer's menu, which is the one thing this
+            // program can be asked to do that has to work while the rest of it is being
+            // deleted.
+            //
+            // Above the parse for the two doorbells' reason — this launch is not opening
+            // a window and everything below would build one — and above everything the
+            // parse leads to for a reason of its own. A package manager's uninstall hook
+            // is not a person: it must not be handed over to a Folio that is already
+            // running (which would change *that* copy's idea of what is registered, in a
+            // process the hook is not waiting on), it must not write a settings file for
+            // a folder about to disappear, and it must not be met by a first-run card. It
+            // is one line of log text and an exit code.
+            //
+            // The line goes to standard output through the console door and **never to a
+            // message box**: this answer is for a transcript, and an uninstall that
+            // stopped to raise a modal nobody is in front of would be worse than an
+            // uninstall that said nothing at all.
+            if cli::remove_shell_integration(std::env::args_os().skip(1)) {
+                let report = shell_integration::remove_shell_integration(
+                    shell_integration::CheckAsker::Verb,
+                    &shell_integration::ProbeEnvironment::Inherited,
+                );
+                let done = report.text(false);
+                if done.is_empty() && report.exit_code() == 0 {
+                    bt_platform::write_to_console(&format!(
+                        "{}\n",
+                        i18n::Text::ShellProfileNothing.text()
+                    ));
+                } else {
+                    bt_platform::write_to_console(&done);
                 }
-                bt_platform::HostPlatform::Windows => {
-                    std::process::exit(update_apply_windows::run_here(&home, &txn, &nonce))
+                bt_platform::write_std_error(report.text(true).as_bytes());
+                std::process::exit(report.exit_code());
+            }
+            if cli::remove_explorer_menu(std::env::args_os().skip(1)) {
+                let report = explorer_menu::remove_from_explorer_menu();
+                bt_platform::write_to_console(&format!("{}\n", report.line));
+                std::process::exit(report.exit_code);
+            }
+        },
+        parse: || {
+            // **The rescue build's two doors** (`--update-recover`, `--update-apply`;
+            // `docs/plans/design/self-update-2026-09-16.md` (b).2). Headless like the
+            // doors above, and above the admission below for a reason of their own:
+            // the rescue build is the one process that must never hold the admission
+            // shared — it takes it exclusive to move files. `--update-recover` is the
+            // recovery door (`update_recover`, U-22; on Windows it recovers what a dead
+            // applier left, U-23); `--update-apply` is the applier — macOS
+            // (`update_apply_macos`, U-28) and Windows (`update_apply_windows`, U-23) —
+            // and is answered with one line where there is none.
+            // **A road process's panic unwinds** (0.4.6 U-34), and its hook is in place
+            // before anything of the door's line is parsed (round 2, blocker 3): the
+            // first word alone says it is a door.
+            if std::env::args_os().nth(1).is_some_and(|word| {
+                word == cli::UPDATE_APPLY_FLAG || word == cli::UPDATE_RECOVER_FLAG
+            }) {
+                install_update_door_panic_hook_at(panic_log_path());
+            }
+            if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
+                let usage = match door {
+                    Ok(cli::UpdateDoor::Recover {
+                        home,
+                        then_launch,
+                        handed_back,
+                    }) => {
+                        std::process::exit(update_recover::run_here(home, then_launch, handed_back))
+                    }
+                    Ok(cli::UpdateDoor::Apply { home, txn, nonce }) => {
+                        match bt_platform::host_platform() {
+                            bt_platform::HostPlatform::MacOs => std::process::exit(
+                                update_apply_macos::run_here(&home, &txn, &nonce),
+                            ),
+                            bt_platform::HostPlatform::Windows => std::process::exit(
+                                update_apply_windows::run_here(&home, &txn, &nonce),
+                            ),
+                            bt_platform::HostPlatform::OtherUnix => None,
+                        }
+                    }
+                    Err(usage) => Some(usage),
+                };
+                bt_platform::write_std_error(
+                    format!("{}\n", cli::update_door_refusal(usage)).as_bytes(),
+                );
+                std::process::exit(2);
+            }
+            // **The command line, before there is anything for it to be wrong about.**
+            // `spike-win-landing.md` §8 puts slice 0 exactly here, between the panic hook
+            // and the event loop, and the reason is what a refusal costs: a syntax error
+            // answered after `EventLoop::build` would have created a window, a swap
+            // chain and a shell in order to tell somebody they typed `--cdw`.
+            match cli::parse(std::env::args_os().skip(1)) {
+                Ok(request) => request,
+                Err(fault) => {
+                    report_at_the_front_door(&fault);
+                    std::process::exit(fault.exit_code());
                 }
-                bt_platform::HostPlatform::OtherUnix => None,
-            },
-            Err(usage) => Some(usage),
-        };
-        bt_platform::write_std_error(format!("{}\n", cli::update_door_refusal(usage)).as_bytes());
-        std::process::exit(2);
-    }
-    // **The command line, before there is anything for it to be wrong about.**
-    // `spike-win-landing.md` §8 puts slice 0 exactly here, between the panic hook
-    // and the event loop, and the reason is what a refusal costs: a syntax error
-    // answered after `EventLoop::build` would have created a window, a swap
-    // chain and a shell in order to tell somebody they typed `--cdw`.
-    let request = match cli::parse(std::env::args_os().skip(1)) {
-        Ok(request) => request,
-        Err(fault) => {
-            report_at_the_front_door(&fault);
-            std::process::exit(fault.exit_code());
-        }
-    };
-    // **This thread owns the window from here** (`bt_platform::admission`, ARCHITECTURE §5.1):
-    // the role every owner-thread door is admitted on, in the phase `Starting` until the loop's
-    // first turn. Below the six argv doors, whose processes never have a window, and above the
-    // hand-over, which is this phase's one wait (§5.3 row 18).
-    bt_platform::admission::enter_window_thread();
-    // **The machine's answers for `bt-term`, before anything here can make a session**
-    // (`host_answers`): its names and the resample pool's priority band. Every session is made by
-    // the event loop below, and a session's first working-directory report reads the names.
-    host_answers::install();
-    // **An update comes first** (`update_startup`, 0.4.6 U-12). The admission is
-    // taken shared here, before the data directory is resolved (which may move
-    // it), before settings, sidecars and the hand-over below; then one look at
-    // the update journal. A start the rescue build must finish leaves from
-    // inside the pass, having touched nothing of the data directory.
-    let admitted = update_startup::pass(&request);
-    // **And the third doorbell, which is this program ringing its own** (§7.59).
-    //
-    // The claim on the data directory is R4-5's and is taken exactly where it
-    // was: `is_writer_of` takes it on the first ask and holds it for the life of
-    // the process. What is new is what happens when it is *refused* — a Folio is
-    // already running, and since the ruling of 2026-09-08 this launch is that
-    // Folio's, not a second one. So the command line goes down the well-known
-    // pipe and this process leaves.
-    //
-    // **Above `enter_resident_run` and below the parse**, and both halves of that
-    // are deliberate. Below, because what is handed over is the request the parse
-    // produced. Above, because the one sentence this path can print — a folder
-    // that is not there — belongs on the console it was typed at; from the next
-    // line down, this program's words go into a file, and a person who typed
-    // `folio --cwd D:\gone` would be answered in a log they do not know exists.
-    //
-    // `None` is every reason to carry on and open a window, which is the
-    // behaviour every Folio had before this channel existed — see
-    // `launch_wire::hand_over` for the five of them and for why they are one
-    // branch.
-    //
-    // The binding is `handed` and not `code` on purpose: `main`'s own tail is
-    // pinned by `the_process_leaves_by_the_one_road_a_webview2_host_may_take` on
-    // the literal `leave_process(code)`, and a second call spelled the same way
-    // would answer that search first — turning a pin on where the run's last
-    // line is written into a pin on a branch that never writes one.
-    let storage = persist::storage_dir();
-    //
-    // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
-    // only in `Starting`. A refusal is one more `None`: carry on and open a window.
-    // **Why a hand-over gave up is kept for the log** (0.4.8 D3): the front door has none, so the
-    // line waits here and is written once `enter_resident_run` has opened this run's.
-    let gave_up = std::cell::Cell::new(None::<String>);
-    let hand_over = || {
-        bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
-            launch_wire::hand_over(
-                token,
-                &admitted,
-                &storage,
-                &request,
-                say_at_the_front_door,
-                |line| gave_up.set(Some(line)),
-            )
-        })
-        .ok()
-        .flatten()
-    };
-    // **An update's trial takes the claim first** (`update_trial`, §C.7): it
-    // asks for it until the old build has let go, and adopts it into the claim
-    // table before anything below asks who writes here. One a holder launched
-    // that is not handed the claim does not start and does not hand itself
-    // over — its applier sees the trial gone without a receipt and rolls
-    // back. A person's start standing in for U-35's reserved trial offers its
-    // launch to the trial that holds the claim, and when that trial does not
-    // take it within the wait, opens its own window, its writes held (0.4.8
-    // E3). Nothing at all in any other start.
-    let stood_down = match update_trial::take_the_claim(&storage, hand_over) {
-        update_trial::Claimed::Ours => None,
-        update_trial::Claimed::HandedOver(handed) => bt_platform::leave_process(handed),
-        update_trial::Claimed::StoodDown(line) => Some(line),
-        update_trial::Claimed::NotHad(line) => {
-            bt_platform::write_std_error(format!("{line}\n").as_bytes());
-            bt_platform::leave_process(1);
-        }
-    };
-    if !persist::is_writer_of(&storage)
-        && let Some(handed) = hand_over()
-    {
-        bt_platform::leave_process(handed);
-    }
+            }
+        },
+        claim: |request: cli::CliRequest| {
+            // **This thread owns the window from here** (`bt_platform::admission`, ARCHITECTURE §5.1):
+            // the role every owner-thread door is admitted on, in the phase `Starting` until the loop's
+            // first turn. Below the six argv doors, whose processes never have a window, and above the
+            // hand-over, which is this phase's one wait (§5.3 row 18).
+            bt_platform::admission::enter_window_thread();
+            // **The machine's answers for `bt-term`, before anything here can make a session**
+            // (`host_answers`): its names and the resample pool's priority band. Every session is made by
+            // the event loop below, and a session's first working-directory report reads the names.
+            host_answers::install();
+            // **An update comes first** (`update_startup`, 0.4.6 U-12). The admission is
+            // taken shared here, before the data directory is resolved (which may move
+            // it), before settings, sidecars and the hand-over below; then one look at
+            // the update journal. A start the rescue build must finish leaves from
+            // inside the pass, having touched nothing of the data directory.
+            let admitted = update_startup::pass(&request);
+            // **And the third doorbell, which is this program ringing its own** (§7.59).
+            //
+            // The claim on the data directory is R4-5's and is taken exactly where it
+            // was: `is_writer_of` takes it on the first ask and holds it for the life of
+            // the process. What is new is what happens when it is *refused* — a Folio is
+            // already running, and since the ruling of 2026-09-08 this launch is that
+            // Folio's, not a second one. So the command line goes down the well-known
+            // pipe and this process leaves.
+            //
+            // **Above `enter_resident_run` and below the parse**, and both halves of that
+            // are deliberate. Below, because what is handed over is the request the parse
+            // produced. Above, because the one sentence this path can print — a folder
+            // that is not there — belongs on the console it was typed at; from the next
+            // line down, this program's words go into a file, and a person who typed
+            // `folio --cwd D:\gone` would be answered in a log they do not know exists.
+            //
+            // `None` is every reason to carry on and open a window, which is the
+            // behaviour every Folio had before this channel existed — see
+            // `launch_wire::hand_over` for the five of them and for why they are one
+            // branch.
+            //
+            // The binding is `handed` and not `code` on purpose: `main`'s own tail is
+            // pinned by `the_process_leaves_by_the_one_road_a_webview2_host_may_take` on
+            // the literal `leave_process(code)`, and a second call spelled the same way
+            // would answer that search first — turning a pin on where the run's last
+            // line is written into a pin on a branch that never writes one.
+            let storage = persist::storage_dir();
+            //
+            // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
+            // only in `Starting`. A refusal is one more `None`: carry on and open a window.
+            // **Why a hand-over gave up is kept for the log** (0.4.8 D3): the front door has none, so the
+            // line waits here and is written once `enter_resident_run` has opened this run's.
+            let gave_up = std::cell::Cell::new(None::<String>);
+            let hand_over = || {
+                bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
+                    launch_wire::hand_over(
+                        token,
+                        &admitted,
+                        &storage,
+                        &request,
+                        say_at_the_front_door,
+                        |line| gave_up.set(Some(line)),
+                    )
+                })
+                .ok()
+                .flatten()
+            };
+            // **An update's trial takes the claim first** (`update_trial`, §C.7): it
+            // asks for it until the old build has let go, and adopts it into the claim
+            // table before anything below asks who writes here. One a holder launched
+            // that is not handed the claim does not start and does not hand itself
+            // over — its applier sees the trial gone without a receipt and rolls
+            // back. A person's start standing in for U-35's reserved trial offers its
+            // launch to the trial that holds the claim, and when that trial does not
+            // take it within the wait, opens its own window, its writes held (0.4.8
+            // E3). Nothing at all in any other start.
+            let stood_down = match update_trial::take_the_claim(&storage, hand_over) {
+                update_trial::Claimed::Ours => None,
+                update_trial::Claimed::HandedOver(handed) => bt_platform::leave_process(handed),
+                update_trial::Claimed::StoodDown(line) => Some(line),
+                update_trial::Claimed::NotHad(line) => {
+                    bt_platform::write_std_error(format!("{line}\n").as_bytes());
+                    bt_platform::leave_process(1);
+                }
+            };
+            if !persist::is_writer_of(&storage)
+                && let Some(handed) = hand_over()
+            {
+                bt_platform::leave_process(handed);
+            }
+            (request, storage, gave_up.take(), stood_down)
+        },
+    });
     // **The thread that owns the window says so, before it owns one.** Every
     // worker this process starts is spawned into the band below normal
     // (`bt_platform::spawn_at_priority`), and this is the other half of that
@@ -75917,7 +78152,7 @@ fn main() -> Result<()> {
     let channel = diagnostics::enter_resident_run(&storage);
     // A start whose hand-over gave up says why where this run's diagnostics go
     // (0.4.8 D3), above the line that says its window saves nothing.
-    if let Some(line) = gave_up.take() {
+    if let Some(line) = gave_up {
         diagnostics::note(&line);
     }
     // A stand-in that stood down beside the reserved trial says so where this
@@ -75945,10 +78180,14 @@ fn main() -> Result<()> {
     // The door is `bt_viewport`'s because `bt-app` depends on the three crates
     // that write these lines and none of them can name this module; see
     // `bt_viewport::trace`.
-    let _trace_shutdown = trace_sink::start();
+    let trace_shutdown = trace_sink::start();
+    // **A value dropped without its retire door says so here, once** (T-DROP-DOORS): from now on
+    // the platform's line about a skipped door is a diagnostics note, never a wait.
+    bt_platform::door_skipped::install(diagnostics::note);
+    bt_pty::say_skipped_doors_through(diagnostics::note);
     ime_outbound::install();
     bt_render::set_trace_writer(trace_sink::stderr_line);
-    if diagnostics::switched_on(std::env::var_os("BT_STARTUP_TRACE")) {
+    if doors.startup {
         trace_sink::stderr_line(format!(
             "BT_STARTUP_TRACE: from here Folio talks to {}",
             channel.label()
@@ -75966,17 +78205,9 @@ fn main() -> Result<()> {
     // is taken; only empty, unheld `*.lock` files older than an hour in
     // Folio's runtime folder. Windows' claim is a kernel name, with no file.
     if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
-        let _ = bt_platform::spawn_at_priority(
-            "folio-claim-sweep",
-            bt_platform::ThreadPriority::BelowNormal,
-            |worker| {
-                let swept = bt_platform::instance::sweep_stale_claims(worker);
-                if swept > 0 {
-                    diagnostics::note(&format!(
-                        "Folio: {swept} stale claim files were swept from the runtime folder"
-                    ));
-                }
-            },
+        start_claim_sweep(
+            &lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            diagnostics::note,
         );
     }
     // **And the witness to the day this thread stops answering** (§1.5).
@@ -75987,11 +78218,11 @@ fn main() -> Result<()> {
     //
     // **The same question `Runtime::trace_perf` asks, asked here** because the
     // watchdog starts before there is an `App` to hold the answer — the reading
-    // `MathWorker::spawn` takes for the same reason one lane over. What it
+    // the resampling share's door (`scale_door`) takes for the same reason one lane over. What it
     // decides is the silence a report is written for: a run somebody started in
     // order to measure it is worth suspending at two seconds, and a run nobody
     // asked anything of is not. See `hang_watch::TRACED_HANG_THRESHOLD`.
-    let trace_perf = diagnostics::switched_on(std::env::var_os("BT_PERF_TRACE"));
+    let trace_perf = doors.perf;
     hang_watch::start(storage.join(hang_watch::REPORTS_DIRECTORY), trace_perf);
     // **And every message the pump dispatches, timed** (ticket 64). A hold the
     // self-report charged to `message pump` names the message that spent it:
@@ -76008,7 +78239,7 @@ fn main() -> Result<()> {
     }
     // The one-time media-session warm-up (§7.23) is paid here, off the first
     // hover: the process-resident session costs ~210ms cold and ~10ms warm.
-    bt_platform::video::prewarm();
+    start_video_prewarm(bt_platform::video::prewarm, diagnostics::note);
     // **The one message this program reads before winit dispatches it** (§7.54).
     //
     // `WM_HOTKEY` for a registration that named no window is a **thread**
@@ -76057,7 +78288,6 @@ fn main() -> Result<()> {
     });
     #[cfg(windows)]
     {
-        use winit::platform::windows::EventLoopBuilderExtWindows;
         // The summon hook is asked first; every message it lets through is
         // then dispatched between the pump timing's pair (ticket 64).
         builder.with_msg_hook(bt_platform::pump::timed_dispatch(
@@ -76083,15 +78313,15 @@ fn main() -> Result<()> {
     // library that cannot know this program has a session to write.
     #[cfg(target_os = "macos")]
     {
-        use winit::platform::macos::EventLoopBuilderExtMacOS;
         builder.with_default_menu(false);
     }
     let event_loop = match builder.build() {
         Ok(event_loop) => event_loop,
         Err(error) => {
-            // The way out from before the loop: `_trace_shutdown`'s drop flushes the trace, which
-            // is an exit door (§5.3 row 17), so the phase says so first.
+            // The way out from before the loop: the trace writer is retired through its flush
+            // door, which is an exit door (§5.3 row 17), so the phase says so first (D-78).
             bt_platform::admission::exiting();
+            let _ = trace_shutdown.flush_through_its_door();
             return Err(anyhow::Error::new(error).context("create winit event loop"));
         }
     };
@@ -76146,7 +78376,7 @@ fn main() -> Result<()> {
             }
         }
     };
-    let mut application = FolioApp::new(event_loop.create_proxy(), request, delegate);
+    let mut application = FolioApp::new(event_loop.create_proxy().into(), request, delegate);
     let outcome = event_loop
         .run_app(&mut application)
         .map_err(|error| anyhow!(error));
@@ -76154,8 +78384,13 @@ fn main() -> Result<()> {
     // or from `Starting` when the loop stopped before its first turn.
     bt_platform::admission::exiting();
     // The session that outlived every question is released once the loop has
-    // returned, never before a question could still be in flight.
-    bt_platform::video::shutdown_media_session();
+    // returned, never before a question could still be in flight — and never
+    // before the engines every window's teardown let go of have left (D-80). An
+    // owner-thread door (`doors::MediaQuiet`, row 27), admitted on the way out; a
+    // refusal leaves the platform to the process's end.
+    let _ = bt_platform::admission::admitted::<doors::MediaQuiet, _>(
+        bt_platform::video::shutdown_media_session,
+    );
     // **An update's exit guard** (0.4.6 U-34): after a Restart to update, this
     // process leaves behind the applier it started, or starts Folio again —
     // here, with the loop over and the session's sentinel gone, after letting
@@ -76198,9 +78433,10 @@ fn main() -> Result<()> {
     // the failure that queue exists for is a writer stuck in a kernel write,
     // and waiting on it forever here would move the hang to the end of the run.
     //
-    // An owner-thread door (`doors::TraceFlush`, row 17), admitted on the way out. A refusal
-    // loses what is still queued, as the flush's own timeout does.
-    let _ = bt_platform::admission::admitted::<doors::TraceFlush, _>(trace_sink::flush);
+    // An owner-thread door (`doors::TraceFlush`, row 17), admitted on the way out, through the
+    // writer's own door (D-78). A refusal loses what is still queued, as the flush's own timeout
+    // does.
+    let _ = trace_shutdown.flush_through_its_door();
     // **The uninstaller, after *Uninstall* on the Settings card, is the very last
     // act** (T-UNINSTALL-UX): started detached, with `--after-pid` naming this
     // process, so it touches nothing until this process has gone. Nothing for any
@@ -76359,6 +78595,8 @@ mod shell_literal_app_tests;
 #[cfg(test)]
 mod shortcuts_app_tests;
 #[cfg(test)]
+mod storage_reread_tests;
+#[cfg(test)]
 mod table_block_app_tests;
 /// **The fixtures the crate root's test files share**, `pub(crate)` where another file
 /// reaches them.
@@ -76452,7 +78690,10 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 26] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 30] = [
+        // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
+        // from a Recent row, beside its every-platform twin on the host's fallback shell.
+        "app_files_tests.rs",
         // Windows-only test fixtures: a share named by a document (`\\server\share`).
         "app_preview_tests.rs",
         // Windows-only test fixtures: UNC shares, WSL distribution shares and device and
@@ -76479,6 +78720,10 @@ mod platform_gate_tests {
         // The startup path: the native-window door's two arms, and the five
         // platform calls M1-1 made non-fatal.
         "main.rs",
+        // Windows-only test fixtures: the Store PowerShell's app execution alias and package (an
+        // MSIX fact), and the never-settling check's program, Windows PowerShell beside its Unix
+        // shell-script twin; the door itself is portable.
+        "packaged_turns_tests.rs",
         // Which rows the palette offers on this machine.
         "palette_index.rs",
         // Windows-only test fixtures: the drive, share, verbatim and WSL spellings of
@@ -76494,6 +78739,9 @@ mod platform_gate_tests {
         "psreadline.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
+        // Windows-only test fixtures: real Windows PowerShell 5.1 panes running Folio's
+        // PSReadLine through a real ConPTY, beside the composition's every-platform tests.
+        "shell_integration_psreadline_tests.rs",
         // Native invalid-name, Windows spelling and direct CRT test fixtures only;
         // the pure encoders stay here as paste-paths design section 5 specifies.
         "shell_literal.rs",
@@ -76501,6 +78749,9 @@ mod platform_gate_tests {
         "tests.rs",
         // Native junction and sharing-mode fixtures, never product platform policy.
         "uninstall_tests.rs",
+        // Only the held-journal fixtures: a hold that refuses a replacing rename is a
+        // Windows fact; their platform-free halves run beside the door everywhere.
+        "update_apply_windows_tests.rs",
         // Only the symlinked-log regression fixture; the recovery road is portable.
         "update_recover.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.
@@ -77028,9 +79279,7 @@ mod cross_window_drag_tests {
     /// and the layer being removed is the live one.
     #[test]
     fn a_rebuild_clears_the_old_layer_first() {
-        let rebuild = item_body(
-            &ItemQuery::method("TheDeviceAndItsWindows", "rebuild").of_trait("LostDevice"),
-        );
+        let rebuild = item_body(&ItemQuery::function("rebuild_every_native_surface"));
         assert!(
             rebuild.contains("window_surface_target(&window.window, &window.compositor)"),
             "the device-loss rebuild names a surface door of its own instead of the one \
@@ -77188,7 +79437,7 @@ mod cross_window_drag_tests {
         assert!(
             !found(
                 needle!(Pattern::text(
-                    "fn install_theme_class_background(window: &Window) {"
+                    "fn install_theme_class_background(window: &impl WindowHost) {"
                 )),
                 View::Raw
             )
@@ -77272,7 +79521,7 @@ mod cross_window_drag_tests {
         // all is never.
         let wait = method_body("FolioApp", "about_to_wait_inner");
         let (before, after) = wait
-            .split_once("let mut wake_deadline = match self.drive_drag_broker(now)")
+            .split_once("let mut wake = match self.drive_drag_broker(now)")
             .expect(
                 "the broker is turned once a loop, and its answer is what the \
                  windows' own deadlines are then folded into",
@@ -77283,7 +79532,7 @@ mod cross_window_drag_tests {
              so promote, transfer, open and place all land in one turn:\n{wait}"
         );
         assert!(
-            after.contains("earliest_deadline([wake_deadline, deadline])"),
+            after.contains("wake_owner::earliest_wake([wake, window_wake])"),
             "every window's clocks fold onto the broker's rather than replacing \
              it:\n{after}"
         );
@@ -78347,8 +80596,13 @@ mod palette_wiring_tests {
             "the paste chord is the window's own predicate, not a second spelling"
         );
         assert!(
-            method_body("Runtime", "clipboard_line").contains("text_field::one_line"),
-            "and what it hands the field is one line of printable text"
+            keys.contains("self.paste_into_field(crate::TextFieldSeat::Palette)"),
+            "the chord asks the clipboard lane for the palette's paste"
+        );
+        assert!(
+            method_body("Runtime", "apply_clipboard_text_to_field")
+                .contains("text_field::one_line"),
+            "and what the answer hands the field is one line of printable text"
         );
         assert!(
             keys.contains("input::one_line_field_key(field, key, self.window.modifiers)"),
@@ -78456,22 +80710,12 @@ mod palette_wiring_tests {
             "a press outside the box puts it away"
         );
 
-        // **The third way out is not in `Runtime` at all**: the two focus arms
-        // live in `<FolioApp as ApplicationHandler>::window_event`, which the
-        // query says and the deleted reading could not — it took the first
-        // `WindowEvent::Focused(false) => {` in the file, and the literal three
-        // lines above is one of them.
-        let dispatch = item_body(
-            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
-        );
-        let blur = dispatch
-            .find("WindowEvent::Focused(false) => {")
-            .expect("the window answers losing focus");
-        let end = dispatch[blur..]
-            .find("WindowEvent::Focused(true) => {")
-            .expect("and getting it back");
+        // **The third way out is losing the window**: the dispatcher's blur arm
+        // is one call (T-POINTER-CAPTURE cut 5, `Runtime::window_blurred`, held to
+        // being the arm's only work by `every_lifecycle_door_ends_the_capture`),
+        // and the blur's own body puts the palette away.
         assert!(
-            dispatch[blur..blur + end].contains("runtime.close_command_palette()"),
+            method_body("Runtime", "window_blurred").contains("self.close_command_palette()"),
             "and a window the reader has left is not one they are aiming in"
         );
     }
@@ -78743,7 +80987,10 @@ mod preview_arrows_runtime_tests {
 
     /// RED (T-PREVIEW-ARROWS round 2) — the browsing-key runtime seam keeps
     /// one surface from key classification through opening, and the ordinary
-    /// image landing is what changes the head's source.
+    /// image landing installs the path on that surface. That the installed
+    /// picture names the head is driven, not read:
+    /// `app_preview_tests::the_preview_head_names_the_picture_installed_on_its_pane`.
+    /// The seam itself is `Runtime`'s, which no test can build without a window.
     ///
     /// MUTATION: replace `open_preview_onto(surface, path.clone())` in
     /// `step_preview_neighbour` with the surface-choosing
@@ -78781,11 +81028,6 @@ mod preview_arrows_runtime_tests {
         assert!(
             landing.contains("self.preview_pane_mut(surface).show_picture(path);"),
             "the opened path is not installed on that surface:\n{landing}"
-        );
-        let head = method_body("TabState", "preview_head_name");
-        assert!(
-            head.contains("Some(image) => Some(image.title())"),
-            "the preview head no longer reads the image installed on its pane:\n{head}"
         );
     }
 }
@@ -78869,7 +81111,6 @@ mod edit_menu_clipboard_tests {
             "self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)",
             "self.window.dirty_gate.is_open()",
             "self.window.first_run.is_open()",
-            "self.window.psreadline_invite.is_open()",
             "self.paste_card_seat().is_some()",
             "self.update_card_is_up()",
             "self.settings_layout().is_some()",
@@ -78893,52 +81134,6 @@ mod edit_menu_clipboard_tests {
                 at < rung,
                 "`{surface}` stands below the clipboard rung, so the menu defers to a surface \
                  the keyboard does not"
-            );
-        }
-    }
-
-    /// PIN — **the four doors the Edit menu ends at are the keystroke's own**,
-    /// and the verb reaches the clipboard through none of its own.
-    ///
-    /// A second copy path would be a second answer to what a selection is worth
-    /// on the pasteboard; a second paste path would be a second place for the
-    /// sanitising, the bracketing and the multi-line policy to be decided. The
-    /// four doors named here are the four the two key handlers name. That the
-    /// menu reaches them — `menubar::run_clipboard_verb` over `Runtime`'s
-    /// `menubar::ClipboardDoors` — is driven behaviourally only up to the doors
-    /// (`a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection`);
-    /// `Runtime`'s own answer to them is unpinned, because no test builds a
-    /// `Runtime` (the D-95 class).
-    ///
-    /// MUTATION: read the pasteboard in `run_an_application_menu_verb` and
-    /// write the bytes itself — the last assertion goes red.
-    #[test]
-    fn the_edit_menus_clipboard_verbs_go_through_the_keystrokes_own_doors() {
-        let verb = method_body("Runtime", "run_an_application_menu_verb");
-        let editor = method_body("Runtime", "preview_key");
-        let ladder = ladder();
-        for (door, other, whose) in [
-            (
-                "self.copy_preview_selection()",
-                editor,
-                "the preview editor",
-            ),
-            ("self.paste_into_preview()", editor, "the preview editor"),
-            ("self.copy_selection()", ladder, "the terminal"),
-            ("self.paste_from_clipboard()", ladder, "the terminal"),
-        ] {
-            assert!(
-                other.contains(door),
-                "`{door}` is no longer what {whose} answers its own chord with"
-            );
-        }
-        for its_own in [
-            "write_terminal_clipboard_text",
-            "bt_platform::clipboard_text",
-        ] {
-            assert!(
-                !verb.contains(its_own),
-                "the Edit menu touches the pasteboard itself through `{its_own}` instead of                  going through the door the keystroke uses"
             );
         }
     }
@@ -79055,7 +81250,7 @@ mod edit_menu_clipboard_tests {
     fn a_copy_over_a_files_column_or_a_read_only_preview_takes_the_terminals_selection() {
         use super::{
             Bias, DualPlaneSession, ImeOwner, TextFieldSeat, ViewSelection, ViewportProjection,
-            clipboard_focus_of, copy_selection,
+            clear_copied_selection, clipboard_focus_of, selection_to_copy,
         };
         use crate::menubar::{ClipboardDoors, run_clipboard_verb};
         use std::num::NonZeroU32;
@@ -79076,18 +81271,21 @@ mod edit_menu_clipboard_tests {
                     clipboard,
                     ..
                 } = self;
-                copy_selection(session, projection, |text| {
-                    clipboard.push(text.to_owned());
-                    Ok(())
-                });
+                // What `Runtime::copy_selection` asks of the clipboard lane, and what its landed
+                // write's effect does.
+                if let Some(text) = selection_to_copy(session, false) {
+                    clipboard.push(text.clone());
+                    clear_copied_selection(session, projection, &text);
+                }
                 Ok(())
             }
             fn paste_into_terminal(&mut self) -> anyhow::Result<()> {
                 self.knocked.push("paste_into_terminal");
                 Ok(())
             }
-            fn copy_document_selection(&mut self) {
+            fn copy_document_selection(&mut self) -> anyhow::Result<()> {
                 self.knocked.push("copy_document_selection");
+                Ok(())
             }
             fn paste_into_document(&mut self) -> anyhow::Result<()> {
                 self.knocked.push("paste_into_document");
@@ -79173,16 +81371,15 @@ mod edit_menu_clipboard_tests {
     /// rung a field with a caret" (`ime_caret_source`), so a field added to the
     /// ladder is asked about without anyone writing it down. The settings
     /// dialog's fields ride the modal rung and are asked with its one extra fact.
-    /// The decision is the one both roads read — `keyboard_input`'s clipboard
-    /// rung and `run_an_application_menu_verb` — which the second half holds
-    /// them to, along with each upper field's own paste rung.
+    /// That the chord and Edit ▸ Paste both read this decision is driven on a
+    /// headless window by
+    /// `runtime::clipboard::tests::paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it_by_either_road`.
     ///
     /// MUTATION: make `menubar::paste_seat` return `clipboard_seat(focus)`
     /// whatever the field — the find bar and the graph search rows answer
-    /// `Terminal` and go red; drop the `input::is_paste_shortcut` arm from
-    /// `git_menu_key` — the source half goes red.
+    /// `Terminal` and go red.
     #[test]
-    fn paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it() {
+    fn every_field_on_the_ladder_takes_the_paste_and_the_shell_takes_only_its_own() {
         use super::{
             ImeCaretSource, ImeOwner, TextFieldSeat, ime_caret_source, text_field_holding,
         };
@@ -79263,83 +81460,6 @@ mod edit_menu_clipboard_tests {
             assert!(
                 fields_reached.contains(&field),
                 "{field:?} is never reached"
-            );
-        }
-
-        // The two roads read that one decision, and nothing else decides.
-        let ladder = ladder();
-        let rung = ladder
-            .find("menubar::paste_seat(self.clipboard_focus())")
-            .expect("the keystroke's paste asks the ladder's seat");
-        let terminal = ladder
-            .find("self.paste_from_clipboard()?;")
-            .expect("and the terminal is one of its answers");
-        assert!(
-            rung < terminal,
-            "the seat is asked before the shell is written to"
-        );
-        assert_eq!(
-            ladder.matches("self.paste_from_clipboard()").count(),
-            1,
-            "a second road to the terminal's paste in the ladder"
-        );
-        assert!(ladder.contains("self.paste_into_field(field)?;"));
-        // Edit ▸ Paste asks `menubar::paste_seat` inside `menubar::run_clipboard_verb`
-        // (the seat is pinned by `a_paste_reaches_the_terminal_only_while_the_shell_holds_the_keyboard`);
-        // `Runtime`'s call into the road is unpinned (the D-95 class).
-        let focus = method_body("Runtime", "clipboard_focus");
-        assert!(
-            focus.contains("ime_owner(self.keyboard_owner())"),
-            "the field is read off the ladder, not listed"
-        );
-        // The fields whose rungs stand above the clipboard rung take the same
-        // two chords themselves, through the same door or predicate.
-        for (handler, answer) in [
-            (
-                "git_menu_key",
-                "self.paste_into_field(TextFieldSeat::GitPrompt)?;",
-            ),
-            (
-                "settings_field_key",
-                "self.paste_into_field(TextFieldSeat::Settings)?;",
-            ),
-            (
-                "palette_key",
-                "input::is_paste_shortcut(&event.logical_key, self.window.modifiers)",
-            ),
-        ] {
-            assert!(
-                method_body("Runtime", handler).contains(answer),
-                "{handler} does not take the window's paste"
-            );
-        }
-        assert!(
-            item_body(&ItemQuery::function("rename_pastes")).contains("input::is_paste_shortcut("),
-            "the name box spells its own paste chord"
-        );
-        let door = method_body("Runtime", "paste_into_field");
-        let read = door
-            .find("bt_platform::clipboard_text()")
-            .expect("the door reads the clipboard");
-        let applied = door
-            .find("self.apply_clipboard_text_to_field(field, &text)")
-            .expect("the door applies its clipboard text");
-        assert!(
-            read < applied,
-            "the field apply step must follow the clipboard read"
-        );
-        let apply = method_body("Runtime", "apply_clipboard_text_to_field");
-        for insert in [
-            "self.search_ime(",
-            "self.graph_search_ime(",
-            "self.git_prompt_ime(",
-            "self.palette_ime(",
-            "self.rename_ime(",
-            "self.paste_into_settings_field(",
-        ] {
-            assert!(
-                apply.contains(insert),
-                "a field's paste skips its own insert: {insert}"
             );
         }
     }
@@ -79585,12 +81705,6 @@ mod summon_key_wiring_tests {
         item_body(&ItemQuery::method(owner, name))
     }
 
-    /// The body of one method of a trait's implementation — the platform's own
-    /// entry points, which are not inherent methods of anything.
-    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
-        item_body(&ItemQuery::method(owner, name).of_trait(trait_name))
-    }
-
     /// RED (§7.54d) — **`is_synthetic` is carried from winit's event to the
     /// gate, and the gate is the first statement in the ladder.**
     ///
@@ -79610,7 +81724,7 @@ mod summon_key_wiring_tests {
     /// terminal it calls up.
     #[test]
     fn the_synthetic_bit_reaches_the_gate_and_the_gate_stands_first() {
-        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let dispatch = method_body("FolioApp", "on_window_event");
         assert!(
             dispatch.contains("runtime.keyboard_input(&event, is_synthetic)"),
             "the dispatch arm drops the bit that says whether this was a keystroke"
@@ -79619,7 +81733,7 @@ mod summon_key_wiring_tests {
             .strip_prefix('{')
             .expect("a body is its braces and what is between them");
         let gate = ladder
-            .find("if !input::is_a_keystroke(event.state, is_synthetic) {")
+            .find("if !input::is_a_keystroke(event.pressed, is_synthetic) {")
             .expect("the ladder opens with the gate");
         let first = ladder
             .lines()
@@ -79748,106 +81862,6 @@ mod live_markdown_edit_tests {
         found.in_the_product(index).len()
     }
 
-    /// **Entering is one door and it does all five things** (T5 ①).
-    ///
-    /// The caret moves, the page's other selection model lets go (research §10
-    /// Q3: two anchors on one surface are two answers to "what is selected"), the
-    /// page starts drawing the caret's block as source, the press that was
-    /// waiting for a body is spent, and the keyboard arrives. A second entrance
-    /// that remembered four of the five would leave a surface drawing a source
-    /// block nothing can be typed into.
-    #[test]
-    fn entering_writes_all_five_things_in_one_place() {
-        let door = method_body("Runtime", "seat_preview_caret");
-        for promise in [
-            "caret.place(&content, offset, extend)",
-            "pane.select(None)",
-            "pane.enter_page()",
-            "self.preview_edit_focus = Some(surface)",
-        ] {
-            assert!(
-                door.contains(promise),
-                "entering no longer does `{promise}`"
-            );
-        }
-        assert_eq!(
-            in_product_items(&found(
-                needle!(Pattern::text("pane.enter_page()")),
-                View::Raw
-            )),
-            1,
-            "one entrance, counted here on purpose — a second is a ruling and \
-             not an edit",
-        );
-    }
-
-    /// **Leaving is one door and three gestures reach it** (T5 ③ as the owner
-    /// reversed it, 2026-09-10).
-    ///
-    /// `Esc`, a press on the page's empty ground, and this surface losing the
-    /// keyboard to a press somewhere else: all three put the source block back
-    /// into prose, and all three keep the caret. The earlier ruling had only the
-    /// first — a page that re-flowed itself every time a hand left it would move
-    /// while nobody was looking at it — and it left a reader who had clicked
-    /// away looking at one paragraph still wearing its markup.
-    ///
-    /// **Counted rather than described**, for the entrance's own reason: one
-    /// door means `md_caret = false` is written once, in the view's own door
-    /// that [`Runtime::leave_preview_page`] reaches; the door that hands a pane
-    /// a different file takes the whole view with the document. A second
-    /// spelling of it is a ruling and not an edit.
-    ///
-    /// **The ground's gesture is now spent at the release** (owner's ruling
-    /// 2026-09-21), which moves *when* it reaches this door and not which door
-    /// it reaches: the press records `Pressed::Ground` and
-    /// [`Runtime::spend_preview_press`] is what leaves.
-    ///
-    /// MUTATION ①: drop the `leave_preview_page` call from the blur check and
-    /// clicking into the terminal beside the pane leaves the block as source.
-    /// MUTATION ②: key the empty-ground arm on `placing` instead of `caret_at`
-    /// and a press on a link renders the page it is standing in.
-    #[test]
-    fn leaving_is_one_door_that_escape_the_ground_and_a_blur_all_reach() {
-        for (name, what) in [
-            ("preview_key", "`Esc`"),
-            (
-                "spend_preview_press",
-                "a press on the page's empty ground, spent at the release",
-            ),
-            (
-                "chrome_mouse_input",
-                "losing the keyboard to a press elsewhere",
-            ),
-        ] {
-            assert!(
-                method_body("Runtime", name).contains("leave_preview_page("),
-                "{what} no longer renders the page again",
-            );
-        }
-        assert!(
-            method_body("Runtime", "press_preview_text").contains("live && caret_at.is_none()"),
-            "empty ground is a press that named no byte of the file — asked of \
-             `caret_at`, because a press on a link names one and is the link's",
-        );
-        assert!(
-            method_body("Runtime", "leave_preview_buffer_in").contains(".leave_document()"),
-            "and handing this surface a different file still leaves the page:              the view, and whether its caret stands on the page, go with the              document",
-        );
-        assert_eq!(
-            in_product_items(&found(
-                needle!(Pattern::text("md_caret = false")),
-                View::Raw
-            )),
-            1,
-            "one door, counted here on purpose; the file swap takes the whole              view with the document",
-        );
-        assert!(
-            !method_body("Runtime", "leave_preview_page").contains("pane.caret ="),
-            "and leaving keeps the caret: it is a byte offset, and the flip to \
-             the source face finds it where this left it",
-        );
-    }
-
     /// **The float gets the caret by the dispatch line it already had** (T5 ⑤,
     /// research §10 Q8, the precedent §7.31 ⑥ set).
     ///
@@ -79927,105 +81941,6 @@ mod live_markdown_edit_tests {
         );
     }
 
-    /// **One selection model on the rendered face** (T5 ④, research §10 Q3,
-    /// ruled).
-    ///
-    /// Two readers of "what is selected here" — the clipboard and the highlight —
-    /// and each of them asks the caret first and the piece model only when there
-    /// is no caret. A reader that asked the other way round would copy one range
-    /// and draw another.
-    #[test]
-    fn the_caret_answers_before_the_piece_selection_everywhere() {
-        for (name, first, second) in [
-            (
-                "preview_selected_text",
-                "self.preview_live_caret(surface)",
-                "pane.md_select().copied()?",
-            ),
-            (
-                "preview_caret_selection_places",
-                "self.preview_live_caret(surface)?",
-                "preview_provenance::place_of(",
-            ),
-        ] {
-            let text = method_body("Runtime", name);
-            let one = text
-                .find(first)
-                .unwrap_or_else(|| panic!("`Runtime::{name}` no longer asks `{first}`"));
-            let two = text
-                .find(second)
-                .unwrap_or_else(|| panic!("`Runtime::{name}` no longer reaches `{second}`"));
-            assert!(
-                one < two,
-                "`Runtime::{name}` asks the two in the wrong order"
-            );
-        }
-        assert!(
-            method_body("Runtime", "preview_selected_text").contains("caret.selected(content)"),
-            "and a caret selection copies the file's own bytes",
-        );
-    }
-
-    /// RED — **(a) a press on a rendered page changes no block's face** (owner's
-    /// report and ruling 2026-09-21, as its closure review narrowed it).
-    ///
-    /// The whole of the report, held where a machine with no screen can hold it:
-    /// the press's own body carries none of the writes that change a page's
-    /// face. It records what it would do ([`super::preview_press::Pressed`]) and
-    /// arms the gesture; the release spends the record.
-    ///
-    /// **The one press it answers where it stands is the one that changes
-    /// nothing** — inside the seat the page is already drawing from, where
-    /// putting the caret leaves every block's face as it is. That is why the
-    /// spend below is pinned *with its guard*: a spend without it is the 0.4.3
-    /// timing back again.
-    ///
-    /// RED GATE: it was red on the shipped 0.4.3 build, where the press placed
-    /// the caret itself (`place_preview_caret_on`) and widened it
-    /// (`widen_preview_caret`) — which is the paragraph that put its marks back
-    /// the instant the button went down.
-    ///
-    /// MUTATION: drop `in_the_seat &&` from the spend below and this goes red
-    /// while every value test in [`super::preview_press`] stays green, which is
-    /// the shape of this defect exactly: the rule was right and the moment was
-    /// wrong.
-    #[test]
-    fn a_press_on_a_rendered_page_changes_no_blocks_face() {
-        let press = method_body("Runtime", "press_preview_text");
-        for wrote in [
-            "self.place_preview_caret_on(",
-            "self.seat_preview_caret(",
-            "self.widen_preview_caret(",
-            "self.leave_preview_page(",
-            "want_caret_at(Some(",
-        ] {
-            assert!(
-                !press.contains(wrote),
-                "the press still does `{wrote}` itself, so the block under the \
-                 pointer changes face while the button is down",
-            );
-        }
-        assert_eq!(
-            press.matches("self.spend_preview_press(").count(),
-            1,
-            "the press spends more than the one gesture that changes nothing",
-        );
-        assert!(
-            press.contains("if in_the_seat && let Some(pressed) = pressed {"),
-            "the press's own spend is no longer guarded by the seat, so every \
-             press is answered where it stands — the 0.4.3 timing",
-        );
-        for records in [
-            "preview_press::Pressed::byte(offset, grain, shift)",
-            "preview_press::Pressed::Ground",
-        ] {
-            assert!(
-                press.contains(records),
-                "the press no longer records `{records}` for the release to spend",
-            );
-        }
-    }
-
     /// RED — **(b) and (c): the release is where a gesture is answered, and the
     /// drag takes the caret nowhere its seat does not already reach** (owner's
     /// ruling 2026-09-21 and its closure review).
@@ -80070,47 +81985,6 @@ mod live_markdown_edit_tests {
             drag.contains("drag.reached = Some(offset)"),
             "the drag no longer remembers where it got to, so a button that comes \
              up off the page collapses the selection it drew",
-        );
-    }
-
-    /// RED — **(d) a repeated press keeps its grain until the release, and (f)
-    /// a page still buying its file keeps its caret owed.**
-    ///
-    /// Both are the record carrying what the press knew: the repeat count is a
-    /// property of the press and of nothing else, and so is the byte a press on
-    /// a half-loaded page named. `md_caret_wanted` is counted rather than
-    /// described, for the entrance's own reason — it is written in exactly one
-    /// place, which is now the spend, and read in exactly one, which is
-    /// [`Runtime::settle_preview_caret`].
-    #[test]
-    fn the_grain_and_the_owed_caret_both_ride_on_the_record() {
-        let press = method_body("Runtime", "press_preview_text");
-        assert!(
-            press.contains("let grain = preview_text_grain(clicks);"),
-            "the press no longer classifies the repeat count it is recording",
-        );
-        let spend = method_body("Runtime", "spend_preview_press");
-        assert!(
-            spend.contains("self.widen_preview_caret(surface, grain)"),
-            "the release no longer grows the caret to the grain the press asked \
-             for, so a double click takes a character",
-        );
-        assert!(
-            spend.contains("want_caret_at(Some(offset))"),
-            "a press on a page still waiting for its file no longer keeps the \
-             caret it asked for",
-        );
-        assert_eq!(
-            in_product_items(&found(
-                needle!(Pattern::text("want_caret_at(Some(")),
-                View::Raw
-            )),
-            1,
-            "one place owes the caret, counted here on purpose",
-        );
-        assert!(
-            method_body("Runtime", "settle_preview_caret").contains("md_caret_wanted"),
-            "and nothing spends it when the body lands",
         );
     }
 
@@ -80369,57 +82243,6 @@ mod refused_preview_card_tests {
             "the window's card button is hit from a second reading of what is refused"
         );
     }
-
-    /// RED — **pressing it runs the verb the unknown page's button runs.**
-    ///
-    /// One door out of this window and no second launcher: the press names a
-    /// surface, the surface names a file — through the picture lane as well as
-    /// the buffer, because a picture is not a buffer — and the file goes to
-    /// `open_local_path`, which is where `bt_platform`'s own refusals live.
-    ///
-    /// RED GATE: `open_preview_externally` reached for a buffer, and a surface
-    /// showing a picture has none. A button drawn on a refused picture would
-    /// have stood over a verb that did nothing at all.
-    #[test]
-    fn pressing_the_button_on_a_refused_page_runs_the_same_verb_as_the_unknown_page() {
-        // The pane's button and the window's reach the same verb.
-        assert!(
-            method_body("Runtime", "chrome_mouse_input")
-                .contains(concat!("ChromeTarget::", "PreviewOpenButton(_) => {")),
-            "the pane's card button no longer takes a press"
-        );
-        assert!(
-            method_body("Runtime", "open_preview_externally")
-                .contains(concat!("open_preview_externally_on", "(")),
-            "the pane's button has grown a second verb of its own"
-        );
-        assert!(
-            method_body("Runtime", "press_float").contains(concat!(
-                "open_preview_externally_on(",
-                "PreviewSurface::Float(id))"
-            )),
-            "the window's card button no longer reaches the pane's verb"
-        );
-        // And that one verb names the file through both lanes.
-        let verb = method_body("Runtime", "open_preview_externally_on");
-        assert!(
-            verb.contains(concat!("preview_file_on(", "surface)"))
-                && verb.contains(concat!("open_path_in_default_app", "(")),
-            "the verb no longer asks this surface for its file, or no longer hands it over"
-        );
-        let file = method_body("Runtime", "preview_file_on");
-        assert!(
-            file.contains(concat!("preview_buffer_on(", "surface)"))
-                && file.contains(concat!("preview_picture(", "surface)")),
-            "the file question misses one of the two lanes, so one kind of card presses nothing"
-        );
-        // One launcher, and it is the door it has always been.
-        assert!(
-            method_body("Runtime", "open_path_in_default_app")
-                .contains(concat!("open_local_path", "_ask(path)")),
-            "the card's button no longer goes through this window's one door"
-        );
-    }
 }
 
 /// **Every field in this window asks whether a press is typing before it types**
@@ -80481,11 +82304,6 @@ mod field_command_tests {
     /// The body of one inherent method of `owner`.
     fn method_body(owner: &str, name: &str) -> &'static str {
         item_body(&ItemQuery::method(owner, name))
-    }
-
-    /// The body of one method of `owner`'s implementation of `trait_name`.
-    fn trait_method_body(owner: &str, trait_name: &str, name: &str) -> &'static str {
-        item_body(&ItemQuery::method(owner, name).of_trait(trait_name))
     }
 
     /// The body of one free function of this crate.
@@ -80597,7 +82415,7 @@ mod field_command_tests {
     /// composing characters the reader asked it not to.
     #[test]
     fn the_option_policy_is_applied_at_one_door() {
-        let dispatch = trait_method_body("FolioApp", "ApplicationHandler", "window_event");
+        let dispatch = method_body("FolioApp", "on_window_event");
         assert!(
             dispatch.contains(concat!("input::", "effective_modifiers(")),
             "the modifier door takes winit's answer without applying the Option ruling"
@@ -80811,7 +82629,7 @@ mod clipboard_path_tests {
                 session.feed(b"\x1b[?2004h").unwrap();
             }
             let prepared = prepare_clipboard_paste(
-                bt_platform::clipboard::read_payload(&mut clipboard),
+                bt_platform::clipboard::read_payload(&mut clipboard).expect("the fake answers"),
                 &recipient(),
                 input_line_needs_a_space_first(&session),
             );
@@ -80850,7 +82668,7 @@ mod clipboard_path_tests {
                 fetched: Vec::new(),
             };
             let prepared = prepare_clipboard_paste(
-                bt_platform::clipboard::read_payload(&mut clipboard),
+                bt_platform::clipboard::read_payload(&mut clipboard).expect("the fake answers"),
                 &recipient(),
                 true,
             );
@@ -80888,7 +82706,7 @@ mod clipboard_path_tests {
             fetched: Vec::new(),
         };
         let prepared = prepare_clipboard_paste(
-            bt_platform::clipboard::read_payload(&mut beside_text),
+            bt_platform::clipboard::read_payload(&mut beside_text).expect("the fake answers"),
             &recipient(),
             false,
         );
@@ -80910,7 +82728,7 @@ mod clipboard_path_tests {
         // picture-only clipboard answers.
         assert!(
             prepare_clipboard_paste(
-                bt_platform::clipboard::read_payload(&mut alone),
+                bt_platform::clipboard::read_payload(&mut alone).expect("the fake answers"),
                 &recipient(),
                 false,
             )
@@ -80919,7 +82737,7 @@ mod clipboard_path_tests {
         );
 
         let prepared = prepare_clipboard_paste(
-            Ok(bt_platform::ClipboardPayload::Picture(vec![shot()])),
+            bt_platform::ClipboardPayload::Picture(vec![shot()]),
             &recipient(),
             false,
         );
@@ -80941,7 +82759,7 @@ mod clipboard_path_tests {
         let written = PathBuf::from("/tmp/folio/clipboard/20260916-143012-1.png");
         for leading_space in [false, true] {
             let as_a_copied_file = prepare_clipboard_paste(
-                Ok(bt_platform::ClipboardPayload::Files(vec![written.clone()])),
+                bt_platform::ClipboardPayload::Files(vec![written.clone()]),
                 &recipient(),
                 leading_space,
             );
@@ -80967,24 +82785,26 @@ mod clipboard_path_tests {
         assert!(shell_literal::refusal_notice(&refused.refused).is_some());
     }
 
+    /// An acquisition error is not a payload: it is the clipboard lane's `Failed`, said once by the
+    /// lane's ledger, and its notice is the window's (`runtime::clipboard::tests::
+    /// a_paste_whose_open_is_refused_five_times_says_so_once_and_writes_nothing`).
     #[test]
-    fn nothing_is_silent_and_payload_refusal_acquisition_error_and_path_error_each_report() {
+    fn nothing_is_silent_and_a_payload_refusal_and_a_path_error_each_report() {
         use bt_platform::{ClipboardPayload, UnsupportedKind};
         for payload in [
             ClipboardPayload::Nothing,
             ClipboardPayload::Picture(Vec::new()),
         ] {
-            let prepared = prepare_clipboard_paste(Ok(payload), &recipient(), false);
+            let prepared = prepare_clipboard_paste(payload, &recipient(), false);
             assert!(prepared.text.is_none());
             assert!(prepared.notice.is_none());
             assert!(prepared.picture.is_empty());
         }
-        for result in [
-            Ok(ClipboardPayload::Refused(UnsupportedKind::Promise)),
-            Err("injected read failure".into()),
-            Ok(ClipboardPayload::Files(vec!["/bad\tname".into()])),
+        for payload in [
+            ClipboardPayload::Refused(UnsupportedKind::Promise),
+            ClipboardPayload::Files(vec!["/bad\tname".into()]),
         ] {
-            let prepared = prepare_clipboard_paste(result, &recipient(), true);
+            let prepared = prepare_clipboard_paste(payload, &recipient(), true);
             assert!(prepared.text.is_none());
             assert!(prepared.notice.is_some());
         }
@@ -80992,26 +82812,27 @@ mod clipboard_path_tests {
 
     #[test]
     fn terminal_is_the_only_new_clipboard_caller_and_k144_keeps_focus() {
+        // T-CLIPBOARD-LANE: the board is read on the clipboard lane's worker, through the one
+        // door the product compiles, and the terminal's paste asks that lane for the payload; its
+        // answer is applied where the lane's terminal is spent.
         assert_eq!(
             in_product_items(&found(
-                needle!(Pattern::text("bt_platform::clipboard_payload()")),
+                needle!(Pattern::text("bt_platform::clipboard_payload(")),
                 View::Raw
             )),
             1,
             "the board is read in one place the product compiles"
         );
         let paste = method_body("Runtime", "paste_from_clipboard_into");
-        let read = paste
-            .find("bt_platform::clipboard_payload()")
-            .expect("the terminal door reads the clipboard");
-        let applied = paste
-            .find("self.apply_clipboard_payload(target, payload)")
-            .expect("the terminal door applies the clipboard payload");
         assert!(
-            read < applied,
-            "the payload apply step must follow the clipboard read"
+            paste.contains("PasteInto::Terminal(target), Ask::Payload"),
+            "the terminal door asks the clipboard lane for the payload:\n{paste}"
         );
-        assert!(paste.contains("hang_watch::Station::ClipboardRead"));
+        let spend = method_body("Runtime", "spend_paste");
+        assert!(
+            spend.contains("self.apply_clipboard_payload(target, payload)"),
+            "the payload the lane answered is applied where the paste is spent:\n{spend}"
+        );
         assert!(!paste.contains("paste_recipient") && !paste.contains("deliver_paste("));
         assert!(!paste.contains("set_focus("));
         assert!(!paste.contains("set_files_keyboard("));
@@ -81082,7 +82903,7 @@ mod clipboard_path_tests {
                     let dropped =
                         prepare_dropped_paste(vec![path.into()], &recipient, leading_space);
                     let copied = prepare_clipboard_paste(
-                        Ok(ClipboardPayload::Files(vec![path.into()])),
+                        ClipboardPayload::Files(vec![path.into()]),
                         &recipient,
                         leading_space,
                     );
@@ -81187,18 +83008,22 @@ mod clipboard_path_tests {
             ),
             (
                 ".paste_paths_into(target, batch.paths, \"write dropped paths to PTY\")",
-                "a dropped batch reaches a shell through one door, and takes the                  whole batch with it — which is what makes the focus and the                  raise behind its answer happen once per drop and not once per                  file",
+                "a dropped batch reaches a shell through one door, and takes the \
+                 whole batch with it — which is what makes the focus and the \
+                 raise behind its answer happen once per drop and not once per \
+                 file",
             ),
             (
                 "self.bring_this_window_forward();",
-                "and a drop brings this window to the front, from the one place                  that spends a whole batch (owner's ruling 2026-09-17)",
+                "and a drop brings this window to the front, from the one place \
+                 that spends a whole batch (owner's ruling 2026-09-17)",
             ),
             (
                 "self.paste_target(seat)",
                 "and it is addressed — tab, seat and shell — as it arrives (X-1)",
             ),
             (
-                ".and_then(bt_platform::pointer_position_in_window)",
+                "bt_platform::pointer_position_in_window(native)",
                 "and there is one door onto the platform's cursor in this window",
             ),
             (
@@ -81218,15 +83043,13 @@ mod clipboard_path_tests {
         }
         // The arm is not an item; the item it stands in is `window_event`, which
         // `FolioApp` reaches through winit's own trait.
-        let arm = item_body(
-            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
-        )
-        .split_once("            WindowEvent::DroppedFile(path) => {")
-        .expect("the dispatcher answers a dropped file")
-        .1
-        .split_once("            WindowEvent::Resized(size)")
-        .expect("and the arm is closed by the one after it")
-        .0;
+        let arm = item_body(&ItemQuery::method("FolioApp", "on_window_event"))
+            .split_once("            WindowEvent::DroppedFile(path) => {")
+            .expect("the dispatcher answers a dropped file")
+            .1
+            .split_once("            WindowEvent::Resized(size)")
+            .expect("and the arm is closed by the one after it")
+            .0;
         assert!(
             !arm.contains("paste"),
             "the arm collects; pasting from it would be one command line per file"
@@ -81270,12 +83093,14 @@ mod clipboard_path_tests {
             flushing.contains("if written {")
                 && flushing.contains("self.focus_the_pane_a_path_landed_in(target.seat)?;")
                 && flushing.contains("self.bring_this_window_forward();"),
-            "a drop no longer takes the keyboard and the window with it, or does              so without asking whether anything was written:
+            "a drop no longer takes the keyboard and the window with it, or does \
+             so without asking whether anything was written:
 {flushing}"
         );
         assert!(
             flushing.find("paste_paths_into") < flushing.find("focus_the_pane_a_path_landed_in"),
-            "the focus moved before the write, so where the bytes went could              depend on it:
+            "the focus moved before the write, so where the bytes went could \
+             depend on it:
 {flushing}"
         );
         for forbidden in ["platform_pointer_now", "pointer_position"] {
@@ -81332,7 +83157,7 @@ mod clipboard_path_tests {
                     let dropped =
                         prepare_dropped_paste(vec![name.into()], &recipient, leading_space);
                     let copied = prepare_clipboard_paste(
-                        Ok(ClipboardPayload::Files(vec![name.into()])),
+                        ClipboardPayload::Files(vec![name.into()]),
                         &recipient,
                         leading_space,
                     );
@@ -81564,7 +83389,9 @@ mod clipboard_path_tests {
         assert_eq!(
             kept(GlassHere::Ours, promised),
             promised.map(|offer| offer.target),
-            "the control: a hand that let go on our own glass, where the box was              drawn, over the shell the box named, pastes — and pastes into that              shell by name"
+            "the control: a hand that let go on our own glass, where the box was \
+             drawn, over the shell the box named, pastes — and pastes into that \
+             shell by name"
         );
 
         // ① The hand moved to another pane and no motion was delivered before
@@ -81617,16 +83444,19 @@ mod clipboard_path_tests {
             assert_eq!(
                 kept(covered, promised),
                 None,
-                "{covered:?}: the path was typed into a terminal behind another                  window, with every identity in the offer unchanged"
+                "{covered:?}: the path was typed into a terminal behind another \
+                 window, with every identity in the offer unchanged"
             );
         }
         assert!(
             !glass_allows_a_text_write(GlassHere::Unknown),
-            "a text write on an answer the window manager would not give is a              guess, and this one cannot be seen or undone"
+            "a text write on an answer the window manager would not give is a \
+             guess, and this one cannot be seen or undone"
         );
         assert!(
             glass_allows_a_drop(GlassHere::Unknown),
-            "and the pane-moving drag keeps the opposite default, which is F2's:              with no answer the payload stays in the window holding it"
+            "and the pane-moving drag keeps the opposite default, which is F2's: \
+             with no answer the payload stays in the window holding it"
         );
 
         // ⑥ P1-b: the box was a refusal — the window is below what its own tree
@@ -81835,9 +83665,9 @@ mod clipboard_path_tests {
         // (`send_paste`, 0.4.4 ticket 02), which `deliver_paste` answers with.
         let send = method_body("Runtime", "send_paste");
         assert!(
-            send.contains(
-                "offer_pty_input(PtyTarget::of(pty.as_ref(), birth.as_ref()), bytes, context)"
-            ) && send.contains("Ok(landed.queued())"),
+            send.contains("offer_pty_input(target, bytes, context)")
+                && send.contains("None => PtyTarget::of(pty.as_ref(), birth.as_ref()),")
+                && send.contains("Ok(landed.queued())"),
             "the paste reports the wrapper's success rather than what the ring \
              did with the bytes:\n{send}"
         );
@@ -82653,9 +84483,7 @@ mod printed_path_provenance_tests {
         // The modifier's door is in the event loop rather than in a method of the window, so the
         // arm is cut out of `window_event`'s own body — which is an identity of this crate and
         // not a prefix of a file that used to run to its end.
-        let loop_body = item_body(
-            &ItemQuery::method("FolioApp", "window_event").of_trait("ApplicationHandler"),
-        );
+        let loop_body = item_body(&ItemQuery::method("FolioApp", "on_window_event"));
         let at = loop_body
             .find("WindowEvent::ModifiersChanged(modifiers) => {")
             .expect("the one door every modifier state comes through");
@@ -83022,37 +84850,6 @@ mod printed_path_provenance_tests {
         assert!(resolved.ends_with("docs"), "{}", resolved.display());
 
         let _ = std::fs::remove_dir_all(&directory);
-    }
-
-    /// GUARD (closure review r6, B-2; re-pointed by CC-4) — **the open door is asked about the name
-    /// `main` asked it about, and the resolved name is the doors' own transform.**
-    ///
-    /// `main`'s Windows `open_local_path` reads `names_a_program` off the *printed* spelling —
-    /// there is no `canonicalize` in that door at all. For one round the branch handed it the
-    /// resolved name instead, which is a different question about a symlink and a refusal `main`
-    /// does not make. Its subject is how `Runtime::activate_hyperlink` and
-    /// `run_path_verify_worker` are written (CONVENTIONS, "A test pins behaviour by running it").
-    ///
-    /// MUTATION: hand `bt_term::verify_path` a raw `canonicalize` in `run_path_verify_worker`
-    /// instead of `bt_platform::resolved_for_a_door`, and the last assertion goes red.
-    #[test]
-    fn the_open_door_is_handed_the_printed_name_and_the_reveal_the_resolved_one() {
-        let press = method_body("Runtime", "activate_hyperlink");
-        let open = press
-            .find("self.open_local_path_verified(&path, facts)?;")
-            .expect("the open door is handed the path as printed");
-        let reveal = press
-            .find("self.reveal_verified(&path, facts)?;")
-            .expect("and so is the reveal, which takes the resolved name off the target");
-        assert!(open < reveal, "the file arm stands before the folder arm");
-        // And the resolved name is the doors' own transform, not a second reading of it: the
-        // path-verification lane hands `bt_term::verify_path` the door's own function as its
-        // resolver (CC-4; `bt-term` names no platform function itself).
-        let door = "bt_platform::resolved_for_a_door";
-        assert!(
-            free_fn_body("run_path_verify_worker").contains(door),
-            "the worker produces the door's input with the door's own function"
-        );
     }
 
     /// RED (audit 3 C-2) — **one resolution per subject, however many readers ask.**

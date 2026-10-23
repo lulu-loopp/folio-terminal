@@ -28,16 +28,57 @@
     hidden console and never with `-activeWindow` (U-31 H-2), and hides the
     passwords.
 
-    **the_watcher_reads_the_journal_where_the_build_writes_it** — the
-    watcher's journal is `H\journal.json`, the name `update_txn.rs`
-    `Home::journal` joins onto the home (U-31 H-1: the old watcher looked in
-    `H\<txn>\journal.json` and never saw a phase).
-
     **update_and_restart_are_shift_tab** — the key driver lights Update and
     Restart with Shift+Tab: Tab lights Skip or Later (U-31 H-4).
 
     **every_guest_script_carries_a_bom** — the updater's guest scripts and
     `ui-probe.ps1` start with a UTF-8 byte-order mark (U-31 H-3).
+
+    **the_kill_waits_on_the_handle_within_its_bound** (H6) — `waits.ps1`
+    `Stop-Within` on a sleeping `pwsh` this case starts (no window; ended by
+    this case on its own handle at the end): a real kill answers true and the
+    process has exited; a kill that has not ended it (a no-op kill, the stand-in
+    for a process the kernel has not let go of) answers false at the bound, and
+    the process is still running.
+    MUTATION: in `Stop-Within`, `return $true` in place of the handle's
+    `WaitForExit`.
+
+    **the_w4_wait_fails_at_its_bound** (H6) — `Wait-RunValue` on a Run key
+    with no FolioUpdate-* value and a journal entry that does not change
+    answers `bound`, with what it last saw, once its bound has passed; a value
+    answers `held`; an entry that changes answers `gone`. `Wait-Fact` refuses a
+    pause over 250 ms. MUTATION: in `Wait-Fact`, `if ($true)` in place of
+    `if ($wfLeft -le 0)` (the bound ends at once: the elapsed check goes red).
+
+    **the_mac_capture_refuses_without_a_window** (H6) — `mac/row.sh
+    --capture-dry-run` under bash, with `osascript`, `ps` and `screencapture`
+    stubbed: a window list with no window of the name refuses (exit 1, a
+    `REFUSED` line), as does an unreadable list; a window found is named and
+    not captured; `screencapture` is never run. MUTATION: in
+    `capture_folio_window`, drop the `-z "${id:-}"` refusal. Not dry
+    (`--capture-window`): a screencapture that fails after a partial write, or
+    writes an empty file, leaves no file and says FAILED; an image written is
+    kept; screencapture is only asked for the window found (`-l`). MUTATION:
+    drop the `rm -f "$out"`.
+
+    **the_host_reports_what_the_guest_saw** (H6) — `rows.ps1`
+    `Get-RowVerdict`: a cut row's marker of FAILED, MISSED or NOT_REACHED, a
+    cut row with no marker, and a `ROW <row> FAILED:` line in a live row's
+    watcher log each fail the row on the host; a reached marker and a log with
+    no failure line are ok. MUTATION: drop `'FAILED'` from the failing phases.
+
+    **the_planted_rows_are_read_against_their_cells** (E1-b) — `rows.ps1`
+    `Get-PlantedJournal` replaces exactly one word of a successor's journal per
+    vocabulary (and adds the adapter key) and refuses a template that does not
+    carry the word once; `Get-CardKind` names the card from its OCR lines;
+    `Get-PlantedVerdict` reads an evidence folder: a journal left byte for byte
+    is `kept`, one gone is `settled`, one rewritten is neither; the card, the
+    window's owner and the diagnostics lines are each compared with the cell,
+    and a differing cell fails the row naming it; the overlay rows' guard
+    passes a journal a rescue settled or a header A acts on by its frozen
+    promise, and fails one that changed with neither. MUTATION: in
+    `Get-PlantedVerdict`, compare the journal with `-eq` on its length only;
+    in the guard, drop `$byRescue`.
 #>
 [CmdletBinding()]
 param()
@@ -170,14 +211,6 @@ try {
     Check ($install.Exit -eq 0 -and $install.Text -match 'snapshot x\.vmx a-installed' -and $install.Text -match '-Phase unpack') `
         "install-candidate.ps1 -WhatIf plans the unpack phase and the snapshot (exit $($install.Exit))"
 
-    # ── the_watcher_reads_the_journal_where_the_build_writes_it ───────────────
-    $txn = [IO.File]::ReadAllText((Join-Path $root 'crates\bt-app\src\update_txn.rs'))
-    $home_ = [regex]::Match($txn, 'fn journal\(&self\) -> PathBuf \{\s*self\.root\.join\("([^"]+)"\)')
-    Check $home_.Success 'update_txn.rs Home::journal joins one name onto the home'
-    $watch = [IO.File]::ReadAllText((Join-Path $root 'scripts\release\cleanvm\updater\guest\watch.ps1'))
-    Check ($watch -match [regex]::Escape("`$journalPath = Join-Path `$H '$($home_.Groups[1].Value)'")) `
-        "watch.ps1 reads H\$($home_.Groups[1].Value), where Home::journal puts it"
-
     # ── update_and_restart_are_shift_tab ──────────────────────────────────────
     $keys = [IO.File]::ReadAllText((Join-Path $root 'scripts\release\cleanvm\updater\guest\keys.ps1'))
     foreach ($verb in 'update', 'restart') {
@@ -187,12 +220,231 @@ try {
     }
 
     # ── every_guest_script_carries_a_bom ──────────────────────────────────────
-    foreach ($rel in @('scripts\release\cleanvm\updater\guest\watch.ps1', 'scripts\release\cleanvm\updater\guest\keys.ps1',
+    foreach ($rel in @('scripts\release\cleanvm\updater\guest\watch.ps1', 'scripts\release\cleanvm\updater\guest\waits.ps1',
+            'scripts\release\cleanvm\updater\guest\keys.ps1',
             'scripts\release\cleanvm\updater\guest\collect.ps1', 'scripts\dev\ui-probe.ps1',
             'scripts\release\release-manifest.ps1', 'scripts\release\smoke.ps1', 'scripts\release\cleanvm\in-guest.ps1')) {
         $head = [IO.File]::ReadAllBytes((Join-Path $root $rel))
         Check ($head.Length -ge 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) "$rel starts with a UTF-8 byte-order mark"
     }
+
+    # ── the_kill_waits_on_the_handle_within_its_bound ─────────────────────────
+    . (Join-Path $root 'scripts\release\cleanvm\updater\guest\waits.ps1')
+    Check ($KillWithinMs -eq 2000) "the kill's bound is the product's CHILD_EXIT_BUDGET, 2 s ($KillWithinMs ms)"
+    # A sleeping pwsh of this case's own, with no window; every one is ended here on its handle.
+    $sleepers = [System.Collections.Generic.List[Diagnostics.Process]]::new()
+    function Start-Sleeper {
+        $info = [Diagnostics.ProcessStartInfo]::new($pwsh)
+        foreach ($a in '-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 600') { $info.ArgumentList.Add($a) }
+        $info.UseShellExecute = $false
+        $info.CreateNoWindow = $true
+        $p = [Diagnostics.Process]::Start($info)
+        $sleepers.Add($p)
+        return $p
+    }
+    try {
+        $killed = Start-Sleeper
+        $ended = Stop-Within -Process $killed -Kill { param($x) $x.Kill() }
+        Check ($ended -and $killed.HasExited) "a killed process is waited for on its handle and has exited (pid $($killed.Id))"
+
+        $stuck = Start-Sleeper
+        $ended = Stop-Within -Process $stuck -Kill { param($x) } -WithinMs 300
+        Check (-not $ended -and -not $stuck.HasExited) "a process still running at the bound answers false (pid $($stuck.Id))"
+    }
+    finally {
+        foreach ($p in $sleepers) {
+            if (-not $p.HasExited) { $p.Kill(); [void]$p.WaitForExit(5000) }
+            Check $p.HasExited "this case's sleeper pid $($p.Id) is ended"
+            $p.Dispose()
+        }
+    }
+
+    # ── the_w4_wait_fails_at_its_bound ────────────────────────────────────────
+    Check ($W4RunWithinMs -eq 90000) "W4's bound is old_within 60 s + 30 s ($W4RunWithinMs ms)"
+    $noValue = [pscustomobject]@{}
+    $noValue | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value { @('OneDrive', 'SecurityHealth') }
+    $w4 = Wait-RunValue -RunKey $noValue -EntrySig { '638000000000000000:812:637999999999999999' } -WithinMs 300
+    Check ($w4.Outcome -eq 'bound' -and $w4.ElapsedMs -ge 300) "no Run value: the W4 wait ends at its bound ($($w4.Outcome) after $($w4.ElapsedMs) ms)"
+    Check ($w4.Seen -eq 'run=[] journal entry 638000000000000000:812:637999999999999999') "the W4 wait says what it last saw ($($w4.Seen))"
+    $withValue = [pscustomobject]@{}
+    $withValue | Add-Member -MemberType ScriptMethod -Name GetValueNames -Value { @('OneDrive', 'FolioUpdate-0123abcd') }
+    $w4 = Wait-RunValue -RunKey $withValue -EntrySig { 'x' } -WithinMs 300
+    Check ($w4.Outcome -eq 'held' -and $w4.Seen -eq 'run=[FolioUpdate-0123abcd]') "a FolioUpdate-* value holds W4 ($($w4.Outcome): $($w4.Seen))"
+    $script:entries = 0
+    $w4 = Wait-RunValue -RunKey $noValue -EntrySig { $script:entries++; "sig$([Math]::Min($script:entries, 2))" } -WithinMs 30000
+    Check ($w4.Outcome -eq 'gone' -and $w4.Seen -eq 'run=[] journal entry sig1 -> sig2') "a journal entry that changes with no Run value ends W4's wait ($($w4.Outcome): $($w4.Seen))"
+    $refused = $false
+    try { [void](Wait-Fact -Look { @{ Holds = $true } } -WithinMs 10 -PauseMs 251) } catch { $refused = $true }
+    Check $refused 'a fact wait refuses a pause over 250 ms'
+    Check ($SpinWithinMs -eq 180000) "the millisecond rows' bound is 170 s of product bounds + 10 s ($SpinWithinMs ms)"
+
+    # ── the_mac_capture_refuses_without_a_window ──────────────────────────────
+    # Git for Windows' bash, never WSL's bash.exe: `git --exec-path` is <git>/<mingw64>/libexec/git-core
+    # whichever git.exe answers, and the bash is <git>/bin/bash.exe. Elsewhere the system's.
+    $bash = if ($IsWindows) { Join-Path ((& git --exec-path) | Split-Path -Parent | Split-Path -Parent | Split-Path -Parent) 'bin\bash.exe' } else { '/bin/bash' }
+    Check (Test-Path -LiteralPath $bash) "a bash to run row.sh with ($bash)"
+    function ConvertTo-Posix([string] $path) {
+        if (-not $IsWindows) { return $path }
+        return '/' + $path.Substring(0, 1).ToLowerInvariant() + $path.Substring(2).Replace('\', '/')
+    }
+    $stubs = Join-Path $scratch 'mac-stubs'
+    [IO.Directory]::CreateDirectory($stubs) | Out-Null
+    $called = Join-Path $scratch 'screencapture-called.txt'
+    [IO.File]::WriteAllText((Join-Path $stubs 'osascript'), "#!/bin/sh`nprintf '%s\n' `"`$STUB_WINDOWS`"`n")
+    [IO.File]::WriteAllText((Join-Path $stubs 'ps'), "#!/bin/sh`nprintf '%s\n' 101 202`n")
+    [IO.File]::WriteAllText((Join-Path $stubs 'screencapture'), "#!/bin/sh`necho `"`$*`" >> '$(ConvertTo-Posix $called)'`n")
+    $rowSh = Join-Path $root 'scripts\release\cleanvm\updater\mac\row.sh'
+    function Invoke-DryCapture([string] $windows) {
+        $env:STUB_WINDOWS = $windows
+        try {
+            $said = & $bash -c 'PATH="$1:$PATH"; export PATH; bash "$2" --capture-dry-run NoSuchApp' _ (ConvertTo-Posix $stubs) (ConvertTo-Posix $rowSh) 2>&1 | Out-String
+            return @{ Exit = $LASTEXITCODE; Text = $said.Trim() }
+        }
+        finally { Remove-Item Env:STUB_WINDOWS }
+    }
+    $none = Invoke-DryCapture '43 '
+    Check ($none.Exit -eq 1 -and $none.Text -eq 'screenshot dry-run.png REFUSED: no on-screen NoSuchApp window of pids [101 202] among 43 windows; nothing captured') `
+        "no window of the name: the capture refuses (exit $($none.Exit): $($none.Text))"
+    $unread = Invoke-DryCapture ''
+    Check ($unread.Exit -eq 1 -and $unread.Text -match 'REFUSED: the window list could not be read') "an unreadable window list: the capture refuses (exit $($unread.Exit): $($unread.Text))"
+    $found = Invoke-DryCapture '43 812'
+    Check ($found.Exit -eq 0 -and $found.Text -eq 'dry run: window 812 of NoSuchApp found among 43 windows; nothing captured') "a window found is named, not captured (exit $($found.Exit): $($found.Text))"
+    Check (-not (Test-Path -LiteralPath $called)) 'the dry run never runs screencapture'
+
+    # A capture that is not dry: screencapture stubbed to fail after a partial write, to write an
+    # empty file, or to write an image. No file may be left when the log says nothing was captured.
+    [IO.File]::WriteAllText((Join-Path $stubs 'screencapture'), (@(
+                '#!/bin/sh', "echo `"`$*`" >> '$(ConvertTo-Posix $called)'", 'for a; do out=$a; done',
+                'case "$STUB_SHOT" in', "  fail) printf 'PN' > `"`$out`"; exit 1 ;;", '  empty) : > "$out" ;;',
+                "  ok) printf 'PNG-bytes' > `"`$out`" ;;", 'esac') -join "`n") + "`n")
+    function Invoke-WindowCapture([string] $shot, [string] $png) {
+        $env:STUB_WINDOWS = '43 812'; $env:STUB_SHOT = $shot
+        try {
+            $said = & $bash -c 'PATH="$1:$PATH"; export PATH; bash "$2" --capture-window "$3" Folio 101' _ (ConvertTo-Posix $stubs) (ConvertTo-Posix $rowSh) (ConvertTo-Posix $png) 2>&1 | Out-String
+            return @{ Exit = $LASTEXITCODE; Text = $said.Trim() }
+        }
+        finally { Remove-Item Env:STUB_WINDOWS, Env:STUB_SHOT }
+    }
+    foreach ($shot in 'fail', 'empty') {
+        $png = Join-Path $scratch "shot-$shot.png"
+        $r = Invoke-WindowCapture $shot $png
+        Check ($r.Exit -eq 1 -and $r.Text -eq "screenshot shot-$shot.png FAILED: screencapture -l 812 wrote no image; nothing captured" -and -not (Test-Path -LiteralPath $png)) `
+            "screencapture that $(if ($shot -eq 'fail') { 'fails after a partial write' } else { 'writes an empty file' }): no file is left (exit $($r.Exit): $($r.Text))"
+    }
+    $png = Join-Path $scratch 'shot-ok.png'
+    $r = Invoke-WindowCapture 'ok' $png
+    Check ($r.Exit -eq 0 -and $r.Text -eq 'screenshot shot-ok.png (window 812)' -and (Test-Path -LiteralPath $png)) "an image written is kept (exit $($r.Exit): $($r.Text))"
+    $args812 = @(Get-Content -LiteralPath $called)
+    Check ($args812.Count -eq 3 -and @($args812 | Where-Object { $_ -notmatch '^-x -o -l 812 ' }).Count -eq 0) "screencapture is only ever asked for window 812 ($($args812 -join ' | '))"
+
+    # ── the_host_reports_what_the_guest_saw ───────────────────────────────────
+    $v = Get-RowVerdict -Cut -Marker "row=W4 phase=FAILED at=10:00:01.250`r`n" -WatchLog @()
+    Check ($v.Failed -and $v.Line -eq 'marker: row=W4 phase=FAILED at=10:00:01.250') "a FAILED marker fails the row on the host ($($v.Line))"
+    foreach ($phase in 'MISSED', 'NOT_REACHED') {
+        $v = Get-RowVerdict -Cut -Marker "row=W5 phase=$phase at=10:00:02.000" -WatchLog @()
+        Check $v.Failed "a $phase marker fails the row on the host ($($v.Line))"
+    }
+    $v = Get-RowVerdict -Cut -Marker $null -WatchLog @()
+    Check ($v.Failed -and $v.Line -eq 'no marker came back from the guest') "a cut row with no marker fails ($($v.Line))"
+    $v = Get-RowVerdict -Cut -Marker 'row=W1 phase=Allocated at=10:00:03.000' -WatchLog @('10:00:00.000 watch start row=W1')
+    Check (-not $v.Failed -and $v.Line -eq 'reached Allocated') "a reached marker is ok ($($v.Line))"
+    $log = @('10:00:00.000 watch start row= freeze=False', '10:02:00.000 ROW rollback FAILED: the trial pid=4242 was killed and is still running 2000 ms later')
+    $v = Get-RowVerdict -WatchLog $log
+    Check ($v.Failed -and $v.Line -eq 'watcher: 10:02:00.000 ROW rollback FAILED: the trial pid=4242 was killed and is still running 2000 ms later') "a live row's FAILED log line fails it on the host ($($v.Line))"
+    $v = Get-RowVerdict -WatchLog @('10:00:00.000 watch start', '10:00:05.000 watch end')
+    Check (-not $v.Failed) "a live row with no failure line is ok ($($v.Line))"
+
+    # -- the_planted_rows_are_read_against_their_cells -----------------------------
+    $tpl = '{"v":1,"txn":"5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d","rescue":"C:\\folio-vm\\folio\\.folio-update\\5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\\rescue\\folio.exe","class":"destructive","outcome":"rolled_back","written_by":"0.4.98","body":{"layout":{"layout":"Members","old_shipped":[],"old_present":[],"new":[]},"phase":{"phase":"RolledBack"}}}'
+    $want = @{
+        'class' = '"class":"rehearsal_destructive"'; 'outcome' = '"outcome":"rehearsal_rolled_back"'; 'v' = '{"v":2,'
+        'phase' = '"phase":"RehearsalRolledBack"'; 'layout' = '"layout":"RehearsalMembers"'; 'adapter' = '"body":{"adapter":"RehearsalOurs",'
+    }
+    foreach ($word in $want.Keys) {
+        $j = Get-PlantedJournal -Template $tpl -Word $word
+        $changed = ($j.Length - $tpl.Length)
+        Check ($j.Contains($want[$word]) -and $j.Contains('"written_by":"0.4.98"') -and ($j -ne $tpl)) "the planted $word word is B's test-only word, written_by kept ($changed chars)"
+        $null = $j | ConvertFrom-Json
+    }
+    $retiredTpl = $tpl -replace '"class":"destructive"', '"class":"terminal"' -replace '\{"phase":"RolledBack"\}', '{"phase":"Retired","outcome":"RolledBack"}'
+    Check ((Get-PlantedJournal -Template $retiredTpl -Word 'retired-outcome').Contains('"outcome":"RehearsalRolledBack"')) "the planted Retired.outcome word is B's"
+    $threw = $false
+    try { $null = Get-PlantedJournal -Template ($tpl -replace '"destructive"', '"terminal"') -Word 'class' } catch { $threw = $true }
+    Check $threw 'a template that does not carry the word is refused, never planted'
+
+    Check ((Get-CardKind -Lines @('window pid=1 path=C:\folio-vm\folio\folio.exe size=1x1', 'An update by a newer Folio is not finished.', 'It finishes when you next sign in, or when you start Folio 0.4.98. Changes made in', 'this session are not ke pt.')) -eq 'newer-held') 'the newer card with the held sentence reads newer-held'
+    Check ((Get-CardKind -Lines @('window pid=1 path=x size=1x1', 'An update by a newer FOIi0 is not finished.')) -eq 'newer') 'the newer card reads newer through the OCR misreads measured (FOIi0)'
+    Check ((Get-CardKind -Lines @('window pid=1 path=x size=1x1', 'The new version did not start.', 'Previous version restored.')) -eq 'restored') 'the rollback card reads restored'
+    Check ((Get-CardKind -Lines @('window none')) -eq 'no-window') 'no window reads no-window'
+    Check ((Get-CardKind -Lines @('window pid=1 path=x size=1x1', 'PS C:\Users\folio>')) -eq 'none') 'a pane with no card reads none'
+
+    function New-Evidence([string] $name, $after, [string[]] $diag, [string[]] $card) {
+        $e = Join-Path $scratch $name
+        [IO.Directory]::CreateDirectory((Join-Path $e 'after-start1\shots')) | Out-Null
+        [IO.Directory]::CreateDirectory((Join-Path $e 'after-start2')) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $e 'planted-journal.json'), $tpl)
+        if ($null -ne $after) { [IO.File]::WriteAllText((Join-Path $e 'after-start2\journal.json'), $after) }
+        [IO.File]::WriteAllLines((Join-Path $e 'after-start2\diagnostics.log'), $diag)
+        [IO.File]::WriteAllLines((Join-Path $e 'after-start1\shots\start1-card-start1.txt'), $card)
+        [IO.File]::WriteAllText((Join-Path $e 'after-start2\processes.txt'), '42 parent=1 C:\folio-vm\folio\folio.exe :: folio.exe')
+        return $e
+    }
+    $installed = 'window pid=42 path=C:\folio-vm\folio\folio.exe size=800x600'
+    $rescueWin = 'window pid=43 path=C:\folio-vm\folio\.folio-update\5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d\rescue\folio.exe size=800x600'
+    $heldLine = '10:00:01 BT_UPDATE_START transaction 5d5d is unfinished and its rescue build C:\x (os error 2) could not be started; Folio starts with its writes held, and nothing this session changes is kept'
+    $heldCell = @{ Journal = 'kept'; Card = 'newer-held'; Window = 'installed'; Lines = @('could not be started; Folio starts with its writes held') }
+    $newerHeld = @($installed, 'An update by a newer Folio is not finished.', 'Changes made in this session are not kept.')
+    $v = Get-PlantedVerdict -Expect $heldCell -Evidence (New-Evidence 'held-ok' $tpl @($heldLine) $newerHeld)
+    Check (-not $v.Failed) "a held cell with the journal kept, its card and its line passes ($($v.Line))"
+    $fromStderr = New-Evidence 'held-stderr' $tpl @('10:00:00 run started') $newerHeld
+    [IO.File]::WriteAllLines((Join-Path $fromStderr 'after-start2\updater-stderr-start1.txt'), @($heldLine))
+    $v = Get-PlantedVerdict -Expect $heldCell -Evidence $fromStderr
+    Check (-not $v.Failed) "a start's line read from its standard error counts ($($v.Line))"
+    $v = Get-PlantedVerdict -Expect $heldCell -Evidence (New-Evidence 'held-rewritten' ($tpl -replace '0.4.98', '0.4.97') @($heldLine) $newerHeld)
+    Check ($v.Failed -and $v.Cells['Journal'].Got -eq 'rewritten') "a journal rewritten in one byte, same length, is not kept ($($v.Line))"
+    $v = Get-PlantedVerdict -Expect $heldCell -Evidence (New-Evidence 'held-plain' $tpl @('10:00:01 BT_UPDATE_START x is left as it is: y') @($installed, 'PS C:\>'))
+    Check ($v.Failed -and -not $v.Cells['Card'].Ok -and -not $v.Cells['Line /could not be started; Folio starts with its writes held/'].Ok) "a plain start with no card fails the held cell on its card and its line ($($v.Line))"
+    $settled = @{ Journal = 'settled'; Card = 'restored'; Window = 'installed'; Lines = @('BT_UPDATE_RECOVER .*recovery ended RolledBack') }
+    $v = Get-PlantedVerdict -Expect $settled -Evidence (New-Evidence 'settled' $null @('10:00:02 BT_UPDATE_RECOVER transaction 5d5d; recovery ended RolledBack; x') @($installed, 'Previous version restored.'))
+    Check (-not $v.Failed) "a journal settled by the rescue with its card passes ($($v.Line))"
+    $failedPlant = New-Evidence 'plant-failed' $tpl @($heldLine) $newerHeld
+    [IO.File]::WriteAllLines((Join-Path $failedPlant 'after-start1\updater-plant-x.txt'), @('00:00:01 placed a', '00:00:02 PLANT FAILED: no rescue'))
+    $v = Get-PlantedVerdict -Expect $heldCell -Evidence $failedPlant
+    Check ($v.Failed -and $v.Cells['Planted'].Got -match 'PLANT FAILED: no rescue') "a row whose plant failed fails, whatever its other cells say ($($v.Line))"
+    # A live row's cells are read from its own collections (RW-receipt-v2: `t240`, `then`).
+    $live = Join-Path $scratch 'live'
+    [IO.Directory]::CreateDirectory((Join-Path $live 't240\shots')) | Out-Null
+    [IO.Directory]::CreateDirectory((Join-Path $live 'then')) | Out-Null
+    [IO.File]::WriteAllLines((Join-Path $live 't240\shots\RW-receipt-v2-card-start1.txt'), @($installed, 'The new version did not start.', 'Previous version restored.'))
+    [IO.File]::WriteAllLines((Join-Path $live 'then\diagnostics.log'), @('BT_UPDATE_APPLY the receipt: version 2 is not one this build reads', 'BT_UPDATE_APPLY transaction x wrote [Armed, Moving, Trial, RollbackIntent, RolledBack, Retired]'))
+    $receiptRow = (Get-UpdaterRows)['RW-receipt-v2']
+    Check ($receiptRow.Answer -and -not $receiptRow.Cut) 'the receipt v2 row is a live row that answers the first run'
+    $v = Get-PlantedVerdict -Expect $receiptRow.Expect -Evidence $live -FirstCollection 't240' -LastCollection 'then'
+    Check (-not $v.Failed) "a live row's cells read from t240 and then pass ($($v.Line))"
+    $v = Get-PlantedVerdict -Expect $receiptRow.Expect -Evidence $live
+    Check ($v.Failed) "the same evidence read from after-start1/after-start2 finds nothing ($($v.Line))"
+    $aside = @{ Journal = 'kept'; Card = 'newer'; Window = 'rescue' }
+    $v = Get-PlantedVerdict -Expect $aside -Evidence (New-Evidence 'aside' $tpl @() @($rescueWin, 'PS C:\>'))
+    Check ($v.Failed -and $v.Cells['Window'].Ok -and $v.Cells['Card'].Got -eq 'none') "the rescue copy's window with no card fails the card cell only ($($v.Line))"
+
+    $guardE = Join-Path $scratch 'guard'
+    foreach ($c in 'after-logon', 'after-start1', 'after-start2') { [IO.Directory]::CreateDirectory((Join-Path $guardE $c)) | Out-Null }
+    [IO.File]::WriteAllText((Join-Path $guardE 'after-logon\journal.json'), $tpl)
+    [IO.File]::WriteAllLines((Join-Path $guardE 'after-logon\diagnostics.log'), @('a'))
+    [IO.File]::WriteAllText((Join-Path $guardE 'after-start1\journal.json'), $tpl)
+    [IO.File]::WriteAllLines((Join-Path $guardE 'after-start1\diagnostics.log'), @('a', 'b'))
+    [IO.File]::WriteAllLines((Join-Path $guardE 'after-start2\diagnostics.log'), @('a', 'b', 'c BT_UPDATE_START retired'))
+    [IO.File]::WriteAllText((Join-Path $guardE 'after-start2\processes.txt'), '42 parent=1 C:\folio-vm\folio\folio.exe :: folio.exe')
+    $v = Get-PlantedVerdict -Expect @{ JournalGuard = $true; Window = 'any' } -Evidence $guardE
+    Check ($v.Failed -and $v.Cells['JournalGuard'].Got -match 'after-start2: the journal went away') "a destructive journal gone with no rescue's line breaks the guard ($($v.Line))"
+    [IO.File]::WriteAllLines((Join-Path $guardE 'after-start2\diagnostics.log'), @('a', 'b', 'c BT_UPDATE_RECOVER transaction 5d5d; recovery ended RolledBack; x'))
+    $v = Get-PlantedVerdict -Expect @{ JournalGuard = $true; Window = 'any' } -Evidence $guardE
+    Check (-not $v.Failed) "a journal a rescue settled in that interval keeps the guard ($($v.Line))"
+    [IO.File]::WriteAllText((Join-Path $guardE 'after-logon\journal.json'), ($tpl -replace '"destructive"', '"deferred"'))
+    [IO.File]::WriteAllText((Join-Path $guardE 'after-start1\journal.json'), ($tpl -replace '"destructive"', '"preparing"'))
+    [IO.File]::WriteAllLines((Join-Path $guardE 'after-start2\diagnostics.log'), @('a', 'b', 'c'))
+    $v = Get-PlantedVerdict -Expect @{ JournalGuard = $true; Window = 'any' } -Evidence $guardE
+    Check (-not $v.Failed) "a preparing or deferred journal A discards keeps the guard (A1) ($($v.Line))"
 }
 finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

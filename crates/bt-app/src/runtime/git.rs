@@ -1,6 +1,8 @@
 //! `git` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::input::Keystroke;
+use crate::window_seam::prelude::*;
 use crate::{
     Ask, Fading, FilesFocusArrival, GitMenuDraw, GitMenuState, GitOrigin, GitPromptDraw,
     GitPromptState, GitRowKey, GraphFilterMenuState, GraphView, LeafId, MarkdownCaretPaint,
@@ -9,8 +11,8 @@ use crate::{
     float_git_page_shown, float_graph_hover, git, git_answer_notice, git_document_answer,
     git_document_question, git_full_path, git_graph, git_panel, git_roots_on_glass,
     git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, graph_key_of, i18n, input,
-    markdown_gap_paragraph, marks, native_window, preview, profiles, restore, seats, settling,
-    text_field, toast, web_thumb,
+    markdown_gap_paragraph, marks, preview, profiles, restore, seats, settling, text_field, toast,
+    web_thumb,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -19,10 +21,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
-use winit::event::{Ime, KeyEvent, MouseScrollDelta};
+use winit::event::{Ime, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **Git is somewhere else now** (T-PROGRAMS-REFRESH): a program walk found git where there
     /// was none, or found another one. Every Git page this window holds was answered about the git
     /// that was there — "not found" included — so its columns' and its floating pages' readings
@@ -72,10 +74,8 @@ impl Runtime<'_> {
     /// page the keyboard, and taking it away from them once per match count
     /// would be this window arguing with a click.
     pub(in crate::runtime) fn web_find_reported(&mut self, count: i32, active: i32) -> Result<()> {
-        if self.window.search.is_focused()
-            && let Ok(native) = native_window(&self.window.window)
-        {
-            let _ = bt_platform::take_keyboard_focus(native);
+        if self.window.search.is_focused() {
+            let _ = self.window.window.take_keyboard_focus();
         }
         if !self.window.search.report_engine_matches(count, active) {
             return Ok(());
@@ -215,9 +215,15 @@ impl Runtime<'_> {
     /// and a column that has since been re-rooted refuses it — both are the
     /// cancellation, arriving as a dropped result. Only an answer that actually
     /// changed something the active tab is drawing asks for a new frame.
+    ///
+    /// `documents` are the answers to git documents — a diff, a file at a
+    /// commit — each addressed by the drain to the buffer it was asked for
+    /// (`git_mutation_lane::OpenPages::file`): this window takes the ones whose
+    /// buffer one of its tabs' pools or its hover card keeps.
     pub(crate) fn apply_git_results(
         &mut self,
         batch: &mut Vec<git::GitResponse>,
+        documents: &mut Vec<git::GitDocumentAnswer>,
         lane_gone: bool,
     ) -> Result<()> {
         let mut changed = lane_gone;
@@ -226,95 +232,70 @@ impl Runtime<'_> {
         // as a head read does — see the tail of [`Self::apply_preview_results`]
         // for what asking `refresh_chrome` alone costs.
         let mut body = false;
+        // **A document goes to the buffer that was opened for it** (G-3,
+        // T-GIT-DOCUMENT-GATED-BY-POOL), which is a pool's — a tab's, and not a
+        // column's — or the hover card's: a diff opened from one column is the
+        // same buffer whichever pane shows it, a column re-rooted or closed since
+        // does not make the document it opened wrong, and a pool merged into
+        // another tab, or carried off with a pane, takes the buffer with it.
+        // Found by the buffer's name, never by its source: a buffer for the same
+        // document opened since an eviction is waiting on its own question.
+        for document in answers_for(documents, |document| self.owns(document.owner())) {
+            // Every question asked for a buffer is a document's.
+            let Ok((_, outcome)) = git_document_answer(document.answer) else {
+                continue;
+            };
+            let answer = outcome
+                .map(|bytes| preview::composed_read(&bytes))
+                .map_err(|fault| git::fault_sentence(&fault));
+            match document.shelf {
+                git::Shelf::Pool(tab) => {
+                    let index = self.window.tabs.iter().position(|open| open.id == tab);
+                    if let Some(index) = index
+                        && self.window.tabs[index]
+                            .preview_pool
+                            .answer_composed(document.buffer, answer)
+                    {
+                        body |= index == self.window.active_tab;
+                    }
+                }
+                // The card stands over whichever tab is in front.
+                git::Shelf::Glance(_) => {
+                    body |= self.answer_glanced_git_document(document.buffer, answer);
+                }
+            }
+        }
+        // **A document nobody will answer says so** (T-GIT-DOCUMENT-GATED-BY-POOL):
+        // with the read worker gone, every buffer still waiting on git — in any of
+        // this window's tabs, or on its card — is settled, rather than left on
+        // "Loading …" for ever. Asked whenever the lane is off, not only on the
+        // turn it went: the window that found it gone may not have been this one.
+        if !self.app.git_worker_running {
+            body |= self.settle_unanswered_git_documents();
+        }
         for response in answers_for(batch, |response| self.owns(response.owner())) {
             let host = response.host;
-            // **The asker has to still be there.** A column that closed,
-            // a graph that was shut and a window that was dismissed are
-            // one cancellation arriving as a dropped answer — and each
-            // says so in its own register, because each is addressed in
-            // its own way.
+            // **The asker is still there, and this is where it stands.**
+            // The drain found the cache that asked by its identity
+            // (`git_mutation_lane::OpenPages::address`) and addressed a
+            // page's answer to where that cache stands in this turn — a
+            // Files view docked or popped out while git ran is reached in
+            // its new place — and let go of the answers whose cache no open
+            // surface holds: a column or a graph that closed and a window
+            // that was dismissed are one cancellation, arriving as an
+            // answer that never reaches a window.
             //
-            // **The float is asked first, and without a tab.** That is
-            // the whole of why its host carries an epoch (user ruling,
-            // 2026-08-19): a pinned window floats *across* tabs by
-            // ruling, so "is that tab still open" is not the question
-            // here, and dropping a page's answer because the tab the
-            // window was born in has since closed would strand it
-            // mid-read with no second asking owed.
+            // **The float is filed without a tab.** That is the whole of
+            // why its host carries an epoch (user ruling, 2026-08-19): a
+            // pinned window floats *across* tabs by ruling, so the tab the
+            // window was born in having since closed does not strand a
+            // page mid-read with no second asking owed.
             let floating = match &host {
-                git::GitHost::Float { id, .. } => {
-                    if self
-                        .window
-                        .float
-                        .live(*id)
-                        .and_then(float::FloatWin::files)
-                        .is_none()
-                    {
-                        continue;
-                    }
-                    Some(*id)
-                }
+                git::GitHost::Float { id, .. } => Some(*id),
                 git::GitHost::Column(_) | git::GitHost::Graph { .. } => None,
             };
             let tab_index = self.window.tabs.iter().position(|tab| tab.id == host.tab());
-            if floating.is_none() {
-                let Some(index) = tab_index else {
-                    continue;
-                };
-                let tab = &self.window.tabs[index];
-                match &host {
-                    git::GitHost::Column(leaf) if !tab.files.contains_key(&leaf.seat) => {
-                        continue;
-                    }
-                    git::GitHost::Graph { root, .. } if !tab.git_graphs.contains_key(root) => {
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            // **The two answers that are documents go to the pool**
-            // (G-3), which is a tab's and not a column's: a diff opened
-            // from one column is the same buffer whichever pane shows
-            // it, and a column re-rooted since does not make the
-            // document it opened wrong. A float's diff lands in the pool
-            // of the tab that was in front when the row was pressed,
-            // which is the tab its host recorded for exactly this.
-            let answer = match git_document_answer(response.answer) {
-                Ok((source, outcome)) => {
-                    let Some(index) = tab_index else {
-                        continue;
-                    };
-                    let tab = &mut self.window.tabs[index];
-                    // Evicted, or never opened — the cancellation,
-                    // arriving as a dropped result.
-                    let Some(buffer) = tab.preview_pool.get_mut(&source) else {
-                        // **The glance's own slot**, exactly as a head
-                        // read's answer finds it (`apply_preview_results`):
-                        // a hover over a commit's file asks git and never
-                        // enters the pool, so its answer lands here or
-                        // nowhere. Matched by source, so a pointer that
-                        // has moved on is the cancellation arriving as a
-                        // dropped result.
-                        if let Some(peek) = self.window.peek_buffer.get_mut(&source) {
-                            match outcome {
-                                Ok(bytes) => peek.accept(preview::composed_read(&bytes)),
-                                Err(fault) => {
-                                    peek.decline(git::fault_sentence(&fault));
-                                }
-                            }
-                            body |= index == self.window.active_tab;
-                        }
-                        continue;
-                    };
-                    match outcome {
-                        Ok(bytes) => buffer.accept(preview::composed_read(&bytes)),
-                        Err(fault) => buffer.decline(git::fault_sentence(&fault)),
-                    }
-                    body |= index == self.window.active_tab;
-                    continue;
-                }
-                Err(answer) => answer,
-            };
+            let answer = response.answer;
             // **A checkout that went through is about the whole
             // repository, not about the surface that asked for it.**
             // After it, every branch head, every status and every
@@ -324,9 +305,11 @@ impl Runtime<'_> {
             // subsystem was built to prevent. Noted before the answer is
             // filed, because filing moves it.
             let moved = match &answer {
+                // A checkout Folio could not finish (`GitFault::Unfinished`)
+                // may have moved too, and is the same claim.
                 git::GitAnswer::Checkout {
                     root,
-                    outcome: Ok(()),
+                    outcome: Ok(()) | Err(git::GitFault::Unfinished),
                     ..
                 } => Some(root.clone()),
                 // **A ref write is the same claim** (v2 ④): a branch
@@ -338,7 +321,7 @@ impl Runtime<'_> {
                 git::GitAnswer::Write {
                     root,
                     verb,
-                    outcome: Ok(()),
+                    outcome: Ok(()) | Err(git::GitFault::Unfinished),
                     ..
                 } if verb.moves_refs() => Some(root.clone()),
                 _ => None,
@@ -535,6 +518,7 @@ impl Runtime<'_> {
         let tab_id = self.window.tabs[active].id;
         let cache = self.window.tabs[active].git_trees.entry(seat).or_default();
         cache.retarget(std::path::Path::new(root));
+        let asker = cache.id();
         let questions = cache.pending_questions();
         // Marked before any send, so a second call on the same frame sees
         // questions already asked rather than asking them twice.
@@ -545,6 +529,8 @@ impl Runtime<'_> {
             if !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+                asker,
+                buffer: None,
                 question,
             }) {
                 self.disable_git_worker();
@@ -712,8 +698,10 @@ impl Runtime<'_> {
     /// the honest reading of it: the pane's head names the document, the panel
     /// beside it has already redrawn, and a diff that silently became a diff of
     /// something else while you were reading it would be the one surface here
-    /// that changes under you. Pressing the row again re-asks, because that is a
-    /// person saying "now".
+    /// that changes under you. Pressing the row again asks only for a document
+    /// with no answer yet — one still waiting, or one nobody answered
+    /// ([`preview::PreviewBuffer::ask_composer`]); an answered one stays the
+    /// snapshot it is until its buffer is let go.
     pub(in crate::runtime) fn open_git_document(
         &mut self,
         seat: SeatId,
@@ -721,30 +709,89 @@ impl Runtime<'_> {
         name: String,
         renamed_from: Option<String>,
     ) -> Result<()> {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        // The page the row was pressed on is the asker: its rows are drawn from
+        // this cache, so a column with no cache has no row to have pressed.
+        // Read before the document is opened, so no buffer waits on a question
+        // that is never asked.
+        let Some(asker) = self.window.tabs[active]
+            .git_trees
+            .get(&seat)
+            .map(git::GitCache::id)
+        else {
+            return Ok(());
+        };
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
         };
         self.open_preview_source_on(surface, source.clone(), name)?;
-        let unread = self
-            .preview_pool
-            .get(&source)
-            .is_some_and(|buffer| *buffer.load() == preview::PreviewLoad::Pending);
-        if !unread {
-            return Ok(());
-        }
-        let Some(question) = git_document_question(&source, renamed_from) else {
+        self.ask_for_git_document(
+            git::GitHost::Column(LeafId { tab: tab_id, seat }),
+            asker,
+            &source,
+            renamed_from,
+        )
+    }
+
+    /// **Ask git for the document the buffer just landed is waiting on** —
+    /// the second of [`Self::open_git_document`]'s two steps, and of its graph's
+    /// and its floating window's twins.
+    ///
+    /// Asked for **the buffer** ([`git::GitRequest::buffer`]) the tab in front
+    /// keeps for `source`, which is who waits for the answer: the page whose row
+    /// was pressed (`asker`, from `host`) may close before git answers, and the
+    /// buffer is filled all the same, in whichever pool keeps it then. Nothing
+    /// is asked for a document already answered
+    /// ([`preview::PreviewBuffer::ask_composer`]); one that was left unanswered
+    /// is asked again. A question the lane will not take is no answer at all, so
+    /// the buffer says so instead of loading for ever
+    /// ([`Self::settle_unanswered_git_documents`]).
+    fn ask_for_git_document(
+        &mut self,
+        host: git::GitHost,
+        asker: git::GitCacheId,
+        source: &preview::PreviewSource,
+        renamed_from: Option<String>,
+    ) -> Result<()> {
+        let Some(question) = git_document_question(source, renamed_from) else {
             return Ok(());
         };
-        let active = self.window.active_tab;
-        let tab_id = self.window.tabs[active].id;
-        if !self.app.git_worker.request(git::GitRequest {
+        let Some(buffer) = self.preview_pool.ask_composer(source) else {
+            return Ok(());
+        };
+        if self.app.git_worker.request(git::GitRequest {
             window: self.window_id(),
-            host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+            host,
+            asker,
+            buffer: Some(buffer),
             question,
         }) {
-            self.disable_git_worker();
+            return Ok(());
+        }
+        self.disable_git_worker();
+        if self.settle_unanswered_git_documents() {
+            self.refresh_preview_for_layout();
+            self.refresh_chrome();
+            self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **Nobody will answer the git documents this window is waiting on** — the
+    /// read worker has gone (T-GIT-DOCUMENT-GATED-BY-POOL). Every buffer still
+    /// waiting on git, in each of this window's tabs' pools and on its hover
+    /// card, says so in one line instead of "Loading …" for ever
+    /// ([`preview::PreviewBuffer::settle_unanswered`]); a press of its row asks
+    /// again. Answers whether a buffer the window shows now was settled: one in
+    /// the tab in front, or the card's.
+    pub(in crate::runtime) fn settle_unanswered_git_documents(&mut self) -> bool {
+        let active = self.window.active_tab;
+        let mut shown = self.settle_glanced_git_document();
+        for (index, tab) in self.window.tabs.iter_mut().enumerate() {
+            shown |= tab.preview_pool.settle_unanswered() && index == active;
+        }
+        shown
     }
 
     /// Put this page's selection on one row (焦点跟随可见视图, 2026-08-19).
@@ -798,7 +845,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn git_page_key(
         &mut self,
         seat: SeatId,
-        event: &KeyEvent,
+        event: &Keystroke,
     ) -> Result<bool> {
         let Some(key) = graph_key_of(&event.logical_key, self.window.modifiers) else {
             // Still the column's key: it owns the keyboard, so nothing here
@@ -1019,6 +1066,7 @@ impl Runtime<'_> {
                 let Some(state) = self.window.tabs[index].git_graphs.get_mut(&root) else {
                     continue;
                 };
+                let asker = state.cache.id();
                 let questions = state.cache.pending_questions();
                 for question in &questions {
                     state.cache.mark_pending(question);
@@ -1030,6 +1078,8 @@ impl Runtime<'_> {
                             tab: tab_id,
                             root: root.clone(),
                         },
+                        asker,
+                        buffer: None,
                         question,
                     }) {
                         self.disable_git_worker();
@@ -1049,6 +1099,7 @@ impl Runtime<'_> {
         let Some(state) = self.window.tabs[index].git_graphs.get(root) else {
             return;
         };
+        let asker = state.cache.id();
         let Some(question) = state.cache.more_commits() else {
             return;
         };
@@ -1064,6 +1115,8 @@ impl Runtime<'_> {
                 tab: tab_id,
                 root: root.to_owned(),
             },
+            asker,
+            buffer: None,
             question,
         }) {
             self.disable_git_worker();
@@ -1080,6 +1133,7 @@ impl Runtime<'_> {
         let Some(state) = self.window.tabs[index].git_graphs.get_mut(root) else {
             return;
         };
+        let asker = state.cache.id();
         let Some(question) = state.cache.begin_compare_files(a, b) else {
             return;
         };
@@ -1089,6 +1143,8 @@ impl Runtime<'_> {
                 tab: tab_id,
                 root: root.to_owned(),
             },
+            asker,
+            buffer: None,
             question,
         }) {
             self.disable_git_worker();
@@ -1647,13 +1703,18 @@ impl Runtime<'_> {
         if let Some(hash) = opened
             && hash != git_graph::GRAPH_UNCOMMITTED_HASH
             && let Some(state) = self.window.tabs[tab].git_graphs.get_mut(root)
-            && let Some(question) = state.cache.begin_commit_files(&hash)
+            && let Some((asker, question)) = state
+                .cache
+                .begin_commit_files(&hash)
+                .map(|question| (state.cache.id(), question))
             && !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Graph {
                     tab: tab_id,
                     root: root.to_owned(),
                 },
+                asker,
+                buffer: None,
                 question,
             })
         {
@@ -1820,32 +1881,32 @@ impl Runtime<'_> {
         name: String,
         renamed_from: Option<String>,
     ) -> Result<()> {
+        let index = self.preview_tab_index(from);
+        let tab_id = self.window.tabs[index].id;
+        // The graph the row was pressed on is the asker: its rows are drawn from
+        // this cache, so a tab with no graph on `root` has no row to have pressed.
+        // Read before the document is opened, so no buffer waits on a question
+        // that is never asked.
+        let Some(asker) = self.window.tabs[index]
+            .git_graphs
+            .get(root)
+            .map(|state| state.cache.id())
+        else {
+            return Ok(());
+        };
         let Some(landing) = self.preview_landing_surface() else {
             return Ok(());
         };
         self.open_preview_source_on(landing, source.clone(), name)?;
-        let unread = self
-            .preview_pool
-            .get(&source)
-            .is_some_and(|buffer| *buffer.load() == preview::PreviewLoad::Pending);
-        if !unread {
-            return Ok(());
-        }
-        let Some(question) = git_document_question(&source, renamed_from) else {
-            return Ok(());
-        };
-        let tab_id = self.window.tabs[self.preview_tab_index(from)].id;
-        if !self.app.git_worker.request(git::GitRequest {
-            window: self.window_id(),
-            host: git::GitHost::Graph {
+        self.ask_for_git_document(
+            git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
             },
-            question,
-        }) {
-            self.disable_git_worker();
-        }
-        Ok(())
+            asker,
+            &source,
+            renamed_from,
+        )
     }
 
     /// **Stand somewhere else** (R10) — from a branch row.
@@ -1855,17 +1916,15 @@ impl Runtime<'_> {
         let Some(cache) = self.window.tabs[active].git_trees.get_mut(&seat) else {
             return Ok(());
         };
+        let asker = cache.id();
         let Some(question) = cache.begin_checkout(target, detach) else {
             return Ok(());
         };
-        if !self.app.git_worker.request(git::GitRequest {
-            window: self.window_id(),
-            host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+        self.ask_git_mutation(
+            git::GitHost::Column(LeafId { tab: tab_id, seat }),
+            asker,
             question,
-        }) {
-            self.disable_git_worker();
-            return Ok(());
-        }
+        )?;
         // The rows dim now, so the frame that shows them dimmed is this one.
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -1884,23 +1943,16 @@ impl Runtime<'_> {
         detach: bool,
     ) -> Result<()> {
         let tab = self.window.tabs[self.window.active_tab].id;
-        let Some(question) = self
+        let Some((asker, question)) = self
             .window
             .float
             .live_mut(id)
             .and_then(float::FloatWin::files_mut)
-            .and_then(|files| files.git.begin_checkout(target, detach))
+            .and_then(|files| Some((files.git.id(), files.git.begin_checkout(target, detach)?)))
         else {
             return Ok(());
         };
-        if !self.app.git_worker.request(git::GitRequest {
-            window: self.window_id(),
-            host: git::GitHost::Float { id, tab },
-            question,
-        }) {
-            self.disable_git_worker();
-            return Ok(());
-        }
+        self.ask_git_mutation(git::GitHost::Float { id, tab }, asker, question)?;
         // The rows dim now, so the frame that shows them dimmed is this one.
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -1923,24 +1975,47 @@ impl Runtime<'_> {
         let Some(state) = self.window.tabs[active].git_graphs.get_mut(root) else {
             return Ok(());
         };
+        let asker = state.cache.id();
         let Some(question) = state.cache.begin_checkout(target, detach) else {
             return Ok(());
         };
-        if !self.app.git_worker.request(git::GitRequest {
-            window: self.window_id(),
-            host: git::GitHost::Graph {
+        self.ask_git_mutation(
+            git::GitHost::Graph {
                 tab: tab_id,
                 root: root.to_owned(),
             },
+            asker,
             question,
-        }) {
-            self.disable_git_worker();
-            return Ok(());
-        }
+        )?;
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
         })?;
+        Ok(())
+    }
+
+    /// **Hand one write or checkout to its repository's mutation lane**
+    /// (`git_mutation_lane`), from whichever page built it. A request the lane
+    /// refuses at the door — full, or its worker gone — is filed at once as its
+    /// receipt, through the road every receipt takes (`apply_git_results`): the
+    /// rows it dimmed undim, and the notice says Folio did not run it.
+    pub(in crate::runtime) fn ask_git_mutation(
+        &mut self,
+        host: git::GitHost,
+        asker: git::GitCacheId,
+        question: git::GitQuestion,
+    ) -> Result<()> {
+        let request = git::GitRequest {
+            window: self.window_id(),
+            host,
+            asker,
+            buffer: None,
+            question,
+        };
+        if let Err((refused, request)) = self.app.git_mutations.ask(request) {
+            let mut receipt = vec![crate::git_mutation_lane::refusal(&refused, request)];
+            self.apply_git_results(&mut receipt, &mut Vec::new(), false)?;
+        }
         Ok(())
     }
 
@@ -2900,9 +2975,8 @@ impl Runtime<'_> {
                 tab: self.window.tabs[self.graph_tab_index(root)].id,
                 root: root.clone(),
             },
-            // The tab travels with it for the pool a *document* answer would
-            // land in — see [`git::GitHost::Float`]; the page's own five answers
-            // come home by the epoch.
+            // The tab in front travels with it — see [`git::GitHost::Float`];
+            // the page's own answers come home by the epoch.
             GitOrigin::Float(id) => git::GitHost::Float { id: *id, tab },
         }
     }
@@ -2923,34 +2997,25 @@ impl Runtime<'_> {
     ) -> Result<()> {
         let active = self.window.active_tab;
         let host = self.git_host_at(origin);
-        let question = match origin {
-            GitOrigin::Column(seat) => self.window.tabs[active]
-                .git_trees
-                .get_mut(seat)
-                .and_then(|cache| cache.begin_write(verb, paths)),
+        let cache = match origin {
+            GitOrigin::Column(seat) => self.window.tabs[active].git_trees.get_mut(seat),
             GitOrigin::Graph(root) => self.window.tabs[active]
                 .git_graphs
                 .get_mut(root)
-                .and_then(|state| state.cache.begin_write(verb, paths)),
+                .map(|state| &mut state.cache),
             GitOrigin::Float(id) => self
                 .window
                 .float
                 .live_mut(*id)
                 .and_then(float::FloatWin::files_mut)
-                .and_then(|files| files.git.begin_write(verb, paths)),
+                .map(|files| &mut files.git),
         };
-        let Some(question) = question else {
+        let Some((asker, question)) =
+            cache.and_then(|cache| Some((cache.id(), cache.begin_write(verb, paths)?)))
+        else {
             return Ok(());
         };
-        let window = self.window_id();
-        if !self.app.git_worker.request(git::GitRequest {
-            window,
-            host,
-            question,
-        }) {
-            self.disable_git_worker();
-            return Ok(());
-        }
+        self.ask_git_mutation(host, asker, question)?;
         // The rows dim now, so the frame that shows them dimmed is this one.
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -3139,7 +3204,7 @@ impl Runtime<'_> {
     /// behind it to type into. What changes when the menu has become a prompt is
     /// only *what* the keys mean — there is now something to type into, and it
     /// takes every key exactly as the graph's search field does.
-    pub(in crate::runtime) fn git_menu_key(&mut self, event: &KeyEvent) -> Result<()> {
+    pub(in crate::runtime) fn git_menu_key(&mut self, event: &Keystroke) -> Result<()> {
         let modifiers = self.window.modifiers;
         if self
             .window
@@ -3371,7 +3436,7 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn graph_search_key(
         &mut self,
         surface: PreviewSurface,
-        event: &KeyEvent,
+        event: &Keystroke,
     ) -> Result<bool> {
         let modifiers = self.window.modifiers;
         let shift = modifiers.shift_key();
@@ -3472,12 +3537,15 @@ impl Runtime<'_> {
         let Some(state) = self.window.tabs[tab].git_graphs.get_mut(&root) else {
             return Ok(());
         };
+        let asker = state.cache.id();
         let Some(question) = state.cache.begin_search(&query) else {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
             window: self.window_id(),
             host: git::GitHost::Graph { tab: tab_id, root },
+            asker,
+            buffer: None,
             question,
         }) {
             self.disable_git_worker();
@@ -3712,24 +3780,21 @@ impl Runtime<'_> {
     fn reread_git_origin(&mut self, origin: &GitOrigin, ask: Ask) -> bool {
         let host = self.git_host_at(origin);
         let active = self.window.active_tab;
-        let questions = match origin {
-            GitOrigin::Column(seat) => match self.window.tabs[active].git_trees.get_mut(seat) {
-                Some(cache) => ask.begin(cache),
-                None => Vec::new(),
-            },
-            GitOrigin::Graph(root) => match self.window.tabs[active].git_graphs.get_mut(root) {
-                Some(state) => ask.begin(&mut state.cache),
-                None => Vec::new(),
-            },
-            GitOrigin::Float(id) => match self
+        let cache = match origin {
+            GitOrigin::Column(seat) => self.window.tabs[active].git_trees.get_mut(seat),
+            GitOrigin::Graph(root) => self.window.tabs[active]
+                .git_graphs
+                .get_mut(root)
+                .map(|state| &mut state.cache),
+            GitOrigin::Float(id) => self
                 .window
                 .float
                 .live_mut(*id)
                 .and_then(float::FloatWin::files_mut)
-            {
-                Some(files) => ask.begin(&mut files.git),
-                None => Vec::new(),
-            },
+                .map(|files| &mut files.git),
+        };
+        let Some((asker, questions)) = cache.map(|cache| (cache.id(), ask.begin(cache))) else {
+            return false;
         };
         if questions.is_empty() {
             return false;
@@ -3738,6 +3803,8 @@ impl Runtime<'_> {
             if !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: host.clone(),
+                asker,
+                buffer: None,
                 question,
             }) {
                 self.disable_git_worker();
@@ -3930,9 +3997,9 @@ impl Runtime<'_> {
         if self.window.float.is_empty() || !self.git_panel_on() {
             return;
         }
-        // Which pool a document answer would land in. Read once, before the
-        // host is walked, because it is a fact about the window and not about
-        // any one float.
+        // The tab in front, which each window's host records (see
+        // [`git::GitHost::Float`]). Read once, before the host is walked,
+        // because it is a fact about the window and not about any one float.
         let tab = self.window.tabs[self.window.active_tab].id;
         let window = self.window_id();
         let mut asks = Vec::new();
@@ -3949,6 +4016,7 @@ impl Runtime<'_> {
                 continue;
             }
             files.git.retarget(std::path::Path::new(&root));
+            let asker = files.git.id();
             let questions = files.git.pending_questions();
             // Marked before any send, so a second turn of the loop on the same
             // frame sees questions already asked rather than asking them twice.
@@ -3958,6 +4026,8 @@ impl Runtime<'_> {
             asks.extend(questions.into_iter().map(|question| git::GitRequest {
                 window,
                 host: git::GitHost::Float { id, tab },
+                asker,
+                buffer: None,
                 question,
             }));
         }
@@ -4095,29 +4165,30 @@ impl Runtime<'_> {
         name: String,
         renamed_from: Option<String>,
     ) -> Result<()> {
+        let tab = self.window.tabs[self.window.active_tab].id;
+        // The window's page is the asker: the row was pressed on its cache, and
+        // a window that is not live with a Files view has no row to have pressed.
+        // Read before the document is opened, so no buffer waits on a question
+        // that is never asked.
+        let Some(asker) = self
+            .window
+            .float
+            .live(id)
+            .and_then(float::FloatWin::files)
+            .map(|files| files.git.id())
+        else {
+            return Ok(());
+        };
         let Some(surface) = self.preview_landing_surface() else {
             return Ok(());
         };
         self.open_preview_source_on(surface, source.clone(), name)?;
-        let unread = self
-            .preview_pool
-            .get(&source)
-            .is_some_and(|buffer| *buffer.load() == preview::PreviewLoad::Pending);
-        if !unread {
-            return Ok(());
-        }
-        let Some(question) = git_document_question(&source, renamed_from) else {
-            return Ok(());
-        };
-        let tab = self.window.tabs[self.window.active_tab].id;
-        if !self.app.git_worker.request(git::GitRequest {
-            window: self.window_id(),
-            host: git::GitHost::Float { id, tab },
-            question,
-        }) {
-            self.disable_git_worker();
-        }
-        Ok(())
+        self.ask_for_git_document(
+            git::GitHost::Float { id, tab },
+            asker,
+            &source,
+            renamed_from,
+        )
     }
 
     /// One of a floating Git row's verbs, pressed — [`Self::press_git_act`] with

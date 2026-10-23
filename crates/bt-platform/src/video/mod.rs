@@ -82,6 +82,14 @@
 //! channel, and the thread it walked away from finishes into a receiver nobody is
 //! holding and unwinds itself.
 //!
+//! **The file is the caller's, not the thread's** (T-ANSWER-AFTER-THE-FILE-IS-CLOSED).
+//! The calling thread opens it ([`TheFile`]), lends the thread a reference to the
+//! stream, and closes the stream itself before it answers — answered or given up
+//! on — so the answer never leaves while a handle on the file is still open.
+//! Media Foundation's own late release of a stream holds a closed stream, and so
+//! does a thread this call walked away from: whatever it is stuck in, it holds
+//! a closed stream, never the file.
+//!
 //! **The two halves are separately callable and separately tested**, which is the
 //! other thing this split bought. [`decode_first_frame`] is the whole
 //! conversation with no clock over it, and [`within_budget`] is the giving-up with
@@ -119,13 +127,17 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::admission::{WaitToken, doors};
+use crate::engine_ledger;
 use windows::Win32::Media::MediaFoundation::{
-    IMF2DBuffer, IMFMediaBuffer, IMFSourceReader, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
-    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION, MF_SOURCE_READER_ALL_STREAMS,
-    MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-    MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFCreateAttributes,
-    MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video, MFSTARTUP_NOSOCKET,
-    MFShutdown, MFStartup, MFVideoFormat_RGB32,
+    IMF2DBuffer, IMFAttributes, IMFByteStream, IMFMediaBuffer, IMFSourceReader, MF_ACCESSMODE_READ,
+    MF_BYTESTREAM_ORIGIN_NAME, MF_FILEFLAGS_NONE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_OPENMODE_FAIL_IF_NOT_EXIST, MF_PD_DURATION,
+    MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
+    MF_SOURCE_READERF_ENDOFSTREAM, MF_VERSION, MFCreateAttributes, MFCreateFile, MFCreateMediaType,
+    MFCreateSourceReaderFromByteStream, MFMediaType_Video, MFSTARTUP_NOSOCKET, MFShutdown,
+    MFStartup, MFVideoFormat_RGB32,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{
@@ -210,8 +222,9 @@ pub struct FirstFrameCost {
     /// Joining the apartment and starting the platform — nearly all of a cold
     /// process's answer, and nothing at all once [`prewarm`] has run.
     pub session: Duration,
-    /// `MFCreateSourceReaderFromURL`: the source resolver choosing a byte stream
-    /// handler, opening the container and reading its index.
+    /// `MFCreateFile` and `MFCreateSourceReaderFromByteStream`: the file opened,
+    /// the source resolver choosing a byte stream handler, the container read for
+    /// its index.
     pub open: Duration,
     /// Selecting the video stream and settling the RGB-32 output type, which is
     /// where the decoder and the video processor are actually bound.
@@ -251,17 +264,139 @@ impl FirstFrameCost {
 /// freezing the window — the same sentence that already keeps the PDF rasteriser
 /// on the decoration worker, which is also this function's one caller. A file
 /// nothing can decode is bounded only by [`FIRST_FRAME_BUDGET`], which is three
-/// seconds and would be three seconds of frozen window.
+/// seconds and would be three seconds of frozen window. The calling thread joins
+/// the process apartment for the length of the call, so it may not be one that
+/// stands in a single-threaded apartment ([`decode_first_frame`]'s rule).
+///
+/// # The file is let go before the answer is
+///
+/// **When this returns, nothing of this module holds the file** — answered,
+/// refused, or given up on (T-ANSWER-AFTER-THE-FILE-IS-CLOSED). The caller
+/// opens it ([`TheFile`]), lends the stream to the thread that decodes, and
+/// closes it itself before it hands back what it found. A closed stream is a
+/// closed file whoever still holds a reference to the stream — the reader Media
+/// Foundation lets go of on its own schedule, or a decode this call walked away
+/// from, whose next read of the closed stream fails and ends it. A walked-away
+/// thread stuck somewhere other than a read of the stream stays where it is — it
+/// is leaked holding a closed stream, never the file. So an editor
+/// that saves over the file the moment the window has its answer is never
+/// refused by a read this window had already finished with.
 #[must_use]
 pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Option<VideoFrame> {
-    // Resolved before the thread, so what crosses is a string and not a borrow.
-    // A path with no valid UTF-16 spelling is not a path this can be handed to
-    // `MFCreateSourceReaderFromURL`.
     let url = HSTRING::from(path.as_os_str());
-    let (fit_width, fit_height) = (fit_width.max(1), fit_height.max(1));
-    within_budget(FIRST_FRAME_BUDGET, move || {
-        decode_from_url(&url, fit_width, fit_height).0
+    let fit = (fit_width.max(1), fit_height.max(1));
+    first_frame_through(&url, FIRST_FRAME_BUDGET, move |stream| {
+        decode_lent(&stream, fit).0
     })
+}
+
+/// [`first_frame`] with its budget and its decode named: the file opened here,
+/// lent to `decode` on a thread of its own under `budget`, and closed here once
+/// the answer is in or the budget has run out — in that order, on every path.
+fn first_frame_through(
+    url: &HSTRING,
+    budget: Duration,
+    decode: impl FnOnce(Lent) -> Option<VideoFrame> + Send + 'static,
+) -> Option<VideoFrame> {
+    let mut cost = FirstFrameCost::default();
+    in_the_process_apartment(&mut cost, |_| {
+        let file = TheFile::open(url)?;
+        let lent = file.lend();
+        let frame = within_budget(budget, move || decode(lent));
+        // **Closed before the answer leaves**: whatever the decode thread still
+        // holds is a reference to a closed stream, not to the file.
+        drop(file);
+        frame
+    })
+}
+
+/// **The file one question reads**, opened by this module and closed by it
+/// (T-ANSWER-AFTER-THE-FILE-IS-CLOSED).
+///
+/// Media Foundation used to open the file itself, inside
+/// `MFCreateSourceReaderFromURL`, and close it when the last of its own
+/// references to the byte stream went — a release on the platform's schedule: a
+/// source resolver's work item or a media source's shutdown can let go of the
+/// stream after the reader handed back has been released and after the answer
+/// built from it has been published, and an editor saving over the file at that
+/// moment was refused with a sharing violation. Opening the stream here puts its
+/// end in this module's hands: [`Drop`] calls `IMFByteStream::Close`, which
+/// closes the file whatever still holds the stream, so the order — the file let
+/// go, then the answer — is this code's and not the platform's.
+///
+/// Opened for reading with [`MF_FILEFLAGS_NONE`], which does not allow write
+/// sharing: a writer meets the open file while a frame is being read, as it did
+/// before; what changed is when the file is closed.
+struct TheFile {
+    stream: IMFByteStream,
+}
+
+impl TheFile {
+    /// The file at `url`, open for reading, or `None` for a file the platform will
+    /// not open (missing, refused) — the module's one silence.
+    fn open(url: &HSTRING) -> Option<Self> {
+        // SAFETY: a platform entry given a string this function holds for the
+        // call, on a thread inside the process apartment (the caller's rule); the
+        // stream it hands back is owned here and closed by `Drop`.
+        let stream = crate::file_reads::opaque(crate::file_reads::Lane::Peek, || unsafe {
+            MFCreateFile(
+                MF_ACCESSMODE_READ,
+                MF_OPENMODE_FAIL_IF_NOT_EXIST,
+                MF_FILEFLAGS_NONE,
+                url,
+            )
+        })
+        .ok()?;
+        // The source resolver chooses a container's handler by the file's name,
+        // which a URL used to carry and a byte stream carries as this attribute.
+        if let Ok(attributes) = stream.cast::<IMFAttributes>() {
+            // SAFETY: an attribute write on the stream this function owns.
+            unsafe {
+                let _ = attributes.SetString(&MF_BYTESTREAM_ORIGIN_NAME, url);
+            }
+        }
+        Some(Self { stream })
+    }
+
+    /// A reference to the stream, for the thread that decodes it.
+    fn lend(&self) -> Lent {
+        Lent(self.stream.clone())
+    }
+}
+
+impl Drop for TheFile {
+    fn drop(&mut self) {
+        // SAFETY: a method on the stream this value owns. A stream a failed read
+        // has already ended answers an error here, which changes nothing: closed
+        // is what this asks for.
+        unsafe {
+            let _ = self.stream.Close();
+        }
+    }
+}
+
+/// **The stream, lent to the thread that decodes it** — a reference, never the
+/// file's end: [`TheFile`] closes the stream on the thread that opened it.
+struct Lent(IMFByteStream);
+
+// SAFETY: a Media Foundation byte stream is a free-threaded object of the
+// process's multithreaded apartment — the platform itself calls it from its
+// work-queue threads ("Media Foundation and COM"). Both threads that use this
+// one, the one that opened it and the one it is lent to, do so inside
+// `in_the_process_apartment`; the lent reference's last `Release` can run after
+// the decode thread has left that bracket, which is harmless while the MTA
+// stands, and `media_session`'s `CoIncrementMTAUsage` keeps it standing for the
+// process's life.
+unsafe impl Send for Lent {}
+
+/// One lent stream decoded on the calling thread, which joins the process
+/// apartment for it — the work [`first_frame`] runs under its budget.
+fn decode_lent(stream: &Lent, fit: (u32, u32)) -> (Option<VideoFrame>, FirstFrameCost) {
+    let mut cost = FirstFrameCost::default();
+    let frame = in_the_process_apartment(&mut cost, |cost| {
+        read_first_frame(&stream.0, fit.0, fit.1, cost)
+    });
+    (frame, cost)
 }
 
 /// **Run `work` on a thread of its own and stop waiting for it after `budget`.**
@@ -330,7 +465,14 @@ fn decode_from_url(
 ) -> (Option<VideoFrame>, FirstFrameCost) {
     let mut cost = FirstFrameCost::default();
     let frame = in_the_process_apartment(&mut cost, |cost| {
-        read_first_frame(url, fit_width, fit_height, cost)
+        let opening = Instant::now();
+        let file = TheFile::open(url)?;
+        let opened = opening.elapsed();
+        let frame = read_first_frame(&file.stream, fit_width, fit_height, cost);
+        cost.open += opened;
+        // Closed before the answer leaves, as [`first_frame`]'s is.
+        drop(file);
+        frame
     });
     (frame, cost)
 }
@@ -348,15 +490,21 @@ fn decode_from_url(
 /// Once, at start-up, from `bt-app`'s `main`. It is deliberately not called
 /// lazily from the file column: the point of it is to spend the first question's
 /// ~200 ms somewhere nobody is waiting, and a hover is not that place.
-pub fn prewarm() {
-    let _ = crate::spawn_at_priority(
+///
+/// # Errors
+///
+/// The thread door's refusal: nothing was warmed, and the first hover's decode starts the
+/// platform itself ([`media_session`]). The caller says it (T-PROFILE-INSTALL-REFUSED-START).
+pub fn prewarm() -> std::io::Result<()> {
+    crate::spawn_at_priority(
         "folio-video-prewarm",
         crate::ThreadPriority::Normal,
         |_ctx| {
             let _inside = READERS.enter();
             media_session();
         },
-    );
+    )
+    .map(drop)
 }
 
 /// **How many threads are inside Media Foundation right now**, and the way to
@@ -503,17 +651,36 @@ static MEDIA_SESSION_STARTS: AtomicU32 = AtomicU32::new(0);
 ///
 /// # Where it is called from
 ///
-/// Once, from `bt-app`'s `main`, after the event loop has returned — and, since
-/// route B, **after every [`engine::Engine`] has been shut down**. A platform
-/// torn down under a decoder that is still running is the same shape §7.35 spent
-/// a slice on, so the ordering is asserted here rather than remembered at the
-/// call site.
-pub fn shutdown_media_session() {
-    debug_assert_eq!(
-        engine::engines_outstanding(),
-        0,
-        "an engine is still standing: `MFShutdown` is the last thing this process does"
-    );
+/// Once, from `bt-app`'s `main`, after the event loop has returned — **an
+/// owner-thread door** (`doors::MediaQuiet`, §5.3 row 27), admitted on the way
+/// out. Every [`engine::Engine`] has been told to stop by then (each window's
+/// teardown shuts its seats down, a request that waits for nothing —
+/// T-DROP-DOORS, D-80), and this is where the process waits for them: until the
+/// engine ledger reads zero, within [`engine::SHUTDOWN_BUDGET`], before anything
+/// else. A platform torn down under a decoder that is still running is the same
+/// shape §7.35 spent a slice on; one that is still running past the bound is
+/// said, and the platform goes down over it, as it does over a reader.
+pub fn shutdown_media_session(token: WaitToken<'_, doors::MediaQuiet>) {
+    let _ = token;
+    let deadline = Instant::now() + engine::SHUTDOWN_BUDGET;
+    let mut counts = engine_ledger::counts();
+    while counts.outstanding() > 0 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            eprintln!(
+                "video: {} engine thread(s) still running {:?} after the last window told \
+                 them to stop; shutting Media Foundation down over them",
+                counts.outstanding(),
+                engine::SHUTDOWN_BUDGET
+            );
+            break;
+        }
+        let (next, _) = engine_ledger::moved()
+            .wait_timeout(counts, left)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        counts = next;
+    }
+    drop(counts);
     if MEDIA_SESSION_STARTS.load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -545,10 +712,10 @@ pub fn shutdown_media_session() {
 /// `MFStartup` can, but with the MTA already standing it is a reference count
 /// rather than an apartment being built. `CoUninitialize` runs only for a call
 /// that actually entered, so no early return can skip half the pairing.
-fn in_the_process_apartment(
+fn in_the_process_apartment<T>(
     cost: &mut FirstFrameCost,
-    work: impl FnOnce(&mut FirstFrameCost) -> Option<VideoFrame>,
-) -> Option<VideoFrame> {
+    work: impl FnOnce(&mut FirstFrameCost) -> Option<T>,
+) -> Option<T> {
     // Counted from before the platform is touched until after this thread has
     // left it, so that `shutdown_media_session` knows whether anybody is inside.
     // See [`Readers`].
@@ -575,9 +742,10 @@ fn in_the_process_apartment(
 }
 
 /// The whole of the Media Foundation conversation, on a thread that already has
-/// an apartment and a started platform.
+/// an apartment and a started platform, over a stream somebody else opened and
+/// closes ([`TheFile`]).
 fn read_first_frame(
-    url: &HSTRING,
+    stream: &IMFByteStream,
     fit_width: u32,
     fit_height: u32,
     cost: &mut FirstFrameCost,
@@ -606,10 +774,7 @@ fn read_first_frame(
         attributes
             .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
             .ok()?;
-        let reader = crate::file_reads::opaque(crate::file_reads::Lane::Peek, || {
-            MFCreateSourceReaderFromURL(url, &attributes)
-        })
-        .ok()?;
+        let reader = MFCreateSourceReaderFromByteStream(stream, &attributes).ok()?;
         lap(&mut cost.open);
 
         // Nothing but the video. An audio stream that is still selected is a
@@ -986,6 +1151,12 @@ fn contain(size: (u32, u32), fit: (u32, u32)) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How long a test here waits for the decoder to answer something that must
+    /// be answered: a quick machine pays nothing, and a decoder that never
+    /// answers is a red. The same patience as the engine's tests
+    /// (`engine::tests::PATIENCE`), whose module is private to `engine`.
+    const DECODER_PATIENCE: Duration = Duration::from_secs(10);
 
     /// PIN — **a frame is measured before it is copied, on both locks** (review
     /// row R2-4).
@@ -1399,7 +1570,16 @@ mod tests {
     fn the_shipped_mov_fixture_gives_up_a_frame_it_will_never_play() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/assets/folio-video-test.mov");
-        let frame = first_frame(&fixture, 280, 160).expect("a real mov gives up a frame");
+        // The decoder itself, on a thread of its own, within the suite's patience
+        // rather than `first_frame`'s outer `FIRST_FRAME_BUDGET`: whether this
+        // decoder reads a QuickTime file is the subject, and how fast a loaded
+        // machine opens and seeks one is not. Only the open and the seek leave the
+        // product's clock here; `read_first_frame` still bounds its `ReadSample`
+        // loop by `FIRST_FRAME_BUDGET`, which is the product's answer to a reader
+        // that never ends.
+        let url = HSTRING::from(fixture.as_os_str());
+        let frame = within_budget(DECODER_PATIENCE, move || decode_from_url(&url, 280, 160).0)
+            .expect("a real mov gives up a frame");
         assert_eq!(
             (frame.native_width, frame.native_height),
             (160, 120),
@@ -1419,5 +1599,139 @@ mod tests {
             (2_800..=3_200).contains(&duration_ms),
             "a three-second fixture: {duration_ms}ms"
         );
+    }
+
+    /// A scratch copy of the shipped `.mp4`, named `name`, in a directory of its
+    /// own that `dir` names.
+    fn a_copy_of_the_fixture(dir: &Path, name: &str) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).expect("a scratch directory");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/assets/folio-video-test.mp4");
+        let copy = dir.join(name);
+        std::fs::copy(&fixture, &copy).expect("a copy of the fixture");
+        copy
+    }
+
+    /// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a closed file is free though a
+    /// reader still holds its stream.**
+    ///
+    /// The fact the whole order rests on: Media Foundation keeps references to a
+    /// byte stream for as long as it likes — the reader made from it, a source
+    /// resolver's work item, a media source shutting down — and none of those may
+    /// decide when the file is let go. Here a reader made from the stream is kept
+    /// alive on purpose, past the close, and the file is still free: closing the
+    /// stream closed the file.
+    ///
+    /// MUTATION: empty `TheFile`'s `Drop` (no `Close`) — the reader still holding
+    /// the stream holds the file, and the exclusive open is refused.
+    #[test]
+    fn a_closed_file_is_free_though_a_reader_still_holds_its_stream() {
+        let dir = bt_testpath::temp_path("folio-video-closed-file");
+        let copy = a_copy_of_the_fixture(&dir, "录屏 clip.mp4");
+        let url = HSTRING::from(copy.as_os_str());
+        let mut cost = FirstFrameCost::default();
+        let held = in_the_process_apartment(&mut cost, |_| {
+            let file = TheFile::open(&url).expect("the fixture opens");
+            // SAFETY: a platform call with an attribute store and a stream this
+            // test owns, inside the apartment `in_the_process_apartment` entered.
+            let reader = unsafe {
+                let mut attributes = None;
+                MFCreateAttributes(&mut attributes, 1).ok()?;
+                MFCreateSourceReaderFromByteStream(&file.stream, &attributes?).ok()?
+            };
+            assert!(
+                !bt_testpath::nobody_holds(&copy),
+                "the fixture's own precondition: the open stream holds the file"
+            );
+            drop(file);
+            let free = bt_testpath::nobody_holds(&copy);
+            drop(reader);
+            Some(free)
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            held,
+            Some(true),
+            "the stream closed is the file let go, whoever still holds the stream"
+        );
+    }
+
+    /// RED (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a frame given up on leaves its
+    /// file free when the answer comes back.**
+    ///
+    /// The decode is handed work that holds the lent stream far past a budget it
+    /// cannot meet, as a demuxer stuck in `ReadSample` would. The answer is the
+    /// module's one silence, and at that moment nobody holds the file: the caller
+    /// closed it before it answered, whatever the walked-away thread still holds.
+    ///
+    /// MUTATION: empty `TheFile`'s `Drop` (no `Close`), or hand the thread the
+    /// `TheFile` itself rather than a [`Lent`] reference — the thread still
+    /// holding the stream holds the file, and the exclusive open is refused.
+    #[test]
+    fn a_frame_given_up_on_leaves_its_file_free() {
+        let dir = bt_testpath::temp_path("folio-video-given-up");
+        let copy = a_copy_of_the_fixture(&dir, "录屏 slow.mp4");
+        let url = HSTRING::from(copy.as_os_str());
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (finished, done) = std::sync::mpsc::channel();
+        let answer = first_frame_through(&url, Duration::from_millis(20), move |stream| {
+            // Held until the test has looked, holding the stream all the while: a decode
+            // that cannot answer inside any budget, whatever the machine is doing.
+            let _ = held.recv();
+            drop(stream);
+            let _ = finished.send(());
+            None
+        });
+        let free = bt_testpath::nobody_holds(&copy);
+        // The walked-away thread is let go, and ends; the scratch file goes after it.
+        let _ = release.send(());
+        let _ = done.recv();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(answer, None, "a decode given up on is the module's silence");
+        assert!(
+            free,
+            "and the file is let go before the silence is answered, though the decode still runs"
+        );
+    }
+
+    /// PIN (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **an answered frame leaves its
+    /// file free at once**, picture or refusal: what the decoration worker hands
+    /// the window is never computed from a file it still holds, so the editor
+    /// that saves over it the moment the card shows the answer is not refused.
+    ///
+    /// The real platform, the shipped fixture and a file that is no video at all
+    /// (the refusal arm, whose source resolver gives up on the bytes), each asked
+    /// through [`first_frame`] and written over at once — exactly the gesture.
+    ///
+    /// No mutation turns this red at will: the platform's late release it guards
+    /// against is a race (CI run 39055489876 lost it once, in a full suite, on the
+    /// answer to a file that is no video). The two REDs above pin the order that
+    /// takes the race away; this states the gesture itself.
+    #[test]
+    fn an_answered_frame_leaves_its_file_free() {
+        let dir = bt_testpath::temp_path("folio-video-answered");
+        let real = a_copy_of_the_fixture(&dir, "录屏 real.mp4");
+        let junk = dir.join("录屏 junk.mp4");
+        std::fs::write(&junk, vec![0x5a_u8; 64]).expect("a file that is no video");
+        let answers = [
+            (
+                "the fixture",
+                first_frame(&real, 280, 160).is_some(),
+                bt_testpath::nobody_holds(&real),
+            ),
+            (
+                "no video",
+                first_frame(&junk, 280, 160).is_some(),
+                bt_testpath::nobody_holds(&junk),
+            ),
+        ];
+        let written = std::fs::write(&junk, vec![0x5a_u8; 256]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            answers,
+            [("the fixture", true, true), ("no video", false, true)],
+            "each answer comes back with its file already free"
+        );
+        assert!(written.is_ok(), "and the writer finishes: {written:?}");
     }
 }

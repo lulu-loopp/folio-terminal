@@ -17,13 +17,14 @@
 //!    one-call entry for a package shares that object rather than lowering a
 //!    universe of its own.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, ItemKind, ItemQuery, ModuleSpec, Needle, Package, Pattern, QueryFailure,
-    Scope, Search, Span, TargetId, TargetKind, TargetRoot, Universe, Vendor, View, Workspace,
-    report, universes,
+    ResolveCutoff, Scope, Search, Span, TargetId, TargetKind, TargetRoot, TraitId, TraitResolver,
+    Universe, Vendor, View, Workspace, report, universes,
 };
 use syn::parse::Parser as _;
 
@@ -1638,4 +1639,233 @@ fn a_view_decides_what_is_there_and_a_match_crosses_nothing() {
         !index.contains(&across, View::Raw),
         "a union must not manufacture an occurrence at a file join"
     );
+}
+
+// ── which trait a path names ──────────────────────────────────────────────
+
+fn path(written: &str) -> Vec<String> {
+    written.split("::").map(str::to_owned).collect()
+}
+
+fn ids(found: &BTreeSet<TraitId>) -> Vec<String> {
+    found.iter().map(ToString::to_string).collect()
+}
+
+/// RED (T-HEADLESS-RUNTIME-SEAM round 10) — **a cycle among `use`s and globs names nothing more,
+/// and a chain past the resolver's hop limit says so.**
+///
+/// Two modules opening each other with globs: a trait declared on one side is found from the
+/// other, and a name neither declares is `Ok(empty)` — a cycle, not a cutoff. A name imported
+/// under its own name (`use outside::outside;`) followed by a path through it names nothing and
+/// is no cutoff either. Twenty renamed re-exports in a row are past the limit: the far end is
+/// `Err(ResolveCutoff)`, a near one resolves; `resolve` keeps answering the near one and empty
+/// for the far one, as before.
+///
+/// MUTATIONS: drop the cycle check in `TraitResolver::in_scope` — the never-declared name runs to
+/// the limit and is `Err`; never set the cutoff — the far end is `Ok(empty)`.
+#[test]
+fn the_resolver_reads_a_cycle_as_naming_nothing_more_and_refuses_past_its_limit() {
+    let index = Index::shared(&fixture_universe("traits_cycle")).expect("the fixture lowers");
+    let resolver = TraitResolver::new(&[("traits_cycle", &index)]);
+    let declared = || {
+        BTreeSet::from([TraitId {
+            package: "traits_cycle".to_owned(),
+            module_path: "crate::left".to_owned(),
+            name: "Declared".to_owned(),
+        }])
+    };
+    assert_eq!(
+        resolver.resolve_checked("traits_cycle", "crate::right", &path("Declared")),
+        Ok(declared()),
+        "a trait declared on one side of a glob cycle is found from the other"
+    );
+    assert_eq!(
+        resolver.resolve_checked("traits_cycle", "crate::right", &path("Missing")),
+        Ok(BTreeSet::new()),
+        "a name the cycle never declares names nothing, and is no cutoff"
+    );
+    assert_eq!(
+        resolver.resolve_checked("traits_cycle", "crate::named", &path("outside::Thing")),
+        Ok(BTreeSet::new()),
+        "a name imported under its own name is no cutoff"
+    );
+    assert_eq!(
+        resolver.resolve_checked("traits_cycle", "crate::chain", &path("Link3")),
+        Ok(declared()),
+        "a short chain resolves"
+    );
+    assert!(
+        matches!(
+            resolver.resolve_checked("traits_cycle", "crate::chain", &path("Link20")),
+            Err(ResolveCutoff(_))
+        ),
+        "a chain past the hop limit says so"
+    );
+    assert!(
+        resolver
+            .resolve("traits_cycle", "crate::chain", &path("Link20"))
+            .is_empty(),
+        "and `resolve` answers it as before"
+    );
+}
+
+/// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **a supertrait or an `impl` block's trait chained
+/// past the resolver's hop limit is a cutoff the checked API says, and the silent one swallows.**
+///
+/// `Near: Link3` names `Declared` through four renamed re-exports; `Far: Link20 + Link3` is cut off
+/// at `Link20`, and `supertraits_checked` answers `Err` carrying the `Declared` it found through
+/// `Link3`. `impl Link3 for Thing` implements `Declared`; `impl Link20 for Thing` is `Err` with
+/// nothing found. `supertraits` and `implemented` answer what was found, as before.
+///
+/// MUTATION: in `TraitResolver::resolve_all`, never set `cut` — `Far`'s supertraits and the
+/// `Link20` block are `Ok`.
+#[test]
+fn supertraits_and_impls_chained_past_the_limit_are_refused_by_the_checked_api() {
+    let index = Index::shared(&fixture_universe("traits_cycle")).expect("the fixture lowers");
+    let resolver = TraitResolver::new(&[("traits_cycle", &index)]);
+    let declared = || {
+        BTreeSet::from([TraitId {
+            package: "traits_cycle".to_owned(),
+            module_path: "crate::left".to_owned(),
+            name: "Declared".to_owned(),
+        }])
+    };
+    let far = |name: &str| TraitId {
+        package: "traits_cycle".to_owned(),
+        module_path: "crate::far".to_owned(),
+        name: name.to_owned(),
+    };
+    assert_eq!(
+        resolver.supertraits_checked(&far("Near")),
+        Ok(declared()),
+        "a supertrait a short chain names resolves"
+    );
+    assert_eq!(
+        resolver.supertraits_checked(&far("Far")),
+        Err(ResolveCutoff(declared())),
+        "a supertrait past the hop limit says so, carrying the one found beside it"
+    );
+    assert_eq!(
+        resolver.supertraits(&far("Far")),
+        declared(),
+        "and `supertraits` answers what was found, as before"
+    );
+    let block = |link: &str| {
+        index
+            .impls()
+            .iter()
+            .find(|block| {
+                block
+                    .trait_path()
+                    .is_some_and(|path| path.last().is_some_and(|last| last == link))
+            })
+            .unwrap_or_else(|| panic!("the fixture implements `{link}`"))
+    };
+    assert_eq!(
+        resolver.implemented_checked("traits_cycle", block("Link3")),
+        Ok(declared()),
+        "an `impl` of a short chain implements the trait at its end"
+    );
+    assert_eq!(
+        resolver.implemented_checked("traits_cycle", block("Link20")),
+        Err(ResolveCutoff(BTreeSet::new())),
+        "an `impl` of a chain past the hop limit says so"
+    );
+    assert!(
+        resolver
+            .implemented("traits_cycle", block("Link20"))
+            .is_empty(),
+        "and `implemented` answers it as before"
+    );
+}
+
+/// RED (T-DOOR-REACH-TRAIT-OBJECTS) — **a trait is its identity, and a path
+/// names the trait the compiler would take it to name.**
+///
+/// Two traits named `Point` in two modules are two traits, each implemented by
+/// the block beside it; `impl Run for Mac` under `use crate::job::{Driver as
+/// Run}`, `impl super::job::Driver for Win` and `impl Driver for Glob` under a
+/// glob all implement `crate::job::Driver`, whose supertrait `Named` resolves
+/// in its own module and whose `Send` and `Sync` resolve to nothing; a `pub use`
+/// of another package's trait names that package's trait; a standard trait is
+/// no trait of these packages.
+///
+/// MUTATION: in `TraitResolver::in_scope`, take a name to be every trait of
+/// that name the package declares, in whatever module (the bare-name keying of
+/// round 1) — the two `Point`s become one and both blocks implement each.
+#[test]
+fn a_trait_path_resolves_to_the_trait_its_module_names() {
+    let own = Index::shared(&fixture_universe("traits")).expect("the fixture lowers");
+    let dep = Index::shared(&fixture_universe("traits_dep")).expect("the fixture lowers");
+    let resolver = TraitResolver::new(&[("traits", &own), ("traits_dep", &dep)]);
+    let implemented: Vec<(String, Vec<String>)> = own
+        .impls()
+        .iter()
+        .map(|block| {
+            (
+                format!("{} {}", block.module_paths().join("|"), block.type_owner()),
+                ids(&resolver.implemented("traits", block)),
+            )
+        })
+        .collect();
+    assert_eq!(
+        implemented,
+        [
+            (
+                "crate::platform_a Ours",
+                vec!["traits crate::platform_a::Point"]
+            ),
+            (
+                "crate::platform_b Ours",
+                vec!["traits crate::platform_b::Point"]
+            ),
+            ("crate::drivers Mac", vec!["traits crate::job::Driver"]),
+            ("crate::drivers Mac", vec!["traits crate::job::Named"]),
+            ("crate::drivers Win", vec!["traits crate::job::Driver"]),
+            ("crate::globbed Glob", vec!["traits crate::job::Driver"]),
+            ("crate::user Opened", vec!["traits_dep crate::seam::Door"]),
+            ("crate::foreign Sent", vec![]),
+        ]
+        .map(|(block, traits)| {
+            (
+                block.to_owned(),
+                traits.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            )
+        })
+    );
+    let driver = TraitId {
+        package: "traits".to_owned(),
+        module_path: "crate::job".to_owned(),
+        name: "Driver".to_owned(),
+    };
+    assert_eq!(
+        ids(&resolver.supertraits(&driver)),
+        ["traits crate::job::Named"]
+    );
+    assert_eq!(resolver.declarations(&driver).len(), 1);
+    assert_eq!(
+        ids(&resolver.resolve("traits", "crate::drivers", &path("Run"))),
+        ["traits crate::job::Driver"]
+    );
+    assert_eq!(
+        ids(&resolver.resolve("traits", "crate::user", &path("crate::reexport::Door"))),
+        ["traits_dep crate::seam::Door"]
+    );
+    assert_eq!(
+        ids(&resolver.resolve("traits", "crate::drivers", &path("traits_dep::seam::Door"))),
+        ["traits_dep crate::seam::Door"]
+    );
+    for (module, written) in [
+        ("crate::job", "Send"),
+        ("crate::foreign", "std::fmt::Debug"),
+        ("crate::drivers", "Point"),
+        ("crate::platform_a", "Ours"),
+    ] {
+        assert!(
+            resolver
+                .resolve("traits", module, &path(written))
+                .is_empty(),
+            "`{written}` in `{module}` names no trait of these packages"
+        );
+    }
 }

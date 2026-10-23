@@ -5,7 +5,7 @@ pub use bt_platform::ime_observation::NativeFacts;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-pub static TRACE: crate::trace::Dump = crate::trace::Dump::new("BT_IME_TRACE");
+pub static TRACE: crate::trace::Dump = crate::trace::Dump::new(|files| files.ime.as_deref());
 
 pub fn now_ms() -> u64 {
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
@@ -133,7 +133,22 @@ impl Report {
     /// committed text alike. Nothing in the event stream says so afterwards;
     /// the only witnesses are these two shapes. Lengths only, never text, and
     /// at most [`PAIRING_LINES_MAX`] lines in the life of a window.
-    pub fn pairing(&mut self, kind: ImeKind, preedit_bytes: usize) -> Option<String> {
+    ///
+    /// **The line ends with the window's native facts at the break**
+    /// (T-IME-BRACKET-FACTS, F4 design note §5.1): whether the window still had
+    /// its input context when the method restarted is the question the next
+    /// occurrence has to answer from the log alone. `facts` is called only for
+    /// a line that will be written — after the shape and after the
+    /// [`PAIRING_LINES_MAX`] cap — so a break past the cap reads nothing. On
+    /// Windows one reading is an `ImmGetContext` and an in-process
+    /// `CoCreateInstance` of the profile manager, the reads every focus change
+    /// already pays: at most [`PAIRING_LINES_MAX`] per window, never on a clock.
+    pub fn pairing(
+        &mut self,
+        kind: ImeKind,
+        preedit_bytes: usize,
+        facts: impl FnOnce() -> NativeFacts,
+    ) -> Option<String> {
         let live = self.live_bytes;
         let shape = match kind {
             ImeKind::Enabled => {
@@ -160,8 +175,9 @@ impl Report {
             return None;
         }
         self.pairing_lines += 1;
+        let facts = facts();
         Some(format!(
-            "Folio: the input method's composition bracket is broken — shape={shape} live_preedit_bytes={live} focused={}",
+            "Folio: the input method's composition bracket is broken — shape={shape} live_preedit_bytes={live} focused={} native={facts:?}",
             self.focused
         ))
     }

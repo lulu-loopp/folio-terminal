@@ -1,7 +1,10 @@
 //! `windows` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::Ending;
 use super::pointer::touch::let_the_system_translate_touch;
+use crate::window_seam::Native;
+use crate::window_seam::prelude::*;
 use crate::{
     App, AppEvent, BrokerRelease, Drag, DragHandover, DragSource, FormulaSwitches, HandoverInto,
     INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts, NewWindowPlan,
@@ -10,7 +13,7 @@ use crate::{
     dpi_snapshot, dwm_dark_mode_owed, end_leaves_of, ensure_metrics_match_authoritative_scale,
     ensure_swapchain_matches_inner, first_term_leaf, float, focus_leaf_index, git, hang_watch,
     i18n, ime_outbound, ime_report, install_page_ground_color, install_theme_class_background,
-    marks, mouse_trace, native_window, new_window_runtime, notify, opening_window_attributes,
+    marks, mouse_trace, new_window_runtime, notify, opening_window_attributes,
     persisted_preview_pages, persisted_window_bounds, plan_launch, presentation_physical_size,
     preview, preview_source_of_recent, profiles, quit, rail_state_for, recorded_window_placement,
     render_sidebar_mode, render_tab_layout, restore, restore_row_seed, restore_window_placement,
@@ -26,7 +29,7 @@ use bt_persist::{SessionSidebarModeV1, SessionTabLayoutV1, SessionWindowV1, TabV
 use bt_platform::admission::{admitted, doors};
 use bt_render::{FrameSource, FrameTrigger, WindowRenderer};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
@@ -34,7 +37,20 @@ use winit::dpi::LogicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
-impl Runtime<'_> {
+/// **What a close's wait leaves the loop to do** (S-6b;
+/// [`Runtime::settle_close_wait`]): the two closes a window cannot re-run
+/// itself, because they are the loop's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AfterTheWait {
+    /// Nothing more: the wait goes on, was withdrawn, or was decided here.
+    Nothing,
+    /// The window's shut, re-run from the top — the close the OS asked for.
+    Shut,
+    /// The run's end with this ordinary window, re-run from the top: its close.
+    EndTheRunWith(WindowId),
+}
+
+impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn give_foreground_with_retry(&self) -> Result<()> {
         crate::take_owned_keyboard_focus(&self.window.window)
     }
@@ -42,7 +58,9 @@ impl Runtime<'_> {
     pub(in crate::runtime) fn request_window_close(&self) -> Result<()> {
         crate::request_owned_window_close(&self.window.window)
     }
+}
 
+impl Runtime<'_, Native> {
     /// **Open a second window on this application** (multiwindow slice C).
     ///
     /// The first window's door reads four files, revives a saved tree, answers a
@@ -132,7 +150,7 @@ impl Runtime<'_> {
         // window that opened before or after it was changed is still a window of
         // this program.
         set_option_as_alt(&window, app.settings_store.loaded().option_sends_alt);
-        let native = native_window(&window)?;
+        let native = crate::native_window_of(&window)?;
         // A second window is a second owner the clipboard may go through — see
         // the first constructor's note.
         bt_platform::register_clipboard_owner(native);
@@ -490,7 +508,7 @@ impl Runtime<'_> {
             },
             Instant::now(),
         );
-        let mut window = new_window_runtime(NewWindowParts {
+        let mut window = new_window_runtime::<Native>(NewWindowParts {
             ime_report,
             parked_pans,
             favicons: Rc::clone(&app.favicons),
@@ -533,7 +551,7 @@ impl Runtime<'_> {
             app,
             window: &mut window,
         };
-        runtime.dress_new_window(native)?;
+        runtime.dress_new_window()?;
         // The seed above with this window's tabs written into it, taken here rather than left to
         // the caller so that no turn of the loop can find a paragraph with nothing in it. The
         // fallback it reads is the seed, which is what makes a maximized window's first snapshot
@@ -571,7 +589,9 @@ impl Runtime<'_> {
         }
         Ok((id, window))
     }
+}
 
+impl<B: Backend> Runtime<'_, B> {
     /// Everything a window owes itself between "its surface exists" and "it can
     /// be shown", shared by both doors that open one.
     ///
@@ -579,7 +599,7 @@ impl Runtime<'_> {
     /// application, and that is exactly why they are said once *per window*:
     /// §2.4's third rule — the setting changes every window, but the sentence
     /// said to DWM is one window's.
-    pub(crate) fn dress_new_window(&mut self, native: bt_platform::NativeWindow) -> Result<()> {
+    pub(crate) fn dress_new_window(&mut self) -> Result<()> {
         self.refresh_work_area();
         // **The window's ground, before the first frame** (§7.1.6c-4b). The
         // clear carries the ground's alpha, so a window that put this on after
@@ -600,7 +620,7 @@ impl Runtime<'_> {
         // — so the row does not get a vote on this one window. Every other window
         // reads the row, exactly as it always did.
         if (self.is_quake_window() || self.app.settings_store.loaded().always_on_top)
-            && let Err(error) = bt_platform::set_window_topmost(native, true)
+            && let Err(error) = self.window.window.set_topmost(true)
         {
             eprintln!("recoverable always-on-top failure: {error}");
         }
@@ -610,7 +630,7 @@ impl Runtime<'_> {
         self.apply_window_dark_mode()?;
         if self.app.acrylic_available
             && self.app.settings_store.loaded().acrylic
-            && let Err(error) = bt_platform::set_system_backdrop(native, true)
+            && let Err(error) = self.window.window.set_backdrop(true)
         {
             eprintln!("recoverable system backdrop failure: {error}");
         }
@@ -788,28 +808,8 @@ impl Runtime<'_> {
                 manual_name,
             } => {
                 let seats = seats::Seats::lone_terminal();
-                // The seed's own profile, never the default one — H66's contract
-                // read for a Recent row: the shell you are asking back is the
-                // shell you had, and "whatever the default is today" is a
-                // different tab wearing this one's folder.
-                // The saved id, or the fallback's when this build has no such row —
-                // `revive_plan`'s own reading, for the same reason.
-                let (profile, unknown_profile_id) = revived_profile(&profile_id);
-                let leaves = BTreeMap::from([(
-                    seats.identity(),
-                    LeafSeed {
-                        profile,
-                        // Whether the folder still stands is asked by the pane's birth
-                        // (`profiles::BirthPlace`), never this thread.
-                        cwd: Some(cwd)
-                            .filter(|cwd| !cwd.is_empty())
-                            .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
-                        unknown_profile_id,
-                        card_skip: 0,
-                        prefill: None,
-                        carried_environment: None,
-                    },
-                )]);
+                let leaves =
+                    BTreeMap::from([(seats.identity(), recent_term_leaf_seed(&profile_id, cwd))]);
                 (seats, manual_name, leaves, BTreeMap::new())
             }
             // A folder tab comes back as the column it was, rooted where it was
@@ -1137,10 +1137,7 @@ impl Runtime<'_> {
     /// succeeded is a different state with a different answer — no minimum at
     /// all, rather than a guess that could lock the user's window.
     pub(in crate::runtime) fn refresh_work_area(&mut self) {
-        let Ok(native) = native_window(&self.window.window) else {
-            return;
-        };
-        let Ok(rect) = bt_platform::get_work_area(native) else {
+        let Some(rect) = self.window.window.work_area() else {
             return;
         };
         let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
@@ -1203,8 +1200,7 @@ impl Runtime<'_> {
         let is_quake = self.is_quake_window();
         let previous = self.app.window_picture(self.window.window.id());
         let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
-        let native = native_window(&self.window.window).ok();
-        let posture = if native.is_some_and(bt_platform::is_window_minimized) {
+        let posture = if self.window.window.is_iconic() {
             WindowPosture::Minimized
         } else if self.window.window.is_maximized() {
             WindowPosture::Maximized
@@ -1218,9 +1214,9 @@ impl Runtime<'_> {
         // Measured only while the window is normal, because that is the only
         // posture whose rectangle is the user's; `recorded_window_placement`
         // states what the other two record instead.
-        let measured = native
-            .filter(|_| posture == WindowPosture::Normal)
-            .and_then(|native| bt_platform::get_window_rect(native).ok())
+        let measured = (posture == WindowPosture::Normal)
+            .then(|| self.window.window.outer_rect())
+            .flatten()
             .map(|rect| persisted_window_bounds(rect, scale));
         // What this window last said about itself, which is what the two
         // postures that have no rectangle of their own fall back to. A window
@@ -1373,9 +1369,8 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        let native = native_window(&self.window.window)?;
         self.window.dwm_dark_mode = Some(dark);
-        if let Err(error) = bt_platform::set_window_dark_mode(native, dark) {
+        if let Err(error) = self.window.window.set_dark_mode(dark) {
             eprintln!("recoverable dark-mode failure: {error}");
         }
         Ok(())
@@ -1613,8 +1608,9 @@ impl Runtime<'_> {
     /// user ruling 2026-08-25), which is [`quit::Quit::saved`]'s own rule one
     /// surface down and for its reason: a shut that closed the window after a
     /// half-finished save would take the half that is still only in memory
-    /// with it. The failures are already named on their own pane by
-    /// `quit_save`; the window stays, so the reader can see them there.
+    /// with it. The failures are named on their own pane as their answers come
+    /// back, and on the window's card; the window stays, so the reader can see
+    /// them there.
     ///
     /// **`Discard` drops only the dirty buffers**: every tab is about to be
     /// written to `session.json`, and its pool goes with it as the list of files
@@ -1628,11 +1624,191 @@ impl Runtime<'_> {
     /// performed here so that everything else a close does still happens in the
     /// order it always did — and, for the run's end, so that `Cancel` leaves the
     /// ordinary window open and the summoned terminal never stands alone.
+    ///
+    /// **`Save all` hands every save to the storage worker and waits** (S-6b):
+    /// the window thread writes nothing ([`Self::save_and_wait`]); the shut is
+    /// held across turns until the saves have answered, and goes only if all of
+    /// them landed.
     fn answer_exit(&mut self, closes: WindowId, answer: restore::GateAnswer) -> Result<()> {
-        let saved_all = answer == restore::GateAnswer::Save && self.quit_save()?.is_complete();
+        if answer == restore::GateAnswer::Save {
+            return self.save_and_wait(closes);
+        }
         self.window.window_close_requested =
-            crate::answer_an_exit_over(&mut self.window.tabs, closes, answer, saved_all);
+            crate::answer_an_exit_over(&mut self.window.tabs, closes, answer, false);
         Ok(())
+    }
+
+    /// **`Save all`, answered on an exit's question** (S-6b): the open editor
+    /// committed as Enter commits it, then every dirty buffer's save handed to
+    /// the storage worker ([`Self::save_every_dirty_preview`]), and the shut
+    /// held while they are on their way ([`restore::CloseWait`] with `saving`).
+    /// A save refused at the hand-over is said on the pane that shows its file,
+    /// now; the wait finds it unsaved and the window stays.
+    fn save_and_wait(&mut self, closes: WindowId) -> Result<()> {
+        let awaited = self.hand_over_every_save()?;
+        let now = Instant::now();
+        let request = if closes == self.window_id() {
+            restore::GateRequest::Shut
+        } else {
+            restore::GateRequest::ShutWithTheRun(closes)
+        };
+        self.window.dirty_gate.wait(restore::CloseWait {
+            request,
+            tab: None,
+            awaited,
+            until: now + restore::CLOSE_WAITS_FOR_A_SAVE,
+            saving: true,
+        });
+        Ok(())
+    }
+
+    /// **Every save this window owes, handed to the storage worker** — `Save all` on a
+    /// shut's question (S-6b) and this window's half of the quit's `Save` (S-6c): the open
+    /// editor committed as Enter commits it, then every dirty buffer's save handed over as
+    /// a press hands it ([`Self::save_every_dirty_preview`]; the window thread writes
+    /// nothing), the panes repainted. Answers every buffer a close of this window would
+    /// lose something of, as each stands now ([`preview::PreviewPool::close_awaited`]):
+    /// what the wait that follows waits for.
+    pub(crate) fn hand_over_every_save(&mut self) -> Result<Vec<preview::Awaited>> {
+        if self.uncommitted_edit_name().is_some() {
+            self.finish_rename(RenameExit::Blur)?;
+        }
+        let handed = self.save_every_dirty_preview();
+        self.repaint_preview()?;
+        Ok(handed.awaited)
+    }
+
+    /// **A close waiting for its saves, looked at again** (S-6b) — on every turn
+    /// of the loop while one waits (`FolioApp::settle_close_waits`), which the
+    /// saves' answers wake (`DocumentsAnswered`) and its bound
+    /// ([`restore::DirtyGate::waits_until`]) ends.
+    ///
+    /// | what the wait finds ([`preview::AtTheClose`]) | what happens |
+    /// |---|---|
+    /// | a body edited (or reloaded) since the close was asked | withdrawn: nothing happens, and the next close asks again |
+    /// | a save still on its way, before the bound | the close goes on waiting |
+    /// | a save still on its way, at the bound | the question, as it always was, with the line saying a save is still on its way |
+    /// | a conflict the pane says | withdrawn: the pane stays, saying the conflict |
+    /// | every buffer saved | the close re-run from the top: nothing to ask, so it closes |
+    /// | a save that did not land — refused, failed on, the worker gone | the close re-run from the top: it asks, the pane having said why once |
+    ///
+    /// The shut's own `Save all` (`saving`) decides on the same findings: every
+    /// buffer saved re-requests the close; one that did not land, or a conflict,
+    /// keeps the window and names them on its card, as the synchronous save
+    /// always did; at the bound the question is put again, saying a save is
+    /// still on its way. A pane's close is re-run only while its tab is still
+    /// the one in front, a tab's only while that tab stands — otherwise the
+    /// close is withdrawn. What the loop itself must re-run — a window's shut,
+    /// or the run's end — is answered for it to do.
+    pub(crate) fn settle_close_wait(&mut self, now: Instant) -> Result<AfterTheWait> {
+        // Taken while it is looked at, and put back if it goes on waiting: every
+        // other road out of here is the wait's end.
+        let Some(wait) = self.window.dirty_gate.take_wait() else {
+            return Ok(AfterTheWait::Nothing);
+        };
+        let found = crate::what_a_close_wait_found(&self.window.tabs, &wait);
+        let finds = |what: preview::AtTheClose| found.iter().any(|(_, at)| *at == what);
+        let stands = restore::SavesFound::of(&found, now, wait.until);
+        match stands {
+            restore::SavesFound::Edited => return Ok(AfterTheWait::Nothing),
+            restore::SavesFound::OnTheirWay => {
+                self.window.dirty_gate.wait(wait);
+                return Ok(AfterTheWait::Nothing);
+            }
+            restore::SavesFound::PastTheBound | restore::SavesFound::Answered => {}
+        }
+        let Some(request) = self.close_as_it_stands(&wait) else {
+            return Ok(AfterTheWait::Nothing);
+        };
+        if stands == restore::SavesFound::PastTheBound {
+            self.window.dirty_gate.open_after_the_wait(request);
+            if self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            return Ok(AfterTheWait::Nothing);
+        }
+        if wait.saving {
+            let unsaved: Vec<String> = found
+                .into_iter()
+                .filter(|(_, at)| *at != preview::AtTheClose::Saved)
+                .map(|(name, _)| name)
+                .collect();
+            // **Every save landed, and something a close would lose is still
+            // here** (round 3): a body undone since its save, which the landing
+            // left in no file. The shut is re-run from the top and asks about it,
+            // as any close does; closing here would lose it unasked.
+            let still_losing = self
+                .window
+                .tabs
+                .iter()
+                .any(|tab| tab.preview_pool.close_names().next().is_some());
+            if unsaved.is_empty() && still_losing {
+                return Ok(match request {
+                    restore::GateRequest::ShutWithTheRun(closing) => {
+                        AfterTheWait::EndTheRunWith(closing)
+                    }
+                    _ => AfterTheWait::Shut,
+                });
+            }
+            let closes = match request {
+                restore::GateRequest::ShutWithTheRun(closing) => closing,
+                _ => self.window_id(),
+            };
+            self.window.window_close_requested = crate::answer_an_exit_over(
+                &mut self.window.tabs,
+                closes,
+                restore::GateAnswer::Save,
+                unsaved.is_empty(),
+            );
+            if unsaved.is_empty() {
+                return Ok(AfterTheWait::Nothing);
+            }
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::quit_not_saved(&unsaved.join(", ")),
+            )?;
+            return self.repaint_preview().map(|()| AfterTheWait::Nothing);
+        }
+        if finds(preview::AtTheClose::Conflict) {
+            return Ok(AfterTheWait::Nothing);
+        }
+        match request {
+            restore::GateRequest::ClosePane(seat) => self.close_pane(seat)?,
+            restore::GateRequest::CloseTab(index) => self.close_tab(index)?,
+            restore::GateRequest::Shut => return Ok(AfterTheWait::Shut),
+            restore::GateRequest::ShutWithTheRun(closing) => {
+                return Ok(AfterTheWait::EndTheRunWith(closing));
+            }
+            _ => {}
+        }
+        Ok(AfterTheWait::Nothing)
+    }
+
+    /// **The close a wait holds, as it can be re-run now** — `None` when its
+    /// subject has moved: a pane's tab no longer the one in front (the close
+    /// reads the tab in front), or a tab no longer in the strip. A tab that only
+    /// moved in the strip is closed where it now stands.
+    fn close_as_it_stands(&self, wait: &restore::CloseWait) -> Option<restore::GateRequest> {
+        match &wait.request {
+            restore::GateRequest::ClosePane(seat) => {
+                (Some(self.id) == wait.tab).then_some(restore::GateRequest::ClosePane(*seat))
+            }
+            restore::GateRequest::CloseTab(_) => self
+                .window
+                .tabs
+                .iter()
+                .position(|tab| Some(tab.id) == wait.tab)
+                .map(restore::GateRequest::CloseTab),
+            other => Some(other.clone()),
+        }
+    }
+
+    /// **The close an answer re-requested, taken by the event loop** — once: the
+    /// request is spent by the taking, so the next event closes nothing.
+    pub(crate) fn take_close_request(&mut self) -> Option<WindowId> {
+        self.window.window_close_requested.take()
     }
 
     /// **What this window would lose if the process left now**, by name.
@@ -1657,7 +1833,7 @@ impl Runtime<'_> {
             .flat_map(|tab| {
                 let where_ = tab.display_title();
                 tab.preview_pool
-                    .dirty_names(None)
+                    .quit_names()
                     .map(|name| unsaved_line(name, &where_))
                     .collect::<Vec<_>>()
             })
@@ -1665,71 +1841,35 @@ impl Runtime<'_> {
             .collect()
     }
 
-    /// **Write this window's half of the save branch back** (slice E2 phase ①,
-    /// v3).
-    ///
-    /// Item by item through the pool's own [`preview::PreviewPool::save_dirty`],
-    /// which is `Ctrl+S`'s conflict check and `Ctrl+S`'s atomic write; then the
-    /// open editor, committed exactly as Enter commits it. What went through and
-    /// what did not are both reported, because a save that half worked leaves a
-    /// state no single sentence describes.
-    ///
-    /// A conflict is a failure *here* even though it is not one at the pane
-    /// (`SaveOutcome`'s own note: "the disk moved and the window is declining to
-    /// guess"). The difference is what happens next: at the pane the buffer
-    /// survives and the reader can look; at a quit the process was about to
-    /// leave, and leaving would take the buffer with it.
-    pub(crate) fn quit_save(&mut self) -> Result<quit::SaveReport> {
-        let mut report = quit::SaveReport::default();
-        for tab in &mut self.window.tabs {
-            for (name, outcome) in tab.preview_pool.save_dirty() {
-                match outcome {
-                    preview::SaveOutcome::Saved => report.saved.push(name),
-                    preview::SaveOutcome::Conflict => report
-                        .failed
-                        .push((name, preview::preview_conflict_notice().to_owned())),
-                    preview::SaveOutcome::Failed(error) => {
-                        eprintln!("recoverable preview save failure: {error}");
-                        report.failed.push((name, error));
-                    }
-                }
-            }
-        }
-        if let Some(name) = self.uncommitted_edit_name() {
-            self.finish_rename(RenameExit::Blur)?;
-            report.saved.push(name);
-        }
-        // **The failures are named where they happened.** One card per window
-        // holding one, rather than a single card in whichever window the chord
-        // was pressed in: a notice belongs where the attention already is, and
-        // the buffers this sentence is about are in *this* window.
-        if !report.failed.is_empty() {
-            let names = report.failed_names().join(", ");
+    /// **What this window's buffers came to under the quit's `Save`, said on its card**
+    /// (S-6c; `FolioApp::settle_the_quits_saves`): the buffers whose saves did not land —
+    /// refused, failed, met another writer's bytes, or edited since they were handed over —
+    /// named as the synchronous save always named them ("Not saved: …"), and the ones still
+    /// on their way to the disk when the quit stopped waiting, in their own true words.
+    /// One card for each, in this window, because the buffers it names are here; the panes
+    /// have said each reason as its answer came back.
+    pub(crate) fn say_the_quits_saves(
+        &mut self,
+        not_saved: &[String],
+        on_its_way: &[String],
+    ) -> Result<()> {
+        if !not_saved.is_empty() {
             self.toast(
                 toast::ToastKind::Error,
                 toast::ToastAnchor::Window,
                 None,
-                i18n::quit_not_saved(&names),
+                i18n::quit_not_saved(&not_saved.join(", ")),
             )?;
         }
-        // The panes that were showing those buffers are looking at what is now on
-        // the disk, and the ones that failed are still dirty and still say so.
-        self.repaint_preview()?;
-        Ok(report)
-    }
-
-    /// **Keep what this window would lose, on a stop that cannot ask** (D-4,
-    /// 0.4.8 G7): every dirty preview buffer of every tab, through the quit's
-    /// judged write and, where that is refused, into `recovery`
-    /// ([`crate::keep_unsaved_edits_over`]), each said in `diagnostics.log` with
-    /// where its edit is. No card and no repaint: the window is about to be
-    /// closed by a process that is stopping.
-    pub(crate) fn keep_unsaved_edits(&mut self, recovery: &Path) {
-        for kept in
-            crate::keep_unsaved_edits_over(&mut self.window.tabs, recovery, SystemTime::now())
-        {
-            crate::diagnostics::note(&kept.line());
+        if !on_its_way.is_empty() {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                None,
+                i18n::quit_save_on_its_way(&on_its_way.join(", ")),
+            )?;
         }
+        self.repaint_preview()
     }
 
     /// **Take this window off the screen and let go of everything it holds**
@@ -1918,9 +2058,7 @@ impl Runtime<'_> {
     /// Whether this window is iconic — Win32's own answer, and the same one
     /// [`Runtime::window_snapshot`] asks before it believes a rectangle.
     pub(in crate::runtime) fn window_is_iconic(&self) -> bool {
-        let iconic = native_window(&self.window.window)
-            .ok()
-            .is_some_and(bt_platform::is_window_minimized);
+        let iconic = self.window.window.is_iconic();
         self.window.diagnostic_minimized.set(iconic);
         iconic
     }
@@ -1981,11 +2119,88 @@ impl Runtime<'_> {
         self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
-            || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
             || self.window.settings.is_open()
             || self.restore_card_is_up()
+    }
+
+    /// **The window lost the keyboard** (`WindowEvent::Focused(false)`) — a lifecycle door of
+    /// T-POINTER-CAPTURE's R-9, and the whole of what a blur says: the rename commits, the
+    /// gesture a held button was making is cancelled, the glance, the hint card, the palette and
+    /// the input method's caret go, and the summoned window is told it may go too.
+    pub(crate) fn window_blurred(&mut self) -> Result<()> {
+        self.observe_ime_focus(false);
+        // Losing the window is a blur, and blur commits (J102). The
+        // mock-up's editor is a real focusable element and gets this
+        // from the DOM; here it has to be said. A press that was still
+        // being held goes with it — the button-up will arrive to a
+        // window that is no longer listening.
+        let committed = self.finish_rename(RenameExit::Blur);
+        // K129. Losing the window is losing the Win32 mouse capture, and
+        // capture loss is this platform's `pointercancel`: the pointer
+        // stream ends with no button-up to end it. It is the only such
+        // signal winit surfaces — there is no `WM_CAPTURECHANGED` event —
+        // and an un-torn-down drag would leave a tab floating over a strip
+        // nobody is holding any more. Same path as Esc: never mind.
+        // F72: the same capture loss ends a divider drag, and ends it
+        // the same way — restoring the one ratio it had been moving.
+        // Left holding the button over a window that is no longer
+        // listening, the gesture was never finished, and a drag nobody
+        // finished did not choose a ratio.
+        //
+        // **And every other gesture with them** (T-POINTER-CAPTURE R-9): a
+        // thumb, a scrubber, a carried window or a selection stops following a
+        // hand that is gone, and a press handed to a program is told its
+        // button came up — one ending, which each gesture answers its own way.
+        let cancelled = self.end_capture(Ending::Cancel);
+        // P149's `window blur`: a glance is about where the pointer is,
+        // and a window that is not listening has no pointer.
+        self.hide_file_peek();
+        // And §7.1.5e′'s: a card about the keys under your hands is a
+        // card about a keyboard this window no longer has. `hide` and
+        // not `spend` — nothing was pressed, so a hand that comes back
+        // still holding `Ctrl` is answered again. And the input method's
+        // context goes with the keyboard: the keyboard's own door
+        // ([`Runtime::blurred`]) says both.
+        self.blurred();
+        // **And the command palette** (DESIGN.md §7.55): 失焦即收. It is
+        // a box for aiming at something *now*, and a window the reader
+        // has left is a window they are not aiming at — coming back to
+        // a half-typed query over a stale list would be this product
+        // holding a question nobody is still asking. It is the one
+        // popup that goes here, and the difference is real: every other
+        // one is anchored to a control the reader can see and come back
+        // to, while this one is anchored to an intent.
+        let _ = self.close_command_palette();
+        self.window.tab_clicks.interrupt();
+        self.window.ime_cursor.reset();
+        hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
+            self.destroy_ime_caret("window_blur")
+        });
+        self.set_cursor_focus(false, Instant::now());
+        // **The summoned terminal goes when the keyboard does** (§7.54),
+        // and it goes on the *next* turn: hiding a window inside the
+        // event that says it lost the focus is asking Windows to move the
+        // focus while it is telling you about the focus. A bit and a turn
+        // — see `FolioApp::settle_quake`, where every other thing this
+        // window does out of the ordinary is also spent.
+        //
+        // The switch is read there and not here for the same reason the
+        // hide is: what this arm knows is that the keyboard left, which
+        // is true whatever the row says. Only a window that is actually
+        // on the screen leaves a bit, because a blur that arrives after
+        // it has gone is a blur about nothing - hiding it is what moved
+        // the focus in the first place.
+        if self.is_quake_window() && self.app.quake.is_showing() {
+            self.app.quake.note_blur();
+        }
+        committed.and(cancelled).and_then(|()| {
+            self.publish_frame(FrameTrigger {
+                occurred_at: Instant::now(),
+                source: FrameSource::Expose,
+            })
+        })
     }
 
     /// **Close this window** (multiwindow slice C).
@@ -2012,6 +2227,9 @@ impl Runtime<'_> {
     /// question a shut can ask is the dirty gate, and it has already been asked,
     /// at the door, before this is reached.
     pub(crate) fn close_window(&mut self, ending: bool) -> Result<()> {
+        // **A window that closes takes the gesture it was holding** (T-POINTER-CAPTURE R-9): a
+        // cancel, said while the window, its tabs and its shells are all still here to be told.
+        self.end_capture(Ending::Cancel)?;
         // §7.1.4: "未提交的重命名在序列化前提交（blur 语义,输入到一半关窗不丢
         // 新名字）". Before the snapshot below, not after — the name has to be on
         // the tab by the time the tab is written down.
@@ -2137,6 +2355,11 @@ impl Runtime<'_> {
         for web in self.window.web.values_mut() {
             let _ = web.close(&self.window.compositor);
         }
+        // **Every recording is told to stop, through its door, and none is waited for**
+        // (T-DROP-DOORS, D-80): each engine thread is asked to leave and let go of, and the
+        // one wait for them is the process's, at exit, before the platform they decode on
+        // is taken down (`bt_platform::video::shutdown_media_session`).
+        self.window.video.shutdown_all();
         // **Every child is told and none of them is waited for**
         // (T-PANE-CLOSE-OFF-THREAD). Each session comes out of its leaf, so
         // nothing left in this window can reach one that is being taken apart,
@@ -2212,3 +2435,29 @@ impl Runtime<'_> {
             .record(seed::Seed::Window { seeds }, Vec::new(), at);
     }
 }
+
+/// **The shell a Recent row asks back** (the `Term` arm of `Runtime::reopen_recent`), as the
+/// seed its one pane is born from.
+///
+/// The seed's own profile, never the default one — H66's contract read for a Recent row: the
+/// shell you are asking back is the shell you had, and "whatever the default is today" is a
+/// different tab wearing this one's folder. The saved id, or the fallback's when this build has
+/// no such row — `revive_plan`'s own reading, for the same reason. Whether the folder still
+/// stands is asked by the pane's birth (`profiles::BirthPlace`), never this thread.
+pub(crate) fn recent_term_leaf_seed(profile_id: &str, cwd: String) -> LeafSeed {
+    let (profile, unknown_profile_id) = revived_profile(profile_id);
+    LeafSeed {
+        profile,
+        cwd: Some(cwd)
+            .filter(|cwd| !cwd.is_empty())
+            .map(|cwd| profiles::SeedPlace::Carried(PathBuf::from(cwd))),
+        unknown_profile_id,
+        card_skip: 0,
+        prefill: None,
+        carried_environment: None,
+    }
+}
+
+#[cfg(test)]
+#[path = "windows_tests.rs"]
+mod tests;

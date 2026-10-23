@@ -54,14 +54,16 @@
 //! the window thread: a durable write waits for the device. The window thread
 //! builds the [`HandoffJob`] — pure: the two journals it may write are
 //! encoded before anything is sent — hands it over, and reads the answer on
-//! its turns under [`crate::quit::HANDOFF_DEADLINE`] ([`look`]). The worker
-//! says how long the write and the start each took, in one line.
+//! the turn the worker's wake brings (`AppEvent::DocumentsAnswered`, sent once
+//! the answer is in its channel), under [`crate::quit::HANDOFF_DEADLINE`]
+//! ([`look`]); a worker that ended without answering is read the same way.
+//! The worker says how long the write and the start each took, in one line.
 
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use bt_platform::admission::{WaitToken, WorkerCtx, doors};
@@ -72,6 +74,7 @@ use bt_platform::install_txn::{self, Held};
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
+use crate::persist::Reply;
 use crate::update_apply::{ExitGuard, Leave, Left, Outgoing, Window};
 use crate::update_txn::{Class, Event, HeaderOutcome, Home, Journal, Nonce, Refusal, Role, TxnId};
 
@@ -690,7 +693,8 @@ impl Leave for OldLeave<'_> {
     }
 
     /// The rescue copy the journal names, with `--update-failed`: O's own
-    /// image, copied, whose own home holds no journal — the envelope's, when
+    /// image, copied, which finds the install's home from its own path and
+    /// shows that journal's card (T-RESCUE-COPY-CARD) — the envelope's, when
     /// this build cannot read the journal whole (0.4.8 E1).
     fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         let home = self.home?;
@@ -723,8 +727,8 @@ impl Leave for OldLeave<'_> {
 pub(crate) enum Looked {
     /// No answer, and the deadline has not passed: look again next turn.
     Waiting,
-    /// The answer came, or the deadline passed without one; the applier it
-    /// started, if it said so.
+    /// The answer came, the storage worker ended without one, or the deadline
+    /// passed without one; the applier it started, if it said so.
     Over {
         line: String,
         applier: Option<Running>,
@@ -733,23 +737,49 @@ pub(crate) enum Looked {
 
 /// **One look at the hand-over's answer** for transaction `txn`, `overdue`
 /// once [`crate::quit::HANDOFF_DEADLINE`] has passed. Never waits.
-pub(crate) fn look(answer: Option<&Receiver<HandedOff>>, txn: TxnId, overdue: bool) -> Looked {
-    match answer.and_then(|answer| answer.try_recv().ok()) {
-        Some(handed) => Looked::Over {
+///
+/// **A request that ended with no answer is over** (C2), read on the turn the
+/// wake brings rather than at the deadline: no applier is known, and the
+/// window's mark decides. Its terminal says which end it was
+/// (`persist::OnTheWorker`): the worker failed on it — its task panicked, and the
+/// worker went on (T-STORAGE-WORKER-ON-THE-SEAM, R2) — or the worker's end left it
+/// owed (queued behind the end, or inside it); the line names which.
+pub(crate) fn look(
+    answer: Option<&mut crate::persist::OnTheWorker<HandedOff>>,
+    txn: TxnId,
+    overdue: bool,
+) -> Looked {
+    match answer.map(crate::persist::OnTheWorker::hear) {
+        Some(Reply::Failed(words)) => Looked::Over {
+            line: format!(
+                "Folio: update {txn}'s hand-over had no answer: the storage worker failed on it \
+                 ({words}) and went on; the window's mark decides who opens Folio as this process \
+                 leaves"
+            ),
+            applier: None,
+        },
+        Some(Reply::Gone) => Looked::Over {
+            line: format!(
+                "Folio: update {txn}'s hand-over had no answer: the storage worker stopped; the \
+                 window's mark decides who opens Folio as this process leaves"
+            ),
+            applier: None,
+        },
+        Some(Reply::Answered(handed)) => Looked::Over {
             line: handed.line(txn),
             applier: match handed {
                 HandedOff::Started { applier } => Some(applier),
                 _ => None,
             },
         },
-        None if overdue => Looked::Over {
+        None | Some(Reply::Waiting) if overdue => Looked::Over {
             line: format!(
                 "Folio: update {txn}'s hand-over did not answer in time; the window's mark decides \
                  who opens Folio as this process leaves"
             ),
             applier: None,
         },
-        None => Looked::Waiting,
+        None | Some(Reply::Waiting) => Looked::Waiting,
     }
 }
 
@@ -884,8 +914,8 @@ mod tests {
     use crate::update_apply::Window;
     use crate::update_job::{Abandon, Applied, Job, Offer, State};
     use crate::update_txn::{
-        Asker, Class, Disk, HeaderOutcome, Home, Inventories, Journal, JournalRead, Layout,
-        Located, Nonce, Phase, PhaseKind, StartAction, StartView, TxnId, at_start, decide,
+        Asker, Class, Disk, HeaderOutcome, Home, Inventories, Journal, Layout, Located, Nonce,
+        Phase, PhaseKind, StartAction, StartView, TxnId, at_start, decide,
     };
 
     #[cfg(windows)]
@@ -1190,6 +1220,48 @@ mod tests {
         }
     }
 
+    /// RED (T-SESSION-RECEIPTS-ON-THE-WAKE round 2) — **the real storage worker wakes the loop
+    /// after a hand-over's answer is in its channel**, so the way out reads it on the turn that
+    /// wake brings and never lingers to [`crate::quit::HANDOFF_DEADLINE`]. The hand-over is the
+    /// real one — the staged transaction, the durable `Handoff`, a recording spawner that starts
+    /// nothing — served by a store's own worker whose wake the test hears; at that wake the look
+    /// finds the answer already there.
+    ///
+    /// MUTATION: drop the `wake()` after the hand-over's answer in the worker's loop
+    /// (`persist::SessionWriter::start`) — no wake comes, and the bounded wait runs out.
+    #[test]
+    fn a_hand_over_served_by_the_worker_wakes_the_loop_after_its_answer() {
+        let folder = Folder::new("wake-唤醒");
+        let staged = staged(&folder);
+        let (spawner, asked) = recording(&staged, false);
+        let handoff = HandoffJob::new(&staged, nonce(), spawner).expect("Prepared → Handoff");
+        let (woke, wakes) = mpsc::channel::<()>();
+        let mut store = SessionStore::at_waking(
+            folder.0.join("会话 session.json"),
+            folder.0.join("session.lock"),
+            move || {
+                let _ = woke.send(());
+            },
+        );
+        let mut answer = store
+            .hand_off(handoff)
+            .expect("the storage worker takes the hand-over");
+        crate::lane::wait_for_a_wake(&wakes, "the worker's wake after the hand-over's answer");
+        match look(Some(&mut answer), TxnId::new(TXN), false) {
+            Looked::Over { applier, .. } => assert_eq!(
+                applier,
+                Some(crate::update_apply::this_process()),
+                "the answer was in its channel at the wake"
+            ),
+            Looked::Waiting => panic!("woken before the hand-over's answer was in its channel"),
+        }
+        assert_eq!(
+            asked.lock().expect("the record").calls.len(),
+            1,
+            "one start"
+        );
+    }
+
     /// RED (U-21) — **`Handoff` is on the disk before the applier is started,
     /// and only after the session landed**: the spawner, reading the journal
     /// at the instant it is asked, finds `Handoff` naming the applier's
@@ -1221,13 +1293,15 @@ mod tests {
         let handoff = HandoffJob::new(&staged, nonce(), spawner).expect("Prepared → Handoff");
         let mut store =
             SessionStore::at(folder.0.join("session.json"), folder.0.join("session.lock"));
-        let answer = store
+        let mut answer = store
             .hand_off(handoff)
             .expect("the storage worker takes the hand-over");
         quit.handoff_sent(Instant::now());
-        let answered = answer
-            .recv_timeout(Duration::from_secs(20))
-            .expect("the storage worker answers");
+        let crate::persist::Reply::Answered(answered) =
+            answer.within_patience("the storage worker's answer")
+        else {
+            panic!("the storage worker answers");
+        };
         assert_eq!(
             answered,
             HandedOff::Started {
@@ -1304,7 +1378,7 @@ mod tests {
         assert_eq!(header.outcome, HeaderOutcome::None);
         assert_eq!(
             at_start(&StartView {
-                journal: JournalRead::Read(header),
+                header,
                 lock_free: true,
                 own_image: None,
                 rescue_image: None,
@@ -1543,19 +1617,14 @@ mod tests {
             SessionStore::at(folder.0.join("session.json"), folder.0.join("session.lock"));
         let start = Instant::now();
         let generation = store
-            .hand_over_final(start)
+            .hand_over_final()
             .expect("handed over")
             .expect("this store writes");
         assert_eq!(quit.requested(generation, start), QuitStep::Write);
         assert!(!quit.receipt_is_overdue(start + UPDATE_RECEIPT_DEADLINE / 2));
-        assert_eq!(
-            quit.wake_at(start),
-            Some(start + crate::quit::ANSWER_LOOK),
-            "the loop comes back to look, and waits for nothing"
-        );
         let late = start + UPDATE_RECEIPT_DEADLINE;
         assert!(quit.receipt_is_overdue(late), "the bound is a bound");
-        let refusal = store.receipt_overdue(generation, late);
+        let refusal = store.receipt_overdue(generation);
         assert!(refusal.quit_may_proceed(), "{refusal:?}");
         assert_eq!(quit.written(WriteVerdict::TimedOut), QuitStep::Retire);
         deliver(&mut quit, &mut job);
@@ -1592,7 +1661,7 @@ mod tests {
         let mut quit = Quit::begin_for(vec!["notes.md".to_owned()], reason);
         let row = |journal: &Journal| {
             let start = at_start(&StartView {
-                journal: JournalRead::Read(journal.header()),
+                header: journal.header(),
                 lock_free: true,
                 own_image: None,
                 rescue_image: None,
@@ -1726,13 +1795,13 @@ mod tests {
     /// The loop's looks at the answer, as `hand_the_update_over` makes them,
     /// with `now` read as `at(turn)`, until the hand-over is over.
     fn look_until_over(
-        answer: &std::sync::mpsc::Receiver<HandedOff>,
+        answer: &mut crate::persist::OnTheWorker<HandedOff>,
         quit: &Quit,
         at: impl Fn(u32) -> Instant,
     ) -> String {
         for turn in 0..2_000 {
             match look(
-                Some(answer),
+                Some(&mut *answer),
                 TxnId::new(TXN),
                 quit.handoff_is_overdue(at(turn)),
             ) {
@@ -1784,21 +1853,21 @@ mod tests {
             HandoffJob::new(&staged, nonce(), Box::new(held)).expect("Prepared → Handoff");
         let mut store =
             SessionStore::at(folder.0.join("session.json"), folder.0.join("session.lock"));
-        let answer = store
+        let mut answer = store
             .hand_off(handoff)
             .expect("the storage worker takes the hand-over");
         let sent = Instant::now();
         quit.handoff_sent(sent);
         assert_eq!(
             look(
-                Some(&answer),
+                Some(&mut answer),
                 TxnId::new(TXN),
                 quit.handoff_is_overdue(sent)
             ),
             Looked::Waiting
         );
         let line = match look(
-            Some(&answer),
+            Some(&mut answer),
             TxnId::new(TXN),
             quit.handoff_is_overdue(sent + crate::quit::HANDOFF_DEADLINE),
         ) {
@@ -1831,9 +1900,11 @@ mod tests {
         // The late start goes through; the applier finds O's live mark.
         *gate.0.lock().expect("the gate") = true;
         gate.1.notify_all();
-        let late = answer
-            .recv()
-            .expect("the worker answers after it is released");
+        let crate::persist::Reply::Answered(late) =
+            answer.within_patience("the answer after the release")
+        else {
+            panic!("the worker answers after it is released");
+        };
         assert!(matches!(late, HandedOff::Started { .. }), "{late:?}");
         assert_eq!(asked.lock().expect("the record").calls.len(), 1);
         let late_applier = Running { pid: 1, started: 1 };
@@ -1855,9 +1926,9 @@ mod tests {
             .expect("back to Prepared for the second road");
         let (spawner, _) = recording(&staged, false);
         let handoff = HandoffJob::new(&staged, nonce(), spawner).expect("Prepared → Handoff");
-        let answer = store.hand_off(handoff).expect("the worker takes it");
+        let mut answer = store.hand_off(handoff).expect("the worker takes it");
         let sent = Instant::now();
-        let line = look_until_over(&answer, &quit, |_| sent);
+        let line = look_until_over(&mut answer, &quit, |_| sent);
         assert!(line.contains("handed to its applier"), "{line}");
         assert_eq!(
             crate::update_apply::window_owner(&staged.home, txn),
@@ -1998,7 +2069,11 @@ mod tests {
     /// RED (T-UPDATE-LOCK-RACE round 3, R2-2) — **a transient owner-mark
     /// read failure is asked again under the same election lock and budget;
     /// only the successful second read is allowed to decide the duty.** The
-    /// injected pause returns immediately, so no clock chooses the result.
+    /// injected pause returns immediately, and the journal's phase and the
+    /// mark's write are injected too, so neither a clock nor a scanner holding
+    /// the journal or the new mark chooses the result. The election lock is the
+    /// one real file left: a lock file of this test's own, which nobody else
+    /// holds.
     ///
     /// MUTATION: return `Mine` on the first read error, or remove the read
     /// retry in `take_the_window_within_using` (one attempt is observed).
@@ -2009,6 +2084,7 @@ mod tests {
         let txn = TxnId::new(TXN);
         let me = crate::update_apply::this_process();
         let mut attempts = 0;
+        let mut written = Vec::new();
         let answer = crate::update_apply::take_the_window_within_reads_at(
             &staged.home,
             txn,
@@ -2025,12 +2101,27 @@ mod tests {
                     Ok(None)
                 }
             },
+            || Ok(crate::update_txn::PhaseKind::Prepared),
+            |mark, bytes| {
+                written.push((mark.to_path_buf(), bytes.to_vec()));
+                Ok(())
+            },
         );
         assert!(answer.is_mine(), "{answer:?}");
         assert_eq!(attempts, 2);
+        let [(mark, bytes)] = written.as_slice() else {
+            panic!("the mark is written once: {written:?}");
+        };
+        assert_eq!(
+            mark,
+            &crate::update_apply::owner_path(&staged.home, txn),
+            "at the window's mark"
+        );
+        std::fs::write(mark, bytes).unwrap();
         assert_eq!(
             crate::update_apply::window_owner(&staged.home, txn),
-            Some(me)
+            Some(me),
+            "naming this process"
         );
     }
 

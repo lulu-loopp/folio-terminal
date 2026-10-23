@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "bt-app"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -272,6 +272,7 @@ dependencies = [
  "bt-platform",
  "bt-pty",
  "bt-render",
+ "bt-render-probe",
  "bt-source",
  "bt-term",
  "bt-testpath",
@@ -301,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "bt-compose"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-detect",
  "bt-doc",
@@ -317,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "bt-corpus"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "bt-compose",
@@ -326,6 +327,7 @@ dependencies = [
  "bt-platform",
  "bt-pty",
  "bt-render",
+ "bt-render-probe",
  "bt-term",
  "bt-transcript",
  "bt-viewport",
@@ -339,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "bt-detect"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-doc",
  "bt-transcript",
@@ -348,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "bt-doc"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-transcript",
  "thiserror 2.0.18",
@@ -356,21 +358,21 @@ dependencies = [
 
 [[package]]
 name = "bt-effects"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "web-time",
 ]
 
 [[package]]
 name = "bt-layout"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-source",
 ]
 
 [[package]]
 name = "bt-lint-probe"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-platform",
  "bt-pty",
@@ -384,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "bt-math"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-doc",
  "bt-effects",
@@ -396,6 +398,7 @@ dependencies = [
  "serde",
  "serde_json",
  "typst-as-lib",
+ "typst-assets",
  "typst-layout",
  "typst-library",
  "typst-svg",
@@ -405,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "bt-persist"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-platform",
  "bt-testpath",
@@ -416,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "bt-platform"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "block2 0.6.2",
  "bt-effects",
@@ -426,6 +429,7 @@ dependencies = [
  "bt-transcript",
  "bt-unicode",
  "bt-winres",
+ "dispatch2",
  "libc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -444,12 +448,13 @@ dependencies = [
  "webview2-com",
  "windows",
  "windows-core",
+ "windows-future",
  "winit",
 ]
 
 [[package]]
 name = "bt-pty"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-platform",
  "bt-pty",
@@ -459,7 +464,6 @@ dependencies = [
  "bt-transcript",
  "bt-viewport",
  "bt-winres",
- "miniz_oxide",
  "nix",
  "portable-pty",
  "thiserror 2.0.18",
@@ -467,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "bt-render"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-detect",
  "bt-doc",
@@ -492,8 +496,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-render-probe"
+version = "0.4.8"
+dependencies = [
+ "bt-doc",
+ "bt-effects",
+ "bt-render",
+ "bt-transcript",
+ "bt-viewport",
+ "pollster",
+ "web-time",
+ "wgpu",
+]
+
+[[package]]
 name = "bt-source"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-testpath",
  "proc-macro2",
@@ -502,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "bt-term"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -524,11 +542,11 @@ dependencies = [
 
 [[package]]
 name = "bt-testpath"
-version = "0.4.7"
+version = "0.4.8"
 
 [[package]]
 name = "bt-transcript"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bitflags 2.13.0",
  "bt-testpath",
@@ -541,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "bt-unicode"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "ttf-parser",
  "unicode-segmentation",
@@ -550,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "bt-viewport"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-doc",
  "bt-transcript",
@@ -559,11 +577,14 @@ dependencies = [
 
 [[package]]
 name = "bt-winres"
-version = "0.4.7"
+version = "0.4.8"
+dependencies = [
+ "miniz_oxide",
+]
 
 [[package]]
 name = "bt-workbench"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "bt-layout",
 ]

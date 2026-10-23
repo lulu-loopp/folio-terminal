@@ -4,8 +4,8 @@
 //! workspace is written in. Three things live here, and all three are facts
 //! about `main` today that go red the day they stop being true:
 //!
-//! 1. **The ten duplicated conditional identities** of §2.4, *regenerated*
-//!    from the index and compared with the plan's list — so an eleventh is a red
+//! 1. **The nine duplicated conditional identities** of §2.4, *regenerated*
+//!    from the index and compared with the plan's list — so a tenth is a red
 //!    test and not a surprise in P3.
 //! 2. **The macro facts of §2.7**: four `macro_rules!` definitions in
 //!    `bt-app`, one of them constructing items — exactly the `Text` enum and
@@ -32,7 +32,7 @@ fn workspace() -> Workspace {
 }
 
 /// `bt-app`'s own `src/` — the universe §5's measurement is written about, and
-/// the one the ten and the macro facts are facts about.
+/// the one the nine and the macro facts are facts about.
 fn bt_app() -> Arc<Index> {
     let workspace = workspace();
     let package = workspace.package("bt-app").expect("bt-app");
@@ -59,20 +59,24 @@ fn bt_source() -> Arc<Index> {
     Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
 }
 
-// ── §2.4 — the ten, regenerated ───────────────────────────────────────────
+// ── §2.4 — the eight, regenerated ─────────────────────────────────────────
 
-/// RED — **`bt-app` declares exactly ten callable identities twice**, and
+/// RED — **`bt-app` declares exactly eight callable identities twice**, and
 /// this set is computed from the index rather than copied from the plan.
 ///
 /// §2.4 counted eleven. Ticket 72 (2026-09-26) made `explorer_menu::read_state`
 /// one portable declaration — its Windows arm already asked nothing the other
-/// platforms lack — so the set shrank by that one row, which is the only way
-/// it may change without a finding.
+/// platforms lack — so the set shrank by that one row; and
+/// T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH round 4 made
+/// `shell_integration::run_profile_path_probe` one road on every platform, one row
+/// more. T-INTEGRATION-INJECT-2-BUILD retired the PSReadLine probe, and with it
+/// `psreadline::run_probe`'s two arms: eight. Shrinking by a finding is the only
+/// way it may change.
 ///
 /// "The full module path is unique" is false in this tree, and these are the
 /// rows that make it false. A query for any of them by name alone is a refusal
 /// (§2.4), which is why P3 needs the list to be a thing that goes red rather
-/// than a paragraph somebody read once. `run_probe` is declared four times
+/// than a paragraph somebody read once. `run_probe` was declared four times
 /// across two modules, so the key is the module path and never the name.
 ///
 /// **The kind is part of the key, and has to be.** The index holds types and
@@ -82,12 +86,12 @@ fn bt_source() -> Arc<Index> {
 /// is the reading §2.4 forbids in the other direction: two different things
 /// taken for one.
 ///
-/// MUTATION: add a second `#[cfg(unix)]` arm to any function in `bt-app` and an
-/// eleventh row appears here; take `#[cfg(debug_assertions)]` off
+/// MUTATION: add a second `#[cfg(unix)]` arm to any function in `bt-app` and a
+/// ninth row appears here; take `#[cfg(debug_assertions)]` off
 /// `panic_selftest_if_due`'s pair and one disappears; drop the kind from the
 /// key and the field/method pairs flood the first list.
 #[test]
-fn the_identities_bt_app_declares_twice_are_the_ten() {
+fn the_identities_bt_app_declares_twice_are_the_eight() {
     let index = bt_app();
     let mut by_identity: BTreeMap<(&'static str, String), Vec<String>> = BTreeMap::new();
     for record in index.items() {
@@ -133,21 +137,20 @@ fn the_identities_bt_app_declares_twice_are_the_ten() {
             "crate::files::is_concealed",
             "crate::hang_watch::run_selftest_if_due",
             "crate::panic_selftest_if_due",
-            "crate::psreadline::run_probe",
             "crate::shell_integration::installed_powershells",
-            "crate::shell_integration::run_profile_path_probe",
             "crate::wsl::<CurrentUser as Registry>::string",
             "crate::wsl::<CurrentUser as Registry>::subkeys",
         ],
-        "the ten of `docs/plans/bt-app-split-prep.md` §2.4 (eleven until ticket 72), \
-         regenerated — an eleventh is a finding about the tree, never a row added to make \
-         this green"
+        "the eight of `docs/plans/bt-app-split-prep.md` §2.4 (nine until \
+         T-INTEGRATION-INJECT-2-BUILD, ten until T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH \
+         round 4, eleven until ticket 72), regenerated — a ninth is a finding about the tree, \
+         never a row added to make this green"
     );
 
     // The same claim for the data the program keeps, whose identities arrived
     // with the struct and field ticket. `bt-app` declares none of them twice:
     // the day it does, the row below is a finding about the tree in exactly the
-    // way an eleventh callable would be.
+    // way a tenth callable would be.
     let data: Vec<String> = duplicated
         .keys()
         .filter(|(sort, _)| *sort != "callable")
@@ -177,14 +180,15 @@ fn the_identities_bt_app_declares_twice_are_the_ten() {
 
 // ── §2.7 — the macro facts about today's tree ─────────────────────────────
 
-/// RED — **the five `macro_rules!` definitions in `bt-app`, and the shapes the
+/// RED — **the four `macro_rules!` definitions in `bt-app`, and the shapes the
 /// traversal cannot classify.**
 ///
 /// §2.7's claim is that the mechanism outlives 2a, so the facts it rests on are
 /// asserted rather than remembered: `i18n::text_entries` constructs exactly
 /// the `Text` enum and an `impl Text` holding only its test list `ALL` (checked
 /// token by token in [`the_text_declaration_and_nothing_else`]), while
-/// `marks::folder_body`, `psreadline::asset`, pointer capture's
+/// `marks::folder_body` (`psreadline::asset`, the fifth, went with the fork's
+/// bytes in T-INTEGRATION-INJECT-2-BUILD), pointer capture's
 /// expression-only `gesture_door`, and
 /// `shell_integration::profile_marks::managed_line` construct no item — so no
 /// macro can be making a `Runtime` method that this index does not hold; the
@@ -209,11 +213,10 @@ fn the_macro_facts_of_this_tree_are_asserted() {
         [
             "text_entries",
             "folder_body",
-            "asset",
             "gesture_door",
             "managed_line"
         ],
-        "bt-app has exactly the five named `macro_rules!` definitions"
+        "bt-app has exactly the four named `macro_rules!` definitions"
     );
 
     let mut by_shape: BTreeMap<String, Vec<String>> = BTreeMap::new();

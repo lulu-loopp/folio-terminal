@@ -40,6 +40,15 @@ jobs:
   release-script-tests:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total seen, x 1.36, rounded up. This job
+    # restores no cache, so every run is in the one regime: over all 58 runs
+    # of 2026-10-15 to 10-17 (38658095635 to 39032766393), p50 1.8 min, max
+    # 2.53 (run 38687157155). 2.53 x 1.36 = 3.44. Its own steps are offline
+    # (no network, a `gh` stand-in), but a job this short is tripped first by
+    # a stall in what every job does, the checkout and the runner's start,
+    # not by a hang: it takes the 10-minute floor of the network-bound jobs
+    # (`cask-audit`). So 10.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -66,6 +75,12 @@ jobs:
   cask-audit:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: macos-latest
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total seen, x 1.36, rounded up. This job
+    # restores no cache, so every run is in the one regime: over all 58 runs
+    # of 2026-10-15 to 10-17 (38658095635 to 39032766393), p50 1.1 min, max
+    # 1.80 (run 38665182697). 1.80 x 1.36 = 2.45. Network-bound jobs get a
+    # 10-minute floor: a stall, not a hang, is what trips them. So 10.
     timeout-minutes: 10
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -113,7 +128,16 @@ jobs:
   gates-can-fail:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 20
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38669130291 38693069271 38693259445 38707969116 38708586878
+    # 38714746975 38715696851 38719369282 38726741790 39010930188
+    # 39014647034 39014757099: 5.3-10.15 min, p50 8.1, max 10.15 (run
+    # 38693069271). 10.15 x 1.36 = 13.80, so 14. With a cache restored (in
+    # full or by its prefix), over the 9 of the ten green runs on `main`
+    # (39032766393 back to 38691455267) that restored one: p50 6.4, max 7.4.
+    timeout-minutes: 14
     steps:
       # Whole history, for one step: `check-migration-debt.ps1` compares the
       # debt list with `git merge-base HEAD origin/main`, and at the default
@@ -364,6 +388,38 @@ jobs:
           }
           exit 0
 
+      # G1's font bound (CC-9): typst-assets' faces turned on for every target in
+      # bt-math's manifest, the shape of a browser build that would carry all
+      # seventeen. The wasm32 check asks every listed crate's graph, so it must
+      # refuse bt-math and bt-compose (whose graph holds bt-math) by name.
+      - name: the wasm font bound can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-math/Cargo.toml"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            $planted = $original.Replace("typst-as-lib.workspace = true", 'typst-as-lib = { workspace = true, features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }')
+            if ($planted -eq $original) { throw "the canary found no typst-as-lib line to plant on" }
+            [IO.File]::WriteAllText($file, $planted)
+            $failed = $false
+            $message = ""
+            try {
+              & ./scripts/ci/check-wasm-lib.ps1 *> $null
+            } catch {
+              $failed = $true
+              $message = $_.Exception.Message
+            }
+            if (-not $failed) { throw "the wasm32 library check accepted typst-assets' fonts in bt-math's wasm32 graph" }
+            if ($message -notmatch "wasm32-unknown-unknown graph of \d+ crate\(s\) turns on typst-assets' fonts" -or
+                $message -notmatch '(?m)^\s+bt-math - ' -or $message -notmatch '(?m)^\s+bt-compose - ') {
+              throw "the wasm32 library check failed for the wrong reason: $message"
+            }
+            Write-Host $message
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
       # G3's five canaries. `clock-guard` reads source text, so each plant is a
       # line appended to a file and nothing is compiled but bt-source's test. A
       # qualified `std::time::Instant::now()` and a nested `use std::{time::{…}}`
@@ -453,19 +509,60 @@ jobs:
           $file = "docs/plans/MIGRATION-DEBT.tsv"
           $original = [IO.File]::ReadAllText($file)
           try {
-            [IO.File]::AppendAllText($file, "crates/planted/src/lib.rs`tprobe`tinclude_str!`tnothing`tP3`tno`tmissing seam`tDEBT`n")
+            [IO.File]::AppendAllText($file, "crates/planted/src/lib.rs`tprobe`tinclude_str!`tnothing`tP3`tno`texception`tmissing seam`tDEBT`n")
             $failed = $false
+            $said = ""
             try {
               & ./scripts/ci/check-migration-debt.ps1
             } catch {
               $failed = $true
+              $said = "$_"
             }
             if (-not $failed) {
               throw "the debt list accepted a row that is not at the merge base"
             }
+            # Red for the shrink rule, naming the planted row: a row the gate
+            # cannot read (a lost column) would be red for another reason.
+            if ($said -notmatch "only shrinks" -or $said -notmatch "probe") {
+              throw "the planted row was refused for another reason: $said"
+            }
           } finally {
             [IO.File]::WriteAllText($file, $original)
           }
+          exit 0
+
+      # The gate finds the six identity columns by name, so the `category`
+      # column (or any column added or moved beside them) is no new row. Its
+      # scratch-repository suite holds that, the growth and duplicate
+      # refusals, and a header missing an identity column.
+      - name: the migration-debt gate reads its identity by column name
+        shell: pwsh
+        run: ./scripts/ci/check-migration-debt-tests.ps1
+
+      # The embedded-spaces gate refuses a run of spaces inside a literal by its
+      # file:line: plant one in a tracked crate file and require exactly that
+      # refusal, then run its scratch-repository suite (the allow-list's
+      # exactness, its shrink, a moved row, and the lexer's own cases).
+      - name: the embedded-spaces gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-lint-probe/src/lib.rs"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "`npub const _EMBEDDED_SPACES_PROBE: &str = `"a planted          continuation`";`n")
+            $line = ([IO.File]::ReadAllText($file) -split "`n").Count - 1
+            $said = & pwsh -NoProfile -File ./scripts/ci/check-embedded-spaces.ps1 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            if ($code -eq 0) {
+              throw "the embedded-spaces gate accepted a planted run of spaces"
+            }
+            if ($said -notmatch [regex]::Escape("${file}:${line}: a string literal carries a run")) {
+              throw "the planted literal was refused for another reason, or not by its file:line: $said"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          & ./scripts/ci/check-embedded-spaces-tests.ps1
           exit 0
 
       # `lane::EXPECTED_FAILURES` only shrinks: a lane does not gain a declared
@@ -504,6 +601,14 @@ jobs:
       - name: the timing-bound gate can actually fail
         shell: pwsh
         run: ./scripts/ci/check-timing-bound-tests.ps1
+
+      # The PSReadLine artefact gate holds the vendored package, its README, the build script's
+      # pinned table and Folio's manifest to one another (T-INTEGRATION-INJECT-2-BUILD). Its
+      # scratch-copy suite moves each pin alone, and puts a `.psm1` and a `FormatsToProcess`
+      # into the manifest, and requires each to be refused by the file that moved.
+      - name: the PSReadLine artefact gate can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-psreadline-artefact-tests.ps1
 
       # `docs/plans/DEAD-CODE.tsv` holds the undated `dead_code` sites the tree
       # had when the gate was written, and only shrinks; every other site is
@@ -556,6 +661,144 @@ jobs:
           } finally {
             [IO.File]::WriteAllText($file, $original)
           }
+          exit 0
+
+      # A merge keeps both sides' removals (A2s). Three plants, each two sides
+      # committed from HEAD and their merge: both sides dropping one row passes
+      # (the control); one side dropping a row and the other its twin of the
+      # same (crate, entry) and count, merged with the first back, is refused by
+      # the row alone (the family total holds); and a merge that keeps a row one
+      # side renamed only by its case is refused, because keys are compared byte
+      # for byte. The checkout is put back exactly (an open merge aborted, the
+      # tree reset, the branch or detached HEAD it had) and that is checked.
+      - name: the bare-site merge check can actually fail
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $file = "docs/plans/window-thread-bare-sites.tsv"
+          $here = (git rev-parse HEAD)
+          $start = (git symbolic-ref -q HEAD)
+          $lines = [IO.File]::ReadAllText($file) -split "`n"
+          $rows = @($lines | Where-Object { $_ -and -not $_.StartsWith("#") } | Select-Object -Skip 1)
+          $cells = { param($row) $row -split "`t" }
+          $without = { param($drop) ((@($lines | Where-Object { $_ -cne $drop })) -join "`n") }
+          $git = @("-c", "user.name=gates-can-fail", "-c", "user.email=gates-can-fail@example.invalid")
+          # Two rows of one (crate, entry) with equal counts: the family bound holds when one comes back
+          # and the other stays removed, so only the row key can refuse.
+          $a = $null; $b = $null
+          foreach ($first in $rows) {
+            $f = & $cells $first
+            $twin = $rows | Where-Object { $_ -cne $first -and (& $cells $_)[0] -ceq $f[0] -and (& $cells $_)[3] -ceq $f[3] -and (& $cells $_)[4] -ceq $f[4] } | Select-Object -First 1
+            if ($twin) { $a = $first; $b = $twin; break }
+          }
+          if (-not $a) { throw "the inventory has no two rows of one (crate, entry) with equal counts to plant the row key with" }
+          # A row whose item has a lowercase letter: its case-changed twin is a rename one side makes.
+          $c = $rows | Where-Object { $_ -cne $a -and $_ -cne $b -and (& $cells $_)[2] -cmatch '[a-z]$' } | Select-Object -First 1
+          $cc = & $cells $c
+          $renamed = "$($cc[0])`t$($cc[1])`t$($cc[2].Substring(0, $cc[2].Length - 1))$($cc[2].Substring($cc[2].Length - 1).ToUpperInvariant())`t$($cc[3])`t$($cc[4])"
+          $d = $rows | Where-Object { $_ -cne $a -and $_ -cne $b -and $_ -cne $c } | Select-Object -Last 1
+          # One plant: two sides from HEAD, their merge written as `merged`, the check's refusal (or none).
+          function Plant([string]$one, [string]$two, [string]$merged) {
+            git switch --quiet --detach $here
+            [IO.File]::WriteAllText($file, $one)
+            git @git commit --quiet -am "plant: one side"
+            $side = (git rev-parse HEAD)
+            git switch --quiet --detach $here
+            [IO.File]::WriteAllText($file, $two)
+            git @git commit --quiet -am "plant: the other side"
+            git @git merge --quiet --no-ff --no-commit $side *> $null
+            [IO.File]::WriteAllText($file, $merged)
+            git add $file
+            git @git commit --quiet -m "plant: the merge"
+            try { & ./scripts/ci/check-window-waits.ps1 | Out-Null; $verdict = $null } catch { $verdict = $_.Exception.Message }
+            Write-Host "plant verdict: $(if ($verdict) { $verdict } else { 'passed' })"
+            return $verdict
+          }
+          $failures = @()
+          try {
+            # The control: both sides drop the same row, and so does the merge. Counted once, it passes.
+            $verdict = Plant (& $without $a) (& $without $a) (& $without $a)
+            if ($verdict) { $failures += "the convergent merge (both sides drop one row) is refused: $verdict" }
+            # One side drops a, the other b; the merge brings a back. The (crate, entry) total is within both
+            # sides' bound, so the row key alone refuses it.
+            $verdict = Plant (& $without $a) (& $without $b) (& $without $b)
+            $row = (($a -split "`t")[0..3] -join ' | ')
+            if (-not $verdict -or $verdict -notmatch [regex]::Escape("brings back what a side removed: the row $row holds")) {
+              $failures += "a merge that brings back the row $row one side removed was not refused by its row: $verdict"
+            }
+            if ($verdict -match 'brings back what a side removed: the \(crate, entry\)') {
+              $failures += "the same-family resurrection was refused by its total, not its row alone: $verdict"
+            }
+            # One side renames c's item by its case, the other drops d; the merge takes the other side's
+            # file, so c comes back under the spelling one side renamed away. Keys are compared byte for
+            # byte, so the row is refused; a reading that ignored case would pass it.
+            $verdict = Plant ((@($lines | ForEach-Object { if ($_ -ceq $c) { $renamed } else { $_ } })) -join "`n") (& $without $d) (& $without $d)
+            $row = (($c -split "`t")[0..3] -join ' | ')
+            if (-not $verdict -or $verdict -cnotmatch [regex]::Escape("brings back what a side removed: the row $row holds")) {
+              $failures += "a merge that keeps a row one side renamed by its case was not refused by its row: $verdict"
+            }
+          } finally {
+            & git rev-parse -q --verify MERGE_HEAD *> $null
+            if ($LASTEXITCODE -eq 0) { git merge --abort }
+            git reset --quiet --hard
+            if ($start) { git checkout --quiet --force ($start -replace '^refs/heads/', '') } else { git switch --quiet --detach $here }
+          }
+          $now = (git rev-parse HEAD)
+          $attached = (git symbolic-ref -q HEAD)
+          $dirty = (git status --porcelain)
+          if ($now -ne $here -or "$attached" -cne "$start" -or $dirty) {
+            $failures += "the plant did not put the checkout back: HEAD $now (was $here), ref '$attached' (was '$start'), status '$dirty'"
+          }
+          if ($failures) { throw ($failures -join "`n") }
+          exit 0
+
+      # The registry's two closed exception lists grow only by a ruling (A2s; the
+      # coordinator's ruling on the R1 review's N4). A `# emergency` row added
+      # without its ruling, with a lowercase one, with a day in other digits, or
+      # under a key that differs from a listed one only in case must be refused,
+      # and the row with its ruling admitted. The merge base is this commit for
+      # the plant; the ref and the file are put back, and that is checked.
+      - name: the exception lists' ruling rule can actually fail
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $file = "crates/bt-app/src/window_waits.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          $main = (git rev-parse refs/remotes/origin/main)
+          $header = "(# emergency\r?\ncrate\tarm\titem\tsince\treason\truling\r?\n)"
+          $row = "bt-app`t-`tcrate::planted`t2026-10-18`ta planted holder for the plant`t"
+          # An existing row's key with one letter's case changed: another key, so a row the base lacks.
+          $existing = "bt-app`t-`tcrate::Append_panic_report`t2026-10-18`ta case twin of a listed holder`t"
+          $failures = @()
+          # The check run with `line` added under `# emergency`; its refusal, or none.
+          function Added([string]$line) {
+            [IO.File]::WriteAllText($file, [regex]::Replace($original, $header, "`$1$line`n"))
+            try { & ./scripts/ci/check-window-waits.ps1 | Out-Null; $verdict = $null } catch { $verdict = $_.Exception.Message }
+            Write-Host "plant verdict: $(if ($verdict) { $verdict } else { 'passed' })"
+            return $verdict
+          }
+          try {
+            git update-ref refs/remotes/origin/main HEAD
+            foreach ($case in @(
+                @{ line = $row; what = "crate::planted"; why = "with no ruling" },
+                @{ line = "${row}t-a2-bare-site-lint 2026-10-18"; what = "crate::planted"; why = "a lowercase ruling" },
+                @{ line = "${row}T-A2-BARE-SITE-LINT $([char]0x0662)026-10-18"; what = "crate::planted"; why = "a day in other digits" },
+                @{ line = $existing; what = "crate::Append_panic_report"; why = "a key that differs from a listed one only in case, with no ruling" })) {
+              $refused = Added $case.line
+              if (-not $refused -or $refused -cnotmatch "\[exceptions\] # emergency adds 'bt-app \| - \| $([regex]::Escape($case.what))' with no ruling") {
+                $failures += "an exception row added with $($case.why) was not refused: $refused"
+              }
+            }
+            $refused = Added "${row}T-A2-BARE-SITE-LINT 2026-10-18"
+            if ($refused) { $failures += "an exception row added with its ruling was refused: $refused" }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+            git update-ref refs/remotes/origin/main $main
+          }
+          if ((git rev-parse refs/remotes/origin/main) -ne $main -or [IO.File]::ReadAllText($file) -cne $original -or (git status --porcelain)) {
+            $failures += "the plant did not put the checkout back (origin/main, $file, or the status)"
+          }
+          if ($failures) { throw ($failures -join "`n") }
           exit 0
 
       # The census's unknown list is keyed by identity (site, module, function,
@@ -640,11 +883,87 @@ jobs:
           }
           exit 0
 
+      # The window seam's native list only shrinks: a planted row must go red,
+      # naming it, for the shrink rule.
+      - name: the window-seam native-list gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/window-seam-native.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "method`tRuntime`tplanted_probe`ta planted row`n")
+            $failed = $false
+            $said = ""
+            try {
+              & ./scripts/ci/check-window-seam-native.ps1
+            } catch {
+              $failed = $true
+              $said = "$_"
+            }
+            if (-not $failed) {
+              throw "the native list accepted a row that is not at the merge base"
+            }
+            if ($said -notmatch "only shrinks" -or $said -notmatch "planted_probe") {
+              throw "the planted row was refused for another reason: $said"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
+      # The runtime voice's direct-line list only shrinks: a planted row must go red, naming it.
+      - name: the runtime-voice list gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/runtime-voice-direct-lines.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "crate::runtime::planted::Runtime::planted_probe`tcall`t1`ta planted row`n")
+            $failed = $false
+            $said = ""
+            try {
+              & ./scripts/ci/check-runtime-voice.ps1
+            } catch {
+              $failed = $true
+              $said = "$_"
+            }
+            if (-not $failed) {
+              throw "the runtime-voice list accepted a row that is not at the merge base"
+            }
+            if ($said -notmatch "only shrinks" -or $said -notmatch "planted_probe") {
+              throw "the planted row was refused for another reason: $said"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
   # ── everything that is decided by reading, not by hardware ────────────────
   logic:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 75
+    # **A budget derived from measurement, re-derived rather than bumped**
+    # (T-CI-LOGIC-JOB-BUDGET; re-derived by T-CI-JOB-BUDGETS-REDERIVE,
+    # measured 2026-10-17). The cold-cache regime dominates: a run whose
+    # cache does not restore compiles everything, and it is the regime a
+    # cache-key change or an evicted cache puts every run in. Cold and
+    # green, over runs 38700488746 38705000975 38715696851 38719369282
+    # 38720519586 38837089117 39010930188 39014647034 39014757099
+    # 39014771087 39014776542 39014784008 39014797273 39016679706
+    # 39017771237 39019091926: 46.3-77.17 min, p50 61.9, max 77.17 (run
+    # 39014647034, the first `main` push after the toolchain change, which
+    # was cold for every job). Headroom 1.36, the factor
+    # T-CI-LOGIC-JOB-BUDGET derived (then the slowest cold `test` step over
+    # the fastest, 47.8 / 35.1 min) and every job's budget uses; over the
+    # cold runs of 2026-10-15 to 10-17 that ratio is 47.8 (run 38842728496)
+    # / 29.8 (run 39014757099) = 1.60, which docs/WINDOWS-CI-RELEASE.md
+    # ("Job budgets") records. 77.17 x 1.36 = 104.95, so 105. With a cache restored, over
+    # the 8 of the ten green runs on `main` (39032766393 back to
+    # 38691455267) that restored one: p50 43.9, max 47.45. Re-derive with
+    # the same rule when the cold max passes 105 / 1.36 = 77.2 min. The
+    # licensing gates are their own job (`licensing`), so a slow suite
+    # cannot cancel them.
+    timeout-minutes: 105
     steps:
       # Whole history: see `gates-can-fail`'s checkout. The debt-list check runs
       # here for real, and a merge base is what it compares against.
@@ -670,6 +989,16 @@ jobs:
       - name: crate dependencies go down the layers
         shell: pwsh
         run: ./scripts/ci/check-crate-edges.ps1
+
+      # A message literal is one sentence (docs/CONVENTIONS.md section 5): a
+      # string literal of first-party Rust with a run of three or more spaces
+      # between two characters of one source line is a lost `\` continuation,
+      # refused by file:line unless `docs/plans/embedded-spaces-allowed.txt`
+      # lists it - a list of deliberate columns that only shrinks against the
+      # merge base.
+      - name: no string literal carries a lost line continuation
+        shell: pwsh
+        run: ./scripts/ci/check-embedded-spaces.ps1
 
       # Each vendored crate must stay a workspace member: its own upstream suite
       # is our regression line against our patches breaking its semantics, and it
@@ -721,6 +1050,7 @@ jobs:
           --package bt-render --package bt-winres --package bt-source
           --package bt-workbench --package bt-app --package bt-lint-probe
           --package bt-testpath --package bt-effects --package bt-compose
+          --package bt-render-probe
           -- --check
 
       # The two excluded packages are still *linted* — their libraries are
@@ -740,12 +1070,24 @@ jobs:
           -- -D warnings
 
       # Ours and alacritty's upstream suite in one go, because vendor is a
-      # member — minus the two crates whose tests are about hardware. `bt-pty`
-      # starts real ConPTY sessions and `bt-render` asks for a real adapter;
-      # each has a job of its own below, where the machine it needs is set up
-      # and where a failure means something specific.
+      # member — minus the three crates whose tests are about hardware. `bt-pty`
+      # starts real ConPTY sessions, and `bt-render` and `bt-render-probe` (the
+      # headless probe and the glyph read-back, thread-door note revision (l)4)
+      # ask for a real adapter; each has a job of its own below, where the
+      # machine it needs is set up and where a failure means something specific.
+      #
+      # Its own budget, under the job's, so that a run past it fails here with
+      # a line naming the budget instead of being cancelled, without a reason,
+      # in whatever step the job's clock happens to stop. The cold max of this
+      # step is 47.8 min (run 38842728496: 34.9 min of it is the compile, the
+      # rest running the tests; no cold run since has gone past it, measured
+      # 2026-10-17); x 1.36, the job's headroom, is 65.0, so 65. The job's 105
+      # leaves 40 for the other steps, whose cold max is 29.6 (run 39014647034,
+      # x 1.36 = 40.2): a run at both edges at once is stopped by the job's
+      # clock, not by this step's.
       - name: test
-        run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render
+        timeout-minutes: 65
+        run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render --exclude bt-render-probe
 
       # The adapter and cell_capture modules are the vendor compatibility seam. Their job is to
       # report terminal facts; importing document, detection, or viewport policy there recreates
@@ -823,6 +1165,20 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-pointer-debt.ps1
 
+      # `docs/plans/ENV-DOORS.tsv` (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY): the product items that read
+      # the environment outside the program's entry. The bt-source test `env_doors` holds it to
+      # the tree; this refuses a row added, or grown, to let a new reader past that test.
+      - name: the environment-door list only shrinks
+        shell: pwsh
+        run: ./scripts/ci/check-env-doors.ps1
+
+      # The environment-door gate's scratch-repository suite plants its three refusals (an
+      # added row, a row reading a new name, a row holding more refusals) and requires each to
+      # fail for its own reason, while the no-base, unchanged and shrink cases pass.
+      - name: the environment-door gate can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-env-doors-tests.ps1
+
       # Gate G3: the crates a browser build reads name no clock of the standard
       # library (`scripts/ci/check-clock-guard.ps1` states the source set and what
       # is out of it by name). The workspace test above ran the same reading;
@@ -877,11 +1233,58 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-census-unknowns.ps1
 
+      # T-BT-SOURCE-CALL-GRAPH round 3: the calls the door reach cannot see through, by site:
+      # bt-source's `call_graph` test holds the code to docs/plans/UNFOLLOWED-EDGES.tsv, and this
+      # holds the list to the merge base's: no key added or grown without a dated reason.
+      - name: the unfollowed edges only shrink
+        shell: pwsh
+        run: |
+          ./scripts/ci/check-unfollowed-edges-tests.ps1
+          ./scripts/ci/check-unfollowed-edges.ps1
+
+      # T-HEADLESS-RUNTIME-SEAM: the places bt-app names a backend holder for the
+      # native backend are listed, and the list is held to the merge base's (or
+      # its seed): no row added.
+      - name: the window seam's native list only shrinks
+        shell: pwsh
+        run: ./scripts/ci/check-window-seam-native.ps1
+
+      # T-DIAGNOSTICS-TEST-SINK: the runtime roads that still say their diagnostics line
+      # directly, not through the window's door, are listed, and the list is held to the merge
+      # base's (or its seed): no row added, no count grown.
+      - name: the runtime voice's direct-line list only shrinks
+        shell: pwsh
+        run: ./scripts/ci/check-runtime-voice.ps1
+
+  # ── the licensing line: notices, machine paths, words, vendored notices ──
+  #
+  # Its own job, not the tail of `logic`: none of these gates reads a build,
+  # and at the end of `logic` they were the steps a slow suite cancelled when
+  # that job ran out of its budget (runs 38714746975, 38726741790,
+  # 38835150475, 39004900090).
+  licensing:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
+    runs-on: windows-2025
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 39010930188 39014647034 39014757099 39014764059 39014776542
+    # 39014784008 39014791387 39014797273 39016679706 39017771237: 4.3-7.92
+    # min, p50 6.3, max 7.92 (run 39014776542). 7.92 x 1.36 = 10.77, so 11.
+    # With a cache restored (in full or by its prefix), over the 7 of the
+    # ten green runs on `main` (39032766393 back to 38691455267) that
+    # restored one: p50 2.9, max 3.4.
+    timeout-minutes: 11
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # The cache carries `~/.cargo/bin`, so a warm run finds cargo-about
+      # already installed at the pinned version and the step below is a check.
+      - uses: ./.github/actions/toolchain
+
       # `check-vendor-notices.ps1` reads upstream alacritty 0.26.0 out of the
-      # registry to diff it against `vendor/`, so the sources have to be there.
-      # A no-op after the build above; named anyway, because a job that only
-      # works because of what a previous step happened to leave behind is a job
-      # that breaks when the steps are reordered.
+      # registry to diff it against `vendor/`, and `check-notices.ps1` asks
+      # cargo for the resolved graph, so the sources have to be there. Nothing
+      # in this job builds, so this is the step that puts them there.
       - name: fetch the sources the notices gates read
         run: cargo fetch --locked
 
@@ -894,10 +1297,11 @@ jobs:
       - name: cargo-about
         run: cargo install cargo-about --locked --version 0.9.2 --features cli
 
-      # The three gates the licensing line owns: the generated third-party
+      # The gates the licensing line owns: the generated third-party
       # notices still match the lock file, no machine path or personal name is
-      # tracked, and every modified vendored file carries its Apache-2.0 §4(b)
-      # notice. Each says so and is skipped when it is not in the tree — this
+      # tracked, every modified vendored file carries its Apache-2.0 §4(b)
+      # notice, and the vendored PSReadLine package is the pinned one, its
+      # DLLs signed by Microsoft (T-INTEGRATION-INJECT-2-BUILD). Each says so and is skipped when it is not in the tree — this
       # branch and that one land separately, and a missing file is not a
       # violation.
       - name: the licensing line's gates
@@ -907,7 +1311,8 @@ jobs:
             "scripts/check-notices.ps1",
             "scripts/check-machine-paths.ps1",
             "scripts/check-doc-words.ps1",
-            "scripts/check-vendor-notices.ps1"
+            "scripts/check-vendor-notices.ps1",
+            "scripts/ci/check-psreadline-artefact.ps1"
           )
           $ran = 0
           foreach ($gate in $gates) {
@@ -931,7 +1336,15 @@ jobs:
   wasm-lib-check:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 30
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38700488746 38714746975 38720519586 38835150475 38835297300
+    # 39010930188 39014647034 39014757099: 3.1-4.77 min, p50 3.8, max 4.77
+    # (run 38720519586). 4.77 x 1.36 = 6.49, so 7. With a cache restored (in
+    # full or by its prefix), over the 9 of the ten green runs on `main`
+    # (39032766393 back to 38691455267) that restored one: p50 1.3, max 2.5.
+    timeout-minutes: 7
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/toolchain
@@ -945,7 +1358,16 @@ jobs:
   conpty:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 30
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38699851507 38705000975 38708586878 38714746975 38715696851
+    # 38830428679 38835150475 38835297300 39010930188 39014647034
+    # 39014757099 39017771237: 7.2-11.80 min, p50 10.7, max 11.80 (run
+    # 38714746975). 11.80 x 1.36 = 16.05, so 17. With a cache restored (in
+    # full or by its prefix), over the 8 of the ten green runs on `main`
+    # (39032766393 back to 38691455267) that restored one: p50 6.4, max 7.1.
+    timeout-minutes: 17
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The compiler and the shared cache both come from
@@ -991,7 +1413,18 @@ jobs:
   gpu:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 40
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38662445897 38707969116 38708586878 38714746975 38715696851
+    # 38726741790 39010930188 39014647034 39014757099 39014764059
+    # 39014771087 39014776542 39014784008 39014791387 39019651600
+    # 39019659078 39020717604 39020858358: 12.9-20.95 min, p50 19.4, max
+    # 20.95 (run 38708586878). 20.95 x 1.36 = 28.49, so 29. With a cache
+    # restored (in full or by its prefix), over the 5 of the ten green runs
+    # on `main` (39032766393 back to 38691455267) that restored one: p50
+    # 5.0, max 5.6.
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The compiler and the shared cache both come from
@@ -1004,14 +1437,14 @@ jobs:
       # DXGI prefers a `d3d10warp.dll` in the loading binary's own directory,
       # which is `target/debug/deps`.
       - name: build the render tests
-        run: cargo test -p bt-render --locked --no-run
+        run: cargo test -p bt-render -p bt-render-probe --locked --no-run
 
       - name: install WARP
         shell: pwsh
         run: ./scripts/ci/install-warp.ps1 -TargetDir target/debug
 
-      - name: test bt-render on a real device
-        run: cargo test -p bt-render --locked
+      - name: test bt-render and bt-render-probe on a real device
+        run: cargo test -p bt-render -p bt-render-probe --locked
 
   # ── the executable, started ───────────────────────────────────────────────
   #
@@ -1023,7 +1456,19 @@ jobs:
   smoke:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 60
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38662065931 38665056067 38665182697 38699851507 38700488746
+    # 38705000975 38708586878 38714746975 38715696851 38719369282
+    # 38726741790 38830428679 38835150475 38835297300 39010930188
+    # 39014647034 39014757099 39014764059 39014771087 39014776542
+    # 39014791387 39014797273 39016679706 39017771237: 6.3-11.05 min, p50
+    # 10.1, max 11.05 (run 39014776542). 11.05 x 1.36 = 15.03, so 16. With a
+    # cache restored (in full or by its prefix), over the 8 of the ten green
+    # runs on `main` (39032766393 back to 38691455267) that restored one:
+    # p50 4.2, max 5.5.
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # The compiler and the shared cache both come from
@@ -1125,14 +1570,28 @@ jobs:
   # platform asserts a fact of every platform"). Measured on the owner's Mac mini
   # on 2026-10-08: the whole `cargo test -p bt-term` is about 40 s once its
   # dependencies are built, which the steps above have already built.
-  # **`bt-app`'s whole suite is still not a step here.** H1 took it from 288
-  # reds to the few that are real macOS defects (ledger, "H1"), and the
-  # ignored-tests gate cannot yet hold a macOS-only ignore for them; a longer
-  # command would only be a red one until those tickets land.
+  # **`bt-app`'s whole suite runs here since H7.** H1 took it from 288 reds to
+  # the few that were real macOS defects, M-SWEEP fixed those four, and the
+  # whole `cargo test -p bt-app` has been green on the owner's Mac mini since
+  # (5534 tests on 75b7c671). What the suite does not run here is decided by
+  # `#[cfg]` in the tests themselves — a fact that exists only on Windows is
+  # `#[cfg(windows)]` — and by one named skip, the test that launches a real
+  # bundle through `/usr/bin/open` (the step's own comment says why).
   core-macos:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: macos-latest
-    timeout-minutes: 60
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38662065931 38707969116 38708586878 38714746975 38830428679
+    # 38835150475 38837089117 38842728496 39010930188 39014647034
+    # 39014757099 39014764059 39014776542 39014784008 39014791387
+    # 39019651600 39019659078 39020717604 39020858358: 19.0-50.63 min, p50
+    # 41.1, max 50.63 (run 39020858358). 50.63 x 1.36 = 68.86, so 69. With a
+    # cache restored (in full or by its prefix), over the 5 of the ten green
+    # runs on `main` (39032766393 back to 38691455267) that restored one:
+    # p50 37.1, max 41.3.
+    timeout-minutes: 69
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -1171,6 +1630,7 @@ jobs:
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
           -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p bt-compose -p alacritty_terminal
+          -p bt-render-probe
 
       # **The application, every target of it** (M1-10). A step of its own and
       # not a name on the line above, because the claim is a different one: the
@@ -1188,49 +1648,33 @@ jobs:
       - name: check the application, every target of it
         run: cargo check --locked --all-targets -p bt-app
 
-      # The application suite still contains Windows-fact fixtures, but these updater modules are
-      # macOS product code and must not wait for a manual re-entry run to compile and execute. Each
-      # filter is required to select at least one test so a renamed module cannot turn this step
-      # green by running nothing. E-12 is the one test that deliberately launches `/usr/bin/open`;
-      # CI keeps the deterministic fake-launch coverage and leaves that real launch to the owner.
-      # The uninstall door runs here too: its bundle, LaunchAgents and Application Support rows are
-      # macOS product code, and its per-platform labels were red here with nothing running them.
-      # The launch wire runs here too (0.4.8 D3): its two-copy tests start two copies of the test
-      # binary over one data directory, and the refusal they pin was a macOS-only defect.
-      - name: test the macOS updater modules
+      # **The application's whole suite** (H7), invoked as `logic` invokes it on Windows — every
+      # test target of the package, `--locked` — rather than the eight module filters this step
+      # used to run (the updater modules, `uninstall::`, `launch_wire`). Those filters existed
+      # because the rest of the suite was red here for reasons that were not defects; H1 and
+      # M-SWEEP removed the reasons, so a filter now only hides tests. What does not run here is
+      # what `#[cfg(windows)]` leaves out (docs/CONVENTIONS.md, "A test that is not limited to one
+      # platform asserts a fact of every platform"), plus one skip by name: E-12's
+      # `the_trial_is_launched_through_launch_services_and_found_by_its_image` deliberately
+      # launches a real bundle through `/usr/bin/open`; CI keeps the deterministic fake-launch
+      # coverage beside it and leaves that real launch to the owner's Mac. libtest's `--skip`
+      # matches a substring, so the step requires the name to match exactly one listed test: a
+      # rename cannot turn it into a skip of nothing, and a new test whose name contains it
+      # cannot be skipped with it unread.
+      # `bt-platform`'s `install_flip`, which this step also used to run by filter, runs in the
+      # portable crates' step below with the rest of that crate's suite.
+      - name: test the application
         run: |
           set -euo pipefail
           skip=the_trial_is_launched_through_launch_services_and_found_by_its_image
-          skip_log="$RUNNER_TEMP/macos-updater-skip-list.log"
-          cargo test --locked -p bt-app --bin folio -- --list | tee "$skip_log"
-          grep -Eq "(^|::)${skip}: test$" "$skip_log" || {
-            echo "the macOS updater skip '$skip' names no test"
+          list_log="$RUNNER_TEMP/macos-app-list.log"
+          cargo test --locked -p bt-app -- --list | tee "$list_log"
+          matches=$(grep -c -F "$skip" "$list_log" || true)
+          grep -Eq "(^|::)${skip}: test$" "$list_log" && [ "$matches" -eq 1 ] || {
+            echo "the macOS application skip '$skip' must match exactly one listed test; it matches $matches"
             exit 1
           }
-          run_app_filter() {
-            filter="$1"
-            log="$RUNNER_TEMP/macos-updater-${filter//[^a-zA-Z0-9]/-}.log"
-            cargo test --locked -p bt-app --bin folio "$filter" -- \
-              --skip "$skip" | tee "$log"
-            grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {
-              echo "the macOS updater filter '$filter' selected no tests"
-              exit 1
-            }
-          }
-          run_app_filter update_apply_macos
-          run_app_filter update_apply::
-          run_app_filter update_recover
-          run_app_filter update_handoff
-          run_app_filter update_trial
-          run_app_filter update_startup
-          run_app_filter uninstall::
-          run_app_filter launch_wire
-          log="$RUNNER_TEMP/macos-updater-install-flip.log"
-          cargo test --locked -p bt-platform install_flip | tee "$log"
-          grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {
-            echo "the macOS updater filter 'install_flip' selected no tests"
-            exit 1
-          }
+          cargo test --locked -p bt-app -- --skip "$skip"
 
       # The eight suites the spike's own table records as green here, plus the
       # two M1-1's branch made green — `bt-transcript` and `bt-viewport`, whose
@@ -1253,7 +1697,7 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-platform -p bt-pty -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p alacritty_terminal
-          -p bt-render -p bt-corpus -p bt-term
+          -p bt-render -p bt-render-probe -p bt-corpus -p bt-term
 
       # **The lint line, held on the second platform** — `logic`'s own clippy
       # line, word for word (ticket 72, D-63). M1-10 started it on `bt-platform`
@@ -1363,7 +1807,17 @@ jobs:
   core-linux:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Budget by `logic`'s rule (T-CI-JOB-BUDGETS-REDERIVE, measured
+    # 2026-10-17): the largest total with no cache restored (the toolchain
+    # step's log says `No cache found.`), x 1.36, rounded up. Cold, over
+    # runs 38699851507 38705000975 38708586878 38714746975 38715696851
+    # 39010930188 39014647034 39014757099 39014764059 39014771087
+    # 39014776542 39014784008 39014791387 39016679706 39017771237: 6.7-10.82
+    # min, p50 10.4, max 10.82 (run 39010930188). 10.82 x 1.36 = 14.72, so
+    # 15. With a cache restored (in full or by its prefix), over the 8 of
+    # the ten green runs on `main` (39032766393 back to 38691455267) that
+    # restored one: p50 7.8, max 8.5.
+    timeout-minutes: 15
     # **The static C runtime is a Windows shipping rule and this job ships
     # nothing.** `.cargo/config.toml` puts `-C target-feature=+crt-static` on
     # every build so that `folio.exe` carries its own CRT rather than asking a
@@ -1407,6 +1861,7 @@ jobs:
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-render -p bt-term -p bt-pty -p bt-corpus -p bt-platform
           -p bt-source -p bt-testpath -p bt-effects -p bt-workbench -p bt-compose -p alacritty_terminal
+          -p bt-render-probe
 
       # `core-macos`'s ten, plus `bt-pty` for the reason above and minus
       # `bt-math` for one of the same shape. `bt-render` is still checked and not

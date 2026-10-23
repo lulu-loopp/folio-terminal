@@ -342,10 +342,12 @@ impl DirChange<'_> {
 /// be that strong for the same reason it is on Windows: every caller's next move
 /// is to touch or to list the very directory it has just armed.
 ///
-/// **Dropping it cancels**, and the cancellation is complete when `drop`
-/// returns: the watcher thread is signalled, it stops and invalidates and
-/// releases the stream on its own run loop's thread, and `drop` joins it. After
-/// that there is no callback in flight, because there is no thread.
+/// **Retiring it cancels** ([`DirWatch::retire_within`], on the worker that
+/// holds it), and the cancellation is complete when the door answers `true`:
+/// the watcher thread is signalled, it stops and invalidates and releases the
+/// stream on its own run loop's thread, and the door joins it. After that there
+/// is no callback in flight, because there is no thread. A drop without the door
+/// signals and waits for nothing.
 ///
 /// **It can also end on its own** (T-DIRWATCH-LIFECYCLE): FSEvents saying the
 /// root changed, or that the volume holding it was unmounted, ends the watcher
@@ -354,9 +356,9 @@ impl DirChange<'_> {
 /// [`DirChange::Ended`].
 pub struct DirWatch {
     /// The watcher thread's run loop and the source that stops it. Held by the
-    /// owner so that `drop` can signal without reaching the stream.
+    /// owner so that the door (or a drop) can signal without reaching the stream.
     stopper: Stopper,
-    /// Taken by `drop`.
+    /// Taken by the door, or by a drop without it.
     thread: Option<std::thread::JoinHandle<()>>,
     /// Where the watcher thread leaves the error that ended it.
     end: Arc<WatchEnd>,
@@ -404,6 +406,36 @@ impl DirWatch {
     /// The error that ended the watcher on its own, handed over once.
     pub fn take_failure(&mut self) -> Option<std::io::Error> {
         self.end.take_failure()
+    }
+
+    /// **The door: stop the watch, and wait — up to `bound`, on the worker `ctx`
+    /// lends — for its thread to leave.** Answers whether it left in time
+    /// (T-DROP-DOORS, D-40): *a directory watch is retired through its bounded
+    /// door on the worker that holds it, never by its drop.*
+    ///
+    /// The thread tears its own stream down: the stop source is one of the
+    /// things its run loop is waiting on, so signalling it is enough, and an
+    /// `FSEventStreamInvalidate` from here would be a second thread reaching into
+    /// a stream whose callback may be running on the first. A thread still
+    /// standing past `bound` is let go, and finishes on its own.
+    pub fn retire_within(
+        mut self,
+        ctx: &crate::admission::WorkerCtx,
+        bound: std::time::Duration,
+    ) -> bool {
+        self.stopper.signal();
+        let Some(thread) = self.thread.take() else {
+            return true;
+        };
+        let deadline = std::time::Instant::now() + bound;
+        while !thread.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            crate::wait::sleep_within(ctx, crate::DIR_WATCH_RETIRE_POLL);
+        }
+        let _ = thread.join();
+        true
     }
 
     /// Start watching `path` and everything under it.
@@ -523,9 +555,9 @@ impl DirWatch {
 
         // A `RecvError` is the thread ending without a word, which is a panic
         // between the spawn and the start — there is no return path there that
-        // does not send. It is still an answer and not an unreachable: this is a
-        // terminal, and a panic taken as a panic takes somebody's scrollback
-        // with it.
+        // does not send. The watcher is not contained, so under the resident
+        // panic hook that panic ends the process before the channel closes: this
+        // arm is reached only where no fatal hook is installed.
         match listening.recv() {
             Ok(Ok(stopper)) => Ok(Self {
                 stopper,
@@ -547,14 +579,18 @@ impl DirWatch {
 }
 
 impl Drop for DirWatch {
+    /// Waits for nothing. After [`DirWatch::retire_within`] there is nothing
+    /// left; without it, the thread is signalled and let go of — it tears its own
+    /// stream down — and the drop says so once.
     fn drop(&mut self) {
-        // The thread tears its own stream down: the stop source is one of the
-        // things its run loop is waiting on, so signalling it is enough, and an
-        // `FSEventStreamInvalidate` from here would be a second thread reaching
-        // into a stream whose callback may be running on the first.
-        self.stopper.signal();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            self.stopper.signal();
+            drop(thread);
+            crate::door_skipped::say(
+                "a directory watch (`DirWatch`)",
+                "its retire door",
+                "its watcher was told to stop and let go of",
+            );
         }
     }
 }
@@ -1222,7 +1258,7 @@ mod tests {
         std::fs::write(deep.join("deep.txt"), b"hi").expect("write three levels down");
         rx.recv_timeout(ARRIVES_WITHIN)
             .expect("a tree watch hears a file three directories under its root");
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// RED (T-PALETTE-DEEP) — **a named tree watch reports a nested file by its relative
@@ -1244,7 +1280,7 @@ mod tests {
             hit,
             "the named tree watch reports its relative path: {seen:?}"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN — **a shallow watch hears only the root's own entries.**
@@ -1294,7 +1330,7 @@ mod tests {
             !seen.iter().any(|name| name.contains('/')),
             "a shallow watch only ever names one component: {seen:?}"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN — **a named watch hears an atomic replace of its file.**
@@ -1330,7 +1366,7 @@ mod tests {
             "an editor's write-temporary-and-rename-over is a change of the file it replaced, \
              and this watch did not say so: {seen:?}"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN — **an overflow is reported as a rescan, through every contract.**
@@ -1404,7 +1440,7 @@ mod tests {
             hit,
             "the stream survived a burst of four thousand files and is still delivering: {seen:?}"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN — **dropping the watch stops the stream, and does not crash doing it.**
@@ -1443,7 +1479,7 @@ mod tests {
             }
             // Dropped with a batch very likely in flight: the join inside `drop`
             // is what makes that safe rather than lucky.
-            drop(watch);
+            assert!(retired(watch), "the watcher left within its bound");
             drop(rx);
         }
 
@@ -1458,7 +1494,7 @@ mod tests {
         std::fs::write(scratch.0.join("before.txt"), b"x").expect("write before the drop");
         rx.recv_timeout(ARRIVES_WITHIN)
             .expect("the watch is awake, so the silence below means something");
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
 
         // Drain whatever was already in flight when the watch was dropped — the
         // claim is about what happens *after* the cancellation.
@@ -1516,7 +1552,7 @@ mod tests {
             "`start` returned with the stream not yet running — everything that moved in that \
              window was before the event id the daemon resolved, and it is not sent again"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN — **a path that cannot be watched is refused, and the refusal says
@@ -1595,7 +1631,7 @@ mod tests {
             watch.take_failure().is_none(),
             "and handed over once, not every time it is asked"
         );
-        drop(watch);
+        assert!(retired(watch), "the watcher left within its bound");
     }
 
     /// PIN — **the root going away ends the watch the way Windows ends it.**
@@ -1704,5 +1740,107 @@ mod tests {
             ),
             Reading::NotOurs
         );
+    }
+
+    /// **A watch retired the way the product retires one**: through its door, on a worker the
+    /// thread door started, within `bound`. Answers whether the watcher left in time.
+    fn retired_within(watch: DirWatch, bound: Duration) -> bool {
+        on_a_worker(move |ctx| watch.retire_within(ctx, bound))
+    }
+
+    /// [`retired_within`] within the product's own bound.
+    fn retired(watch: DirWatch) -> bool {
+        retired_within(watch, crate::DIR_WATCH_RETIRE_BUDGET)
+    }
+
+    /// A watch on `path` whose watcher stands inside its wake until the test lets it go (drops
+    /// the sender: every wake after that passes at once, since one write can be several
+    /// notifications), and the flag the wake raises on its way out. Written into, so the watcher is in the wake when this
+    /// returns.
+    fn a_held_watch(
+        path: &Path,
+    ) -> (
+        DirWatch,
+        mpsc::Sender<()>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let (entered, inside) = mpsc::channel();
+        let (release, held) = mpsc::channel::<()>();
+        let left = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leaving = std::sync::Arc::clone(&left);
+        let watched = path.to_path_buf();
+        let watch = on_a_worker(move |ctx| {
+            DirWatch::start(ctx, &watched, move |_| {
+                let _ = entered.send(());
+                let _ = held.recv();
+                leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        })
+        .expect("watch a directory this process just made");
+        std::fs::write(path.join("hold.txt"), b"x").expect("write into the watched directory");
+        crate::door_skipped::received(&inside, "the watcher inside its wake");
+        (watch, release, left)
+    }
+
+    /// RED (T-DROP-DOORS, D-40) — **the door waits for the watcher to leave, and a watcher that
+    /// does not leave within the bound is let go.**
+    ///
+    /// The watcher is held inside its wake. A door with no time at all answers `false` at once
+    /// and lets it go; a door called while the hold is let go answers `true`, and when it does
+    /// the wake has returned.
+    ///
+    /// MUTATION: return `true` from `retire_within` without the wait and the first door says the
+    /// watcher left while it stands in the wake; drop the `is_finished` loop for a bare `join`
+    /// and the first door never answers within the suite's patience.
+    #[test]
+    fn the_door_waits_for_the_watcher_within_its_bound() {
+        let _turn = stream_gate::watchers_take_turns();
+        let scratch = Scratch::new("retire-held");
+        let (watch, release, _left) = a_held_watch(&scratch.0);
+        assert!(
+            !retired_within(watch, Duration::ZERO),
+            "a watcher standing in its wake has not left within no time at all"
+        );
+        drop(release);
+
+        let (watch, release, left) = a_held_watch(&scratch.0);
+        let (going, on_its_way) = mpsc::channel();
+        let (answered, heard) = mpsc::channel();
+        let leaving = std::sync::Arc::clone(&left);
+        std::thread::spawn(move || {
+            let _ = going.send(());
+            let left_in_time = retired_within(watch, crate::door_skipped::PATIENCE);
+            let _ = answered.send((
+                left_in_time,
+                leaving.load(std::sync::atomic::Ordering::SeqCst),
+            ));
+        });
+        crate::door_skipped::received(&on_its_way, "the retiring thread");
+        drop(release);
+        let (left_in_time, wake_returned) =
+            crate::door_skipped::received(&heard, "the door, once the watcher is let go");
+        assert!(left_in_time, "the watcher left within the door's bound");
+        assert!(
+            wake_returned,
+            "the door answered before the watcher left its wake"
+        );
+    }
+
+    /// RED (T-DROP-DOORS, D-40) — **a watch dropped without its door waits for nothing, and says
+    /// so once.**
+    ///
+    /// The watcher is held inside its wake for the whole of the drop: a drop that joined it would
+    /// stand until the test let go, and the test lets go only after the drop has answered.
+    ///
+    /// MUTATION: put the join back in `Drop` and the drop's thread does not answer within the
+    /// suite's patience; take the saying out and the count is zero.
+    #[test]
+    fn a_watch_dropped_without_its_door_waits_for_nothing_and_says_so_once() {
+        let _turn = stream_gate::watchers_take_turns();
+        let scratch = Scratch::new("drop-held");
+        let (watch, release, _left) = a_held_watch(&scratch.0);
+        let skipped = crate::door_skipped::dropped_alone(watch, "a drop while the watcher is held");
+        assert_eq!(skipped, 1, "the drop says its skipped door once");
+        drop(release);
     }
 }

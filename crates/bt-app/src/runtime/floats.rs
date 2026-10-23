@@ -1,6 +1,8 @@
 //! `floats` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::{Gone, OwnerGone};
+use crate::window_seam::prelude::*;
 use crate::{
     CardWords, DropLanding, FileMenuState, FileMenuTarget, FileMenuTreeRow, HoverFloat, Layered,
     LeafId, MenuPaint, OwnTrigger, PAGE_SPINNER_STROKE_LOGICAL_PX, PointerTarget, PopoverTrigger,
@@ -22,7 +24,7 @@ use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::MouseScrollDelta;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Rebuild chrome while leaving the overlay to a present that already owes
     /// a current-frame formula rebuild.
     pub(crate) fn refresh_chrome_without_overlay(&mut self) -> bool {
@@ -1793,10 +1795,7 @@ impl Runtime<'_> {
                 // The clipboard door copy-on-select uses, so the menu and the
                 // drag write the same bytes and both leave the selection
                 // standing — the terminal's row's own rule, one surface over.
-                profiles::TermMenuRow::Copy => {
-                    self.copy_preview_text_selection(surface);
-                    Ok(())
-                }
+                profiles::TermMenuRow::Copy => self.copy_preview_text_selection(surface).map(drop),
                 profiles::TermMenuRow::SelectAll => {
                     let selection = match &self.preview_pane(surface).map(|pane| pane.doc()) {
                         Some(PreviewDocument::Markdown { blocks, .. }) => {
@@ -1822,10 +1821,7 @@ impl Runtime<'_> {
             // which clears the selection afterwards — right for a keystroke that
             // ends a gesture, wrong for a menu row that was reached by pointing
             // at what is still highlighted.
-            profiles::TermMenuRow::Copy => {
-                self.copy_selection_on_release(seat);
-                Ok(())
-            }
+            profiles::TermMenuRow::Copy => self.copy_selection_on_release(seat),
             profiles::TermMenuRow::Paste => self.paste_from_clipboard_into(seat),
             profiles::TermMenuRow::SelectAll => self.select_all_in_pane(seat),
             profiles::TermMenuRow::Find => self.open_search(seat),
@@ -1884,7 +1880,7 @@ impl Runtime<'_> {
     /// reason: a menu cannot be both waiting to open its child and holding it
     /// open against the rows.
     pub(in crate::runtime) fn advance_term_menu(&mut self, now: Instant) -> Result<()> {
-        let Some(menu) = self.window.term_menu.as_ref() else {
+        let Some(menu) = self.window.term_menu.as_mut() else {
             return Ok(());
         };
         let Some(due) = menu.submenu_hold_until else {
@@ -1893,6 +1889,13 @@ impl Runtime<'_> {
         if now < due {
             return Ok(());
         }
+        // **A matured hold is spent on the turn it comes due, whatever follows**
+        // (T-WINDOW-THREAD-UNDER-LOAD). Left standing by a road below that cannot act — a rest
+        // whose pointer has left the window, a heading that has no child to open — it was an
+        // instant in the past that the wake fold handed `ControlFlow::WaitUntil` on every turn,
+        // and the loop spun until the next pointer move. Whatever the roads below arm again
+        // (the hover they drive) is a new hold of its own.
+        menu.submenu_hold_until = None;
         if menu.submenu_open {
             self.set_term_submenu(false)?;
             if let Some(position) = self.window.pointer_position {
@@ -1979,13 +1982,16 @@ impl Runtime<'_> {
         position: Option<PhysicalPosition<f64>>,
         now: Instant,
     ) {
-        // **A drag owns the pointer outright**, and a gesture in flight is not a
-        // hover — the same rule the tip, the layout peek and the float's own
+        // **A held gesture owns the pointer outright**, and a gesture in flight is
+        // not a hover — the same rule the tip, the layout peek and the float's own
         // intent already live by (`rebuild_tooltip_anchors` empties its whole
         // list for the length of a drag). A menu dropped under a pane being
         // carried across the window would be a menu nobody asked for, standing
-        // in the way of the drop.
-        if self.held_drag().is_some() || self.held_float_drag().copied().is_some() {
+        // in the way of the drop; and the same menu opened by a divider, a thumb
+        // or a selection resting on a `⌄` would eat the release the gesture is
+        // owed (T-POINTER-CAPTURE R-7, cut 6: every gesture in the slot, not the
+        // drag and the float carry alone).
+        if self.a_gesture_holds_the_pointer() {
             self.window.chevrons.clear();
             return;
         }
@@ -2770,13 +2776,19 @@ impl Runtime<'_> {
             // pressing the same commit again draws its files without a second
             // subprocess.
             if let Some(hash) = opened {
-                question = files.git.begin_commit_files(&hash);
+                let asker = files.git.id();
+                question = files
+                    .git
+                    .begin_commit_files(&hash)
+                    .map(|question| (asker, question));
             }
         }
-        if let Some(question) = question
+        if let Some((asker, question)) = question
             && !self.app.git_worker.request(git::GitRequest {
                 window: self.window_id(),
                 host: git::GitHost::Float { id, tab },
+                asker,
+                buffer: None,
                 question,
             })
         {
@@ -2791,18 +2803,20 @@ impl Runtime<'_> {
     /// The next fifty commits, for a floating page (R16).
     pub(in crate::runtime) fn load_more_float_commits(&mut self, id: float::FloatId) -> Result<()> {
         let tab = self.window.tabs[self.window.active_tab].id;
-        let Some(question) = self
+        let Some((asker, question)) = self
             .window
             .float
             .live_mut(id)
             .and_then(float::FloatWin::files_mut)
-            .and_then(|files| files.git.more_commits())
+            .and_then(|files| Some((files.git.id(), files.git.more_commits()?)))
         else {
             return Ok(());
         };
         if !self.app.git_worker.request(git::GitRequest {
             window: self.window_id(),
             host: git::GitHost::Float { id, tab },
+            asker,
+            buffer: None,
             question,
         }) {
             self.disable_git_worker();
@@ -3357,7 +3371,8 @@ impl Runtime<'_> {
         // Git page reaches a float only by being carried there — a column that
         // was on it when it popped out (`undock_files_column`).
         let state = seats::FilesLeafState {
-            root,
+            root: root.root,
+            folder_unknown: root.folder_unknown,
             ..seats::FilesLeafState::default()
         };
         self.place_float(
@@ -3467,6 +3482,10 @@ impl Runtime<'_> {
 
     /// Begin one float's exit (§7.1.2's remaining closers, and only those).
     pub(in crate::runtime) fn dismiss_float(&mut self, id: float::FloatId) -> Result<bool> {
+        // **The gesture held on the window goes before the window does** (T-POINTER-CAPTURE R-9,
+        // owner gone): its carry, a press on its head, a thumb, a selection or a picture pan
+        // inside it, a row of its tree.
+        self.end_capture(OwnerGone(Gone::Float(id)));
         if !self.window.float.dismiss(id, Instant::now()) {
             return Ok(false);
         }
@@ -3624,7 +3643,7 @@ impl Runtime<'_> {
 }
 
 /// **The menu verb's doors are the keystroke's** ([`menubar::ClipboardDoors`]).
-impl menubar::ClipboardDoors for Runtime<'_> {
+impl<B: Backend> menubar::ClipboardDoors for Runtime<'_, B> {
     fn copy_terminal_selection(&mut self) -> Result<()> {
         self.copy_selection()
     }
@@ -3633,8 +3652,8 @@ impl menubar::ClipboardDoors for Runtime<'_> {
         self.paste_from_clipboard()
     }
 
-    fn copy_document_selection(&mut self) {
-        self.copy_preview_selection();
+    fn copy_document_selection(&mut self) -> Result<()> {
+        self.copy_preview_selection()
     }
 
     fn paste_into_document(&mut self) -> Result<()> {

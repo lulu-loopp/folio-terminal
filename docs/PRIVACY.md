@@ -138,6 +138,12 @@ diagnosed from the log alone. These paths can contain your account name or the
 names of your folders. They stay on this computer; review the log before you
 share it.
 
+When a settings, shortcuts, profiles or pins file edited outside Folio replaces a
+value set in Folio, `diagnostics.log` names each such value: a setting or a
+shortcut by its name, a profile by the title you gave it, a pin by its target —
+a full path or URL. These lines stay on this computer; review the log before you
+share it.
+
 ### The web preview's profile
 
 A separate place from the directory above, and where it is depends on the
@@ -338,7 +344,7 @@ GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 
 
 ### 更新（macOS）
 
-在 Mac 上，卡片、设置行以及按下后到重启之前的流程与 Windows 相同；不同的是替换对象和文件所在位置。A Homebrew-installed copy gets the same card when Homebrew's own record names that bundle, and Folio carries only the install attributes that already exist. <!-- // zh: pending D2 --> 若 macOS 从只读位置运行该副本（下载后未移动就打开的应用会从一个随机副本运行），或该副本所在文件夹不允许当前账户写入，则无法自行替换：**Update** 会先告知，不写入任何内容，卡片转而提供发布页。
+在 Mac 上，卡片、设置行以及按下后到重启之前的流程与 Windows 相同；不同的是替换对象和文件所在位置。Homebrew 安装的副本，只要 Homebrew 自己的记录指向该应用包，也会得到同样的卡片；Folio 在新的应用包上保留 Homebrew 已有的安装属性。若 macOS 从只读位置运行该副本（下载后未移动就打开的应用会从一个随机副本运行），或该副本所在文件夹不允许当前账户写入，则无法自行替换：**Update** 会先告知，不写入任何内容，卡片转而提供发布页。
 
 | | |
 | --- | --- |
@@ -387,6 +393,8 @@ rm -rf ~/Library/Application\ Support/Folio/diagnostics*.log \
 ```
 
 更新的某一步未能启动程序时，`diagnostics.log` 会记录该程序的完整路径、Folio 的安装位置，以及启动失败的进程所在的文件夹（它的工作目录），以便仅凭日志就能定位故障。这些路径里可能带有你的账户名或文件夹名称。它们留在本机；分享日志前先看一遍。
+
+在 Folio 之外编辑的设置、快捷键、配置文件或钉住条目文件替换了在 Folio 中设定的值时，`diagnostics.log` 会逐一记下这些值：设置或快捷键记名称，配置文件记你起的标题，钉住条目记目标——完整路径或 URL。这些记录留在本机；分享日志前先看一遍。
 
 ### 网页预览的 profile
 
@@ -452,15 +460,33 @@ rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio �
 - **更新进行中（macOS）**：一个 LaunchAgent 文件 `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`，更新结束时删除；应用旁边的隐藏文件夹 `.Folio.app.folio-update`，存放暂存的更新并在完成后保留两个小锁文件——见上文「更新（macOS）」一节。
 - PowerShell 整合被要求时，在 PowerShell 自己报出的 `$PROFILE` 末尾追加一行，追加前先
   在旁边留一份带日期的原件副本。删除该行可撤销。
-- At start, Folio reads the scoop marker or the Homebrew install and Caskroom attributes. If the Homebrew Caskroom attribute is absent, it checks only `/opt/homebrew/Caskroom/folio` and `/usr/local/Caskroom/folio`, lists the selected Caskroom's `.metadata` record and reads its `Folio.app` link. It starts no `brew` process and changes nothing. <!-- // zh: pending D2 -->
-- **以上五项加上更新检查，正是初次设置卡所问的全部。** 它在从未运行过 Folio 的机器上
-  出现一次，自己什么也不写：按下**完成**按的就是上面列举的那几行设置，而**暂不**一行
-  也不按。卡本身记下的只有一件事：它已经出现过。
-<!-- zh: pending T-OS-SIGNALS-MAC — the English list above now names macOS in the program-search item and adds the "Your region, on macOS" item -->
-- **程序搜索文件夹只在本机受到监视。** Windows 上每次程序扫描都会读取当前账户的
-  `PATH` 和 `PATHEXT`，并浅层监视 `PATH` 中现有的本地文件夹，让新安装的程序不必等到
-  再次打开菜单就能出现。只有 Windows 报告变化时才读取条目名称；不读取文件内容，
-  不连接远程 `PATH` 条目，也不监视可移除卷上的条目。
+- **以上各项加上更新检查，就是初次设置卡可能问到的全部。** 它只列出本机适用的行，
+  所以没装 agent 的机器看到的更少。它在从未运行过 Folio 的机器上出现一次，自己什么也
+  不写：按下**完成**按的就是上面列举的那几行设置，而**暂不**一行也不按。卡本身记下的
+  只有一件事：它已经出现过。
+- **安装渠道在启动时于本机读取。** scoop 安装的副本在其版本文件夹中带有
+  `folio-install.json`。Homebrew 安装的副本可能带有扩展属性
+  `io.github.lulu-loopp.folio.install`（包管理器，以及卸载时是否运行 Folio 的清理）和
+  `io.github.lulu-loopp.folio.caskroom`（要检查的 Caskroom）。没有第二个属性时，Folio
+  只检查 `/opt/homebrew/Caskroom/folio` 和 `/usr/local/Caskroom/folio`，再列出所选
+  Caskroom 的 `.metadata` 文件夹，读取其中的 `Folio.app` 链接，看它是否指向这个应用包。
+  这些都是只读的目录与属性读取：Folio 不读取 `HOMEBREW_PREFIX`，不启动 `brew`，不发送
+  任何内容，也不改动 Homebrew 的文件。所有属性都由包管理器写入；Folio 更新时只沿用已经
+  存在的那些属性。
+- **用 winget 安装的副本，依据 winget 自己的记录识别。** winget 不在文件夹中写任何标记；
+  Folio 启动时只读不改地读取 Windows 注册表中当前账户的卸载条目
+  （`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall`），找到 winget
+  为 Folio 写的那一条，看它是否指向这个副本的文件夹。其他程序的条目一概略过。查到的结果
+  在 `diagnostics.log` 中记为一行，只写 winget 的条目，不写文件夹。
+- **程序搜索文件夹只在本机受到监视。** 在 Windows 和 macOS 上，每次程序扫描都会读取所
+  搜索的 `PATH`（Windows 上是当前账户的，连同 `PATHEXT`；macOS 上是 Folio 启动时得到的），
+  并浅层监视 `PATH` 中现有的每个本地文件夹，让新安装的程序不必等到再次打开菜单就能出现。
+  只有系统报告变化时才读取条目名称；不读取文件内容，不连接远程 `PATH` 条目，也不监视
+  可移除卷上的条目。
+- **macOS 上的地区设置。** Folio 启动时、系统通知地区已更改时，以及上次读取失败后又有
+  新窗格创建时，会向系统询问你的地区设置（`defaults read -g AppleLocale`）和已安装的
+  locale 列表（`locale -a`），以告诉每个新窗格它的 `LANG`。不写入任何内容，结果只保存在
+  内存中。
 - 若干 `BT_*` 环境变量会让 Folio 把终端内容写到你指定的文件——`BT_PTY_DUMP` 写的是每个
   窗格的每一个字节。你不设，它们就都不生效。全部列在 `docs/BT-ENVIRONMENT.md`。
 - **卸载**（设置 ▸ 关于 ▸ 卸载 Folio、`uninstall.cmd` 或 `folio --uninstall`）移除上述 Folio 写入的全部内容以及 Folio 自身的文件；设置和会话目录保留，除非你要求一并移除。

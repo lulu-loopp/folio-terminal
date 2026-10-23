@@ -9,10 +9,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use bt_persist::{
-    BackgroundFitV1, Debouncer, ExitState, LanguageV1, MinimumContrastV1, PsReadLineInviteV1,
-    ReadReport, SETTINGS_SCHEMA_VERSION, SettingsV1, SplitDirectionV1, ThemeModeV1,
-    WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel, read_settings,
-    remove_sentinel, write_settings_atomic,
+    BackgroundFitV1, Debouncer, ExitState, LanguageV1, MinimumContrastV1, ReadReport,
+    SETTINGS_SCHEMA_VERSION, SettingsV1, SplitDirectionV1, ThemeModeV1, WriteAlertAction,
+    WriteFailureTracker, create_sentinel, probe_sentinel, read_settings, remove_sentinel,
+    write_settings_atomic,
 };
 
 fn unique_dir(tag: &str) -> PathBuf {
@@ -46,7 +46,6 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         terminal_font_family: "Cascadia Mono".to_owned(),
         terminal_cjk_font_family: "Microsoft YaHei UI".to_owned(),
         terminal_font_size: 20,
-        psreadline_invite: PsReadLineInviteV1::Installed,
         light_scheme: "Solarized Light".to_owned(),
         dark_scheme: "Nord".to_owned(),
         background_image: r"D:\pictures\ridge.jpg".to_owned(),
@@ -117,10 +116,6 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
     );
     assert!(
         on_disk.contains("\"terminal_font_size\": 20"),
-        "written file must be human-readable JSON: {on_disk}"
-    );
-    assert!(
-        on_disk.contains("\"psreadline_invite\": \"Installed\""),
         "written file must be human-readable JSON: {on_disk}"
     );
     assert!(

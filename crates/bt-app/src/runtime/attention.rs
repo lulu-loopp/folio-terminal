@@ -1,10 +1,11 @@
 //! `attention` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::window_seam::prelude::*;
 use crate::{
     AttentionDelivery, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane, PointerTarget,
     PreviewSurface, Runtime, TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in,
-    attention, attention_trace, emit_attention_lines, float, i18n, marks, native_window,
+    attention, attention_trace, emit_attention_lines, float, i18n, marks, merge_notice_card,
     next_attention_stop, notice, notify, profiles, quit, raise_cancelled_quit_card_on, seats,
     taskbar_lane, toast,
 };
@@ -13,7 +14,7 @@ use bt_layout::SeatId;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Raise a notice (user ruling, 2026-08-16).
     ///
     /// The one door. Everything that wants to say "this just happened" comes
@@ -214,6 +215,21 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// **Say on this window what a batch of re-reads' merges replaced**
+    /// (T-STORE-NOTICE; design note 2026-10-11 §3.6): the card
+    /// ([`merge_notice_card`]) through the one door, [`Self::toast`] — no title,
+    /// no verb, and the hover asked at birth as for every card; nothing for an
+    /// empty notice.
+    pub(crate) fn raise_merge_notice(
+        &mut self,
+        notice: &crate::document_request::MergeNotice,
+    ) -> Result<()> {
+        let Some((kind, anchor, body)) = merge_notice_card(notice) else {
+            return Ok(());
+        };
+        self.toast(kind, anchor, None, body)
     }
 
     /// **The cancelled quit's one choice** (revision (d)2): *Leave without this change* asks
@@ -838,10 +854,8 @@ impl Runtime<'_> {
                 }
             }
         }
-        if !flashes.is_empty()
-            && let Ok(native) = native_window(&self.window.window)
-        {
-            bt_platform::flash_window(native);
+        if !flashes.is_empty() {
+            self.window.window.flash();
             // **Kept with the number of the taskbar answer it was decided on** (ticket 62), so a
             // newer answer that says the bar hides itself can take it back.
             TaskbarFlash::record(
@@ -854,6 +868,14 @@ impl Runtime<'_> {
             Some(error) => self.raise_notification_refusal(&error),
             None => Ok(()),
         }
+    }
+
+    /// **The window came to the foreground, and a taskbar flash ends there** (ticket 62):
+    /// `FLASHW_TIMERNOFG` runs until the window comes forward, and on macOS activation ends the
+    /// bounce, so the record of what the flash was about ends with it. Attention's door for the
+    /// focus; nothing is asked of the platform, which has already stopped.
+    pub(crate) fn window_focused(&mut self) {
+        self.window.taskbar_flash = None;
     }
 
     /// **Take back a taskbar flash the lane's newest answer contradicts** (0.4.5 ticket 62).
@@ -878,9 +900,7 @@ impl Runtime<'_> {
         else {
             return Ok(());
         };
-        if let Ok(native) = native_window(&self.window.window) {
-            bt_platform::stop_flashing_window(native);
-        }
+        self.window.window.stop_flashing();
         self.observe_window_place();
         let place = self.window.observed_place;
         let window = &*self.window;
@@ -1163,3 +1183,7 @@ impl Runtime<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "attention_tests.rs"]
+mod tests;

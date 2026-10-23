@@ -1,6 +1,8 @@
 //! `dpi` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use super::pointer::Ending;
+use crate::window_seam::prelude::*;
 use crate::{
     ResizeReanchor, Runtime, card_trace, dpi_snapshot, earliest_deadline,
     ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner,
@@ -16,7 +18,7 @@ use bt_render::{FrameSource, FrameTrigger};
 use std::time::Instant;
 use winit::dpi::PhysicalSize;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// Grow (or shrink) every self-sizing float to the rows it is now showing.
     ///
     /// Returns whether anything moved. It re-runs the *placement* and not merely
@@ -175,12 +177,13 @@ impl Runtime<'_> {
         now: Instant,
     ) -> Result<Option<Instant>> {
         hang_watch::at(hang_watch::Station::PtyResize);
-        // **A gesture nobody is holding any more is over** (Codex review 2026-09-17). Read before
-        // the held-hand question below, because that question is the one a stale answer ruins: a
-        // divider drag whose capture was taken away with no blur and no button-up would otherwise
-        // read as a hand still on the geometry for the rest of this window's life, and no pane of
-        // it could release or settle another resize.
-        self.end_a_divider_drag_that_lost_its_pointer()?;
+        // **A gesture nobody is holding any more is over** (Codex review 2026-09-17, for the
+        // divider; T-POINTER-CAPTURE R-9, for every gesture). Read before the held-hand question
+        // below, because that question is the one a stale answer ruins: a divider drag whose
+        // capture was taken away with no blur and no button-up would otherwise read as a hand
+        // still on the geometry for the rest of this window's life, and no pane of it could
+        // release or settle another resize.
+        self.end_a_capture_that_lost_its_pointer()?;
         let active = self.window.active_tab;
         let focused_seat = self.window.tabs[active].focused_leaf;
         // **Is a hand still on the geometry** — see [`service_pending_pty_resize`]. The two
@@ -422,6 +425,11 @@ impl Runtime<'_> {
     /// has changed yet. See [`DpiRectangle`], which is announced here and holds
     /// the whole of that argument.
     pub(crate) fn scale_factor_changed(&mut self) -> Result<()> {
+        // **First, a gesture measured in the pixels being left** (T-POINTER-CAPTURE R-9): a grab
+        // inside a thumb or a floating window's head, a press's origin, a picture's last point
+        // are distances at the old scale, so the gesture holding one is cancelled before anything
+        // below re-lays the window at the new one.
+        self.end_capture(Ending::ScaleChange)?;
         // A scale change is a display change on every road that produces one, so
         // the rate is re-read here as well as on the move — see
         // [`Self::follow_the_display`]. The two events do not always both

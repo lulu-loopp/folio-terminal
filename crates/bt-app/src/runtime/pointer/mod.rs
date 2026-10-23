@@ -13,16 +13,18 @@
 //! (`every_pointer_read_is_the_routers_or_a_captures`, §4.2).
 
 mod capture;
+mod ending;
 mod release;
 mod router;
 pub(crate) mod touch;
 
+pub(crate) use capture::{ButtonSet, CaptureOwner, PointerCapture};
 #[cfg(test)]
 pub(crate) use capture::{
-    CaptureIndex, PressVerdict, cancel_then_route, capture_index_for_button_event, latch_in,
-    press_against_the_slot, release_ends_the_capture,
+    PressVerdict, ReleaseVerdict, cancel_then_route, press_against_the_slot,
+    release_against_the_slot,
 };
-pub(crate) use capture::{CaptureOwner, PointerCapture};
+pub(crate) use ending::{Ending, Gone, Leaving, OwnerGone};
 
 #[cfg(test)]
 pub(crate) use router::{BANDS_THAT_TAKE_NO_POINTER, POINTER_LAYERS_TOP_FIRST, Visits};
@@ -30,11 +32,19 @@ pub(crate) use router::{
     FloatFacts, Plane, PointerFacts, PointerHit, PointerScene, walk_pointer_layers,
 };
 
+use crate::window_seam::prelude::*;
 use crate::{PreviewSurface, Runtime, float, git_panel, hang_watch, risen_frame, seats};
 use anyhow::Result;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::WindowEvent;
+
+/// **Where the pointer is now, in a native window's own physical pixels** — the system's reading
+/// behind the native backend's `WindowHost::pointer_in_window` door, read here where every
+/// pointer read belongs; `None` where the platform will not say.
+pub(crate) fn pointer_in_native_window(native: bt_platform::NativeWindow) -> Option<(i32, i32)> {
+    bt_platform::pointer_position_in_window(native)
+}
 
 /// **Whether a window event is a pointer event** — the dispatcher's one
 /// question about the pointer, answered here so that it names no pointer kind
@@ -105,7 +115,73 @@ pub(crate) struct PointerMemo {
     answer: Option<(PhysicalPosition<f64>, Option<PointerHit>)>,
 }
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
+    /// **The hosted page under the hand** — the page layer's own answer, whatever gesture is
+    /// held: the page whose shown bounds hold the point, less what stands over it there (the tab
+    /// list, a download sheet, an open search capsule). [`Runtime::web_page_at`] is this with a
+    /// held gesture subtracted, for the press, the hover and the cursor; the wheel asks this
+    /// itself, because under a held gesture a notch over a page is the page layer's to swallow
+    /// rather than a notch over nothing (R-10, cut 6).
+    pub(crate) fn page_under_the_hand(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<crate::LeafId> {
+        let (x, y) = (position.x as f32, position.y as f32);
+        if self.tab_list_target_at(position).is_some() {
+            return None;
+        }
+        if self
+            .window
+            .web_sheet_layouts
+            .iter()
+            .any(|(_, layout)| crate::websheet::covers(layout, x, y))
+        {
+            return None;
+        }
+        let inside = |box_: [f32; 4]| x >= box_[0] && x < box_[2] && y >= box_[1] && y < box_[3];
+        if self
+            .window
+            .search_layout
+            .is_some_and(|capsule| self.window.search.is_open() && inside(capsule.frame))
+        {
+            return None;
+        }
+        self.web_page_shown_at(position)
+    }
+
+    /// **Where the cursor is, this instant, in this window's own pixels**
+    /// (GitHub issue #1 ②, owner's ruling 2026-09-16: a drop lands in the pane
+    /// under the cursor).
+    ///
+    /// **Two readers, and they are the two gestures that put a path on a command
+    /// line.** [`Self::collect_dropped_file`] asks it as an external drop
+    /// arrives, and [`Self::keep_the_paste_offer`] asks it as an internal drag is
+    /// let go of (review 2026-09-17). Both for one reason: there is only one
+    /// instant at which "where is the cursor" and "where was this let go of" are
+    /// the same question, and it is the one this process is standing in while
+    /// the platform delivers the release. Nothing else in this window reads it,
+    /// and the name is the platform's rather than either gesture's so that
+    /// neither road can grow a second door.
+    ///
+    /// **The units are `CursorMoved`'s and no conversion happens here**, which
+    /// was checked rather than assumed. On Windows a pointer event is
+    /// `WM_MOUSEMOVE`'s `lParam` — physical pixels from the client area's
+    /// top-left — which is precisely what `GetCursorPos` put through
+    /// `ScreenToClient` answers. On macOS winit takes its view's point and
+    /// multiplies by the window's backing scale, which is precisely what the
+    /// AppKit arm does with `NSEvent.mouseLocation` after the same two
+    /// conversions. So the platform's answer is already in the window's physical
+    /// pixels and is used as it stands; scaling it again here would square the
+    /// factor on every Retina and every 150% display.
+    ///
+    /// Neither `pointer_position` nor [`crate::WindowRuntime::pointer_last_seen`] is
+    /// read: both say where the hand was *before* the drag, which is not where
+    /// this drop landed, and a routing built on either would be a guess wearing
+    /// a measurement's clothes.
+    pub(in crate::runtime) fn platform_pointer_now(&self) -> Option<PhysicalPosition<f64>> {
+        crate::platform_pointer_of(self.window.window.pointer_in_window())
+    }
+
     /// **The one door every pointer event of a window comes through**
     /// (T-POINTER-CAPTURE cut 1). The dispatcher hands over each event
     /// [`is_pointer_event`] names; a pointer entering the window asks nothing,
@@ -295,3 +371,7 @@ impl Runtime<'_> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "held_tests.rs"]
+mod held_tests;

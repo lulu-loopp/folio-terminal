@@ -1,17 +1,18 @@
 //! `frame` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::wake_owner::WakeOwner;
+use crate::window_seam::prelude::*;
 use crate::{
     BrokerAim, Drag, FILES_NOTICE_DWELL, FOOT_REVEAL_FEEDBACK, Fading, FrameImageReferences,
     FrameTraces, GhostFace, HyperlinkActivation, PaneDraw, PointerTarget, PresentIntent, Runtime,
     STARTUP_PTY_POLL_INTERVAL, SearchRefresh, TabPress, a_bare_redraw_still_owes_a_present,
     advance_periodic_deadline, apply_hover_marks, attention_ledger_deadline, chrome_over,
-    chrome_tick_reuses_picture, dispatch_tab_decoration_tasks, earliest_named_deadline, files,
-    foreground_program_deadline, git, hang_watch, hyperlink_activation, ime_outbound,
-    mark_leaf_painted, math_copy_window, native_window, present_diagnostics, present_gate, preview,
-    pty_drain_says_nothing_new, pty_frame_is_unchanged, sample_window_place, seats, settings,
-    settling, startup_poll_delay, take_math_worker_notice, trace_sink, trace_unchanged_present,
-    update, webhost,
+    chrome_tick_reuses_picture, dispatch_tab_decoration_tasks, earliest_named_deadline, files, git,
+    hang_watch, hyperlink_activation, ime_outbound, mark_leaf_painted, math_copy_window,
+    present_diagnostics, present_gate, preview, pty_drain_says_nothing_new, pty_frame_is_unchanged,
+    sample_window_place, seats, settings, settling, startup_poll_delay, take_math_worker_notice,
+    toast, trace_sink, trace_unchanged_present, update, webhost,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -24,7 +25,7 @@ use bt_viewport::{HyperlinkHit, ViewportFrame};
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalPosition;
 
-impl Runtime<'_> {
+impl<B: Backend> Runtime<'_, B> {
     /// **What the platform draws in this window's title bar** (M3-3, owner
     /// ruling 2026-09-12).
     ///
@@ -976,10 +977,7 @@ impl Runtime<'_> {
         state.attempted(&attempt);
         if self.app.trace_perf {
             hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
-                let native = native_window(&self.window.window)
-                    .ok()
-                    .map(bt_platform::native_present_facts)
-                    .unwrap_or_default();
+                let native = self.window.window.present_facts();
                 trace_sink::stderr_line(
                     attempt.line(
                         native,
@@ -1638,7 +1636,7 @@ impl Runtime<'_> {
         &mut self,
         now: Instant,
         application_clocks: bool,
-    ) -> Result<Option<Instant>> {
+    ) -> Result<Option<(WakeOwner, Instant)>> {
         self.check_picture_freshness(now, false);
         // **The frame debt belongs to the turn that incurs it** (owner's report
         // 2026-09-18). Opened here rather than cleared wherever it is paid,
@@ -1693,10 +1691,17 @@ impl Runtime<'_> {
         // The four answers a platform modal can have left behind, under their
         // own name (T-STATION-SPLIT) — see [`hang_watch::Station::Pickers`].
         hang_watch::at(hang_watch::Station::Pickers);
-        self.apply_math_context_menu_result();
+        self.apply_math_context_menu_result()?;
         self.apply_folder_pick_result()?;
         self.apply_image_pick_result()?;
         self.apply_save_pick_result()?;
+        // **What the clipboard lane answered this window, and the pastes it no longer wants**
+        // (`clipboard_lane`): before the drain, so a paste that has landed goes to its shell ahead
+        // of the turn's output; and on every turn, so a lost wake loses no answer and a paste's
+        // deadline is kept on the turn it falls in.
+        hang_watch::during(hang_watch::Station::ClipboardRead, || {
+            self.settle_clipboard(now)
+        })?;
         self.drain_pty()?;
         if !self.window.first_text_presented && now >= self.window.startup_poll_at {
             advance_periodic_deadline(
@@ -1736,9 +1741,6 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::ClockRaiseFirstRunIfDue, || {
             self.raise_first_run_if_due()
         })?;
-        hang_watch::during(hang_watch::Station::ClockRaisePsreadlineInviteIfDue, || {
-            self.raise_psreadline_invite_if_due()
-        })?;
         hang_watch::during(hang_watch::Station::ClockAdvanceCursorBlinkIfDue, || {
             self.advance_cursor_blink_if_due(now)
         })?;
@@ -1752,6 +1754,11 @@ impl Runtime<'_> {
             .quit
             .as_ref()
             .is_some_and(crate::quit::Quit::holds_the_storage_worker);
+        // The storage worker's two clocks — the storage watch's re-read and the autosave — run
+        // under this one predicate, and the wake fold books them under it too
+        // (T-WINDOW-THREAD-UNDER-LOAD): a clock reported while its spender is held is an instant
+        // the loop would spin on.
+        let storage_clocks = application_clocks && !quit_holds_the_worker;
         if application_clocks {
             // A poll of the world outside this process, put back on the clock
             // run's name the moment it returns (T-STATION-SPLIT).
@@ -1759,7 +1766,7 @@ impl Runtime<'_> {
             hang_watch::during(hang_watch::Station::ClockAdvanceSchemeWatch, || {
                 self.advance_scheme_watch(now)
             })?;
-            if !quit_holds_the_worker {
+            if storage_clocks {
                 hang_watch::during(hang_watch::Station::ClockAdvanceStorageWatch, || {
                     self.advance_storage_watch(now)
                 })?;
@@ -1848,12 +1855,22 @@ impl Runtime<'_> {
         hang_watch::during(hang_watch::Station::ClockAdvanceGitWatch, || {
             self.advance_git_watch()
         })?;
-        if application_clocks && !quit_holds_the_worker {
+        if storage_clocks {
             // `flush_if_due` stamps [`hang_watch::Station::Autosave`] itself,
             // and since T-STATION-SPLIT that name covers the file it writes and
             // nothing else: the clock run below says its own name on the very
             // next line.
-            self.app.session_store.flush_if_due(now);
+            // **A session that cannot be saved is said once per streak** (`persist`'s
+            // `REFUSALS_BEFORE_TOLD`; `docs/M2-persistence-schema-v1.md` §5.3), on the card the
+            // start-up announcement uses for it.
+            if let Some(fault) = self.app.session_store.autosave(now) {
+                self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    None,
+                    fault,
+                )?;
+            }
         }
         // **The one rule, in the one place it can be kept.** Whichever rung holds
         // the keyboard publishes its caret here, at the tail of every pass —
@@ -2167,63 +2184,63 @@ impl Runtime<'_> {
             && self.window.settings.category() == settings::SettingsCategory::About)
             .then(|| update::last_checked_deadline(now, update::unix_epoch_ms()))
             .flatten();
-        const DEADLINE_OWNERS: [&str; 56] = [
-            "startup poll",
-            "IME cursor",
-            "shell caret",
-            "tab press",
-            "rename caret",
-            "strip animation",
-            "web teardown",
-            "PTY resize",
-            "resize finish",
-            "synchronized update",
-            "live stability",
-            "foreground program",
-            "PTY coalesce",
-            "attention credential",
-            "tooltip",
-            "key hint",
-            "Cards hint",
-            "toast",
-            "command flash",
-            "command rails",
-            "terminal thumbs",
-            "layout peek",
-            "file peek",
-            "file-peek close grace",
-            "file-peek dwell",
-            "float",
-            "revealed foot",
-            "web zoom acknowledgement",
-            "web dialog acknowledgement",
-            "preview save notice",
-            "preview refusal",
-            "chevrons",
-            "pane menu",
-            "terminal menu",
-            "tab menu",
-            "drag spring",
-            "drag auto-scroll",
-            "hyperlink hover",
-            "peek hover",
-            "formula tools",
-            "formula toggle",
-            "formula-copy acknowledgement",
-            "preview resample",
-            "session save",
-            "schemes watch",
-            "storage watch",
-            "git watch",
-            "update check",
-            "About last checked",
-            "preview watch",
-            "files watch",
-            "refused frame",
-            "window title",
-            "search walk",
-            "web engine warm-up",
-            "spare web controller",
+        const DEADLINE_OWNERS: [WakeOwner; 56] = [
+            WakeOwner::StartupPoll,
+            WakeOwner::ImeCursor,
+            WakeOwner::ShellCaret,
+            WakeOwner::TabPress,
+            WakeOwner::RenameCaret,
+            WakeOwner::StripAnimation,
+            WakeOwner::WebTeardown,
+            WakeOwner::PtyResize,
+            WakeOwner::ResizeFinish,
+            WakeOwner::SynchronizedUpdate,
+            WakeOwner::LiveStability,
+            WakeOwner::PtyCoalesce,
+            WakeOwner::AttentionCredential,
+            WakeOwner::Tooltip,
+            WakeOwner::KeyHint,
+            WakeOwner::CardsHint,
+            WakeOwner::Toast,
+            WakeOwner::ClipboardPasteDeadline,
+            WakeOwner::CommandFlash,
+            WakeOwner::CommandRails,
+            WakeOwner::TerminalThumbs,
+            WakeOwner::LayoutPeek,
+            WakeOwner::FilePeek,
+            WakeOwner::FilePeekCloseGrace,
+            WakeOwner::FilePeekDwell,
+            WakeOwner::Float,
+            WakeOwner::RevealedFoot,
+            WakeOwner::WebZoomAcknowledgement,
+            WakeOwner::WebDialogAcknowledgement,
+            WakeOwner::PreviewSaveNotice,
+            WakeOwner::PreviewRefusal,
+            WakeOwner::Chevrons,
+            WakeOwner::PaneMenu,
+            WakeOwner::TerminalMenu,
+            WakeOwner::TabMenu,
+            WakeOwner::DragSpring,
+            WakeOwner::DragAutoScroll,
+            WakeOwner::HyperlinkHover,
+            WakeOwner::PeekHover,
+            WakeOwner::FormulaTools,
+            WakeOwner::FormulaToggle,
+            WakeOwner::FormulaCopyAcknowledgement,
+            WakeOwner::PreviewResample,
+            WakeOwner::SessionSave,
+            WakeOwner::SchemesWatch,
+            WakeOwner::StorageWatch,
+            WakeOwner::GitWatch,
+            WakeOwner::UpdateCheck,
+            WakeOwner::AboutLastChecked,
+            WakeOwner::PreviewWatch,
+            WakeOwner::FilesWatch,
+            WakeOwner::RefusedFrame,
+            WakeOwner::WindowTitle,
+            WakeOwner::SearchWalk,
+            WakeOwner::WebEngineWarmUp,
+            WakeOwner::SpareWebController,
         ];
         let deadlines = [
             startup_deadline,
@@ -2255,7 +2272,12 @@ impl Runtime<'_> {
             resize_finish_deadline,
             synchronized_update_deadline,
             live_stability_deadline,
-            foreground_program_deadline(&self.window.tabs),
+            // **No foreground-program cadence** (T-WINDOW-THREAD-UNDER-LOAD round 3). The cadence
+            // is a gate on the publish of a pane's own output (`dispatch_tab_decoration_tasks`
+            // asks `Cadence::should_request` with the publish's instant), and no turn spends it:
+            // booked here, a frame candidate's five-second instant — in a background tab, or in
+            // the tab on screen while nothing printed — came due on a turn that probed nothing,
+            // stayed in the past, and the loop spun on it until that tab published.
             // **The bounded wait for the rest of a burst**, and the wake that keeps
             // [`coalesce::Pending`]'s invariant true: a deferred publication is never `Some`
             // without this line booking the turn that pays it. A window whose panes are not
@@ -2265,7 +2287,14 @@ impl Runtime<'_> {
             // A standing credential's ten minutes, and only while one is standing. A window whose
             // panes are asking for nothing reports nothing and costs no wake-ups at all — which is
             // every window, almost always.
-            attention_ledger_deadline(&self.window.tabs),
+            // Spent by `settle_attention`, which runs behind the strip's tick and the window's frame
+            // gate (`advance_strip_animation`), so it is booked no earlier than the turn that gate
+            // admits (T-WINDOW-THREAD-UNDER-LOAD): a due credential refused by the gate is an
+            // instant the loop would otherwise spin on until the gate opens.
+            attention_ledger_deadline(&self.window.tabs).map(|due| {
+                self.strip_animation_next_tick(self.window.frame_clock.interval())
+                    .map_or(due, |tick| due.max(tick))
+            }),
             // The tip's 380ms while one is settling, and the fade's own frames
             // until it lands. A window with no tip under the pointer reports
             // nothing and costs no wake-ups at all.
@@ -2285,6 +2314,9 @@ impl Runtime<'_> {
             // finishing — and nothing at all while one is held under the pointer,
             // because a stopped clock owes no wake-ups (2026-08-16).
             self.toast_deadline(now),
+            // A paste the clipboard lane still owes this window, withdrawn at its deadline if it is
+            // still owed then (`clipboard_lane::PASTE_DEADLINE`); nothing while none is.
+            self.window.clipboard.deadline(),
             // The jump flash's own 950ms, at the animation's rate and only while
             // one is running. A window that has not jumped asks for nothing.
             self.command_flash_deadline(now),
@@ -2425,7 +2457,8 @@ impl Runtime<'_> {
             // in the past must be impossible rather than merely unreached.
             math_copy_window(self.window.math_copied.as_ref().map(|(_, at)| at), now),
             self.preview_resample_deadline(),
-            application_clocks
+            // Under its spender's own predicate (`storage_clocks`, T-WINDOW-THREAD-UNDER-LOAD).
+            storage_clocks
                 .then(|| self.app.session_store.deadline())
                 .flatten(),
             // The schemes folder's own debounce, on the same terms: absent for
@@ -2435,7 +2468,8 @@ impl Runtime<'_> {
                 .flatten(),
             // And the storage folder's, on exactly the same terms — absent for
             // every window in which nothing at all has been written lately.
-            application_clocks
+            // Under its spender's own predicate (`storage_clocks`, T-WINDOW-THREAD-UNDER-LOAD).
+            storage_clocks
                 .then(|| self.app.storage_watch.deadline())
                 .flatten(),
             // The debounce a change notification started (R31's D): the
@@ -2519,12 +2553,20 @@ impl Runtime<'_> {
             && at.saturating_duration_since(now) < Duration::from_millis(100)
         {
             trace_sink::stderr_line(format!(
-                "BT_PERF_TRACE idle_wake owner={owner:?} in_us={}",
+                "BT_PERF_TRACE idle_wake owner={:?} in_us={}",
+                WakeOwner::name(owner),
                 at.saturating_duration_since(now).as_micros(),
             ));
         }
-        let wake_deadline = wake.map(|(_, at)| at);
-        self.reap_exited_tabs()?;
-        Ok(wake_deadline)
+        self.reap_exited_tabs(now)?;
+        Ok(wake)
     }
 }
+
+#[cfg(test)]
+#[path = "frame_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "wake_fold_tests.rs"]
+mod wake_fold_tests;

@@ -57,6 +57,7 @@ $portable = @(
     "bt-transcript",
     "bt-viewport",
     "bt-render",
+    "bt-render-probe",
     "bt-term",
     "bt-pty",
     "bt-corpus",

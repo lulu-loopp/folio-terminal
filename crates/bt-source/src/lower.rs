@@ -35,9 +35,10 @@ use syn::spanned::Spanned;
 
 use crate::declarations::{Compilation, cfg_predicates};
 use crate::index::{
-    CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord, ImplRecord, Index,
-    ItemKind, ItemRecord, LiteralRecord, LiteralValue, MacroKind, MacroRecord, MacroShape,
-    ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord, UnsupportedMacroShape,
+    AliasRecord, CommentKind, CommentRecord, ConditionalVariant, DeclarationPath, FileRecord,
+    ImplRecord, Index, ItemKind, ItemRecord, LiteralRecord, LiteralValue, MacroKind, MacroRecord,
+    MacroShape, ModuleRecord, ModuleShape, Span, TokenKind, TokenRecord, TraitRecord,
+    UnsupportedMacroShape, UseRecord, ValueKind, ValueRecord,
 };
 use crate::reject::Rejection;
 use crate::universe::Universe;
@@ -69,6 +70,10 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     let mut comments = Vec::new();
     let mut items = Vec::new();
     let mut impls = Vec::new();
+    let mut traits = Vec::new();
+    let mut uses = Vec::new();
+    let mut aliases = Vec::new();
+    let mut values = Vec::new();
     let mut modules = Vec::new();
     let mut macros = Vec::new();
     let mut shapes = Vec::new();
@@ -183,6 +188,10 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
                     declared: &declared,
                     items: &mut items,
                     impls: &mut impls,
+                    traits: &mut traits,
+                    uses: &mut uses,
+                    aliases: &mut aliases,
+                    values: &mut values,
                     modules: &mut modules,
                 };
                 // The stack opens empty and unconditional: what stands *outside*
@@ -211,6 +220,14 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
     items.shrink_to_fit();
     impls.shrink_to_fit();
     impls.sort_by_key(|block| (block.whole().start(), block.whole().end()));
+    traits.shrink_to_fit();
+    traits.sort_by_key(|declaration| (declaration.whole().start(), declaration.whole().end()));
+    uses.shrink_to_fit();
+    uses.sort_by_key(|used| (used.whole().start(), used.whole().end()));
+    aliases.shrink_to_fit();
+    aliases.sort_by_key(|alias| (alias.whole().start(), alias.whole().end()));
+    values.shrink_to_fit();
+    values.sort_by_key(|value| (value.whole().start(), value.whole().end()));
     macros.shrink_to_fit();
     macros.sort_by_key(|record| (record.tokens.start(), record.tokens.end()));
     shapes.shrink_to_fit();
@@ -226,6 +243,10 @@ pub(crate) fn build(universe: &Universe) -> Result<Index, Vec<Rejection>> {
         by_path,
         items,
         impls,
+        traits,
+        uses,
+        aliases,
+        values,
         modules,
         tokens,
         literals,
@@ -783,6 +804,10 @@ struct Parsed<'a> {
     declared: &'a [DeclarationPath],
     items: &'a mut Vec<ItemRecord>,
     impls: &'a mut Vec<ImplRecord>,
+    traits: &'a mut Vec<TraitRecord>,
+    uses: &'a mut Vec<UseRecord>,
+    aliases: &'a mut Vec<AliasRecord>,
+    values: &'a mut Vec<ValueRecord>,
     modules: &'a mut Vec<ModuleRecord>,
 }
 
@@ -993,8 +1018,10 @@ impl Parsed<'_> {
                     let whole = self.span(opens..written.end);
                     let body = self.span(written);
                     self.impls.push(ImplRecord {
+                        declared: self.declarations_for(module),
                         type_owner: owner.clone(),
                         trait_name: trait_name.clone(),
+                        trait_path: block.trait_.as_ref().map(|(_, path, _)| segments(path)),
                         variant: ConditionalVariant {
                             predicates: predicates.clone(),
                             compilation: inside,
@@ -1003,6 +1030,23 @@ impl Parsed<'_> {
                         body,
                     });
                     for member in &block.items {
+                        if let syn::ImplItem::Const(constant) = member {
+                            self.value(
+                                module,
+                                predicates,
+                                inside,
+                                &constant.attrs,
+                                Some(&constant.vis),
+                                constant.const_token.span.byte_range().start,
+                                constant.semi_token.span.byte_range().end,
+                                (
+                                    constant.ident.to_string(),
+                                    Some(owner.clone()),
+                                    trait_name.clone(),
+                                    ValueKind::Const,
+                                ),
+                            );
+                        }
                         let syn::ImplItem::Fn(function) = member else {
                             continue;
                         };
@@ -1034,7 +1078,41 @@ impl Parsed<'_> {
                     predicates.extend(own);
                     let inside = gate.and(compilation);
                     let trait_name = definition.ident.to_string();
+                    let written = braces(&definition.brace_token);
+                    let opens = start_of(
+                        &definition.attrs,
+                        Some(&definition.vis),
+                        definition.trait_token.span.byte_range().start,
+                    );
+                    self.traits.push(TraitRecord {
+                        declared: self.declarations_for(module),
+                        name: trait_name.clone(),
+                        supertraits: supertraits(definition),
+                        variant: ConditionalVariant {
+                            predicates: predicates.clone(),
+                            compilation: inside,
+                        },
+                        whole: self.span(opens..written.end),
+                        body: self.span(written),
+                    });
                     for member in &definition.items {
+                        if let syn::TraitItem::Const(constant) = member {
+                            self.value(
+                                module,
+                                predicates,
+                                inside,
+                                &constant.attrs,
+                                None,
+                                constant.const_token.span.byte_range().start,
+                                constant.semi_token.span.byte_range().end,
+                                (
+                                    constant.ident.to_string(),
+                                    None,
+                                    Some(trait_name.clone()),
+                                    ValueKind::Const,
+                                ),
+                            );
+                        }
                         let syn::TraitItem::Fn(function) = member else {
                             continue;
                         };
@@ -1067,9 +1145,108 @@ impl Parsed<'_> {
                     }
                     predicates.truncate(depth);
                 }
+                syn::Item::Const(constant) => {
+                    self.value(
+                        module,
+                        predicates,
+                        gate,
+                        &constant.attrs,
+                        Some(&constant.vis),
+                        constant.const_token.span.byte_range().start,
+                        constant.semi_token.span.byte_range().end,
+                        (constant.ident.to_string(), None, None, ValueKind::Const),
+                    );
+                }
+                syn::Item::Static(value) => {
+                    self.value(
+                        module,
+                        predicates,
+                        gate,
+                        &value.attrs,
+                        Some(&value.vis),
+                        value.static_token.span.byte_range().start,
+                        value.semi_token.span.byte_range().end,
+                        (value.ident.to_string(), None, None, ValueKind::Static),
+                    );
+                }
+                syn::Item::Type(alias) => {
+                    let (own, compilation) = cfg_predicates(&alias.attrs, self.text);
+                    let opens = start_of(
+                        &alias.attrs,
+                        Some(&alias.vis),
+                        alias.type_token.span.byte_range().start,
+                    );
+                    let mut standing = predicates.clone();
+                    standing.extend(own);
+                    self.aliases.push(AliasRecord {
+                        declared: self.declarations_for(module),
+                        name: alias.ident.to_string(),
+                        variant: ConditionalVariant {
+                            predicates: standing,
+                            compilation: gate.and(compilation),
+                        },
+                        whole: self.span(opens..alias.semi_token.span.byte_range().end),
+                    });
+                }
+                syn::Item::Use(used) => {
+                    let (own, compilation) = cfg_predicates(&used.attrs, self.text);
+                    let mut names = Vec::new();
+                    let mut globs = Vec::new();
+                    flatten_use(&used.tree, &mut Vec::new(), &mut names, &mut globs);
+                    let opens = start_of(
+                        &used.attrs,
+                        Some(&used.vis),
+                        used.use_token.span.byte_range().start,
+                    );
+                    let mut standing = predicates.clone();
+                    standing.extend(own);
+                    self.uses.push(UseRecord {
+                        declared: self.declarations_for(module),
+                        names,
+                        globs,
+                        variant: ConditionalVariant {
+                            predicates: standing,
+                            compilation: gate.and(compilation),
+                        },
+                        whole: self.span(opens..used.semi_token.span.byte_range().end),
+                    });
+                }
                 _ => {}
             }
         }
+    }
+
+    /// One `const` or `static` ([`ValueRecord`]): `named` is its name, the type an `impl` block is
+    /// for, the trait, and the keyword.
+    #[allow(clippy::too_many_arguments)]
+    fn value(
+        &mut self,
+        module: &[String],
+        predicates: &[String],
+        gate: Compilation,
+        attrs: &[syn::Attribute],
+        visibility: Option<&syn::Visibility>,
+        keyword: usize,
+        end: usize,
+        named: (String, Option<String>, Option<String>, ValueKind),
+    ) {
+        let (own, compilation) = cfg_predicates(attrs, self.text);
+        let opens = start_of(attrs, visibility, keyword);
+        let mut standing = predicates.to_vec();
+        standing.extend(own);
+        let (name, type_owner, trait_name, kind) = named;
+        self.values.push(ValueRecord {
+            declared: self.declarations_for(module),
+            name,
+            type_owner,
+            trait_name,
+            kind,
+            variant: ConditionalVariant {
+                predicates: standing,
+                compilation: gate.and(compilation),
+            },
+            whole: self.span(opens..end),
+        });
     }
 
     /// The module paths an inline module inside this file answers to — one per
@@ -1252,6 +1429,93 @@ impl Parsed<'_> {
         // no arguments to drop, so it is its own spelling with the source's own
         // spacing collapsed.
         collapsed(&self.text[ty.span().byte_range()])
+    }
+}
+
+/// A path's segments, without arguments: `crate::lane::Owed<Id>` is
+/// `["crate", "lane", "Owed"]`.
+fn segments(path: &syn::Path) -> Vec<String> {
+    path.segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect()
+}
+
+/// The supertraits a trait declaration names: the bounds after its name and
+/// those its `where` clause puts on `Self`, each a path without arguments; a
+/// relaxed `?Sized` and a lifetime are none.
+fn supertraits(definition: &syn::ItemTrait) -> Vec<Vec<String>> {
+    let named = |bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>| {
+        bounds
+            .iter()
+            .filter_map(|bound| match bound {
+                syn::TypeParamBound::Trait(bound)
+                    if matches!(bound.modifier, syn::TraitBoundModifier::None) =>
+                {
+                    Some(segments(&bound.path))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut found = named(&definition.supertraits);
+    for predicate in definition
+        .generics
+        .where_clause
+        .iter()
+        .flat_map(|clause| &clause.predicates)
+    {
+        if let syn::WherePredicate::Type(predicate) = predicate
+            && let syn::Type::Path(bounded) = &predicate.bounded_ty
+            && bounded.qself.is_none()
+            && bounded.path.is_ident("Self")
+        {
+            found.extend(named(&predicate.bounds));
+        }
+    }
+    found
+}
+
+/// A `use` tree, flattened into the names it brings in and the globs it opens;
+/// `prefix` is the path written before this subtree.
+fn flatten_use(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    names: &mut Vec<(String, Vec<String>)>,
+    globs: &mut Vec<Vec<String>>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            flatten_use(&path.tree, prefix, names, globs);
+            prefix.pop();
+        }
+        syn::UseTree::Name(name) => {
+            let name = name.ident.to_string();
+            if name == "self" {
+                if let Some(last) = prefix.last() {
+                    names.push((last.clone(), prefix.clone()));
+                }
+            } else {
+                let mut path = prefix.clone();
+                path.push(name.clone());
+                names.push((name, path));
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            let original = rename.ident.to_string();
+            let mut path = prefix.clone();
+            if original != "self" {
+                path.push(original);
+            }
+            names.push((rename.rename.to_string(), path));
+        }
+        syn::UseTree::Glob(_) => globs.push(prefix.clone()),
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                flatten_use(tree, prefix, names, globs);
+            }
+        }
     }
 }
 
@@ -1557,6 +1821,10 @@ mod tests {
         };
         let mut items = Vec::new();
         let mut impls = Vec::new();
+        let mut traits = Vec::new();
+        let mut uses = Vec::new();
+        let mut aliases = Vec::new();
+        let mut values = Vec::new();
         let mut modules = Vec::new();
         let parsed = Parsed {
             text,
@@ -1565,6 +1833,10 @@ mod tests {
             declared: &[],
             items: &mut items,
             impls: &mut impls,
+            traits: &mut traits,
+            uses: &mut uses,
+            aliases: &mut aliases,
+            values: &mut values,
             modules: &mut modules,
         };
         let owner = parsed.type_owner(&block.self_ty);

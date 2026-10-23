@@ -48,14 +48,14 @@
 //!
 //! 1. **[`current`] itself** — an atomic now, not a `OnceLock`, so [`install`]
 //!    can be called again. It is read from the layout code on the UI thread and
-//!    from the PSReadLine probe's thread, hence `Relaxed` loads of a plain word
-//!    rather than a lock.
+//!    from workers' threads, hence `Relaxed` loads of a plain word rather than a
+//!    lock.
 //! 2. **[`lang_revision`]** — the number that did not exist. It feeds
 //!    `bt_doc::LayoutKey::lang_rev`, which is what makes the language a member
 //!    of the layout's identity rather than an ambient fact about it.
-//! 3. **`crate::psreadline::row_description`'s three `OnceLock<String>`** — the
-//!    only process-lifetime string cache in this app that is built out of this
-//!    table. It is keyed by [`Lang`] now, which is why it has room for six.
+//! 3. A process-lifetime string cache built out of this table must be keyed by
+//!    [`Lang`] (the retired PSReadLine row's was the first; [`intern`] is the one
+//!    left).
 //!
 //! Everything else was audited and is language-neutral by construction:
 //! `profiles::title`'s cache holds names this file deliberately does not carry,
@@ -98,9 +98,8 @@ use bt_platform::HostPlatform;
 /// a typo in it.
 ///
 /// `repr(u8)` because the live answer is an atomic word — see [`Current`]. The
-/// discriminants are also the indices of the per-language cache slots
-/// `crate::psreadline::row_description` keeps, which is what [`Self::COUNT`] and
-/// [`Self::from_index`] are for: a third variant then fails to compile in the
+/// discriminants are also the indices of any per-language cache slots, which is
+/// what [`Self::COUNT`] and [`Self::from_index`] are for: a third variant then fails to compile in the
 /// one place that would otherwise have silently kept two.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
@@ -444,6 +443,9 @@ text_entries! {
     PastePathNushell,
     PasteClipboardPromise,
     PasteClipboardRead,
+    /// Another program held the clipboard past a paste's deadline, or the clipboard lane could
+    /// take no more requests (T-CLIPBOARD-LANE).
+    PasteClipboardBusy,
     /// The clipboard held a picture and the file Folio writes for it could not
     /// be written (§7.61).
     PasteClipboardPicture,
@@ -587,9 +589,6 @@ text_entries! {
     CjkKorean,
     CjkUndeclared,
     RowFontSize,
-    /// The Terminal page's first row, and therefore the row that puts that page
-    /// in the rail at all.
-    RowPsReadLine,
 
     DescTheme,
     DescCursor,
@@ -689,30 +688,6 @@ text_entries! {
     // `no_string_in_this_table_asks_for_a_relaunch` is the pin, and it reads this
     // file, so the words it forbids are not spelled out here.
 
-    // ── the PSReadLine row and its invitation ──────────────────────
-    /// The row's line while the out-of-band probe has not answered yet. It is a
-    /// real state and not a placeholder: the probe starts a process, and on a
-    /// cold machine that takes long enough to see.
-    PsReadLineProbing,
-    /// The row's line when the newest probe failed: unknown, never "no module", and asked again
-    /// when the page opens (T-PROBE-NO-CACHED-FAILURE).
-    PsReadLineCheckFailed,
-    /// `settings.json` says Folio installed the module and the directory is not
-    /// there. Something outside Folio removed it, which is a fact the row owes
-    /// the reader rather than a state to silently correct.
-    PsReadLineRowGone,
-    /// A module somebody else wrote is standing in the directory Folio installs
-    /// into, so neither verb on the row is offered (audit 3, E-1).
-    PsReadLineRowNotOurs,
-    /// The invitation's own question. It names the symptom the reader has
-    /// already seen — the input line that does not follow the window — rather
-    /// than the module, because the module is not what they noticed.
-    PsReadLineInviteTitle,
-    PsReadLineInstall,
-    /// The refusal, worded so it is plainly not the last chance: the Terminal
-    /// page keeps the row.
-    PsReadLineNotNow,
-    PsReadLineRemovedToast,
 
     // ── Explorer's context menu (§7.4) ─────────────────────────────────────
     /// **The words in Explorer's own menu**, and the one string in this table
@@ -861,6 +836,17 @@ text_entries! {
     /// VP9 `.webm` plays where the Store codec is installed and does not where
     /// it is not.
     VideoFormatCannotPlay,
+    /// **What a surface says when a video never finished loading** — the
+    /// platform's own refusal of a source that said neither what it is nor why
+    /// it could not be opened within its load budget
+    /// (T-VIDEO-ENGINE-NO-DURATION). The surface stops showing a player that
+    /// will never start and prints this instead.
+    VideoDidNotLoad,
+    /// **What a video's bar says in place of its scrubber** when the recording
+    /// has loaded and declares no length — a live stream, or a container
+    /// written without a duration (T-VIDEO-ENGINE-NO-DURATION). There is
+    /// nothing to scrub along, and a `0:00` would read as a load not finished.
+    VideoNoLength,
     /// `</>` while the pane is showing the source — press it for the rendering.
     ///
     /// Two entries and not one, on [`Self::PreviewWebReload`]'s precedent: the
@@ -887,6 +873,9 @@ text_entries! {
     FilesPermissionDenied,
     FilesNotFound,
     FilesUnreadable,
+    /// The foot's right hand when a files card or column opened on the home folder because the
+    /// pane's folder could not be read (T-CWD-FROM-PROCESS). Never cut.
+    FilesFolderUnknown,
     /// **Length-sensitive**: the foot clips this from the left with
     /// `ellipsized_left`, so the tail is the half that survives.
     FilesRevealed,
@@ -932,9 +921,46 @@ text_entries! {
     /// looks like a still picture because it is one.
     PreviewAnimationBroken,
     PreviewSaved,
+    /// "Saved", for a save written by an ordinary write because the drive cannot
+    /// replace the file in one step — said the first time on each such drive
+    /// (T-PREVIEW-NO-EXCHANGE-RULING, owner ruling 2026-10-15).
+    PreviewSavedOrdinarily,
     PreviewConflict,
     /// The clause that gets filled into [`not_saved`].
     PreviewNothingToSave,
+    /// The clause [`not_saved`] is filled with when a save could not reach the
+    /// disk at all (S-6a): nothing in this process would write it.
+    PreviewSaveNotStarted,
+    /// The clause for a body too large to save, `{limit}` filled by
+    /// [`preview_save_too_large`] (S-6a).
+    PreviewSaveTooLarge,
+    /// The clause for a file that is a link or has a second name (S-6a round 2).
+    PreviewSaveLink,
+    /// The clause for a file on a drive that cannot replace it in one step —
+    /// FAT and exFAT removable media (S-6a round 2). Said by
+    /// `preview::refusal_said` for `Refusal::ExchangeUnavailable`, which only a
+    /// request whose `no_exchange` is `Refuse` is answered; since the owner's
+    /// ruling of 2026-10-15 the preview's own is `PlainWriter`, so no product road
+    /// says it while that switch stands (T-PREVIEW-NO-EXCHANGE-RULING).
+    PreviewSaveNoExchange,
+    /// The clause for a name beside the file, needed for its replacement, that
+    /// is taken (S-6a round 2).
+    PreviewSaveNameTaken,
+    /// The clause for a file whose bytes could not be read to check them
+    /// against what was read (S-6a round 2).
+    PreviewSaveUnread,
+    /// What a quit's or a stop's writer says of a buffer whose save is still
+    /// on its way: it does not write over it (S-6a round 3).
+    PreviewSaveOnItsWay,
+    /// The clause for a save whose file changed while it was out, over a body
+    /// the person had reloaded meanwhile (S-6a round 6).
+    PreviewSaveReloaded,
+    /// What a quit's or a stop's road says of a body a save sent that did not
+    /// land, no longer the body (S-6a round 6, R1).
+    PreviewSaveUnlanded,
+    /// The clause for a save handed over while the preview already has
+    /// `preview::PREVIEW_SAVES_OWED` saves on their way (T-STORAGE-WORKER-ON-THE-SEAM, R1).
+    PreviewSaveTooMany,
     /// The start's toast for one copy a stop kept in the recovered folder, `{folder}` filled
     /// by [`recovered_edits_kept_in`] (T-RECOVERED-FOLDER).
     RecoveredEditKept,
@@ -945,6 +971,16 @@ text_entries! {
     SettingsFileKept,
     /// The same, for `keybindings.json` ([`keybindings_file_kept_in`]).
     KeybindingsFileKept,
+    /// A value of one profile the file won over Folio's, `{profile}` and
+    /// `{field}` filled by [`merged_profile_value_in`] (T-STORE-MERGE-PROFILES-PINS).
+    MergedProfileValue,
+    /// The order of the profiles, as a value the file won over Folio's
+    /// (T-STORE-MERGE-PROFILES-PINS).
+    MergedProfilesOrder,
+    /// Whether a profile is kept out of the pickers, as a field a profiles
+    /// merge names: the editor has a verb for it (Hide / Show), not a row
+    /// (T-STORE-MERGE-PROFILES-PINS).
+    MergedProfileHidden,
     /// The tail line of a crowded pane strip, for one seat it has no row for
     /// (AUDIT-hardcode SEAT-1; filled by [`seat_overflow_notice_in`]).
     SeatOverflowOne,
@@ -1034,6 +1070,19 @@ text_entries! {
     HandoffsTooManySuffix,
     /// Its words alone, a substring of the long form; also the fonts card's refusal text.
     HandoffsTooMany,
+    /// The suffix for a target the hand-off door found was not there (T-HANDOFF-DOOR-REASON).
+    HandoffNotFoundSuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffNotFound,
+    /// The suffix for a target the system refused access to (T-HANDOFF-DOOR-REASON).
+    HandoffAccessDeniedSuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffAccessDenied,
+    /// The suffix for a target the door or the system refused for a reason of no named kind
+    /// (T-HANDOFF-DOOR-REASON); the reason itself goes to the stderr line only.
+    HandoffNotOpenedSuffix,
+    /// Its words alone, a substring of the long form; also the fonts card's refusal text.
+    HandoffNotOpened,
 
     // ── a drag's landing caption ───────────────────────────────────────────
     DragSwapPanes,
@@ -1070,7 +1119,8 @@ text_entries! {
     DescAlwaysOnTop,
     /// The sentence a greyed Acrylic row carries **instead of** its ordinary
     /// description. The reason lives in the description line rather than in a
-    /// slot of its own, which is `psreadline::row_description`'s ruling: there
+    /// slot of its own, which is the ruling the retired PSReadLine row was the first
+    /// to follow (§7.47): there
     /// is one muted line under a title, and a row that is off has exactly one
     /// thing worth saying there.
     DescAcrylicUnavailable,
@@ -1241,6 +1291,10 @@ text_entries! {
     /// A question the row depends on (the parse answer, the edition's observation) got no
     /// answer; the next visit to the Profiles page asks again (release read m2).
     CapPowerShellUndetermined,
+    /// The edition's observation could not run — its worker's start was refused, or it ended
+    /// before it answered — so the row claims nothing; the next visit to the Profiles page asks
+    /// again (T-OBSERVATION-REFUSAL-ON-THE-PAGE).
+    CapPowerShellCheckNotRun,
     /// The edition runs `-Command` text in Constrained Language Mode, where the loader does
     /// nothing: the row claims nothing and offers nothing (T-PROBE-NO-CACHED-FAILURE).
     CapPowerShellConstrained,
@@ -1431,12 +1485,6 @@ text_entries! {
     // family is a conflict in every lane that is adding one.
     RowBlockMaxHeight,
     DescBlockMaxHeight,
-    /// **The PSReadLine row's fourth value** (2026-08-18): an older Folio build's
-    /// module is installed and this one carries a newer patch. It stands where a
-    /// picker draws its ticked item, because that is the one place on the row a
-    /// reader is already looking for its state — and the two items behind it are
-    /// still `On` and `Off`, which is what the ruling asked for.
-    PsReadLineUpdate,
     /// The uncapped end of the `Maximum height` picker: the one option that is a
     /// word rather than a quantity, which is why it is in this table and the
     /// three numbers beside it are not.
@@ -1713,6 +1761,18 @@ text_entries! {
     /// none, because this one stands alone on a row.
     GitNoCommits,
     GitFaultTimedOut,
+    /// A write or checkout refused at the press: its repository's mutation
+    /// lane already owes as many as it holds (`git::NotRun::Full`).
+    GitNotRunFull,
+    /// A write or checkout whose repository's worker ended before it ran
+    /// (`git::NotRun::WorkerGone`).
+    GitNotRunWorkerGone,
+    /// A write or checkout whose worker could not be started
+    /// (`git::NotRun::NotStarted`).
+    GitNotRunNotStarted,
+    /// A write or checkout whose work failed inside Folio after git may have
+    /// run it (`git::GitFault::Unfinished`); the page is read again.
+    GitUnfinished,
     /// The fifth of the worker sentences, in the shape the other four wear: a
     /// worker dying is a feature going away, and the line has to say which half
     /// still works.
@@ -1804,6 +1864,18 @@ text_entries! {
     /// seat, on the same profile, in the last folder it reported.
     TermMenuShellAgain,
 
+    // ── the system's own menus and dialogs (`bt_platform`) ─────────────────
+    //
+    // Words `bt-platform` puts on a surface the system draws, passed in with the
+    // call that shows it (T-NATIVE-LABELS-FROM-THE-CALLER): that crate has no
+    // table of its own. Two columns because each sits beside the system's own
+    // words, and a Mac and a Windows machine say Copy differently in Chinese.
+    /// The one row of the formula's right-click menu (`MathContextMenu`).
+    FormulaMenuCopyLatex,
+    /// The name beside the image filter in the Windows file chooser
+    /// (`ImagePicker`). The macOS panel filters by type and names no filter.
+    ImageFileType,
+
     // ── the pane's `⌄` menu (`crate::profiles`) ────────────────────────────
     /// The submenu head. The `▸` is drawn rather than written.
     PaneMenuSplitWith,
@@ -1868,6 +1940,12 @@ text_entries! {
     GateDelete,
     GateClear,
     GateTitleUnsaved,
+    /// The line a close's question adds when it is put at the end of its wait for
+    /// a save that is still on its way to the disk (S-6b).
+    GateSaveStillOnItsWay,
+    /// The title of a close's question when what it would lose is only saves
+    /// that have not reached the disk, over buffers with no unsaved edits (S-6b).
+    GateTitleSaveNotLanded,
     /// It says *changes*, not *unsaved changes*: the file on disk is saved, and
     /// what is about to go is the difference between it and what git has.
     GateTitleGitDiscard,
@@ -1902,6 +1980,10 @@ text_entries! {
     /// A diff with nothing in it, which is not a failure: a commit's reading of
     /// a file it did not touch, or two copies that agree.
     GitDocumentEmpty,
+    /// A diff or a file at a commit whose question nobody will answer — git
+    /// reading stopped, or would not take it — said where "Loading …" would
+    /// stand, with the way back: opening it again asks again.
+    GitDocumentUnanswered,
 
     // ── a drag's landing caption, the two that escaped ─────────────────────
     /// The captions a file row and a folder row earn over a preview seat, beside
@@ -2120,6 +2202,13 @@ text_entries! {
     RowPowerShellProfileLine,
     DescPowerShellProfileLine,
     RemovePowerShellProfileLine,
+    /// The removal row for the PSReadLine copy an earlier Folio wrote into Documents
+    /// (T-INTEGRATION-INJECT-2-BUILD, owner ruling Q4), shown only while there is one.
+    RowLegacyPsReadLine,
+    DescLegacyPsReadLine,
+    RemoveLegacyPsReadLine,
+    /// What its press says when the copy went.
+    LegacyPsReadLineRemovedToast,
     ShellProfileAddedToast,
 
     // ── Claude Code's hooks (attention plan §3.3, Terminal page) ────────────
@@ -2344,6 +2433,10 @@ text_entries! {
     /// filled by [`quit_documents_not_saved_in`]. A plain statement; its one choice is
     /// [`Self::QuitLeaveWithoutChange`].
     QuitDocumentsNotSaved,
+    /// **The card a quit answered `Save` raises when it stopped waiting for saves still on
+    /// their way to the disk** (S-6c, T-QUIT-AND-STOP-SAVES): `{names}` is the files, filled
+    /// by [`quit_save_on_its_way_in`]. The quit did not leave; the saves may yet land.
+    QuitSaveOnItsWay,
     /// The cancelled quit's one choice: leave, without the changes the card names.
     QuitLeaveWithoutChange,
     /// **What the system's own message box says when a stop could keep a change to one
@@ -2358,10 +2451,23 @@ text_entries! {
     ListLast,
     /// A list cut at its bound: `{names}` shown, then how many more, `{count}`.
     ListMore,
-    /// **The line the system's shutdown screen shows for a Folio window while the layout is
-    /// being written** (B-ENDSESSION): `ShutdownBlockReasonCreate`'s reason, up for at most the
-    /// session write's budget. A state, so a few words.
-    ShutdownSavingLayout,
+    /// **One file's line on the storage pass's card** (T-STORE-NOTICE; design note
+    /// 2026-10-11 §3.6, (b)11): `{file}`, then its clauses, filled by
+    /// [`merge_notice_in`].
+    MergeFileLine,
+    /// The clause naming the values a file's merge took from the file over Folio's:
+    /// `{names}`, at most [`NAMES_ON_A_CARD`] of them.
+    MergeFromDisk,
+    /// The clause naming the values the file gave that were not put in force:
+    /// `{names}`, at most [`NAMES_ON_A_CARD`] of them.
+    MergeNotApplied,
+    /// Between a file's two clauses.
+    MergeClauseSeparator,
+    /// **The line the system's shutdown screen shows for a Folio window while its work is being
+    /// written** (B-ENDSESSION; T-ENDSESSION-SAVES: the preview edits and the owed documents go
+    /// ahead of the layout): `ShutdownBlockReasonCreate`'s reason, up for at most the session
+    /// write's budget and the copies of what did not land. A state, so a few words.
+    ShutdownSavingWork,
 
     // ── the preview pane's lock (§7.7 ⑧, Claude 定 2026-08-23) ─────────────
     //
@@ -2947,6 +3053,13 @@ text_entries! {
     /// write being undone, saw (0.4.8 G7).
     ShellProfileChangedElsewhere,
     ShellProfileNothing,
+    /// A change asked of a worker the thread door would not start — `$PROFILE`'s Enable, Undo or
+    /// removal, the Explorer first-page switch — so nothing was changed
+    /// (T-PROFILE-INSTALL-REFUSED-START).
+    ChangeNotStarted,
+    /// A change whose worker ended in a panic before it answered: it may have stopped anywhere,
+    /// so the sentence claims nothing about what was done (T-PROFILE-INSTALL-REFUSED-START).
+    ChangeStopped,
 
     // ── the application menu bar (M3-2, macOS) ─────────────────────────────
     //
@@ -3131,6 +3244,10 @@ text_entries! {
     /// Another program held the update's journal open past the applier's window
     /// (`update_job::Failure::JournalHeld`; 0.4.8 E4); `{error}` is the system's refusal.
     UpdateFailedJournalHeld,
+    /// Another program held a member of the update open past the applier's window
+    /// (`update_job::Failure::JournalHeld` with its `file`; T-UPDATE-MOVE-HELD-RETRY); `{file}` is
+    /// the member's name, `{error}` the system's refusal.
+    UpdateFailedFileHeld,
     /// After *Updated.*, when the update was committed after its trial ended holding a person's
     /// change (`update_job::TrialChanges::NotKept`; 0.4.8 E4); `{detail}` is the detail it follows.
     UpdateCardTrialNotKept,
@@ -3208,6 +3325,11 @@ impl Text {
                 lang,
                 "The clipboard could not be read. Copy again and retry.",
                 "剪贴板无法读取。重新复制后再试。",
+            ),
+            Self::PasteClipboardBusy => pick(
+                lang,
+                "The clipboard was busy, so nothing was pasted. Try again.",
+                "剪贴板被占用，没有粘贴任何内容。再试一次。",
             ),
             Self::PasteClipboardPicture => pick(
                 lang,
@@ -3349,7 +3471,6 @@ impl Text {
             Self::CjkUndeclared => pick(lang, "CJK (language undeclared)", "语言未注明"),
             Self::RowTerminalCjkFont => pick(lang, "CJK font", "中文字体"),
             Self::RowFontSize => pick(lang, "Font size", "字号"),
-            Self::RowPsReadLine => pick(lang, "PSReadLine patch", "PSReadLine 补丁"),
 
             Self::DescTheme => pick(
                 lang,
@@ -3603,49 +3724,6 @@ impl Text {
             Self::OptionSplitRight => pick(lang, "Right", "右侧"),
             Self::OptionSplitDown => pick(lang, "Down", "下方"),
 
-            Self::PsReadLineProbing => pick(
-                lang,
-                "Checking which PSReadLine this machine has",
-                "正在检查本机的 PSReadLine 版本",
-            ),
-            Self::PsReadLineCheckFailed => pick(
-                lang,
-                "Could not check which PSReadLine this machine has. Folio checks again when this page opens.",
-                "无法检查本机的 PSReadLine 版本。再次打开此页时重新检测。",
-            ),
-            Self::PsReadLineRowGone => pick(
-                lang,
-                "The copy Folio installed is no longer on disk",
-                "Folio 安装的副本已不在磁盘上",
-            ),
-            Self::PsReadLineRowNotOurs => pick(
-                lang,
-                "Another PSReadLine is installed here. Folio leaves it alone",
-                "本机的 PSReadLine 并非由 Folio 安装，Folio 不作改动",
-            ),
-            // **Length-sensitive.** The dialog's title is one unwrapped line in
-            // a 400px float, exactly as the dirty gate's is; the first draft
-            // ("…when the window resizes?") ran off the right edge on a real
-            // window. It still names the symptom the reader has already seen
-            // rather than the module, which is the half that matters.
-            Self::PsReadLineInviteTitle => pick(
-                lang,
-                "Fix the input line after a resize?",
-                "修复缩放后输入行错位？",
-            ),
-            Self::PsReadLineInstall => pick(lang, "Install", "安装"),
-            // **One word for deferring, everywhere** (user ruling 2026-09-06).
-            // The Chinese used to be its own phrase; the first-run card asks a
-            // reader to defer too, and two surfaces spending two words on one
-            // idea is the drift this table exists to stop. The English never
-            // moved.
-            Self::PsReadLineNotNow => pick(lang, "Not now", "暂不"),
-            Self::PsReadLineRemovedToast => pick(
-                lang,
-                "Removed. New PowerShell sessions use the module Windows ships",
-                "已移除。新开的 PowerShell 会话将使用 Windows 自带的模块",
-            ),
-
             // ── Explorer's context menu (§7.4) ─────────────────────────────
             //
             // **`ContextMenuVerb` is length-sensitive in a way nothing else in
@@ -3731,6 +3809,12 @@ impl Text {
             Self::VideoFormatCannotPlay => {
                 pick(lang, "This format cannot be played", "此格式无法播放")
             }
+            Self::VideoDidNotLoad => pick(
+                lang,
+                "This video did not finish loading",
+                "此视频未能加载完成",
+            ),
+            Self::VideoNoLength => pick(lang, "No length", "无时长"),
             Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
             Self::PreviewFlipToPage => pick(lang, "View page", "查看页面"),
             Self::FileMenuCopyPath => pick(lang, "Copy path", "复制路径"),
@@ -3743,6 +3827,7 @@ impl Text {
             Self::FilesPermissionDenied => pick(lang, "Permission denied", "没有权限"),
             Self::FilesNotFound => pick(lang, "Folder not found", "文件夹不存在"),
             Self::FilesUnreadable => pick(lang, "Could not read folder", "无法读取文件夹"),
+            Self::FilesFolderUnknown => pick(lang, "Folder unknown", "文件夹未知"),
             // "File Explorer" is a Windows product and has a Chinese name of its
             // own; using the English one here would send the reader looking for
             // something their Start menu does not have.
@@ -3825,6 +3910,11 @@ impl Text {
                 pick(lang, "First frame · would not play", "首帧 · 无法播放")
             }
             Self::PreviewSaved => pick(lang, "Saved", "已保存"),
+            Self::PreviewSavedOrdinarily => pick(
+                lang,
+                "Saved · this drive cannot replace a file in one step",
+                "已保存 · 此磁盘不支持一步替换文件",
+            ),
             Self::PreviewConflict => pick(
                 lang,
                 "Not saved · changed on disk · edits kept",
@@ -3835,36 +3925,79 @@ impl Text {
             Self::PreviewNothingToSave => {
                 pick(lang, "there is nothing to save", "没有要保存的内容")
             }
+            Self::PreviewSaveNotStarted => {
+                pick(lang, "the file could not be written", "文件无法写入")
+            }
+            Self::PreviewSaveTooLarge => {
+                pick(lang, "it is larger than {limit}", "文件超过 {limit}")
+            }
+            Self::PreviewSaveLink => pick(
+                lang,
+                "the file is a link or has a second name",
+                "文件是链接，或有第二个名称",
+            ),
+            Self::PreviewSaveNoExchange => pick(
+                lang,
+                "this drive cannot replace a file in one step",
+                "此磁盘不支持一步替换文件",
+            ),
+            Self::PreviewSaveNameTaken => pick(
+                lang,
+                "a file beside it is in the way",
+                "旁边有文件占用了所需的名称",
+            ),
+            Self::PreviewSaveUnread => pick(
+                lang,
+                "the file could not be read to check it",
+                "无法读取文件进行核对",
+            ),
+            Self::PreviewSaveOnItsWay => pick(
+                lang,
+                "a save of it was still on its way to the disk",
+                "上一次保存仍在写入磁盘",
+            ),
+            Self::PreviewSaveReloaded => pick(
+                lang,
+                "the file changed and you reloaded it",
+                "文件已改动，你重新加载了它",
+            ),
+            Self::PreviewSaveUnlanded => pick(
+                lang,
+                "a version you saved was not written to the disk",
+                "你保存的某个版本没有写入磁盘",
+            ),
+            Self::PreviewSaveTooMany => pick(
+                lang,
+                "too many saves are already on their way to the disk",
+                "已有太多保存在等待写入磁盘",
+            ),
             Self::RecoveredEditKept => pick(
                 lang,
                 "An unsaved edit was kept at {folder}",
-                "An unsaved edit was kept at {folder}", // zh: pending T-RECOVERED-FOLDER
+                "一处未保存的编辑已保留在 {folder}",
             ),
             Self::RecoveredEditsKept => pick(
                 lang,
                 "{count} unsaved edits were kept at {folder}",
-                "{count} unsaved edits were kept at {folder}", // zh: pending T-RECOVERED-FOLDER
+                "{count} 处未保存的编辑已保留在 {folder}",
             ),
             Self::SettingsFileKept => pick(
                 lang,
                 "{file} could not be read; the settings already in force were kept",
-                "{file} could not be read; the settings already in force were kept", // zh: pending T-STORE-MERGE-SETTINGS
+                "{file} 无法读取；保留了正在生效的设置",
             ),
             Self::KeybindingsFileKept => pick(
                 lang,
                 "{file} could not be read; the shortcuts already in force were kept",
-                "{file} could not be read; the shortcuts already in force were kept", // zh: pending T-STORE-MERGE-SETTINGS
+                "{file} 无法读取；保留了正在生效的快捷键",
             ),
-            Self::SeatOverflowOne => pick(
-                lang,
-                "1 more does not fit",
-                "1 more does not fit", // zh: pending H2
-            ),
-            Self::SeatOverflowMany => pick(
-                lang,
-                "{count} more do not fit",
-                "{count} more do not fit", // zh: pending H2
-            ),
+            Self::MergedProfileValue => pick(lang, "{profile}: {field}", "{profile}：{field}"),
+            Self::MergedProfilesOrder => pick(lang, "Order of the profiles", "配置文件的顺序"),
+            Self::MergedProfileHidden => pick(lang, "Hidden from the pickers", "从选择器中隐藏"),
+            Self::SeatOverflowOne => pick(lang, "1 more does not fit", "还有 1 个放不下"),
+            Self::SeatOverflowMany => {
+                pick(lang, "{count} more do not fit", "还有 {count} 个放不下")
+            }
             Self::PreviewFailedImageLoad => pick(
                 lang,
                 "Preview failed: image could not be loaded",
@@ -3950,36 +4083,32 @@ impl Text {
                 pick(lang, " · no program to open it", " · 无程序可打开")
             }
             Self::HyperlinkNoProgram => pick(lang, "no program to open it", "无程序可打开"),
-            Self::HandoffCouldNotRunSuffix => pick(
-                lang,
-                " · the hand-off could not run",
-                " · the hand-off could not run", // zh: pending S-5
-            ),
-            Self::HandoffCouldNotRun => pick(
-                lang,
-                "the hand-off could not run",
-                "the hand-off could not run", // zh: pending S-5
-            ),
-            Self::HandoffsStoppedSuffix => pick(
-                lang,
-                " · hand-offs have stopped",
-                " · hand-offs have stopped", // zh: pending S-5
-            ),
-            Self::HandoffsStopped => pick(
-                lang,
-                "hand-offs have stopped",
-                "hand-offs have stopped", // zh: pending S-5
-            ),
+            Self::HandoffCouldNotRunSuffix => {
+                pick(lang, " · the hand-off could not run", " · 未能交给系统打开")
+            }
+            Self::HandoffCouldNotRun => {
+                pick(lang, "the hand-off could not run", "未能交给系统打开")
+            }
+            Self::HandoffsStoppedSuffix => {
+                pick(lang, " · hand-offs have stopped", " · 已停止交给系统打开")
+            }
+            Self::HandoffsStopped => pick(lang, "hand-offs have stopped", "已停止交给系统打开"),
             Self::HandoffsTooManySuffix => pick(
                 lang,
                 " · too many hand-offs at once",
-                " · too many hand-offs at once", // zh: pending S-5
+                " · 同时交给系统打开的项目太多",
             ),
             Self::HandoffsTooMany => pick(
                 lang,
                 "too many hand-offs at once",
-                "too many hand-offs at once", // zh: pending S-5
+                "同时交给系统打开的项目太多",
             ),
+            Self::HandoffNotFoundSuffix => pick(lang, " · not found", " · 找不到"),
+            Self::HandoffNotFound => pick(lang, "not found", "找不到"),
+            Self::HandoffAccessDeniedSuffix => pick(lang, " · access denied", " · 拒绝访问"),
+            Self::HandoffAccessDenied => pick(lang, "access denied", "拒绝访问"),
+            Self::HandoffNotOpenedSuffix => pick(lang, " · not opened", " · 未打开"),
+            Self::HandoffNotOpened => pick(lang, "not opened", "未打开"),
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragSwapPanes => pick(lang, "Swap panes", "交换窗格"),
@@ -4090,6 +4219,11 @@ impl Text {
                 "PowerShell integration could not be determined for these arguments. Folio asks again when this page opens.",
                 "自定义启动参数，PowerShell 整合状态未知。再次打开此页时重新检测。",
             ),
+            Self::CapPowerShellCheckNotRun => pick(
+                lang,
+                "PowerShell integration could not be determined for these arguments: the check could not run. Folio asks again when this page opens.",
+                "自定义启动参数，PowerShell 整合状态未知：检测未能运行。再次打开此页时重新检测。",
+            ),
             Self::CapPowerShellConstrained => pick(
                 lang,
                 "PowerShell integration is not provided: this PowerShell runs in Constrained Language Mode.",
@@ -4136,9 +4270,6 @@ impl Text {
                 "高度超过此值的渲染块在块内滚动，不再增高。",
             ),
             Self::OptionBlockHeightNone => pick(lang, "No limit", "不限"),
-            // A verb, because that is what pressing `On` here does. 「更新」is
-            // the word every Chinese software updater uses for exactly this.
-            Self::PsReadLineUpdate => pick(lang, "Update", "更新"),
 
             // ── the profile editor (§7.1.6c-6b) ────────────────
             Self::ProfilesEdit => pick(lang, "Edit", "编辑"),
@@ -4218,11 +4349,7 @@ impl Text {
             Self::ProfilesEnvAdd => pick(lang, "Add", "添加"),
             Self::ProfilesEnvName => pick(lang, "Name", "名称"),
             Self::ProfilesEnvValue => pick(lang, "Value", "值"),
-            Self::ProfilesEnvPerPane => pick(
-                lang,
-                "Set per pane",
-                "Set per pane", // zh: pending H2-NITS
-            ),
+            Self::ProfilesEnvPerPane => pick(lang, "Set per pane", "每个窗格各自设定"),
             Self::ProfilesAuto => pick(lang, "Auto", "自动"),
             Self::ProfilesOn => pick(lang, "On", "开"),
             Self::ProfilesOff => pick(lang, "Off", "关"),
@@ -4383,8 +4510,6 @@ impl Text {
                 pick(lang, "Move the focus between panes", "在窗格之间移动焦点")
             }
             Self::ShortcutReservedResizePane => pick(lang, "Resize a pane", "调整窗格大小"),
-            // zh: pending H2-NITS — the existing translation with `{modifier}` where
-            // it said `Alt`; the writer checks the word order.
             Self::ShortcutReservedAltArrow => pick(
                 lang,
                 "Reserved: readline reads {modifier}+arrow as word movement",
@@ -4499,6 +4624,26 @@ impl Text {
                 "git did not answer and was stopped",
                 "git 没有回答，已被停止",
             ),
+            Self::GitNotRunFull => pick(
+                lang,
+                "Too many git actions are waiting in this repository; this one was not run",
+                "此仓库中等待的 git 操作过多，这一项未执行",
+            ),
+            Self::GitNotRunWorkerGone => pick(
+                lang,
+                "Git actions in this repository stopped; this one was not run",
+                "此仓库的 git 操作已停止，这一项未执行",
+            ),
+            Self::GitNotRunNotStarted => pick(
+                lang,
+                "Folio could not start this git action",
+                "Folio 无法启动这项 git 操作",
+            ),
+            Self::GitUnfinished => pick(
+                lang,
+                "Folio could not finish this git action; the page was read again",
+                "Folio 未能完成这项 git 操作，已重新读取此页",
+            ),
             Self::GitWorkerStopped => pick(
                 lang,
                 "Git reading stopped. The terminal is unaffected",
@@ -4586,6 +4731,19 @@ impl Text {
             Self::TermMenuClearScrollback => pick(lang, "Clear scrollback…", "清除回滚…"),
             Self::TermMenuShellAgain => pick(lang, "Restart shell…", "重启 shell…"),
 
+            // ── the system's own menus and dialogs ─────────────────────────
+            Self::FormulaMenuCopyLatex => pick_platform(
+                lang,
+                platform,
+                "Copy LaTeX",
+                "复制 LaTeX",
+                "Copy LaTeX",
+                "复制 LaTeX",
+            ),
+            Self::ImageFileType => {
+                pick_platform(lang, platform, "Images", "图片", "Images", "图片")
+            }
+
             // ── the pane's `⌄` menu ────────────────────────────────────────
             Self::PaneMenuSplitWith => pick(lang, "Split with", "拆分并运行"),
             Self::PaneMenuNewInFolder => {
@@ -4638,6 +4796,16 @@ impl Text {
             Self::GateDelete => pick(lang, "Delete", "删除"),
             Self::GateClear => pick(lang, "Clear", "清除"),
             Self::GateTitleUnsaved => pick(lang, "Discard unsaved changes?", "放弃未保存的改动？"),
+            Self::GateSaveStillOnItsWay => pick(
+                lang,
+                "A save is still on its way to the disk.",
+                "仍有一次保存正在写入磁盘。",
+            ),
+            Self::GateTitleSaveNotLanded => pick(
+                lang,
+                "A save has not reached the disk. Close anyway?",
+                "有一次保存尚未写入磁盘。仍要关闭？",
+            ),
             Self::GateTitleGitDiscard => pick(lang, "Discard changes?", "放弃改动？"),
             Self::GateTitleGitDelete => pick(lang, "Delete this file?", "删除这个文件？"),
             Self::GateTitleGitDeleteBranch => pick(lang, "Delete this branch?", "删除这个分支？"),
@@ -4685,40 +4853,39 @@ impl Text {
                 "session.json could not be written. Nothing was closed.",
                 "session.json 写入失败。没有关闭任何窗口。",
             ),
-            Self::ShutdownSavingLayout => pick(lang, "Saving your layout", "正在保存窗口布局"),
-            Self::QuitDocumentsNotSaved => pick(
+            Self::ShutdownSavingWork => pick(lang, "Saving your work", "正在保存你的工作"),
+            Self::QuitDocumentsNotSaved => {
+                pick(lang, "{files} could not be saved.", "无法保存 {files}。")
+            }
+            Self::QuitSaveOnItsWay => pick(
                 lang,
-                "{files} could not be saved.",
-                "{files} could not be saved.", // zh: pending T-QUIT-DOCUMENTS
+                "Still on its way to the disk: {names}",
+                "仍在写入磁盘：{names}",
             ),
-            Self::QuitLeaveWithoutChange => pick(
-                lang,
-                "Leave without this change",
-                "Leave without this change", // zh: pending T-QUIT-DOCUMENTS
-            ),
+            Self::QuitLeaveWithoutChange => {
+                pick(lang, "Leave without this change", "放弃这项更改并退出")
+            }
             Self::StoppedChangeLost => pick(
                 lang,
                 "Folio stopped. A change to {file} could not be kept.",
-                "Folio stopped. A change to {file} could not be kept.", // zh: pending T-QUIT-DOCUMENTS
+                "Folio 已停止。对 {file} 的一项更改未能保留。",
             ),
             Self::StoppedChangesLost => pick(
                 lang,
                 "Folio stopped. Changes to {files} could not be kept.",
-                "Folio stopped. Changes to {files} could not be kept.", // zh: pending T-QUIT-DOCUMENTS
+                "Folio 已停止。对 {files} 的更改未能保留。",
             ),
-            Self::ListSeparator => pick(
-                lang, ", ", ", ", // zh: pending T-QUIT-DOCUMENTS
-            ),
-            Self::ListLast => pick(
-                lang,
-                "{names} and {last}",
-                "{names} and {last}", // zh: pending T-QUIT-DOCUMENTS
-            ),
+            Self::ListSeparator => pick(lang, ", ", "、"),
+            Self::ListLast => pick(lang, "{names} and {last}", "{names} 和 {last}"),
             Self::ListMore => pick(
                 lang,
                 "{names} and {count} more",
-                "{names} and {count} more", // zh: pending T-QUIT-DOCUMENTS
+                "{names} 以及另外 {count} 个",
             ),
+            Self::MergeFileLine => pick(lang, "{file}: {clauses}.", "{file}：{clauses}。"),
+            Self::MergeFromDisk => pick(lang, "{names} came from disk", "{names} 取自磁盘"),
+            Self::MergeNotApplied => pick(lang, "{names} not applied", "{names} 未生效"),
+            Self::MergeClauseSeparator => pick(lang, "; ", "；"),
 
             // ── the preview pane's lock (§7.7 ⑧) ───────────────────────────
             Self::PreviewLock => pick(
@@ -4824,6 +4991,11 @@ impl Text {
             Self::FolderMenuNewTerminal => pick(lang, "New terminal here", "在这里新建终端"),
 
             Self::GitDocumentEmpty => pick(lang, "No changes to show", "没有可显示的改动"),
+            Self::GitDocumentUnanswered => pick(
+                lang,
+                "Not loaded. Open it again to retry",
+                "未载入。重新打开即可重试",
+            ),
 
             // ── a drag's landing caption ───────────────────────────────────
             Self::DragOpenInPreview => pick(lang, "Open in this preview", "在这个预览里打开"),
@@ -5078,6 +5250,22 @@ impl Text {
                 lang,
                 "Remove the line from $PROFILE",
                 "从 $PROFILE 移除此行",
+            ),
+            Self::RowLegacyPsReadLine => {
+                pick(lang, "Earlier PSReadLine copy", "旧的 PSReadLine 副本")
+            }
+            Self::DescLegacyPsReadLine => pick(
+                lang,
+                "An earlier Folio put it in Documents. Folio no longer uses it.",
+                "旧版 Folio 将它放在「文档」中。Folio 已不再使用它。",
+            ),
+            Self::RemoveLegacyPsReadLine => {
+                pick(lang, "Remove it from Documents", "从「文档」移除")
+            }
+            Self::LegacyPsReadLineRemovedToast => pick(
+                lang,
+                "Removed. PowerShell windows opened from now on use their own PSReadLine.",
+                "已移除。此后打开的 PowerShell 窗口使用 PowerShell 自带的 PSReadLine。",
             ),
             Self::ShellProfileAddedToast => pick(
                 lang,
@@ -5506,11 +5694,7 @@ impl Text {
                 "This address does not open in a preview.",
                 "这个地址不在预览中打开。",
             ),
-            Self::WebAddressNoSuchFile => pick(
-                lang,
-                "No such file",
-                "No such file", // zh: pending M-SWEEP-048
-            ),
+            Self::WebAddressNoSuchFile => pick(lang, "No such file", "文件不存在"),
             Self::WebFailAddressInvalidSay => {
                 pick(lang, "This address is not valid.", "这个地址无效。")
             }
@@ -5927,6 +6111,16 @@ impl Text {
                 "No Folio profile lines found.",
                 "未找到 Folio 整合行。",
             ),
+            Self::ChangeNotStarted => pick(
+                lang,
+                "Folio could not start this change, so nothing was changed.",
+                "Folio 无法开始这项更改，未做任何改动。",
+            ),
+            Self::ChangeStopped => pick(
+                lang,
+                "Folio stopped before this change finished.",
+                "这项更改完成前 Folio 已停止。",
+            ),
 
             // ── the application menu bar (M3-2, macOS) ─────────────────────
             //
@@ -6134,30 +6328,27 @@ impl Text {
                 "Another program held the update record open: {error}",
                 "另一个程序占用了更新记录：{error}",
             ),
+            Self::UpdateFailedFileHeld => pick(
+                lang,
+                "Another program held {file} open: {error}",
+                "另一个程序占用了 {file}：{error}",
+            ),
             Self::UpdateCardTrialNotKept => pick(
                 lang,
                 "{detail} Changes made before Folio confirmed the update were not kept.",
                 "{detail}更新确认前所做的更改没有保留。",
             ),
-            Self::UpdateFailedUndone => pick(
-                lang,
-                "The update was undone.",
-                "The update was undone.", // zh: pending E5
-            ),
+            Self::UpdateFailedUndone => pick(lang, "The update was undone.", "更新已撤销。"),
             Self::UpdateCardUndone => pick(
                 lang,
                 "Changes made in Folio {version} were not kept.",
-                "Changes made in Folio {version} were not kept.", // zh: pending E5
+                "在 Folio {version} 中所做的更改没有保留。",
             ),
             Self::UpdateCardRestartMissed => {
                 pick(lang, "The restart did not happen.", "未能重启。")
             }
             Self::ShellDidNotStart => pick(lang, "Shell not started", "Shell 未启动"),
-            Self::ShellBirthDeath => pick(
-                lang,
-                "exited at birth",
-                "exited at birth", // zh: pending T-SHELL-BIRTH-DEATH
-            ),
+            Self::ShellBirthDeath => pick(lang, "exited at birth", "启动即退出"),
         }
     }
 
@@ -6215,6 +6406,25 @@ impl Text {
         Self::CleanupMarkHttpStorages,
         Self::CleanupMarkPreferences,
         Self::CleanupMarkSavedState,
+    ];
+
+    /// **The entries whose Chinese column holds no word**: placeholders and
+    /// punctuation only — a joiner between names or clauses, or a frame around
+    /// two values whose words arrive at run time.
+    ///
+    /// Not [`Self::UNTRANSLATED`]: these do differ from the English, by the
+    /// punctuation Chinese writes (`、`, `；`, `：`, `。`). They are exempt from
+    /// the Han-character pin because a correct Chinese column has nothing for
+    /// that pin to find, and held to a pin of their own instead: what is left
+    /// once the placeholders are taken out is CJK or full-width punctuation
+    /// (U+3000–303F, U+FF00–FFEF) and nothing else: no ASCII, so the English
+    /// column copied over fails, and no Han, so a row with words listed here fails.
+    #[cfg(test)]
+    const PUNCTUATION_ONLY: [Self; 4] = [
+        Self::ListSeparator,
+        Self::MergeClauseSeparator,
+        Self::MergedProfileValue,
+        Self::MergeFileLine,
     ];
 
     /// **The uninstaller's inventory rows that name a Windows thing** — the second
@@ -6291,13 +6501,12 @@ impl Text {
         Self::ExplorerFirstPageAddedRestartToast,
         Self::ExplorerFirstPageUnreadable,
         Self::ExplorerFirstPageNoPackage,
-        // — the PSReadLine repair: one edition of one shell, and a module
-        //   written under that account's `Documents`
-        Self::RowPsReadLine,
-        Self::PsReadLineProbing,
-        Self::PsReadLineCheckFailed,
-        Self::PsReadLineRowNotOurs,
-        Self::PsReadLineRemovedToast,
+        // — the copy an earlier Folio wrote into one edition of one shell's `Documents`
+        //   (T-INTEGRATION-INJECT-2-BUILD): its removal row and what its press says
+        Self::RowLegacyPsReadLine,
+        Self::DescLegacyPsReadLine,
+        Self::RemoveLegacyPsReadLine,
+        Self::LegacyPsReadLineRemovedToast,
         // Only the Windows PowerShell discovery worker can emit this refusal.
         Self::ShellProfileProbeFailed,
         // — the Acrylic row's reason, which only a Windows with no backdrop
@@ -6326,70 +6535,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-SHELL-BIRTH-DEATH — the face of a shell that ended at birth.
-        (Self::ShellBirthDeath, HostPlatform::Windows),
-        (Self::ShellBirthDeath, HostPlatform::MacOs),
-        // zh: pending T-RECOVERED-FOLDER — the start's toast for the edits a stop kept in the
-        // recovered folder.
-        (Self::RecoveredEditKept, HostPlatform::Windows),
-        (Self::RecoveredEditKept, HostPlatform::MacOs),
-        (Self::RecoveredEditsKept, HostPlatform::Windows),
-        (Self::RecoveredEditsKept, HostPlatform::MacOs),
-        // zh: pending T-STORE-MERGE-SETTINGS — the "kept" card for a settings or
-        // keybindings file that will not parse mid-run.
-        (Self::SettingsFileKept, HostPlatform::Windows),
-        (Self::SettingsFileKept, HostPlatform::MacOs),
-        (Self::KeybindingsFileKept, HostPlatform::Windows),
-        (Self::KeybindingsFileKept, HostPlatform::MacOs),
-        // 0.4.8 E5: the card of a rollback that did not keep what a Folio ran over it changed.
-        (Self::UpdateFailedUndone, HostPlatform::Windows),
-        (Self::UpdateFailedUndone, HostPlatform::MacOs),
-        (Self::UpdateCardUndone, HostPlatform::Windows),
-        (Self::UpdateCardUndone, HostPlatform::MacOs),
-        // 0.4.8 M-SWEEP-048: the address field's sentence for a path that names no file.
-        (Self::WebAddressNoSuchFile, HostPlatform::Windows),
-        (Self::WebAddressNoSuchFile, HostPlatform::MacOs),
-        // zh: pending H2 — the crowded pane strip's tail line (AUDIT-hardcode SEAT-1).
-        (Self::SeatOverflowOne, HostPlatform::Windows),
-        (Self::SeatOverflowOne, HostPlatform::MacOs),
-        (Self::SeatOverflowMany, HostPlatform::Windows),
-        (Self::SeatOverflowMany, HostPlatform::MacOs),
-        // zh: pending S-5 — what a link, an address or the fonts card says when its hand-off
-        // could not run, or the hand-off lane's worker stopped with it owed.
-        (Self::HandoffCouldNotRunSuffix, HostPlatform::Windows),
-        (Self::HandoffCouldNotRunSuffix, HostPlatform::MacOs),
-        (Self::HandoffCouldNotRun, HostPlatform::Windows),
-        (Self::HandoffCouldNotRun, HostPlatform::MacOs),
-        (Self::HandoffsStoppedSuffix, HostPlatform::Windows),
-        (Self::HandoffsStoppedSuffix, HostPlatform::MacOs),
-        (Self::HandoffsStopped, HostPlatform::Windows),
-        (Self::HandoffsStopped, HostPlatform::MacOs),
-        (Self::HandoffsTooManySuffix, HostPlatform::Windows),
-        (Self::HandoffsTooManySuffix, HostPlatform::MacOs),
-        (Self::HandoffsTooMany, HostPlatform::Windows),
-        (Self::HandoffsTooMany, HostPlatform::MacOs),
-        // zh: pending H2-NITS — a Profiles ghost row's value that each pane has
-        // its own of.
-        (Self::ProfilesEnvPerPane, HostPlatform::Windows),
-        (Self::ProfilesEnvPerPane, HostPlatform::MacOs),
-        // zh: pending T-QUIT-DOCUMENTS — the cancelled quit's card and its choice, the
-        // stopped process's native message, and the lists they name files in.
-        (Self::QuitDocumentsNotSaved, HostPlatform::Windows),
-        (Self::QuitDocumentsNotSaved, HostPlatform::MacOs),
-        (Self::QuitLeaveWithoutChange, HostPlatform::Windows),
-        (Self::QuitLeaveWithoutChange, HostPlatform::MacOs),
-        (Self::StoppedChangeLost, HostPlatform::Windows),
-        (Self::StoppedChangeLost, HostPlatform::MacOs),
-        (Self::StoppedChangesLost, HostPlatform::Windows),
-        (Self::StoppedChangesLost, HostPlatform::MacOs),
-        (Self::ListSeparator, HostPlatform::Windows),
-        (Self::ListSeparator, HostPlatform::MacOs),
-        (Self::ListLast, HostPlatform::Windows),
-        (Self::ListLast, HostPlatform::MacOs),
-        (Self::ListMore, HostPlatform::Windows),
-        (Self::ListMore, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -6439,30 +6585,6 @@ pub fn new_tab_tip(profile_title: &str) -> String {
     match current() {
         Lang::English => format!("New tab ({profile_title})"),
         Lang::Chinese => format!("新建标签（{profile_title}）"),
-    }
-}
-
-/// The invitation's body: what the machine has, what it costs today, what
-/// installing writes and where, and how it comes back out.
-///
-/// Four facts and no persuasion. Both versions are parameters because the
-/// module version this build ships is a Rust constant that `folio.ps1`'s own
-/// gate reads too — a literal here would be the third place it is written, and
-/// the one nothing would catch when it moved.
-#[must_use]
-pub fn psreadline_invite_body(found: &str, patched: &str, path: &str) -> String {
-    match current() {
-        Lang::English => format!(
-            "Windows PowerShell ships with PSReadLine {found}. On that version the input line \
-             lands in the wrong place when the window is resized, and the repair Folio sends \
-             does nothing. Installing writes PSReadLine {patched} to {path}. It takes effect in \
-             PowerShell sessions started after that, and Settings ▸ Terminal removes it."
-        ),
-        Lang::Chinese => format!(
-            "Windows PowerShell 自带的 PSReadLine 是 {found}。在这个版本上，缩放窗口后输入行会\
-             错位，Folio 发出的修复指令不起作用。安装会把 PSReadLine {patched} 写入 \
-             {path}，对此后新开的 PowerShell 会话生效，并可在设置 ▸ 终端中移除。"
-        ),
     }
 }
 
@@ -6520,64 +6642,6 @@ pub fn scheme_in_use_gone(name: &str, fallback: &str) -> String {
             format!("{name} is no longer in the schemes folder. {fallback} is in force.")
         }
         Lang::Chinese => format!("配色 {name} 已不在 schemes 文件夹中，当前使用 {fallback}。"),
-    }
-}
-
-/// Why the Install button is dark.
-///
-/// Windows' script execution policy governs `.psm1` files, and PSReadLine is a
-/// script module: under `AllSigned` or `Restricted` a module Folio writes would
-/// be refused at import. The button is disabled rather than allowed to write
-/// files that cannot load, and the reason is on screen rather than in a card
-/// after the fact.
-#[must_use]
-pub fn psreadline_policy_reason(policy: &str) -> String {
-    match current() {
-        Lang::English => format!(
-            "Windows' execution policy is {policy}, which refuses to load an unsigned module."
-        ),
-        Lang::Chinese => format!("Windows 的执行策略是 {policy}，不会加载未签名的模块。"),
-    }
-}
-
-/// The row's line when the machine's PSReadLine is older than the patched one.
-///
-/// **The three PSReadLine row lines take their language as an argument**, where
-/// every other value-carrying string in this file reads [`current`]. They are
-/// the only three the app caches for the life of the process — see
-/// `crate::psreadline::row_description`, which keeps one slot per [`Lang`] — and
-/// a cache filling itself from an ambient answer is a cache that cannot be asked
-/// for the other column.
-#[must_use]
-pub fn psreadline_row_outdated_in(lang: Lang, found: &str) -> String {
-    match lang {
-        Lang::English => {
-            format!("{found} on this machine · resizing still misplaces the input line")
-        }
-        Lang::Chinese => format!("本机为 {found} · 调整窗口大小时输入行仍会错位"),
-    }
-}
-
-/// The row's line after Folio has written the module.
-#[must_use]
-pub fn psreadline_row_installed_in(lang: Lang, patched: &str) -> String {
-    match lang {
-        Lang::English => format!("{patched} · installed by Folio"),
-        Lang::Chinese => format!("{patched} · 由 Folio 安装"),
-    }
-}
-
-/// The row's line when an older Folio build's module is the one on disk
-/// (2026-08-18).
-///
-/// It names **both** builds because the reader's question in this state is not
-/// "what have I got" but "what would pressing On change", and a sentence naming
-/// only one of the two answers neither half of it.
-#[must_use]
-pub fn psreadline_row_update_in(lang: Lang, installed: &str, available: &str) -> String {
-    match lang {
-        Lang::English => format!("{installed} · installed by Folio · {available} available"),
-        Lang::Chinese => format!("{installed} · 由 Folio 安装 · 可更新至 {available}"),
     }
 }
 
@@ -6757,6 +6821,18 @@ pub fn update_failed_journal_held(error: &str) -> String {
         .replace("{error}", error)
 }
 
+/// **The failed card's reason when another program held a member of the
+/// update open** — `Another program held folio.exe open: The process cannot
+/// access the file because it is being used by another process. (os error
+/// 32)` (T-UPDATE-MOVE-HELD-RETRY), filled from [`Text::UpdateFailedFileHeld`].
+#[must_use]
+pub fn update_failed_file_held(file: &str, error: &str) -> String {
+    Text::UpdateFailedFileHeld
+        .text()
+        .replace("{file}", file)
+        .replace("{error}", error)
+}
+
 /// **The line of a rollback that did not keep what a Folio ran over it
 /// changed** — `Changes made in Folio 0.4.9 were not kept.` (0.4.8 E5),
 /// filled from [`Text::UpdateCardUndone`].
@@ -6808,10 +6884,9 @@ pub fn focus_mode_row_in(lang: Lang, chord: Option<&str>) -> String {
 ///
 /// `SettingsRow::description` answers `&'static str` — every row in the dialog
 /// hands its answer straight to a `ChromeLabel`, and the whole table costs zero
-/// allocations because of it. `psreadline::row_description` meets the same
-/// signature with a `OnceLock` per language, which is sound there because its
-/// probe is a one-shot; it is **not** sound for a sentence whose value can change
-/// while the process runs — the version `update::row_description` names, or the
+/// allocations because of it. A `OnceLock` per language meets the same signature,
+/// which is sound only for a sentence fixed for the process; it is **not** sound
+/// for a sentence whose value can change while the process runs — the version `update::row_description` names, or the
 /// chord `focus_mode_row_in` names after a rebind — because a `OnceLock` would
 /// go on drawing the first one.
 ///
@@ -6834,77 +6909,12 @@ pub(crate) fn intern(text: String) -> &'static str {
     held
 }
 
-/// The row's line when the machine already had a new enough module of its own.
-#[must_use]
-pub fn psreadline_row_current_in(lang: Lang, found: &str) -> String {
-    match lang {
-        Lang::English => format!("{found} on this machine · already keeps the input line in place"),
-        Lang::Chinese => format!("本机为 {found} · 调整窗口大小时输入行保持原位"),
-    }
-}
-
-/// The row's line when the machine's module is old **and Windows' execution
-/// policy would refuse the replacement** (§7.47).
-///
-/// **The row says why the switch will not move.** Before this line existed the
-/// obstacle was written down in exactly one place — the invitation's reason
-/// line — and a reader who had already answered that invitation could never see
-/// it again: the row said `2.0.0 on this machine · resizing still misplaces the
-/// input line`, the `On` item was dark, and a press on it did nothing and said
-/// nothing. That is the whole of the 2026-08-29 defect.
-///
-/// Two clauses and not three. `resizing still misplaces the input line` is the
-/// case *for* the module, and it is made by the row's own title and by the
-/// invitation; what this reader is owed instead is the reason the answer is not
-/// available to them, and a row that said all three would wrap past the height
-/// every row on this page shares.
-#[must_use]
-pub fn psreadline_row_blocked_in(lang: Lang, found: &str, policy: &str) -> String {
-    match lang {
-        Lang::English => format!(
-            "{found} on this machine · Windows' execution policy is {policy}, which refuses to \
-             load an unsigned module"
-        ),
-        Lang::Chinese => {
-            format!("本机为 {found} · Windows 执行策略为 {policy}，不加载未签名的模块")
-        }
-    }
-}
-
-/// The card raised when the module lands.
-#[must_use]
-pub fn psreadline_installed_toast(patched: &str) -> String {
-    match current() {
-        Lang::English => {
-            format!("PSReadLine {patched} installed. PowerShell sessions started after this use it")
-        }
-        Lang::Chinese => {
-            format!("已安装 PSReadLine {patched}。此后新开的 PowerShell 会话将使用它")
-        }
-    }
-}
-
-// ── the six sentences a refused press speaks (§7.47) ────────────────────────
+// ── the sentence a refused removal of the earlier PSReadLine copy speaks (§7.47) ──
 //
-// **Every one of them names the path.** A reader who is told an install did not
-// happen and not told where it would have gone has been handed a sentence they
-// can do nothing with; a reader who has the path can look, can copy it, and can
-// finish the job by hand. That is the whole of the copy-guide rule here, and it
-// is why `psreadline_install_failed`'s old one-argument shape is gone: it
-// carried Windows' own words and dropped the only other fact in the room.
-
-/// The card raised when writing the module failed, carrying what Windows said.
-///
-/// The operating system's own sentence is passed through rather than
-/// summarised: it is the only text that distinguishes a full disk from a
-/// redirected Documents folder from a file another process is holding open.
-#[must_use]
-pub fn psreadline_install_failed(path: &str, message: &str) -> String {
-    match current() {
-        Lang::English => format!("Could not write PSReadLine to {path}: {message}"),
-        Lang::Chinese => format!("无法把 PSReadLine 写入 {path}：{message}"),
-    }
-}
+// **It names the path.** A reader who is told a removal did not happen and not
+// told where has been handed a sentence they can do nothing with; a reader who
+// has the path can look, can copy it, and can finish the job by hand. Windows'
+// own words are carried whole beside it.
 
 #[must_use]
 pub fn psreadline_remove_failed(path: &str, message: &str) -> String {
@@ -6914,160 +6924,30 @@ pub fn psreadline_remove_failed(path: &str, message: &str) -> String {
     }
 }
 
-/// The command that lifts the refusal, in the one scope that needs no
-/// administrator.
-///
-/// **`CurrentUser` and not `LocalMachine`, and that is measured rather than
-/// preferred**: on the clean Windows 10 of 2026-08-29,
-/// `Set-ExecutionPolicy -Scope LocalMachine` from an unelevated shell failed
-/// silently — the policy did not move — while the same command at
-/// `-Scope CurrentUser` took. A card that told a reader to run something their
-/// shell will refuse is a card that has sent them somewhere worse than nowhere.
-///
-/// `RemoteSigned` and not `Bypass` or `Unrestricted`: it is the weakest policy
-/// that loads the module, it is what Windows Server ships with, and it still
-/// asks for a signature on anything that came off the network.
-pub const POLICY_REMEDY_COMMAND: &str = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned";
-
-/// The card raised when the execution policy is what stopped the install.
-///
-/// Measured on a clean Windows 10 Pro 22H2 on 2026-08-29: under `Restricted`
-/// the module writes perfectly well and then `Import-Module PSReadLine` loads
-/// **nothing** — `PSReadLine.format.ps1xml` is refused as a script, and the
-/// import fails with it. So the refusal is right and the silence was the bug.
-///
-/// **Three sentences, and the middle one is a way out** (§7.47). A card that
-/// names the obstacle and stops leaves its reader exactly where they were
-/// standing; the copy rule is that a sentence on screen says what can be done
-/// *now*, and what can be done now is one command in the shell already in front
-/// of them. It is on the card and deliberately not on the row: the row has one
-/// line to say what the machine is, and a command is not a state.
-///
-/// **The way out comes before the path, and that order is the whole of what a
-/// six-line cap costs.** `TOAST_MAX_LINES` drops what does not fit and marks
-/// the cut with an ellipsis, and this card carries the longest text this
-/// product raises — a module path under a redirected `Documents` can be a
-/// hundred characters on its own. Whatever falls off the end must therefore be
-/// the least actionable half, and between "here is the command that fixes it"
-/// and "here is where the file would have gone", the path is the half a reader
-/// can lose and still act. `the_way_out_survives_the_cards_six_line_cap` in
-/// `toast.rs` holds that.
-///
-/// The clause about *why* an unsigned module is refused is not repeated here:
-/// the row this card was raised from says it, one line above the picker that
-/// was just pressed.
-#[must_use]
-pub fn psreadline_policy_refused(patched: &str, policy: &str, path: &str) -> String {
-    let remedy = POLICY_REMEDY_COMMAND;
-    match current() {
-        Lang::English => format!(
-            "PSReadLine {patched} was not installed. Windows' execution policy is {policy}. Run \
-             {remedy} in PowerShell, then try again. The module goes to {path}."
-        ),
-        Lang::Chinese => format!(
-            "未安装 PSReadLine {patched}。Windows 的执行策略是 {policy}。在 PowerShell 中运行 \
-             {remedy} 后再试。模块本应写入 {path}。"
-        ),
-    }
-}
-
-/// The card raised when Windows would not say where Documents is.
-///
-/// No path in this one because there is no path to name — which is exactly what
-/// it says.
-#[must_use]
-pub fn psreadline_no_documents(patched: &str) -> String {
-    match current() {
-        Lang::English => format!(
-            "PSReadLine {patched} was not installed. Windows did not say where this user's \
-             Documents folder is, and PowerShell looks for the module under it."
-        ),
-        Lang::Chinese => format!(
-            "未安装 PSReadLine {patched}。Windows 没有给出本用户的 Documents 文件夹位置，而 \
-             PowerShell 在它下面找这个模块。"
-        ),
-    }
-}
-
-/// The card raised when the probe has not answered yet.
-#[must_use]
-pub fn psreadline_still_reading() -> String {
-    match current() {
-        Lang::English => {
-            "Still reading this machine's PSReadLine. Try again in a moment.".to_owned()
-        }
-        Lang::Chinese => "正在读取本机的 PSReadLine，请稍候再试。".to_owned(),
-    }
-}
-
-/// The card raised when `On` is pressed on a machine whose own module is already
-/// new enough.
-#[must_use]
-pub fn psreadline_already_current(found: &str, path: &str) -> String {
-    match current() {
-        Lang::English => format!(
-            "This machine's own PSReadLine {found} already keeps the input line in place, so \
-             nothing was written to {path}."
-        ),
-        Lang::Chinese => {
-            format!("本机自带的 PSReadLine {found} 已能守住输入行，未向 {path} 写入任何东西。")
-        }
-    }
-}
-
-/// The card raised when `On` is pressed over a module Folio did not write
-/// (audit 3, E-1).
-///
-/// It names the path for the reason every refusal on this row does — that is
-/// the half a reader can act on — and it says who the module belongs to rather
-/// than how new it is, because ownership is what stopped the write.
-#[must_use]
-pub fn psreadline_occupied(path: &str) -> String {
-    match current() {
-        Lang::English => {
-            format!("A PSReadLine Folio did not install is at {path}, so nothing was written.")
-        }
-        Lang::Chinese => format!("{path} 有非 Folio 安装的 PSReadLine，未写入任何东西。"),
-    }
-}
-
-/// The card raised when `On` is pressed over a directory that already holds it.
-#[must_use]
-pub fn psreadline_already_there(patched: &str, path: &str) -> String {
-    match current() {
-        Lang::English => format!("PSReadLine {patched} is already installed at {path}."),
-        Lang::Chinese => format!("PSReadLine {patched} 已经装在 {path}。"),
-    }
-}
-
-/// The card raised when `Off` is pressed and the guard kept its hands off.
-///
-/// **One sentence for two situations** — a directory holding somebody else's
-/// module, and a directory holding nothing at all — because it is true of both
-/// and because the distinction is not one a reader can act on differently. What
-/// they can act on is the path, which is in it.
-#[must_use]
-pub fn psreadline_not_ours(path: &str) -> String {
-    match current() {
-        Lang::English => {
-            format!("No module written by Folio is at {path}, so nothing was removed.")
-        }
-        Lang::Chinese => format!("{path} 没有 Folio 写的模块，未移除任何东西。"),
-    }
-}
-
 /// The card raised when the registry would not take the Explorer verb, carrying
 /// what Windows said.
 ///
 /// One sentence for both directions, because what a reader can act on is the
 /// operating system's own code and not which way the switch was moving — and
 /// the row beside the card already says which state the machine ended up in.
-/// [`psreadline_install_failed`]'s ruling for passing the message through whole.
+/// The message is passed through whole, as [`psreadline_remove_failed`] passes it.
 #[must_use]
 pub fn context_menu_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Could not change Explorer's menu: {message}"),
         Lang::Chinese => format!("修改资源管理器菜单失败：{message}"),
+    }
+}
+
+/// **The sentence a change whose worker did not run to its end is answered with**
+/// (T-PROFILE-INSTALL-REFUSED-START), `started` saying whether the worker ran at all
+/// (`lane::WorkerEnd::started`): a worker the thread door refused changed nothing, and one that
+/// ended in a panic may have stopped anywhere, so the second claims nothing about what was done.
+pub(crate) fn unfinished_change(started: bool) -> Text {
+    if started {
+        Text::ChangeStopped
+    } else {
+        Text::ChangeNotStarted
     }
 }
 
@@ -7083,6 +6963,16 @@ pub fn explorer_first_page_failed(message: &str) -> String {
     match current() {
         Lang::English => format!("Windows would not register the package: {message}"),
         Lang::Chinese => format!("Windows 拒绝登记这个包：{message}"),
+    }
+}
+
+/// **The same, for a removal Windows refused** (T-PROFILE-INSTALL-REFUSED-START review): the
+/// switch turned off asks Windows to remove the package, not to register it.
+#[must_use]
+pub fn explorer_first_page_remove_failed(message: &str) -> String {
+    match current() {
+        Lang::English => format!("Windows would not remove the package: {message}"),
+        Lang::Chinese => format!("Windows 拒绝移除这个包：{message}"),
     }
 }
 
@@ -7532,8 +7422,19 @@ pub fn not_renamed(reason: &str) -> String {
     }
 }
 
-/// A save that did not happen, and why. The `{reason}` is either
-/// [`Text::PreviewNothingToSave`] or an `io::Error`, and the second of those is
+/// The clause for a preview body larger than a save may write (S-6a), `limit`
+/// already in words.
+#[must_use]
+pub fn preview_save_too_large(limit: &str) -> String {
+    Text::PreviewSaveTooLarge.text().replace("{limit}", limit)
+}
+
+/// A save that did not happen, and why. The `{reason}` is a clause of this
+/// table — [`Text::PreviewNothingToSave`], and for a preview save on the storage
+/// worker [`Text::PreviewSaveNotStarted`], [`Text::PreviewSaveTooLarge`],
+/// [`Text::PreviewSaveLink`], [`Text::PreviewSaveNoExchange`],
+/// [`Text::PreviewSaveNameTaken`] or [`Text::PreviewSaveUnread`] — or an
+/// `io::Error`, and the second of those is
 /// the OS's own sentence in the OS's own language — a known seam, recorded in the
 /// inventory's §E and not papered over here.
 #[must_use]
@@ -7593,6 +7494,49 @@ pub fn quit_documents_not_saved_in(lang: Lang, files: &[&str]) -> String {
     )
 }
 
+/// **The storage pass's card** (T-STORE-NOTICE; design note 2026-10-11 §3.6,
+/// (b)11): one line per file, in the notice's order —
+/// `settings.json: Theme and Font size came from disk.` — each clause naming at
+/// most [`NAMES_ON_A_CARD`] values, then how many more. A statement, with nothing
+/// to choose: the file has already won.
+#[must_use]
+pub fn merge_notice(notice: &crate::document_request::MergeNotice) -> String {
+    merge_notice_in(current(), notice)
+}
+
+/// [`merge_notice`] in a named language.
+#[must_use]
+pub fn merge_notice_in(lang: Lang, notice: &crate::document_request::MergeNotice) -> String {
+    let clause = |text: Text, names: &[String]| {
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        text.in_lang(lang).replace(
+            "{names}",
+            &files_listed_in(lang, &names, Some(NAMES_ON_A_CARD)),
+        )
+    };
+    notice
+        .files
+        .iter()
+        .map(|file| {
+            let mut clauses = Vec::new();
+            if !file.values.is_empty() {
+                clauses.push(clause(Text::MergeFromDisk, &file.values));
+            }
+            if !file.not_applied.is_empty() {
+                clauses.push(clause(Text::MergeNotApplied, &file.not_applied));
+            }
+            Text::MergeFileLine
+                .in_lang(lang)
+                .replace("{file}", file.file)
+                .replace(
+                    "{clauses}",
+                    &clauses.join(Text::MergeClauseSeparator.in_lang(lang)),
+                )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// **What the system's message box says when a stop kept a change nowhere**
 /// (T-QUIT-DOCUMENTS; revision (d)3): every such file, named.
 #[must_use]
@@ -7627,6 +7571,20 @@ fn quit_not_saved_in(lang: Lang, names: &str) -> String {
         Lang::English => format!("Not saved: {names}"),
         Lang::Chinese => format!("未能保存：{names}"),
     }
+}
+
+/// **What a quit answered `Save` says when it stopped waiting for saves still on their way**
+/// (S-6c): the names, and that they are not yet on the disk — true at the bound, whatever the
+/// worker answers later. [`quit_not_saved`]'s card, for the saves that have not answered.
+#[must_use]
+pub fn quit_save_on_its_way(names: &str) -> String {
+    quit_save_on_its_way_in(current(), names)
+}
+
+fn quit_save_on_its_way_in(lang: Lang, names: &str) -> String {
+    Text::QuitSaveOnItsWay
+        .in_lang(lang)
+        .replace("{names}", names)
 }
 
 /// **One row of `Move to window ▸`** (B9, user ruling 2026-08-25).
@@ -7898,6 +7856,9 @@ pub enum CliText<'a> {
     RepeatedFlag(&'a str),
     /// A second bare path. One command line names one place.
     ExtraPath(&'a str),
+    /// A flag that only says something beside another, given without it
+    /// (`crate::cli::CliFault::Unpaired`, T-UPDATE-MOVE-HELD-RETRY).
+    UnpairedFlag { flag: &'a str, needs: &'a str },
     /// `--cwd` named something that is not a folder.
     ///
     /// The second sentence is the half the reader cannot see for themselves: the
@@ -7985,6 +7946,10 @@ impl CliText<'_> {
                 Lang::English => format!("{flag} was given twice."),
                 Lang::Chinese => format!("{flag} 给了两次。"),
             },
+            Self::UnpairedFlag { flag, needs } => match lang {
+                Lang::English => format!("{flag} was given without {needs}."),
+                Lang::Chinese => format!("{flag} 需要搭配 {needs} 使用。"),
+            },
             Self::ExtraPath(path) => match lang {
                 Lang::English => format!("One path at a time — {path} is the second."),
                 Lang::Chinese => format!("一次只能给一个路径，{path} 是第二个。"),
@@ -8046,7 +8011,7 @@ impl CliText<'_> {
     /// The samples deliberately contain no Han characters of their own, so that
     /// the Chinese column's own words are what the Han test finds.
     #[cfg(test)]
-    pub const SAMPLES: [Self; 11] = [
+    pub const SAMPLES: [Self; 12] = [
         Self::Usage {
             profile_ids: "pwsh, winps",
         },
@@ -8054,6 +8019,10 @@ impl CliText<'_> {
         Self::UnknownFlag("--nope"),
         Self::RepeatedFlag("--profile"),
         Self::ExtraPath(r"D:\b"),
+        Self::UnpairedFlag {
+            flag: "--update-held-file",
+            needs: "--update-journal-held",
+        },
         Self::NoSuchFolder(r"D:\gone"),
         Self::NoSuchProfile("fish"),
         Self::NoSuchPath(r"D:\gone"),
@@ -8073,8 +8042,7 @@ impl CliText<'_> {
 // Every one of these is a sentence with a number, a name or a path in it, which
 // is why it is here and not in the table: the table is `&'static str` and these
 // allocate. They are written as a private `…_in(lang, …)` with a public wrapper
-// that reads the language in force, which is
-// [`psreadline_row_outdated_in`]'s shape and is here for its reason — a test
+// that reads the language in force, for one reason — a test
 // that had to `install` a language in order to read a sentence would be a test
 // racing every other test in this file for the process's own answer.
 
@@ -9013,6 +8981,20 @@ fn keybindings_file_kept_in(lang: Lang, file: &str) -> String {
         .replace("{file}", file)
 }
 
+/// **One value of one profile, named the way its card says it** — the row's
+/// title and the field's label (T-STORE-MERGE-PROFILES-PINS).
+#[must_use]
+pub fn merged_profile_value(profile: &str, field: &str) -> String {
+    merged_profile_value_in(current(), profile, field)
+}
+
+fn merged_profile_value_in(lang: Lang, profile: &str, field: &str) -> String {
+    Text::MergedProfileValue
+        .in_lang(lang)
+        .replace("{profile}", profile)
+        .replace("{field}", field)
+}
+
 /// **A switcher row the pin would not keep** (§7.7 ⑤, 2026-08-24).
 ///
 /// A pin is a press and a press is owed an answer. §7.7 ③'s 「什么都没发生比一个
@@ -9042,7 +9024,7 @@ fn switcher_pin_refused_in(lang: Lang, target: &str) -> String {
 /// `PageKept`).
 ///
 /// The platform's own sentence is passed through rather than summarised, on
-/// [`psreadline_install_failed`]'s reason: it is the only text that tells a
+/// [`psreadline_remove_failed`]'s reason: it is the only text that tells a
 /// controller that had already gone from a parent window Windows would not set,
 /// and neither of those is a thing this window can word better than the report
 /// it was given.
@@ -9381,6 +9363,7 @@ mod tests {
             Text::PastePathNushell,
             Text::PasteClipboardPromise,
             Text::PasteClipboardRead,
+            Text::PasteClipboardBusy,
             Text::PasteClipboardPicture,
             Text::PasteProfileOverride,
         ];
@@ -9802,6 +9785,7 @@ mod tests {
                 | CliText::UnknownFlag(_)
                 | CliText::RepeatedFlag(_)
                 | CliText::ExtraPath(_)
+                | CliText::UnpairedFlag { .. }
                 | CliText::NoSuchFolder(_)
                 | CliText::NoSuchProfile(_)
                 | CliText::NoSuchPath(_)
@@ -9973,6 +9957,12 @@ mod tests {
     /// The failure this catches is the half-translation: a sentence whose
     /// technical tokens were kept and whose words were forgotten still differs
     /// from its English, so the test above would pass it.
+    ///
+    /// An entry on [`Text::PUNCTUATION_ONLY`] has no word to carry; its Chinese
+    /// column, placeholders taken out, is CJK or full-width punctuation
+    /// (U+3000–303F, U+FF00–FFEF) and nothing else. MUTATIONS: give
+    /// `ListSeparator` its English `", "` in the Chinese column, or add
+    /// `QuitSave` (全部保存) to that list, and the punctuation assertion names it.
     #[test]
     fn every_chinese_entry_carries_at_least_one_han_character() {
         for entry in Text::ALL {
@@ -9984,6 +9974,28 @@ mod tests {
                     continue;
                 }
                 let chinese = entry.on(Lang::Chinese, platform);
+                if Text::PUNCTUATION_ONLY.contains(&entry) {
+                    let mut rest = String::new();
+                    let mut in_placeholder = false;
+                    for c in chinese.chars() {
+                        match c {
+                            '{' => in_placeholder = true,
+                            '}' => in_placeholder = false,
+                            _ if !in_placeholder => rest.push(c),
+                            _ => {}
+                        }
+                    }
+                    assert!(
+                        !rest.is_empty()
+                            && rest.chars().all(|c| {
+                                ('\u{3000}'..='\u{303f}').contains(&c)
+                                    || ('\u{ff00}'..='\u{ffef}').contains(&c)
+                            }),
+                        "{entry:?} reads {chinese:?} on {platform:?}: outside its \
+                         placeholders it should be full-width punctuation alone"
+                    );
+                    continue;
+                }
                 assert!(
                     chinese
                         .chars()
@@ -10487,6 +10499,9 @@ mod tests {
                 (Text::HandoffCouldNotRunSuffix, Text::HandoffCouldNotRun),
                 (Text::HandoffsStoppedSuffix, Text::HandoffsStopped),
                 (Text::HandoffsTooManySuffix, Text::HandoffsTooMany),
+                (Text::HandoffNotFoundSuffix, Text::HandoffNotFound),
+                (Text::HandoffAccessDeniedSuffix, Text::HandoffAccessDenied),
+                (Text::HandoffNotOpenedSuffix, Text::HandoffNotOpened),
             ] {
                 let long = long.in_lang(lang);
                 let short = short.in_lang(lang);
@@ -11046,8 +11061,7 @@ mod tests {
     /// table's, in both languages, with the verb agreeing with the count.**
     ///
     /// It was an English sentence with an English plural rule written in
-    /// `seats.rs`, so the Chinese window drew English. The Chinese rows are
-    /// pending (`CHINESE_PENDING`), and the entries are the table's either way.
+    /// `seats.rs`, so the Chinese window drew English.
     ///
     /// MUTATION: drop the one-seat template from `seat_overflow_notice_in` —
     /// "1 more do not fit" goes red.

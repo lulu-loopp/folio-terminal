@@ -137,7 +137,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&out_dir)?;
     // The 200 ms the platform costs the first question, spent before a window
     // exists rather than in the middle of the first play.
-    bt_platform::video::prewarm();
+    if let Err(error) = bt_platform::video::prewarm() {
+        eprintln!("video-probe: the media platform's warm-up could not be started: {error}");
+    }
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -157,10 +159,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_size: None,
     };
     event_loop.run_app(&mut probe)?;
-    // §7.35's ordering, and `shutdown_media_session`'s own debug assertion:
-    // every engine is gone before the platform is handed back.
-    drop(probe.engine.take());
-    bt_platform::video::shutdown_media_session();
+    // §7.35's ordering: the engine is shut down through its door, and the media
+    // session's way out — an owner-thread door on the way out — waits for it to
+    // have left before the platform is handed back.
+    if let Some(mut engine) = probe.engine.take() {
+        engine.shutdown();
+    }
+    assert!(
+        bt_platform::admission::exiting(),
+        "the probe is on its way out"
+    );
+    admit::<bt_platform::admission::doors::MediaQuiet, _>(
+        bt_platform::video::shutdown_media_session,
+    );
     Ok(())
 }
 
@@ -448,7 +459,7 @@ impl Probe {
                 .join(format!("{name}-{:.1}s.png", state.position_secs));
             // A probe whose device has gone away has no evidence to write down,
             // and saying so is more use than a PNG of nothing.
-            match offscreen.read_back(gpu) {
+            match bt_render_probe::read_back(offscreen, gpu) {
                 Ok(pixels) => write_png(pixels, WIDTH, HEIGHT, &file),
                 Err(error) => {
                     eprintln!("PROBE could not read the frame back: {error}");

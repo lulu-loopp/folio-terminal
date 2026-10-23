@@ -571,7 +571,7 @@ pub struct AnimationCursor {
     /// [`Self::ended`] because the window does a different thing with it: a
     /// playback that ran out of file stands on its last frame, and a playback
     /// whose file changed is let go of so the pane opens the new file down the
-    /// ordinary path. See `adopt_animation_fill`.
+    /// ordinary path. See `AnimationCache::adopt_fill`.
     stale: bool,
 }
 
@@ -962,7 +962,7 @@ impl AnimationCursor {
     }
 
     /// **Whether the file was rewritten under the loop** (user report
-    /// 2026-09-12) — see [`Self::stale`] and `adopt_animation_fill`.
+    /// 2026-09-12) — see [`Self::stale`] and `AnimationCache::adopt_fill`.
     #[must_use]
     pub fn file_changed(&self) -> bool {
         self.stale
@@ -1179,7 +1179,7 @@ impl Animation {
     /// is the thing that noticed, and `false` while the cursor is away.
     ///
     /// A playback that answers `true` is one the window lets go of: see
-    /// `adopt_animation_fill`, which is the only caller and the only moment the
+    /// `AnimationCache::adopt_fill`, which is the only caller and the only moment the
     /// cursor is certainly home.
     #[must_use]
     pub fn file_changed(&self) -> bool {
@@ -1381,6 +1381,17 @@ impl Animation {
         // The reservation ends where the frames it stood for begin: they are in
         // the ring now and `ring_bytes` counts them (B9).
         self.in_flight_bytes = 0;
+    }
+
+    /// **The fill out for this animation failed**: its cursor — and the composition canvas it
+    /// owns — went with the request and will not come home, so the canvas and the reservation made
+    /// for the frames it was ordered both end here: those bytes will never be this process's.
+    /// With no cursor, no fill is asked again: the animation stands on its last frame until a
+    /// surface begins showing the file again and opens a new playback.
+    pub fn fill_lost(&mut self) {
+        self.in_flight_bytes = 0;
+        // The canvas is the cursor's, and the cursor is gone with the request.
+        self.canvas_bytes = 0;
     }
 
     /// **This animation's first frame is on the glass — start its clock here**
@@ -2125,7 +2136,7 @@ mod tests {
     /// its first frame", said by the half of the defect that is in this module.
     ///
     /// The same sentence covers the other half. An animation nobody draws does
-    /// not advance (the window's `advance_drawn_animations`), so by the time a
+    /// not advance (the window's `AnimationCache::advance_drawn`), so by the time a
     /// reader comes back to it its due time is a moment in the past; without a
     /// rebase the first tick after a tab switch would fast-forward through
     /// however long the tab was away.
@@ -2173,6 +2184,58 @@ mod tests {
         );
         animation.advance(revealed + Duration::from_millis(200));
         assert_eq!(animation.frame_index(), 2);
+    }
+
+    /// RED (S-8 round 3) — **A fill that failed on the worker releases its reservation**: the
+    /// window's animation cache weighs the playback by what it holds again, the reserved frames
+    /// that will never come out of it, and the animation asks for no fill (its cursor went with
+    /// the request) until a surface opens the file again. A failed fill for a playback the window
+    /// has moved on from changes nothing.
+    ///
+    /// MUTATION: make `Animation::fill_lost` keep `in_flight_bytes` — the cache overcounts the
+    /// playback for as long as it lives. Or keep `canvas_bytes` — the playback is weighed for a
+    /// canvas no cursor holds any more.
+    #[test]
+    fn a_failed_fill_releases_its_reservation() {
+        const SIDE: u16 = 64;
+        let animation = decode_bytes(a_gif_of(12, SIDE, 5)).expect("a small capture");
+        let canvas = animation.bytes_held() - animation.ring_bytes();
+        let key = "d:\\\u{52a8}\u{56fe}\\loading.gif".to_owned();
+        let mut cache = crate::AnimationCache::with_budget(u64::MAX);
+        crate::test_support::shown_and_opened(&mut cache, 1, &key, 7, Ok(animation));
+        let parked = cache.bytes_held();
+        cache.send_fill(&key, |serial, cursor, want| {
+            assert_eq!(serial, 7);
+            assert!(want > 0, "a ring with room in it");
+            drop(cursor);
+            crate::FillSent::Sent
+        });
+        let reserved = cache.bytes_held();
+        let reservation = reserved - parked;
+        assert!(reservation > 0, "the fill is reserved");
+        cache.release_failed_fill(&key, 8);
+        assert_eq!(
+            cache.bytes_held(),
+            reserved,
+            "another playback's fill changes nothing"
+        );
+        cache.release_failed_fill(&key, 7);
+        assert_eq!(
+            cache.bytes_held(),
+            reserved - reservation - canvas,
+            "the reservation and the canvas are released"
+        );
+        let Some(crate::AnimationEntry::Ready { animation, .. }) = cache.get(&key) else {
+            panic!("the playback stands");
+        };
+        assert_eq!(
+            animation.bytes_held(),
+            animation.ring_bytes(),
+            "the canvas went with the cursor: only the frames in the ring are held"
+        );
+        cache.send_fill(&key, |_, _, _| {
+            panic!("no fill is asked: the decoder went with the request")
+        });
     }
 
     /// RED — **an animation is weighed by all three of its allocations**
@@ -2482,7 +2545,7 @@ mod tests {
     /// instead of decoded into the middle of a picture: the moment the loop
     /// comes round.
     ///
-    /// The window's half of this is `adopt_animation_fill`, which lets the
+    /// The window's half of this is `AnimationCache::adopt_fill`, which lets the
     /// playback go so the pane opens the file again — see the test of that name
     /// in `main.rs`.
     ///
