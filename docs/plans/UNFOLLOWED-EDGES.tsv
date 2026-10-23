@@ -5047,7 +5047,7 @@ crates/bt-app/src/seats.rs	bt-app crate::seats::tab_strip_geometry	Ambiguous	sat
 crates/bt-app/src/seats.rs	bt-app crate::seats::tab_strip_geometry	Ambiguous	unwrap_or	2	
 crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	collect	1	
 crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	filter_map	1	
-crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	map	2	
+crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	map	2	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; Iterator::map over the bar's boxes, stating each with its role (Own or MaximizeButton), which reaches no door
 crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Dynamic	cropped	1	
 crates/bt-app/src/seats.rs	bt-app crate::seats::to_persisted	Ambiguous	collect	1	
 crates/bt-app/src/seats.rs	bt-app crate::seats::to_persisted	Ambiguous	into_iter	1	
@@ -8947,10 +8947,10 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Am
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Ambiguous	into_iter	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Ambiguous	ok	5	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Ambiguous	take_while	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	as_bool	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	as_slice	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	ok	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	saturating_sub	2	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	as_bool	1	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; the custom-frame subclass's hit test moved into frame_hit_at with its calls; BOOL::as_bool on IsZoomed, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	as_slice	1	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; the custom-frame subclass's hit test moved into frame_hit_at with its calls; Vec::as_slice on the borrowed title-bar boxes, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	ok	1	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; the custom-frame subclass's hit test moved into frame_hit_at with its calls; windows::core::Result::ok on GetClientRect, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	saturating_sub	2	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; the custom-frame subclass's hit test moved into frame_hit_at with its calls; i32::saturating_sub on the client rectangle, which reaches no door
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::get_window_rect	Ambiguous	map_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::get_work_area	Ambiguous	as_bool	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::hide_every_window_of_this_process	Ambiguous	as_bool	1	
@@ -8998,8 +8998,8 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_family_
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_family_named	Ambiguous	ok	3	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_font_families	Ambiguous	map_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_font_families	Ambiguous	to_string	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::mouse_key_state	Ambiguous	fold	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::mouse_key_state	Dynamic	down	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::mouse_key_state	Ambiguous	fold	1	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; Iterator::fold of the key-state flags a client mouse message carries, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::mouse_key_state	Dynamic	down	1	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; the local closure reading GetKeyState for one key, which reaches no door
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_facts	Ambiguous	as_bool	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_facts	Ambiguous	map	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_facts	Ambiguous	ok	1	
