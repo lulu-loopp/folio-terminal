@@ -4988,15 +4988,25 @@ impl<B: Backend> Runtime<'_, B> {
                 self.play_video_file_on(surface, &path)?;
                 return Ok(true);
             }
-            // **Off the bar, the picture is the body ladder's** (owner's ruling
-            // 2026-10-23): a click plays or pauses and a double click zooms the
-            // pane — [`Self::press_video_picture`], the ladder's top rung, which
-            // a docked pane reaches after its press has focused it and a float
-            // reaches through its body. The card keeps its door.
+            // **Off the bar, a pane's or a window's picture is the body
+            // ladder's** (owner's ruling 2026-10-23): a click plays or pauses and
+            // a double click zooms the pane — [`Self::press_video_picture`], the
+            // ladder's top rung, which a docked pane reaches after its press has
+            // focused it and a float reaches through its body. **The card keeps
+            // its own gestures** (user ruling 2026-08-28: 「点 ▶ 或双击画面进播放态」):
+            // its click is its door, and a double click on its picture starts
+            // the recording there, or toggles one already playing —
+            // [`Self::double_click_on_the_cards_video`].
             let Some(layout) = self.video_bar_layout_of(surface) else {
+                if surface == PreviewSurface::Peek && self.double_click_on_the_cards_video(at)? {
+                    return Ok(true);
+                }
                 continue;
             };
             if !layout.holds(at) {
+                if surface == PreviewSurface::Peek && self.double_click_on_the_cards_video(at)? {
+                    return Ok(true);
+                }
                 continue;
             }
             let slot = layout.slot_at(at);
@@ -5036,6 +5046,48 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(false)
     }
 
+    /// **A double click on the glance card's recording** (user ruling
+    /// 2026-08-28: 「点 ▶ 或双击画面进播放态」): it starts a still there, inside
+    /// the card, and toggles a recording already playing there. `true` when the
+    /// press was the second of a pair on the card's picture; the first is not
+    /// taken, and is the card's own click.
+    ///
+    /// The card's alone: a pane's and a window's picture answer through the
+    /// body ladder ([`Self::press_video_picture`], rows 38 and 39), and the card
+    /// is in neither row.
+    fn double_click_on_the_cards_video(&mut self, at: [f32; 2]) -> Result<bool> {
+        let surface = PreviewSurface::Peek;
+        let scale = self.window.renderer.scale_factor() as f32;
+        let now = Instant::now();
+        let Some(shape) = self.video_shape_of(surface, scale, now) else {
+            return Ok(false);
+        };
+        if !file_peek::contains(shape.rect(), at) {
+            return Ok(false);
+        }
+        // Only over something that is a recording — a document, a picture and a
+        // page all have their own answer to a double click.
+        let playing = self.window.video.get(surface).is_some();
+        let path = self.file_peek_subject().and_then(|it| it.path);
+        if !playing && !path.as_deref().is_some_and(preview::path_names_a_video) {
+            return Ok(false);
+        }
+        if !self.preview_image_clicks.register(surface, at, now) {
+            return Ok(false);
+        }
+        if playing {
+            if let Some(seat) = self.window.video.get_mut(surface) {
+                seat.toggle(now);
+            }
+            self.refresh_chrome();
+            self.present_chrome_change()?;
+            return Ok(true);
+        }
+        let Some(path) = path else { return Ok(false) };
+        self.play_video_file_on(surface, &path)?;
+        Ok(true)
+    }
+
     /// **A press on a recording's picture** (owner's ruling 2026-10-23, rows
     /// 38 and 39) — the body ladder's top rung, [`PreviewBodyRung::VideoPicture`],
     /// so a docked pane and a floating window answer it through one door. `true`
@@ -5060,6 +5112,12 @@ impl<B: Backend> Runtime<'_, B> {
         if self.preview_image_clicks.register(surface, at, now) {
             self.double_click_video_picture(surface)?;
         } else {
+            // **A first press forgets the last click's record** (review round 1,
+            // 2026-10-23): that record is the click's own and is put back only by
+            // the press that pairs with *it*. A press that pairs with this one —
+            // after a drag, say, which is no click and records nothing — must
+            // find nothing to put back.
+            self.window.video_click = None;
             self.latch_video_picture_press(VideoPicturePress::at(surface, at));
         }
         Ok(true)
@@ -5224,7 +5282,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// Told to *every* seat and not only to the one under the pointer, because
     /// "the pointer is somewhere else" is the fact that ends a reveal and a seat
     /// that was never told it would hold its bar up for ever.
-    pub(in crate::runtime) fn note_video_hover(&mut self, position: Option<PhysicalPosition<f64>>) {
+    pub(in crate::runtime) fn note_video_hover(
+        &mut self,
+        position: Option<PhysicalPosition<f64>>,
+    ) -> Result<()> {
         let scale = self.window.renderer.scale_factor() as f32;
         let now = Instant::now();
         let at = position.map(|at| [at.x as f32, at.y as f32]);
@@ -5249,15 +5310,25 @@ impl<B: Backend> Runtime<'_, B> {
                 )
             })
             .collect();
+        let mut repaints = false;
         for ((surface, rect), (_, over_bar)) in shapes.iter().zip(bars) {
             let Some(seat) = self.window.video.get_mut(*surface) else {
                 continue;
             };
-            match at.filter(|at| file_peek::contains(*rect, *at)) {
+            repaints |= match at.filter(|at| file_peek::contains(*rect, *at)) {
                 Some(at) => seat.pointer_moved(at, over_bar, now),
                 None => seat.pointer_left(),
-            }
+            };
         }
+        // **A hand on a bar is a frame owed** (row 41; review round 1,
+        // 2026-10-23): the scrubber's time stands over the point under it, and a
+        // paused recording has no decoded picture coming to draw it there. Only
+        // a move on or off a bar asks; a hand anywhere else asks for nothing.
+        if repaints {
+            self.refresh_chrome();
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// **The control bar of every docked pane that is playing** (route B slice
@@ -6948,11 +7019,11 @@ impl<B: Backend> Runtime<'_, B> {
             self.step_preview_neighbour(surface, direction)?;
             return Ok(true);
         }
-        // **A player's five keys, after file travel** (user ruling
-        // 2026-08-28; §7.44 ②).
+        // **A player's keys, after file travel** (user ruling 2026-08-28;
+        // §7.44 ②; T-VIDEO-POINTER-AND-KEYS row 42).
         //
-        // Space, Shift+`←`/`→`, `↑`/`↓` and `M` reach the player before
-        // document scrolling. Plain horizontal arrows were consumed above,
+        // Space, Shift+`←`/`→`, `↑`/`↓`, `M`, Home/End and `,`/`.` reach the
+        // player before document scrolling. Plain horizontal arrows were consumed above,
         // including at the ends and while the folder listing is pending.
         //
         // **On whichever surface holds the keyboard**, which is the whole of
@@ -6972,6 +7043,9 @@ impl<B: Backend> Runtime<'_, B> {
             if let Some(seat) = self.window.video.get_mut(surface)
                 && seat.key_press(&event.logical_key, event.physical_key, modified, now)
             {
+                // A key the player took changed playback after any click: a
+                // second press now has nothing of that click's to put back.
+                self.window.video_click = None;
                 self.refresh_chrome();
                 self.present_chrome_change()?;
                 return Ok(true);
@@ -13052,7 +13126,14 @@ impl<B: Backend> Runtime<'_, B> {
         // this tick owes the glass a picture is still `chrome_moved`'s to answer,
         // and a re-projection that drew the same rows draws nothing.
         let cards_owe = self.window.cards.owes_frame();
-        let owes_frame = owes_frame || pictures_owe || cards_owe;
+        // **A recording's bar, changed by its own clocks** (T-VIDEO-POINTER-AND-KEYS
+        // review round 1, 2026-10-23): its fade, and the volume's flash going out.
+        // `strip_animation_work` wakes the window for both through
+        // `VideoSeats::bar_deadline` and `bar_is_moving`; this is what the woken
+        // tick finds owed. While a recording plays its decoded pictures carry the
+        // bar anyway; paused, nothing else would, and the flash stood.
+        let bars_owe = self.window.video.bars_owe_a_frame(now, motion);
+        let owes_frame = owes_frame || pictures_owe || cards_owe || bars_owe;
         if !owes_frame && !panes_owe {
             return Ok(());
         }

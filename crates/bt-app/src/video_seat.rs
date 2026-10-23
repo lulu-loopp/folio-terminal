@@ -745,6 +745,13 @@ pub struct VideoSeat {
     /// ([`crate::FOOT_REVEAL_FEEDBACK`]). Only the moment is kept: the number
     /// flashed is the engine's, read when it is painted.
     gain_flash_at: Option<Instant>,
+    /// **What the window last drew of this bar on its own clocks** — its
+    /// opacity, in the 256 steps a frame can show, and whether the volume's
+    /// flash was up — or `None` before the first look. The bar changes on those
+    /// clocks with no new picture to carry it while the recording is paused, so
+    /// the window's strip tick asks [`Self::bar_owes_a_frame`] and pays the
+    /// frame itself (review round 1, 2026-10-23).
+    bar_drawn: Option<(u8, bool)>,
     /// Which of [`VIDEO_RATES`] is in force. An index and not a number, because
     /// the button cycles and a float that had drifted would never match.
     rate_index: usize,
@@ -788,6 +795,7 @@ impl VideoSeat {
             grab: None,
             hover: None,
             gain_flash_at: None,
+            bar_drawn: None,
             rate_index: 0,
         })
     }
@@ -1046,8 +1054,9 @@ impl VideoSeat {
         self.acted(now);
     }
 
-    /// **The five keys the ruling named**, answered only by the surface that is
-    /// holding the keyboard. `true` when the key was one of them.
+    /// **The player's keys** — the five the 2026-08-28 ruling named
+    /// (Space, Shift+`←`/`→`, `↑`/`↓`, `M`) and row 42's Home/End and `,`/`.`
+    /// — answered only by the surface that is holding the keyboard. `true` when the key was one of them.
     ///
     /// A modified key is never one of these: `Ctrl`, `Alt` and `Win` chords are
     /// the window's, and a player that swallowed `Ctrl+←` would be eating one of
@@ -1101,28 +1110,36 @@ impl VideoSeat {
     /// Arms the intent once and does not restart it, which is the difference
     /// between a bar that comes up while a hand is travelling towards it and one
     /// that never comes up at all.
-    pub fn pointer_moved(&mut self, at: [f32; 2], over_bar: bool, now: Instant) {
+    ///
+    /// `true` when the move changed what the bar paints for the hand — the
+    /// scrubber's time label, which stands over the bar only while the hand is
+    /// on it (row 41) — so the caller owes the frame: a paused recording has no
+    /// decoded picture coming to redraw the bar (review round 1, 2026-10-23).
+    pub fn pointer_moved(&mut self, at: [f32; 2], over_bar: bool, now: Instant) -> bool {
+        let repaints = (over_bar || self.over_bar) && self.hover != Some(at);
         self.hover = Some(at);
         self.over_bar = over_bar;
         if over_bar {
             self.acted(now);
-            return;
-        }
-        if self.revealed_at.is_some() {
+        } else if self.revealed_at.is_some() {
             self.acted_at = now;
-            return;
-        }
-        if self.arming_at.is_none() {
+        } else if self.arming_at.is_none() {
             self.arming_at = Some(now);
         }
+        repaints
     }
 
     /// The pointer left the picture altogether: the intent is disarmed and the
     /// dwell is allowed to run out.
-    pub fn pointer_left(&mut self) {
+    ///
+    /// `true` when the hand left from the bar, taking the scrubber's label with
+    /// it, which owes the frame [`Self::pointer_moved`] says it does.
+    pub fn pointer_left(&mut self) -> bool {
+        let repaints = self.over_bar;
         self.arming_at = None;
         self.over_bar = false;
         self.hover = None;
+        repaints
     }
 
     /// Let an armed intent become a reveal, and let a bar that has finished
@@ -1220,6 +1237,19 @@ impl VideoSeat {
     #[must_use]
     pub fn bar_is_moving(&self, now: Instant, motion: crate::Motion) -> bool {
         self.presence(now, motion).moving
+    }
+
+    /// **Whether the bar's clocks have changed what it paints since the window
+    /// last drew it** — its opacity, or the volume's flash coming up or going
+    /// out — noting the answer as drawn. The half of [`Self::bar_deadline`]
+    /// that pays: that deadline wakes the window, and this is what the woken
+    /// tick finds owed, playing or paused.
+    pub fn bar_owes_a_frame(&mut self, now: Instant, motion: crate::Motion) -> bool {
+        let drawn = (
+            (self.presence(now, motion).opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+            self.gain_flashing(now),
+        );
+        self.bar_drawn.replace(drawn) != Some(drawn)
     }
 
     /// Take hold of a track. The fraction under the pointer applies at once,
@@ -1902,6 +1932,15 @@ impl VideoSeats {
         self.seats
             .values()
             .any(|seat| seat.bar_is_moving(now, motion))
+    }
+
+    /// Whether any seat's bar owes a frame its own clocks made — see
+    /// [`VideoSeat::bar_owes_a_frame`]. Every seat is asked, so each notes what
+    /// this frame will draw.
+    pub fn bars_owe_a_frame(&mut self, now: Instant, motion: crate::Motion) -> bool {
+        self.seats.values_mut().fold(false, |owed, seat| {
+            seat.bar_owes_a_frame(now, motion) | owed
+        })
     }
 
     /// **Every seat shut down: each engine told to stop and let go of.** The door
@@ -3002,18 +3041,20 @@ mod tests {
             .bar_deadline(now, crate::Motion::Full)
             .expect("a flash that is up owes the frame that takes it off");
         assert!(deadline <= now + flash, "{deadline:?}");
-        // With every other deadline past, the flash's end is the one owed.
+        // Just before the flash goes out it is the soonest thing owed: the bar
+        // the notch held up stands its dwell past the flash's end, which is the
+        // precondition asserted rather than assumed.
         let late = now + flash - Duration::from_millis(1);
-        if seat
-            .presence(late, crate::Motion::Full)
-            .settled_at
-            .is_none_or(|settled| settled <= late)
-        {
-            assert_eq!(
-                seat.bar_deadline(late, crate::Motion::Full),
-                Some(now + flash)
-            );
-        }
+        assert!(
+            seat.presence(late, crate::Motion::Full)
+                .settled_at
+                .is_none_or(|settled| settled > now + flash),
+            "the bar outlasts the flash"
+        );
+        assert_eq!(
+            seat.bar_deadline(late, crate::Motion::Full),
+            Some(now + flash)
+        );
         seat.shutdown();
         crate::test_support::engines_settling_to(before);
     }

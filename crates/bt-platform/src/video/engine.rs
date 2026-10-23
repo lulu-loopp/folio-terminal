@@ -1642,20 +1642,6 @@ impl IMFMediaEngineNotify_Impl for Notify_Impl {
     }
 }
 
-/// **A Direct3D 11 device for the decoder to decode onto, hardware if there is
-/// one.**
-///
-/// `VIDEO_SUPPORT` is what lets the engine bind a hardware decoder to it;
-/// `BGRA_SUPPORT` is what lets it produce the format asked for above. Neither
-/// flag is available on every machine, so a device that refuses them is asked
-/// for again without them — a decode that falls back to software inside the
-/// platform is still a decode, and a refusal here would be a machine that plays
-/// nothing.
-///
-/// **WARP is a real answer and not a failure.** The release gate's clean virtual
-/// machine has no graphics driver, and every frame in this module reaches system
-/// memory anyway; a software rasteriser is slower at the `TransferVideoFrame`
-/// and identical everywhere else.
 /// **The frame rate the first stream that declares one declares** — a video
 /// stream's; an audio stream has none.
 ///
@@ -1685,6 +1671,20 @@ fn frame_rate_of(packed: u64) -> Option<f64> {
     (numerator > 0 && denominator > 0).then(|| f64::from(numerator) / f64::from(denominator))
 }
 
+/// **A Direct3D 11 device for the decoder to decode onto, hardware if there is
+/// one.**
+///
+/// `VIDEO_SUPPORT` is what lets the engine bind a hardware decoder to it;
+/// `BGRA_SUPPORT` is what lets it produce the format asked for above. Neither
+/// flag is available on every machine, so a device that refuses them is asked
+/// for again without them — a decode that falls back to software inside the
+/// platform is still a decode, and a refusal here would be a machine that plays
+/// nothing.
+///
+/// **WARP is a real answer and not a failure.** The release gate's clean virtual
+/// machine has no graphics driver, and every frame in this module reaches system
+/// memory anyway; a software rasteriser is slower at the `TransferVideoFrame`
+/// and identical everywhere else.
 fn create_device(
     adapter: Adapter,
 ) -> Result<(ID3D11Device, ID3D11DeviceContext, bool), EngineError> {

@@ -2459,3 +2459,226 @@ fn a_floating_windows_picture_answers_as_a_panes_does() {
     folio.window.video.shutdown_all();
     crate::test_support::engines_settling_to(before);
 }
+
+/// **The double click's pair window runs out** for the last press any tab of `folio` counted — its
+/// moment set back past [`crate::MULTI_CLICK_INTERVAL`], as the clock would have moved it — so the
+/// next press is a first one.
+fn the_pair_window_lapses(folio: &mut HeadlessFolio) {
+    for tab in &mut folio.window.tabs {
+        if let Some((_, _, when)) = tab.preview_image_clicks.last.as_mut() {
+            *when = when
+                .checked_sub(crate::MULTI_CLICK_INTERVAL + Duration::from_millis(1))
+                .expect("the clock has run longer than one pair window");
+        }
+    }
+}
+
+/// The window's own loop, run headless for `span`: each turn answered, and the next one taken
+/// when the turn said it wants waking (or at the end of the span) — nothing drawn that the loop
+/// itself did not draw.
+fn run_the_loop_for(folio: &mut HeadlessFolio, span: Duration) {
+    let end = Instant::now() + span;
+    loop {
+        let now = Instant::now();
+        if now >= end {
+            return;
+        }
+        let wake = folio
+            .runtime()
+            .turn(now, true)
+            .expect("the turn is answered");
+        let until = wake
+            .map_or(end, |(_, at)| at.min(end))
+            .max(now + Duration::from_millis(1));
+        std::thread::sleep(until.saturating_duration_since(Instant::now()));
+    }
+}
+
+/// Every label the window's overlay is drawing that stands wholly above `top`.
+fn labels_above(folio: &HeadlessFolio, top: f32) -> Vec<bt_render::ChromeLabel> {
+    folio
+        .window
+        .renderer
+        .overlay
+        .0
+        .iter()
+        .flat_map(|layer| layer.labels.iter())
+        .filter(|label| label.rect[3] <= top)
+        .cloned()
+        .collect()
+}
+
+/// A recording beside a shell, played by a click, loaded, then paused — the scrubber's usual
+/// case — with the bar up and drawn. Returns the bar's layout.
+fn a_paused_recording(tag: &str) -> (HeadlessFolio, PreviewSurface, crate::video_seat::BarLayout) {
+    let (mut folio, surface) = a_recording_beside_a_shell(tag);
+    let stage = stage_of(&mut folio, surface);
+    click(&mut folio, on_the_picture(stage, 20.0));
+    loaded(&folio, surface);
+    folio
+        .window
+        .video
+        .get_mut(surface)
+        .expect("playing")
+        .toggle(Instant::now());
+    let paused = played(&folio, surface, |state| !state.playing);
+    assert!(!paused.playing, "the fixture pauses: {paused:?}");
+    run_the_loop_for(&mut folio, Duration::from_millis(300));
+    folio.draw();
+    let layout = folio
+        .runtime()
+        .video_bar_layout_of(surface)
+        .expect("a paused recording's bar is up");
+    (folio, surface, layout)
+}
+
+/// RED (T-VIDEO-POINTER-AND-KEYS review round 1, blocker 1) — **what a click did is put back only
+/// by the press that pairs with that click**: a drag across the picture is no click, and a press
+/// that pairs with the drag's own press must not undo a click made long before it.
+///
+/// MUTATION: keep `WindowRuntime::video_click` across a first press in
+/// `Runtime::press_video_picture` — the pairing press plays the paused recording from where the
+/// old click found it, and the assertion goes red.
+#[test]
+fn a_press_pairing_with_a_drag_puts_back_no_older_click() {
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let (mut folio, surface) = a_recording_beside_a_shell("video-picture-drag-pair");
+    let stage = stage_of(&mut folio, surface);
+    click(&mut folio, on_the_picture(stage, 20.0));
+    loaded(&folio, surface);
+    the_pair_window_lapses(&mut folio);
+    // A click that pauses, and records what it did.
+    click(&mut folio, on_the_picture(stage, 60.0));
+    let paused = played(&folio, surface, |state| !state.playing);
+    assert!(!paused.playing, "the click pauses: {paused:?}");
+    the_pair_window_lapses(&mut folio);
+    // A drag across the picture, then a press where the drag began, inside the pair window.
+    let origin = on_the_picture(stage, 100.0);
+    folio.press(origin);
+    let away = PhysicalPosition::new(origin.x + 40.0, origin.y);
+    folio.move_to(away);
+    folio.release(away);
+    folio.press(origin);
+    folio.release(origin);
+    // A fence: the engine answers its commands in order, so once this volume has landed any play
+    // or seek the pair had sent has landed before it.
+    folio
+        .window
+        .video
+        .get_mut(surface)
+        .expect("the seat stands")
+        .set_volume(0.3, Instant::now());
+    let after = played(&folio, surface, |state| (state.volume - 0.3).abs() < 1e-6);
+    assert!(
+        !after.playing && (after.position_secs - paused.position_secs).abs() < 0.05,
+        "the pairing press left playback as it was: {after:?} against {paused:?}"
+    );
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
+}
+
+/// RED (T-VIDEO-POINTER-AND-KEYS review round 1, blocker 2) — **the scrubber's time follows the
+/// hand on a paused recording**, painted by the window's own loop: no decoded frame comes to
+/// redraw the bar while it is paused, so the move itself owes the frame.
+///
+/// MUTATION: have `Runtime::note_video_hover` ask for no frame — the label never reaches the
+/// overlay and the first assertion goes red.
+#[test]
+fn the_scrubbers_time_follows_the_hand_on_a_paused_recording() {
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let (mut folio, surface, layout) = a_paused_recording("video-scrub-label-paused");
+    let track = layout.seek;
+    let row = f64::from((track[1] + track[3]) / 2.0);
+    let along = |fraction: f32| {
+        PhysicalPosition::new(f64::from(track[0] + (track[2] - track[0]) * fraction), row)
+    };
+    let said = |folio: &HeadlessFolio| -> Vec<(String, f32)> {
+        labels_above(folio, layout.bar[1])
+            .into_iter()
+            .map(|label| (label.text, (label.rect[0] + label.rect[2]) / 2.0))
+            .collect()
+    };
+    assert!(
+        said(&folio).is_empty(),
+        "no label before the hand is on the scrubber"
+    );
+
+    for (fraction, text) in [(0.3, "0:01"), (0.7, "0:03")] {
+        let at = along(fraction);
+        folio.move_to(at);
+        run_the_loop_for(&mut folio, Duration::from_millis(120));
+        let labels = said(&folio);
+        assert!(
+            labels
+                .iter()
+                .any(|(said, centre)| said == text && (centre - at.x as f32).abs() <= 2.0),
+            "at {fraction} of the track the overlay says {text} over the hand: {labels:?}"
+        );
+    }
+    // Off the bar, onto the picture: the label goes.
+    let stage = stage_of(&mut folio, surface);
+    folio.move_to(on_the_picture(stage, 20.0));
+    run_the_loop_for(&mut folio, Duration::from_millis(120));
+    assert!(
+        said(&folio).is_empty(),
+        "the label leaves with the hand: {:?}",
+        said(&folio)
+    );
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
+}
+
+/// RED (T-VIDEO-POINTER-AND-KEYS review round 1, blocker 2) — **the volume's flash goes out on a
+/// paused recording** when its clock runs out, by the window's own loop.
+///
+/// MUTATION: drop the bars' fold from `Runtime::advance_strip_animation` — the loop wakes for the
+/// flash's end, finds nothing owed, and the panel stands; the last assertion goes red.
+#[test]
+fn the_volumes_flash_goes_out_on_a_paused_recording() {
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let (mut folio, surface, layout) = a_paused_recording("video-gain-flash-paused");
+    let stage = stage_of(&mut folio, surface);
+    let over = on_the_picture(stage, 20.0);
+    folio.move_to(over);
+    {
+        let mut runtime = folio.runtime();
+        runtime
+            .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, -1.0))
+            .expect("a notch is taken");
+        runtime.flush_wheel().expect("and spent");
+    }
+    let flashed = |folio: &HeadlessFolio| {
+        labels_above(folio, layout.bar[1])
+            .iter()
+            .any(|label| label.text.ends_with('%'))
+    };
+    run_the_loop_for(&mut folio, Duration::from_millis(100));
+    assert!(
+        flashed(&folio),
+        "the notch flashes the volume: {:?} bar {:?}",
+        folio
+            .window
+            .renderer
+            .overlay
+            .0
+            .iter()
+            .flat_map(|l| l.labels.iter())
+            .map(|l| (l.text.clone(), l.rect))
+            .collect::<Vec<_>>(),
+        layout.bar
+    );
+    run_the_loop_for(
+        &mut folio,
+        crate::FOOT_REVEAL_FEEDBACK + Duration::from_millis(300),
+    );
+    assert!(
+        !flashed(&folio),
+        "the flash is gone once its clock has run out: {:?}",
+        labels_above(&folio, layout.bar[1])
+    );
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
+}

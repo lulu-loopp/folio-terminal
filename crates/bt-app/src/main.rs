@@ -64142,7 +64142,7 @@ mod pty_drain_budget_tests {
             .find("let cards_owe = self.window.cards.owes_frame();")
             .expect("the tick asks whether a card is behind its pane");
         let folded = advance
-            .find("let owes_frame = owes_frame || pictures_owe || cards_owe;")
+            .find("let owes_frame = owes_frame || pictures_owe || cards_owe || bars_owe;")
             .expect("and folds it in beside the animations' own debts");
         let gate = advance
             .find("if !owes_frame && !panes_owe {")

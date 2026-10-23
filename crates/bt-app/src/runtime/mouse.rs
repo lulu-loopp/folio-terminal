@@ -1628,12 +1628,15 @@ impl<B: Backend> Runtime<'_, B> {
         // gone somewhere else, and a seat that only heard about moves nothing
         // else wanted would hold its bar up for ever.
         //
-        // **It asks for no frame of its own**, and that is deliberate: what a
-        // move can change is when the bar is *due* — an intent armed, a dwell
-        // restarted — and `strip_animation_work` reads exactly those two
-        // through `VideoSeats::bar_deadline` on the turn this move ends. A
-        // present forced here would be a repaint on every pointer move anywhere
-        // in the window for as long as anything is playing.
+        // **It asks for a frame only for a hand on a bar**, and that is
+        // deliberate: what a move elsewhere can change is when the bar is *due*
+        // — an intent armed, a dwell restarted — and `strip_animation_work`
+        // reads exactly those two through `VideoSeats::bar_deadline` on the
+        // turn this move ends. A present forced on every move would be a
+        // repaint on every pointer move anywhere in the window for as long as
+        // anything is playing. On a bar the scrubber's time stands over the
+        // hand (row 41), and a paused recording has no picture coming to draw
+        // it there, so that move owes its frame (review round 1, 2026-10-23).
         //
         // **A hand on a surface inside a pane is not on the picture under it**
         // (T-STRIP-HOVER-THROUGH): a pill standing over the bar must not light
@@ -1642,7 +1645,7 @@ impl<B: Backend> Runtime<'_, B> {
         // with no video pays nothing for it.
         let on_the_picture = self.window.video.iter().next().is_none()
             || self.in_pane_surface_at(position).is_none();
-        self.note_video_hover(on_the_picture.then_some(position));
+        self.note_video_hover(on_the_picture.then_some(position))?;
         // The glance card's thumb, ahead of everything: it is the topmost thing
         // on the glass, and a gesture in flight is not a hover. It owns the
         // pointer outside the card too — a drag that let go the moment it left
