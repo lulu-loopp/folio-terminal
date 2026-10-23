@@ -736,6 +736,10 @@ pub struct VideoSeat {
     acted_at: Instant,
     over_bar: bool,
     grab: Option<BarSlot>,
+    /// **Where the pointer stands over this seat's picture**, in whole-surface
+    /// pixels, or `None` once it has left — what the scrubber's time label is
+    /// read against (row 41). A fact about the hand, not about the engine.
+    hover: Option<[f32; 2]>,
     /// **When the wheel last moved the volume** (row 40) — the start of the
     /// flash that says the volume, on the band's flash clock
     /// ([`crate::FOOT_REVEAL_FEEDBACK`]). Only the moment is kept: the number
@@ -782,6 +786,7 @@ impl VideoSeat {
             acted_at: now,
             over_bar: false,
             grab: None,
+            hover: None,
             gain_flash_at: None,
             rate_index: 0,
         })
@@ -1096,7 +1101,8 @@ impl VideoSeat {
     /// Arms the intent once and does not restart it, which is the difference
     /// between a bar that comes up while a hand is travelling towards it and one
     /// that never comes up at all.
-    pub fn pointer_moved(&mut self, over_bar: bool, now: Instant) {
+    pub fn pointer_moved(&mut self, at: [f32; 2], over_bar: bool, now: Instant) {
+        self.hover = Some(at);
         self.over_bar = over_bar;
         if over_bar {
             self.acted(now);
@@ -1116,6 +1122,7 @@ impl VideoSeat {
     pub fn pointer_left(&mut self) {
         self.arming_at = None;
         self.over_bar = false;
+        self.hover = None;
     }
 
     /// Let an armed intent become a reveal, and let a bar that has finished
@@ -1299,6 +1306,7 @@ impl VideoSeat {
             &self.engine.state(),
             BarHand {
                 grab: self.grab,
+                hover: self.hover,
                 gain_flash: self.gain_flashing(now),
             },
             self.presence(now, motion).opacity,
@@ -1519,9 +1527,11 @@ fn paint_bar(
         }
     }
 
-    // **The label that stands over the bar** (owner's ruling 2026-10-23, row
-    // 40): the volume a wheel has just set, a small panel of the bar's own
-    // ground with its figures on it.
+    // **The two labels that stand over the bar** (owner's ruling 2026-10-23,
+    // rows 40 and 41): the time under the pointer on the scrubber, and the
+    // volume a wheel has just set. Each is a small panel of the bar's own ground
+    // with its figures on it, and they are the only words the six gestures
+    // added.
     let mut tag = |text: String, rect: [f32; 4]| {
         quads.extend(bt_render::rounded_overlay_fill(
             rect,
@@ -1543,6 +1553,9 @@ fn paint_bar(
             mono: false,
         });
     };
+    if let Some((text, rect)) = seek_label(state, &layout, hand, scale) {
+        tag(text, rect);
+    }
     if hand.gain_flash {
         let (text, rect) = gain_label(&layout, gain, scale);
         tag(text, rect);
@@ -1561,11 +1574,49 @@ fn paint_bar(
 }
 
 /// **What the hand is doing on the bar**, as the painter needs it: the track in
-/// hand, and whether the volume's flash is up.
+/// hand, where the pointer stands, and whether the volume's flash is up.
 #[derive(Clone, Copy, Debug, Default)]
 struct BarHand {
     grab: Option<BarSlot>,
+    hover: Option<[f32; 2]>,
     gain_flash: bool,
+}
+
+/// **The scrubber's time label** (row 41): `m:ss` (`h:mm:ss` past an hour) of
+/// the point under the pointer, standing over the rail at that point — or, while
+/// the scrubber is held, of the playhead, standing over the playhead. `None`
+/// when the scrubber is no control, when the recording has no length to take a
+/// fraction of, and when the hand is elsewhere.
+fn seek_label(
+    state: &EngineState,
+    layout: &BarLayout,
+    hand: BarHand,
+    scale: f32,
+) -> Option<(String, [f32; 4])> {
+    if !layout.seekable {
+        return None;
+    }
+    let duration = state
+        .duration_secs
+        .filter(|duration| duration.is_finite() && *duration > 0.0)?;
+    let track = layout.seek;
+    let (seconds, x) = if hand.grab == Some(BarSlot::Seek) {
+        let fraction = (state.position_secs / duration).clamp(0.0, 1.0);
+        (
+            state.position_secs.clamp(0.0, duration),
+            track[0] + (track[2] - track[0]) * fraction as f32,
+        )
+    } else {
+        let at = hand.hover?;
+        if layout.slot_at(at) != Some(BarSlot::Seek) {
+            return None;
+        }
+        let fraction = fraction_along(track, at[0]);
+        (fraction * duration, at[0].clamp(track[0], track[2]))
+    };
+    let text = clock_text(seconds);
+    let rect = label_over_bar(layout, x, text.chars().count(), scale);
+    Some((text, rect))
 }
 
 /// **The volume's flash** (row 40): the volume as a whole percent — the same
@@ -2978,6 +3029,132 @@ mod tests {
             rate: 1.0,
             ..EngineState::default()
         }
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS, row 41) — **the scrubber says the time
+    /// under the pointer, over the rail at that point, and while held it says
+    /// the playhead's**; past an hour it says the hours; with no length, or
+    /// with the hand anywhere but the scrubber, it says nothing.
+    ///
+    /// MUTATION: drop the `slot_at` test in [`seek_label`] — a pointer over
+    /// the play button reads a time off the track's left end, and the "off the
+    /// scrubber" assertion goes red. MUTATION: read the hover while the
+    /// scrubber is held — the held label says the pointer's time and not the
+    /// playhead's.
+    #[test]
+    fn the_scrubber_says_the_time_under_the_pointer() {
+        let body = [0.0, 0.0, 900.0, 500.0];
+        let state = a_paused_recording(Some(100.0), 30.0);
+        let layout = bar_layout_of(&state, body, 1.0, 0.0).expect("a pane fits the bar");
+        let track = layout.seek;
+        let row = (track[1] + track[3]) / 2.0;
+        let x_at = |fraction: f32| track[0] + (track[2] - track[0]) * fraction;
+        let hovering = |at: [f32; 2]| BarHand {
+            hover: Some(at),
+            ..BarHand::default()
+        };
+        for (fraction, said) in [(0.0, "0:00"), (0.25, "0:25"), (0.5, "0:50")] {
+            let x = x_at(fraction);
+            let (text, rect) = seek_label(&state, &layout, hovering([x, row]), 1.0)
+                .unwrap_or_else(|| panic!("a label at {fraction}"));
+            assert_eq!(text, said, "at {fraction} of the track");
+            assert!(rect[3] < layout.bar[1], "{rect:?} stands over the bar");
+            assert!(
+                rect[0] >= layout.bar[0] && rect[2] <= layout.bar[2],
+                "{rect:?} stays inside the bar's width"
+            );
+            if fraction == 0.25 {
+                assert!(
+                    ((rect[0] + rect[2]) / 2.0 - x).abs() <= 1.0,
+                    "{rect:?} is centred on the pointer at {x}"
+                );
+            }
+        }
+        // And painted: the label is in the bar's layer, on a panel of its own.
+        let palette = bt_render::chrome_palette();
+        let quarter = [x_at(0.25), row];
+        let band = paint_bar(
+            &state,
+            hovering(quarter),
+            1.0,
+            body,
+            1.0,
+            &palette,
+            BarMeta::none(),
+        );
+        assert!(
+            band.layers[0]
+                .labels
+                .iter()
+                .any(|label| label.text == "0:25"),
+            "the painter draws the label: {:?}",
+            band.layers[0].labels
+        );
+        let bare = paint_bar(
+            &state,
+            BarHand::default(),
+            1.0,
+            body,
+            1.0,
+            &palette,
+            BarMeta::none(),
+        );
+        assert!(
+            band.layers[0].quads.len() > bare.layers[0].quads.len(),
+            "the label stands on a panel"
+        );
+
+        // Past an hour, the hours.
+        let long = a_paused_recording(Some(2.0 * 3_600.0), 0.0);
+        let long_layout = bar_layout_of(&long, body, 1.0, 0.0).expect("a pane fits the bar");
+        let long_track = long_layout.seek;
+        let three_quarters = [
+            long_track[0] + (long_track[2] - long_track[0]) * 0.75,
+            (long_track[1] + long_track[3]) / 2.0,
+        ];
+        assert_eq!(
+            seek_label(&long, &long_layout, hovering(three_quarters), 1.0).map(|(text, _)| text),
+            Some("1:30:00".to_owned())
+        );
+
+        // Off the scrubber: over the play button, over the picture.
+        let on_play = [
+            (layout.play[0] + layout.play[2]) / 2.0,
+            (layout.play[1] + layout.play[3]) / 2.0,
+        ];
+        assert_eq!(seek_label(&state, &layout, hovering(on_play), 1.0), None);
+        assert_eq!(
+            seek_label(&state, &layout, hovering([450.0, 100.0]), 1.0),
+            None
+        );
+        assert_eq!(seek_label(&state, &layout, BarHand::default(), 1.0), None);
+
+        // While the scrubber is held, the playhead's time, over the playhead —
+        // wherever the pointer has wandered.
+        let held = BarHand {
+            grab: Some(BarSlot::Seek),
+            hover: Some([450.0, 100.0]),
+            gain_flash: false,
+        };
+        let (text, rect) = seek_label(&state, &layout, held, 1.0).expect("a held scrubber says");
+        assert_eq!(text, "0:30");
+        assert!(
+            ((rect[0] + rect[2]) / 2.0 - x_at(0.3)).abs() <= 1.0,
+            "{rect:?}"
+        );
+
+        // No length: nothing to take a fraction of.
+        let lengthless = a_paused_recording(None, 30.0);
+        let lengthless_layout =
+            bar_layout_of(&lengthless, body, 1.0, 0.0).expect("a pane fits the bar");
+        let middle = [
+            (lengthless_layout.seek[0] + lengthless_layout.seek[2]) / 2.0,
+            row,
+        ];
+        assert_eq!(
+            seek_label(&lengthless, &lengthless_layout, hovering(middle), 1.0),
+            None
+        );
     }
 
     /// RED (T-VIDEO-POINTER-AND-KEYS, row 40) — **the volume a wheel set is

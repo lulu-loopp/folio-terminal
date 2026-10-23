@@ -5254,7 +5254,7 @@ impl<B: Backend> Runtime<'_, B> {
                 continue;
             };
             match at.filter(|at| file_peek::contains(*rect, *at)) {
-                Some(_) => seat.pointer_moved(over_bar, now),
+                Some(at) => seat.pointer_moved(at, over_bar, now),
                 None => seat.pointer_left(),
             }
         }
