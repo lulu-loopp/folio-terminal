@@ -4427,6 +4427,7 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::bu
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::choose_preview_row	Ambiguous	nth	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::click_video_picture	Ambiguous	map	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::click_video_picture	Ambiguous	then_some	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::click_video_picture	Ambiguous	zip	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::complete_peek_image	Ambiguous	clone	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::complete_peek_image	Ambiguous	cloned	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::complete_peek_image	Ambiguous	collect	1	
@@ -4476,6 +4477,7 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::no
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_preview_link_hover	Ambiguous	map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	collect	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	filter_map	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	holds	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; video_seat::BarLayout::holds on a closure parameter the grammar does not type, a rectangle test that reaches no door
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	into_iter	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	is_some_and	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::open_preview_link	Ambiguous	map	1	
@@ -6815,6 +6817,8 @@ crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::<VideoSeat as std::fmt
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::BarLayout::slot_at	Dynamic	hit	2	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::bar_deadline	Ambiguous	into_iter	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::open	Ambiguous	play	1	
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::pointer_left	Ambiguous	flatten	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::pointer_moved	Ambiguous	flatten	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::seek_end	Ambiguous	is_finite	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::seek_to	Ambiguous	is_finite	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::step	Ambiguous	is_finite	1	

@@ -2682,3 +2682,84 @@ fn the_volumes_flash_goes_out_on_a_paused_recording() {
     folio.window.video.shutdown_all();
     crate::test_support::engines_settling_to(before);
 }
+
+/// RED (T-VIDEO-POINTER-AND-KEYS review round 2) — **a click's record answers only for the seat it
+/// was made on**: once another recording has been put on the surface between a click and the
+/// press that pairs with it (file travel lands the next file's still, and its play disc opens a
+/// new seat), the pair must not put the old one's playhead onto the new one.
+///
+/// MUTATION: drop the seat-key test from `Runtime::double_click_video_picture`'s filter — the
+/// pair pauses the new recording at the old one's playhead and the last assertion goes red.
+#[test]
+fn a_pair_after_the_seat_is_replaced_puts_nothing_back_on_the_new_one() {
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let (mut folio, surface) = a_recording_beside_a_shell("video-picture-replaced-pair");
+    let stage = stage_of(&mut folio, surface);
+    let at = on_the_picture(stage, 20.0);
+    click(&mut folio, at);
+    loaded(&folio, surface);
+    folio
+        .window
+        .video
+        .get_mut(surface)
+        .expect("playing")
+        .toggle(Instant::now());
+    let paused = played(&folio, surface, |state| !state.playing);
+    the_pair_window_lapses(&mut folio);
+    // A click that plays from `paused.position_secs`, recording "pause it there" as its undo.
+    click(&mut folio, at);
+    played(&folio, surface, |state| state.playing);
+    let first = folio
+        .window
+        .video
+        .get(surface)
+        .expect("the seat stands")
+        .key()
+        .to_owned();
+    // Another recording put on the surface: file travel's own door lands the next file's still,
+    // and the door the still's play disc takes plays it.
+    let next =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/assets/folio-video-test.mov");
+    folio
+        .runtime()
+        .open_preview_onto(surface, next.clone())
+        .expect("travel lands the next file");
+    folio.draw();
+    folio
+        .runtime()
+        .play_video_file_on(surface, &next)
+        .expect("the next recording opens");
+    let replaced = folio
+        .window
+        .video
+        .get(surface)
+        .expect("a seat plays the next recording")
+        .key()
+        .to_owned();
+    assert_ne!(
+        replaced, first,
+        "the fixture's own precondition: another seat"
+    );
+    // The press that pairs with the click.
+    folio.press(at);
+    folio.release(at);
+    // A fence: the engine answers its commands in order, so once this volume has landed any
+    // pause or seek the pair had sent has landed before it.
+    folio
+        .window
+        .video
+        .get_mut(surface)
+        .expect("the seat stands")
+        .set_volume(0.3, Instant::now());
+    let after = played(&folio, surface, |state| {
+        state.ready && (state.volume - 0.3).abs() < 1e-6
+    });
+    assert!(
+        after.playing,
+        "the pair put the old recording's pause at {:.2} s onto the new one: {after:?}",
+        paused.position_secs
+    );
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
+}

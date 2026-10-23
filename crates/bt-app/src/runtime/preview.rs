@@ -5188,8 +5188,17 @@ impl<B: Backend> Runtime<'_, B> {
                 .is_some()
                 .then_some(PictureUndo::Opened)
         };
-        self.window.video_click = undo.map(|undo| VideoPictureClick { surface, undo });
         self.mouse_trace(|| format!("video_picture click surface={surface:?} undo={undo:?}"));
+        let seat = self
+            .window
+            .video
+            .get(surface)
+            .map(|seat| seat.key().to_owned());
+        self.window.video_click = undo.zip(seat).map(|(undo, seat)| VideoPictureClick {
+            surface,
+            seat,
+            undo,
+        });
         self.refresh_chrome();
         self.present_chrome_change()
     }
@@ -5202,12 +5211,14 @@ impl<B: Backend> Runtime<'_, B> {
     /// zoom for a video, so there the pair only leaves playback as it was.
     fn double_click_video_picture(&mut self, surface: PreviewSurface) -> Result<()> {
         let now = Instant::now();
-        if let Some(click) = self
-            .window
-            .video_click
-            .take()
-            .filter(|click| click.surface == surface)
-        {
+        if let Some(click) = self.window.video_click.take().filter(|click| {
+            click.surface == surface
+                && self
+                    .window
+                    .video
+                    .get(surface)
+                    .is_some_and(|seat| seat.key() == click.seat)
+        }) {
             match click.undo {
                 PictureUndo::Seat(undo) => {
                     if let Some(seat) = self.window.video.get_mut(surface) {
@@ -5298,32 +5309,29 @@ impl<B: Backend> Runtime<'_, B> {
             .into_iter()
             .filter_map(|surface| Some((surface, self.video_shape_of(surface, scale, now)?.rect())))
             .collect();
-        let bars: Vec<(PreviewSurface, bool)> = shapes
+        let bars: Vec<Option<video_seat::BarLayout>> = shapes
             .iter()
-            .map(|(surface, _)| {
-                (
-                    *surface,
-                    at.is_some_and(|at| {
-                        self.video_bar_layout_of(*surface)
-                            .is_some_and(|layout| layout.holds(at))
-                    }),
-                )
-            })
+            .map(|(surface, _)| self.video_bar_layout_of(*surface))
             .collect();
         let mut repaints = false;
-        for ((surface, rect), (_, over_bar)) in shapes.iter().zip(bars) {
+        for ((surface, rect), layout) in shapes.iter().zip(bars) {
             let Some(seat) = self.window.video.get_mut(*surface) else {
                 continue;
             };
+            let layout = layout.as_ref();
             repaints |= match at.filter(|at| file_peek::contains(*rect, *at)) {
-                Some(at) => seat.pointer_moved(at, over_bar, now),
-                None => seat.pointer_left(),
+                Some(at) => {
+                    let over_bar = layout.is_some_and(|layout| layout.holds(at));
+                    seat.pointer_moved(at, over_bar, layout, scale, now)
+                }
+                None => seat.pointer_left(layout, scale),
             };
         }
-        // **A hand on a bar is a frame owed** (row 41; review round 1,
-        // 2026-10-23): the scrubber's time stands over the point under it, and a
-        // paused recording has no decoded picture coming to draw it there. Only
-        // a move on or off a bar asks; a hand anywhere else asks for nothing.
+        // **A moved scrubber label is a frame owed** (row 41; review rounds 1
+        // and 2, 2026-10-23): the scrubber's time stands over the point under
+        // the hand, and a paused recording has no decoded picture coming to draw
+        // it there. Only a move that changes the label's words or place asks; a
+        // hand on the bar's buttons, or anywhere else, asks for nothing.
         if repaints {
             self.refresh_chrome();
             self.present_chrome_change()?;

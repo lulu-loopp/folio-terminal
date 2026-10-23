@@ -27580,9 +27580,16 @@ impl VideoPicturePress {
 /// **One click on a recording's picture, and how to put it back** (row 39) —
 /// see [`video_seat::ClickUndo`] for why the double click undoes rather than
 /// waits.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// **The record answers for the one seat it was made on** (review round 2,
+/// 2026-10-23): `seat` is that seat's key ([`video_seat::VideoSeat::key`], a
+/// serial the window never reuses), and a pair whose surface holds any other
+/// seat by then — file travel opened the next recording there, or the still
+/// came back and was played again — puts nothing back.
+#[derive(Clone, Debug, PartialEq)]
 struct VideoPictureClick {
     surface: PreviewSurface,
+    seat: String,
     undo: PictureUndo,
 }
 

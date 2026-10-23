@@ -1111,12 +1111,24 @@ impl VideoSeat {
     /// between a bar that comes up while a hand is travelling towards it and one
     /// that never comes up at all.
     ///
-    /// `true` when the move changed what the bar paints for the hand — the
-    /// scrubber's time label, which stands over the bar only while the hand is
-    /// on it (row 41) — so the caller owes the frame: a paused recording has no
-    /// decoded picture coming to redraw the bar (review round 1, 2026-10-23).
-    pub fn pointer_moved(&mut self, at: [f32; 2], over_bar: bool, now: Instant) -> bool {
-        let repaints = (over_bar || self.over_bar) && self.hover != Some(at);
+    /// `true` when the move changed the scrubber's time label — its words or
+    /// its place (row 41), read against `layout`, the bar as it is laid out
+    /// now — so the caller owes the frame: a paused recording has no decoded
+    /// picture coming to redraw the bar (review rounds 1 and 2, 2026-10-23). A
+    /// move across the bar's buttons, or anywhere off the scrubber, owes none.
+    pub fn pointer_moved(
+        &mut self,
+        at: [f32; 2],
+        over_bar: bool,
+        layout: Option<&BarLayout>,
+        scale: f32,
+        now: Instant,
+    ) -> bool {
+        // Off the bar before and after, no label stood or stands: the hover's
+        // label is only ever over the scrubber, and a held scrubber's follows
+        // the playhead, not the hand.
+        let near = over_bar || self.over_bar;
+        let before = near.then(|| self.hover_label(layout, scale)).flatten();
         self.hover = Some(at);
         self.over_bar = over_bar;
         if over_bar {
@@ -1126,20 +1138,34 @@ impl VideoSeat {
         } else if self.arming_at.is_none() {
             self.arming_at = Some(now);
         }
-        repaints
+        near && before != self.hover_label(layout, scale)
+    }
+
+    /// The scrubber's time label for the hand as it stands, against `layout`
+    /// — what [`Self::bar`] paints ([`seek_label`]); `None` with no bar.
+    fn hover_label(&self, layout: Option<&BarLayout>, scale: f32) -> Option<(String, [f32; 4])> {
+        let hand = BarHand {
+            grab: self.grab,
+            hover: self.hover,
+            gain_flash: false,
+        };
+        seek_label(&self.engine.state(), layout?, hand, scale)
     }
 
     /// The pointer left the picture altogether: the intent is disarmed and the
     /// dwell is allowed to run out.
     ///
-    /// `true` when the hand left from the bar, taking the scrubber's label with
-    /// it, which owes the frame [`Self::pointer_moved`] says it does.
-    pub fn pointer_left(&mut self) -> bool {
-        let repaints = self.over_bar;
+    /// `true` when the hand took the scrubber's label with it, which owes the
+    /// frame [`Self::pointer_moved`] says it does.
+    pub fn pointer_left(&mut self, layout: Option<&BarLayout>, scale: f32) -> bool {
+        let before = self
+            .over_bar
+            .then(|| self.hover_label(layout, scale))
+            .flatten();
         self.arming_at = None;
         self.over_bar = false;
         self.hover = None;
-        repaints
+        before != self.hover_label(layout, scale)
     }
 
     /// Let an armed intent become a reveal, and let a bar that has finished
@@ -3054,6 +3080,55 @@ mod tests {
         assert_eq!(
             seat.bar_deadline(late, crate::Motion::Full),
             Some(now + flash)
+        );
+        seat.shutdown();
+        crate::test_support::engines_settling_to(before);
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS review round 2) — **a move owes a frame
+    /// only when it changes the scrubber's label**: along the scrubber it does,
+    /// across the play button it does not, and leaving the scrubber for the
+    /// button takes the label away, which does.
+    ///
+    /// MUTATION: answer `over_bar || self.over_bar` from
+    /// [`VideoSeat::pointer_moved`] (round 1's answer) — the move across the
+    /// play button owes a frame and the second assertion goes red.
+    #[test]
+    fn a_move_owes_a_frame_only_when_the_scrubbers_label_changes() {
+        let _ledger = crate::test_support::ledger_gate();
+        let before = bt_platform::video::engine::engines_outstanding();
+        let mut seat = a_playing_seat();
+        let state = seat.state_reaching(|state| state.duration_secs.is_some());
+        let body = [0.0, 0.0, 900.0, 500.0];
+        let layout = bar_layout_of(&state, body, 1.0, 0.0).expect("a pane fits the bar");
+        let now = Instant::now();
+        let row = |rect: [f32; 4]| (rect[1] + rect[3]) / 2.0;
+        let along = |fraction: f32| {
+            [
+                layout.seek[0] + (layout.seek[2] - layout.seek[0]) * fraction,
+                row(layout.seek),
+            ]
+        };
+        let on_play = |dx: f32| [layout.play[0] + 4.0 + dx, row(layout.play)];
+
+        seat.pointer_moved(along(0.2), true, Some(&layout), 1.0, now);
+        assert!(
+            seat.pointer_moved(along(0.6), true, Some(&layout), 1.0, now),
+            "along the scrubber the label moves"
+        );
+        seat.pointer_moved(on_play(0.0), true, Some(&layout), 1.0, now);
+        assert!(
+            !seat.pointer_moved(on_play(2.0), true, Some(&layout), 1.0, now),
+            "across the play button no label stands, and no frame is owed"
+        );
+        seat.pointer_moved(along(0.6), true, Some(&layout), 1.0, now);
+        assert!(
+            seat.pointer_moved(on_play(0.0), true, Some(&layout), 1.0, now),
+            "off the scrubber the label goes"
+        );
+        assert!(
+            !seat.pointer_left(Some(&layout), 1.0),
+            "leaving from the button takes no label with it"
         );
         seat.shutdown();
         crate::test_support::engines_settling_to(before);
