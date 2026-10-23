@@ -5047,7 +5047,7 @@ crates/bt-app/src/seats.rs	bt-app crate::seats::tab_strip_geometry	Ambiguous	sat
 crates/bt-app/src/seats.rs	bt-app crate::seats::tab_strip_geometry	Ambiguous	unwrap_or	2	
 crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	collect	1	
 crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	filter_map	1	
-crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	map	1	
+crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	map	2	
 crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Dynamic	cropped	1	
 crates/bt-app/src/seats.rs	bt-app crate::seats::to_persisted	Ambiguous	collect	1	
 crates/bt-app/src/seats.rs	bt-app crate::seats::to_persisted	Ambiguous	into_iter	1	
@@ -8892,13 +8892,11 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::collect_cjk_famil
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::collect_monospace_families	Ambiguous	GetFontFamily	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::collect_monospace_families	Ambiguous	GetFontFamilyCount	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::current_user_registry_subkeys	Ambiguous	is_err	2	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	as_bool	3	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	as_slice	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	as_bool	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	contains	2	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	is_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	load	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	saturating_add	2	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	saturating_sub	4	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	saturating_sub	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	store	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::delete_registry_tree	Ambiguous	is_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::detach_console	Ambiguous	is_ok	1	
@@ -8949,6 +8947,10 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Am
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Ambiguous	into_iter	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Ambiguous	ok	5	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Ambiguous	take_while	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	as_bool	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	as_slice	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	ok	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	saturating_sub	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::get_window_rect	Ambiguous	map_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::get_work_area	Ambiguous	as_bool	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::hide_every_window_of_this_process	Ambiguous	as_bool	1	
@@ -8996,6 +8998,8 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_family_
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_family_named	Ambiguous	ok	3	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_font_families	Ambiguous	map_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_font_families	Ambiguous	to_string	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::mouse_key_state	Ambiguous	fold	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::mouse_key_state	Dynamic	down	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_facts	Ambiguous	as_bool	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_facts	Ambiguous	map	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_facts	Ambiguous	ok	1	
