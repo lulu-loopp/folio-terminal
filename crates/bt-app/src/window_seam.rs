@@ -1201,7 +1201,7 @@ pub(crate) trait FrameDoor {
     fn set_window_band(&self, band_logical_px: f32) -> Result<(), String>;
     fn set_title(&self, title: &str) -> bool;
     fn press_title_bar(&self) -> Result<(), String>;
-    fn set_title_bar_boxes(&self, boxes: &[[i32; 4]]);
+    fn set_title_bar_boxes(&self, boxes: &[bt_platform::TitleBarBox]);
     fn set_min_client_size(&self, logical: Option<(u32, u32)>) -> Result<(), String>;
 }
 
@@ -1221,7 +1221,7 @@ impl FrameDoor for bt_platform::CustomWindowFrame {
     fn press_title_bar(&self) -> Result<(), String> {
         bt_platform::CustomWindowFrame::press_title_bar(self)
     }
-    fn set_title_bar_boxes(&self, boxes: &[[i32; 4]]) {
+    fn set_title_bar_boxes(&self, boxes: &[bt_platform::TitleBarBox]) {
         bt_platform::CustomWindowFrame::set_title_bar_boxes(self, boxes);
     }
     fn set_min_client_size(&self, logical: Option<(u32, u32)>) -> Result<(), String> {

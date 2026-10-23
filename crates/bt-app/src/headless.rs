@@ -134,8 +134,8 @@ pub(crate) enum WindowEffect {
     TitleBarPressed,
     /// The band the frame wears, in logical pixels.
     WindowBand(f32),
-    /// The title bar's own boxes.
-    TitleBarBoxes(Vec<[i32; 4]>),
+    /// The title bar's own boxes, each with its role.
+    TitleBarBoxes(Vec<bt_platform::TitleBarBox>),
     /// The client's smallest size.
     MinClientSize(Option<(u32, u32)>),
     /// The folder chooser asked for, starting where it was told.
@@ -1250,7 +1250,7 @@ impl FrameDoor for HeadlessFrame {
         self.ledger.record(WindowEffect::TitleBarPressed);
         Ok(())
     }
-    fn set_title_bar_boxes(&self, boxes: &[[i32; 4]]) {
+    fn set_title_bar_boxes(&self, boxes: &[bt_platform::TitleBarBox]) {
         self.ledger
             .record(WindowEffect::TitleBarBoxes(boxes.to_vec()));
     }
@@ -2008,7 +2008,11 @@ mod tests {
         );
         frame.press_title_bar().expect("recorded");
         frame.set_window_band(40.0).expect("recorded");
-        frame.set_title_bar_boxes(&[[0, 0, 10, 10]]);
+        let maximize = bt_platform::TitleBarBox {
+            rect: [0, 0, 10, 10],
+            role: bt_platform::TitleBarBoxRole::MaximizeButton,
+        };
+        frame.set_title_bar_boxes(&[maximize]);
         frame
             .set_min_client_size(Some((300, 200)))
             .expect("recorded");
@@ -2101,7 +2105,7 @@ mod tests {
                 WindowEffect::FrameTitle("帧 frame".to_owned()),
                 WindowEffect::TitleBarPressed,
                 WindowEffect::WindowBand(40.0),
-                WindowEffect::TitleBarBoxes(vec![[0, 0, 10, 10]]),
+                WindowEffect::TitleBarBoxes(vec![maximize]),
                 WindowEffect::MinClientSize(Some((300, 200))),
                 WindowEffect::FolderAsked(Some(folder.clone())),
                 WindowEffect::FileAsked(
