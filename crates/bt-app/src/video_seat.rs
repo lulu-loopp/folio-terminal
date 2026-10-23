@@ -888,27 +888,45 @@ impl VideoSeat {
     /// "At the end" is [`stands_at_end`]: the engine's `ended`, or a playhead
     /// put on the last frame by `End` or the scrubber, which is a recording
     /// with nothing left to play just as surely.
-    pub fn toggle(&mut self, now: Instant) {
+    ///
+    /// Answers what would put it back — see [`ClickUndo`].
+    pub fn toggle(&mut self, now: Instant) -> ClickUndo {
         let state = self.engine.state();
-        if state.playing {
+        let undo = if state.playing {
             self.engine.pause();
+            ClickUndo::Play
         } else {
             if stands_at_end(&state) {
                 self.engine.seek(0.0);
             }
             self.engine.play();
-        }
+            ClickUndo::PauseAt(state.position_secs)
+        };
         self.acted(now);
+        undo
     }
 
-    /// **One gesture on the picture** (owner's ruling 2026-10-23, row 38) —
+    /// **One gesture on the picture** (owner's ruling 2026-10-23, rows 38 and 39) —
     /// the door a pane and a floating window both reach, so the two faces
     /// answer a hand the same way by construction.
     ///
-    /// A click is [`Self::toggle`].
-    pub fn picture(&mut self, gesture: PictureGesture, now: Instant) {
+    /// A click is [`Self::toggle`] and answers what would put it back; the
+    /// second press of a double click is handed that answer and puts it back,
+    /// so the zoom it means leaves playback as it was.
+    pub fn picture(&mut self, gesture: PictureGesture, now: Instant) -> Option<ClickUndo> {
         match gesture {
-            PictureGesture::Click => self.toggle(now),
+            PictureGesture::Click => Some(self.toggle(now)),
+            PictureGesture::DoubleClick(undo) => {
+                match undo {
+                    ClickUndo::Play => self.engine.play(),
+                    ClickUndo::PauseAt(position) => {
+                        self.engine.pause();
+                        self.engine.seek(position);
+                    }
+                }
+                self.acted(now);
+                None
+            }
         }
     }
 
@@ -1026,7 +1044,9 @@ impl VideoSeat {
             return false;
         };
         match verb {
-            PlayerKey::Toggle => self.toggle(now),
+            PlayerKey::Toggle => {
+                self.toggle(now);
+            }
             PlayerKey::Start => self.seek_start(now),
             PlayerKey::End => self.seek_end(now),
             PlayerKey::FrameBack => self.step_frame(-1.0, now),
@@ -1507,11 +1527,28 @@ fn stands_at_end(state: &EngineState) -> bool {
 }
 
 /// **One gesture on a recording's picture**, off its bar (owner's ruling
-/// 2026-10-23, row 38) — see [`VideoSeat::picture`].
+/// 2026-10-23, rows 38 and 39) — see [`VideoSeat::picture`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PictureGesture {
     /// One click: play or pause.
     Click,
+    /// The second press of a double click, handed what the first one did.
+    DoubleClick(ClickUndo),
+}
+
+/// **What puts one click's toggle back** (row 39's decision, §7.44): the click
+/// acts on its release, and the second press of a double click undoes it, so
+/// the double click's zoom leaves playback exactly as it was.
+///
+/// It is the gesture's record of what it changed — which way it went, and the
+/// playhead it left — kept only while a second press can still pair with it.
+/// Nothing reads it to draw: the engine stays the one authority for that.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ClickUndo {
+    /// The click paused a playing recording.
+    Play,
+    /// The click started a paused or ended one, from this playhead.
+    PauseAt(f64),
 }
 
 /// **`m:ss`, and `h:mm:ss` once there is an hour to say.**
@@ -2695,6 +2732,62 @@ mod tests {
         assert!(
             ended.ended,
             "End on a playing recording makes it end: {ended:?}"
+        );
+        seat.shutdown();
+        crate::test_support::engines_settling_to(before);
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS, rows 38, 39 and 43) — **a click on the
+    /// picture plays or pauses, an ended recording plays from the start, and
+    /// the second press of a double click puts back what the first did**, from
+    /// each of the three places a click can find a recording.
+    ///
+    /// MUTATION: answer `ClickUndo::PauseAt(0.0)` from [`VideoSeat::toggle`] —
+    /// the paused-at-two-seconds case comes back at the start and goes red.
+    #[test]
+    fn a_click_toggles_and_the_double_click_puts_it_back() {
+        let _ledger = crate::test_support::ledger_gate();
+        let before = bt_platform::video::engine::engines_outstanding();
+        let mut seat = a_playing_seat();
+        // Playing: the click pauses, the double click plays again.
+        let undo = seat.picture(PictureGesture::Click, Instant::now());
+        assert_eq!(undo, Some(ClickUndo::Play));
+        assert!(!seat.state_reaching(|state| !state.playing).playing);
+        seat.picture(PictureGesture::DoubleClick(ClickUndo::Play), Instant::now());
+        assert!(seat.state_reaching(|state| state.playing).playing);
+
+        // Paused at two seconds: the click plays from there, the double click
+        // pauses at two seconds again.
+        seat.toggle(Instant::now());
+        seat.state_reaching(|state| !state.playing);
+        seat.engine.seek(2.0);
+        let paused = seat.state_reaching(|state| near(state, 2.0));
+        assert!(near(&paused, 2.0), "{paused:?}");
+        let undo = seat.picture(PictureGesture::Click, Instant::now());
+        let Some(ClickUndo::PauseAt(was)) = undo else {
+            panic!("a paused recording's click is a play: {undo:?}");
+        };
+        assert!((was - 2.0).abs() < 0.05, "{was}");
+        assert!(seat.state_reaching(|state| state.playing).playing);
+        seat.picture(
+            PictureGesture::DoubleClick(ClickUndo::PauseAt(was)),
+            Instant::now(),
+        );
+        let put_back = seat.state_reaching(|state| !state.playing && near(state, 2.0));
+        assert!(
+            !put_back.playing && near(&put_back, 2.0),
+            "the pair left it as it was: {put_back:?}"
+        );
+
+        // At the end: the click plays from the start (row 43).
+        seat.seek_end(Instant::now());
+        let at_end = seat.state_reaching(|state| state.position_secs >= 4.9);
+        assert!(stands_at_end(&at_end), "{at_end:?}");
+        seat.picture(PictureGesture::Click, Instant::now());
+        let again = seat.state_reaching(|state| state.playing && state.position_secs < 2.0);
+        assert!(
+            again.playing && again.position_secs < 2.0,
+            "an ended recording plays from the start: {again:?}"
         );
         seat.shutdown();
         crate::test_support::engines_settling_to(before);

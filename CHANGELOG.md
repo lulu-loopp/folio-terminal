@@ -9,6 +9,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Added
 
 - Clicking a video's picture plays it or pauses it. <!-- zh: 单击视频画面即可播放或暂停。 -->
+- Double-clicking a video's picture zooms its pane, and the video goes on playing or stays paused as it was. <!-- zh: 双击视频画面会放大它所在的窗格，视频照旧播放或保持暂停。 -->
 - `Home` and `End` go to a video's start and end, and while it is paused `,` and `.` step one frame back and forward. <!-- zh: `Home` 和 `End` 跳到视频的开头和结尾；暂停时，`,` 和 `.` 后退或前进一帧。 -->
 - A video that has ended plays again from the start, whether you press the play button, press Space or click the picture. <!-- zh: 已播完的视频再次播放时从头开始，无论是按播放按钮、按空格还是单击画面。 -->
 

@@ -14823,6 +14823,11 @@ struct WindowRuntime<B: Backend = Native> {
     /// stable, so the layers handed to the renderer come out in the same order
     /// every frame.
     video: video_seat::VideoSeats,
+    /// **What the last click on a recording's picture did, while a second press
+    /// can still pair with it** (owner's ruling 2026-10-23, row 39) — what the
+    /// double click undoes before it zooms. Window-level beside [`Self::video`],
+    /// because a floating window's picture is clicked as a pane's is.
+    video_click: Option<VideoPictureClick>,
     /// **Every animated picture this window has looked inside**, by the same
     /// normalised path key the decode cache beside it uses (user ruling
     /// 2026-08-28; §7.44 ⑤).
@@ -27480,8 +27485,8 @@ enum ImageGrasp {
 /// and a rung added here is added to both.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreviewBodyRung {
-    /// A recording's picture: a click plays or pauses
-    /// (`Runtime::press_video_picture`; owner's ruling 2026-10-23).
+    /// A recording's picture: a click plays or pauses, a double click zooms
+    /// the pane (`Runtime::press_video_picture`; owner's ruling 2026-10-23).
     VideoPicture,
     /// The body's own scroll bar (`Runtime::press_preview_body_thumb`).
     BodyThumb,
@@ -27570,6 +27575,25 @@ impl VideoPicturePress {
         self.wandered |= (point[0] - self.origin[0]).abs() > IMAGE_DOUBLE_CLICK_SLOP_PX
             || (point[1] - self.origin[1]).abs() > IMAGE_DOUBLE_CLICK_SLOP_PX;
     }
+}
+
+/// **One click on a recording's picture, and how to put it back** (row 39) —
+/// see [`video_seat::ClickUndo`] for why the double click undoes rather than
+/// waits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct VideoPictureClick {
+    surface: PreviewSurface,
+    undo: PictureUndo,
+}
+
+/// What a click on a picture did that a double click puts back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PictureUndo {
+    /// The seat was already there and toggled.
+    Seat(video_seat::ClickUndo),
+    /// The click started a still, which opened its seat: closing it puts the
+    /// still back.
+    Opened,
 }
 
 #[derive(Default)]
@@ -45842,6 +45866,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         compositor,
         web: BTreeMap::new(),
         video: video_seat::VideoSeats::default(),
+        video_click: None,
         animations: AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES),
         animations_drawn: BTreeMap::new(),
         pictures_owe_a_frame: false,

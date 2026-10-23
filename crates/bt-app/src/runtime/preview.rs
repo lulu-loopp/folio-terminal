@@ -17,27 +17,28 @@ use crate::{
     MarkdownSourceBytes, MathWorkerRequest, Motion, NoticeHost, PAGE_ADDRESS_REFUSAL,
     PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey, PageHandOff, PagePicture, PasteTarget, PeekAsk,
     PeekCacheEntry, PeekThumbnailTarget, PictureErrand, PictureOnGlass, PictureReach,
-    PictureRefusal, PopoverTrigger, Popup, PresentIntent, PreviewBlockDrag, PreviewBodyDrag,
-    PreviewDocument, PreviewEditPaint, PreviewHeadFrame, PreviewHexHover, PreviewImageState,
-    PreviewLink, PreviewMathSite, PreviewOpenLane, PreviewPane, PreviewPreedit, PreviewRailFrame,
-    PreviewSurface, PreviewTextDrag, PreviewTextSite, ProseParagraph, RenameSubject, Reparse,
-    RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest, ScrollThumbState,
-    SourceBlocks, Step, SurfacePixels, SurfaceSubject, TabClick, TabId, TabRename, TabState,
-    TabTriggerHand, VideoGlance, VideoPicturePress, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb,
-    WindowRuntime, animation, animation_layer_key, animation_refusal_notice, answer_one_picture,
-    answers_for, attention_trace, build_preview_diff_body, build_preview_markdown_body,
-    build_preview_table_body, build_preview_text_body, clipboard_picture, create_leaf_session,
-    crumb_segments, deliver_clipboard_picture, diagnostics, documents_held_in,
-    documents_held_mut_in, documents_pictures, earliest_deadline, file_peek, files,
-    files_a_tab_stands_on, files_row_display_name, float, float_dock_label, folded_levels,
-    foot_revealed_label, forget_a_picture, forget_standing_answers, git_panel, graph_key_of,
-    hang_watch, hex_peek, highlight, i18n, image_clamped_pan, image_destination, image_is_pannable,
-    image_meta_sentence, image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale,
-    image_zoom_settles, image_zoom_toggled, ime_owner, input, markdown_empty_page_offset,
-    markdown_prose_composition, markdown_prose_paragraphs, markdown_runs, markdown_source_cell,
-    markdown_source_offset_at, marks, measure_preview_links, notice, owe_sharpened_rasters,
-    page_address_hand_off, page_destination, page_foot_flash, page_foot_lead, page_source_file,
-    peek_scale_task, picture_channel_owner, picture_errand, picture_files_of, pictures_awaited_by,
+    PictureRefusal, PictureUndo, PopoverTrigger, Popup, PresentIntent, PreviewBlockDrag,
+    PreviewBodyDrag, PreviewDocument, PreviewEditPaint, PreviewHeadFrame, PreviewHexHover,
+    PreviewImageState, PreviewLink, PreviewMathSite, PreviewOpenLane, PreviewPane, PreviewPreedit,
+    PreviewRailFrame, PreviewSurface, PreviewTextDrag, PreviewTextSite, ProseParagraph,
+    RenameSubject, Reparse, RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest,
+    ScrollThumbState, SourceBlocks, Step, SurfacePixels, SurfaceSubject, TabClick, TabId,
+    TabRename, TabState, TabTriggerHand, VideoGlance, VideoPictureClick, VideoPicturePress,
+    VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime, animation, animation_layer_key,
+    animation_refusal_notice, answer_one_picture, answers_for, attention_trace,
+    build_preview_diff_body, build_preview_markdown_body, build_preview_table_body,
+    build_preview_text_body, clipboard_picture, create_leaf_session, crumb_segments,
+    deliver_clipboard_picture, diagnostics, documents_held_in, documents_held_mut_in,
+    documents_pictures, earliest_deadline, file_peek, files, files_a_tab_stands_on,
+    files_row_display_name, float, float_dock_label, folded_levels, foot_revealed_label,
+    forget_a_picture, forget_standing_answers, git_panel, graph_key_of, hang_watch, hex_peek,
+    highlight, i18n, image_clamped_pan, image_destination, image_is_pannable, image_meta_sentence,
+    image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale, image_zoom_settles,
+    image_zoom_toggled, ime_owner, input, markdown_empty_page_offset, markdown_prose_composition,
+    markdown_prose_paragraphs, markdown_runs, markdown_source_cell, markdown_source_offset_at,
+    marks, measure_preview_links, notice, owe_sharpened_rasters, page_address_hand_off,
+    page_destination, page_foot_flash, page_foot_lead, page_source_file, peek_scale_task,
+    picture_channel_owner, picture_errand, picture_files_of, pictures_awaited_by,
     pictures_need_handing_over, place_preview_math, preedit_caret_byte, present_diagnostics,
     preview, preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_prose,
     preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
@@ -4988,9 +4989,9 @@ impl<B: Backend> Runtime<'_, B> {
                 return Ok(true);
             }
             // **Off the bar, the picture is the body ladder's** (owner's ruling
-            // 2026-10-23): a click plays or pauses —
-            // [`Self::press_video_picture`], the ladder's top rung, which a
-            // docked pane reaches after its press has focused it and a float
+            // 2026-10-23): a click plays or pauses and a double click zooms the
+            // pane — [`Self::press_video_picture`], the ladder's top rung, which
+            // a docked pane reaches after its press has focused it and a float
             // reaches through its body. The card keeps its door.
             let Some(layout) = self.video_bar_layout_of(surface) else {
                 continue;
@@ -5014,7 +5015,9 @@ impl<B: Backend> Runtime<'_, B> {
                 continue;
             };
             match slot {
-                Some(video_seat::BarSlot::PlayPause) => seat.toggle(now),
+                Some(video_seat::BarSlot::PlayPause) => {
+                    seat.toggle(now);
+                }
                 Some(video_seat::BarSlot::Mute) => seat.toggle_mute(now),
                 Some(video_seat::BarSlot::Rate) => seat.cycle_rate(now),
                 Some(slot @ (video_seat::BarSlot::Seek | video_seat::BarSlot::Volume)) => {
@@ -5033,15 +5036,18 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(false)
     }
 
-    /// **A press on a recording's picture** (owner's ruling 2026-10-23, row
-    /// 38) — the body ladder's top rung, [`PreviewBodyRung::VideoPicture`], so
-    /// a docked pane and a floating window answer it through one door. `true`
+    /// **A press on a recording's picture** (owner's ruling 2026-10-23, rows
+    /// 38 and 39) — the body ladder's top rung, [`PreviewBodyRung::VideoPicture`],
+    /// so a docked pane and a floating window answer it through one door. `true`
     /// when the press was on a recording's picture and was taken.
     ///
     /// The bar and the still's play disc were asked first (`press_video_at`, the
     /// chrome's play target), so what reaches here is the picture itself. The
-    /// press waits for its release ([`CaptureOwner::VideoPicture`]), which
-    /// decides whether it was a click.
+    /// press is counted by the window's one double-click counter
+    /// ([`ImageClicks`], the picture zoom's): the second of a pair is the double
+    /// click and is answered here, on the press, as every double click in this
+    /// window is; any other press waits for its release
+    /// ([`CaptureOwner::VideoPicture`]), which decides whether it was a click.
     pub(in crate::runtime) fn press_video_picture(&mut self, at: [f32; 2]) -> Result<bool> {
         let Some((surface, _)) = self.preview_surface_at_point(at) else {
             return Ok(false);
@@ -5051,7 +5057,11 @@ impl<B: Backend> Runtime<'_, B> {
         if !self.video_picture_holds(surface, at, scale, now) {
             return Ok(false);
         }
-        self.latch_video_picture_press(VideoPicturePress::at(surface, at));
+        if self.preview_image_clicks.register(surface, at, now) {
+            self.double_click_video_picture(surface)?;
+        } else {
+            self.latch_video_picture_press(VideoPicturePress::at(surface, at));
+        }
         Ok(true)
     }
 
@@ -5099,11 +5109,13 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **One click on a recording's picture: play if paused or at the end (from
     /// the start), pause if playing** — and a still that is not playing yet is
-    /// a paused recording, so the click starts it.
+    /// a paused recording, so the click starts it. What the click did is kept
+    /// for the second press of a double click to put back.
     fn click_video_picture(&mut self, surface: PreviewSurface) -> Result<()> {
         let now = Instant::now();
-        if let Some(seat) = self.window.video.get_mut(surface) {
-            seat.picture(video_seat::PictureGesture::Click, now);
+        let undo = if let Some(seat) = self.window.video.get_mut(surface) {
+            seat.picture(video_seat::PictureGesture::Click, now)
+                .map(PictureUndo::Seat)
         } else {
             let Some(path) = self
                 .preview_picture(surface)
@@ -5112,8 +5124,47 @@ impl<B: Backend> Runtime<'_, B> {
                 return Ok(());
             };
             self.play_video_file_on(surface, &path)?;
+            self.window
+                .video
+                .get(surface)
+                .is_some()
+                .then_some(PictureUndo::Opened)
+        };
+        self.window.video_click = undo.map(|undo| VideoPictureClick { surface, undo });
+        self.mouse_trace(|| format!("video_picture click surface={surface:?} undo={undo:?}"));
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// **A double click on a recording's picture: the pane's zoom, with
+    /// playback left as it was** (row 39). The first click of the pair has
+    /// already played or paused, and is put back here before the zoom —
+    /// §7.44's entry says why this undoes rather than waits. A pane zooms by its
+    /// head's own verb ([`Self::toggle_pane_zoom`]); a floating window has no
+    /// zoom for a video, so there the pair only leaves playback as it was.
+    fn double_click_video_picture(&mut self, surface: PreviewSurface) -> Result<()> {
+        let now = Instant::now();
+        if let Some(click) = self
+            .window
+            .video_click
+            .take()
+            .filter(|click| click.surface == surface)
+        {
+            match click.undo {
+                PictureUndo::Seat(undo) => {
+                    if let Some(seat) = self.window.video.get_mut(surface) {
+                        seat.picture(video_seat::PictureGesture::DoubleClick(undo), now);
+                    }
+                }
+                PictureUndo::Opened => self.stop_video_on(surface)?,
+            }
         }
-        self.mouse_trace(|| format!("video_picture click surface={surface:?}"));
+        self.mouse_trace(|| format!("video_picture double-click surface={surface:?}"));
+        if let PreviewSurface::Seat(leaf) = surface
+            && leaf.tab == self.id
+        {
+            self.toggle_pane_zoom(leaf.seat)?;
+        }
         self.refresh_chrome();
         self.present_chrome_change()
     }

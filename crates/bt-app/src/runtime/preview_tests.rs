@@ -2171,6 +2171,71 @@ fn a_click_on_a_recordings_picture_plays_and_pauses_it() {
     crate::test_support::engines_settling_to(before);
 }
 
+/// RED (T-VIDEO-POINTER-AND-KEYS, row 39) — **a double click on the picture zooms the pane and
+/// leaves playback as it was**: playing stays playing, paused stays paused at its playhead, and a
+/// second double click lets the zoom go.
+///
+/// MUTATION: drop the undo from `Runtime::double_click_video_picture` — the first click of the
+/// pair pauses a playing recording and the pane zooms over a stopped one.
+#[test]
+fn a_double_click_on_a_recording_zooms_its_pane_and_leaves_playback_as_it_was() {
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let (mut folio, surface) = a_recording_beside_a_shell("video-picture-double-click");
+    let PreviewSurface::Seat(leaf) = surface else {
+        unreachable!("a docked pane")
+    };
+    let stage = stage_of(&mut folio, surface);
+    click(&mut folio, on_the_picture(stage, 20.0));
+    loaded(&folio, surface);
+    played(&folio, surface, |state| {
+        state.playing && state.position_secs > 0.2
+    });
+    assert_eq!(folio.window.tabs[0].seats.zoom(), None);
+
+    let pair = on_the_picture(stage, 80.0);
+    click(&mut folio, pair);
+    click(&mut folio, pair);
+    assert_eq!(
+        folio.window.tabs[0].seats.zoom(),
+        Some(leaf.seat),
+        "a double click is the pane's zoom"
+    );
+    let still_playing = played(&folio, surface, |state| state.playing);
+    assert!(
+        still_playing.playing,
+        "and playing stays playing: {still_playing:?}"
+    );
+
+    // Paused at a playhead: the pair leaves it paused there.
+    pane_key(
+        &mut folio,
+        Key::Named(NamedKey::Space),
+        KeyCode::Space,
+        Some(" "),
+    );
+    let paused = played(&folio, surface, |state| !state.playing);
+    let stage = stage_of(&mut folio, surface);
+    let pair = on_the_picture(stage, 140.0);
+    click(&mut folio, pair);
+    click(&mut folio, pair);
+    assert_eq!(
+        folio.window.tabs[0].seats.zoom(),
+        None,
+        "and a second lets it go"
+    );
+    let after = played(&folio, surface, |state| {
+        !state.playing && (state.position_secs - paused.position_secs).abs() < 0.05
+    });
+    assert!(
+        !after.playing && (after.position_secs - paused.position_secs).abs() < 0.05,
+        "paused stays paused at {}: {after:?}",
+        paused.position_secs
+    );
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
+}
+
 /// RED (T-VIDEO-POINTER-AND-KEYS, rows 42 and 43) — **`End` takes a recording to its end, and
 /// every play door then plays it from the start**: the bar's button, Space, and a click on the
 /// picture. `Home` is the start.
