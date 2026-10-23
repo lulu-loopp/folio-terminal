@@ -12,10 +12,10 @@ NestedInstallerFiles:
   PortableCommandAlias: folio
 ArchiveBinariesDependOnPath: true
 UpgradeBehavior: install
-ReleaseDate: 2026-10-DD
+ReleaseDate: 2026-10-23
 Installers:
 - Architecture: x64
   InstallerUrl: https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.8-preview/folio-0.4.8-windows-x64.zip
-  InstallerSha256: <ZIP_SHA256>
+  InstallerSha256: 9512CBF99B569387DE4A47BD6D143D32C068214989495A2EEAA2AE85CE6FC42F
 ManifestType: installer
 ManifestVersion: 1.12.0
