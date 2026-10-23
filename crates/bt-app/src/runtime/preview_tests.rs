@@ -2236,6 +2236,76 @@ fn a_double_click_on_a_recording_zooms_its_pane_and_leaves_playback_as_it_was() 
     crate::test_support::engines_settling_to(before);
 }
 
+/// RED (T-VIDEO-POINTER-AND-KEYS, row 40) — **a wheel notch over the picture is one volume step;
+/// over the bar's tracks it is the tracks', and with `Ctrl` held it keeps its window-wide
+/// meaning.**
+///
+/// MUTATION: drop the `modifiers.is_empty()` test from the wheel's video station — `Ctrl`-wheel
+/// over the picture moves the volume and the last assertion goes red.
+#[test]
+fn a_wheel_notch_over_a_recordings_picture_is_its_volume() {
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let (mut folio, surface) = a_recording_beside_a_shell("video-picture-wheel");
+    let stage = stage_of(&mut folio, surface);
+    let over = on_the_picture(stage, 20.0);
+    click(&mut folio, over);
+    loaded(&folio, surface);
+    folio
+        .window
+        .video
+        .get_mut(surface)
+        .expect("playing")
+        .set_volume(0.5, Instant::now());
+    played(&folio, surface, |state| (state.volume - 0.5).abs() < 1e-6);
+    let notch = |folio: &mut HeadlessFolio, at: PhysicalPosition<f64>, lines: f32| {
+        folio.move_to(at);
+        let mut runtime = folio.runtime();
+        runtime
+            .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, lines))
+            .expect("a notch is taken");
+        runtime.flush_wheel().expect("and spent");
+    };
+
+    notch(&mut folio, over, 1.0);
+    let louder = played(&folio, surface, |state| (state.volume - 0.55).abs() < 1e-6);
+    assert!(
+        (louder.volume - 0.55).abs() < 1e-6,
+        "one notch up: {louder:?}"
+    );
+    notch(&mut folio, over, -2.0);
+    let quieter = played(&folio, surface, |state| (state.volume - 0.45).abs() < 1e-6);
+    assert!(
+        (quieter.volume - 0.45).abs() < 1e-6,
+        "two down: {quieter:?}"
+    );
+
+    // Over the bar's elapsed clock: not the picture's.
+    let layout = folio
+        .runtime()
+        .video_bar_layout_of(surface)
+        .expect("the bar is up");
+    notch(
+        &mut folio,
+        centre(layout.at.expect("the elapsed clock")),
+        1.0,
+    );
+    // With `Ctrl` held, over the picture: the window's own meaning.
+    folio.window.modifiers = winit::keyboard::ModifiersState::CONTROL;
+    notch(&mut folio, over, 1.0);
+    folio.window.modifiers = winit::keyboard::ModifiersState::empty();
+    // One notch the picture does take, so the wait below ends on a state the two above had
+    // their chance to change.
+    notch(&mut folio, over, -1.0);
+    let last = played(&folio, surface, |state| (state.volume - 0.40).abs() < 1e-6);
+    assert!(
+        (last.volume - 0.40).abs() < 1e-6,
+        "neither the bar's notch nor Ctrl's moved the volume: {last:?}"
+    );
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
+}
+
 /// RED (T-VIDEO-POINTER-AND-KEYS, rows 42 and 43) — **`End` takes a recording to its end, and
 /// every play door then plays it from the start**: the bar's button, Space, and a click on the
 /// picture. `Home` is the start.
@@ -2309,6 +2379,83 @@ fn every_play_door_plays_an_ended_recording_from_the_start() {
     pane_key(&mut folio, Key::Named(NamedKey::Home), KeyCode::Home, None);
     let start = played(&folio, surface, |state| state.position_secs < 0.05);
     assert!(start.position_secs < 0.05, "Home is the start: {start:?}");
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
+}
+
+/// RED (T-VIDEO-POINTER-AND-KEYS, rows 38–40, the float's face) — **a floating window's picture
+/// answers a click, a double click and the wheel as a pane's does**, through the same door; and a
+/// double click there, where a recording has no zoom, only leaves playback as it was.
+///
+/// MUTATION: drop the `VideoPicture` arm from `PreviewBodyRung::LADDER` — the float's body takes
+/// the press for nothing and the first assertion goes red.
+#[test]
+fn a_floating_windows_picture_answers_as_a_panes_does() {
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let (mut folio, surface) = a_recording_beside_a_shell("video-picture-float");
+    let PreviewSurface::Seat(leaf) = surface else {
+        unreachable!("a docked pane")
+    };
+    folio
+        .runtime()
+        .pop_out_preview(leaf.seat)
+        .expect("the recording is torn off");
+    folio.draw();
+    let id = folio
+        .window
+        .float
+        .live_windows()
+        .next()
+        .expect("a window holds the recording")
+        .id();
+    let float = PreviewSurface::Float(id);
+    folio.draw();
+    let stage = stage_of(&mut folio, float);
+
+    click(&mut folio, on_the_picture(stage, 20.0));
+    loaded(&folio, float);
+    click(&mut folio, on_the_picture(stage, 60.0));
+    let paused = played(&folio, float, |state| !state.playing);
+    assert!(!paused.playing, "the next click pauses: {paused:?}");
+
+    let pair = on_the_picture(stage, 100.0);
+    click(&mut folio, pair);
+    click(&mut folio, pair);
+    let after = played(&folio, float, |state| {
+        !state.playing && (state.position_secs - paused.position_secs).abs() < 0.05
+    });
+    assert!(
+        !after.playing && (after.position_secs - paused.position_secs).abs() < 0.05,
+        "a double click leaves it paused where it was: {after:?}"
+    );
+    assert_eq!(
+        folio.window.tabs[0].seats.zoom(),
+        None,
+        "and zooms no pane of the tab behind it"
+    );
+
+    let volume = folio
+        .window
+        .video
+        .get(float)
+        .expect("playing")
+        .state()
+        .volume;
+    let at = on_the_picture(stage, 20.0);
+    folio.move_to(at);
+    let mut runtime = folio.runtime();
+    runtime
+        .queue_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, -1.0))
+        .expect("a notch is taken");
+    runtime.flush_wheel().expect("and spent");
+    let quieter = played(&folio, float, |state| {
+        (state.volume - (volume - 0.05)).abs() < 1e-6
+    });
+    assert!(
+        (quieter.volume - (volume - 0.05)).abs() < 1e-6,
+        "a notch over the window's picture is one step: {quieter:?}"
+    );
     folio.window.video.shutdown_all();
     crate::test_support::engines_settling_to(before);
 }

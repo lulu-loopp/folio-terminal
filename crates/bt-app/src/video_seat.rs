@@ -151,6 +151,14 @@ const VIDEO_GAIN_STEP: f64 = 0.05;
 /// rate a screen recording is made at.
 const VIDEO_FALLBACK_FRAME_RATE: f64 = 30.0;
 
+/// The gap between the bar's top edge and a label standing over it — the time
+/// under the pointer on the scrubber, and the volume a wheel just set.
+const BAR_LABEL_GAP_LOGICAL_PX: f32 = 4.0;
+/// A label's padding either side of its figures.
+const BAR_LABEL_PADDING_X_LOGICAL_PX: f32 = 6.0;
+/// A label's corner — the house's small radius.
+const BAR_LABEL_RADIUS_LOGICAL_PX: f32 = 4.0;
+
 /// What the mute button restores when it is pressed on a video whose volume is
 /// already nothing — the same half the shell page's script used, and for its
 /// reason: un-muting into silence is a button that does nothing.
@@ -728,6 +736,11 @@ pub struct VideoSeat {
     acted_at: Instant,
     over_bar: bool,
     grab: Option<BarSlot>,
+    /// **When the wheel last moved the volume** (row 40) — the start of the
+    /// flash that says the volume, on the band's flash clock
+    /// ([`crate::FOOT_REVEAL_FEEDBACK`]). Only the moment is kept: the number
+    /// flashed is the engine's, read when it is painted.
+    gain_flash_at: Option<Instant>,
     /// Which of [`VIDEO_RATES`] is in force. An index and not a number, because
     /// the button cycles and a float that had drifted would never match.
     rate_index: usize,
@@ -769,6 +782,7 @@ impl VideoSeat {
             acted_at: now,
             over_bar: false,
             grab: None,
+            gain_flash_at: None,
             rate_index: 0,
         })
     }
@@ -906,13 +920,14 @@ impl VideoSeat {
         undo
     }
 
-    /// **One gesture on the picture** (owner's ruling 2026-10-23, rows 38 and 39) —
+    /// **One gesture on the picture** (owner's ruling 2026-10-23, rows 38–40) —
     /// the door a pane and a floating window both reach, so the two faces
     /// answer a hand the same way by construction.
     ///
     /// A click is [`Self::toggle`] and answers what would put it back; the
     /// second press of a double click is handed that answer and puts it back,
-    /// so the zoom it means leaves playback as it was.
+    /// so the zoom it means leaves playback as it was; a wheel moves the volume
+    /// one [`VIDEO_GAIN_STEP`] per notch and flashes it.
     pub fn picture(&mut self, gesture: PictureGesture, now: Instant) -> Option<ClickUndo> {
         match gesture {
             PictureGesture::Click => Some(self.toggle(now)),
@@ -925,6 +940,11 @@ impl VideoSeat {
                     }
                 }
                 self.acted(now);
+                None
+            }
+            PictureGesture::Wheel(notches) => {
+                self.nudge_volume(f64::from(notches) * VIDEO_GAIN_STEP, now);
+                self.gain_flash_at = Some(now);
                 None
             }
         }
@@ -1167,8 +1187,20 @@ impl VideoSeat {
             .into_iter();
         armed
             .chain(self.presence(now, motion).settled_at)
+            .chain(self.gain_flash_ends())
             .min()
             .filter(|deadline| *deadline > now)
+    }
+
+    /// When the volume's flash goes out — the frame that takes it off is owed.
+    fn gain_flash_ends(&self) -> Option<Instant> {
+        self.gain_flash_at
+            .map(|at| at + crate::FOOT_REVEAL_FEEDBACK)
+    }
+
+    /// Whether the volume's flash is up at `now`.
+    fn gain_flashing(&self, now: Instant) -> bool {
+        self.gain_flash_ends().is_some_and(|ends| now < ends)
     }
 
     /// **Whether this seat's bar is in flight at `now`** — the half of
@@ -1265,7 +1297,10 @@ impl VideoSeat {
     ) -> Band {
         paint_bar(
             &self.engine.state(),
-            self.grab,
+            BarHand {
+                grab: self.grab,
+                gain_flash: self.gain_flashing(now),
+            },
             self.presence(now, motion).opacity,
             body,
             scale,
@@ -1302,7 +1337,7 @@ pub fn retirement(state: &EngineState) -> Option<(EngineError, crate::i18n::Text
 /// what it paints is a function of what it was handed and nothing else.
 fn paint_bar(
     state: &EngineState,
-    grab: Option<BarSlot>,
+    hand: BarHand,
     presence: f32,
     body: [f32; 4],
     scale: f32,
@@ -1317,6 +1352,7 @@ fn paint_bar(
     let Some(layout) = bar_layout_of(state, body, scale, meta.width) else {
         return Band::default();
     };
+    let grab = hand.grab;
     let font_px = font_logical_px() * scale;
 
     let mut quads: Vec<OverlayQuad> = Vec::with_capacity(12);
@@ -1483,6 +1519,35 @@ fn paint_bar(
         }
     }
 
+    // **The label that stands over the bar** (owner's ruling 2026-10-23, row
+    // 40): the volume a wheel has just set, a small panel of the bar's own
+    // ground with its figures on it.
+    let mut tag = |text: String, rect: [f32; 4]| {
+        quads.extend(bt_render::rounded_overlay_fill(
+            rect,
+            (BAR_LABEL_RADIUS_LOGICAL_PX * scale).round(),
+            palette.preview_code_ground,
+            1.0,
+        ));
+        labels.push(ChromeLabel {
+            text,
+            rect,
+            clip: None,
+            font_size_px: font_px,
+            color: palette.preview_code_text,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: true,
+            mono: false,
+        });
+    };
+    if hand.gain_flash {
+        let (text, rect) = gain_label(&layout, gain, scale);
+        tag(text, rect);
+    }
+
     Band::surface(
         vec![OverlayLayer {
             quads,
@@ -1493,6 +1558,48 @@ fn paint_bar(
         presence,
         [0.0, 0.0],
     )
+}
+
+/// **What the hand is doing on the bar**, as the painter needs it: the track in
+/// hand, and whether the volume's flash is up.
+#[derive(Clone, Copy, Debug, Default)]
+struct BarHand {
+    grab: Option<BarSlot>,
+    gain_flash: bool,
+}
+
+/// **The volume's flash** (row 40): the volume as a whole percent — the same
+/// spelling a zoom flashes ([`crate::i18n::zoom_percent`]) — over the volume
+/// track, or over the mute button where the track has given way, or over the
+/// bar's right end where both have.
+fn gain_label(layout: &BarLayout, gain: f64, scale: f32) -> (String, [f32; 4]) {
+    let text = crate::i18n::zoom_percent(gain);
+    let over = layout
+        .volume
+        .or(layout.mute)
+        .map_or(layout.bar[2] - BAR_PADDING_X_LOGICAL_PX * scale, |rect| {
+            (rect[0] + rect[2]) / 2.0
+        });
+    let rect = label_over_bar(layout, over, text.chars().count(), scale);
+    (text, rect)
+}
+
+/// **A label's box over the bar**, centred on `x` and kept inside the bar's
+/// width: figures reserved the way the clocks are ([`BAR_FIGURE_ADVANCE_EM`]),
+/// a control's height, and standing [`BAR_LABEL_GAP_LOGICAL_PX`] clear of the
+/// bar's top edge.
+fn label_over_bar(layout: &BarLayout, x: f32, figures: usize, scale: f32) -> [f32; 4] {
+    let px = |logical: f32| logical * scale;
+    let width = (figures as f32 * BAR_FIGURE_ADVANCE_EM * px(font_logical_px())
+        + 2.0 * px(BAR_LABEL_PADDING_X_LOGICAL_PX))
+    .ceil();
+    let height = px(BAR_BUTTON_LOGICAL_PX).round().max(1.0);
+    let bottom = (layout.bar[1] - px(BAR_LABEL_GAP_LOGICAL_PX)).round();
+    let left = (x - width / 2.0)
+        .min(layout.bar[2] - width)
+        .max(layout.bar[0])
+        .round();
+    [left, bottom - height, left + width, bottom]
 }
 
 /// **How long one frame of this recording is**: the engine's declared rate when
@@ -1527,13 +1634,15 @@ fn stands_at_end(state: &EngineState) -> bool {
 }
 
 /// **One gesture on a recording's picture**, off its bar (owner's ruling
-/// 2026-10-23, rows 38 and 39) — see [`VideoSeat::picture`].
+/// 2026-10-23, rows 38–40) — see [`VideoSeat::picture`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PictureGesture {
     /// One click: play or pause.
     Click,
     /// The second press of a double click, handed what the first one did.
     DoubleClick(ClickUndo),
+    /// The wheel, by this many notches (up is positive).
+    Wheel(f32),
 }
 
 /// **What puts one click's toggle back** (row 39's decision, §7.44): the click
@@ -2351,7 +2460,7 @@ mod tests {
         let palette = bt_render::chrome_palette();
         let bar = paint_bar(
             &state,
-            None,
+            BarHand::default(),
             0.5,
             [0.0, 0.0, 900.0, 500.0],
             1.0,
@@ -2390,7 +2499,7 @@ mod tests {
         assert!(
             paint_bar(
                 &state,
-                None,
+                BarHand::default(),
                 0.0,
                 [0.0, 0.0, 900.0, 500.0],
                 1.0,
@@ -2437,7 +2546,15 @@ mod tests {
         let no_length = crate::i18n::Text::VideoNoLength.text();
         let painted = |state: &EngineState| {
             let layout = bar_layout_of(state, body, 1.0, 0.0).expect("a pane fits the whole bar");
-            let bar = paint_bar(state, None, 1.0, body, 1.0, &palette, BarMeta::none());
+            let bar = paint_bar(
+                state,
+                BarHand::default(),
+                1.0,
+                body,
+                1.0,
+                &palette,
+                BarMeta::none(),
+            );
             (layout, bar.layers[0].clone())
         };
 
@@ -2791,5 +2908,130 @@ mod tests {
         );
         seat.shutdown();
         crate::test_support::engines_settling_to(before);
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS, row 40) — **a wheel notch over the
+    /// picture is one volume step, clamped to the recording's range, and it
+    /// flashes on the band's flash clock**, whose end is a frame the window
+    /// owes.
+    ///
+    /// MUTATION: drop `self.gain_flash_ends()` from
+    /// [`VideoSeat::bar_deadline`] — the frame that takes the number off is
+    /// never asked for and the deadline assertion goes red.
+    #[test]
+    fn a_wheel_notch_is_one_volume_step_and_flashes() {
+        let _ledger = crate::test_support::ledger_gate();
+        let before = bt_platform::video::engine::engines_outstanding();
+        let mut seat = a_playing_seat();
+        seat.set_volume(0.5, Instant::now());
+        seat.state_reaching(|state| (state.volume - 0.5).abs() < 1e-6);
+        let now = Instant::now();
+        seat.picture(PictureGesture::Wheel(2.0), now);
+        let louder = seat.state_reaching(|state| (state.volume - 0.6).abs() < 1e-6);
+        assert!(
+            (louder.volume - 0.6).abs() < 1e-6,
+            "two notches up: {louder:?}"
+        );
+        seat.picture(PictureGesture::Wheel(-1.0), now);
+        let quieter = seat.state_reaching(|state| (state.volume - 0.55).abs() < 1e-6);
+        assert!(
+            (quieter.volume - 0.55).abs() < 1e-6,
+            "one down: {quieter:?}"
+        );
+        seat.picture(PictureGesture::Wheel(40.0), now);
+        assert!(seat.state_reaching(|state| state.volume >= 1.0).volume <= 1.0);
+        seat.picture(PictureGesture::Wheel(-40.0), now);
+        assert!(seat.state_reaching(|state| state.volume <= 0.0).volume >= 0.0);
+
+        let flash = crate::FOOT_REVEAL_FEEDBACK;
+        assert!(seat.gain_flashing(now));
+        assert!(seat.gain_flashing(now + flash - Duration::from_millis(1)));
+        assert!(!seat.gain_flashing(now + flash), "the flash is the band's");
+        let deadline = seat
+            .bar_deadline(now, crate::Motion::Full)
+            .expect("a flash that is up owes the frame that takes it off");
+        assert!(deadline <= now + flash, "{deadline:?}");
+        // With every other deadline past, the flash's end is the one owed.
+        let late = now + flash - Duration::from_millis(1);
+        if seat
+            .presence(late, crate::Motion::Full)
+            .settled_at
+            .is_none_or(|settled| settled <= late)
+        {
+            assert_eq!(
+                seat.bar_deadline(late, crate::Motion::Full),
+                Some(now + flash)
+            );
+        }
+        seat.shutdown();
+        crate::test_support::engines_settling_to(before);
+    }
+
+    /// A loaded recording of `duration_secs`, paused at `position_secs`.
+    fn a_paused_recording(duration_secs: Option<f64>, position_secs: f64) -> EngineState {
+        EngineState {
+            duration_secs,
+            position_secs,
+            ready: true,
+            has_video: true,
+            volume: 0.5,
+            rate: 1.0,
+            ..EngineState::default()
+        }
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS, row 40) — **the volume a wheel set is
+    /// said over the volume track while its flash is up**, as a whole percent,
+    /// and not otherwise.
+    ///
+    /// MUTATION: drop the `hand.gain_flash` arm from [`paint_bar`] — the flash
+    /// is never drawn and the first assertion goes red.
+    #[test]
+    fn the_volume_a_wheel_set_is_said_over_its_track() {
+        let body = [0.0, 0.0, 900.0, 500.0];
+        let palette = bt_render::chrome_palette();
+        let state = a_paused_recording(Some(100.0), 0.0);
+        let layout = bar_layout_of(&state, body, 1.0, 0.0).expect("a pane fits the bar");
+        let flashing = BarHand {
+            gain_flash: true,
+            ..BarHand::default()
+        };
+        let band = paint_bar(&state, flashing, 1.0, body, 1.0, &palette, BarMeta::none());
+        let label = band.layers[0]
+            .labels
+            .iter()
+            .find(|label| label.text == "50%")
+            .unwrap_or_else(|| panic!("the volume is said: {:?}", band.layers[0].labels));
+        let track = layout.volume.expect("a wide bar has its volume track");
+        assert!(
+            ((label.rect[0] + label.rect[2]) / 2.0 - (track[0] + track[2]) / 2.0).abs() <= 1.0,
+            "{:?} stands over the volume track {track:?}",
+            label.rect
+        );
+        assert!(label.rect[3] < layout.bar[1], "over the bar, not on it");
+        let quiet = paint_bar(
+            &state,
+            BarHand::default(),
+            1.0,
+            body,
+            1.0,
+            &palette,
+            BarMeta::none(),
+        );
+        assert!(
+            quiet.layers[0]
+                .labels
+                .iter()
+                .all(|label| label.text != "50%"),
+            "no flash, no number"
+        );
+        // A bar that has shed its volume track says it over the mute.
+        let narrow = [0.0, 0.0, 240.0, 200.0];
+        if let Some(narrow_layout) = bar_layout_of(&state, narrow, 1.0, 0.0)
+            && narrow_layout.volume.is_none()
+        {
+            let (_, rect) = gain_label(&narrow_layout, 0.5, 1.0);
+            assert!(rect[0] >= narrow_layout.bar[0] && rect[2] <= narrow_layout.bar[2]);
+        }
     }
 }

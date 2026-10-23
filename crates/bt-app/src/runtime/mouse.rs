@@ -5772,10 +5772,30 @@ impl<B: Backend> Runtime<'_, B> {
         // branch below and scrolled a body with nothing in it.
         if let Some(position) = self.window.pointer_position
             && let Some((surface, body)) = self.preview_surface_at(position)
-            && self.window.git_graphs_shown.contains_key(&surface)
         {
-            self.mouse_trace(|| format!("wheel_route taken=pane at=git-graph surface={surface:?}"));
-            return self.scroll_git_graph(surface, body, delta);
+            if self.window.git_graphs_shown.contains_key(&surface) {
+                self.mouse_trace(|| {
+                    format!("wheel_route taken=pane at=git-graph surface={surface:?}")
+                });
+                return self.scroll_git_graph(surface, body, delta);
+            }
+            // **A notch over a recording's picture is its volume** (owner's
+            // ruling 2026-10-23, row 40), one step a notch as `↑`/`↓` step it —
+            // on a pane's or a floating window's picture, off its bar, and only
+            // with no modifier held: `Ctrl`-, `Shift`- and `Alt`-wheel go on to
+            // the routes that give them their window-wide meanings. Asked before
+            // the picture's zoom below, which a recording does not take.
+            if self.window.modifiers.is_empty()
+                && !wheel_points_sideways(delta)
+                && self.wheel_video_picture(
+                    surface,
+                    [position.x as f32, position.y as f32],
+                    wheel_zoom_notches(delta),
+                )?
+            {
+                self.mouse_trace(|| "wheel_route taken=pane at=video-volume".to_owned());
+                return Ok(());
+            }
         }
         // **A notch over a picture is a zoom** (user ruling 2026-08-16, ticket
         // #60). It is asked beside the document's branch and not inside it,

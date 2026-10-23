@@ -58006,8 +58006,11 @@ mod mouse_trace_station_tests {
         // notice strip is swallowed, with its own `wheel_route taken=overlay
         // at=in-pane` line above it. 26 → 27 the same day: a notch on a band
         // painted above the panes that does not scroll is swallowed, with its
-        // own `wheel_route taken=overlay at=over-pane` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 28);
+        // own `wheel_route taken=overlay at=over-pane` line above it. 28 → 29 on
+        // 2026-10-23 (T-VIDEO-POINTER-AND-KEYS, row 40): a notch over a
+        // recording's picture is its volume, with its own `wheel_route taken=pane
+        // at=video-volume` line above it.
+        assert_every_exit_is_traced("mouse_wheel", 29);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }

@@ -5169,6 +5169,31 @@ impl<B: Backend> Runtime<'_, B> {
         self.present_chrome_change()
     }
 
+    /// **The wheel over a recording's picture is its volume** (owner's ruling
+    /// 2026-10-23, row 40): one [`video_seat::PictureGesture::Wheel`] notch per
+    /// notch, as `↑` and `↓` step it, on a pane's or a floating window's
+    /// picture and off its bar, `surface` being the one the pointer is over and
+    /// `at` the point. `true` when the notch was the picture's.
+    pub(in crate::runtime) fn wheel_video_picture(
+        &mut self,
+        surface: PreviewSurface,
+        at: [f32; 2],
+        notches: f32,
+    ) -> Result<bool> {
+        let scale = self.window.renderer.scale_factor() as f32;
+        let now = Instant::now();
+        if !self.video_picture_holds(surface, at, scale, now) {
+            return Ok(false);
+        }
+        let Some(seat) = self.window.video.get_mut(surface) else {
+            return Ok(false);
+        };
+        seat.picture(video_seat::PictureGesture::Wheel(notches), now);
+        self.refresh_chrome();
+        self.present_chrome_change()?;
+        Ok(true)
+    }
+
     /// A held track follows the pointer, and it follows it **outside its own
     /// bar** — a scrub that stopped tracking the moment the hand left a
     /// thirty-four pixel strip would make the end of a recording a matter of
