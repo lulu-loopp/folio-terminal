@@ -146,6 +146,11 @@ const VIDEO_STEP_SECONDS: f64 = 5.0;
 /// How far `↑` and `↓` move the volume.
 const VIDEO_GAIN_STEP: f64 = 0.05;
 
+/// **The frame rate a frame step is measured in when the engine reports none**
+/// (owner's ruling 2026-10-23, row 42): a thirtieth of a second, the commonest
+/// rate a screen recording is made at.
+const VIDEO_FALLBACK_FRAME_RATE: f64 = 30.0;
+
 /// What the mute button restores when it is pressed on a video whose volume is
 /// already nothing — the same half the shell page's script used, and for its
 /// reason: un-muting into silence is a button that does nothing.
@@ -876,18 +881,51 @@ impl VideoSeat {
 
     // ── the verbs ─────────────────────────────────────────────────────────
 
-    /// Play if paused (or ended, from the start), pause if playing.
+    /// **Play if paused (or at the end, from the start), pause if playing** —
+    /// every play door's verb: the bar's button and Space.
+    ///
+    /// "At the end" is [`stands_at_end`]: the engine's `ended`, or a playhead
+    /// put on the last frame by `End` or the scrubber, which is a recording
+    /// with nothing left to play just as surely.
     pub fn toggle(&mut self, now: Instant) {
         let state = self.engine.state();
         if state.playing {
             self.engine.pause();
         } else {
-            if state.ended {
+            if stands_at_end(&state) {
                 self.engine.seek(0.0);
             }
             self.engine.play();
         }
         self.acted(now);
+    }
+
+    /// The playhead to the start — `Home`.
+    pub fn seek_start(&mut self, now: Instant) {
+        self.engine.seek(0.0);
+        self.acted(now);
+    }
+
+    /// **The playhead to the end — `End`.** A playing recording goes on
+    /// playing into it, so the engine reaches its end and says `ended` itself,
+    /// as it does when the end is reached by watching; a paused one stands on
+    /// its last frame. A recording that declares no length has no end to go to.
+    pub fn seek_end(&mut self, now: Instant) {
+        if let Some(duration) = self.engine.state().duration_secs
+            && duration.is_finite()
+        {
+            self.engine.seek(duration);
+        }
+        self.acted(now);
+    }
+
+    /// **One frame back or forward — `,` and `.` — while paused**, and nothing
+    /// while playing: a frame step is a reading of one picture, and a running
+    /// clock has already moved past it.
+    pub fn step_frame(&mut self, frames: f64, now: Instant) {
+        if let Some(seconds) = frame_step(&self.engine.state(), frames) {
+            self.step(seconds, now);
+        }
     }
 
     /// Move the playhead by `seconds`, clamped to the recording.
@@ -977,6 +1015,10 @@ impl VideoSeat {
         };
         match verb {
             PlayerKey::Toggle => self.toggle(now),
+            PlayerKey::Start => self.seek_start(now),
+            PlayerKey::End => self.seek_end(now),
+            PlayerKey::FrameBack => self.step_frame(-1.0, now),
+            PlayerKey::FrameForward => self.step_frame(1.0, now),
             PlayerKey::Back => self.step(-VIDEO_STEP_SECONDS, now),
             PlayerKey::Forward => self.step(VIDEO_STEP_SECONDS, now),
             PlayerKey::Louder => self.nudge_volume(VIDEO_GAIN_STEP, now),
@@ -1421,6 +1463,37 @@ fn paint_bar(
     )
 }
 
+/// **How long one frame of this recording is**: the engine's declared rate when
+/// it has one, else [`VIDEO_FALLBACK_FRAME_RATE`].
+#[must_use]
+fn frame_secs(state: &EngineState) -> f64 {
+    1.0 / state
+        .frame_rate
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .unwrap_or(VIDEO_FALLBACK_FRAME_RATE)
+}
+
+/// **How far `frames` frame steps move the playhead**, or `None` while the
+/// recording plays — see [`VideoSeat::step_frame`].
+#[must_use]
+fn frame_step(state: &EngineState, frames: f64) -> Option<f64> {
+    (!state.playing).then(|| frames * frame_secs(state))
+}
+
+/// **Whether a recording has nothing left to play**: the engine says it ended,
+/// or its playhead stands on the last frame of a declared length — where `End`
+/// puts a paused recording and where a scrubber dragged to the right leaves one.
+/// Within half a frame, because the last frame *is* the end: a playhead the
+/// engine reports a hair short of the length is on that frame.
+#[must_use]
+fn stands_at_end(state: &EngineState) -> bool {
+    state.ended
+        || state
+            .duration_secs
+            .filter(|duration| duration.is_finite() && *duration > 0.0)
+            .is_some_and(|duration| state.position_secs >= duration - frame_secs(state) / 2.0)
+}
+
 /// **`m:ss`, and `h:mm:ss` once there is an hour to say.**
 ///
 /// [`crate::preview::format_duration`] and not a second formatter: the facts
@@ -1625,10 +1698,18 @@ impl VideoSeats {
     }
 }
 
-/// **The player's five keys**, as [`VideoSeat::key_press`] answers them.
+/// **The player's keys**, as [`VideoSeat::key_press`] answers them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PlayerKey {
     Toggle,
+    /// `Home`: the start.
+    Start,
+    /// `End`: the end.
+    End,
+    /// `,`: one frame back, while paused.
+    FrameBack,
+    /// `.`: one frame forward, while paused.
+    FrameForward,
     Back,
     Forward,
     Louder,
@@ -1637,9 +1718,13 @@ pub(crate) enum PlayerKey {
 }
 
 /// Which of the player's keys one unmodified press is: Space, the four arrows,
-/// and `M` — the mute's letter read by [`crate::input::verb_letter`], so on a
-/// layout that prints another script it is the key at `M` (owner ruling
-/// 2026-10-11 on H2 Q6).
+/// `Home` and `End`, `,` and `.`, and `M` — the mute's letter read by
+/// [`crate::input::verb_letter`], so on a layout that prints another script it
+/// is the key at `M` (owner ruling 2026-10-11 on H2 Q6).
+///
+/// **`,` and `.` are read by the character they type** (owner's ruling
+/// 2026-10-23, row 42), not by `verb_letter`: they are punctuation, which every
+/// layout prints, and AZERTY prints `,` on the key a US keyboard calls `M`.
 pub(crate) fn player_key(
     key: &winit::keyboard::Key,
     physical: winit::keyboard::PhysicalKey,
@@ -1651,6 +1736,10 @@ pub(crate) fn player_key(
         Key::Named(NamedKey::ArrowRight) => Some(PlayerKey::Forward),
         Key::Named(NamedKey::ArrowUp) => Some(PlayerKey::Louder),
         Key::Named(NamedKey::ArrowDown) => Some(PlayerKey::Quieter),
+        Key::Named(NamedKey::Home) => Some(PlayerKey::Start),
+        Key::Named(NamedKey::End) => Some(PlayerKey::End),
+        Key::Character(text) if text.as_str() == "," => Some(PlayerKey::FrameBack),
+        Key::Character(text) if text.as_str() == "." => Some(PlayerKey::FrameForward),
         Key::Character(_) => {
             (crate::input::verb_letter(key, physical) == Some('m')).then_some(PlayerKey::Mute)
         }
@@ -1699,7 +1788,7 @@ mod tests {
     /// script there**, and a Latin layout's own `m` wherever it stands.
     ///
     /// MUTATIONS: (1) drop the physical fallback from `input::verb_letter` —
-    /// the Russian `ь` goes red; (2) apply it to every letter — AZERTY's `,` on
+    /// the Russian `ь` goes red; (2) apply it to every letter — a US `n` on
     /// the physical `M` becomes the mute and goes red.
     #[test]
     fn the_mute_is_the_key_at_m_on_a_non_latin_layout() {
@@ -1717,9 +1806,10 @@ mod tests {
         }
         assert_eq!(at("m", KeyCode::KeyM), Some(PlayerKey::Mute));
         assert_eq!(at("M", KeyCode::KeyM), Some(PlayerKey::Mute));
-        // AZERTY prints `m` on the key a US keyboard calls `;`, and `,` at `M`.
+        // AZERTY prints `m` on the key a US keyboard calls `;`, and `,` at `M` —
+        // which is the frame step back, by the character it types (row 42).
         assert_eq!(at("m", KeyCode::Semicolon), Some(PlayerKey::Mute));
-        assert_eq!(at(",", KeyCode::KeyM), None);
+        assert_eq!(at(",", KeyCode::KeyM), Some(PlayerKey::FrameBack));
         // A US keyboard's other letters are not the mute.
         assert_eq!(at("n", KeyCode::KeyM), None);
     }
@@ -2408,5 +2498,185 @@ mod tests {
             None,
             "a player with no length is still a player"
         );
+    }
+    /// RED (T-VIDEO-POINTER-AND-KEYS, row 42) — **`Home`, `End`, `,` and `.`
+    /// are the player's**, `Home`/`End` by name and the two punctuation keys by
+    /// the character they type, wherever a layout prints them.
+    ///
+    /// MUTATION: drop the `","` arm from [`player_key`] — `,` falls to the
+    /// mute's letter test and answers nothing, and the first line goes red.
+    #[test]
+    fn home_end_and_the_two_frame_keys_are_the_players() {
+        use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+        let at = |key: Key, code| player_key(&key, PhysicalKey::Code(code));
+        let typed = |text: &str| Key::Character(text.into());
+        assert_eq!(at(typed(","), KeyCode::Comma), Some(PlayerKey::FrameBack));
+        assert_eq!(
+            at(typed("."), KeyCode::Period),
+            Some(PlayerKey::FrameForward)
+        );
+        // AZERTY: `,` at the US `M`, and `.` is shifted `;` — read by what it types.
+        assert_eq!(at(typed(","), KeyCode::KeyM), Some(PlayerKey::FrameBack));
+        assert_eq!(
+            at(typed("."), KeyCode::Comma),
+            Some(PlayerKey::FrameForward)
+        );
+        // What a US keyboard types shifted on those keys is not a frame step.
+        assert_eq!(at(typed("<"), KeyCode::Comma), None);
+        assert_eq!(at(typed(">"), KeyCode::Period), None);
+        assert_eq!(
+            at(Key::Named(NamedKey::Home), KeyCode::Home),
+            Some(PlayerKey::Start)
+        );
+        assert_eq!(
+            at(Key::Named(NamedKey::End), KeyCode::End),
+            Some(PlayerKey::End)
+        );
+    }
+
+    /// RED (row 42) — **a frame is the engine's declared rate's, else a
+    /// thirtieth of a second; and a playhead on the last frame is at the end**.
+    ///
+    /// MUTATION: compare `position_secs >= duration` in [`stands_at_end`] — a
+    /// playhead the engine reports a hair short of the length reads as not at
+    /// the end, and the third assertion block goes red.
+    #[test]
+    fn a_frame_is_the_declared_rates_and_the_last_frame_is_the_end() {
+        let at = |position_secs: f64, frame_rate: Option<f64>| EngineState {
+            duration_secs: Some(5.0),
+            position_secs,
+            frame_rate,
+            ..EngineState::default()
+        };
+        assert!((frame_secs(&at(0.0, Some(5.0))) - 0.2).abs() < 1e-12);
+        assert!((frame_secs(&at(0.0, Some(25.0))) - 0.04).abs() < 1e-12);
+        for nothing in [None, Some(0.0), Some(f64::NAN), Some(-30.0)] {
+            assert!(
+                (frame_secs(&at(0.0, nothing)) - 1.0 / 30.0).abs() < 1e-12,
+                "{nothing:?} is no rate, so a frame is a thirtieth"
+            );
+        }
+        // On the last frame, or a hair short of it, is the end.
+        assert!(stands_at_end(&at(5.0, Some(5.0))));
+        assert!(stands_at_end(&at(4.95, Some(5.0))));
+        // One frame short is not: there is a picture left to see.
+        assert!(!stands_at_end(&at(4.8, Some(5.0))));
+        assert!(!stands_at_end(&at(0.0, Some(5.0))));
+        // The engine's word is enough, and a recording with no length has no
+        // last frame to stand on.
+        assert!(stands_at_end(&EngineState {
+            ended: true,
+            ..at(1.0, None)
+        }));
+        assert!(!stands_at_end(&EngineState {
+            duration_secs: None,
+            ..at(1_000.0, None)
+        }));
+    }
+
+    /// RED (row 42) — **a frame step moves a paused playhead by one frame and
+    /// a playing one not at all.**
+    ///
+    /// MUTATION: drop the `!state.playing` test from [`frame_step`] — a
+    /// playing recording jumps a frame and the first assertion goes red.
+    #[test]
+    fn a_frame_step_is_one_frame_and_only_while_paused() {
+        let state = |playing: bool, frame_rate: Option<f64>| EngineState {
+            playing,
+            frame_rate,
+            duration_secs: Some(5.0),
+            ..EngineState::default()
+        };
+        assert_eq!(frame_step(&state(true, Some(5.0)), 1.0), None);
+        assert_eq!(frame_step(&state(true, None), -1.0), None);
+        let forward = frame_step(&state(false, Some(5.0)), 1.0).expect("paused");
+        assert!((forward - 0.2).abs() < 1e-12, "{forward}");
+        let back = frame_step(&state(false, Some(5.0)), -1.0).expect("paused");
+        assert!((back + 0.2).abs() < 1e-12, "{back}");
+        let unrated = frame_step(&state(false, None), 1.0).expect("paused");
+        assert!((unrated - 1.0 / 30.0).abs() < 1e-12, "{unrated}");
+    }
+
+    /// The fixture every host's engine decodes: 160×120, five seconds, five
+    /// frames a second (`tests/assets/PROVENANCE.md`).
+    fn the_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/assets/folio-video-test.mp4")
+    }
+
+    /// A seat on [`the_fixture`], loaded and playing as a seat opens.
+    fn a_playing_seat() -> VideoSeat {
+        let seat = VideoSeat::open(&the_fixture(), 1, Instant::now()).expect("the fixture opens");
+        let state = seat.state_reaching(|state| state.ready && state.playing);
+        assert!(state.ready && state.playing, "the fixture plays: {state:?}");
+        seat
+    }
+
+    /// Within one frame's tolerance of `seconds`.
+    fn near(state: &EngineState, seconds: f64) -> bool {
+        (state.position_secs - seconds).abs() < 0.05
+    }
+
+    /// A key the player answers, pressed with no modifier.
+    fn press(seat: &mut VideoSeat, key: winit::keyboard::Key, code: winit::keyboard::KeyCode) {
+        let physical = winit::keyboard::PhysicalKey::Code(code);
+        assert!(
+            seat.key_press(&key, physical, false, Instant::now()),
+            "{key:?}"
+        );
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS, row 42) — **on a real engine, `Home`
+    /// and `End` bound the recording and `,`/`.` step a paused one a frame at
+    /// a time, at the rate the file declares**; `End` on a playing recording
+    /// plays into its end, which the engine then says.
+    ///
+    /// MUTATION: measure a frame by [`VIDEO_FALLBACK_FRAME_RATE`] always — the
+    /// fixture's 0.2 s frames step by 0.033 s and the first `.` goes red.
+    #[test]
+    fn the_frame_keys_and_home_and_end_drive_a_real_recording() {
+        use winit::keyboard::{Key, KeyCode, NamedKey};
+        let _ledger = crate::test_support::ledger_gate();
+        let before = bt_platform::video::engine::engines_outstanding();
+        let mut seat = a_playing_seat();
+        seat.toggle(Instant::now());
+        seat.state_reaching(|state| !state.playing && state.frame_rate.is_some());
+
+        press(&mut seat, Key::Named(NamedKey::Home), KeyCode::Home);
+        let start = seat.state_reaching(|state| near(state, 0.0));
+        assert!(near(&start, 0.0), "Home is the start: {start:?}");
+        for frame in 1..=2 {
+            press(&mut seat, Key::Character(".".into()), KeyCode::Period);
+            let at = f64::from(frame) * 0.2;
+            let state = seat.state_reaching(|state| near(state, at));
+            assert!(near(&state, at), "`.` #{frame} stands at {at}: {state:?}");
+        }
+        press(&mut seat, Key::Character(",".into()), KeyCode::Comma);
+        let back = seat.state_reaching(|state| near(state, 0.2));
+        assert!(near(&back, 0.2), "`,` is one frame back: {back:?}");
+        assert!(!back.playing, "a frame step does not play");
+
+        press(&mut seat, Key::Named(NamedKey::End), KeyCode::End);
+        let end = seat.state_reaching(|state| state.position_secs >= 4.9);
+        assert!(end.position_secs >= 4.9, "End is the end: {end:?}");
+        assert!(
+            stands_at_end(&end),
+            "and a paused one stands there: {end:?}"
+        );
+
+        // Playing, `,` and `.` change nothing a hand would see as a step, and
+        // `End` lets it run out.
+        press(&mut seat, Key::Named(NamedKey::Home), KeyCode::Home);
+        seat.toggle(Instant::now());
+        let playing = seat.state_reaching(|state| state.playing && state.position_secs < 2.0);
+        assert!(playing.playing, "{playing:?}");
+        press(&mut seat, Key::Named(NamedKey::End), KeyCode::End);
+        let ended = seat.state_reaching(|state| state.ended);
+        assert!(
+            ended.ended,
+            "End on a playing recording makes it end: {ended:?}"
+        );
+        seat.shutdown();
+        crate::test_support::engines_settling_to(before);
     }
 }

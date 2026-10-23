@@ -6,7 +6,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- `Home` and `End` go to a video's start and end, and while it is paused `,` and `.` step one frame back and forward. <!-- zh: `Home` 和 `End` 跳到视频的开头和结尾；暂停时，`,` 和 `.` 后退或前进一帧。 -->
 
 ## 0.4.8-preview — 2026-10-23
 
