@@ -1202,33 +1202,33 @@ fn is_the_new_bundle(seen: &Sight) -> bool {
 /// appended to ([`Machine::log`]).
 struct Machine<'a> {
     home: &'a Home,
-    log: Option<Option<PathBuf>>,
+    log: Option<PathBuf>,
 }
 
 impl Machine<'_> {
     /// **The log the pass's lines are also appended to**, found once, when
     /// the first is said: the rescue build's (`update_recover::log_file`) —
     /// the data directory's `diagnostics.log`, else `recover.log` beside the
-    /// journal — and `None` when this process's standard error is that file
-    /// already (`update_recover::appended_to`). A start opened from Explorer
-    /// or by a rescue has no console, and its lines were said nowhere
-    /// (T-UNKEPT-CARD-ONCE).
-    fn log(&mut self) -> Option<PathBuf> {
+    /// journal. A start opened from Explorer or by a rescue has no console,
+    /// and its lines were said nowhere (T-UNKEPT-CARD-ONCE).
+    fn log(&mut self) -> PathBuf {
         let home = self.home;
         self.log
             .get_or_insert_with(|| {
-                let (log, _) =
-                    crate::update_recover::log_file(home, &crate::persist::storage_dir_unmoved());
-                crate::update_recover::appended_to(&log).map(Path::to_path_buf)
+                crate::update_recover::log_file(home, &crate::persist::storage_dir_unmoved()).0
             })
             .clone()
     }
 }
 
-/// One line on standard error, and appended to `log` when there is one.
-fn say_to(log: Option<&Path>, line: &str) {
+/// **One line on standard error, and appended to `log`** — unless standard
+/// error is `log` at the moment of writing (`update_recover::appended_to`):
+/// a worker's line is written up to [`RESCUE_ENDS_WITHIN`] after the pass,
+/// by when the resident run may have pointed standard error at that very
+/// `diagnostics.log`, and asking at the hand-off would write it twice.
+fn say_to(log: &Path, line: &str) {
     bt_platform::write_std_error(format!("{line}\n").as_bytes());
-    if let Some(log) = log {
+    if let Some(log) = crate::update_recover::appended_to(log) {
         let _ = crate::diagnostics::append_note(log, line);
     }
 }
@@ -1246,7 +1246,7 @@ fn mounts_under(folder: &Path) -> Result<Vec<PathBuf>, String> {
 impl World for Machine<'_> {
     fn say(&mut self, line: &str) {
         let log = self.log();
-        say_to(log.as_deref(), line);
+        say_to(&log, line);
     }
 
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
@@ -1287,7 +1287,7 @@ impl World for Machine<'_> {
             bt_platform::ThreadPriority::BelowNormal,
             move |worker| {
                 if let Err(line) = job(worker) {
-                    say_to(log.as_deref(), &line);
+                    say_to(&log, &line);
                 }
             },
         )
@@ -1837,10 +1837,12 @@ mod tests {
             }
         }
 
-        /// RED (T-UNKEPT-CARD-ONCE, F1; macOS) — **a retirement whose image is
-        /// detached on a worker raises the card of the journal's note on the
-        /// start that hands it over, and the next start finds nothing**: the
-        /// worker removes the journal.
+        /// GUARD (T-UNKEPT-CARD-ONCE, F1; macOS) — **a retirement whose image
+        /// is detached on a worker raises the card of the journal's note on
+        /// the start that hands it over, and the next start finds nothing**:
+        /// the worker removes the journal. Not RED on b7204455, which already
+        /// raised this road's card; it holds F1 to raising it for
+        /// `Retirement::OnAWorker`.
         ///
         /// MUTATION: in `run_by`'s Retire arm, raise the card only for
         /// `Retirement::Done` (no card on the detach road).
