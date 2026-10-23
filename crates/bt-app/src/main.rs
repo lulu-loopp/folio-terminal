@@ -27480,6 +27480,9 @@ enum ImageGrasp {
 /// and a rung added here is added to both.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreviewBodyRung {
+    /// A recording's picture: a click plays or pauses
+    /// (`Runtime::press_video_picture`; owner's ruling 2026-10-23).
+    VideoPicture,
     /// The body's own scroll bar (`Runtime::press_preview_body_thumb`).
     BodyThumb,
     /// A wide block's bar (`Runtime::press_preview_block_thumb`).
@@ -27495,7 +27498,8 @@ enum PreviewBodyRung {
 
 impl PreviewBodyRung {
     /// The order, top rung first.
-    const LADDER: [Self; 5] = [
+    const LADDER: [Self; 6] = [
+        Self::VideoPicture,
         Self::BodyThumb,
         Self::BlockThumb,
         Self::Picture,
@@ -27507,6 +27511,7 @@ impl PreviewBodyRung {
     /// before it was one list, kept so an old trace and a new one read alike.
     fn trace_name(self) -> &'static str {
         match self {
+            Self::VideoPicture => "press-video-picture",
             Self::BodyThumb => "press-preview-body-thumb",
             Self::BlockThumb => "press-preview-block-thumb",
             Self::Picture => "press-preview-image",
@@ -27536,6 +27541,36 @@ struct ImageDrag {
 /// halves of a real double click. The slop is generous enough for that and far
 /// too small to join two deliberate clicks at opposite corners.
 const IMAGE_DOUBLE_CLICK_SLOP_PX: f32 = 6.0;
+
+/// **A press on a recording's picture, not yet a click** (owner's ruling
+/// 2026-10-23, row 38; capture C23): the click is decided by the release, and a
+/// press that wandered past the double-click slop before it is a drag, which
+/// means nothing here.
+#[derive(Clone, Copy, Debug)]
+struct VideoPicturePress {
+    surface: PreviewSurface,
+    /// Where the press landed, in physical pixels.
+    origin: [f32; 2],
+    /// Whether the pointer has left [`IMAGE_DOUBLE_CLICK_SLOP_PX`] of it.
+    wandered: bool,
+}
+
+impl VideoPicturePress {
+    fn at(surface: PreviewSurface, origin: [f32; 2]) -> Self {
+        Self {
+            surface,
+            origin,
+            wandered: false,
+        }
+    }
+
+    /// The pointer is at `point` now. The slop is the double click's, so a
+    /// press is a click exactly as far as it could still be half of a pair.
+    fn travel(&mut self, point: [f32; 2]) {
+        self.wandered |= (point[0] - self.origin[0]).abs() > IMAGE_DOUBLE_CLICK_SLOP_PX
+            || (point[1] - self.origin[1]).abs() > IMAGE_DOUBLE_CLICK_SLOP_PX;
+    }
+}
 
 #[derive(Default)]
 struct ImageClicks {

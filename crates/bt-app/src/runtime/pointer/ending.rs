@@ -49,7 +49,7 @@
 use crate::window_seam::prelude::*;
 use crate::{
     FloatDragKind, LeafId, MouseRoute, PasteTarget, PreviewSurface, RowHost, Runtime, TabId,
-    UserInputKind, a_capture_still_holds_its_pointer, float, input,
+    UserInputKind, VideoPicturePress, a_capture_still_holds_its_pointer, float, input,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -213,6 +213,7 @@ impl CaptureOwner {
             Self::Route(MouseRoute::MathBlock) => "Route::MathBlock",
             Self::SettingsSlider(_) => "SettingsSlider",
             Self::SettingsMenuBar(_) => "SettingsMenuBar",
+            Self::VideoPicture(_) => "VideoPicture",
         }
     }
 
@@ -220,6 +221,7 @@ impl CaptureOwner {
     pub(crate) fn preview_surface(&self) -> Option<PreviewSurface> {
         match self {
             Self::VideoBar(surface) | Self::EditSelection(_, surface) => Some(*surface),
+            Self::VideoPicture(press) => Some(press.surface),
             Self::PreviewBodyThumb(_, drag) => Some(drag.surface),
             Self::BlockThumb(_, drag) => Some(drag.surface),
             Self::PicturePan(_, drag) => Some(drag.surface),
@@ -242,7 +244,8 @@ impl CaptureOwner {
     }
 
     /// **Whether the payload holds a pixel quantity taken at the press** (R-9's scale change): a
-    /// press's origin, which its six-pixel travel is measured from; a grab inside a thumb, a
+    /// press's origin, which its six-pixel travel is measured from (a press on a recording's
+    /// picture's among them); a grab inside a thumb, a
     /// floating window's head or a carried tab; a picture's last point. Each is a distance in the
     /// window's physical pixels, so a new scale makes it a distance in a space the window no
     /// longer has. A divider, a scrubber, a selection on the edit surface and a press on a cell
@@ -261,7 +264,8 @@ impl CaptureOwner {
             | Self::RenderedSelection(..)
             | Self::TerminalThumb(..)
             | Self::TerminalFootMark(..)
-            | Self::SettingsMenuBar(_) => true,
+            | Self::SettingsMenuBar(_)
+            | Self::VideoPicture(_) => true,
             Self::Drag(drag) => drag.tab_carry().is_some(),
             Self::FloatDrag(drag) => matches!(drag.kind, FloatDragKind::Move { .. }),
             Self::Divider(_)
@@ -292,10 +296,12 @@ impl CaptureOwner {
                 }
                 RowHost::Float(_) => false,
             },
-            Self::VideoBar(surface) => match surface {
-                PreviewSurface::Seat(leaf) => glass.takes(leaf.tab, leaf.seat),
-                PreviewSurface::Float(_) | PreviewSurface::Peek => false,
-            },
+            Self::VideoBar(surface) | Self::VideoPicture(VideoPicturePress { surface, .. }) => {
+                match surface {
+                    PreviewSurface::Seat(leaf) => glass.takes(leaf.tab, leaf.seat),
+                    PreviewSurface::Float(_) | PreviewSurface::Peek => false,
+                }
+            }
             Self::PreviewBodyThumb(tab, drag) => glass.takes_the_surface(*tab, drag.surface),
             Self::BlockThumb(tab, drag) => glass.takes_the_surface(*tab, drag.surface),
             Self::PicturePan(tab, drag) => glass.takes_the_surface(*tab, drag.surface),
@@ -339,7 +345,7 @@ impl CaptureOwner {
             Self::FloatHeadPress(press) => matches!(gone, Gone::Float(id) if id == press.win),
             Self::FloatDrag(drag) => matches!(gone, Gone::Float(id) if id == drag.win),
             Self::GlanceHeadPress(_) | Self::GlanceThumb(_) => gone == Gone::GlanceCard,
-            Self::VideoBar(surface) => {
+            Self::VideoBar(surface) | Self::VideoPicture(VideoPicturePress { surface, .. }) => {
                 surface_goes(gone, *surface)
                     || matches!(surface, PreviewSurface::Seat(leaf) if the_tab(gone, leaf.tab))
             }
@@ -504,8 +510,10 @@ impl<B: Backend> Runtime<'_, B> {
                 Ok(())
             }
             // A selection on the cells or the edit surface keeps what it selected; a press that
-            // had not become anything is dropped.
+            // had not become anything is dropped — a press on a picture included: a cancelled
+            // click is no click.
             CaptureOwner::Route(MouseRoute::Local(_))
+            | CaptureOwner::VideoPicture(_)
             | CaptureOwner::EditSelection(..)
             | CaptureOwner::TabPress(_)
             | CaptureOwner::PanePress(..)
@@ -541,7 +549,8 @@ impl<B: Backend> Runtime<'_, B> {
             | CaptureOwner::TerminalFootMark(..)
             | CaptureOwner::Route(MouseRoute::Local(_) | MouseRoute::Forward { .. })
             | CaptureOwner::SettingsSlider(_)
-            | CaptureOwner::SettingsMenuBar(_) => {}
+            | CaptureOwner::SettingsMenuBar(_)
+            | CaptureOwner::VideoPicture(_) => {}
         }
     }
 

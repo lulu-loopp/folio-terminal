@@ -12,6 +12,7 @@ use crate::test_support::{
     buffer_saying, host_spelling, png_bytes, scratch_png_named, seat_of, tab_with_a_preview,
 };
 use crate::{PreviewSurface, TabId};
+use winit::keyboard::KeyCode;
 
 /// A heading and three paragraphs: the second with a bold word whose marks the rendered face
 /// hides and the source face shows, the third with a link.
@@ -2003,4 +2004,246 @@ fn the_picture_chooser_is_asked_with_the_tables_name_for_its_filter() {
             crate::i18n::Text::ImageFileType.text().to_owned()
         )],
     );
+}
+
+// ── a recording's picture, driven (T-VIDEO-POINTER-AND-KEYS) ─────────────────────────────────
+
+/// The recording every host's engine decodes: five seconds at five frames a second.
+fn the_recording() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/assets/folio-video-test.mp4")
+}
+
+/// A window whose preview pane stands the recording's still beside a shell that holds the focus,
+/// drawn once.
+fn a_recording_beside_a_shell(tag: &str) -> (HeadlessFolio, PreviewSurface) {
+    let (tab, seat) = tab_with_a_preview(1, vec![]);
+    let mut folio = HeadlessFolio::with_tabs(tag, vec![tab], 0);
+    let surface = seat_of(TabId(1), seat);
+    a_picture_on(&mut folio, surface, &the_recording());
+    folio.draw();
+    assert_ne!(
+        folio.window.tabs[0].seats.focus(),
+        seat,
+        "the fixture's own precondition: the shell holds the focus"
+    );
+    (folio, surface)
+}
+
+/// The rectangle the recording is drawn in on `surface`.
+fn stage_of(folio: &mut HeadlessFolio, surface: PreviewSurface) -> [f32; 4] {
+    folio
+        .runtime()
+        .video_shape_of(surface, 1.0, Instant::now())
+        .expect("the pane stages the recording")
+        .rect()
+}
+
+/// A point on the picture `left` pixels in from its left edge and a quarter of the way down —
+/// clear of the bar along its bottom and of the play disc in its middle.
+fn on_the_picture(stage: [f32; 4], left: f32) -> PhysicalPosition<f64> {
+    PhysicalPosition::new(
+        f64::from(stage[0] + left),
+        f64::from(stage[1] + (stage[3] - stage[1]) / 4.0),
+    )
+}
+
+/// One click: down and up at `at`.
+fn click(folio: &mut HeadlessFolio, at: PhysicalPosition<f64>) {
+    folio.press(at);
+    folio.release(at);
+}
+
+/// The engine's state on `surface`, once `until` holds.
+fn played(
+    folio: &HeadlessFolio,
+    surface: PreviewSurface,
+    until: impl Fn(&bt_platform::video::engine::EngineState) -> bool,
+) -> bt_platform::video::engine::EngineState {
+    folio
+        .window
+        .video
+        .get(surface)
+        .expect("the surface is playing the recording")
+        .state_reaching(until)
+}
+
+/// The recording on `surface` loaded and playing — a seat publishes the play it was opened with
+/// before the file has said how long it is, and `End` has no end to go to until it has.
+fn loaded(folio: &HeadlessFolio, surface: PreviewSurface) {
+    let state = played(folio, surface, |state| state.ready && state.playing);
+    assert!(
+        state.ready && state.playing,
+        "the recording plays: {state:?}"
+    );
+}
+
+/// The centre of a box.
+fn centre(rect: [f32; 4]) -> PhysicalPosition<f64> {
+    PhysicalPosition::new(
+        f64::from((rect[0] + rect[2]) / 2.0),
+        f64::from((rect[1] + rect[3]) / 2.0),
+    )
+}
+
+/// A key the pane's player answers, pressed with no modifier.
+fn pane_key(
+    folio: &mut HeadlessFolio,
+    key: winit::keyboard::Key,
+    code: KeyCode,
+    text: Option<&str>,
+) {
+    assert!(
+        folio
+            .runtime()
+            .preview_key(&key_down(key, code, text))
+            .expect("a headless key is answered"),
+        "the pane takes {code:?}"
+    );
+}
+
+/// RED (T-VIDEO-POINTER-AND-KEYS, row 38) — **one click on a recording's picture plays it and the
+/// next pauses it; the first click on a pane that does not hold the focus focuses it and plays;
+/// a press that wanders is not a click; and a press on the bar's own ground is the bar's.**
+///
+/// MUTATION: drop `PreviewBodyRung::VideoPicture` from `PreviewBodyRung::LADDER` — the press
+/// focuses the pane and nothing plays, and the first assertion goes red. MUTATION: drop the
+/// `wandered` test from `Runtime::release_video_picture` — the drag pauses the recording.
+#[test]
+fn a_click_on_a_recordings_picture_plays_and_pauses_it() {
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let (mut folio, surface) = a_recording_beside_a_shell("video-picture-click");
+    let PreviewSurface::Seat(leaf) = surface else {
+        unreachable!("a docked pane")
+    };
+    let stage = stage_of(&mut folio, surface);
+
+    click(&mut folio, on_the_picture(stage, 20.0));
+    assert_eq!(
+        folio.window.tabs[0].seats.focus(),
+        leaf.seat,
+        "the first click focuses the pane"
+    );
+    assert!(
+        folio.window.video.get(surface).is_some(),
+        "and starts the recording it shows"
+    );
+    loaded(&folio, surface);
+
+    // The next click, far enough along not to pair with the first, pauses.
+    click(&mut folio, on_the_picture(stage, 60.0));
+    assert!(!played(&folio, surface, |state| !state.playing).playing);
+
+    // A press that wanders past the double click's slop before it is let go is a drag.
+    let from = on_the_picture(stage, 100.0);
+    folio.press(from);
+    folio.move_to(PhysicalPosition::new(from.x + 40.0, from.y + 10.0));
+    folio.release(PhysicalPosition::new(from.x + 40.0, from.y + 10.0));
+    assert!(
+        !folio
+            .window
+            .video
+            .get(surface)
+            .expect("still there")
+            .state()
+            .playing,
+        "a drag across the picture is no click"
+    );
+
+    // The bar's own ground — its elapsed clock, which is no control — is the bar's.
+    let layout = folio
+        .runtime()
+        .video_bar_layout_of(surface)
+        .expect("a paused recording's bar is up");
+    let clock = layout.at.expect("a pane's bar has its elapsed clock");
+    click(&mut folio, centre(clock));
+    assert!(
+        !folio
+            .window
+            .video
+            .get(surface)
+            .expect("still there")
+            .state()
+            .playing,
+        "a press on the bar is not a press on the picture"
+    );
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
+}
+
+/// RED (T-VIDEO-POINTER-AND-KEYS, rows 42 and 43) — **`End` takes a recording to its end, and
+/// every play door then plays it from the start**: the bar's button, Space, and a click on the
+/// picture. `Home` is the start.
+///
+/// MUTATION: start a recording from where it stands in `VideoSeat::toggle` rather than from the
+/// start when it [`video_seat`] stands at its end — the three doors each play the last frame and
+/// stop, and each goes red.
+#[test]
+fn every_play_door_plays_an_ended_recording_from_the_start() {
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let (mut folio, surface) = a_recording_beside_a_shell("video-every-play-door");
+    let stage = stage_of(&mut folio, surface);
+    // A click starts it and focuses the pane, so the keys below are the pane's.
+    click(&mut folio, on_the_picture(stage, 20.0));
+    loaded(&folio, surface);
+    pane_key(
+        &mut folio,
+        Key::Named(NamedKey::Space),
+        KeyCode::Space,
+        Some(" "),
+    );
+    played(&folio, surface, |state| !state.playing);
+
+    /// One way to start a recording: the folio and the surface it is on.
+    type Door = fn(&mut HeadlessFolio, PreviewSurface);
+    let doors: [(&str, Door); 3] = [
+        ("the bar's button", |folio, surface| {
+            let layout = folio
+                .runtime()
+                .video_bar_layout_of(surface)
+                .expect("the bar is up");
+            click(folio, centre(layout.play));
+        }),
+        ("Space", |folio, _| {
+            pane_key(
+                folio,
+                Key::Named(NamedKey::Space),
+                KeyCode::Space,
+                Some(" "),
+            );
+        }),
+        ("a click on the picture", |folio, surface| {
+            let stage = stage_of(folio, surface);
+            click(folio, on_the_picture(stage, 160.0));
+        }),
+    ];
+    for (door, open) in doors {
+        pane_key(&mut folio, Key::Named(NamedKey::End), KeyCode::End, None);
+        let at_end = played(&folio, surface, |state| state.position_secs >= 4.9);
+        assert!(
+            at_end.position_secs >= 4.9 && !at_end.playing,
+            "{door}: {at_end:?}"
+        );
+        open(&mut folio, surface);
+        let again = played(&folio, surface, |state| {
+            state.playing && state.position_secs < 2.0
+        });
+        assert!(
+            again.playing && again.position_secs < 2.0,
+            "{door} plays an ended recording from the start: {again:?}"
+        );
+        pane_key(
+            &mut folio,
+            Key::Named(NamedKey::Space),
+            KeyCode::Space,
+            Some(" "),
+        );
+        played(&folio, surface, |state| !state.playing);
+    }
+    pane_key(&mut folio, Key::Named(NamedKey::Home), KeyCode::Home, None);
+    let start = played(&folio, surface, |state| state.position_secs < 0.05);
+    assert!(start.position_secs < 0.05, "Home is the start: {start:?}");
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
 }

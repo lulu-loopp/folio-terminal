@@ -1105,6 +1105,9 @@ impl<B: Backend> Runtime<'_, B> {
     ) -> Result<Option<PreviewBodyRung>> {
         for rung in PreviewBodyRung::LADDER {
             let taken = match rung {
+                PreviewBodyRung::VideoPicture => {
+                    self.press_video_picture([position.x as f32, position.y as f32])?
+                }
                 PreviewBodyRung::BodyThumb => self.press_preview_body_thumb(position)?,
                 PreviewBodyRung::BlockThumb => self.press_preview_block_thumb(position)?,
                 PreviewBodyRung::Picture => self.press_preview_image(position)?,
@@ -1615,6 +1618,10 @@ impl<B: Backend> Runtime<'_, B> {
         if self.drag_video_bar(position)? {
             return Ok(());
         }
+        // A press on a recording's picture is a click until it wanders past the
+        // double click's slop (row 38). Told and not consumed: the press is not a
+        // drag of anything, so every hover below still hears the move.
+        self.travel_video_picture_press([position.x as f32, position.y as f32]);
         // And every playing surface is told where the pointer is, before any
         // branch below can consume the move — the bar's reveal is armed by a
         // pointer settling on the picture and its dwell is ended by one that has

@@ -23,9 +23,9 @@ use crate::{
     PreviewSurface, PreviewTextDrag, PreviewTextSite, ProseParagraph, RenameSubject, Reparse,
     RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest, ScrollThumbState,
     SourceBlocks, Step, SurfacePixels, SurfaceSubject, TabClick, TabId, TabRename, TabState,
-    TabTriggerHand, VideoGlance, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime,
-    animation, animation_layer_key, animation_refusal_notice, answer_one_picture, answers_for,
-    attention_trace, build_preview_diff_body, build_preview_markdown_body,
+    TabTriggerHand, VideoGlance, VideoPicturePress, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb,
+    WindowRuntime, animation, animation_layer_key, animation_refusal_notice, answer_one_picture,
+    answers_for, attention_trace, build_preview_diff_body, build_preview_markdown_body,
     build_preview_table_body, build_preview_text_body, clipboard_picture, create_leaf_session,
     crumb_segments, deliver_clipboard_picture, diagnostics, documents_held_in,
     documents_held_mut_in, documents_pictures, earliest_deadline, file_peek, files,
@@ -2471,8 +2471,16 @@ impl<B: Backend> Runtime<'_, B> {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<(PreviewSurface, [f32; 4])> {
+        self.preview_surface_at_point([position.x as f32, position.y as f32])
+    }
+
+    /// [`Self::preview_surface_at`], asked of a point the router has already
+    /// handed over.
+    pub(in crate::runtime) fn preview_surface_at_point(
+        &self,
+        [x, y]: [f32; 2],
+    ) -> Option<(PreviewSurface, [f32; 4])> {
         let scale = self.window.renderer.scale_factor() as f32;
-        let (x, y) = (position.x as f32, position.y as f32);
         self.window
             .float
             .hit_order()
@@ -4979,23 +4987,15 @@ impl<B: Backend> Runtime<'_, B> {
                 self.play_video_file_on(surface, &path)?;
                 return Ok(true);
             }
+            // **Off the bar, the picture is the body ladder's** (owner's ruling
+            // 2026-10-23): a click plays or pauses —
+            // [`Self::press_video_picture`], the ladder's top rung, which a
+            // docked pane reaches after its press has focused it and a float
+            // reaches through its body. The card keeps its door.
             let Some(layout) = self.video_bar_layout_of(surface) else {
-                // **No bar up, so the picture itself is the control** (user
-                // ruling 2026-08-28: 「点 ▶ 或双击画面进播放态」). A double click
-                // anywhere on a recording starts it, which is the gesture every
-                // player has and the one a reader tries first.
-                if self.double_click_started_a_video(surface, at)? {
-                    return Ok(true);
-                }
                 continue;
             };
             if !layout.holds(at) {
-                // The same gesture over a picture whose bar is up — and here it
-                // is a *toggle*, because a video that is already playing is one
-                // a second double click should stop.
-                if self.double_click_started_a_video(surface, at)? {
-                    return Ok(true);
-                }
                 continue;
             }
             let slot = layout.slot_at(at);
@@ -5033,72 +5033,89 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(false)
     }
 
-    /// **A double click on a recording's own picture** — start it, or stop it
-    /// if it is already running. `true` when the press was the second of a pair
-    /// and was taken.
+    /// **A press on a recording's picture** (owner's ruling 2026-10-23, row
+    /// 38) — the body ladder's top rung, [`PreviewBodyRung::VideoPicture`], so
+    /// a docked pane and a floating window answer it through one door. `true`
+    /// when the press was on a recording's picture and was taken.
     ///
-    /// The picture and not a button, which is why it is here and not in
-    /// [`Self::press_preview_image`]: that door is the *zoom*'s, and a video's
-    /// still does not zoom (§7.23 ⑤) — it returns before it ever reaches a
-    /// click. So the two gestures never meet, and a video's double click has to
-    /// be counted where a video's presses are.
-    ///
-    /// [`ImageClicks`] is the same counter a picture's zoom toggle uses, and it
-    /// is the same counter on purpose: what makes two presses a double click —
-    /// the interval, and how far the pointer may have travelled between them —
-    /// is a fact about a hand, not about what is under it.
-    fn double_click_started_a_video(
-        &mut self,
-        surface: PreviewSurface,
-        at: [f32; 2],
-    ) -> Result<bool> {
+    /// The bar and the still's play disc were asked first (`press_video_at`, the
+    /// chrome's play target), so what reaches here is the picture itself. The
+    /// press waits for its release ([`CaptureOwner::VideoPicture`]), which
+    /// decides whether it was a click.
+    pub(in crate::runtime) fn press_video_picture(&mut self, at: [f32; 2]) -> Result<bool> {
+        let Some((surface, _)) = self.preview_surface_at_point(at) else {
+            return Ok(false);
+        };
         let scale = self.window.renderer.scale_factor() as f32;
         let now = Instant::now();
-        let Some(shape) = self.video_shape_of(surface, scale, now) else {
-            return Ok(false);
-        };
-        if !file_peek::contains(shape.rect(), at) {
+        if !self.video_picture_holds(surface, at, scale, now) {
             return Ok(false);
         }
-        // Only over something that is a recording — a document, a picture and a
-        // page all have their own answer to a double click.
-        let playing = self.window.video.get(surface).is_some();
-        if !playing {
-            let names_a_video = match surface {
-                PreviewSurface::Peek => self
-                    .file_peek_subject()
-                    .and_then(|it| it.path)
-                    .is_some_and(|path| preview::path_names_a_video(&path)),
-                _ => self
-                    .preview_picture(surface)
-                    .is_some_and(|image| preview::path_names_a_video(&image.path)),
-            };
-            if !names_a_video {
-                return Ok(false);
-            }
-        }
-        if !self.preview_image_clicks.register(surface, at, now) {
-            // The first of a possible pair. Not taken: a single click on a
-            // picture belongs to whatever the picture's own single click means.
-            return Ok(false);
-        }
-        if playing {
-            if let Some(seat) = self.window.video.get_mut(surface) {
-                seat.toggle(now);
-            }
-            self.refresh_chrome();
-            self.present_chrome_change()?;
-            return Ok(true);
-        }
-        let path = match surface {
-            PreviewSurface::Peek => self.file_peek_subject().and_then(|it| it.path),
-            _ => self
-                .preview_picture(surface)
-                .map(|image| image.path.clone()),
-        };
-        let Some(path) = path else { return Ok(false) };
-        self.play_video_file_on(surface, &path)?;
+        self.latch_video_picture_press(VideoPicturePress::at(surface, at));
         Ok(true)
+    }
+
+    /// Whether `at` is on the picture of a recording `surface` is showing —
+    /// playing, or standing as its still — and not on its bar.
+    fn video_picture_holds(
+        &self,
+        surface: PreviewSurface,
+        at: [f32; 2],
+        scale: f32,
+        now: Instant,
+    ) -> bool {
+        let recording = self.window.video.get(surface).is_some()
+            || self
+                .preview_picture(surface)
+                .is_some_and(|image| preview::path_names_a_video(&image.path));
+        recording
+            && self
+                .video_shape_of(surface, scale, now)
+                .is_some_and(|shape| file_peek::contains(shape.rect(), at))
+            && !self
+                .video_bar_layout_of(surface)
+                .is_some_and(|layout| layout.holds(at))
+    }
+
+    /// The pointer moved with a press on a picture held: past the double
+    /// click's slop it is no longer a click.
+    pub(in crate::runtime) fn travel_video_picture_press(&mut self, at: [f32; 2]) {
+        if let Some(press) = self.held_video_picture_press_mut() {
+            press.travel(at);
+        }
+    }
+
+    /// **The release of a press on a picture** — a click, unless it wandered
+    /// (row 38). Always taken: the press was the picture's.
+    pub(in crate::runtime) fn release_video_picture(&mut self) -> Result<bool> {
+        let Some(press) = self.take_video_picture_press() else {
+            return Ok(false);
+        };
+        if !press.wandered {
+            self.click_video_picture(press.surface)?;
+        }
+        Ok(true)
+    }
+
+    /// **One click on a recording's picture: play if paused or at the end (from
+    /// the start), pause if playing** — and a still that is not playing yet is
+    /// a paused recording, so the click starts it.
+    fn click_video_picture(&mut self, surface: PreviewSurface) -> Result<()> {
+        let now = Instant::now();
+        if let Some(seat) = self.window.video.get_mut(surface) {
+            seat.picture(video_seat::PictureGesture::Click, now);
+        } else {
+            let Some(path) = self
+                .preview_picture(surface)
+                .map(|image| image.path.clone())
+            else {
+                return Ok(());
+            };
+            self.play_video_file_on(surface, &path)?;
+        }
+        self.mouse_trace(|| format!("video_picture click surface={surface:?}"));
+        self.refresh_chrome();
+        self.present_chrome_change()
     }
 
     /// A held track follows the pointer, and it follows it **outside its own

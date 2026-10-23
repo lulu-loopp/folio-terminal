@@ -12,7 +12,8 @@ use crate::{
     DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragSource, FilePeekPress, FloatDrag,
     FloatHeadPress, ImageDrag, LeafSession, LocalImageActivation, PanePress, PreviewBlockDrag,
     PreviewBodyDrag, PreviewTextDrag, RowPress, SelectionDrag, SelectionDragMode, SpringGate,
-    TabCarry, TabPress, TerminalColumnDrag, TerminalThumbDrag, preview, settings,
+    TabCarry, TabPress, TerminalColumnDrag, TerminalThumbDrag, VideoPicturePress, preview,
+    settings,
 };
 use bt_doc::Bias;
 use bt_layout::{Axis, Ratio, SplitId};
@@ -98,6 +99,7 @@ fn every_owner(on: On) -> Vec<CaptureOwner> {
         CaptureOwner::GlanceHeadPress(FilePeekPress { latch }),
         CaptureOwner::GlanceThumb(3.0),
         CaptureOwner::VideoBar(on.surface),
+        CaptureOwner::VideoPicture(VideoPicturePress::at(on.surface, [3.0, 3.0])),
         CaptureOwner::PreviewBodyThumb(
             on.tab,
             PreviewBodyDrag {
@@ -170,6 +172,7 @@ fn every_name() -> Vec<&'static str> {
         "GlanceHeadPress",
         "GlanceThumb",
         "VideoBar",
+        "VideoPicture",
         "PreviewBodyThumb",
         "BlockThumb",
         "PicturePan",
@@ -292,11 +295,12 @@ fn each_owner_against_and_gone(
 }
 
 /// The owner kinds whose payload names a tab-bound surface (R-9's *off the glass*).
-const TAB_BOUND: [&str; 14] = [
+const TAB_BOUND: [&str; 15] = [
     "Divider",
     "PanePress",
     "RowPress",
     "VideoBar",
+    "VideoPicture",
     "PreviewBodyThumb",
     "BlockThumb",
     "PicturePan",
@@ -310,8 +314,9 @@ const TAB_BOUND: [&str; 14] = [
 ];
 
 /// The gestures held on a preview surface's document.
-const ON_A_DOCUMENT: [&str; 6] = [
+const ON_A_DOCUMENT: [&str; 7] = [
     "VideoBar",
+    "VideoPicture",
     "PreviewBodyThumb",
     "BlockThumb",
     "PicturePan",
@@ -396,6 +401,7 @@ fn each_door_ends_a_held_capture() {
             "TerminalThumb",
             "TerminalFootMark",
             "SettingsMenuBar",
+            "VideoPicture",
         ],
         |runtime| every_owner(on_pane(runtime, 0)),
         |application| {
@@ -447,7 +453,7 @@ fn each_door_ends_a_held_capture() {
         &mut application,
         "a zoom",
         "off the glass",
-        &TAB_BOUND[..13],
+        &TAB_BOUND[..14],
         |runtime| every_owner(on_pane(runtime, 1)),
         |application| {
             let mut runtime = application.runtime();
@@ -510,6 +516,7 @@ fn each_door_ends_a_held_capture() {
             "FloatHeadPress",
             "FloatDrag",
             "VideoBar",
+            "VideoPicture",
             "PreviewBodyThumb",
             "BlockThumb",
             "PicturePan",
@@ -537,6 +544,7 @@ fn each_door_ends_a_held_capture() {
             "GlanceHeadPress",
             "GlanceThumb",
             "VideoBar",
+            "VideoPicture",
             "PreviewBodyThumb",
             "BlockThumb",
             "PicturePan",
@@ -606,6 +614,7 @@ fn each_door_ends_a_held_capture() {
         "PanePress",
         "RowPress",
         "VideoBar",
+        "VideoPicture",
         "PreviewBodyThumb",
         "BlockThumb",
         "PicturePan",
@@ -659,6 +668,7 @@ fn each_door_ends_a_held_capture() {
             "RowPress",
             "Drag",
             "VideoBar",
+            "VideoPicture",
             "PreviewBodyThumb",
             "BlockThumb",
             "PicturePan",

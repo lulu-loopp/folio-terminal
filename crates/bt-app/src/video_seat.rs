@@ -882,7 +882,8 @@ impl VideoSeat {
     // ── the verbs ─────────────────────────────────────────────────────────
 
     /// **Play if paused (or at the end, from the start), pause if playing** —
-    /// every play door's verb: the bar's button and Space.
+    /// every play door's verb: the bar's button, Space, a click on the picture
+    /// (row 43).
     ///
     /// "At the end" is [`stands_at_end`]: the engine's `ended`, or a playhead
     /// put on the last frame by `End` or the scrubber, which is a recording
@@ -898,6 +899,17 @@ impl VideoSeat {
             self.engine.play();
         }
         self.acted(now);
+    }
+
+    /// **One gesture on the picture** (owner's ruling 2026-10-23, row 38) —
+    /// the door a pane and a floating window both reach, so the two faces
+    /// answer a hand the same way by construction.
+    ///
+    /// A click is [`Self::toggle`].
+    pub fn picture(&mut self, gesture: PictureGesture, now: Instant) {
+        match gesture {
+            PictureGesture::Click => self.toggle(now),
+        }
     }
 
     /// The playhead to the start — `Home`.
@@ -1492,6 +1504,14 @@ fn stands_at_end(state: &EngineState) -> bool {
             .duration_secs
             .filter(|duration| duration.is_finite() && *duration > 0.0)
             .is_some_and(|duration| state.position_secs >= duration - frame_secs(state) / 2.0)
+}
+
+/// **One gesture on a recording's picture**, off its bar (owner's ruling
+/// 2026-10-23, row 38) — see [`VideoSeat::picture`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PictureGesture {
+    /// One click: play or pause.
+    Click,
 }
 
 /// **`m:ss`, and `h:mm:ss` once there is an hour to say.**
