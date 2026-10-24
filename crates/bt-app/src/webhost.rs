@@ -6099,13 +6099,12 @@ mod rasterization_tests {
     }
 
     /// RED (T-PDF-CONTENT-TYPE) — **a new navigation forgets what the last response
-    /// said**, and the response for the next document never judges the one still
-    /// on the glass.
+    /// said**: a commit with no response of its own is judged by its address, even
+    /// when it is the address the last response answered.
     ///
-    /// MUTATION: never forget `served` at `NavigationStarting` (and match it to
-    /// any commit), and the page after the PDF is owed 2.0; apply a response to
-    /// whatever is committed, and the PDF still on the glass is re-told 1.5 the
-    /// moment the next page's `text/html` arrives.
+    /// MUTATION: never forget `served` at `NavigationStarting`, and the second
+    /// commit of `/download?id=7` is judged by the first one's `application/pdf` —
+    /// owed 2.0 for a document nobody said was a PDF.
     #[test]
     fn a_new_navigation_forgets_what_the_last_response_said() {
         let mut seat = seat_at(1.5);
@@ -6114,24 +6113,33 @@ mod rasterization_tests {
         committed(&mut seat, SERVED_PDF);
         seat.rastered = Some(2.0);
 
-        navigating(&mut seat, "https://example.com/next");
-        served(&mut seat, "https://example.com/next", "text/html");
-        assert_eq!(
-            seat.rasterization_owed(),
-            None,
-            "the PDF on the glass is not judged by the next page's response"
-        );
-        committed(&mut seat, "https://example.com/next");
-        assert_eq!(seat.document, WebDocument::Page);
-        assert_eq!(seat.rasterization_owed(), Some(1.5));
-
         navigating(&mut seat, SERVED_PDF);
         committed(&mut seat, SERVED_PDF);
-        assert_eq!(
-            seat.document,
-            WebDocument::Page,
-            "a commit with no response of its own is judged by its address"
-        );
+        assert_eq!(seat.document, WebDocument::Page);
+        assert_eq!(seat.rasterization_owed(), Some(1.5));
+    }
+
+    /// RED (T-PDF-CONTENT-TYPE) — **the response for the next document never judges
+    /// the one still on the glass**; it waits for its own commit.
+    ///
+    /// MUTATION: apply a response to whatever is committed, and the PDF still on
+    /// the glass is re-told 1.5 the moment the next page's `text/html` arrives.
+    #[test]
+    fn the_next_documents_response_never_judges_the_one_on_the_glass() {
+        const NEXT: &str = "https://example.com/next";
+        let mut seat = seat_at(1.5);
+        navigating(&mut seat, SERVED_PDF);
+        served(&mut seat, SERVED_PDF, "application/pdf");
+        committed(&mut seat, SERVED_PDF);
+        seat.rastered = Some(2.0);
+
+        navigating(&mut seat, NEXT);
+        served(&mut seat, NEXT, "text/html");
+        assert_eq!(seat.document, WebDocument::Pdf);
+        assert_eq!(seat.rasterization_owed(), None);
+        committed(&mut seat, NEXT);
+        assert_eq!(seat.document, WebDocument::Page);
+        assert_eq!(seat.rasterization_owed(), Some(1.5));
     }
 
     /// **What a served media type says**, whatever the address: its essence, in any
