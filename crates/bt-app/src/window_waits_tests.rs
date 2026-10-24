@@ -11926,10 +11926,11 @@ pub fn main() {
 /// decided another crate's item. A path led by a root ([`LandmarkScope`]: here `std`) is another
 /// crate's; one led by an unknown name is refused.
 ///
-/// MUTATIONS: read no glob for a multi-segment path ([`LandmarkScope::readings`]) and follow no
-/// glob import ([`through_uses`]) — the first two `main`s read `parse`; count every first segment
-/// outside the crate as another crate's ([`call_resolution`]'s root check) — the `ghost` path is
-/// read as no landmark and the entry reads `parse`.
+/// MUTATIONS: count every first segment outside the crate as another crate's
+/// ([`call_resolution`]'s root check) — the glob's `wire::hand_over(…)` is decided another
+/// crate's and the entry reads `parse`, the green the re-check found; read no glob for a
+/// multi-segment path ([`LandmarkScope::readings`]) and follow no glob import ([`through_uses`]) —
+/// the same call resolves to nothing and is refused.
 #[test]
 fn a_landmark_brought_in_through_a_glob_is_the_landmark() {
     for (tag, main) in [
