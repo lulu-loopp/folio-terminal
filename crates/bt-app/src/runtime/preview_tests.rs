@@ -2843,24 +2843,25 @@ fn picture_path(folio: &mut HeadlessFolio, surface: PreviewSurface) -> std::path
         .clone()
 }
 
-/// One key pressed with `modifiers` held, and whether the preview took it.
+/// One key pressed with `modifiers` held, **through the whole keyboard ladder**
+/// (`Runtime::keyboard_input`): every rung above the preview's — the popups, the shortcut table,
+/// the files column — is asked first, as it is for a hand.
 fn picture_key(
     folio: &mut HeadlessFolio,
     modifiers: winit::keyboard::ModifiersState,
     key: winit::keyboard::Key,
     code: KeyCode,
     text: Option<&str>,
-) -> bool {
+) {
     folio.window.modifiers = modifiers;
-    let taken = folio
+    folio
         .runtime()
-        .preview_key(&key_down(key, code, text))
+        .keyboard_input(&key_down(key, code, text), false)
         .expect("a headless key is answered");
     folio.window.modifiers = winit::keyboard::ModifiersState::empty();
-    taken
 }
 
-fn arrow(folio: &mut HeadlessFolio, named: NamedKey, code: KeyCode) -> bool {
+fn arrow(folio: &mut HeadlessFolio, named: NamedKey, code: KeyCode) {
     picture_key(
         folio,
         winit::keyboard::ModifiersState::empty(),
@@ -2870,7 +2871,7 @@ fn arrow(folio: &mut HeadlessFolio, named: NamedKey, code: KeyCode) -> bool {
     )
 }
 
-fn digit(folio: &mut HeadlessFolio, text: &str, code: KeyCode) -> bool {
+fn digit(folio: &mut HeadlessFolio, text: &str, code: KeyCode) {
     picture_key(
         folio,
         winit::keyboard::ModifiersState::empty(),
@@ -2910,19 +2911,19 @@ fn the_arrows_pan_a_picture_zoomed_past_its_box_and_stop_at_each_edge() {
         "the fixture's own precondition: at 100 % the picture overflows its box on both axes"
     );
 
-    assert!(arrow(&mut folio, NamedKey::ArrowRight, KeyCode::ArrowRight));
+    arrow(&mut folio, NamedKey::ArrowRight, KeyCode::ArrowRight);
     let pan = zoom_of(&mut folio, surface).pan;
     assert!(
         close_to(pan[0], -width / 8.0) && close_to(pan[1], 0.0),
         "`→` shows an eighth of the box more of the right side: {pan:?}"
     );
-    assert!(picture_key(
+    picture_key(
         &mut folio,
         winit::keyboard::ModifiersState::SHIFT,
         Key::Named(NamedKey::ArrowDown),
         KeyCode::ArrowDown,
         None,
-    ));
+    );
     let pan = zoom_of(&mut folio, surface).pan;
     assert!(
         close_to(pan[0], -width / 8.0) && close_to(pan[1], -height / 2.0),
@@ -2938,10 +2939,7 @@ fn the_arrows_pan_a_picture_zoomed_past_its_box_and_stop_at_each_edge() {
     ];
     for (named, code, side, name) in edges {
         for _ in 0..40 {
-            assert!(
-                arrow(&mut folio, named, code),
-                "the picture keeps the arrow at its {name} edge"
-            );
+            arrow(&mut folio, named, code);
         }
         let held = zoom_of(&mut folio, surface);
         let drawn = crate::image_destination(body, LARGE, held);
@@ -2949,7 +2947,7 @@ fn the_arrows_pan_a_picture_zoomed_past_its_box_and_stop_at_each_edge() {
             close_to(drawn[side], body[side]),
             "carried to its {name} edge, the picture's edge rests on the body's: {drawn:?} in {body:?}"
         );
-        assert!(arrow(&mut folio, named, code));
+        arrow(&mut folio, named, code);
         assert_eq!(
             zoom_of(&mut folio, surface),
             held,
@@ -3003,7 +3001,7 @@ fn a_picture_that_fits_keeps_the_arrows_for_the_folder() {
         });
     assert!(zoom_of(&mut folio, surface).is_fit());
 
-    assert!(arrow(&mut folio, NamedKey::ArrowRight, KeyCode::ArrowRight));
+    arrow(&mut folio, NamedKey::ArrowRight, KeyCode::ArrowRight);
     assert_eq!(
         picture_path(&mut folio, surface),
         next,
@@ -3048,7 +3046,7 @@ fn the_digit_stops_land_where_the_double_click_lands() {
         "the fixture's own precondition: the double click from Fit is 100 %, centred"
     );
     set(&mut folio, crate::ImageZoom::FIT);
-    assert!(digit(&mut folio, "1", KeyCode::Digit1));
+    digit(&mut folio, "1", KeyCode::Digit1);
     assert_eq!(
         zoom_of(&mut folio, surface),
         clicked_from_fit,
@@ -3064,7 +3062,7 @@ fn the_digit_stops_land_where_the_double_click_lands() {
         "the fixture's own precondition: the double click from 300 % is Fit"
     );
     set(&mut folio, panned);
-    assert!(digit(&mut folio, "0", KeyCode::Digit0));
+    digit(&mut folio, "0", KeyCode::Digit0);
     assert_eq!(
         zoom_of(&mut folio, surface),
         clicked_from_zoomed,
@@ -3073,8 +3071,8 @@ fn the_digit_stops_land_where_the_double_click_lands() {
 }
 
 /// RED (T-PICTURE-KEYS-PAN-AND-ZOOM) — **a floating window's picture answers the same keys**: torn
-/// off and holding the keyboard, a zoomed picture pans one step at `→`, and `0` and `1` land where
-/// the window's own double click lands.
+/// off, pinned and given the keyboard by a click as a hand gives it, a zoomed picture pans one step
+/// at `→`, and `0` and `1` land where the window's own double click lands.
 ///
 /// MUTATION: drop the pan arm from `Runtime::preview_browse_key` — the float's `→` pans nothing.
 #[test]
@@ -3088,24 +3086,42 @@ fn a_floating_windows_picture_pans_and_stops_on_the_same_keys() {
         .pop_out_preview(leaf.seat)
         .expect("the picture is torn off");
     folio.draw();
-    let win = folio
+    let id = folio
         .window
         .float
-        .live_windows_mut()
+        .live_windows()
         .next()
-        .expect("a window holds the picture");
-    win.focused = true;
-    let float = PreviewSurface::Float(win.id());
+        .expect("a window holds the picture")
+        .id();
+    let float = PreviewSurface::Float(id);
+    assert!(
+        folio.window.float.is_pinned(id),
+        "the fixture's own precondition: the torn-off window is pinned"
+    );
+    // Whatever the tear-off left, the keyboard starts elsewhere, so the click below is what
+    // hands it over.
+    folio.window.float.blur();
     folio.draw();
-    assert_eq!(
+    assert_ne!(
         folio.runtime().preview_keyboard_surface(),
         Some(float),
-        "the fixture's own precondition: the window holds the keyboard"
+        "the fixture's own precondition: the window does not hold the keyboard yet"
     );
     let body = picture_body(&mut folio, float);
     let centre = PhysicalPosition::new(
         f64::from((body[0] + body[2]) / 2.0),
         f64::from((body[1] + body[3]) / 2.0),
+    );
+    // A click near the body's corner, far past the double click's slop from the centre, so it
+    // is not half of the pair below.
+    click(
+        &mut folio,
+        PhysicalPosition::new(f64::from(body[0] + 24.0), f64::from(body[1] + 24.0)),
+    );
+    assert_eq!(
+        folio.runtime().preview_keyboard_surface(),
+        Some(float),
+        "the fixture's own precondition: the click gave the window the keyboard"
     );
 
     click(&mut folio, centre);
@@ -3116,16 +3132,16 @@ fn a_floating_windows_picture_pans_and_stops_on_the_same_keys() {
         crate::ImageZoom::scaled(1.0),
         "the fixture's own precondition: the window's double click is 100 %"
     );
-    assert!(digit(&mut folio, "0", KeyCode::Digit0));
+    digit(&mut folio, "0", KeyCode::Digit0);
     assert!(zoom_of(&mut folio, float).is_fit(), "`0` is Fit");
-    assert!(digit(&mut folio, "1", KeyCode::Digit1));
+    digit(&mut folio, "1", KeyCode::Digit1);
     assert_eq!(
         zoom_of(&mut folio, float),
         clicked,
         "`1` is the double click's 100 %"
     );
 
-    assert!(arrow(&mut folio, NamedKey::ArrowRight, KeyCode::ArrowRight));
+    arrow(&mut folio, NamedKey::ArrowRight, KeyCode::ArrowRight);
     let pan = zoom_of(&mut folio, float).pan;
     assert!(
         close_to(pan[0], -(body[2] - body[0]) / 8.0) && close_to(pan[1], 0.0),
@@ -3134,8 +3150,8 @@ fn a_floating_windows_picture_pans_and_stops_on_the_same_keys() {
 }
 
 /// CONTROL (T-PICTURE-KEYS-PAN-AND-ZOOM) — **a digit or an arrow typed while the shell holds the
-/// keyboard is the shell's**: the preview beside it does not take it and its picture does not
-/// move.
+/// keyboard is the shell's**: through the whole ladder, the picture in the preview beside it does
+/// not move.
 #[test]
 fn a_digit_typed_into_the_shell_never_reaches_the_picture_beside_it() {
     let (mut folio, surface) =
@@ -3150,15 +3166,8 @@ fn a_digit_typed_into_the_shell_never_reaches_the_picture_beside_it() {
         None,
         "the fixture's own precondition: the shell holds the keyboard"
     );
-    assert!(
-        !digit(&mut folio, "0", KeyCode::Digit0),
-        "`0` is the shell's"
-    );
-    assert!(!arrow(
-        &mut folio,
-        NamedKey::ArrowRight,
-        KeyCode::ArrowRight
-    ));
+    digit(&mut folio, "0", KeyCode::Digit0);
+    arrow(&mut folio, NamedKey::ArrowRight, KeyCode::ArrowRight);
     assert_eq!(
         zoom_of(&mut folio, surface),
         held,
