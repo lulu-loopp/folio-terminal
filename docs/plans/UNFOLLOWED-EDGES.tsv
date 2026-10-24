@@ -6934,13 +6934,14 @@ crates/bt-app/src/webhost.rs	bt-app crate::webhost::refusal_sentence	Ambiguous	t
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::refusal_sentence	Ambiguous	to_owned	2	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::tell_all_seat_its_color_scheme	Ambiguous	get_or_insert	1	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	and_then	1	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	is_empty	1	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	eq_ignore_ascii_case	1	2026-10-24: T-PDF-CONTENT-TYPE; `str::eq_ignore_ascii_case` on the trimmed media-type essence (a `&str`), on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	is_empty	2	2026-10-24: T-PDF-CONTENT-TYPE; `str::is_empty` on the media-type essence (an empty type is no type) and on the file's stem, on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	is_some_and	2	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	next	1	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	next	2	2026-10-24: T-PDF-CONTENT-TYPE; `Iterator::next` on `str::split(';')` (the media type before its parameters) and on `str::rsplit('/')` (the address's last segment), on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	rsplit	1	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	rsplit_once	1	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	to_str	1	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	unwrap_or	2	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	unwrap_or	3	2026-10-24: T-PDF-CONTENT-TYPE; `Option::unwrap_or` after `Iterator::next` on `str::split`/`str::rsplit` and after `str::find` (the query and fragment cut), on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Dynamic	pdf	1	2026-10-22: T-PDF-TEXT-RENDERING; a local closure (the extension test) called by name inside web_document, whose body is walked with it and calls no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_engine_folder	Ambiguous	is_empty	1	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_engine_folder	Ambiguous	join	4	
@@ -10124,6 +10125,8 @@ crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_ev
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	CreateWebResourceResponse	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	DocumentTitle	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	DownloadOperation	1	
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	GetHeader	1	2026-10-24: T-PDF-CONTENT-TYPE; a WebView2 getter on the response's own arguments (the request's address, the status, the Content-Type header), read inside the callback, which reaches no door
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	Headers	1	2026-10-24: T-PDF-CONTENT-TYPE; a WebView2 getter on the response's own arguments (the request's address, the status, the Content-Type header), read inside the callback, which reaches no door
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	HttpStatusCode	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	IsDocumentPlayingAudio	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	IsSuccess	1	
@@ -10134,15 +10137,17 @@ crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_ev
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	ProcessDescription	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	ProcessFailedKind	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	Reason	1	
-crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	Request	1	
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	Request	2	2026-10-24: T-PDF-CONTENT-TYPE; a WebView2 getter on the response's own arguments (the request's address, the status, the Content-Type header), read inside the callback, which reaches no door
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	Response	1	2026-10-24: T-PDF-CONTENT-TYPE; a WebView2 getter on the response's own arguments (the request's address, the status, the Content-Type header), read inside the callback, which reaches no door
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	ResultFilePath	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	SetCancel	5	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	SetHandled	3	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	SetResponse	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	SetState	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	Source	2	
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	StatusCode	1	2026-10-24: T-PDF-CONTENT-TYPE; a WebView2 getter on the response's own arguments (the request's address, the status, the Content-Type header), read inside the callback, which reaches no door
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	SystemCursorId	1	
-crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	Uri	5	
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	Uri	6	2026-10-24: T-PDF-CONTENT-TYPE; a WebView2 getter on the response's own arguments (the request's address, the status, the Content-Type header), read inside the callback, which reaches no door
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	VirtualKey	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	WebErrorStatus	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	add_AcceleratorKeyPressed	1	
@@ -10163,16 +10168,17 @@ crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_ev
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	add_SourceChanged	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	add_WebResourceRequested	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	and_then	4	
-crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	as_deref	1	
-crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	borrow_mut	3	
-crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	cast	11	
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	as_deref	2	2026-10-24: T-PDF-CONTENT-TYPE; a standard-library method (str, Option, RefCell, Result, windows::core::Interface) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	borrow_mut	4	2026-10-24: T-PDF-CONTENT-TYPE; a standard-library method (str, Option, RefCell, Result, windows::core::Interface) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	cast	12	2026-10-24: T-PDF-CONTENT-TYPE; a standard-library method (str, Option, RefCell, Result, windows::core::Interface) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	contains	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	expect	2	
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	is_err	1	2026-10-24: T-PDF-CONTENT-TYPE; a standard-library method (str, Option, RefCell, Result, windows::core::Interface) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	map	1	
-crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	map_err	27	
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	map_err	29	2026-10-24: T-PDF-CONTENT-TYPE; a standard-library method (str, Option, RefCell, Result, windows::core::Interface) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	ok	4	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	ok_or_else	1	
-crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	push	19	
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	push	20	2026-10-24: T-PDF-CONTENT-TYPE; the host's own event queue (Shared::push) or a Vec, on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Ambiguous	unwrap_or_default	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::attach_events	Dynamic	(value)	3	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::WebHost::capture_preview	Ambiguous	CapturePreview	1	
@@ -10326,6 +10332,9 @@ crates/bt-platform/src/webview.rs	bt-platform crate::webview::read_stream	Ambigu
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::read_stream	Ambiguous	ok	6	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::read_stream	Ambiguous	truncate	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::read_string	Dynamic	getter	1	
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::same_resource	Ambiguous	unwrap_or	1	2026-10-24: T-PDF-CONTENT-TYPE; `Option::unwrap_or` after `str::find('#')` (the fragment cut), on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::same_resource	Dynamic	cut	2	2026-10-24: T-PDF-CONTENT-TYPE; a local closure that cuts an address at its fragment, which reaches no door
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::serves_the_navigation	Ambiguous	contains	1	2026-10-24: T-PDF-CONTENT-TYPE; `Range::contains` on the redirect status range `300..400` (a `Range<i32>`), on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::spare_parent	Ambiguous	map_err	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::spare_parent	Ambiguous	saturating_sub	2	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::warm_web_environment	Ambiguous	borrow_mut	1	

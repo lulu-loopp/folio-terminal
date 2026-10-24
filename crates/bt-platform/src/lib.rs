@@ -7719,13 +7719,24 @@ mod probe_child_tests {
         if std::env::var(HELPER_MODE).as_deref() != Ok("compare") {
             return;
         }
-        let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/tb-tests")
-            .join("probe twin \u{4e2d}\u{6587}");
-        std::fs::create_dir_all(&directory).expect("the twin's working directory");
-        let by_std = described_by_std(twin(&directory));
+        // The test's own folder (T-TEST-ORDER-STRAYS): two runs of the helper at once shared
+        // one fixed name. Removed when the helper lets go of it, on a red as on a green.
+        struct Folder(std::path::PathBuf);
+        impl Drop for Folder {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let folder = Folder(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tb-tests")
+                .join(bt_testpath::unique_name("probe twin \u{4e2d}\u{6587}")),
+        );
+        let directory = &folder.0;
+        std::fs::create_dir_all(directory).expect("the twin's working directory");
+        let by_std = described_by_std(twin(directory));
         let by_probe = Described::read(
-            &spawn_probe(&mut twin(&directory), HELPER_STDIO)
+            &spawn_probe(&mut twin(directory), HELPER_STDIO)
                 .expect("the probe's twin")
                 .wait_with_output()
                 .expect("collect the probe's twin")
@@ -9369,9 +9380,9 @@ pub use webview::{
     RehostOutcome, RehostSide, RehostStep, SpareParent, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord,
     WebColorScheme, WebDpiOwnership, WebEvent, WebGuards, WebHost, WebInstallReport, WebKey,
     WebMouseEvent, WebNavigationVerdict, WebRequestVerdict, WebSetting, WebSettingRule,
-    forget_web_environment, install_rollback, rehost_compensation, spare_parent,
-    warm_web_environment, web_controller_visibility, web_environment_epoch, web_mouse_buttons,
-    webview2_runtime_version,
+    forget_web_environment, install_rollback, rehost_compensation, same_resource,
+    serves_the_navigation, spare_parent, warm_web_environment, web_controller_visibility,
+    web_environment_epoch, web_mouse_buttons, webview2_runtime_version,
 };
 
 #[cfg(windows)]

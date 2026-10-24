@@ -12,7 +12,7 @@ use syn::spanned::Spanned;
 
 use super::decls::{Answer, Tables, trait_self};
 use super::names::Named;
-use super::{CallSite, Edge, ItemId, Node, Target, Unresolved, ValueId, Via};
+use super::{CallSite, Edge, Enclosing, Handed, ItemId, Node, Target, Unresolved, ValueId, Via};
 use crate::census::types::{Receiver, Std, Ty, Written, option_of, std_named};
 use crate::declarations::cfg_predicates;
 use crate::index::{ConditionalVariant, DeclarationPath, ItemKind, Span};
@@ -48,7 +48,8 @@ pub(crate) struct Walker<'t, 'i> {
     module: String,
     written: Written,
     scopes: Vec<Scope>,
-    closures: Vec<Span>,
+    /// The closure literals open around the site being walked, outermost first.
+    closures: Vec<Enclosing>,
     macros: Vec<String>,
     /// Inside a statement or a match arm the arms rule out.
     dead: usize,
@@ -107,6 +108,7 @@ impl<'t, 'i> Walker<'t, 'i> {
                         span: record.whole(),
                         name: record.name().to_owned(),
                         closure: None,
+                        closures: Vec::new(),
                         macro_arg: None,
                     },
                     to: Target::Unresolved(Unresolved::Unparsed {
@@ -217,6 +219,7 @@ impl<'t, 'i> Walker<'t, 'i> {
                     span: record.whole(),
                     name: record.name().to_owned(),
                     closure: None,
+                    closures: Vec::new(),
                     macro_arg: None,
                 },
                 to: Target::Unresolved(Unresolved::Unparsed {
@@ -287,7 +290,8 @@ impl<'t, 'i> Walker<'t, 'i> {
             site: CallSite {
                 span,
                 name: name.to_owned(),
-                closure: self.closures.last().copied(),
+                closure: self.closures.last().map(|open| open.closure),
+                closures: self.closures.clone(),
                 macro_arg: self.macros.last().cloned(),
             },
             to: target,
@@ -710,7 +714,7 @@ impl<'t, 'i> Walker<'t, 'i> {
                 self.expr(&cast.expr);
                 self.written.ty(&cast.ty)
             }
-            syn::Expr::Closure(closure) => self.closure(closure, &[]),
+            syn::Expr::Closure(closure) => self.closure(closure, &[], None),
             syn::Expr::Const(block) => self.block(&block.block),
             syn::Expr::Continue(_) | syn::Expr::Infer(_) => Ty::unknown("no value"),
             syn::Expr::Field(field) => {
@@ -1046,7 +1050,7 @@ impl<'t, 'i> Walker<'t, 'i> {
         }
     }
 
-    fn closure(&mut self, closure: &syn::ExprClosure, params: &[Ty]) -> Ty {
+    fn closure(&mut self, closure: &syn::ExprClosure, params: &[Ty], handed: Option<Handed>) -> Ty {
         let span = self.span_of(closure.span());
         self.scopes.push(Scope::default());
         let mut types = Vec::new();
@@ -1058,7 +1062,10 @@ impl<'t, 'i> Walker<'t, 'i> {
             types.push(ty.clone());
             self.bind(input, ty, Mode::Move);
         }
-        self.closures.push(span);
+        self.closures.push(Enclosing {
+            closure: span,
+            handed,
+        });
         self.expr(&closure.body);
         self.closures.pop();
         self.scopes.pop();
@@ -1067,6 +1074,7 @@ impl<'t, 'i> Walker<'t, 'i> {
 
     fn arguments<'a>(
         &mut self,
+        call: Span,
         args: impl Iterator<Item = &'a syn::Expr>,
         answer: &Answer,
     ) -> Vec<Ty> {
@@ -1074,7 +1082,7 @@ impl<'t, 'i> Walker<'t, 'i> {
             .map(|(at, arg)| match arg {
                 syn::Expr::Closure(closure) => {
                     let params = answer.closure_at(at);
-                    self.closure(closure, &params)
+                    self.closure(closure, &params, Some(Handed { call, argument: at }))
                 }
                 other => self.expr(other),
             })
@@ -1087,7 +1095,7 @@ impl<'t, 'i> Walker<'t, 'i> {
         let span = self.span_of(call.method.span());
         let answer = self.tables.method(&receiver, &name, &self.written);
         self.answer(span, &name, &answer);
-        self.arguments(call.args.iter(), &answer);
+        self.arguments(span, call.args.iter(), &answer);
         answer.ret()
     }
 
@@ -1103,7 +1111,7 @@ impl<'t, 'i> Walker<'t, 'i> {
                 let (span, name) = path_site(self, path);
                 let answer = self.path_call(path);
                 self.answer(span, &name, &answer);
-                let args = self.arguments(call.args.iter(), &answer);
+                let args = self.arguments(span, call.args.iter(), &answer);
                 if answer
                     .targets
                     .iter()
@@ -1119,7 +1127,7 @@ impl<'t, 'i> Walker<'t, 'i> {
                 let span = self.span_of(closure.span());
                 let args: Vec<Ty> = call.args.iter().map(|arg| self.expr(arg)).collect();
                 self.push(span, "(closure)", Target::Closure(span), Via::Direct);
-                self.closure(closure, &args);
+                self.closure(closure, &args, None);
                 Ty::unknown("what a closure returns")
             }
             other => {

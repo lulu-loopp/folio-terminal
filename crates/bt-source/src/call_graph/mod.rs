@@ -25,7 +25,7 @@
 //! | R5 | Method on a stated first-party trait: `dyn Tr` (bare, `&`, `Box`, `Arc`, `Rc`), `impl Tr`, `T: Tr` (inline or `where`), `self` in a default method, `Tr::m` / `T::m` | Every admitted impl's method; the default only for an impl that does not override it, or when there is none; supertraits, whose impls count only for types implementing the stated trait | [`Target::Item`] set, [`Via::Dispatch`]; no impl and no default: [`Unresolved::Dynamic`] |
 //! | R6 | UFCS `<X as Tr>::m()` | `X` stated: that impl's `m`, else `Tr`'s default; `X` a bound generic: R5; a foreign trait on a first-party `X`: its impl, else foreign. `<X>::m` is R3 | [`Target::Item`] |
 //! | R7 | Type alias `type A = B;` | Followed to `B` through [`crate::AliasRecord`]s, arguments substituted, up to the hop limit | as `B` |
-//! | R8 | Inline closure call `(\|x\| …)(y)`; any closure literal | The closure's body is walked as part of the item it is written in; each edge found inside carries [`CallSite::closure`] | [`Target::Closure`] |
+//! | R8 | Inline closure call `(\|x\| …)(y)`; any closure literal | The closure's body is walked as part of the item it is written in; each edge found inside carries [`CallSite::closure`], and [`CallSite::closures`] names every closure open around it with the call it is an argument of ([`Handed`]: the call's site span and the argument's position), so a closure handed to a call is told from one bound, stored or called in place | [`Target::Closure`] |
 //! | R9 | A path in value position: `spawn(worker)`, `.map(Self::f)` | Data — a `const` or `static` ([`crate::ValueRecord`]), an associated `const`, a unit struct or variant, a binding — is no edge (a `static` is typed by its declaration); anything else is placed as R1/R3 and **every** edge it gives is pushed | any [`Target`], [`Via::Value`] |
 //! | R10 | A `fn` or `impl` written inside a body | Walked as part of the enclosing item | [`Target::Nested`] |
 //! | R11 | A callee outside the packages handed in | Its full path after the first-party `use` items are followed (`std::sync::Mutex::lock`, `std::fs::write`) | [`Target::Foreign`]: a boundary, not a failure |
@@ -203,8 +203,33 @@ pub struct CallSite {
     /// The innermost closure literal the site is written in, if any: code defined here that runs
     /// where the closure is handed.
     pub closure: Option<Span>,
+    /// Every closure literal the site is written in, outermost first (the last is
+    /// [`Self::closure`]), each with the call it is written as an argument of, if any: what a guard
+    /// asks to tell a closure *handed* to a call (a worker body given to a spawn) from one the item
+    /// runs itself.
+    pub closures: Vec<Enclosing>,
     /// The innermost macro whose arguments the site is written in, if any.
     pub macro_arg: Option<String>,
+}
+
+/// **One closure literal a site is written in**, and the call it is handed to.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Enclosing {
+    pub closure: Span,
+    /// The call the closure literal is written as an argument of — its [`CallSite::span`] and the
+    /// argument's position — or `None` for a closure bound, returned, stored or called in place.
+    pub handed: Option<Handed>,
+}
+
+/// **The call a closure literal is an argument of**: the call's site span (the name called, as
+/// its own edges' [`CallSite::span`]) and the argument's position among the arguments written in
+/// the parentheses, from 0. A method call's receiver is written before the dot and is not counted
+/// (`pool.submit(1, f)`: `f` is 1); a path call counts every argument written, so in the same call
+/// spelled `Pool::submit(&pool, 1, f)` the receiver is argument 0 and `f` is 2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Handed {
+    pub call: Span,
+    pub argument: usize,
 }
 
 /// How an edge's target is reached.
@@ -346,6 +371,32 @@ impl<'i> Resolver<'i> {
     #[must_use]
     pub fn index_of(&self, id: ItemId) -> &'i Index {
         self.tables.index(id.package())
+    }
+
+    /// **The type paths the item's written arguments name, every alias followed** (R7): a
+    /// foreign type by its path (`std::sync::Mutex`), a first-party type by
+    /// `package module::Name`, a type alias by what it names, its arguments substituted. A type
+    /// the census does not type (a qualified associated type, `impl Trait`, a raw pointer) names
+    /// no path: a caller reads it as written. `Err`: the item has no signature the resolver read,
+    /// or each type path it could not place, why.
+    ///
+    /// # Errors
+    ///
+    /// The item's signature was not read, or a type path in its arguments names nothing placed.
+    pub fn argument_type_paths(&self, id: ItemId) -> Result<BTreeSet<String>, Vec<String>> {
+        let Some(sig) = self.tables.sigs.get(&id) else {
+            return Err(vec!["no signature was read".to_owned()]);
+        };
+        let mut paths = BTreeSet::new();
+        let mut unread = Vec::new();
+        for param in &sig.params {
+            self.tables.type_paths(param, 0, &mut paths, &mut unread);
+        }
+        if unread.is_empty() {
+            Ok(paths)
+        } else {
+            Err(unread)
+        }
     }
 
     /// Whether the arms admit the item.

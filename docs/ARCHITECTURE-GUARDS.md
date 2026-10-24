@@ -422,6 +422,40 @@ wait from the window path or route it through an admitted worker; update the
 registry through `scripts/dev/generate-window-waits-table.ps1`, never by
 hand-editing the generated architecture region.
 
+The role and phase writers (`enter_window_thread`, `loop_running`, `exiting`,
+`quit_abandoned`, `enter_standalone_main`) are called only where `PINS` places
+them, each after the landmark of its owner's body that its pin names. A landmark
+is placed by the call it names (T-LANDMARK-GUARD-BY-CALL, 2026-10-24): the call
+of a path or a name that resolves to the landmark's item, however it is spelled
+(`cli::parse(…)`, `launch_wire::hand_over(…)`, an alias such as `wire::hand_over(…)`
+after `use crate::launch_wire as wire;` or a glob that brings `wire` in, a
+re-export, a glob re-export), followed through the crate's `use` declarations,
+explicit and glob; a method call on the receiver written in `LANDMARKS`
+(`builder.build()`, `event_loop.run_app(…)`, `self.session_store.close()`); or a
+variant's path (`StartCause::Init`, each declared variant `QuitStep::V`). Never a
+bare identifier: a field, a statement `let` or a parameter of the owner and the
+local it binds, a path that resolves to another item (one of the crate's, or one
+led by a first-party crate, a dependency, `std`/`core`/`alloc` or a primitive
+type), another enum's variant
+and an enum's associated item are not landmarks. Any other position of a
+landmark's name is refused with the name, the shape and the line: a path that
+resolves to nothing (no item of the crate, a first segment that is none of those
+crates) or to the landmark and another item at once
+(globs), a pattern, a parameter (a closure's too), an import, a value, a method
+call on another receiver, a path naming a method, a landmark's path not called
+directly, a path with generic arguments or a leading `::`, `Enum::*` /
+`Enum::{…}`, a rename, a macro or a nested `fn` of the name, and the landmark
+itself written inside a nested `fn`'s body or the arguments of a macro other than
+the standard ones that run them in place (`IN_PLACE_MACROS`: `matches!`,
+`assert!`, `format!`, …) (`window_waits_tests::landmarks_in`; the planted cases are the `a_*landmark*`
+tests, and `a_refused_landmark_fails_the_pinned_writers_guard` runs the whole
+guard). Not followed: a landmark called inside a helper the owner calls, and a
+name brought in by what the guard's `use` reader does not record (a `use` a macro
+writes, an `extern crate … as`); either, for a landmark no pin names
+(`hand_over`), can leave a moved writer reading the earlier landmark its pin
+names. When refused, rename what is not a landmark, or
+widen the grammar in its own change with a planted case.
+
 The registry's `# completions` section (S-1, 2026-10-11) is the side-effects
 contract's ledger, one row per request protocol, held by the
 `every_*completions*` tests (among them `every_worker_door_body_is_reached_from_a_completions_door`) and `every_conforming_request_door_holds_no_wait_of_its_own`
@@ -466,6 +500,84 @@ When red, give the new answer, lane, thread or registry row its ledger row (or
 correct the row the code moved past); a status names the D-row or registry row
 that repairs it and only ever becomes `conforms` — never mark a row conforming
 to make a check pass.
+
+## Request doors return at once (C1)
+
+The rule: a request door asked on the window thread performs no synchronous external effect and
+waits on no lock, thread, process, file or owner door before its request leaves the thread
+(C1 of `docs/plans/design/side-effects-contract-2026-10-11.md`, revision (b)2;
+T-REQUEST-DOOR-GUARD, S-2b). Each door is a row of `crates/bt-app/src/window_waits.tsv`'s
+`# request-doors` (`door`, `asked on`, `boundary`, `handed`, `mailbox`), one per `# completions`
+door whose thread is not the window's or `main`'s (`window_waits_tests::every_request_door_has_its_line`
+holds the equality both ways). A `window` row is walked over `bt_source::call_graph` from the door to
+its boundary: the calls its request leaves the thread by, each of which the walk must meet. A
+call that takes the worker's body names that argument, `key@N` (`lane::Executor::start_worker@2`,
+counted as `Handed::argument` counts: a method's receiver not counted, a UFCS path call's every
+written argument counted); a closure literal written there is the worker's and is not walked
+(`CallSite::closures`, `Handed`; an `@N` on a foreign `std::`/`core::` callee is refused, its
+signature unread), while every other closure written at the call (one the boundary
+item runs on the caller's thread: `admit_between`'s `between`, a refusal's voice) and the call's own
+body are walked as the door's. A first-party boundary item is walked, not a stop: a stop would hide
+the enqueue's own locks. `—` is a door that hands nothing over (it arms a wait); its walk is judged
+all the same, with no boundary to meet. A row asked `main (before the loop)` or in a `door
+process` is not walked, and those rows are a closed list (`window_waits_tests::NOT_WALKED`): a
+walked door that reaches one is a `NotWalked` violation, since the reach contradicts the row, and
+moving a row out of the walk is a diff that list names. The walk fails on an effect (a
+`# vocabulary` path; under `std::fs`, `std::net`, `std::process`, `std::os::{windows, unix}::fs` or
+the `std::io` read and write handles; a `Path`'s or `PathBuf`'s question to the disk (`is_file`,
+`exists`, `metadata`, `read_dir`, `canonicalize`, …); `std::env::set_current_dir`; a function of the `windows`
+crate's `Storage::FileSystem`, `System::Registry` and `System::IO` modules, or the shell's
+`ShellExecute(Ex)W` and `SHCreateStreamOnFileEx`), an `# entrances` item, an owner door's or a
+worker's body, a blocking primitive outside the row's `mailbox` items (the `std::sync` and
+`std::thread` waits, joins, parks, scopes and `Once`, and the Win32 `WaitFor*Object*`,
+`SignalObjectAndWait` and `SleepEx`), another window door that does not conform (`Inherits`, by its
+status), a boundary never met, and every unresolved edge but an allowed macro (never the print,
+write or `dbg!` family) and a derive's or `#[from]`'s callee; `Cutoff` and `Unparsed` are never
+listable. Every `mailbox` item is a dated line of a closed list (`window_waits_tests::MAILBOX`),
+which says what the item holds its lock across: naming a new item in a cell needs its line, and a
+line no cell names is refused. Four hold their lock across a thread start (`lane::Queue::ask`,
+`lane::Coalescing::ask`, `GitMutationLane::ask_through`, `persist::SessionWriter::start`); the last
+two hold a lock no worker takes, which is what makes them safe. A `mailbox` item that takes the lock
+as an argument (`lane::lock(&Mutex<T>)`, read from its signature, as written or through a type
+alias, which the resolver follows: `Resolver::argument_type_paths`) locks whatever its caller hands
+it: it is exempt only where another `mailbox` item of the row calls it, so the cell names the methods
+that lock through it. Every first-party impl of a
+foreign trait is walked once as a root of its own, one `Implicit` row per impl *method*, its
+verdict held by what stands behind it (an effect, a blocking primitive or a door-level finding
+behind it takes only `violation`). A `const`'s and a plain `static`'s initializer are not walked
+(the compiler evaluates them; a function one names runs where it is called, a `Dynamic` edge); a
+`LazyLock`'s or `OnceLock`'s is. A key in any cell names one item per `cfg` arm (one per
+platform's module); two items on one arm (a bare name two modules declare) are refused, and so is
+a first-party `# vocabulary` or `# entrances` path naming nothing.
+
+**The sites, by site.** `docs/plans/REQUEST-DOOR-SITES.tsv` lists every failure keyed by file,
+item, kind and name (no line), with `sites`, a verdict and a reason: `std` or `follows <key>; …`
+(read: nothing behind it, or the named items, which the walk then follows), `unreviewed` (not read
+yet, counted), or `violation` (a C1 breach; an effect, a blocking primitive and every door-level
+kind take no other verdict, the reason naming its finding; an unread row's reason is
+`2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))`). After the review's fold: 7 991 keys,
+28 589 sites; 53 `std`, 7 546 `unreviewed`, 392 `violation`; 29 of the 57 walked doors breach C1.
+The violations are six findings, each a ticket: (a) the window thread's `diagnostics::note` (row
+20) inherited by 16 request doors and the gesture doors; (b) the trace sink and stderr written on
+the calling thread; (c) the seven gesture doors that answer and draw inline (`Runtime::hand_off`,
+the clipboard doors, pane reap and close), measured over each gesture's whole road; (d) two lazy
+initializers that touch the file system on first use (`profiles::registry`, `persist::storage_dir`);
+(e) the implicit impls behind which is an effect, a blocking primitive or a door, unproven to stay
+off a request door's road; (f) `explorer_menu`'s request and probe asking the disk for the package
+file on the window thread.
+
+Where and what to do: `crates/bt-source/tests/request_doors.rs` —
+`every_request_door_returns_at_once` (one index of the tree, about 20 s; prints `REQUEST_DOOR` per
+door) holds the list equal to the tree, naming the doors that meet a key it does not list; the
+fixture tests (`tests/fixtures/call_graph/request_doors/`) hold each class, each red under a named
+mutation. `scripts/ci/check-request-door-sites.ps1` (its planted cases in
+`check-request-door-sites-tests.ps1`) holds the list to the merge base's: a key added or grown,
+a verdict moved to `unreviewed` or `violation` or away from `violation`, or a `follows` row
+re-pointed, takes a new reason `YYYY-MM-DD: <why>`; it prints both debts' counts. `gates-can-fail` plants a file write and a stored `Box<dyn Fn()>` call
+in `HandoffLane::submit` and requires each refused by file, site and door. When red: keep the
+door from reaching it, or correct the row's cells (a hand-over call the boundary misses walks a
+worker's closure as the door's), and regenerate with `scripts/generate-request-door-sites.ps1`,
+reading each new site and dating its reason.
 
 ## Lane contract and the completion seam
 
@@ -643,6 +755,48 @@ own: it is `LOAD_ANSWER_PATIENCE` (`bt-platform`'s `video_load`), derived from
 the product's `LOAD_BUDGET` and `IDLE_POLL_INTERVAL` so that it cannot end
 before the engine's own refusal lands, and handed to the engine's wait door —
 so it is not a row (T-VIDEO-ENGINE-NO-DURATION).
+
+2026-10-24 (T-TIMING-BOUND-STRAYS): the scan reads three shapes, not one. Besides
+a std real wait or `elapsed()` in the test's own body, it lists **clock
+arithmetic in the test's own body** (a comparison, a subtraction or a
+`duration_since` whose two sides hold different `Instant::now()` /
+`SystemTime::now()` readings, followed through the test's bindings; one reading
+and its offsets is not one) and **a budget measured in a test-only helper** (a
+test-only callable of the test's own target, reached through resolved call-graph
+edges, that keeps an `elapsed()` or a two-reading difference rather than only
+comparing or formatting it). Unresolved edges whose candidates measure, macro
+arguments that do not parse and name a clock, and bodies that do not parse are
+refused by file and line. The list's `# widened <date> by <ticket> (+<n> rows)`
+line admits exactly the rows a widening finds; `check-timing-bound.ps1` refuses
+any other growth. Its product half is
+`no_product_function_reads_again_the_clock_it_was_handed`: a product function
+handed `now: Instant` judges on that instant, and a second reading needs a
+listed reason (a real wait in between). Not read: a reading handed back by a
+call (`while Instant::now() < deadline_in(..)`), and an instant handed under any
+name but `now` (`deadline: Instant` rightly meets a fresh reading); a widening
+line counts only in a change that also changes the scan.
+
+## Test order and shared fixtures
+
+The rule: a test's verdict does not hang on a file another build step made, on the
+process's directory or environment, or on a fixture folder another test or an
+earlier run shares (T-TEST-ORDER-STRAYS, 2026-10-24).
+
+Where and what to do: `crates/bt-source/tests/test_order.rs` is the gate and
+`docs/plans/TEST-ORDER-EXCEPTIONS.tsv` its register. It refuses, in test code, a
+`CARGO_BIN_EXE_` literal outside an integration test's folder, in a body, a `const` initializer or product code alike (A1), a path derived from the
+test executable's folder with no `bt_testpath` name (A2), a
+`set_current_dir`/`set_var`/`remove_var` call (C1), and a create under the
+temporary folder or the build directory with no `bt_testpath` name (D1), and a
+module-level `use` that brings `env::temp_dir` in, globs `env` or renames `env`, or a
+`use` inside a test body that does one of those (D0: a bare `temp_dir()` call could then
+not be told from a test's own helper). A row listed twice is refused. When red,
+name the path with `bt_testpath::unique_name`/`temp_path`, locate a bin through
+`CARGO_BIN_EXE_<name>` in an integration test (cargo builds it for that target),
+or, when the fixed name is the subject, add a row saying why. A process-global that
+two tests touch is not in its grammar: review owns it. An `#[ignore]`d test that
+must run alone or serially says so on its line of `scripts/ci/ignored-tests.txt`
+(`run=alone`, `run=serial`).
 
 ## Raw-effect and thread-door exceptions
 

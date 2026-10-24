@@ -2124,6 +2124,13 @@ impl Heartbeat {
             .unwrap_or(u64::MAX)
     }
 
+    /// The instant this heartbeat's clock reads zero at, for a test that measures from it
+    /// rather than from a reading of its own (T-TIMING-BOUND-STRAYS).
+    #[cfg(test)]
+    pub(crate) fn origin(&self) -> Instant {
+        self.origin
+    }
+
     /// **The window thread came round.** Called once per `about_to_wait`.
     ///
     /// The turn counter is stored last and with `Release`, and read first and

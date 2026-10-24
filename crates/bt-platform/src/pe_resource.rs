@@ -159,8 +159,8 @@ mod tests {
     /// RED (U-14) — **a file that is not an executable, and an executable
     /// without the resource, are refused, and nothing is run to find out.**
     ///
-    /// The door's positive arm is held by `bt-app`'s
-    /// `update_archive::tests::the_manifest_is_read_out_of_a_built_folio_exe_without_running_it`,
+    /// The door's positive arm is held by `bt-app`'s integration test
+    /// `built_folio_manifest::the_manifest_is_read_out_of_a_built_folio_exe_without_running_it`,
     /// on the real `folio.exe` this workspace builds. Here the two refusals a
     /// hostile or damaged archive can produce are held on real files: text
     /// named `folio.exe` is not an image the loader maps, and this test's own

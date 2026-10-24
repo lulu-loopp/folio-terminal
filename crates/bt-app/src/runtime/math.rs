@@ -1317,7 +1317,7 @@ impl<B: Backend> Runtime<'_, B> {
             window,
             &mut self.window.tabs[active],
             &senders,
-            Instant::now(),
+            now,
             &mut self.app.math_worker_running,
             &mut self.app.math_worker_notice_pending,
         );

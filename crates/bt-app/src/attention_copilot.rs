@@ -1422,10 +1422,15 @@ mod tests {
 
     #[test]
     fn attention_two_live_copies_require_takeover_and_preserve_bytes() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/tb-tests")
-            .join(concat!("copilot-", "two-copies"));
-        std::fs::create_dir_all(&root).unwrap();
+        // The test's own folders, removed when it lets go of them (T-TEST-ORDER-STRAYS): the
+        // root, and the marks folder `apply_to` names after it.
+        let root = crate::test_support::ScratchFolder::create(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tb-tests")
+                .join(bt_testpath::unique_name(concat!("copilot-", "two-copies"))),
+        );
+        let marks = crate::test_support::attention_marks_folder("copilot", &root);
+        let root = root.also_removing(marks);
         // **Two folders, one file name.** An operand is Folio's only if its file name is one
         // Folio installs itself under, which is how two real copies differ: same program, two
         // places. The odd characters this fixture exists for move to the folder.
@@ -1459,9 +1464,7 @@ mod tests {
             path,
             install.into(),
             exe,
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/tb-test-marks/copilot")
-                .join(path.parent().unwrap().file_name().unwrap()),
+            &crate::test_support::attention_marks_folder("copilot", path),
         )
     }
 
@@ -1973,7 +1976,16 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(path).expect("read")).expect("json")
     }
 
-    fn scratch(name: &str) -> PathBuf {
-        bt_testpath::temp_path(&format!("folio-copilot-{name}"))
+    /// A scratch folder of this test's own under the build directory, removed with its marks
+    /// folder when the test lets go (T-TEST-ORDER-STRAYS: it was a `%TEMP%` path nothing
+    /// removed, and the marks folder was named after the fixed `hooks` folder inside it).
+    fn scratch(name: &str) -> crate::test_support::ScratchFolder {
+        let dir = crate::test_support::ScratchFolder::create(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tb-tests")
+                .join(bt_testpath::unique_name(&format!("folio-copilot-{name}"))),
+        );
+        let marks = crate::test_support::attention_marks_folder("copilot", &dir);
+        dir.also_removing(marks)
     }
 }
