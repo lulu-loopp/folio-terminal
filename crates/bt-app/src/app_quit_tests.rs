@@ -71,12 +71,19 @@ fn the_cancelled_quits_card_names_the_files_and_carries_one_choice() {
 /// A headless application whose quit has come to its session write: the documents and the
 /// recovery phases walked with nothing to do (the recovery folder is this test's own), the
 /// picture taken, and a session document recorded and not yet written — into a store at `store`
-/// whose save budget is the suite's patience, with the documents phase begun at `begun`.
+/// whose save budget is the suite's patience — with the documents phase begun at the instant
+/// handed back beside it, read once the window is built (T-TIMING-BOUND-STRAYS: building a
+/// headless window is the slow part of this fixture, and the quit's one budget is counted from
+/// this instant, so a fixture that read its clock before the build spent the budget on it).
+/// The store's folder is the third thing handed back.
 fn a_quit_at_its_write(
     tag: &str,
     store: impl FnOnce(&std::path::Path) -> std::path::PathBuf,
-    begun: Instant,
-) -> crate::headless::HeadlessApplication {
+) -> (
+    crate::headless::HeadlessApplication,
+    Instant,
+    std::path::PathBuf,
+) {
     let folio = crate::headless::HeadlessFolio::with_tabs(
         tag,
         vec![crate::test_support::ringing_tab(1, 1)],
@@ -90,10 +97,9 @@ fn a_quit_at_its_write(
         persist::SessionStore::at(place.join("session.json"), place.join("session.lock"));
     app.session_store.set_save_budget(crate::lane::PATIENCE);
     app.pane_retirement_deadline = crate::lane::PATIENCE;
-    app.session_store.record(
-        crate::test_support::shells_document(&root, 1),
-        Instant::now(),
-    );
+    let begun = Instant::now();
+    app.session_store
+        .record(crate::test_support::shells_document(&root, 1), begun);
     let mut quit = quit::Quit::begin(Vec::new());
     let mut none: [&mut dyn crate::document_request::QuitDocument; 0] = [];
     quit.documents_turn(&mut none, begun);
@@ -104,7 +110,7 @@ fn a_quit_at_its_write(
         "the fixture's own precondition: the quit is at its write"
     );
     app.quit = Some(quit);
-    application
+    (application, begun, place)
 }
 
 /// Whether the window carries the card that says the session was not written.
@@ -126,21 +132,20 @@ fn says_not_written(application: &mut crate::headless::HeadlessApplication) -> b
 /// MUTATION: swallow the store's answer in `FolioApp::settle_quit`'s `Write` arm
 /// (`let landed: Result<(), persist::SaveRefusal> = Ok(());` over the flush's own) — the refused
 /// write goes on to hide the windows over a session file it never wrote; read every refusal as
-/// one that may proceed — the same.
+/// one that may proceed — the same; read the clock again in the `Write` arm (`let now =
+/// Instant::now();`) instead of judging the write on the turn's own instant — the turn past the
+/// budget writes the session anyway (T-TIMING-BOUND-STRAYS).
 #[test]
 fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
     crate::test_support::on_the_window_thread();
-    let now = Instant::now();
 
     // Refused: the store's folder is not there to be written into.
-    let mut refused = a_quit_at_its_write(
-        "headless-quit-refused",
-        |root| root.join("这里没有 not-here"),
-        now,
-    );
+    let (mut refused, begun, _) = a_quit_at_its_write("headless-quit-refused", |root| {
+        root.join("这里没有 not-here")
+    });
     refused
         .folio
-        .settle_quit(&refused.event_loop, Instant::now())
+        .settle_quit(&refused.event_loop, begun)
         .expect("the turn is answered");
     assert!(
         says_not_written(&mut refused),
@@ -153,10 +158,11 @@ fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
     );
 
     // Landed: the store's folder is there.
-    let mut landed = a_quit_at_its_write("headless-quit-landed", |root| root.to_path_buf(), now);
+    let (mut landed, begun, _) =
+        a_quit_at_its_write("headless-quit-landed", |root| root.to_path_buf());
     landed
         .folio
-        .settle_quit(&landed.event_loop, Instant::now())
+        .settle_quit(&landed.event_loop, begun)
         .expect("the turn is answered");
     assert!(
         !says_not_written(&mut landed),
@@ -174,15 +180,21 @@ fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
         "and the quit goes on its way out"
     );
 
-    // Out of budget: the documents phase began longer ago than the quit's one budget.
-    let long_ago = now
-        .checked_sub(persist::SESSION_SAVE_BUDGET + std::time::Duration::from_secs(1))
-        .expect("the process is older than the budget");
-    let mut spent = a_quit_at_its_write("headless-quit-spent", |root| root.to_path_buf(), long_ago);
+    // Out of budget: the turn comes longer after the documents phase began than the quit's one
+    // budget — on the turn's own clock, which is the one the write is judged on.
+    let (mut spent, begun, folder) =
+        a_quit_at_its_write("headless-quit-spent", |root| root.to_path_buf());
     spent
         .folio
-        .settle_quit(&spent.event_loop, Instant::now())
+        .settle_quit(
+            &spent.event_loop,
+            begun + persist::SESSION_SAVE_BUDGET + std::time::Duration::from_secs(1),
+        )
         .expect("the turn is answered");
+    assert!(
+        !folder.join("session.json").exists(),
+        "a quit with none of its budget left hands nothing over"
+    );
     assert!(
         !says_not_written(&mut spent),
         "a save that ran out of its budget is not read as one that was refused"
