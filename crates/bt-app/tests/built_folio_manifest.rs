@@ -17,6 +17,11 @@
 //! left there. The archive half of the old test — this build's own members through
 //! `update_archive::expand` — stays beside the reader, fed the embedded manifest's text
 //! (`update_archive::tests::this_builds_own_members_expand_whole_under_its_embedded_manifest`).
+//! The product's own door, `update_archive::EmbeddedManifest` (crate-private to the bin, so not
+//! reachable from here), is held on a real executable beside it: the bin's unit-test executable
+//! is linked with the same resource (`rustc-link-arg-bins` reaches every unit of the bin target),
+//! and `update_archive::tests::the_product_door_reads_the_manifest_out_of_this_test_executable`
+//! reads it through the door under the product cap.
 //!
 //! Off Windows no build carries a manifest and the door has no loader.
 //!

@@ -1086,3 +1086,25 @@ fn the_product_cap_admits_this_builds_manifest() {
         super::MANIFEST_MAX_BYTES
     );
 }
+
+/// RED (T-TEST-ORDER-STRAYS review N7) — **the product's own door, `EmbeddedManifest`, reads the
+/// manifest out of the executable running this test.** `build.rs` links the resource with
+/// `rustc-link-arg-bins`, which cargo passes to every unit of the bin target, its test harness
+/// included, so this executable carries the block whatever else the run built: the door is held
+/// on a real executable here, and on the built `folio.exe` by `tests/built_folio_manifest.rs`.
+///
+/// MUTATION: read under another resource name in `EmbeddedManifest` and this is red on Windows.
+#[test]
+fn the_product_door_reads_the_manifest_out_of_this_test_executable() {
+    let Some(path) = option_env!("FOLIO_RELEASE_MANIFEST") else {
+        return;
+    };
+    let embedded = std::fs::read_to_string(path).unwrap();
+    let this = std::env::current_exe().unwrap();
+    assert_eq!(
+        EmbeddedManifest
+            .manifest_text(&this)
+            .unwrap_or_else(|error| panic!("{}: {error}", this.display())),
+        embedded
+    );
+}
