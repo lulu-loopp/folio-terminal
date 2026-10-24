@@ -64,6 +64,20 @@
 #
 # A test that belongs in CI does not go on this list; it stops being ignored.
 #
+# **Run conditions** (2026-10-24, T-TEST-ORDER-STRAYS). A name may carry, after a tab, the way
+# it has to be run; the gate checks the spelling, a person reads it:
+#
+#   * `run=serial` -- with `--ignored --test-threads=1`, never beside another test. Every probe
+#     that drives a real ConPTY session or measures wall-clock time on this machine: two of them
+#     at once load the machine each one is measuring.
+#   * `run=alone` -- in a process of its own: `--exact <name> --ignored`. The test changes a
+#     process-wide fact the other tests of its binary read. `cjk_settings_layout_timing_probe`
+#     publishes a real font list and switches the process language.
+#
+# The two WebView2 probes carry neither: since T-TEST-ORDER-STRAYS each counts its own
+# controller's hide on its own thread and attributes windows by its own browser process, and
+# the two run green side by side.
+#
 # **The last two are the exception, and they are on this list under protest.**
 # `bt-render`'s two atlas soaks are RED gates for a user's 2026-08-29 report, not
 # probes — they belong in CI and cannot be there, because CI's only adapter is
@@ -83,36 +97,36 @@
 # two come off this list first.
 
 minus_probe
-hang_watch::tests::measure_cpu_sampler_and_station_cost
+hang_watch::tests::measure_cpu_sampler_and_station_cost	run=serial
 highlight::tests::regenerate_the_powershell_packdump
 marks::tests::the_symbol_sheet_is_written_for_a_person_to_look_at
 paths::tests::a_scrollback_relative_reference_keeps_the_directory_it_was_printed_under
-preview_typing::md_typing_path_benchmark
-preview_typing::md_typing_path_eager_benchmark
-preview::tests::md_loading_worker_benchmark
-settings::tests::cjk_settings_layout_timing_probe
+preview_typing::md_typing_path_benchmark	run=serial
+preview_typing::md_typing_path_eager_benchmark	run=serial
+preview::tests::md_loading_worker_benchmark	run=serial
+settings::tests::cjk_settings_layout_timing_probe	run=alone
 shell_integration::tests::shell_integration_symlink_profile_and_linked_parent_are_refused
 tests::a_long_chinese_session_never_runs_the_atlas_out_of_room
-tests::a_recall_carved_into_the_prompt_is_the_child_s_own_console_buffer
+tests::a_recall_carved_into_the_prompt_is_the_child_s_own_console_buffer	run=serial
 tests::a_session_long_enough_to_wear_the_packer_out_gets_its_text_back
-tests::empty_prompt_committed_resize_chain_reanchor_pair_probe
-tests::empty_prompt_resize_invoke_prompt_pair_probe
-tests::exact_right_edge_widen_reanchor_pair_probe
-tests::invoke_prompt_key_translation_probe
-tests::invoke_prompt_requires_open_osc133_input_region_probe
-tests::mistimed_cpr_narrow_resize_probe
-tests::narrow_resize_conpty_reflow_probe
-tests::nonempty_buffer_committed_resize_chain_reanchor_pair_probe
-tests::nonempty_cjk_buffer_committed_resize_chain_reanchor_probe
-tests::nonempty_resize_shorter_history_recall_render_memory_pair_probe
-tests::profile_shape_narrow_resize_probe
-tests::psreadline_2_no_op_handler_consumes_invoke_prompt_chord_probe
-tests::psreadline_resize_chord_history_transparency_pair_probe
-tests::reanchor_cursor_cpr_resize_storm_pair_probe
-tests::resize_burst_composed_frame_probe
-tests::system_conpty_resize_cursor_outcome_matches_the_sidecar_contract
-tests::typed_input_gate_blank_window_probe
-tests::typed_input_resize_deferral_probe
+tests::empty_prompt_committed_resize_chain_reanchor_pair_probe	run=serial
+tests::empty_prompt_resize_invoke_prompt_pair_probe	run=serial
+tests::exact_right_edge_widen_reanchor_pair_probe	run=serial
+tests::invoke_prompt_key_translation_probe	run=serial
+tests::invoke_prompt_requires_open_osc133_input_region_probe	run=serial
+tests::mistimed_cpr_narrow_resize_probe	run=serial
+tests::narrow_resize_conpty_reflow_probe	run=serial
+tests::nonempty_buffer_committed_resize_chain_reanchor_pair_probe	run=serial
+tests::nonempty_cjk_buffer_committed_resize_chain_reanchor_probe	run=serial
+tests::nonempty_resize_shorter_history_recall_render_memory_pair_probe	run=serial
+tests::profile_shape_narrow_resize_probe	run=serial
+tests::psreadline_2_no_op_handler_consumes_invoke_prompt_chord_probe	run=serial
+tests::psreadline_resize_chord_history_transparency_pair_probe	run=serial
+tests::reanchor_cursor_cpr_resize_storm_pair_probe	run=serial
+tests::resize_burst_composed_frame_probe	run=serial
+tests::system_conpty_resize_cursor_outcome_matches_the_sidecar_contract	run=serial
+tests::typed_input_gate_blank_window_probe	run=serial
+tests::typed_input_resize_deferral_probe	run=serial
 webview::webview2_runtime_probe::a_local_page_reaches_only_its_own_folder
 webview::webview2_runtime_probe::a_parked_spare_is_hidden_and_warms_off_every_monitor
 
