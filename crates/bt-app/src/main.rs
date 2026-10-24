@@ -287,7 +287,7 @@ use bt_persist::WindowStateV1;
 // again so that its callers, and its test modules through `use super::*`, read them as before.
 use runtime::platform_pointer_of;
 #[cfg(test)]
-use runtime::a_capture_still_holds_its_pointer;
+use runtime::{a_capture_still_holds_its_pointer, resolved_theme_change};
 use bt_platform::admission::{WaitToken, doors};
 use bt_pty::{
     OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PSREADLINE_PASTE_INPUT, PtyError, PtySession,
@@ -76010,13 +76010,6 @@ fn resolve_theme_mode(mode: ThemeModeV1, os_theme: Option<OsTheme>) -> Theme {
         },
         ThemeModeV1::Light => Theme::Light,
         ThemeModeV1::Dark => Theme::Dark,
-    }
-}
-
-fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> {
-    match mode {
-        ThemeModeV1::System => Some(resolve_theme_mode(mode, Some(os_theme))),
-        ThemeModeV1::Light | ThemeModeV1::Dark => None,
     }
 }
 

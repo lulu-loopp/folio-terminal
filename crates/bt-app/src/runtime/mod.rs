@@ -40,6 +40,8 @@ pub(crate) use windows::recent_term_leaf_seed;
 // its `use runtime::{…}` lines so that no caller changes.
 #[cfg(test)]
 pub(crate) use pointer::a_capture_still_holds_its_pointer;
+#[cfg(test)]
+pub(crate) use diagnostics::resolved_theme_change;
 pub(crate) use pointer::platform_pointer_of;
 mod terminal;
 mod tooltips;
