@@ -137,7 +137,12 @@ jobs:
     # 38693069271). 10.15 x 1.36 = 13.80, so 14. With a cache restored (in
     # full or by its prefix), over the 9 of the ten green runs on `main`
     # (39032766393 back to 38691455267) that restored one: p50 6.4, max 7.4.
-    timeout-minutes: 14
+    # T-REQUEST-DOOR-GUARD (2026-10-24) adds the request-door canary: two runs
+    # of bt-source's `request_doors` real-tree test, 40 s for both on the
+    # 9950X with the binary built, plus that test binary's own build (its
+    # dependencies are the `measure` step's); taken as 1.2 min cold until runs
+    # measure it. 10.15 + 1.2 = 11.35 x 1.36 = 15.44, so 16.
+    timeout-minutes: 16
     steps:
       # Whole history, for one step: `check-migration-debt.ps1` compares the
       # debt list with `git merge-base HEAD origin/main`, and at the default
@@ -498,6 +503,43 @@ jobs:
         env:
           BT_SOURCE_MEASURE_BUDGETS: "1"
         run: cargo test -p bt-source --locked --test measure -- --nocapture
+
+      # T-REQUEST-DOOR-GUARD (C1, a request door returns at once), over the real tree: bt-source's
+      # `request_doors::every_request_door_returns_at_once` walks each request door of
+      # window_waits.tsv to its boundary and holds what it meets to
+      # docs/plans/REQUEST-DOOR-SITES.tsv. Two plants in the hand-off lane's door
+      # (`HandoffLane::submit`, on `Runtime::hand_off`'s road): a helper that writes a file, and a
+      # stored `Box<dyn Fn()>` called there. Each must be refused by the guard naming the planted
+      # file, the site and the door; the file is put back after each. The test binary is the one
+      # bt-source's other tests build (no bt-app build); each run is one index of the tree.
+      - name: the request-door guard can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-app/src/handoff_lane.rs"
+          $original = [IO.File]::ReadAllText($file)
+          $door = "    ) -> Result<HandoffRequest, Declined> {`n"
+          if (-not $original.Contains($door)) { throw "the hand-off lane's submit is not where the canary plants" }
+          $plants = @(
+            @{ body = "        request_door_probe();`n"; tail = "`nfn request_door_probe() {`n    let _ = std::fs::write(`"request-door-probe`", b`"`");`n}`n"; site = '"Effect", "std::fs::write"' },
+            @{ body = "        let request_door_probe: Box<dyn Fn()> = Box::new(|| {});`n        request_door_probe();`n"; tail = ""; site = '"Dynamic", "request_door_probe"' }
+          )
+          foreach ($plant in $plants) {
+            try {
+              $planted = $original.Replace($door, $door + $plant.body) + $plant.tail
+              [IO.File]::WriteAllText($file, $planted)
+              $output = & cargo test -p bt-source --locked --test request_doors -- --exact every_request_door_returns_at_once 2>&1 | Out-String
+              $code = $LASTEXITCODE
+              if ($code -eq 0) { throw "the request-door guard accepted $($plant.site) planted in $file" }
+              $named = "in the tree, not on the list: (`"$file`""
+              if (-not $output.Contains($named) -or -not $output.Contains($plant.site) -or -not $output.Contains("met walking Runtime::hand_off")) {
+                throw "the request-door guard failed for another reason on $($plant.site):`n$output"
+              }
+              Write-Host "refused as required: $($plant.site) in $file, met walking Runtime::hand_off"
+            } finally {
+              [IO.File]::WriteAllText($file, $original)
+            }
+          }
+          exit 0
 
       # `docs/plans/MIGRATION-DEBT.tsv` is the list of source readers blocked on
       # a missing seam, and its whole value is that it only shrinks. A row added
