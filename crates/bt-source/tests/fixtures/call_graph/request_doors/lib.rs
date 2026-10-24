@@ -338,3 +338,26 @@ pub fn submit_asks_the_disk(lane: &'static Lane, job: u32) {
     std::thread::park();
     submit(lane, job);
 }
+
+/// R2: the worker's lock under an alias of `Mutex`.
+pub type Held = Mutex<u32>;
+
+/// A lock helper whose argument is written through the alias: it locks whatever cell its caller
+/// hands it, as [`lock`] does.
+pub fn lock_cell(cell: &Held) -> std::sync::MutexGuard<'_, u32> {
+    cell.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl Lane {
+    /// The lock the worker holds, taken through the aliased helper.
+    pub fn peek_through_alias(&self) -> u32 {
+        *lock_cell(&self.worker)
+    }
+}
+
+/// R2: the worker's lock taken through the aliased helper by a method no row declares.
+pub fn submit_peeks_through_alias(lane: &'static Lane, job: u32) {
+    let _ = lane.peek_through_alias();
+    submit_through(lane, job);
+}

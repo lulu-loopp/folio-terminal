@@ -429,12 +429,21 @@ watch steward	EarHandle::want	watch-steward	WatchStewardAnswered	a failed start 
 ## a refusal's voice) and the call's own body are walked as the door's. `—` is a door that hands
 ## nothing over (it arms a wait). `handed` names the worker functions the door names as values
 ## (`LocaleCell::new(read_system_locale_declaration, …)`), never called on the road. `mailbox` names
-## the items whose own body may take a lock, each held only for a queue operation, a copy or an
-## update that waits on nothing (a declaration the guard cannot prove: the engine reads no flow); an
-## item that takes the lock as an argument (`lane::lock(&Mutex<T>)`) locks whatever its caller hands
-## it, so it is exempt only where another `mailbox` item of the row calls it, and the cell names the
-## methods that lock through it. `—` is none; a cell of several is `, `-separated. The rows not
-## walked are a closed list (`window_waits_tests::NOT_WALKED`); a walked door that reaches one fails.
+## the items whose own body may take a lock, a declaration the guard cannot prove (the engine reads
+## no flow). Most hold it for a queue operation, a copy or an update that waits on nothing. Four hold
+## it across a thread start: `lane::Queue::ask` and `lane::Coalescing::ask` hold their line or book
+## across their worker's first start (the worker takes it only to take a job, its condvar wait
+## letting it go); `GitMutationLane::ask_through` holds `shares` across a new share's worker start
+## and a refused start's line, and `persist::SessionWriter::start` holds `worker` across the
+## writer's start, each safe only because no worker takes that lock. `StorageLane::admit_between`
+## holds `requests` across its caller's `between` (walked as the door's) and a channel send that
+## does not wait. Each item's reason is a dated line of a closed list
+## (`window_waits_tests::MAILBOX`): naming a new item in a cell needs its line there. An item that
+## takes the lock as an argument, as written or through a type alias (`lane::lock(&Mutex<T>)`),
+## locks whatever its caller hands it, so it is exempt only where another `mailbox` item of the row
+## calls it, and the cell names the methods that lock through it. `—` is none; a cell of several is
+## `, `-separated. The rows not walked are a closed list (`window_waits_tests::NOT_WALKED`); a
+## walked door that reaches one fails.
 ## What the walk meets beyond them is `docs/plans/REQUEST-DOOR-SITES.tsv`.
 
 # request-doors

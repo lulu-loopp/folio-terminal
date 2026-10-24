@@ -1068,6 +1068,69 @@ impl<'i> Tables<'i> {
         targets
     }
 
+    /// **Every type path `ty` writes, placed, each alias followed to what it names** (R7, its
+    /// arguments substituted): a foreign type by its path (`std::sync::Mutex`), a first-party one
+    /// by `package module::Name`; a trait names no type, so only its arguments are read, and a
+    /// type the census does not type names none. A path that cannot be placed, or an alias chain
+    /// past the hop limit, is said in `unread`.
+    pub(crate) fn type_paths(
+        &self,
+        ty: &Ty,
+        hops: usize,
+        paths: &mut BTreeSet<String>,
+        unread: &mut Vec<String>,
+    ) {
+        match ty {
+            Ty::Named(named) => {
+                for arg in &named.args {
+                    self.type_paths(arg, hops, paths, unread);
+                }
+                match self.place(named) {
+                    Placed::Foreign(path) => {
+                        paths.insert(path.join("::"));
+                    }
+                    Placed::Types(keys) => {
+                        for (at, module, name) in keys {
+                            paths.insert(format!("{} {module}::{name}", self.package(at)));
+                        }
+                    }
+                    Placed::Alias(key) => {
+                        if hops == DEREF_STEPS {
+                            unread.push(format!(
+                                "the alias `{}` chains past the hop limit",
+                                named.name
+                            ));
+                            return;
+                        }
+                        for target in self.alias_targets(&key, &named.args) {
+                            self.type_paths(&target, hops + 1, paths, unread);
+                        }
+                    }
+                    Placed::Trait => {}
+                    Placed::Unplaced(why) | Placed::Cut(why) => unread.push(why),
+                }
+            }
+            Ty::Traits(traits) => {
+                for named in traits {
+                    for arg in &named.args {
+                        self.type_paths(arg, hops, paths, unread);
+                    }
+                }
+            }
+            Ty::Ref { inner, .. } | Ty::Slice(inner) | Ty::Iter(inner) | Ty::Entry(inner) => {
+                self.type_paths(inner, hops, paths, unread);
+            }
+            Ty::Tuple(items) | Ty::Fn(items) => {
+                for item in items {
+                    self.type_paths(item, hops, paths, unread);
+                }
+            }
+            // A type the census does not type (a qualified associated type, `impl Trait`, a raw
+            // pointer) names no path here: the caller reads it as written.
+            Ty::Param(_) | Ty::Assoc { .. } | Ty::Unknown(_) => {}
+        }
+    }
+
     /// The standard type `ty` is, when it is one of the fixed list's.
     pub(crate) fn std_of(&self, ty: &Ty) -> Option<(Std, Vec<Ty>)> {
         let Ty::Named(named) = ty else {

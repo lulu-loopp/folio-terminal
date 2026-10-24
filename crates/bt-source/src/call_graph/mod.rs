@@ -373,6 +373,32 @@ impl<'i> Resolver<'i> {
         self.tables.index(id.package())
     }
 
+    /// **The type paths the item's written arguments name, every alias followed** (R7): a
+    /// foreign type by its path (`std::sync::Mutex`), a first-party type by
+    /// `package module::Name`, a type alias by what it names, its arguments substituted. A type
+    /// the census does not type (a qualified associated type, `impl Trait`, a raw pointer) names
+    /// no path: a caller reads it as written. `Err`: the item has no signature the resolver read,
+    /// or each type path it could not place, why.
+    ///
+    /// # Errors
+    ///
+    /// The item's signature was not read, or a type path in its arguments names nothing placed.
+    pub fn argument_type_paths(&self, id: ItemId) -> Result<BTreeSet<String>, Vec<String>> {
+        let Some(sig) = self.tables.sigs.get(&id) else {
+            return Err(vec!["no signature was read".to_owned()]);
+        };
+        let mut paths = BTreeSet::new();
+        let mut unread = Vec::new();
+        for param in &sig.params {
+            self.tables.type_paths(param, 0, &mut paths, &mut unread);
+        }
+        if unread.is_empty() {
+            Ok(paths)
+        } else {
+            Err(unread)
+        }
+    }
+
     /// Whether the arms admit the item.
     #[must_use]
     pub fn admitted(&self, id: ItemId) -> bool {

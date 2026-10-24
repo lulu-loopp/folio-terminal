@@ -33,6 +33,7 @@ submit_between	window	Lane::admit_with	—	Lane::admit_with
 submit_with_voice	window	spawn_with@1	—	—
 submit_through	window	std::sync::Condvar::notify_one, spawn@0	—	lock, Lane::mailbox_through
 submit_peeks_through	window	std::sync::Condvar::notify_one, spawn@0	—	lock, Lane::mailbox_through
+submit_peeks_through_alias	window	std::sync::Condvar::notify_one, spawn@0	—	lock, lock_cell, Lane::mailbox_through
 submit_prewarms	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
 submit_noting	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
 submit_pokes	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox

@@ -928,6 +928,7 @@ fn fixture_reviewed() -> BTreeMap<SiteKey, (Verdict, String)> {
             "runs the closure its caller writes, which is walked as the caller's",
         ),
         ("lock", "Ambiguous", "unwrap_or_else", "a LockResult's"),
+        ("lock_cell", "Ambiguous", "unwrap_or_else", "a LockResult's"),
         (
             "Lane::peek",
             "Ambiguous",
@@ -1156,6 +1157,21 @@ fn a_lock_helper_is_exempt_only_through_a_declared_method() {
     );
 }
 
+/// RED (re-check of the review, R2) — **a helper whose argument is a lock written through a type
+/// alias is a lock helper**: `lock_cell(cell: &Held)` under `type Held = Mutex<u32>`, declared in
+/// the row's mailbox, locks the worker's lock for `Lane::peek_through_alias`, which no row
+/// declares, and fails it.
+///
+/// MUTATION: drop the placed paths from [`takes_a_lock`] (the written syntax only) — `lock_cell`
+/// is no lock helper, and the worker's lock passes.
+#[test]
+fn a_lock_helper_written_through_an_alias_is_one() {
+    assert_eq!(
+        judge_fixture("submit_peeks_through_alias"),
+        ["Blocking bt-rd crate::lock_cell"]
+    );
+}
+
 /// RED — **(ii) an entrance and (i) a first-party vocabulary entry** reached each fail the door.
 ///
 /// MUTATION: drop the `Entrance` check in `Judge::walk` — both pass.
@@ -1263,11 +1279,12 @@ fn the_effect_and_blocking_lists_cover_win32_paths_and_parks() {
 /// one name of two modules on one arm is refused, a key qualified by its module names one item,
 /// and a key naming one item per platform's module is admitted; a first-party `# vocabulary` path
 /// that names nothing is refused, as an `# entrances` one is; a boundary's worker argument past
-/// the item's arguments is refused.
+/// the item's arguments is refused, and so is any `@N` on a foreign callee, whose signature the
+/// guard does not read (re-check of the review, R3).
 ///
 /// MUTATIONS: drop the one-arm check in [`key_items`] — `twin` is admitted; drop the empty
 /// vocabulary refusal in [`read_registry`] — the planted path passes; drop the argument count —
-/// `spawn@5` passes.
+/// `spawn@5` passes; drop the foreign `@N` refusal — `notify_one@0` passes.
 #[test]
 fn the_registry_refuses_a_key_on_two_modules_and_a_path_naming_nothing() {
     let twin = fixture_key("twin");
@@ -1300,6 +1317,18 @@ fn the_registry_refuses_a_key_on_two_modules_and_a_path_naming_nothing() {
             .iter()
             .any(|refusal| refusal.contains("`spawn_with@5` names argument 5")),
         "{refusals:?}"
+    );
+    let foreign = registry.replacen(
+        "submit\twindow\tstd::sync::Condvar::notify_one, spawn@0",
+        "submit\twindow\tstd::sync::Condvar::notify_one@0, spawn@0",
+        1,
+    );
+    assert_eq!(
+        fixture_refusals(&foreign),
+        [
+            "`submit`: `std::sync::Condvar::notify_one@0` names an argument of a foreign callee, \
+             whose signature the guard does not read"
+        ]
     );
 }
 
@@ -1511,9 +1540,16 @@ fn argument_count(signature: &syn::Signature) -> usize {
 }
 
 /// Whether the item takes the lock it takes as an argument (`lane::lock<T>(&Mutex<T>)`): an
-/// argument's type, or a generic bound, names `Mutex` or `RwLock`. Such a helper locks whatever its
-/// caller hands it.
-fn takes_a_lock(signature: &syn::Signature) -> bool {
+/// argument's type, or a generic bound, names `Mutex` or `RwLock`, as written or through a type
+/// alias (`paths`, the argument types' paths with every alias followed: `fn lock(cell: &Cell)`
+/// under `type Cell = Mutex<State>` takes a lock; the re-check of the review, R2). A type the
+/// census does not type (a qualified associated type, `impl Trait`) is read as written only. Such
+/// a helper locks whatever its caller hands it.
+fn takes_a_lock(signature: &syn::Signature, paths: &BTreeSet<String>) -> bool {
+    let placed = paths.iter().any(|path| {
+        let name = path.rsplit("::").next().unwrap_or(path);
+        name == "Mutex" || name == "RwLock"
+    });
     struct Names(bool);
     impl<'ast> syn::visit::Visit<'ast> for Names {
         fn visit_path_segment(&mut self, segment: &'ast syn::PathSegment) {
@@ -1528,7 +1564,7 @@ fn takes_a_lock(signature: &syn::Signature) -> bool {
         }
     }
     syn::visit::Visit::visit_generics(&mut names, &signature.generics);
-    names.0
+    placed || names.0
 }
 
 /// A first-party path of `# vocabulary` or `# entrances` (`bt_pty::PtySession::resize`): every
@@ -1750,6 +1786,17 @@ fn read_registry(
                 None => (spelled, None),
             };
             let callee = if written.starts_with("std::") || written.starts_with("core::") {
+                // A foreign callee's arguments are not read (the registry names no signature of
+                // it), so its `@N` could be counted against nothing: refused (the re-check of
+                // the review, R3).
+                if worker.is_some() {
+                    refused.push(format!(
+                        "`{}`: `{spelled}` names an argument of a foreign callee, whose signature \
+                         the guard does not read",
+                        cells[0]
+                    ));
+                    continue;
+                }
                 Callee::Foreign(written.to_owned())
             } else {
                 let items = resolve(written, &mut refused);
@@ -1787,16 +1834,22 @@ fn read_registry(
             .collect();
         let mut lock_helpers = BTreeSet::new();
         for id in &mailbox {
-            match signature(resolver, *id) {
-                Some(signature) => {
-                    if takes_a_lock(&signature) {
+            match (signature(resolver, *id), resolver.argument_type_paths(*id)) {
+                (Some(signature), Ok(paths)) => {
+                    if takes_a_lock(&signature, &paths) {
                         lock_helpers.insert(*id);
                     }
                 }
-                None => refused.push(format!(
+                (None, _) => refused.push(format!(
                     "`{}`: the mailbox item `{}` has no signature the guard reads",
                     cells[0],
                     resolver.key(*id)
+                )),
+                (Some(_), Err(unread)) => refused.push(format!(
+                    "`{}`: the mailbox item `{}`'s argument types are not all placed: {}",
+                    cells[0],
+                    resolver.key(*id),
+                    unread.join("; ")
                 )),
             }
         }
