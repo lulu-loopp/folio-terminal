@@ -24,7 +24,10 @@
 //!      image still mounted under `H/<txn>` (detached on a worker of its own,
 //!      which the start does not wait for — U-27), then `H\<txn>`, then the
 //!      journal, each removed durably through `bt_platform::install_txn`, all
-//!      under the transaction lock; continue;
+//!      under the transaction lock — a removal of `H\<txn>` refused while its
+//!      rescue build still runs from it (the start a Windows rescue opens)
+//!      is finished on a worker once the rescue has ended (T-UNKEPT-CARD-ONCE);
+//!      continue;
 //!    - `destructive`, or the trial of another transaction, or no trial at all
 //!      → the rescue build is started detached with
 //!      `--update-recover [<home>] --then-launch <this command line>` (the
@@ -76,6 +79,9 @@
 //! journal notes such a version raises *The update was undone.* over the
 //! rollback's own card. The start that retires a commit whose journal notes
 //! the trial's version raises E4's card that its held changes were not kept.
+//! Either card is raised only by the retirement that removes the journal, or
+//! hands its removal to a worker: one that keeps the journal for the next
+//! start raises none, since the next start raises it (T-UNKEPT-CARD-ONCE).
 //!
 //! **The rescue copy's start** (T-RESCUE-COPY-CARD): a Windows lock holder
 //! whose install holds neither whole set starts `H\<txn>\rescue\folio.exe`
@@ -109,6 +115,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use bt_platform::file_reads::{self, Lane};
+use bt_platform::install_flip;
 use bt_platform::install_txn::{self, Held, Hold};
 
 use crate::cli;
@@ -414,7 +421,11 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
                 file: request.update_held_file.as_deref(),
             }),
     };
-    match run_by(&start, starter, &mut Machine) {
+    let mut machine = Machine {
+        home: &home,
+        log: None,
+    };
+    match run_by(&start, starter, &mut machine) {
         Verdict::Exit(code) => bt_platform::leave_process(code),
         Verdict::Continue {
             admission,
@@ -655,11 +666,15 @@ pub(crate) fn run_by(start: &Start<'_>, starter: Starter, world: &mut impl World
             stands_in: false,
         },
         action @ (StartAction::Retire | StartAction::Discard) => {
-            // Read by the start that retires the transaction, before the
-            // retirement removes its folder: once, never by a start that
-            // leaves it to a lock holder.
-            let failed = match action {
-                StartAction::Retire => match undone(&seen, world) {
+            let retired = retire(action, &header, start.home, lock, world);
+            // Raised by the start whose retirement removes the journal, or
+            // hands its removal to a worker, from the journal read before it
+            // (`seen`): once, never by a start that leaves it to a lock
+            // holder, and never by one that keeps the journal for the next
+            // start, which would raise it again (T-UNKEPT-CARD-ONCE).
+            let failed = match (action, retired) {
+                (_, Retirement::Kept) | (StartAction::Discard, _) => failed,
+                _ => match undone(&seen, world) {
                     Some(undone) => Some(match failed {
                         Some(Failure::JournalHeld { error, file, .. }) => Failure::JournalHeld {
                             error,
@@ -670,9 +685,7 @@ pub(crate) fn run_by(start: &Start<'_>, starter: Starter, world: &mut impl World
                     }),
                     None => failed.or_else(|| changes_not_kept(&seen, world)),
                 },
-                _ => failed,
             };
-            retire(action, &header, start.home, lock, world);
             Verdict::Continue {
                 admission,
                 trial: None,
@@ -828,63 +841,167 @@ fn image(program: &Path) -> Option<Digest> {
 /// transaction lock — go to a worker ([`World::on_a_worker`]), because a
 /// detach waits on `hdiutil` and this is the window thread. The start goes on
 /// without waiting for it.
+///
+/// **A removal of `H\<txn>` refused while its rescue build still runs goes to
+/// a worker too** (T-UNKEPT-CARD-ONCE): the start a Windows rescue opens runs
+/// this pass while the rescue, an executable inside `H\<txn>`, waits for a
+/// Folio to take the data directory's claim — which that start takes only
+/// after this pass — and Windows refuses to remove a running image. The
+/// worker holds the lock, waits for the processes running from the rescue
+/// build to end (at most [`RESCUE_ENDS_WITHIN`], through its wait door), then
+/// removes the folder and then the journal; one whose wait lapses keeps the
+/// transaction for the next start, with its line.
+///
+/// Answers whether the journal was removed ([`Retirement::Done`]), its
+/// removal handed to a worker ([`Retirement::OnAWorker`]), or the transaction
+/// kept for the next start ([`Retirement::Kept`]).
 fn retire(
     action: StartAction,
     header: &Header,
     home: &Home,
     mut lock: Option<Held>,
     world: &mut impl World,
-) {
+) -> Retirement {
     let steps = action.steps();
+    let txn = header.txn;
     let kept = |failure: String| {
-        format!(
-            "BT_UPDATE_START transaction {} is kept for the next start: {failure}",
-            header.txn
-        )
+        format!("BT_UPDATE_START transaction {txn} is kept for the next start: {failure}")
     };
     if steps.remove_entrance
-        && let Err(failure) = world.retire_entrance(header.txn)
+        && let Err(failure) = world.retire_entrance(txn)
     {
         world.say(&kept(failure));
-        return;
+        return Retirement::Kept;
     }
-    let folder = home.transaction(header.txn);
+    let folder = home.transaction(txn);
     for (at, step) in steps.clearing.iter().enumerate() {
         let done = match step {
             Clearing::DetachMount => match world.mounts_under(&folder) {
                 Ok(points) if points.is_empty() => Ok(()),
                 Ok(_) => {
                     let rest = steps.clearing[at..].to_vec();
-                    let (txn, home, held) = (header.txn, home.clone(), lock.take());
+                    let (home, held) = (home.clone(), lock.take());
                     let job: OffThread = Box::new(move |worker| {
                         // The lock goes with the steps it guards, and is
                         // let go when they are done.
                         let _held = held;
-                        for step in rest {
-                            perform(worker, step, txn, &home).map_err(|failure| {
-                                format!(
-                                    "BT_UPDATE_START transaction {txn} is kept for the next start: {failure}"
-                                )
-                            })?;
-                        }
-                        Ok(())
+                        the_rest(worker, rest, txn, &home)
                     });
                     match world.on_a_worker(job) {
-                        Ok(()) => return,
+                        Ok(()) => return Retirement::OnAWorker,
                         Err(error) => Err(format!("no worker to detach its image on: {error}")),
                     }
                 }
                 Err(error) => Err(error),
             },
-            Clearing::Delete(removal) => {
-                delete(*removal, header.txn, home).map_err(|failure| failure.to_string())
-            }
+            Clearing::Delete(removal) => match delete(*removal, txn, home) {
+                Ok(()) => Ok(()),
+                Err(refused) if *removal == Removal::TxnDir => {
+                    let refused = refused.to_string();
+                    let rescue = home.rescue_program(&header.rescue);
+                    match install_flip::running_from(&rescue) {
+                        Ok(running) if !running.is_empty() => {
+                            let rest = steps.clearing[at..].to_vec();
+                            let (home, held, said) = (home.clone(), lock.take(), refused.clone());
+                            let job: OffThread = Box::new(move |worker| {
+                                let _held = held;
+                                if !ended_within(worker, &running, RESCUE_ENDS_WITHIN) {
+                                    return Err(format!(
+                                        "BT_UPDATE_START transaction {txn} is kept for the next start: its rescue build {} still runs {} s after {said}",
+                                        rescue.display(),
+                                        RESCUE_ENDS_WITHIN.as_secs()
+                                    ));
+                                }
+                                the_rest(worker, rest, txn, &home)
+                            });
+                            match world.on_a_worker(job) {
+                                Ok(()) => return Retirement::OnAWorker,
+                                Err(error) => Err(format!(
+                                    "{refused}, and no worker to wait for its rescue build on: {error}"
+                                )),
+                            }
+                        }
+                        Ok(_) => Err(refused),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(refused),
+                        Err(error) => Err(format!(
+                            "{refused}, and what runs from its rescue build {} cannot be listed: {error}",
+                            rescue.display()
+                        )),
+                    }
+                }
+                Err(refused) => Err(refused.to_string()),
+            },
         };
         if let Err(failure) = done {
             world.say(&kept(failure));
-            return;
+            return Retirement::Kept;
         }
     }
+    Retirement::Done
+}
+
+/// **What became of a retirement** ([`retire`]): the card of the journal's
+/// note belongs to the retirement that removes the journal, or hands its
+/// removal to a worker — never to one that keeps it for the next start, which
+/// raises the card again (T-UNKEPT-CARD-ONCE).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Retirement {
+    /// Every step is done: the journal is gone.
+    Done,
+    /// The steps from the first that cannot be done on this thread went to a
+    /// worker, with the lock; the start does not wait for it.
+    OnAWorker,
+    /// A step failed, and the transaction is kept for the next start; its
+    /// line is said.
+    Kept,
+}
+
+/// **How long a retirement's worker waits for its rescue build to end**
+/// ([`retire`]): the rescue's wait for a Folio to take the data directory's
+/// claim (`update_apply::ACKNOWLEDGED_WITHIN`), which began before the start
+/// it opened ran this pass, and ten seconds for its last line and its exit.
+const RESCUE_ENDS_WITHIN: std::time::Duration =
+    crate::update_apply::ACKNOWLEDGED_WITHIN.saturating_add(std::time::Duration::from_secs(10));
+
+/// How often that worker looks again.
+const RESCUE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// **Whether every process in `running` ended within `within`**, asked every
+/// [`RESCUE_POLL`] through `worker`'s wait door.
+fn ended_within(
+    worker: &bt_platform::admission::WorkerCtx,
+    running: &[install_flip::Running],
+    within: std::time::Duration,
+) -> bool {
+    let began = std::time::Instant::now();
+    loop {
+        if !running
+            .iter()
+            .any(|process| install_flip::still_running(*process))
+        {
+            return true;
+        }
+        if began.elapsed() >= within {
+            return false;
+        }
+        bt_platform::wait::sleep_within(worker, RESCUE_POLL);
+    }
+}
+
+/// The steps of a retirement left to a worker, in order, stopping at the
+/// first that fails, as its one line.
+fn the_rest(
+    worker: &bt_platform::admission::WorkerCtx,
+    rest: Vec<Clearing>,
+    txn: TxnId,
+    home: &Home,
+) -> Result<(), String> {
+    for step in rest {
+        perform(worker, step, txn, home).map_err(|failure| {
+            format!("BT_UPDATE_START transaction {txn} is kept for the next start: {failure}")
+        })?;
+    }
+    Ok(())
 }
 
 /// One of a retirement's steps on a worker: the detach of every image under
@@ -1081,12 +1198,55 @@ fn is_the_new_bundle(seen: &Sight) -> bool {
     this.is_some() && crate::update::Version::parse(&new.version) == this
 }
 
-/// This process's own world.
-struct Machine;
+/// This process's own world: its home, for the log its lines are also
+/// appended to ([`Machine::log`]).
+struct Machine<'a> {
+    home: &'a Home,
+    log: Option<PathBuf>,
+}
 
-impl World for Machine {
+impl Machine<'_> {
+    /// **The log the pass's lines are also appended to**, found once, when
+    /// the first is said: the rescue build's (`update_recover::log_file`) —
+    /// the data directory's `diagnostics.log`, else `recover.log` beside the
+    /// journal. A start opened from Explorer or by a rescue has no console,
+    /// and its lines were said nowhere (T-UNKEPT-CARD-ONCE).
+    fn log(&mut self) -> PathBuf {
+        let home = self.home;
+        self.log
+            .get_or_insert_with(|| {
+                crate::update_recover::log_file(home, &crate::persist::storage_dir_unmoved()).0
+            })
+            .clone()
+    }
+}
+
+/// **One line on standard error, and appended to `log`** — unless standard
+/// error is `log` at the moment of writing (`update_recover::appended_to`):
+/// a worker's line is written up to [`RESCUE_ENDS_WITHIN`] after the pass,
+/// by when the resident run may have pointed standard error at that very
+/// `diagnostics.log`, and asking at the hand-off would write it twice.
+fn say_to(log: &Path, line: &str) {
+    bt_platform::write_std_error(format!("{line}\n").as_bytes());
+    if let Some(log) = crate::update_recover::appended_to(log) {
+        let _ = crate::diagnostics::append_note(log, line);
+    }
+}
+
+/// **The mount points under `folder`** ([`World::mounts_under`]): macOS's
+/// mount table; none elsewhere.
+fn mounts_under(folder: &Path) -> Result<Vec<PathBuf>, String> {
+    // Only macOS mounts an update's image (U-17); elsewhere there is none.
+    if bt_platform::host_platform() != bt_platform::HostPlatform::MacOs {
+        return Ok(Vec::new());
+    }
+    bt_platform::macos_update::mounts_under(folder).map_err(|refusal| refusal.to_string())
+}
+
+impl World for Machine<'_> {
     fn say(&mut self, line: &str) {
-        bt_platform::write_std_error(format!("{line}\n").as_bytes());
+        let log = self.log();
+        say_to(&log, line);
     }
 
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
@@ -1117,20 +1277,17 @@ impl World for Machine {
     }
 
     fn mounts_under(&mut self, folder: &Path) -> Result<Vec<PathBuf>, String> {
-        // Only macOS mounts an update's image (U-17); elsewhere there is none.
-        if bt_platform::host_platform() != bt_platform::HostPlatform::MacOs {
-            return Ok(Vec::new());
-        }
-        bt_platform::macos_update::mounts_under(folder).map_err(|refusal| refusal.to_string())
+        mounts_under(folder)
     }
 
     fn on_a_worker(&mut self, job: OffThread) -> io::Result<()> {
+        let log = self.log();
         bt_platform::spawn_at_priority(
             "bt-update-sweep",
             bt_platform::ThreadPriority::BelowNormal,
             move |worker| {
                 if let Err(line) = job(worker) {
-                    bt_platform::write_std_error(format!("{line}\n").as_bytes());
+                    say_to(&log, &line);
                 }
             },
         )
@@ -1217,11 +1374,14 @@ mod tests {
             /// What each job handed to a worker answered; the test's world
             /// waits for it, where the product's does not.
             workers: Vec<Result<(), String>>,
+            /// Done once a job is on its worker, before the world waits for
+            /// it: what the start goes on to do meanwhile (the rescue's end).
+            meanwhile: Option<Box<dyn FnOnce() + Send>>,
         }
 
         impl World for Recorded {
             fn mounts_under(&mut self, folder: &Path) -> Result<Vec<PathBuf>, String> {
-                Machine.mounts_under(folder)
+                mounts_under(folder)
             }
 
             fn on_a_worker(&mut self, job: OffThread) -> io::Result<()> {
@@ -1230,6 +1390,9 @@ mod tests {
                     bt_platform::ThreadPriority::BelowNormal,
                     job,
                 )?;
+                if let Some(meanwhile) = self.meanwhile.take() {
+                    meanwhile();
+                }
                 self.workers.push(
                     worker
                         .join()
@@ -1672,6 +1835,57 @@ mod tests {
                 assert!(!scene.home.journal().exists(), "{tag}: then the journal");
                 assert!(world.said.is_empty(), "{tag}: {:?}", world.said);
             }
+        }
+
+        /// GUARD (T-UNKEPT-CARD-ONCE, F1; macOS) — **a retirement whose image
+        /// is detached on a worker raises the card of the journal's note on
+        /// the start that hands it over, and the next start finds nothing**:
+        /// the worker removes the journal. Not RED on b7204455, which already
+        /// raised this road's card; it holds F1 to raising it for
+        /// `Retirement::OnAWorker`.
+        ///
+        /// MUTATION: in `run_by`'s Retire arm, raise the card only for
+        /// `Retirement::Done` (no card on the detach road).
+        #[test]
+        fn a_retirement_handed_to_the_detach_worker_raises_its_card_once() {
+            use crate::update_prepare_macos::tests::fixture;
+            use crate::update_txn::{Outcome, Phase};
+            if !fixture::on_macos() {
+                return;
+            }
+            let scratch = fixture::Scratch::new("startup-detach-card");
+            let image = fixture::blank_image(&scratch.root.join("left.dmg"));
+            let Some(scene) = Scene::new("detach-card") else {
+                return;
+            };
+            write_noted(
+                &scene,
+                Phase::Retired {
+                    outcome: Outcome::Committed,
+                    untried: false,
+                },
+                Some("0.4.9"),
+            );
+            let folder = scene.home.transaction(txn());
+            let _detach = fixture::Detach(scene.root.clone());
+            fixture::attach(&image, &folder.join("mnt"));
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(
+                failed,
+                Some(Failure::ChangesNotKept {
+                    version: "0.4.9".to_owned(),
+                }),
+                "{:?}",
+                world.said
+            );
+            assert_eq!(world.workers, vec![Ok(())], "{:?}", world.said);
+            assert!(
+                !scene.home.journal().exists(),
+                "the worker removed the journal"
+            );
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut Recorded::default()));
+            assert_eq!(failed, None, "once");
         }
 
         /// RED (U-12) — **a terminal journal whose lock somebody else holds is left
@@ -3335,6 +3549,221 @@ mod tests {
                 Some(Failure::Undone {
                     version: "0.4.9".to_owned()
                 })
+            );
+        }
+
+        /// **A file inside `H\<txn>` that cannot be removed while this is
+        /// held** — what an antivirus scan or an indexer holding a file does
+        /// to a retirement: on Windows the file is held open without delete
+        /// sharing (`trust_harness::hold_without_delete_sharing`); elsewhere
+        /// its folder is made read-only, so its entry cannot be unlinked. Let
+        /// go when dropped: the folder's permissions are put back.
+        struct Unremovable {
+            folder: PathBuf,
+            before: std::fs::Permissions,
+            _open: Option<std::fs::File>,
+        }
+
+        impl Unremovable {
+            fn inside(scene: &Scene) -> Self {
+                let folder = scene.home.transaction(txn()).join("backup");
+                std::fs::create_dir_all(&folder).unwrap();
+                let file = folder.join("folio.exe");
+                std::fs::write(&file, b"older").unwrap();
+                let before = std::fs::metadata(&folder).unwrap().permissions();
+                let open = if bt_platform::host_platform() == bt_platform::HostPlatform::Windows {
+                    Some(bt_platform::trust_harness::hold_without_delete_sharing(&file).unwrap())
+                } else {
+                    let mut read_only = before.clone();
+                    read_only.set_readonly(true);
+                    std::fs::set_permissions(&folder, read_only).unwrap();
+                    None
+                };
+                Self {
+                    folder,
+                    before,
+                    _open: open,
+                }
+            }
+        }
+
+        impl Drop for Unremovable {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.folder, self.before.clone());
+            }
+        }
+
+        /// RED (T-UNKEPT-CARD-ONCE, F1) — **a retirement that cannot remove
+        /// `H\<txn>` raises no card of the journal's note, and the retirement
+        /// that removes the journal raises it, once**: a commit's *changes not
+        /// kept*, and a rollback's *The update was undone.* over the card of
+        /// the word that sent the start (which a kept retirement keeps). The
+        /// journal is the note's record until it is removed; a card raised by
+        /// a start that kept it is raised again by the next (the Windows
+        /// clean VM's R3 and E5, 2026-10-23).
+        ///
+        /// MUTATION: in `run_by`'s Retire arm, apply `undone` /
+        /// `changes_not_kept` whatever `retire` answers (the card on both
+        /// starts).
+        #[test]
+        fn a_kept_retirement_raises_no_card_and_the_retirement_that_removes_the_journal_raises_it_once()
+         {
+            use crate::update_txn::{Outcome, Phase};
+            let Some(scene) = Scene::new("kept-once") else {
+                return;
+            };
+            let committed = Phase::Retired {
+                outcome: Outcome::Committed,
+                untried: false,
+            };
+            let not_kept = Some(Failure::ChangesNotKept {
+                version: "0.4.9".to_owned(),
+            });
+            let noted = write_noted(&scene, committed, Some("0.4.9"));
+            let held = Unremovable::inside(&scene);
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(failed, None, "kept: no card yet: {:?}", world.said);
+            assert_eq!(std::fs::read(scene.home.journal()).unwrap(), noted);
+            assert!(
+                world.said.len() == 1 && world.said[0].contains("is kept for the next start"),
+                "one line says it is kept: {:?}",
+                world.said
+            );
+            drop(held);
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(failed, not_kept, "{:?}", world.said);
+            assert!(!scene.home.journal().exists(), "retired");
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut Recorded::default()));
+            assert_eq!(failed, None, "once");
+
+            // A rollback a lock holder sent this start after: the kept
+            // retirement keeps the word's own card; the next start says the
+            // update was undone.
+            std::fs::create_dir_all(scene.rescue.parent().unwrap()).unwrap();
+            std::fs::write(&scene.rescue, RUNNING_BUILD).unwrap();
+            let rolled_back = Phase::Retired {
+                outcome: Outcome::RolledBack,
+                untried: false,
+            };
+            write_noted(&scene, rolled_back, Some("0.4.9"));
+            let held = Unremovable::inside(&scene);
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run_sent(&scene.home.journal(), &mut world));
+            assert_eq!(failed, Some(Failure::RolledBack), "{:?}", world.said);
+            assert!(scene.home.journal().exists(), "kept");
+            drop(held);
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(
+                failed,
+                Some(Failure::Undone {
+                    version: "0.4.9".to_owned()
+                }),
+                "{:?}",
+                world.said
+            );
+            assert!(!scene.home.journal().exists(), "retired");
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut Recorded::default()));
+            assert_eq!(failed, None, "once");
+        }
+
+        /// RED (T-UNKEPT-CARD-ONCE, F2; Windows) — **the start the rescue
+        /// build opens retires on a worker once the rescue has ended**: the
+        /// rescue runs from `H\<txn>\rescue\folio.exe` until a Folio takes the
+        /// data directory's claim, which the start it opened takes only after
+        /// this pass, so the pass's removal of `H\<txn>` is refused; the rest
+        /// of the retirement goes to a worker, which holds the lock, waits for
+        /// the rescue to end, then removes the folder and then the journal.
+        /// The card is raised by this start, and the next start finds nothing.
+        ///
+        /// MUTATION: in `retire`, keep the transaction when the folder's
+        /// removal is refused, whatever runs from the rescue build (the
+        /// journal kept, the card on the next start).
+        #[test]
+        fn a_start_opened_by_the_rescue_retires_on_a_worker_once_the_rescue_ends() {
+            use crate::update_txn::{Outcome, Phase};
+            if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
+                return;
+            }
+            let Some(scene) = Scene::new("rescue-runs") else {
+                return;
+            };
+            std::fs::remove_file(&scene.rescue).unwrap();
+            bt_platform::trust_harness::program(
+                &scene.rescue,
+                bt_platform::trust::FileVersion([0, 4, 7, 0]),
+                bt_platform::trust_harness::Behaviour::StaysUp,
+            )
+            .unwrap();
+            /// The rescue, ended when this is dropped, on a failed assertion
+            /// too.
+            struct Rescue(std::sync::Arc<std::sync::Mutex<std::process::Child>>);
+            impl Rescue {
+                fn end(&self) {
+                    let mut child = self.0.lock().unwrap();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+            impl Drop for Rescue {
+                fn drop(&mut self) {
+                    self.end();
+                }
+            }
+            let rescue = Rescue(std::sync::Arc::new(std::sync::Mutex::new(
+                bt_platform::quiet_command(&scene.rescue)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            )));
+            write_noted(
+                &scene,
+                Phase::Retired {
+                    outcome: Outcome::Committed,
+                    untried: false,
+                },
+                Some("0.4.9"),
+            );
+            // The rescue ends once the start has gone on past its pass (it
+            // takes the data directory's claim), while the worker waits.
+            let ends = Rescue(std::sync::Arc::clone(&rescue.0));
+            let mut world = Recorded {
+                meanwhile: Some(Box::new(move || {
+                    ends.end();
+                })),
+                ..Recorded::default()
+            };
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(
+                failed,
+                Some(Failure::ChangesNotKept {
+                    version: "0.4.9".to_owned(),
+                }),
+                "{:?}",
+                world.said
+            );
+            assert_eq!(world.workers, vec![Ok(())], "{:?}", world.said);
+            assert!(
+                !scene.home.transaction(txn()).exists(),
+                "H\\<txn> is removed"
+            );
+            assert!(!scene.home.journal().exists(), "then the journal");
+            assert!(
+                install_txn::try_hold(&scene.home.lock(), Hold::Exclusive)
+                    .unwrap()
+                    .is_some(),
+                "the worker let the lock go"
+            );
+            let mut world = Recorded::default();
+            let (failed, ..) = continued_with(scene.run(&[], None, &mut world));
+            assert_eq!(
+                failed, None,
+                "the next start finds nothing: {:?}",
+                world.said
             );
         }
 

@@ -144,12 +144,13 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Media::MediaFoundation::{
     CLSID_MFMediaEngineClassFactory, IMFAttributes, IMFDXGIDeviceManager, IMFMediaEngine,
-    IMFMediaEngineClassFactory, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl,
+    IMFMediaEngineClassFactory, IMFMediaEngineEx, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl,
     MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_CANPLAY_MAYBE, MF_MEDIA_ENGINE_CANPLAY_PROBABLY,
     MF_MEDIA_ENGINE_DXGI_MANAGER, MF_MEDIA_ENGINE_ERR, MF_MEDIA_ENGINE_ERR_ABORTED,
     MF_MEDIA_ENGINE_ERR_DECODE, MF_MEDIA_ENGINE_ERR_ENCRYPTED, MF_MEDIA_ENGINE_ERR_NETWORK,
     MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_PRELOAD_AUTOMATIC,
-    MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MFCreateAttributes, MFCreateDXGIDeviceManager,
+    MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_MT_FRAME_RATE, MFCreateAttributes,
+    MFCreateDXGIDeviceManager,
 };
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
@@ -334,6 +335,14 @@ pub struct EngineState {
     /// something other than a black rectangle.
     pub has_video: bool,
     pub has_audio: bool,
+    /// **The pictures per second the video stream declares**, or `None` before
+    /// the metadata has arrived and for a source that declares none.
+    ///
+    /// The stream's own nominal rate (`MF_MT_FRAME_RATE` here, an
+    /// `AVAssetTrack`'s `nominalFrameRate` on a Mac): what one frame step is
+    /// measured in. It is a fact about the file, not a measurement of how
+    /// fast frames are arriving.
+    pub frame_rate: Option<f64>,
 }
 
 impl EngineState {
@@ -1029,6 +1038,8 @@ struct Look {
     rate: f64,
     has_video: bool,
     has_audio: bool,
+    /// The video stream's declared frame rate, once it is answerable.
+    frame_rate: Option<f64>,
 }
 
 impl Look {
@@ -1057,6 +1068,7 @@ impl Look {
             ready: self.size.is_some() || self.has_audio,
             has_video: self.has_video,
             has_audio: self.has_audio,
+            frame_rate: self.frame_rate,
         }
     }
 }
@@ -1166,6 +1178,7 @@ impl<M: Media> Pump<M> {
                 EngineState {
                     duration_secs: None,
                     natural_size: None,
+                    frame_rate: None,
                     ready: false,
                     error: Some(error),
                     ..said
@@ -1192,6 +1205,11 @@ struct Machinery {
     /// first time the size is known.
     target: Option<(ID3D11Texture2D, ID3D11Texture2D, u32, u32)>,
     generation: u64,
+    /// **The stream's declared frame rate, asked once** — `None` until the
+    /// metadata has arrived, then the answer (itself `None` for a source that
+    /// declares none). A media type does not change under a loaded source, so
+    /// one question is the whole of it.
+    frame_rate: Option<Option<f64>>,
 }
 
 impl Media for Machinery {
@@ -1330,6 +1348,7 @@ impl Machinery {
                 context,
                 target: None,
                 generation: 0,
+                frame_rate: None,
             })
         }
     }
@@ -1402,6 +1421,15 @@ impl Machinery {
                 .is_ok()
                 && width > 0
                 && height > 0;
+            // Asked once the size is answerable, which is when the media
+            // types are: before it the streams are not known yet.
+            let frame_rate = if sized {
+                *self
+                    .frame_rate
+                    .get_or_insert_with(|| declared_frame_rate(&self.engine))
+            } else {
+                None
+            };
             Look {
                 size: sized.then_some((width, height)),
                 duration: self.engine.GetDuration(),
@@ -1413,6 +1441,7 @@ impl Machinery {
                 rate: self.engine.GetPlaybackRate(),
                 has_video: self.engine.HasVideo().as_bool(),
                 has_audio: self.engine.HasAudio().as_bool(),
+                frame_rate,
             }
         }
     }
@@ -1611,6 +1640,35 @@ impl IMFMediaEngineNotify_Impl for Notify_Impl {
         }
         Ok(())
     }
+}
+
+/// **The frame rate the first stream that declares one declares** — a video
+/// stream's; an audio stream has none.
+///
+/// `IMFMediaEngineEx::GetStreamAttribute` answers media-type attributes as well
+/// as stream-descriptor ones, so `MF_MT_FRAME_RATE` is read off the engine's own
+/// source and the file is not opened a second time.
+fn declared_frame_rate(engine: &IMFMediaEngine) -> Option<f64> {
+    // SAFETY: COM methods on the engine thread's own engine, inside its
+    // apartment; the `PROPVARIANT` is owned by this frame and cleared by its
+    // drop.
+    unsafe {
+        let engine: IMFMediaEngineEx = engine.cast().ok()?;
+        let streams = engine.GetNumberOfStreams().ok()?;
+        (0..streams).find_map(|stream| {
+            let value = engine.GetStreamAttribute(stream, &MF_MT_FRAME_RATE).ok()?;
+            frame_rate_of(u64::try_from(&value).ok()?)
+        })
+    }
+}
+
+/// **`MF_MT_FRAME_RATE`'s packed ratio, as pictures per second** — the
+/// numerator in the upper 32 bits, the denominator in the lower (29.97 is
+/// `30000 / 1001`). A zero on either side is no rate.
+fn frame_rate_of(packed: u64) -> Option<f64> {
+    let numerator = (packed >> 32) as u32;
+    let denominator = packed as u32;
+    (numerator > 0 && denominator > 0).then(|| f64::from(numerator) / f64::from(denominator))
 }
 
 /// **A Direct3D 11 device for the decoder to decode onto, hardware if there is
@@ -1938,6 +1996,21 @@ mod tests {
         assert!(!state.playing, "an engine does not start on its own");
         assert_eq!(state.error, None, "{state:?}");
         engine.shutdown();
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS, row 42) — **`MF_MT_FRAME_RATE`'s packed
+    /// ratio reads as pictures per second**: the numerator in the upper half,
+    /// the denominator in the lower, and a zero on either side is no rate.
+    ///
+    /// MUTATION: swap the two halves and 29.97 reads as 0.0334.
+    #[test]
+    fn a_packed_frame_rate_is_read_as_its_ratio() {
+        let packed = |numerator: u64, denominator: u64| (numerator << 32) | denominator;
+        let ntsc = frame_rate_of(packed(30_000, 1_001)).expect("29.97 is a rate");
+        assert!((ntsc - 29.97).abs() < 0.001, "{ntsc}");
+        assert_eq!(frame_rate_of(packed(25, 1)), Some(25.0));
+        assert_eq!(frame_rate_of(packed(0, 1)), None, "no pictures a second");
+        assert_eq!(frame_rate_of(packed(30, 0)), None, "no denominator");
     }
 
     /// RED — **a frame arrives after `play`, and the position advances**

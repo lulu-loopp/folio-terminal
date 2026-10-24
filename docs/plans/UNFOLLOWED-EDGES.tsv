@@ -4425,6 +4425,9 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::bu
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::build_preview_body_in	Ambiguous	map	2	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::build_preview_body_in	Ambiguous	push	2	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::choose_preview_row	Ambiguous	nth	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::click_video_picture	Ambiguous	map	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::click_video_picture	Ambiguous	then_some	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::click_video_picture	Ambiguous	zip	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::complete_peek_image	Ambiguous	clone	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::complete_peek_image	Ambiguous	cloned	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::complete_peek_image	Ambiguous	collect	1	
@@ -4439,7 +4442,8 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::co
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::copy_preview_selection	Ambiguous	selected	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::copy_preview_selection	Ambiguous	to_owned	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::dock_preview_float	Ambiguous	map	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::double_click_started_a_video	Ambiguous	is_some_and	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::double_click_on_the_cards_video	Ambiguous	as_deref	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::double_click_on_the_cards_video	Ambiguous	is_some_and	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::drag_preview_block_thumb	Ambiguous	along	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::dress_preview_address_editor	Ambiguous	map	2	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::dress_preview_address_editor	Ambiguous	text	1	
@@ -4473,6 +4477,7 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::no
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_preview_link_hover	Ambiguous	map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	collect	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	filter_map	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	holds	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; video_seat::BarLayout::holds on a closure parameter the grammar does not type, a rectangle test that reaches no door
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	into_iter	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::note_video_hover	Ambiguous	is_some_and	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::open_preview_link	Ambiguous	map	1	
@@ -4544,7 +4549,7 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::pr
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_resample_deadline	Ambiguous	filter_map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_seat_bar_layers	Ambiguous	collect	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_seat_bar_layers	Ambiguous	flat_map	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_surface_at	Ambiguous	map	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_surface_at_point	Ambiguous	map	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_surface_body_rect	Ambiguous	flatten	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_surfaces	Ambiguous	collect	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_surfaces	Ambiguous	map	1	
@@ -5047,7 +5052,7 @@ crates/bt-app/src/seats.rs	bt-app crate::seats::tab_strip_geometry	Ambiguous	sat
 crates/bt-app/src/seats.rs	bt-app crate::seats::tab_strip_geometry	Ambiguous	unwrap_or	2	
 crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	collect	1	
 crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	filter_map	1	
-crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	map	1	
+crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Ambiguous	map	2	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; Iterator::map over the bar's boxes, stating each with its role (Own or MaximizeButton), which reaches no door
 crates/bt-app/src/seats.rs	bt-app crate::seats::title_bar_folio_boxes	Dynamic	cropped	1	
 crates/bt-app/src/seats.rs	bt-app crate::seats::to_persisted	Ambiguous	collect	1	
 crates/bt-app/src/seats.rs	bt-app crate::seats::to_persisted	Ambiguous	into_iter	1	
@@ -6709,25 +6714,24 @@ crates/bt-app/src/update_recover.rs	bt-app crate::update_recover::run_here	Ambig
 crates/bt-app/src/update_recover.rs	bt-app crate::update_recover::run_here	Ambiguous	unwrap_or	1	
 crates/bt-app/src/update_recover.rs	bt-app crate::update_recover::run_windows	Ambiguous	carry	1	
 crates/bt-app/src/update_recover.rs	bt-app crate::update_recover::run_windows	Ambiguous	say	2	
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::<Machine as World>::mounts_under	Ambiguous	to_string	1	
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::<Machine as World>::on_a_worker	Ambiguous	as_bytes	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::<Machine as World>::on_a_worker	Dynamic	job	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::<Machine as World>::retire_entrance	Ambiguous	to_string	1	
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::<Machine as World>::say	Ambiguous	as_bytes	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::<Machine as World>::spawn_detached	Ambiguous	map	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::<Machine as World>::spawn_detached	Ambiguous	spawn	1	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::ended_within	Ambiguous	elapsed	1	2026-10-23: T-UNKEPT-CARD-ONCE; `Instant::elapsed` on the worker's own start instant, a standard-library method on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::failed	Ambiguous	cloned	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::hand_to_rescue	Ambiguous	is_some	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::held	Ambiguous	map	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::held	Ambiguous	or_else	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::is_held	Ambiguous	is_some	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::is_last_trial	Ambiguous	is_some	1	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::mounts_under	Ambiguous	to_string	1	2026-10-23: T-UNKEPT-CARD-ONCE; the same site as `<Machine as World>::mounts_under`'s row, moved to a free function the test world shares; a standard-library method on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous	collect	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous	map	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::pass	Ambiguous	skip	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::perform	Ambiguous	to_string	2	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::rescue_copy	Ambiguous	is_some	1	2026-10-22: T-RESCUE-WINDOW-NO-OFFER; `Option::is_some` on the `OnceLock` read `update_startup::rescue_copy` answers, a standard-library method on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::retire	Ambiguous	to_string	1	
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::retire	Ambiguous	kind	1	2026-10-23: T-UNKEPT-CARD-ONCE; `io::Error::kind` on `install_flip::running_from`'s error, a standard-library method on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::retire	Dynamic	kept	2	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	flatten	2	2026-10-21: T-RESCUE-COPY-CARD; the same sites as `update_startup::run`'s rows, the pass renamed `run_by` (the rescue copy's start); a standard-library method (Option, bool) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	is_some	3	2026-10-21: T-RESCUE-COPY-CARD; the same sites as `update_startup::run`'s rows, the pass renamed `run_by` (the rescue copy's start); a standard-library method (Option, bool) on a receiver the grammar does not type, which reaches no door
@@ -6735,6 +6739,7 @@ crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguo
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	map	2	2026-10-21: T-RESCUE-COPY-CARD; the same sites as `update_startup::run`'s rows, the pass renamed `run_by` (the rescue copy's start); a standard-library method (Option, bool) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	or_else	1	2026-10-21: T-RESCUE-COPY-CARD; the same sites as `update_startup::run`'s rows, the pass renamed `run_by` (the rescue copy's start); a standard-library method (Option, bool) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::run_by	Ambiguous	then	1	2026-10-21: T-RESCUE-COPY-CARD; the same sites as `update_startup::run`'s rows, the pass renamed `run_by` (the rescue copy's start); a standard-library method (Option, bool) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::say_to	Ambiguous	as_bytes	1	2026-10-23: T-UNKEPT-CARD-ONCE; the same site as `<Machine as World>::say`'s and `on_a_worker`'s rows, the two folded into one function; `String::as_bytes`, a standard-library method on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::stand_down	Ambiguous	is_ok	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::stands_in	Ambiguous	is_some	1	
 crates/bt-app/src/update_startup.rs	bt-app crate::update_startup::stood_down	Ambiguous	is_some	1	
@@ -6812,6 +6817,9 @@ crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::<VideoSeat as std::fmt
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::BarLayout::slot_at	Dynamic	hit	2	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::bar_deadline	Ambiguous	into_iter	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::open	Ambiguous	play	1	
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::pointer_left	Ambiguous	flatten	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::pointer_moved	Ambiguous	flatten	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::seek_end	Ambiguous	is_finite	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::seek_to	Ambiguous	is_finite	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeat::step	Ambiguous	is_finite	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::VideoSeats::shutdown_all	Ambiguous	shutdown	1	
@@ -6825,12 +6833,19 @@ crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::bar_layout	Dynamic	px	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::bar_layout	Dynamic	rail_of	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::clock_figures	Ambiguous	count	2	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::fraction_of	Ambiguous	clamp	1	
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::frame_step	Ambiguous	then	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::gain_label	Ambiguous	count	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::label_over_bar	Ambiguous	round	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::label_over_bar	Dynamic	px	4	2026-10-23: T-VIDEO-POINTER-AND-KEYS; label_over_bar's local `px` closure, a logical-to-physical multiplication, which reaches no door
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Ambiguous	flatten	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Ambiguous	map	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Ambiguous	text	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Ambiguous	then_some	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Ambiguous	to_owned	1	
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Dynamic	clock_label	3	
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Dynamic	tag	2	2026-10-23: T-VIDEO-POINTER-AND-KEYS; paint_bar's local `tag` closure, which pushes a label's panel and its figures into the bar's layer and reaches no door
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::player_key	Ambiguous	as_str	2	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::seek_label	Ambiguous	count	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/watch_steward.rs	bt-app crate::watch_steward::<EarHandle as std::fmt::Debug>::fmt	Ambiguous	field	1	
 crates/bt-app/src/watch_steward.rs	bt-app crate::watch_steward::<EarHandle as std::fmt::Debug>::fmt	Ambiguous	finish	1	
 crates/bt-app/src/watch_steward.rs	bt-app crate::watch_steward::EarHandle::take_reports	Ambiguous	clone	1	
@@ -8892,13 +8907,11 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::collect_cjk_famil
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::collect_monospace_families	Ambiguous	GetFontFamily	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::collect_monospace_families	Ambiguous	GetFontFamilyCount	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::current_user_registry_subkeys	Ambiguous	is_err	2	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	as_bool	3	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	as_slice	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	as_bool	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	contains	2	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	is_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	load	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	saturating_add	2	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	saturating_sub	4	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	saturating_sub	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::custom_frame_subclass	Ambiguous	store	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::delete_registry_tree	Ambiguous	is_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::detach_console	Ambiguous	is_ok	1	
@@ -8949,6 +8962,10 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Am
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Ambiguous	into_iter	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Ambiguous	ok	5	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::font_file_path	Ambiguous	take_while	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	as_bool	1	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; the custom-frame subclass's hit test moved into frame_hit_at with its calls; BOOL::as_bool on IsZoomed, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	as_slice	1	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; the custom-frame subclass's hit test moved into frame_hit_at with its calls; Vec::as_slice on the borrowed title-bar boxes, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	ok	1	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; the custom-frame subclass's hit test moved into frame_hit_at with its calls; windows::core::Result::ok on GetClientRect, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::frame_hit_at	Ambiguous	saturating_sub	2	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; the custom-frame subclass's hit test moved into frame_hit_at with its calls; i32::saturating_sub on the client rectangle, which reaches no door
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::get_window_rect	Ambiguous	map_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::get_work_area	Ambiguous	as_bool	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::hide_every_window_of_this_process	Ambiguous	as_bool	1	
@@ -8996,6 +9013,8 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_family_
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_family_named	Ambiguous	ok	3	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_font_families	Ambiguous	map_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::monospace_font_families	Ambiguous	to_string	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::mouse_key_state	Ambiguous	fold	1	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; Iterator::fold of the key-state flags a client mouse message carries, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::mouse_key_state	Dynamic	down	1	2026-10-23: T-SNAP-LAYOUTS-MAXBUTTON; the local closure reading GetKeyState for one key, which reaches no door
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_facts	Ambiguous	as_bool	2	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_facts	Ambiguous	map	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_facts	Ambiguous	ok	1	
@@ -9489,9 +9508,11 @@ crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::E
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	and_then	2	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	firstObject	1	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	is_empty	2	
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	is_finite	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	is_some_and	2	
-crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	map	2	
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	map	3	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door; the third is the first video track's frame rate beside its natural size
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	naturalSize	1	
+crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	nominalFrameRate	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; AVAssetTrack::nominalFrameRate, an AVFoundation property read on the first video track, which reaches no door
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	preferredTransform	1	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::build	Ambiguous	tracksWithMediaType	2	
 crates/bt-platform/src/macos_player.rs	bt-platform crate::video::macos_player::Machinery::publish_state	Ambiguous	code	1	
@@ -10002,6 +10023,8 @@ crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Machine
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Pump::publish_state	Ambiguous	into_inner	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Pump::publish_state	Ambiguous	unwrap_or_else	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::create_device	Ambiguous	is_ok	1	
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::declared_frame_rate	Ambiguous	find_map	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::declared_frame_rate	Ambiguous	ok	4	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::protect_from_other_threads	Ambiguous	GetMultithreadProtected	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::protect_from_other_threads	Ambiguous	SetMultithreadProtected	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::protect_from_other_threads	Ambiguous	as_bool	1	

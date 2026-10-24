@@ -63,7 +63,8 @@
 - A PDF previewed on a display scaled to 125 %, 150 % or 175 % no longer shows
   letters of uneven weight and words with gaps; there the PDF viewer's own
   controls are drawn larger, and its toolbar is shortened, or not shown, in
-  narrower panes. <!-- pending the refit check -->
+  narrower panes. A pane resized after a PDF is opened does not re-fit the page
+  to its new width until the PDF is opened again, as in earlier versions.
 - Unsaved preview edits survive Windows shutting down, restarting or signing
   out; what could not be written in time is kept in the recovered folder, which
   the next start offers.
@@ -144,7 +145,7 @@
 
 | asset | what it is |
 | --- | --- |
-| `folio-0.4.8-windows-x64.zip` | the ten files that belong together, in one folder — `sha256:<ZIP_SHA256>` |
+| `folio-0.4.8-windows-x64.zip` | the ten files that belong together, in one folder — `sha256:9512cbf99b569387de4a47bd6d143d32c068214989495a2eeaa2ae85ce6fc42f` |
 | `folio-windows-x64.zip` | the same archive under a name that does not change from one release to the next — the same `sha256` |
 | `SHA256SUMS.txt` | the hash of the archive under each of its two names and of the bill of materials, in the format `sha256sum -c` reads |
 | `folio-0.4.8.cdx.json` | the CycloneDX bill of materials for what is in the build |
@@ -183,7 +184,7 @@ sha256sum -c SHA256SUMS.txt
 
 | asset | what it is |
 | --- | --- |
-| `Folio-0.4.8-macos-arm64.dmg` | the application, signed and notarized — `sha256:<DMG_SHA256>` |
+| `Folio-0.4.8-macos-arm64.dmg` | the application, signed and notarized — `sha256:fd3d532160ce36abff881b5a3d7bd425b36a387b5d1c12b63f1999e90bf391ea` |
 | `Folio-macos-arm64.dmg` | the same image under a name that does not change from one release to the next — the same `sha256` |
 | `SHA256SUMS-macos.txt` | the hash of the image under each of its two names, in the format `shasum -c` reads |
 
@@ -217,4 +218,4 @@ daily check; pressing Check there still asks.
 
 </details>
 
-Full changelog: [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.8-preview/CHANGELOG.md#048-preview--2026-10-DD) · [v0.4.7-preview…v0.4.8-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.7-preview...v0.4.8-preview)
+Full changelog: [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.8-preview/CHANGELOG.md#048-preview--2026-10-23) · [v0.4.7-preview…v0.4.8-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.7-preview...v0.4.8-preview)

@@ -298,15 +298,16 @@ pub struct CustomFrameMetrics<'a> {
     pub width: i32,
     pub height: i32,
     pub title_bar_height: i32,
-    /// **Every box the application itself draws in the title bar**, as
-    /// `[left, top, right, bottom]` in the same physical pixels as the fields
-    /// above, half-open on the far edges. The caption buttons are among them —
-    /// on this host they are the application's own drawing like everything else
-    /// in that bar.
+    /// **Every box the application itself draws in the title bar**, each with
+    /// what it is to the window ([`TitleBarBox`]). The caption buttons are
+    /// among them — on this host they are the application's own drawing like
+    /// everything else in that bar, and the one of them the system has a use
+    /// for says which it is.
     ///
-    /// Order is not read and overlaps are allowed: the only question asked of
-    /// this list is whether a point is in any of them.
-    pub app_boxes: &'a [[i32; 4]],
+    /// Order is not read and overlaps are allowed: the questions asked of this
+    /// list are whether a point is in any of them and, if it is, whether one of
+    /// those is a window button.
+    pub app_boxes: &'a [TitleBarBox],
     pub resize_border: i32,
     pub resizable: bool,
 }
@@ -404,11 +405,42 @@ impl PlatformChrome {
     };
 }
 
+/// **One box the application draws in the title bar, and what it is to the
+/// window** (T-SNAP-LAYOUTS-MAXBUTTON, `docs/DESIGN.md` §13.11 ⑥).
+///
+/// `rect` is `[left, top, right, bottom]` in the physical pixels of
+/// [`CustomFrameMetrics`], half-open on the far edges.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TitleBarBox {
+    pub rect: [i32; 4],
+    pub role: TitleBarBoxRole,
+}
+
+/// **What a title-bar box is to the system.** The application draws and
+/// answers every one of them; the role only says whether the system is told
+/// which window button one of them is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TitleBarBoxRole {
+    /// The application's own control and nothing the system has a word for:
+    /// the point answers `Client`.
+    Own,
+    /// The window's maximize/restore button. The point answers
+    /// [`CustomFrameHit::MaximizeButton`], which is what Windows 11 reads to
+    /// open its Snap Layouts flyout on a hover and to stand the Win+Z picker
+    /// over the button. The drawing, the hover wash, the tooltip and the press
+    /// stay the application's: the frame hands the pointer messages this
+    /// answer turns into non-client ones back to it as the client messages
+    /// they were.
+    MaximizeButton,
+}
+
 /// Win32 non-client regions expressed without Win32 constants so their mapping
 /// can be pinned on every host used by the workspace tests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CustomFrameHit {
     Client,
+    /// A [`TitleBarBoxRole::MaximizeButton`] box: `HTMAXBUTTON`.
+    MaximizeButton,
     Caption,
     Left,
     Right,
@@ -422,8 +454,10 @@ pub enum CustomFrameHit {
 
 /// Map one client-coordinate point to the native non-client region it represents.
 /// Resize edges win over the title bar, and every box the application draws in
-/// that bar — the caption run included — stays `Client` so the application can
-/// paint and handle it.
+/// that bar — the caption run included — stays the application's to paint and
+/// handle: `Client`, or, for the box that is the window's maximize button,
+/// [`CustomFrameHit::MaximizeButton`] — the system is told which button it is
+/// and the frame hands its pointer messages back to the application.
 ///
 /// **The bar is the complement of those boxes and nothing narrower** (owner
 /// ruling 2026-09-13, §13.11 ⑥): on the title bar, every pixel that is not one
@@ -458,14 +492,20 @@ pub fn custom_frame_hit_test(metrics: CustomFrameMetrics<'_>, x: i32, y: i32) ->
     if x < 0 || x >= metrics.width {
         return CustomFrameHit::Client;
     }
-    if metrics
-        .app_boxes
-        .iter()
-        .any(|rect| x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3])
-    {
-        return CustomFrameHit::Client;
+    // **A box that names a window button names it wherever it stands**: where
+    // an own box overlaps it, the point is still that button, because order is
+    // not read and the system's answer must not depend on it.
+    let mut hit = CustomFrameHit::Caption;
+    for held in metrics.app_boxes.iter().filter(|held| {
+        let rect = held.rect;
+        x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3]
+    }) {
+        match held.role {
+            TitleBarBoxRole::MaximizeButton => return CustomFrameHit::MaximizeButton,
+            TitleBarBoxRole::Own => hit = CustomFrameHit::Client,
+        }
     }
-    CustomFrameHit::Caption
+    hit
 }
 
 /// A pending move/size, as `WM_WINDOWPOSCHANGING` states one.
@@ -9443,8 +9483,11 @@ mod windows_impl {
                     CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
                 },
                 KeyboardAndMouse::{
-                    GetCapture, GetKeyboardLayout, MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX,
-                    MapVirtualKeyW, SetFocus, VkKeyScanW,
+                    GetCapture, GetKeyState, GetKeyboardLayout, MAPVK_VK_TO_CHAR,
+                    MAPVK_VSC_TO_VK_EX, MapVirtualKeyW, SetFocus, TME_LEAVE, TME_NONCLIENT,
+                    TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS, TrackMouseEvent, VIRTUAL_KEY,
+                    VK_CONTROL, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_SHIFT, VK_XBUTTON1,
+                    VK_XBUTTON2, VkKeyScanW,
                 },
                 // One call that undoes one winit makes, and the four that answer
                 // the system's pan gesture — see
@@ -9470,9 +9513,9 @@ mod windows_impl {
                 DestroyMenu, FLASHW_STOP, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx,
                 GA_ROOT, GCLP_HBRBACKGROUND, GF_BEGIN, GF_END, GetAncestor, GetClientRect,
                 GetCursorPos, GetSystemMetrics, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT,
-                HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
-                HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed, MB_ICONINFORMATION, MB_OK,
-                MB_SETFOREGROUND, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW,
+                HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON, HTRIGHT, HTTOP, HTTOPLEFT,
+                HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed, MB_ICONINFORMATION,
+                MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW,
                 RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN,
                 SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
                 SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
@@ -9480,9 +9523,14 @@ mod windows_impl {
                 SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
                 TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DEVICECHANGE,
                 WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE,
-                WM_GETMINMAXINFO, WM_INPUTLANGCHANGE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
-                WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_SETTINGCHANGE, WM_THEMECHANGED,
-                WM_TOUCH, WM_WINDOWPOSCHANGING, WindowFromPoint,
+                WM_GETMINMAXINFO, WM_INPUTLANGCHANGE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+                WM_MBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
+                WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMBUTTONDBLCLK,
+                WM_NCMBUTTONDOWN, WM_NCMBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+                WM_NCRBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_NCXBUTTONDBLCLK,
+                WM_NCXBUTTONDOWN, WM_NCXBUTTONUP, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
+                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH,
+                WM_WINDOWPOSCHANGING, WM_XBUTTONDOWN, WM_XBUTTONUP, WindowFromPoint,
             },
         },
     };
@@ -9490,11 +9538,21 @@ mod windows_impl {
     use super::{
         CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
         INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PanStep, PanTrack, PendingWindowPos,
-        PlatformChrome, TaskbarProgress, TaskbarProgressState, ThreadPriority, VisualLayer,
-        WheelScrollAmount, WindowRect, composition_visual_offset, custom_frame_hit_test,
-        hold_pending_pos_to, logical_px_for_dpi, window_skirt,
+        PlatformChrome, TaskbarProgress, TaskbarProgressState, ThreadPriority, TitleBarBox,
+        VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
+        custom_frame_hit_test, hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
     use crate::admission::{WaitToken, WorkerCtx, doors};
+
+    // The custom frame hands the pointer messages its `HTMAXBUTTON` answer turns
+    // non-client back to the application as the client messages they were
+    // (`window_button_passage`): the key-state word those carry, and the one
+    // client message that is not in `WindowsAndMessaging`.
+    use windows::Win32::System::SystemServices::{
+        MK_CONTROL, MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MK_SHIFT, MK_XBUTTON1, MK_XBUTTON2,
+        MODIFIERKEYS_FLAGS,
+    };
+    use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 
     /// Classify one absolute `PATH` directory without ever touching a remote server. Drive type
     /// is asked from the lexical root first; only a local or removable path reaches metadata.
@@ -10835,7 +10893,17 @@ mod windows_impl {
         /// loop, and the subclass procedure runs on the thread that owns the
         /// `HWND`, which is that same event loop. Nothing between the borrow and
         /// its end sends a message, so the callback cannot re-enter it.
-        title_bar_boxes: RefCell<Vec<[i32; 4]>>,
+        title_bar_boxes: RefCell<Vec<TitleBarBox>>,
+        /// **Whether the application has been told the pointer is on the
+        /// maximize button** through a client message this frame made out of a
+        /// non-client one (T-SNAP-LAYOUTS-MAXBUTTON; [`window_button_passage`]).
+        ///
+        /// Written by the subclass procedure alone, on the window's own thread,
+        /// so a `Cell` for `title_bar_boxes`' reason. It is what lets the frame
+        /// say "the pointer came off it" exactly once, and what tells a
+        /// `WM_MOUSELEAVE` about the *client* area — which the button is not, to
+        /// the system — from the pointer leaving the window.
+        on_window_button: Cell<bool>,
         /// Smallest client size the window may be dragged to, in logical pixels,
         /// or `(0, 0)` for "no minimum". Logical rather than physical so the
         /// constraint survives a DPI change without anyone recomputing it.
@@ -10908,6 +10976,7 @@ mod windows_impl {
             let state = Box::new(CustomFrameState {
                 geometry,
                 title_bar_boxes: RefCell::new(Vec::new()),
+                on_window_button: Cell::new(false),
                 min_client_logical_width: AtomicI32::new(0),
                 min_client_logical_height: AtomicI32::new(0),
                 adopting: AtomicBool::new(false),
@@ -11043,13 +11112,15 @@ mod windows_impl {
         }
 
         /// **State the boxes the application draws in this window's title bar**
-        /// (§13.11 ⑥), in physical pixels. Everything in the bar that is not one
-        /// of them answers `HTCAPTION`, so the window is picked up by it.
+        /// (§13.11 ⑥), in physical pixels, each with its role. Everything in the
+        /// bar that is not one of them answers `HTCAPTION`, so the window is
+        /// picked up by it; the box whose role is the maximize button answers
+        /// `HTMAXBUTTON`, so Windows knows where that button is.
         ///
         /// Said again on every rebuild of the bar rather than settled at
         /// install: a tab is one of these boxes, and tabs open, close, scroll
         /// and change width.
-        pub fn set_title_bar_boxes(&self, boxes: &[[i32; 4]]) {
+        pub fn set_title_bar_boxes(&self, boxes: &[TitleBarBox]) {
             let mut held = self.state.title_bar_boxes.borrow_mut();
             held.clear();
             held.extend_from_slice(boxes);
@@ -11263,10 +11334,6 @@ mod windows_impl {
                 result
             }
             WM_NCHITTEST => {
-                let mut client = RECT::default();
-                if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
-                    return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
-                }
                 let mut point = POINT {
                     x: low_word_signed(lparam.0),
                     y: high_word_signed(lparam.0),
@@ -11276,49 +11343,379 @@ mod windows_impl {
                 {
                     return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
                 }
-                let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-                let resize_border = if unsafe { IsZoomed(hwnd) }.as_bool() {
-                    0
-                } else {
-                    native_resize_border(dpi)
-                };
                 // SAFETY: `CustomWindowFrame` owns this allocation and removes the subclass
                 // before dropping it, so the reference-data pointer is live for every callback.
                 let state = unsafe { &*(reference_data as *const CustomFrameState) };
-                // Borrowed for the length of the answer and no longer. The
-                // setter runs on this same thread and nothing below it sends a
-                // message, so this borrow meets no other.
-                let app_boxes = state.title_bar_boxes.borrow();
-                let hit = custom_frame_hit_test(
-                    CustomFrameMetrics {
-                        width: client.right.saturating_sub(client.left),
-                        height: client.bottom.saturating_sub(client.top),
-                        title_bar_height: logical_px_for_dpi(
-                            state.geometry.title_bar_logical_px,
-                            dpi,
-                        ),
-                        app_boxes: app_boxes.as_slice(),
-                        resize_border,
-                        resizable: resize_border > 0,
-                    },
-                    point.x,
-                    point.y,
-                );
-                LRESULT(match hit {
-                    CustomFrameHit::Client => HTCLIENT,
-                    CustomFrameHit::Caption => HTCAPTION,
-                    CustomFrameHit::Left => HTLEFT,
-                    CustomFrameHit::Right => HTRIGHT,
-                    CustomFrameHit::Top => HTTOP,
-                    CustomFrameHit::Bottom => HTBOTTOM,
-                    CustomFrameHit::TopLeft => HTTOPLEFT,
-                    CustomFrameHit::TopRight => HTTOPRIGHT,
-                    CustomFrameHit::BottomLeft => HTBOTTOMLEFT,
-                    CustomFrameHit::BottomRight => HTBOTTOMRIGHT,
-                } as isize)
+                match unsafe { frame_hit_at(hwnd, state, point) } {
+                    Some(hit) => LRESULT(hit_test_code(hit) as isize),
+                    None => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
+                }
+            }
+            // **The maximize button's pointer messages, handed back to the
+            // application** (T-SNAP-LAYOUTS-MAXBUTTON). Every message here is
+            // either one that `HTMAXBUTTON` turned non-client or one whose
+            // meaning that answer changed; [`window_button_passage`] decides
+            // each and [`pass_window_button_message`] does what it says.
+            WM_NCMOUSEMOVE | WM_NCMOUSELEAVE | WM_MOUSEMOVE | WM_MOUSELEAVE | WM_NCLBUTTONDOWN
+            | WM_NCLBUTTONUP | WM_NCLBUTTONDBLCLK | WM_NCRBUTTONDOWN | WM_NCRBUTTONUP
+            | WM_NCRBUTTONDBLCLK | WM_NCMBUTTONDOWN | WM_NCMBUTTONUP | WM_NCMBUTTONDBLCLK
+            | WM_NCXBUTTONDOWN | WM_NCXBUTTONUP | WM_NCXBUTTONDBLCLK => {
+                // SAFETY: as above.
+                let state = unsafe { &*(reference_data as *const CustomFrameState) };
+                unsafe { pass_window_button_message(hwnd, state, message, wparam, lparam) }
             }
             _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
         }
+    }
+
+    /// **The custom frame's answer for one client point**, or `None` when the
+    /// window cannot be measured — the one place the live window's numbers are
+    /// put to [`custom_frame_hit_test`], so `WM_NCHITTEST` and the question "is
+    /// this client point still the maximize button" are one rule.
+    ///
+    /// # Safety
+    ///
+    /// `hwnd` is the window `state` is installed on, and this runs on its
+    /// thread.
+    unsafe fn frame_hit_at(
+        hwnd: HWND,
+        state: &CustomFrameState,
+        point: POINT,
+    ) -> Option<CustomFrameHit> {
+        let mut client = RECT::default();
+        unsafe { GetClientRect(hwnd, &mut client) }.ok()?;
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        let resize_border = if unsafe { IsZoomed(hwnd) }.as_bool() {
+            0
+        } else {
+            native_resize_border(dpi)
+        };
+        // Borrowed for the length of the answer and no longer. The setter runs
+        // on this same thread and nothing below it sends a message, so this
+        // borrow meets no other.
+        let app_boxes = state.title_bar_boxes.borrow();
+        Some(custom_frame_hit_test(
+            CustomFrameMetrics {
+                width: client.right.saturating_sub(client.left),
+                height: client.bottom.saturating_sub(client.top),
+                title_bar_height: logical_px_for_dpi(state.geometry.title_bar_logical_px, dpi),
+                app_boxes: app_boxes.as_slice(),
+                resize_border,
+                resizable: resize_border > 0,
+            },
+            point.x,
+            point.y,
+        ))
+    }
+
+    /// **The `WM_NCHITTEST` code for one region** — the mapping half of the
+    /// bridge, pure so a test can hold it.
+    pub(super) fn hit_test_code(hit: CustomFrameHit) -> u32 {
+        match hit {
+            CustomFrameHit::Client => HTCLIENT,
+            CustomFrameHit::MaximizeButton => HTMAXBUTTON,
+            CustomFrameHit::Caption => HTCAPTION,
+            CustomFrameHit::Left => HTLEFT,
+            CustomFrameHit::Right => HTRIGHT,
+            CustomFrameHit::Top => HTTOP,
+            CustomFrameHit::Bottom => HTBOTTOM,
+            CustomFrameHit::TopLeft => HTTOPLEFT,
+            CustomFrameHit::TopRight => HTTOPRIGHT,
+            CustomFrameHit::BottomLeft => HTBOTTOMLEFT,
+            CustomFrameHit::BottomRight => HTBOTTOMRIGHT,
+        }
+    }
+
+    /// **What the custom frame does with one pointer message, given whether the
+    /// pointer is on the maximize button** (T-SNAP-LAYOUTS-MAXBUTTON).
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) struct ButtonPassage {
+        /// A `WM_MOUSELEAVE` goes on to the application before anything else:
+        /// it was told the pointer is on the button, and the pointer is not.
+        pub(super) leave_first: bool,
+        /// The client message that goes on in this one's place, at this one's
+        /// point in client coordinates.
+        pub(super) as_client: Option<u32>,
+        /// Whether this message itself goes on afterwards, as it came.
+        pub(super) onward: bool,
+        /// Whether the pointer is on the button once this message is done.
+        pub(super) on_button: bool,
+        /// Whether the frame asks the system for the `WM_NCMOUSELEAVE` that
+        /// says the pointer has left the non-client area it is in.
+        pub(super) track_leave: bool,
+    }
+
+    /// **The one decision in handing the maximize button back to the
+    /// application** (T-SNAP-LAYOUTS-MAXBUTTON).
+    ///
+    /// # Why the application gets client messages for a button the system knows
+    ///
+    /// Windows 11 opens its Snap Layouts flyout over a window's maximize button,
+    /// and stands the Win+Z picker on it, only where the window's own
+    /// `WM_NCHITTEST` says `HTMAXBUTTON` (Microsoft, "Support snap layouts for
+    /// desktop apps on Windows 11"). That answer makes the button non-client to
+    /// the system, so the pointer over it arrives as `WM_NCMOUSEMOVE`,
+    /// `WM_NCLBUTTONDOWN` and the rest — messages winit turns into no event,
+    /// and which `DefWindowProc` answers by drawing and tracking a native button
+    /// of its own. The button is still the application's: drawn, washed on
+    /// hover, tipped and pressed by the same code as every other box in the
+    /// bar. So each of those messages goes on to winit as the client message
+    /// the pointer made before the answer changed, at the same point in client
+    /// coordinates, and the application's road for a hover, a tooltip and a
+    /// press is the one it always was — the press acts when the button goes
+    /// down, as it always has, and a quick second press is a press, because the
+    /// window class asks for no double clicks. Only `WM_NCMOUSEMOVE` also goes
+    /// on as itself: the system's own hover over its maximize button is the
+    /// flyout.
+    ///
+    /// # The leave the client area raises is not the pointer leaving
+    ///
+    /// winit asks for a `WM_MOUSELEAVE` when the pointer enters the client
+    /// area, and the system answers at once when the pointer is not in the
+    /// client area — which, on the button, it is not. So while the application
+    /// is told the pointer is on the button, a `WM_MOUSELEAVE` is the client
+    /// area's and is kept back; the frame asks for the non-client
+    /// `WM_NCMOUSELEAVE` instead, and says `WM_MOUSELEAVE` itself when the
+    /// pointer comes off the button: on that message, on a `WM_NCMOUSEMOVE`
+    /// over another part of the frame, or on a client move whose point the hit
+    /// test no longer gives to the button. That leave is also what makes winit
+    /// track the client area again: its next move is an entry.
+    ///
+    /// `on` is whether the pointer is on the button by this message: its hit
+    /// code for a non-client message, the hit test of its point for a client
+    /// move (asked only while `was`), `false` for `WM_NCMOUSELEAVE`, and `was`
+    /// for `WM_MOUSELEAVE`, which says nothing about the button.
+    pub(super) fn window_button_passage(message: u32, on: bool, was: bool) -> ButtonPassage {
+        let untouched = ButtonPassage {
+            leave_first: was && !on,
+            as_client: None,
+            onward: true,
+            on_button: on,
+            track_leave: false,
+        };
+        match message {
+            WM_NCMOUSEMOVE if on => ButtonPassage {
+                as_client: Some(WM_MOUSEMOVE),
+                track_leave: true,
+                ..untouched
+            },
+            WM_MOUSELEAVE if on => ButtonPassage {
+                onward: false,
+                ..untouched
+            },
+            _ if on => match client_button_message(message) {
+                Some(client) => ButtonPassage {
+                    as_client: Some(client),
+                    onward: false,
+                    ..untouched
+                },
+                None => untouched,
+            },
+            _ => untouched,
+        }
+    }
+
+    /// **The client message a non-client button message stands for.** A double
+    /// click is the press it is in the client area of a window whose class asks
+    /// for no double clicks, which winit's does not.
+    fn client_button_message(message: u32) -> Option<u32> {
+        Some(match message {
+            WM_NCLBUTTONDOWN | WM_NCLBUTTONDBLCLK => WM_LBUTTONDOWN,
+            WM_NCLBUTTONUP => WM_LBUTTONUP,
+            WM_NCRBUTTONDOWN | WM_NCRBUTTONDBLCLK => WM_RBUTTONDOWN,
+            WM_NCRBUTTONUP => WM_RBUTTONUP,
+            WM_NCMBUTTONDOWN | WM_NCMBUTTONDBLCLK => WM_MBUTTONDOWN,
+            WM_NCMBUTTONUP => WM_MBUTTONUP,
+            WM_NCXBUTTONDOWN | WM_NCXBUTTONDBLCLK => WM_XBUTTONDOWN,
+            WM_NCXBUTTONUP => WM_XBUTTONUP,
+            _ => return None,
+        })
+    }
+
+    /// **The `wParam` of the client message a non-client one stands for**: the
+    /// key-state word a client mouse message carries, and, for an X button,
+    /// which one, in the high word where both kinds of message keep it.
+    pub(super) fn client_mouse_wparam(
+        message: u32,
+        wparam: WPARAM,
+        keys: MODIFIERKEYS_FLAGS,
+    ) -> WPARAM {
+        let x_button = match message {
+            WM_NCXBUTTONDOWN | WM_NCXBUTTONUP | WM_NCXBUTTONDBLCLK => wparam.0 & 0xFFFF_0000,
+            _ => 0,
+        };
+        WPARAM(x_button | keys.0 as usize)
+    }
+
+    /// The key-state word of a client mouse message, read the way the system
+    /// writes it: which buttons, and which of Shift and Ctrl, are down.
+    fn mouse_key_state() -> MODIFIERKEYS_FLAGS {
+        // SAFETY: a read of this thread's keyboard state.
+        let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
+        [
+            (VK_LBUTTON, MK_LBUTTON),
+            (VK_RBUTTON, MK_RBUTTON),
+            (VK_MBUTTON, MK_MBUTTON),
+            (VK_XBUTTON1, MK_XBUTTON1),
+            (VK_XBUTTON2, MK_XBUTTON2),
+            (VK_SHIFT, MK_SHIFT),
+            (VK_CONTROL, MK_CONTROL),
+        ]
+        .into_iter()
+        .filter(|(key, _)| down(*key))
+        .fold(MODIFIERKEYS_FLAGS(0), |word, (_, flag)| {
+            MODIFIERKEYS_FLAGS(word.0 | flag.0)
+        })
+    }
+
+    /// **Everything [`dispatch_window_button_message`] does to the world**, as
+    /// one seam: the subclass procedure's arm is [`FrameButtonEffects`], which
+    /// calls Win32; a test's arm records.
+    pub(super) trait WindowButtonEffects {
+        /// Where the frame's hit test puts a client point, or `None` when the
+        /// window cannot be measured.
+        fn hit_at(&mut self, client: POINT) -> Option<CustomFrameHit>;
+        /// A screen point in this window's client coordinates.
+        fn client_point(&mut self, screen: POINT) -> POINT;
+        /// The key-state word a client mouse message carries, as of now.
+        fn key_state(&mut self) -> MODIFIERKEYS_FLAGS;
+        /// Send the client message a non-client one stands for on to the next
+        /// procedure, at its client point and with its `wParam`.
+        fn send_client(&mut self, message: u32, wparam: WPARAM, client: POINT) -> LRESULT;
+        /// Send the client area's `WM_MOUSELEAVE` on to the next procedure.
+        fn send_leave(&mut self);
+        /// Ask the system to post a leave for this window, with these flags.
+        fn track_leave(&mut self, flags: TRACKMOUSEEVENT_FLAGS);
+        /// Hand the message, as it came, to `DefSubclassProc`.
+        fn pass_on(&mut self, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT;
+    }
+
+    /// The subclass procedure's arm of [`WindowButtonEffects`]: the live
+    /// window, its frame's state, and the Win32 calls.
+    struct FrameButtonEffects<'a> {
+        hwnd: HWND,
+        state: &'a CustomFrameState,
+    }
+
+    impl WindowButtonEffects for FrameButtonEffects<'_> {
+        fn hit_at(&mut self, client: POINT) -> Option<CustomFrameHit> {
+            // SAFETY: the subclass procedure's own window and its frame's state,
+            // on the window's thread.
+            unsafe { frame_hit_at(self.hwnd, self.state, client) }
+        }
+
+        fn client_point(&mut self, screen: POINT) -> POINT {
+            let mut point = screen;
+            // SAFETY: this thread's own window and a point on the stack.
+            let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(self.hwnd, &mut point) };
+            point
+        }
+
+        fn key_state(&mut self) -> MODIFIERKEYS_FLAGS {
+            mouse_key_state()
+        }
+
+        fn send_client(&mut self, message: u32, wparam: WPARAM, client: POINT) -> LRESULT {
+            let lparam =
+                LPARAM(((u32::from(client.y as u16) << 16) | u32::from(client.x as u16)) as isize);
+            // SAFETY: called from inside the subclass procedure for this window.
+            unsafe { DefSubclassProc(self.hwnd, message, wparam, lparam) }
+        }
+
+        fn send_leave(&mut self) {
+            // SAFETY: as above.
+            let _ = unsafe { DefSubclassProc(self.hwnd, WM_MOUSELEAVE, WPARAM(0), LPARAM(0)) };
+        }
+
+        fn track_leave(&mut self, flags: TRACKMOUSEEVENT_FLAGS) {
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: flags,
+                hwndTrack: self.hwnd,
+                dwHoverTime: 0,
+            };
+            // SAFETY: a structure sized as the call asks, naming this thread's
+            // window. A refusal leaves the next move over another part of the
+            // frame, or the next client move, to say the pointer came off.
+            let _ = unsafe { TrackMouseEvent(&mut track) };
+        }
+
+        fn pass_on(&mut self, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            // SAFETY: as above.
+            unsafe { DefSubclassProc(self.hwnd, message, wparam, lparam) }
+        }
+    }
+
+    /// Carry out [`window_button_passage`] for one message, from the subclass
+    /// procedure.
+    ///
+    /// # Safety
+    ///
+    /// Called from the custom-frame subclass procedure with that call's own
+    /// arguments; `state` is the frame's.
+    unsafe fn pass_window_button_message(
+        hwnd: HWND,
+        state: &CustomFrameState,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        dispatch_window_button_message(
+            &state.on_window_button,
+            &mut FrameButtonEffects { hwnd, state },
+            message,
+            wparam,
+            lparam,
+        )
+    }
+
+    /// **Carry out [`window_button_passage`] for one message**, through
+    /// `effects`. `on_button` is the frame's [`CustomFrameState::on_window_button`].
+    pub(super) fn dispatch_window_button_message(
+        on_button: &Cell<bool>,
+        effects: &mut impl WindowButtonEffects,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        let was = on_button.get();
+        let point = POINT {
+            x: low_word_signed(lparam.0),
+            y: high_word_signed(lparam.0),
+        };
+        let on = match message {
+            WM_NCMOUSELEAVE => false,
+            WM_MOUSELEAVE => was,
+            // A client move carries a client point.
+            WM_MOUSEMOVE => was && effects.hit_at(point) == Some(CustomFrameHit::MaximizeButton),
+            // Every non-client mouse message carries its hit code in the low word.
+            _ => (wparam.0 & 0xFFFF) as u32 == HTMAXBUTTON,
+        };
+        let passage = window_button_passage(message, on, was);
+        // Written before anything goes on, so a message sent while this one is
+        // being handled reads where the pointer is now.
+        on_button.set(passage.on_button);
+        if passage.leave_first {
+            effects.send_leave();
+        }
+        let mut result = LRESULT(0);
+        if let Some(client_message) = passage.as_client {
+            // A non-client mouse message carries its point in screen
+            // coordinates, a client one in client coordinates.
+            let client = effects.client_point(point);
+            let client_wparam = client_mouse_wparam(message, wparam, effects.key_state());
+            result = effects.send_client(client_message, client_wparam, client);
+        }
+        if passage.track_leave {
+            // After the client move and not before it: the system tracks one
+            // leave at a time, and winit asks for the client area's while it
+            // handles that move.
+            effects.track_leave(TME_LEAVE | TME_NONCLIENT);
+        }
+        if passage.onward {
+            result = effects.pass_on(message, wparam, lparam);
+        }
+        result
     }
 
     /// **The messages a touch makes that Windows' own translation has to see**,
@@ -25812,22 +26209,33 @@ mod custom_frame_tests {
 
     /// **The boxes the application draws in the bar these tests describe**
     /// (§13.11 ⑥): a tab strip whose run ends at 240 logical pixels, and a
-    /// caption run of four 46-wide buttons ending on the window's own edge.
-    /// Everything else on the bar is the window's to be dragged by, which is
-    /// what the cases below strike.
-    fn app_boxes(dpi: u32) -> Vec<[i32; 4]> {
+    /// caption run of four 46-wide buttons ending on the window's own edge —
+    /// the gear, minimize, maximize and close, the third of them stated as the
+    /// maximize button. Everything else on the bar is the window's to be
+    /// dragged by, which is what the cases below strike.
+    fn app_boxes(dpi: u32) -> Vec<TitleBarBox> {
         let title = logical_px_for_dpi(40, dpi);
         let width = logical_px_for_dpi(960, dpi);
         let button = logical_px_for_dpi(46, dpi);
-        let mut boxes = vec![[0, 0, logical_px_for_dpi(240, dpi), title]];
+        let mut boxes = vec![TitleBarBox {
+            rect: [0, 0, logical_px_for_dpi(240, dpi), title],
+            role: TitleBarBoxRole::Own,
+        }];
         boxes.extend((0..4).map(|index| {
             let left = width - (4 - index) * button;
-            [left, 0, left + button, title]
+            TitleBarBox {
+                rect: [left, 0, left + button, title],
+                role: if index == 2 {
+                    TitleBarBoxRole::MaximizeButton
+                } else {
+                    TitleBarBoxRole::Own
+                },
+            }
         }));
         boxes
     }
 
-    fn metrics(dpi: u32, app_boxes: &[[i32; 4]]) -> CustomFrameMetrics<'_> {
+    fn metrics(dpi: u32, app_boxes: &[TitleBarBox]) -> CustomFrameMetrics<'_> {
         CustomFrameMetrics {
             width: logical_px_for_dpi(960, dpi),
             height: logical_px_for_dpi(600, dpi),
@@ -25909,6 +26317,455 @@ mod custom_frame_tests {
         assert_eq!(
             custom_frame_hit_test(m, m.width - 1, 1),
             CustomFrameHit::Client
+        );
+    }
+
+    /// RED (T-SNAP-LAYOUTS-MAXBUTTON) — **the box stated as the maximize button
+    /// answers as the maximize button, and every other box as the
+    /// application's.** Windows opens Snap Layouts over a custom title bar's
+    /// maximize button only where the frame says `HTMAXBUTTON`, and a frame
+    /// that called every box `Client` never said it.
+    ///
+    /// MUTATION: answer `CustomFrameHit::Client` for a point in any box, role
+    /// or no role (the code before this ticket), and the maximize cases go red.
+    #[test]
+    fn custom_frame_hit_test_knows_the_caption_buttons_roles() {
+        let boxes = app_boxes(96);
+        let m = metrics(96, &boxes);
+        let maximize = boxes[3].rect;
+        // Its middle and its four inside corners.
+        for (x, y) in [
+            ((maximize[0] + maximize[2]) / 2, 20),
+            (maximize[0], maximize[1] + 8),
+            (maximize[2] - 1, maximize[1] + 8),
+            (maximize[0], maximize[3] - 1),
+            (maximize[2] - 1, maximize[3] - 1),
+        ] {
+            assert_eq!(
+                custom_frame_hit_test(m, x, y),
+                CustomFrameHit::MaximizeButton,
+                "({x}, {y}) is in the maximize button's box"
+            );
+        }
+        // Its neighbours are the application's own, and the tab strip is.
+        assert_eq!(
+            custom_frame_hit_test(m, maximize[0] - 1, 20),
+            CustomFrameHit::Client,
+            "minimize, left of it"
+        );
+        assert_eq!(
+            custom_frame_hit_test(m, maximize[2], 20),
+            CustomFrameHit::Client,
+            "close, right of it"
+        );
+        assert_eq!(custom_frame_hit_test(m, 100, 20), CustomFrameHit::Client);
+        // The resize edge still outranks the bar above the button.
+        assert_eq!(
+            custom_frame_hit_test(m, (maximize[0] + maximize[2]) / 2, 0),
+            CustomFrameHit::Top,
+            "the top resize edge runs across the caption run"
+        );
+        // An own box laid over it does not take it away: order is not read.
+        let mut overlaid = boxes.clone();
+        overlaid.push(TitleBarBox {
+            rect: maximize,
+            role: TitleBarBoxRole::Own,
+        });
+        overlaid.rotate_right(1);
+        assert_eq!(
+            custom_frame_hit_test(metrics(96, &overlaid), (maximize[0] + maximize[2]) / 2, 20),
+            CustomFrameHit::MaximizeButton
+        );
+        // A maximized window has no resize band, and the button is still the
+        // button — up to the screen's top edge, where the hand meets it.
+        let mut zoomed = m;
+        zoomed.resizable = false;
+        zoomed.resize_border = 0;
+        assert_eq!(
+            custom_frame_hit_test(zoomed, (maximize[0] + maximize[2]) / 2, 0),
+            CustomFrameHit::MaximizeButton
+        );
+        assert_eq!(
+            custom_frame_hit_test(zoomed, (maximize[0] + maximize[2]) / 2, 20),
+            CustomFrameHit::MaximizeButton
+        );
+    }
+}
+
+/// **How the custom frame hands the maximize button back to the application**
+/// (T-SNAP-LAYOUTS-MAXBUTTON): the `WM_NCHITTEST` code, and the decision about
+/// every pointer message that code turns non-client.
+#[cfg(all(test, windows))]
+mod window_button_message_tests {
+    use super::CustomFrameHit;
+    use super::windows_impl::{
+        ButtonPassage, WindowButtonEffects, client_mouse_wparam, dispatch_window_button_message,
+        hit_test_code, window_button_passage,
+    };
+    use std::cell::Cell;
+    use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
+    use windows::Win32::System::SystemServices::{
+        MK_CONTROL, MK_LBUTTON, MK_SHIFT, MODIFIERKEYS_FLAGS,
+    };
+    use windows::Win32::UI::Controls::WM_MOUSELEAVE;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT_FLAGS,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON, HTRIGHT,
+        HTTOP, HTTOPLEFT, HTTOPRIGHT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+        WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+        WM_NCRBUTTONUP, WM_NCXBUTTONUP, WM_RBUTTONUP, XBUTTON2,
+    };
+
+    /// RED (T-SNAP-LAYOUTS-MAXBUTTON) — **the maximize button's region is
+    /// `HTMAXBUTTON` to Windows**, and every other region keeps its code.
+    ///
+    /// MUTATION: map `CustomFrameHit::MaximizeButton` to `HTCLIENT` and this
+    /// goes red on its first line.
+    #[test]
+    fn the_frame_answers_htmaxbutton_for_the_maximize_button() {
+        assert_eq!(hit_test_code(CustomFrameHit::MaximizeButton), HTMAXBUTTON);
+        for (hit, code) in [
+            (CustomFrameHit::Client, HTCLIENT),
+            (CustomFrameHit::Caption, HTCAPTION),
+            (CustomFrameHit::Left, HTLEFT),
+            (CustomFrameHit::Right, HTRIGHT),
+            (CustomFrameHit::Top, HTTOP),
+            (CustomFrameHit::Bottom, HTBOTTOM),
+            (CustomFrameHit::TopLeft, HTTOPLEFT),
+            (CustomFrameHit::TopRight, HTTOPRIGHT),
+            (CustomFrameHit::BottomLeft, HTBOTTOMLEFT),
+            (CustomFrameHit::BottomRight, HTBOTTOMRIGHT),
+        ] {
+            assert_eq!(hit_test_code(hit), code, "{hit:?}");
+        }
+    }
+
+    /// RED (T-SNAP-LAYOUTS-MAXBUTTON) — **a press and a release on the
+    /// maximize button take the button's own road**: each goes on to the
+    /// application as the client message it was before the frame said
+    /// `HTMAXBUTTON`, and never on as itself — `DefWindowProc` given the
+    /// non-client press draws and tracks a native button of its own, and given
+    /// the right button's release opens the window menu. The press is the
+    /// client press, which is where the application's caption buttons act; a
+    /// quick second press is a press, as it is in a client area whose window
+    /// class asks for no double clicks.
+    ///
+    /// MUTATIONS: let `WM_NCLBUTTONDOWN` go on as itself (`onward: true`) and
+    /// the first assertion goes red; swap the client messages the press and the
+    /// release stand for (the press acting on the release) and the first two
+    /// go red; turn the double click into nothing and the third goes red.
+    #[test]
+    fn an_nc_press_and_release_on_the_maximize_button_takes_the_buttons_own_road() {
+        let as_client = |client| ButtonPassage {
+            leave_first: false,
+            as_client: Some(client),
+            onward: false,
+            on_button: true,
+            track_leave: false,
+        };
+        assert_eq!(
+            window_button_passage(WM_NCLBUTTONDOWN, true, true),
+            as_client(WM_LBUTTONDOWN),
+            "the press, as the client press, swallowed from the default procedure"
+        );
+        assert_eq!(
+            window_button_passage(WM_NCLBUTTONUP, true, true),
+            as_client(WM_LBUTTONUP),
+            "the release, as the client release"
+        );
+        assert_eq!(
+            window_button_passage(WM_NCLBUTTONDBLCLK, true, true),
+            as_client(WM_LBUTTONDOWN),
+            "a second press inside the double-click time is the press it was"
+        );
+        assert_eq!(
+            window_button_passage(WM_NCRBUTTONUP, true, true),
+            as_client(WM_RBUTTONUP),
+            "the right button's release is the application's, not the window menu"
+        );
+        // The X button keeps saying which one it is; the key word is the
+        // client message's own.
+        let x2 = (usize::from(XBUTTON2)) << 16;
+        assert_eq!(
+            client_mouse_wparam(
+                WM_NCXBUTTONUP,
+                WPARAM(x2 | HTMAXBUTTON as usize),
+                MODIFIERKEYS_FLAGS(MK_SHIFT.0 | MK_LBUTTON.0)
+            ),
+            WPARAM(x2 | (MK_SHIFT.0 | MK_LBUTTON.0) as usize)
+        );
+        assert_eq!(
+            client_mouse_wparam(WM_NCLBUTTONDOWN, WPARAM(HTMAXBUTTON as usize), MK_LBUTTON),
+            WPARAM(MK_LBUTTON.0 as usize),
+            "the hit code does not travel into the client message"
+        );
+        // A press anywhere else in the frame is the system's, as it was: the
+        // caption's drag and the edges' resize.
+        assert_eq!(
+            window_button_passage(WM_NCLBUTTONDOWN, false, false),
+            ButtonPassage {
+                leave_first: false,
+                as_client: None,
+                onward: true,
+                on_button: false,
+                track_leave: false,
+            }
+        );
+    }
+
+    /// What the application hears of the pointer, as winit tells it: on after a
+    /// client move, off after a leave. `steps` are the messages the frame is
+    /// sent and whether each puts the pointer on the button, read the way the
+    /// subclass reads it (`WM_NCMOUSELEAVE` never does, `WM_MOUSELEAVE` keeps
+    /// what was).
+    fn hover_after(steps: &[(u32, bool)]) -> Vec<bool> {
+        let (mut was, mut hovered) = (false, false);
+        let mut heard = Vec::new();
+        for &(message, on) in steps {
+            let on = match message {
+                WM_NCMOUSELEAVE => false,
+                WM_MOUSELEAVE => was,
+                _ => on,
+            };
+            let passage = window_button_passage(message, on, was);
+            if passage.leave_first {
+                hovered = false;
+            }
+            if passage.as_client == Some(WM_MOUSEMOVE) {
+                hovered = true;
+            }
+            if passage.onward {
+                match message {
+                    WM_MOUSEMOVE => hovered = true,
+                    WM_MOUSELEAVE => hovered = false,
+                    _ => {}
+                }
+            }
+            was = passage.on_button;
+            heard.push(hovered);
+        }
+        heard
+    }
+
+    /// RED (T-SNAP-LAYOUTS-MAXBUTTON) — **the pointer coming onto the maximize
+    /// button lights it and the pointer leaving puts it out**, through the very
+    /// client move and leave the application has always drawn the wash from.
+    ///
+    /// The awkward step is the third: winit asks for the client area's leave
+    /// as the pointer enters, and the system answers at once because the button
+    /// is not client area to it. That leave is kept back, so the wash stays;
+    /// the non-client leave the frame asked for is the one that puts it out.
+    ///
+    /// MUTATION: make `WM_NCMOUSELEAVE` say nothing (`leave_first: false` and
+    /// the pointer kept on the button) and the hover sticks: the fifth step
+    /// goes red.
+    #[test]
+    fn nc_mouse_move_and_leave_drive_the_drawn_buttons_hover() {
+        let onto_the_button = window_button_passage(WM_NCMOUSEMOVE, true, false);
+        assert_eq!(
+            onto_the_button,
+            ButtonPassage {
+                leave_first: false,
+                as_client: Some(WM_MOUSEMOVE),
+                onward: true,
+                on_button: true,
+                track_leave: true,
+            },
+            "the client move for the application, the non-client one still for \
+             the system (its hover is the flyout), and the non-client leave asked for"
+        );
+        assert_eq!(
+            hover_after(&[
+                // The tab strip's client area tells winit the pointer left it.
+                (WM_MOUSELEAVE, false),
+                // Onto the button.
+                (WM_NCMOUSEMOVE, true),
+                // winit's own leave, answered at once.
+                (WM_MOUSELEAVE, false),
+                (WM_NCMOUSEMOVE, true),
+                // Off it, out of the window.
+                (WM_NCMOUSELEAVE, false),
+                // And a later client leave is the client area's again.
+                (WM_MOUSELEAVE, false),
+            ]),
+            [false, true, true, true, false, false]
+        );
+        // Off it onto the empty bar, which is non-client too and raises no
+        // non-client leave.
+        assert_eq!(
+            hover_after(&[(WM_NCMOUSEMOVE, true), (WM_NCMOUSEMOVE, false)]),
+            [true, false]
+        );
+        // Off it into the client area, before the non-client leave arrives:
+        // the client move is a fresh entry.
+        assert_eq!(
+            window_button_passage(WM_MOUSEMOVE, false, true),
+            ButtonPassage {
+                leave_first: true,
+                as_client: None,
+                onward: true,
+                on_button: false,
+                track_leave: false,
+            }
+        );
+        // A client move whose point is still the button — the hand holding a
+        // press — leaves it lit.
+        assert_eq!(
+            hover_after(&[(WM_NCMOUSEMOVE, true), (WM_MOUSEMOVE, true)]),
+            [true, true]
+        );
+    }
+
+    /// One thing [`dispatch_window_button_message`] did to the world, as the
+    /// recording arm of its seam writes it down.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Effect {
+        /// A client message sent on: message, `wParam`, client point.
+        Client(u32, usize, (i32, i32)),
+        /// The client area's `WM_MOUSELEAVE` sent on.
+        Leave,
+        /// A leave asked of the system, with these flags.
+        Track(u32),
+        /// The message handed, as it came, to `DefSubclassProc`.
+        PassOn(u32),
+    }
+
+    /// The recording arm: a window whose client origin stands at `ORIGIN` on
+    /// the screen, whose hit test answers `hit`, and whose keys are `keys`.
+    struct Recorder {
+        seen: Vec<Effect>,
+        hit: Option<CustomFrameHit>,
+        keys: MODIFIERKEYS_FLAGS,
+    }
+
+    const ORIGIN: (i32, i32) = (100, 50);
+
+    impl WindowButtonEffects for Recorder {
+        fn hit_at(&mut self, _client: POINT) -> Option<CustomFrameHit> {
+            self.hit
+        }
+        fn client_point(&mut self, screen: POINT) -> POINT {
+            POINT {
+                x: screen.x - ORIGIN.0,
+                y: screen.y - ORIGIN.1,
+            }
+        }
+        fn key_state(&mut self) -> MODIFIERKEYS_FLAGS {
+            self.keys
+        }
+        fn send_client(&mut self, message: u32, wparam: WPARAM, client: POINT) -> LRESULT {
+            self.seen
+                .push(Effect::Client(message, wparam.0, (client.x, client.y)));
+            LRESULT(0)
+        }
+        fn send_leave(&mut self) {
+            self.seen.push(Effect::Leave);
+        }
+        fn track_leave(&mut self, flags: TRACKMOUSEEVENT_FLAGS) {
+            self.seen.push(Effect::Track(flags.0));
+        }
+        fn pass_on(&mut self, message: u32, _wparam: WPARAM, _lparam: LPARAM) -> LRESULT {
+            self.seen.push(Effect::PassOn(message));
+            LRESULT(0)
+        }
+    }
+
+    /// A mouse message's `lParam` for a point.
+    fn at(x: i32, y: i32) -> LPARAM {
+        LPARAM(((u32::from(y as u16) << 16) | u32::from(x as u16)) as isize)
+    }
+
+    /// RED (T-SNAP-LAYOUTS-MAXBUTTON, review nit) — **the dispatcher does what
+    /// the passage says, and nothing else**: driven through its effects seam with
+    /// a recording arm, one message at a time, over a window whose client
+    /// origin stands at (100, 50) on the screen and a pointer at (1000, 60) on
+    /// the maximize button.
+    ///
+    /// MUTATIONS: hand the non-client press to `DefSubclassProc` as well and the
+    /// press step goes red; forget the `TrackMouseEvent` and the move step goes
+    /// red; send the leave twice and the leave step goes red.
+    #[test]
+    fn the_dispatcher_carries_out_the_passage_through_its_effects() {
+        let on_button = Cell::new(false);
+        let mut recorder = Recorder {
+            seen: Vec::new(),
+            hit: Some(CustomFrameHit::MaximizeButton),
+            keys: MODIFIERKEYS_FLAGS(0),
+        };
+        let step = |recorder: &mut Recorder, message: u32, wparam: usize, keys| {
+            recorder.seen.clear();
+            recorder.keys = keys;
+            dispatch_window_button_message(
+                &on_button,
+                recorder,
+                message,
+                WPARAM(wparam),
+                at(1000, 60),
+            );
+            (recorder.seen.clone(), on_button.get())
+        };
+        let button = HTMAXBUTTON as usize;
+        let client = (1000 - ORIGIN.0, 60 - ORIGIN.1);
+
+        // Onto the button: the client move for the application, the leave the
+        // frame asks for, and the move itself for the system.
+        assert_eq!(
+            step(&mut recorder, WM_NCMOUSEMOVE, button, MK_CONTROL),
+            (
+                vec![
+                    Effect::Client(WM_MOUSEMOVE, MK_CONTROL.0 as usize, client),
+                    Effect::Track((TME_LEAVE | TME_NONCLIENT).0),
+                    Effect::PassOn(WM_NCMOUSEMOVE),
+                ],
+                true
+            ),
+            "the move"
+        );
+        // winit's client-area leave, answered at once over the button: kept back.
+        assert_eq!(
+            step(&mut recorder, WM_MOUSELEAVE, 0, MODIFIERKEYS_FLAGS(0)),
+            (vec![], true),
+            "the client area's leave"
+        );
+        // The press: exactly one client press, at the client point, with the
+        // key state, and nothing to `DefSubclassProc`.
+        assert_eq!(
+            step(&mut recorder, WM_NCLBUTTONDOWN, button, MK_LBUTTON),
+            (
+                vec![Effect::Client(
+                    WM_LBUTTONDOWN,
+                    MK_LBUTTON.0 as usize,
+                    client
+                )],
+                true
+            ),
+            "the press"
+        );
+        assert_eq!(
+            step(&mut recorder, WM_NCLBUTTONDBLCLK, button, MK_LBUTTON),
+            (
+                vec![Effect::Client(
+                    WM_LBUTTONDOWN,
+                    MK_LBUTTON.0 as usize,
+                    client
+                )],
+                true
+            ),
+            "the double click is one press"
+        );
+        // Off it: one client leave, the cell cleared, the leave itself on to
+        // the system.
+        assert_eq!(
+            step(&mut recorder, WM_NCMOUSELEAVE, 0, MODIFIERKEYS_FLAGS(0)),
+            (vec![Effect::Leave, Effect::PassOn(WM_NCMOUSELEAVE)], false),
+            "the leave"
+        );
+        // And a client leave after that is the client area's own again.
+        assert_eq!(
+            step(&mut recorder, WM_MOUSELEAVE, 0, MODIFIERKEYS_FLAGS(0)),
+            (vec![Effect::PassOn(WM_MOUSELEAVE)], false)
         );
     }
 }

@@ -6,9 +6,20 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Added
 
-## 0.4.8-preview — 2026-10-DD
+- Clicking a video's picture plays it or pauses it. <!-- zh: 单击视频画面即可播放或暂停。 -->
+- Double-clicking a video's picture zooms its pane, and the video goes on playing or stays paused as it was. <!-- zh: 双击视频画面会放大它所在的窗格，视频照旧播放或保持暂停。 -->
+- Turning the mouse wheel over a video's picture changes its volume, and the new volume shows for a moment above the control bar. <!-- zh: 在视频画面上滚动鼠标滚轮可调节音量，新的音量会在控制条上方短暂显示。 -->
+- Hovering over a video's progress bar shows the time under the pointer, and while you drag the playhead it shows where you are. <!-- zh: 鼠标停在视频进度条上时显示指针处的时间；拖动播放头时显示当前位置。 -->
+- `Home` and `End` go to a video's start and end, and while it is paused `,` and `.` step one frame back and forward. <!-- zh: `Home` 和 `End` 跳到视频的开头和结尾；暂停时，`,` 和 `.` 后退或前进一帧。 -->
+- A video that has ended plays again from the start, whether you press the play button, press Space or click the picture. <!-- zh: 已播完的视频再次播放时从头开始，无论是按播放按钮、按空格还是单击画面。 -->
+
+### Fixed
+
+- On Windows 11, resting the pointer on the maximize button opens the snap layouts, and Win+Z shows them over the button. <!-- zh: pending T-SNAP-LAYOUTS-MAXBUTTON -->
+
+## 0.4.8-preview — 2026-10-23
 
 ### Added
 
@@ -48,7 +59,7 @@ Nothing yet.
 - The copy Folio opens when an update could not be finished is no longer offered that update and no longer checks for updates; before, an update started from it would have been prepared inside that copy's folder instead of the installed Folio's. <!-- zh: 更新无法完成时 Folio 打开的那份副本不再提供该更新，也不再检查更新；以前从它开始的更新会准备在该副本的文件夹中，而不是已安装的 Folio 的文件夹中。 -->
 - On Windows, saving over a recording or another file right after Folio has shown it is no longer refused because Folio still has the file open. <!-- zh: Windows 上，在 Folio 显示录制文件或其他文件之后立即覆盖保存，不再因 Folio 仍打开着该文件而被拒绝。 -->
 - A window no longer keeps one processor busy after a clock it was waiting for has passed (most often an agent's pane in a tab not on screen), which under a heavy CPU load left the terminal slow to draw and scroll. <!-- zh: 窗口等待的时刻过去之后，不再让一个处理器核心一直忙碌（最常见于不在屏幕上的标签页中的 agent 窗格）；这在 CPU 负载很高时曾让终端绘制和滚动变慢。 -->
-- A PDF previewed in a pane on a display scaled to 125 %, 150 % or 175 % no longer shows letters of uneven weight and words with gaps in them. On such a display the PDF viewer's own controls are drawn larger than before (a third larger at 150 %), and its toolbar is shortened in panes narrower than about 1800 pixels at 150 %, shortened again below about 1150, and may not be shown at all. <!-- pending the refit check --> <!-- zh: 在缩放为 125%、150% 或 175% 的显示器上，窗格中预览的 PDF 不再出现笔画粗细不均、单词中间断开的文字。在这类显示器上，PDF 查看器自身的控件比以前画得更大（150% 时大三分之一）；150% 时，窗格窄于约 1800 像素时工具栏会缩短，窄于约 1150 像素时再缩短，也可能完全不显示。 -->
+- A PDF previewed in a pane on a display scaled to 125 %, 150 % or 175 % no longer shows letters of uneven weight and words with gaps in them. On such a display the PDF viewer's own controls are drawn larger than before (a third larger at 150 %), and its toolbar is shortened in panes narrower than about 1800 pixels at 150 %, shortened again below about 1150, and may not be shown at all. A pane resized after a PDF is opened does not re-fit the page to its new width until the PDF is opened again, as in earlier versions. <!-- zh: 在缩放为 125%、150% 或 175% 的显示器上，窗格中预览的 PDF 不再出现笔画粗细不均、单词中间断开的文字。在这类显示器上，PDF 查看器自身的控件比以前画得更大（150% 时大三分之一）；150% 时，窗格窄于约 1800 像素时工具栏会缩短，窄于约 1150 像素时再缩短，也可能完全不显示。PDF 打开后再调整窗格大小，页面不会按新的宽度重新排布，重新打开该 PDF 才会；以前的版本也是如此。 -->
 - When Folio cannot save your window layout (a full disk, a folder that became read-only), it tells you once and stops trying again every couple of seconds; it tries again at your next change and when you quit. <!-- zh: Folio 无法保存窗口布局时（磁盘已满、文件夹变为只读），只提示一次，不再每隔几秒重试；下次改动时和退出时会再试。 -->
 - A picture that could not be loaded is no longer read again and again while the window holds many other pictures. <!-- zh: 窗口中有许多其他图片时，无法载入的图片不再被反复读取。 -->
 - A GIF caught while it was being written plays once the write finishes. <!-- zh: 正在写入时被打开的 GIF，写入完成后即可播放。 -->
@@ -57,6 +68,7 @@ Nothing yet.
 - An update is no longer undone because the new version's note that it started properly was refused for a moment (another program holding the folder, say); Folio tries again about four times a second, for up to about fifteen minutes, or for as long as it takes when the new version has to confirm the update itself. <!-- zh: 新版本记录自己已正常启动的写入被短暂拒绝时（例如另一个程序占用了文件夹），更新不再被撤销：Folio 每秒重试约四次，最长约十五分钟；需要新版本自己确认更新时，则一直重试到写入为止。 -->
 - On the Git page, presses in one repository run one after another and never wait for work in another repository, and a press Folio could not carry out says so and lets its row go instead of leaving it dimmed. <!-- zh: Git 页上，同一仓库中的操作依次执行，不再等待其他仓库的工作；Folio 无法执行的操作会加以说明并恢复该行，不再让它一直变暗。 -->
 - After an update, Folio no longer says that changes made while the new version was being tried were not kept when they were, in a rare case where the disk took the note but would not confirm it. <!-- zh: 更新之后，在磁盘已写入记录却不予确认的少见情况下，Folio 不再误报新版本试运行期间所做的更改没有保留。 -->
+- On Windows, the card that says changes were not kept, or that the update was undone, is no longer shown on two starts in a row when the update was finished as Folio opened. <!-- zh: Windows 上，更新在 Folio 打开时完成后，说明更改没有保留或更新已撤销的卡片不再在连续两次启动时都显示。 -->
 - A Git page that is docked, popped out or moved to another tab while git is still working on it now gets the answer: its dimmed rows come back and a checkout it started no longer blocks the next one. <!-- zh: git 仍在处理时被停靠、弹出或移到另一个标签页的 Git 页，现在能收到结果：变暗的行会恢复，它发起的检出不再阻塞下一次检出。 -->
 - A slow checkout or other git action in one repository no longer holds up the Git pages of other repositories: their files and branches are read while it runs. <!-- zh: 某个仓库中缓慢的检出或其他 git 操作不再拖住其他仓库的 Git 页：它运行期间，其他仓库的文件和分支照常读取。 -->
 - A diff or a file at a commit opened from a Git page now shows up even when that page is closed, or its tab merged into another, before git answers; if Folio's git reading has stopped, the pane says it was not loaded instead of "Loading…" for ever, and opening it again tries again. <!-- zh: 从 Git 页打开的差异或某次提交时的文件，即使在 git 回答前该页已关闭、或其标签页已并入另一个，现在也会显示；Folio 的 git 读取已停止时，窗格显示未载入，不再一直显示「载入中…」，再次打开即会重试。 -->

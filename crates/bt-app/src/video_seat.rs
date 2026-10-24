@@ -146,6 +146,19 @@ const VIDEO_STEP_SECONDS: f64 = 5.0;
 /// How far `↑` and `↓` move the volume.
 const VIDEO_GAIN_STEP: f64 = 0.05;
 
+/// **The frame rate a frame step is measured in when the engine reports none**
+/// (owner's ruling 2026-10-23, row 42): a thirtieth of a second, the commonest
+/// rate a screen recording is made at.
+const VIDEO_FALLBACK_FRAME_RATE: f64 = 30.0;
+
+/// The gap between the bar's top edge and a label standing over it — the time
+/// under the pointer on the scrubber, and the volume a wheel just set.
+const BAR_LABEL_GAP_LOGICAL_PX: f32 = 4.0;
+/// A label's padding either side of its figures.
+const BAR_LABEL_PADDING_X_LOGICAL_PX: f32 = 6.0;
+/// A label's corner — the house's small radius.
+const BAR_LABEL_RADIUS_LOGICAL_PX: f32 = 4.0;
+
 /// What the mute button restores when it is pressed on a video whose volume is
 /// already nothing — the same half the shell page's script used, and for its
 /// reason: un-muting into silence is a button that does nothing.
@@ -723,6 +736,22 @@ pub struct VideoSeat {
     acted_at: Instant,
     over_bar: bool,
     grab: Option<BarSlot>,
+    /// **Where the pointer stands over this seat's picture**, in whole-surface
+    /// pixels, or `None` once it has left — what the scrubber's time label is
+    /// read against (row 41). A fact about the hand, not about the engine.
+    hover: Option<[f32; 2]>,
+    /// **When the wheel last moved the volume** (row 40) — the start of the
+    /// flash that says the volume, on the band's flash clock
+    /// ([`crate::FOOT_REVEAL_FEEDBACK`]). Only the moment is kept: the number
+    /// flashed is the engine's, read when it is painted.
+    gain_flash_at: Option<Instant>,
+    /// **What the window last drew of this bar on its own clocks** — its
+    /// opacity, in the 256 steps a frame can show, and whether the volume's
+    /// flash was up — or `None` before the first look. The bar changes on those
+    /// clocks with no new picture to carry it while the recording is paused, so
+    /// the window's strip tick asks [`Self::bar_owes_a_frame`] and pays the
+    /// frame itself (review round 1, 2026-10-23).
+    bar_drawn: Option<(u8, bool)>,
     /// Which of [`VIDEO_RATES`] is in force. An index and not a number, because
     /// the button cycles and a float that had drifted would never match.
     rate_index: usize,
@@ -764,6 +793,9 @@ impl VideoSeat {
             acted_at: now,
             over_bar: false,
             grab: None,
+            hover: None,
+            gain_flash_at: None,
+            bar_drawn: None,
             rate_index: 0,
         })
     }
@@ -876,18 +908,98 @@ impl VideoSeat {
 
     // ── the verbs ─────────────────────────────────────────────────────────
 
-    /// Play if paused (or ended, from the start), pause if playing.
-    pub fn toggle(&mut self, now: Instant) {
+    /// **Play if paused (or at the end, from the start), pause if playing** —
+    /// every play door's verb: the bar's button, Space, a click on the picture
+    /// (row 43).
+    ///
+    /// "At the end" is [`stands_at_end`]: the engine's `ended`, or a playhead
+    /// put on the last frame by `End` or the scrubber, which is a recording
+    /// with nothing left to play just as surely.
+    ///
+    /// Answers what would put it back — see [`ClickUndo`].
+    pub fn toggle(&mut self, now: Instant) -> ClickUndo {
         let state = self.engine.state();
-        if state.playing {
+        let undo = if state.playing {
             self.engine.pause();
+            ClickUndo::Play
         } else {
-            if state.ended {
+            if stands_at_end(&state) {
                 self.engine.seek(0.0);
             }
             self.engine.play();
+            ClickUndo::PauseAt(state.position_secs)
+        };
+        self.acted(now);
+        undo
+    }
+
+    /// **One gesture on the picture** (owner's ruling 2026-10-23, rows 38–40) —
+    /// the door a pane and a floating window both reach, so the two faces
+    /// answer a hand the same way by construction.
+    ///
+    /// A click is [`Self::toggle`] and answers what would put it back; the
+    /// second press of a double click is handed that answer and puts it back,
+    /// so the zoom it means leaves playback as it was; a wheel moves the volume
+    /// one [`VIDEO_GAIN_STEP`] per notch and flashes it.
+    pub fn picture(&mut self, gesture: PictureGesture, now: Instant) -> Option<ClickUndo> {
+        match gesture {
+            PictureGesture::Click => Some(self.toggle(now)),
+            PictureGesture::DoubleClick(undo) => {
+                match undo {
+                    ClickUndo::Play => self.engine.play(),
+                    ClickUndo::PauseAt(position) => {
+                        self.engine.pause();
+                        self.engine.seek(position);
+                    }
+                }
+                self.acted(now);
+                None
+            }
+            PictureGesture::Wheel(notches) => {
+                self.nudge_volume(f64::from(notches) * VIDEO_GAIN_STEP, now);
+                self.gain_flash_at = Some(now);
+                None
+            }
+        }
+    }
+
+    /// The playhead to the start — `Home`.
+    pub fn seek_start(&mut self, now: Instant) {
+        self.engine.seek(0.0);
+        self.acted(now);
+    }
+
+    /// **The playhead to the end — `End` — and the recording stopped there**,
+    /// playing or paused: it stands on its last frame, which
+    /// [`stands_at_end`] reads as the end, so the next play door starts it from
+    /// the beginning (row 43).
+    ///
+    /// **Paused by the seat, not left to run into the end** (Mac gate,
+    /// 2026-10-23). Media Foundation reports `ended` the moment a seek lands on
+    /// the end of a playing stream; AVFoundation says it only through the
+    /// did-play-to-end notification, on its own time — and not at all without
+    /// a run loop — so a playing recording sent to its end stood there
+    /// "playing" on one machine and ended on the other. The pause is the
+    /// engine's own verb and the position is the engine's own report; the seat
+    /// keeps no ended state of its own. A recording that declares no length has
+    /// no end to go to, and keeps playing.
+    pub fn seek_end(&mut self, now: Instant) {
+        if let Some(duration) = self.engine.state().duration_secs
+            && duration.is_finite()
+        {
+            self.engine.pause();
+            self.engine.seek(duration);
         }
         self.acted(now);
+    }
+
+    /// **One frame back or forward — `,` and `.` — while paused**, and nothing
+    /// while playing: a frame step is a reading of one picture, and a running
+    /// clock has already moved past it.
+    pub fn step_frame(&mut self, frames: f64, now: Instant) {
+        if let Some(seconds) = frame_step(&self.engine.state(), frames) {
+            self.step(seconds, now);
+        }
     }
 
     /// Move the playhead by `seconds`, clamped to the recording.
@@ -953,8 +1065,9 @@ impl VideoSeat {
         self.acted(now);
     }
 
-    /// **The five keys the ruling named**, answered only by the surface that is
-    /// holding the keyboard. `true` when the key was one of them.
+    /// **The player's keys** — the five the 2026-08-28 ruling named
+    /// (Space, Shift+`←`/`→`, `↑`/`↓`, `M`) and row 42's Home/End and `,`/`.`
+    /// — answered only by the surface that is holding the keyboard. `true` when the key was one of them.
     ///
     /// A modified key is never one of these: `Ctrl`, `Alt` and `Win` chords are
     /// the window's, and a player that swallowed `Ctrl+←` would be eating one of
@@ -976,7 +1089,13 @@ impl VideoSeat {
             return false;
         };
         match verb {
-            PlayerKey::Toggle => self.toggle(now),
+            PlayerKey::Toggle => {
+                self.toggle(now);
+            }
+            PlayerKey::Start => self.seek_start(now),
+            PlayerKey::End => self.seek_end(now),
+            PlayerKey::FrameBack => self.step_frame(-1.0, now),
+            PlayerKey::FrameForward => self.step_frame(1.0, now),
             PlayerKey::Back => self.step(-VIDEO_STEP_SECONDS, now),
             PlayerKey::Forward => self.step(VIDEO_STEP_SECONDS, now),
             PlayerKey::Louder => self.nudge_volume(VIDEO_GAIN_STEP, now),
@@ -1002,26 +1121,62 @@ impl VideoSeat {
     /// Arms the intent once and does not restart it, which is the difference
     /// between a bar that comes up while a hand is travelling towards it and one
     /// that never comes up at all.
-    pub fn pointer_moved(&mut self, over_bar: bool, now: Instant) {
+    ///
+    /// `true` when the move changed the scrubber's time label — its words or
+    /// its place (row 41), read against `layout`, the bar as it is laid out
+    /// now — so the caller owes the frame: a paused recording has no decoded
+    /// picture coming to redraw the bar (review rounds 1 and 2, 2026-10-23). A
+    /// move across the bar's buttons, or anywhere off the scrubber, owes none.
+    pub fn pointer_moved(
+        &mut self,
+        at: [f32; 2],
+        over_bar: bool,
+        layout: Option<&BarLayout>,
+        scale: f32,
+        now: Instant,
+    ) -> bool {
+        // Off the bar before and after, no label stood or stands: the hover's
+        // label is only ever over the scrubber, and a held scrubber's follows
+        // the playhead, not the hand.
+        let near = over_bar || self.over_bar;
+        let before = near.then(|| self.hover_label(layout, scale)).flatten();
+        self.hover = Some(at);
         self.over_bar = over_bar;
         if over_bar {
             self.acted(now);
-            return;
-        }
-        if self.revealed_at.is_some() {
+        } else if self.revealed_at.is_some() {
             self.acted_at = now;
-            return;
-        }
-        if self.arming_at.is_none() {
+        } else if self.arming_at.is_none() {
             self.arming_at = Some(now);
         }
+        near && before != self.hover_label(layout, scale)
+    }
+
+    /// The scrubber's time label for the hand as it stands, against `layout`
+    /// — what [`Self::bar`] paints ([`seek_label`]); `None` with no bar.
+    fn hover_label(&self, layout: Option<&BarLayout>, scale: f32) -> Option<(String, [f32; 4])> {
+        let hand = BarHand {
+            grab: self.grab,
+            hover: self.hover,
+            gain_flash: false,
+        };
+        seek_label(&self.engine.state(), layout?, hand, scale)
     }
 
     /// The pointer left the picture altogether: the intent is disarmed and the
     /// dwell is allowed to run out.
-    pub fn pointer_left(&mut self) {
+    ///
+    /// `true` when the hand took the scrubber's label with it, which owes the
+    /// frame [`Self::pointer_moved`] says it does.
+    pub fn pointer_left(&mut self, layout: Option<&BarLayout>, scale: f32) -> bool {
+        let before = self
+            .over_bar
+            .then(|| self.hover_label(layout, scale))
+            .flatten();
         self.arming_at = None;
         self.over_bar = false;
+        self.hover = None;
+        before != self.hover_label(layout, scale)
     }
 
     /// Let an armed intent become a reveal, and let a bar that has finished
@@ -1093,8 +1248,20 @@ impl VideoSeat {
             .into_iter();
         armed
             .chain(self.presence(now, motion).settled_at)
+            .chain(self.gain_flash_ends())
             .min()
             .filter(|deadline| *deadline > now)
+    }
+
+    /// When the volume's flash goes out — the frame that takes it off is owed.
+    fn gain_flash_ends(&self) -> Option<Instant> {
+        self.gain_flash_at
+            .map(|at| at + crate::FOOT_REVEAL_FEEDBACK)
+    }
+
+    /// Whether the volume's flash is up at `now`.
+    fn gain_flashing(&self, now: Instant) -> bool {
+        self.gain_flash_ends().is_some_and(|ends| now < ends)
     }
 
     /// **Whether this seat's bar is in flight at `now`** — the half of
@@ -1107,6 +1274,19 @@ impl VideoSeat {
     #[must_use]
     pub fn bar_is_moving(&self, now: Instant, motion: crate::Motion) -> bool {
         self.presence(now, motion).moving
+    }
+
+    /// **Whether the bar's clocks have changed what it paints since the window
+    /// last drew it** — its opacity, or the volume's flash coming up or going
+    /// out — noting the answer as drawn. The half of [`Self::bar_deadline`]
+    /// that pays: that deadline wakes the window, and this is what the woken
+    /// tick finds owed, playing or paused.
+    pub fn bar_owes_a_frame(&mut self, now: Instant, motion: crate::Motion) -> bool {
+        let drawn = (
+            (self.presence(now, motion).opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+            self.gain_flashing(now),
+        );
+        self.bar_drawn.replace(drawn) != Some(drawn)
     }
 
     /// Take hold of a track. The fraction under the pointer applies at once,
@@ -1191,7 +1371,11 @@ impl VideoSeat {
     ) -> Band {
         paint_bar(
             &self.engine.state(),
-            self.grab,
+            BarHand {
+                grab: self.grab,
+                hover: self.hover,
+                gain_flash: self.gain_flashing(now),
+            },
             self.presence(now, motion).opacity,
             body,
             scale,
@@ -1228,7 +1412,7 @@ pub fn retirement(state: &EngineState) -> Option<(EngineError, crate::i18n::Text
 /// what it paints is a function of what it was handed and nothing else.
 fn paint_bar(
     state: &EngineState,
-    grab: Option<BarSlot>,
+    hand: BarHand,
     presence: f32,
     body: [f32; 4],
     scale: f32,
@@ -1243,6 +1427,7 @@ fn paint_bar(
     let Some(layout) = bar_layout_of(state, body, scale, meta.width) else {
         return Band::default();
     };
+    let grab = hand.grab;
     let font_px = font_logical_px() * scale;
 
     let mut quads: Vec<OverlayQuad> = Vec::with_capacity(12);
@@ -1409,6 +1594,40 @@ fn paint_bar(
         }
     }
 
+    // **The two labels that stand over the bar** (owner's ruling 2026-10-23,
+    // rows 40 and 41): the time under the pointer on the scrubber, and the
+    // volume a wheel has just set. Each is a small panel of the bar's own ground
+    // with its figures on it, and they are the only words the six gestures
+    // added.
+    let mut tag = |text: String, rect: [f32; 4]| {
+        quads.extend(bt_render::rounded_overlay_fill(
+            rect,
+            (BAR_LABEL_RADIUS_LOGICAL_PX * scale).round(),
+            palette.preview_code_ground,
+            1.0,
+        ));
+        labels.push(ChromeLabel {
+            text,
+            rect,
+            clip: None,
+            font_size_px: font_px,
+            color: palette.preview_code_text,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: true,
+            mono: false,
+        });
+    };
+    if let Some((text, rect)) = seek_label(state, &layout, hand, scale) {
+        tag(text, rect);
+    }
+    if hand.gain_flash {
+        let (text, rect) = gain_label(&layout, gain, scale);
+        tag(text, rect);
+    }
+
     Band::surface(
         vec![OverlayLayer {
             quads,
@@ -1419,6 +1638,144 @@ fn paint_bar(
         presence,
         [0.0, 0.0],
     )
+}
+
+/// **What the hand is doing on the bar**, as the painter needs it: the track in
+/// hand, where the pointer stands, and whether the volume's flash is up.
+#[derive(Clone, Copy, Debug, Default)]
+struct BarHand {
+    grab: Option<BarSlot>,
+    hover: Option<[f32; 2]>,
+    gain_flash: bool,
+}
+
+/// **The scrubber's time label** (row 41): `m:ss` (`h:mm:ss` past an hour) of
+/// the point under the pointer, standing over the rail at that point — or, while
+/// the scrubber is held, of the playhead, standing over the playhead. `None`
+/// when the scrubber is no control, when the recording has no length to take a
+/// fraction of, and when the hand is elsewhere.
+fn seek_label(
+    state: &EngineState,
+    layout: &BarLayout,
+    hand: BarHand,
+    scale: f32,
+) -> Option<(String, [f32; 4])> {
+    if !layout.seekable {
+        return None;
+    }
+    let duration = state
+        .duration_secs
+        .filter(|duration| duration.is_finite() && *duration > 0.0)?;
+    let track = layout.seek;
+    let (seconds, x) = if hand.grab == Some(BarSlot::Seek) {
+        let fraction = (state.position_secs / duration).clamp(0.0, 1.0);
+        (
+            state.position_secs.clamp(0.0, duration),
+            track[0] + (track[2] - track[0]) * fraction as f32,
+        )
+    } else {
+        let at = hand.hover?;
+        if layout.slot_at(at) != Some(BarSlot::Seek) {
+            return None;
+        }
+        let fraction = fraction_along(track, at[0]);
+        (fraction * duration, at[0].clamp(track[0], track[2]))
+    };
+    let text = clock_text(seconds);
+    let rect = label_over_bar(layout, x, text.chars().count(), scale);
+    Some((text, rect))
+}
+
+/// **The volume's flash** (row 40): the volume as a whole percent — the same
+/// spelling a zoom flashes ([`crate::i18n::zoom_percent`]) — over the volume
+/// track, or over the mute button where the track has given way, or over the
+/// bar's right end where both have.
+fn gain_label(layout: &BarLayout, gain: f64, scale: f32) -> (String, [f32; 4]) {
+    let text = crate::i18n::zoom_percent(gain);
+    let over = layout
+        .volume
+        .or(layout.mute)
+        .map_or(layout.bar[2] - BAR_PADDING_X_LOGICAL_PX * scale, |rect| {
+            (rect[0] + rect[2]) / 2.0
+        });
+    let rect = label_over_bar(layout, over, text.chars().count(), scale);
+    (text, rect)
+}
+
+/// **A label's box over the bar**, centred on `x` and kept inside the bar's
+/// width: figures reserved the way the clocks are ([`BAR_FIGURE_ADVANCE_EM`]),
+/// a control's height, and standing [`BAR_LABEL_GAP_LOGICAL_PX`] clear of the
+/// bar's top edge.
+fn label_over_bar(layout: &BarLayout, x: f32, figures: usize, scale: f32) -> [f32; 4] {
+    let px = |logical: f32| logical * scale;
+    let width = (figures as f32 * BAR_FIGURE_ADVANCE_EM * px(font_logical_px())
+        + 2.0 * px(BAR_LABEL_PADDING_X_LOGICAL_PX))
+    .ceil();
+    let height = px(BAR_BUTTON_LOGICAL_PX).round().max(1.0);
+    let bottom = (layout.bar[1] - px(BAR_LABEL_GAP_LOGICAL_PX)).round();
+    let left = (x - width / 2.0)
+        .min(layout.bar[2] - width)
+        .max(layout.bar[0])
+        .round();
+    [left, bottom - height, left + width, bottom]
+}
+
+/// **How long one frame of this recording is**: the engine's declared rate when
+/// it has one, else [`VIDEO_FALLBACK_FRAME_RATE`].
+#[must_use]
+fn frame_secs(state: &EngineState) -> f64 {
+    1.0 / state
+        .frame_rate
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .unwrap_or(VIDEO_FALLBACK_FRAME_RATE)
+}
+
+/// **How far `frames` frame steps move the playhead**, or `None` while the
+/// recording plays — see [`VideoSeat::step_frame`].
+#[must_use]
+fn frame_step(state: &EngineState, frames: f64) -> Option<f64> {
+    (!state.playing).then(|| frames * frame_secs(state))
+}
+
+/// **Whether a recording has nothing left to play**: the engine says it ended,
+/// or its playhead stands on the last frame of a declared length — where `End`
+/// puts a paused recording and where a scrubber dragged to the right leaves one.
+/// Within half a frame, because the last frame *is* the end: a playhead the
+/// engine reports a hair short of the length is on that frame.
+#[must_use]
+fn stands_at_end(state: &EngineState) -> bool {
+    state.ended
+        || state
+            .duration_secs
+            .filter(|duration| duration.is_finite() && *duration > 0.0)
+            .is_some_and(|duration| state.position_secs >= duration - frame_secs(state) / 2.0)
+}
+
+/// **One gesture on a recording's picture**, off its bar (owner's ruling
+/// 2026-10-23, rows 38–40) — see [`VideoSeat::picture`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PictureGesture {
+    /// One click: play or pause.
+    Click,
+    /// The second press of a double click, handed what the first one did.
+    DoubleClick(ClickUndo),
+    /// The wheel, by this many notches (up is positive).
+    Wheel(f32),
+}
+
+/// **What puts one click's toggle back** (row 39's decision, §7.44): the click
+/// acts on its release, and the second press of a double click undoes it, so
+/// the double click's zoom leaves playback exactly as it was.
+///
+/// It is the gesture's record of what it changed — which way it went, and the
+/// playhead it left — kept only while a second press can still pair with it.
+/// Nothing reads it to draw: the engine stays the one authority for that.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ClickUndo {
+    /// The click paused a playing recording.
+    Play,
+    /// The click started a paused or ended one, from this playhead.
+    PauseAt(f64),
 }
 
 /// **`m:ss`, and `h:mm:ss` once there is an hour to say.**
@@ -1614,6 +1971,15 @@ impl VideoSeats {
             .any(|seat| seat.bar_is_moving(now, motion))
     }
 
+    /// Whether any seat's bar owes a frame its own clocks made — see
+    /// [`VideoSeat::bar_owes_a_frame`]. Every seat is asked, so each notes what
+    /// this frame will draw.
+    pub fn bars_owe_a_frame(&mut self, now: Instant, motion: crate::Motion) -> bool {
+        self.seats.values_mut().fold(false, |owed, seat| {
+            seat.bar_owes_a_frame(now, motion) | owed
+        })
+    }
+
     /// **Every seat shut down: each engine told to stop and let go of.** The door
     /// §7.42 ⑦'s exit protocol comes through when a window closes
     /// (`Runtime::let_go_of_this_window`, every road that ends a window); it
@@ -1625,10 +1991,18 @@ impl VideoSeats {
     }
 }
 
-/// **The player's five keys**, as [`VideoSeat::key_press`] answers them.
+/// **The player's keys**, as [`VideoSeat::key_press`] answers them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PlayerKey {
     Toggle,
+    /// `Home`: the start.
+    Start,
+    /// `End`: the end.
+    End,
+    /// `,`: one frame back, while paused.
+    FrameBack,
+    /// `.`: one frame forward, while paused.
+    FrameForward,
     Back,
     Forward,
     Louder,
@@ -1637,9 +2011,13 @@ pub(crate) enum PlayerKey {
 }
 
 /// Which of the player's keys one unmodified press is: Space, the four arrows,
-/// and `M` — the mute's letter read by [`crate::input::verb_letter`], so on a
-/// layout that prints another script it is the key at `M` (owner ruling
-/// 2026-10-11 on H2 Q6).
+/// `Home` and `End`, `,` and `.`, and `M` — the mute's letter read by
+/// [`crate::input::verb_letter`], so on a layout that prints another script it
+/// is the key at `M` (owner ruling 2026-10-11 on H2 Q6).
+///
+/// **`,` and `.` are read by the character they type** (owner's ruling
+/// 2026-10-23, row 42), not by `verb_letter`: they are punctuation, which every
+/// layout prints, and AZERTY prints `,` on the key a US keyboard calls `M`.
 pub(crate) fn player_key(
     key: &winit::keyboard::Key,
     physical: winit::keyboard::PhysicalKey,
@@ -1651,6 +2029,10 @@ pub(crate) fn player_key(
         Key::Named(NamedKey::ArrowRight) => Some(PlayerKey::Forward),
         Key::Named(NamedKey::ArrowUp) => Some(PlayerKey::Louder),
         Key::Named(NamedKey::ArrowDown) => Some(PlayerKey::Quieter),
+        Key::Named(NamedKey::Home) => Some(PlayerKey::Start),
+        Key::Named(NamedKey::End) => Some(PlayerKey::End),
+        Key::Character(text) if text.as_str() == "," => Some(PlayerKey::FrameBack),
+        Key::Character(text) if text.as_str() == "." => Some(PlayerKey::FrameForward),
         Key::Character(_) => {
             (crate::input::verb_letter(key, physical) == Some('m')).then_some(PlayerKey::Mute)
         }
@@ -1699,7 +2081,7 @@ mod tests {
     /// script there**, and a Latin layout's own `m` wherever it stands.
     ///
     /// MUTATIONS: (1) drop the physical fallback from `input::verb_letter` —
-    /// the Russian `ь` goes red; (2) apply it to every letter — AZERTY's `,` on
+    /// the Russian `ь` goes red; (2) apply it to every letter — a US `n` on
     /// the physical `M` becomes the mute and goes red.
     #[test]
     fn the_mute_is_the_key_at_m_on_a_non_latin_layout() {
@@ -1717,9 +2099,10 @@ mod tests {
         }
         assert_eq!(at("m", KeyCode::KeyM), Some(PlayerKey::Mute));
         assert_eq!(at("M", KeyCode::KeyM), Some(PlayerKey::Mute));
-        // AZERTY prints `m` on the key a US keyboard calls `;`, and `,` at `M`.
+        // AZERTY prints `m` on the key a US keyboard calls `;`, and `,` at `M` —
+        // which is the frame step back, by the character it types (row 42).
         assert_eq!(at("m", KeyCode::Semicolon), Some(PlayerKey::Mute));
-        assert_eq!(at(",", KeyCode::KeyM), None);
+        assert_eq!(at(",", KeyCode::KeyM), Some(PlayerKey::FrameBack));
         // A US keyboard's other letters are not the mute.
         assert_eq!(at("n", KeyCode::KeyM), None);
     }
@@ -2204,7 +2587,7 @@ mod tests {
         let palette = bt_render::chrome_palette();
         let bar = paint_bar(
             &state,
-            None,
+            BarHand::default(),
             0.5,
             [0.0, 0.0, 900.0, 500.0],
             1.0,
@@ -2243,7 +2626,7 @@ mod tests {
         assert!(
             paint_bar(
                 &state,
-                None,
+                BarHand::default(),
                 0.0,
                 [0.0, 0.0, 900.0, 500.0],
                 1.0,
@@ -2290,7 +2673,15 @@ mod tests {
         let no_length = crate::i18n::Text::VideoNoLength.text();
         let painted = |state: &EngineState| {
             let layout = bar_layout_of(state, body, 1.0, 0.0).expect("a pane fits the whole bar");
-            let bar = paint_bar(state, None, 1.0, body, 1.0, &palette, BarMeta::none());
+            let bar = paint_bar(
+                state,
+                BarHand::default(),
+                1.0,
+                body,
+                1.0,
+                &palette,
+                BarMeta::none(),
+            );
             (layout, bar.layers[0].clone())
         };
 
@@ -2408,5 +2799,543 @@ mod tests {
             None,
             "a player with no length is still a player"
         );
+    }
+    /// RED (T-VIDEO-POINTER-AND-KEYS, row 42) — **`Home`, `End`, `,` and `.`
+    /// are the player's**, `Home`/`End` by name and the two punctuation keys by
+    /// the character they type, wherever a layout prints them.
+    ///
+    /// MUTATION: drop the `","` arm from [`player_key`] — `,` falls to the
+    /// mute's letter test and answers nothing, and the first line goes red.
+    #[test]
+    fn home_end_and_the_two_frame_keys_are_the_players() {
+        use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+        let at = |key: Key, code| player_key(&key, PhysicalKey::Code(code));
+        let typed = |text: &str| Key::Character(text.into());
+        assert_eq!(at(typed(","), KeyCode::Comma), Some(PlayerKey::FrameBack));
+        assert_eq!(
+            at(typed("."), KeyCode::Period),
+            Some(PlayerKey::FrameForward)
+        );
+        // AZERTY: `,` at the US `M`, and `.` is shifted `;` — read by what it types.
+        assert_eq!(at(typed(","), KeyCode::KeyM), Some(PlayerKey::FrameBack));
+        assert_eq!(
+            at(typed("."), KeyCode::Comma),
+            Some(PlayerKey::FrameForward)
+        );
+        // What a US keyboard types shifted on those keys is not a frame step.
+        assert_eq!(at(typed("<"), KeyCode::Comma), None);
+        assert_eq!(at(typed(">"), KeyCode::Period), None);
+        assert_eq!(
+            at(Key::Named(NamedKey::Home), KeyCode::Home),
+            Some(PlayerKey::Start)
+        );
+        assert_eq!(
+            at(Key::Named(NamedKey::End), KeyCode::End),
+            Some(PlayerKey::End)
+        );
+    }
+
+    /// RED (row 42) — **a frame is the engine's declared rate's, else a
+    /// thirtieth of a second; and a playhead on the last frame is at the end**.
+    ///
+    /// MUTATION: compare `position_secs >= duration` in [`stands_at_end`] — a
+    /// playhead the engine reports a hair short of the length reads as not at
+    /// the end, and the third assertion block goes red.
+    #[test]
+    fn a_frame_is_the_declared_rates_and_the_last_frame_is_the_end() {
+        let at = |position_secs: f64, frame_rate: Option<f64>| EngineState {
+            duration_secs: Some(5.0),
+            position_secs,
+            frame_rate,
+            ..EngineState::default()
+        };
+        assert!((frame_secs(&at(0.0, Some(5.0))) - 0.2).abs() < 1e-12);
+        assert!((frame_secs(&at(0.0, Some(25.0))) - 0.04).abs() < 1e-12);
+        for nothing in [None, Some(0.0), Some(f64::NAN), Some(-30.0)] {
+            assert!(
+                (frame_secs(&at(0.0, nothing)) - 1.0 / 30.0).abs() < 1e-12,
+                "{nothing:?} is no rate, so a frame is a thirtieth"
+            );
+        }
+        // On the last frame, or a hair short of it, is the end.
+        assert!(stands_at_end(&at(5.0, Some(5.0))));
+        assert!(stands_at_end(&at(4.95, Some(5.0))));
+        // One frame short is not: there is a picture left to see.
+        assert!(!stands_at_end(&at(4.8, Some(5.0))));
+        assert!(!stands_at_end(&at(0.0, Some(5.0))));
+        // The engine's word is enough, and a recording with no length has no
+        // last frame to stand on.
+        assert!(stands_at_end(&EngineState {
+            ended: true,
+            ..at(1.0, None)
+        }));
+        assert!(!stands_at_end(&EngineState {
+            duration_secs: None,
+            ..at(1_000.0, None)
+        }));
+    }
+
+    /// RED (row 42) — **a frame step moves a paused playhead by one frame and
+    /// a playing one not at all.**
+    ///
+    /// MUTATION: drop the `!state.playing` test from [`frame_step`] — a
+    /// playing recording jumps a frame and the first assertion goes red.
+    #[test]
+    fn a_frame_step_is_one_frame_and_only_while_paused() {
+        let state = |playing: bool, frame_rate: Option<f64>| EngineState {
+            playing,
+            frame_rate,
+            duration_secs: Some(5.0),
+            ..EngineState::default()
+        };
+        assert_eq!(frame_step(&state(true, Some(5.0)), 1.0), None);
+        assert_eq!(frame_step(&state(true, None), -1.0), None);
+        let forward = frame_step(&state(false, Some(5.0)), 1.0).expect("paused");
+        assert!((forward - 0.2).abs() < 1e-12, "{forward}");
+        let back = frame_step(&state(false, Some(5.0)), -1.0).expect("paused");
+        assert!((back + 0.2).abs() < 1e-12, "{back}");
+        let unrated = frame_step(&state(false, None), 1.0).expect("paused");
+        assert!((unrated - 1.0 / 30.0).abs() < 1e-12, "{unrated}");
+    }
+
+    /// The fixture every host's engine decodes: 160×120, five seconds, five
+    /// frames a second (`tests/assets/PROVENANCE.md`).
+    fn the_fixture() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/assets/folio-video-test.mp4")
+    }
+
+    /// A seat on [`the_fixture`], loaded and playing as a seat opens.
+    fn a_playing_seat() -> VideoSeat {
+        let seat = VideoSeat::open(&the_fixture(), 1, Instant::now()).expect("the fixture opens");
+        let state = seat.state_reaching(|state| state.ready && state.playing);
+        assert!(state.ready && state.playing, "the fixture plays: {state:?}");
+        seat
+    }
+
+    /// Within one frame's tolerance of `seconds`.
+    fn near(state: &EngineState, seconds: f64) -> bool {
+        (state.position_secs - seconds).abs() < 0.05
+    }
+
+    /// A key the player answers, pressed with no modifier.
+    fn press(seat: &mut VideoSeat, key: winit::keyboard::Key, code: winit::keyboard::KeyCode) {
+        let physical = winit::keyboard::PhysicalKey::Code(code);
+        assert!(
+            seat.key_press(&key, physical, false, Instant::now()),
+            "{key:?}"
+        );
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS, row 42) — **on a real engine, `Home`
+    /// and `End` bound the recording and `,`/`.` step a paused one a frame at
+    /// a time, at the rate the file declares**; `End` on a playing recording
+    /// plays into its end, which the engine then says.
+    ///
+    /// MUTATION: measure a frame by [`VIDEO_FALLBACK_FRAME_RATE`] always — the
+    /// fixture's 0.2 s frames step by 0.033 s and the first `.` goes red.
+    #[test]
+    fn the_frame_keys_and_home_and_end_drive_a_real_recording() {
+        use winit::keyboard::{Key, KeyCode, NamedKey};
+        let _ledger = crate::test_support::ledger_gate();
+        let before = bt_platform::video::engine::engines_outstanding();
+        let mut seat = a_playing_seat();
+        seat.toggle(Instant::now());
+        seat.state_reaching(|state| !state.playing && state.frame_rate.is_some());
+
+        press(&mut seat, Key::Named(NamedKey::Home), KeyCode::Home);
+        let start = seat.state_reaching(|state| near(state, 0.0));
+        assert!(near(&start, 0.0), "Home is the start: {start:?}");
+        for frame in 1..=2 {
+            press(&mut seat, Key::Character(".".into()), KeyCode::Period);
+            let at = f64::from(frame) * 0.2;
+            let state = seat.state_reaching(|state| near(state, at));
+            assert!(near(&state, at), "`.` #{frame} stands at {at}: {state:?}");
+        }
+        press(&mut seat, Key::Character(",".into()), KeyCode::Comma);
+        let back = seat.state_reaching(|state| near(state, 0.2));
+        assert!(near(&back, 0.2), "`,` is one frame back: {back:?}");
+        assert!(!back.playing, "a frame step does not play");
+
+        press(&mut seat, Key::Named(NamedKey::End), KeyCode::End);
+        let end = seat.state_reaching(|state| state.position_secs >= 4.9);
+        assert!(end.position_secs >= 4.9, "End is the end: {end:?}");
+        assert!(
+            stands_at_end(&end),
+            "and a paused one stands there: {end:?}"
+        );
+
+        // Playing, `End` stops it on its last frame, the same on both
+        // machines: paused, and standing at the end.
+        press(&mut seat, Key::Named(NamedKey::Home), KeyCode::Home);
+        seat.toggle(Instant::now());
+        let playing = seat.state_reaching(|state| state.playing && state.position_secs < 2.0);
+        assert!(playing.playing, "{playing:?}");
+        press(&mut seat, Key::Named(NamedKey::End), KeyCode::End);
+        let ended = seat.state_reaching(|state| !state.playing && stands_at_end(state));
+        assert!(
+            !ended.playing && stands_at_end(&ended),
+            "End on a playing recording stops it at its end: {ended:?}"
+        );
+        seat.shutdown();
+        crate::test_support::engines_settling_to(before);
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS, rows 38, 39 and 43) — **a click on the
+    /// picture plays or pauses, an ended recording plays from the start, and
+    /// the second press of a double click puts back what the first did**, from
+    /// each of the three places a click can find a recording.
+    ///
+    /// MUTATION: answer `ClickUndo::PauseAt(0.0)` from [`VideoSeat::toggle`] —
+    /// the paused-at-two-seconds case comes back at the start and goes red.
+    #[test]
+    fn a_click_toggles_and_the_double_click_puts_it_back() {
+        let _ledger = crate::test_support::ledger_gate();
+        let before = bt_platform::video::engine::engines_outstanding();
+        let mut seat = a_playing_seat();
+        // Playing: the click pauses, the double click plays again.
+        let undo = seat.picture(PictureGesture::Click, Instant::now());
+        assert_eq!(undo, Some(ClickUndo::Play));
+        assert!(!seat.state_reaching(|state| !state.playing).playing);
+        seat.picture(PictureGesture::DoubleClick(ClickUndo::Play), Instant::now());
+        assert!(seat.state_reaching(|state| state.playing).playing);
+
+        // Paused at two seconds: the click plays from there, the double click
+        // pauses at two seconds again.
+        seat.toggle(Instant::now());
+        seat.state_reaching(|state| !state.playing);
+        seat.engine.seek(2.0);
+        let paused = seat.state_reaching(|state| near(state, 2.0));
+        assert!(near(&paused, 2.0), "{paused:?}");
+        let undo = seat.picture(PictureGesture::Click, Instant::now());
+        let Some(ClickUndo::PauseAt(was)) = undo else {
+            panic!("a paused recording's click is a play: {undo:?}");
+        };
+        assert!((was - 2.0).abs() < 0.05, "{was}");
+        assert!(seat.state_reaching(|state| state.playing).playing);
+        seat.picture(
+            PictureGesture::DoubleClick(ClickUndo::PauseAt(was)),
+            Instant::now(),
+        );
+        let put_back = seat.state_reaching(|state| !state.playing && near(state, 2.0));
+        assert!(
+            !put_back.playing && near(&put_back, 2.0),
+            "the pair left it as it was: {put_back:?}"
+        );
+
+        // At the end: the click plays from the start (row 43).
+        seat.seek_end(Instant::now());
+        let at_end = seat.state_reaching(|state| state.position_secs >= 4.9);
+        assert!(stands_at_end(&at_end), "{at_end:?}");
+        seat.picture(PictureGesture::Click, Instant::now());
+        let again = seat.state_reaching(|state| state.playing && state.position_secs < 2.0);
+        assert!(
+            again.playing && again.position_secs < 2.0,
+            "an ended recording plays from the start: {again:?}"
+        );
+        seat.shutdown();
+        crate::test_support::engines_settling_to(before);
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS, row 40) — **a wheel notch over the
+    /// picture is one volume step, clamped to the recording's range, and it
+    /// flashes on the band's flash clock**, whose end is a frame the window
+    /// owes.
+    ///
+    /// MUTATION: drop `self.gain_flash_ends()` from
+    /// [`VideoSeat::bar_deadline`] — the frame that takes the number off is
+    /// never asked for and the deadline assertion goes red.
+    #[test]
+    fn a_wheel_notch_is_one_volume_step_and_flashes() {
+        let _ledger = crate::test_support::ledger_gate();
+        let before = bt_platform::video::engine::engines_outstanding();
+        let mut seat = a_playing_seat();
+        seat.set_volume(0.5, Instant::now());
+        seat.state_reaching(|state| (state.volume - 0.5).abs() < 1e-6);
+        let now = Instant::now();
+        seat.picture(PictureGesture::Wheel(2.0), now);
+        let louder = seat.state_reaching(|state| (state.volume - 0.6).abs() < 1e-6);
+        assert!(
+            (louder.volume - 0.6).abs() < 1e-6,
+            "two notches up: {louder:?}"
+        );
+        seat.picture(PictureGesture::Wheel(-1.0), now);
+        let quieter = seat.state_reaching(|state| (state.volume - 0.55).abs() < 1e-6);
+        assert!(
+            (quieter.volume - 0.55).abs() < 1e-6,
+            "one down: {quieter:?}"
+        );
+        seat.picture(PictureGesture::Wheel(40.0), now);
+        assert!(seat.state_reaching(|state| state.volume >= 1.0).volume <= 1.0);
+        seat.picture(PictureGesture::Wheel(-40.0), now);
+        assert!(seat.state_reaching(|state| state.volume <= 0.0).volume >= 0.0);
+
+        let flash = crate::FOOT_REVEAL_FEEDBACK;
+        assert!(seat.gain_flashing(now));
+        assert!(seat.gain_flashing(now + flash - Duration::from_millis(1)));
+        assert!(!seat.gain_flashing(now + flash), "the flash is the band's");
+        let deadline = seat
+            .bar_deadline(now, crate::Motion::Full)
+            .expect("a flash that is up owes the frame that takes it off");
+        assert!(deadline <= now + flash, "{deadline:?}");
+        // Just before the flash goes out it is the soonest thing owed: the bar
+        // the notch held up stands its dwell past the flash's end, which is the
+        // precondition asserted rather than assumed.
+        let late = now + flash - Duration::from_millis(1);
+        assert!(
+            seat.presence(late, crate::Motion::Full)
+                .settled_at
+                .is_none_or(|settled| settled > now + flash),
+            "the bar outlasts the flash"
+        );
+        assert_eq!(
+            seat.bar_deadline(late, crate::Motion::Full),
+            Some(now + flash)
+        );
+        seat.shutdown();
+        crate::test_support::engines_settling_to(before);
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS review round 2) — **a move owes a frame
+    /// only when it changes the scrubber's label**: along the scrubber it does,
+    /// across the play button it does not, and leaving the scrubber for the
+    /// button takes the label away, which does.
+    ///
+    /// MUTATION: answer `over_bar || self.over_bar` from
+    /// [`VideoSeat::pointer_moved`] (round 1's answer) — the move across the
+    /// play button owes a frame and the second assertion goes red.
+    #[test]
+    fn a_move_owes_a_frame_only_when_the_scrubbers_label_changes() {
+        let _ledger = crate::test_support::ledger_gate();
+        let before = bt_platform::video::engine::engines_outstanding();
+        let mut seat = a_playing_seat();
+        let state = seat.state_reaching(|state| state.duration_secs.is_some());
+        let body = [0.0, 0.0, 900.0, 500.0];
+        let layout = bar_layout_of(&state, body, 1.0, 0.0).expect("a pane fits the bar");
+        let now = Instant::now();
+        let row = |rect: [f32; 4]| (rect[1] + rect[3]) / 2.0;
+        let along = |fraction: f32| {
+            [
+                layout.seek[0] + (layout.seek[2] - layout.seek[0]) * fraction,
+                row(layout.seek),
+            ]
+        };
+        let on_play = |dx: f32| [layout.play[0] + 4.0 + dx, row(layout.play)];
+
+        seat.pointer_moved(along(0.2), true, Some(&layout), 1.0, now);
+        assert!(
+            seat.pointer_moved(along(0.6), true, Some(&layout), 1.0, now),
+            "along the scrubber the label moves"
+        );
+        seat.pointer_moved(on_play(0.0), true, Some(&layout), 1.0, now);
+        assert!(
+            !seat.pointer_moved(on_play(2.0), true, Some(&layout), 1.0, now),
+            "across the play button no label stands, and no frame is owed"
+        );
+        seat.pointer_moved(along(0.6), true, Some(&layout), 1.0, now);
+        assert!(
+            seat.pointer_moved(on_play(0.0), true, Some(&layout), 1.0, now),
+            "off the scrubber the label goes"
+        );
+        assert!(
+            !seat.pointer_left(Some(&layout), 1.0),
+            "leaving from the button takes no label with it"
+        );
+        seat.shutdown();
+        crate::test_support::engines_settling_to(before);
+    }
+
+    /// A loaded recording of `duration_secs`, paused at `position_secs`.
+    fn a_paused_recording(duration_secs: Option<f64>, position_secs: f64) -> EngineState {
+        EngineState {
+            duration_secs,
+            position_secs,
+            ready: true,
+            has_video: true,
+            volume: 0.5,
+            rate: 1.0,
+            ..EngineState::default()
+        }
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS, row 41) — **the scrubber says the time
+    /// under the pointer, over the rail at that point, and while held it says
+    /// the playhead's**; past an hour it says the hours; with no length, or
+    /// with the hand anywhere but the scrubber, it says nothing.
+    ///
+    /// MUTATION: drop the `slot_at` test in [`seek_label`] — a pointer over
+    /// the play button reads a time off the track's left end, and the "off the
+    /// scrubber" assertion goes red. MUTATION: read the hover while the
+    /// scrubber is held — the held label says the pointer's time and not the
+    /// playhead's.
+    #[test]
+    fn the_scrubber_says_the_time_under_the_pointer() {
+        let body = [0.0, 0.0, 900.0, 500.0];
+        let state = a_paused_recording(Some(100.0), 30.0);
+        let layout = bar_layout_of(&state, body, 1.0, 0.0).expect("a pane fits the bar");
+        let track = layout.seek;
+        let row = (track[1] + track[3]) / 2.0;
+        let x_at = |fraction: f32| track[0] + (track[2] - track[0]) * fraction;
+        let hovering = |at: [f32; 2]| BarHand {
+            hover: Some(at),
+            ..BarHand::default()
+        };
+        for (fraction, said) in [(0.0, "0:00"), (0.25, "0:25"), (0.5, "0:50")] {
+            let x = x_at(fraction);
+            let (text, rect) = seek_label(&state, &layout, hovering([x, row]), 1.0)
+                .unwrap_or_else(|| panic!("a label at {fraction}"));
+            assert_eq!(text, said, "at {fraction} of the track");
+            assert!(rect[3] < layout.bar[1], "{rect:?} stands over the bar");
+            assert!(
+                rect[0] >= layout.bar[0] && rect[2] <= layout.bar[2],
+                "{rect:?} stays inside the bar's width"
+            );
+            if fraction == 0.25 {
+                assert!(
+                    ((rect[0] + rect[2]) / 2.0 - x).abs() <= 1.0,
+                    "{rect:?} is centred on the pointer at {x}"
+                );
+            }
+        }
+        // And painted: the label is in the bar's layer, on a panel of its own.
+        let palette = bt_render::chrome_palette();
+        let quarter = [x_at(0.25), row];
+        let band = paint_bar(
+            &state,
+            hovering(quarter),
+            1.0,
+            body,
+            1.0,
+            &palette,
+            BarMeta::none(),
+        );
+        assert!(
+            band.layers[0]
+                .labels
+                .iter()
+                .any(|label| label.text == "0:25"),
+            "the painter draws the label: {:?}",
+            band.layers[0].labels
+        );
+        let bare = paint_bar(
+            &state,
+            BarHand::default(),
+            1.0,
+            body,
+            1.0,
+            &palette,
+            BarMeta::none(),
+        );
+        assert!(
+            band.layers[0].quads.len() > bare.layers[0].quads.len(),
+            "the label stands on a panel"
+        );
+
+        // Past an hour, the hours.
+        let long = a_paused_recording(Some(2.0 * 3_600.0), 0.0);
+        let long_layout = bar_layout_of(&long, body, 1.0, 0.0).expect("a pane fits the bar");
+        let long_track = long_layout.seek;
+        let three_quarters = [
+            long_track[0] + (long_track[2] - long_track[0]) * 0.75,
+            (long_track[1] + long_track[3]) / 2.0,
+        ];
+        assert_eq!(
+            seek_label(&long, &long_layout, hovering(three_quarters), 1.0).map(|(text, _)| text),
+            Some("1:30:00".to_owned())
+        );
+
+        // Off the scrubber: over the play button, over the picture.
+        let on_play = [
+            (layout.play[0] + layout.play[2]) / 2.0,
+            (layout.play[1] + layout.play[3]) / 2.0,
+        ];
+        assert_eq!(seek_label(&state, &layout, hovering(on_play), 1.0), None);
+        assert_eq!(
+            seek_label(&state, &layout, hovering([450.0, 100.0]), 1.0),
+            None
+        );
+        assert_eq!(seek_label(&state, &layout, BarHand::default(), 1.0), None);
+
+        // While the scrubber is held, the playhead's time, over the playhead —
+        // wherever the pointer has wandered.
+        let held = BarHand {
+            grab: Some(BarSlot::Seek),
+            hover: Some([450.0, 100.0]),
+            gain_flash: false,
+        };
+        let (text, rect) = seek_label(&state, &layout, held, 1.0).expect("a held scrubber says");
+        assert_eq!(text, "0:30");
+        assert!(
+            ((rect[0] + rect[2]) / 2.0 - x_at(0.3)).abs() <= 1.0,
+            "{rect:?}"
+        );
+
+        // No length: nothing to take a fraction of.
+        let lengthless = a_paused_recording(None, 30.0);
+        let lengthless_layout =
+            bar_layout_of(&lengthless, body, 1.0, 0.0).expect("a pane fits the bar");
+        let middle = [
+            (lengthless_layout.seek[0] + lengthless_layout.seek[2]) / 2.0,
+            row,
+        ];
+        assert_eq!(
+            seek_label(&lengthless, &lengthless_layout, hovering(middle), 1.0),
+            None
+        );
+    }
+
+    /// RED (T-VIDEO-POINTER-AND-KEYS, row 40) — **the volume a wheel set is
+    /// said over the volume track while its flash is up**, as a whole percent,
+    /// and not otherwise.
+    ///
+    /// MUTATION: drop the `hand.gain_flash` arm from [`paint_bar`] — the flash
+    /// is never drawn and the first assertion goes red.
+    #[test]
+    fn the_volume_a_wheel_set_is_said_over_its_track() {
+        let body = [0.0, 0.0, 900.0, 500.0];
+        let palette = bt_render::chrome_palette();
+        let state = a_paused_recording(Some(100.0), 0.0);
+        let layout = bar_layout_of(&state, body, 1.0, 0.0).expect("a pane fits the bar");
+        let flashing = BarHand {
+            gain_flash: true,
+            ..BarHand::default()
+        };
+        let band = paint_bar(&state, flashing, 1.0, body, 1.0, &palette, BarMeta::none());
+        let label = band.layers[0]
+            .labels
+            .iter()
+            .find(|label| label.text == "50%")
+            .unwrap_or_else(|| panic!("the volume is said: {:?}", band.layers[0].labels));
+        let track = layout.volume.expect("a wide bar has its volume track");
+        assert!(
+            ((label.rect[0] + label.rect[2]) / 2.0 - (track[0] + track[2]) / 2.0).abs() <= 1.0,
+            "{:?} stands over the volume track {track:?}",
+            label.rect
+        );
+        assert!(label.rect[3] < layout.bar[1], "over the bar, not on it");
+        let quiet = paint_bar(
+            &state,
+            BarHand::default(),
+            1.0,
+            body,
+            1.0,
+            &palette,
+            BarMeta::none(),
+        );
+        assert!(
+            quiet.layers[0]
+                .labels
+                .iter()
+                .all(|label| label.text != "50%"),
+            "no flash, no number"
+        );
+        // A bar that has shed its volume track says it over the mute.
+        let narrow = [0.0, 0.0, 240.0, 200.0];
+        if let Some(narrow_layout) = bar_layout_of(&state, narrow, 1.0, 0.0)
+            && narrow_layout.volume.is_none()
+        {
+            let (_, rect) = gain_label(&narrow_layout, 0.5, 1.0);
+            assert!(rect[0] >= narrow_layout.bar[0] && rect[2] <= narrow_layout.bar[2]);
+        }
     }
 }

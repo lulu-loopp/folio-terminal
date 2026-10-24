@@ -202,6 +202,9 @@ impl<B: Backend> Runtime<'_, B> {
             // The head's other meaning, and it *is* claimed: the press was consumed on the way
             // down so that the hand could still choose, and the release is where it is spent.
             CaptureOwner::GlanceHeadPress(_) => self.release_file_peek_press(),
+            // **A press on a recording's picture is a click if it did not wander**, and the
+            // release is where that is decided (row 38).
+            CaptureOwner::VideoPicture(_) => self.release_video_picture(),
             // "Pressed and let go without moving" is the absence of a gesture.
             CaptureOwner::FloatHeadPress(_) => {
                 self.drop_float_head_press();

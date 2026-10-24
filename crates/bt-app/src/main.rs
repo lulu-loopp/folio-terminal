@@ -14823,6 +14823,11 @@ struct WindowRuntime<B: Backend = Native> {
     /// stable, so the layers handed to the renderer come out in the same order
     /// every frame.
     video: video_seat::VideoSeats,
+    /// **What the last click on a recording's picture did, while a second press
+    /// can still pair with it** (owner's ruling 2026-10-23, row 39) — what the
+    /// double click undoes before it zooms. Window-level beside [`Self::video`],
+    /// because a floating window's picture is clicked as a pane's is.
+    video_click: Option<VideoPictureClick>,
     /// **Every animated picture this window has looked inside**, by the same
     /// normalised path key the decode cache beside it uses (user ruling
     /// 2026-08-28; §7.44 ⑤).
@@ -27480,6 +27485,9 @@ enum ImageGrasp {
 /// and a rung added here is added to both.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreviewBodyRung {
+    /// A recording's picture: a click plays or pauses, a double click zooms
+    /// the pane (`Runtime::press_video_picture`; owner's ruling 2026-10-23).
+    VideoPicture,
     /// The body's own scroll bar (`Runtime::press_preview_body_thumb`).
     BodyThumb,
     /// A wide block's bar (`Runtime::press_preview_block_thumb`).
@@ -27495,7 +27503,8 @@ enum PreviewBodyRung {
 
 impl PreviewBodyRung {
     /// The order, top rung first.
-    const LADDER: [Self; 5] = [
+    const LADDER: [Self; 6] = [
+        Self::VideoPicture,
         Self::BodyThumb,
         Self::BlockThumb,
         Self::Picture,
@@ -27507,6 +27516,7 @@ impl PreviewBodyRung {
     /// before it was one list, kept so an old trace and a new one read alike.
     fn trace_name(self) -> &'static str {
         match self {
+            Self::VideoPicture => "press-video-picture",
             Self::BodyThumb => "press-preview-body-thumb",
             Self::BlockThumb => "press-preview-block-thumb",
             Self::Picture => "press-preview-image",
@@ -27536,6 +27546,62 @@ struct ImageDrag {
 /// halves of a real double click. The slop is generous enough for that and far
 /// too small to join two deliberate clicks at opposite corners.
 const IMAGE_DOUBLE_CLICK_SLOP_PX: f32 = 6.0;
+
+/// **A press on a recording's picture, not yet a click** (owner's ruling
+/// 2026-10-23, row 38; capture C23): the click is decided by the release, and a
+/// press that wandered past the double-click slop before it is a drag, which
+/// means nothing here.
+#[derive(Clone, Copy, Debug)]
+struct VideoPicturePress {
+    surface: PreviewSurface,
+    /// Where the press landed, in physical pixels.
+    origin: [f32; 2],
+    /// Whether the pointer has left [`IMAGE_DOUBLE_CLICK_SLOP_PX`] of it.
+    wandered: bool,
+}
+
+impl VideoPicturePress {
+    fn at(surface: PreviewSurface, origin: [f32; 2]) -> Self {
+        Self {
+            surface,
+            origin,
+            wandered: false,
+        }
+    }
+
+    /// The pointer is at `point` now. The slop is the double click's, so a
+    /// press is a click exactly as far as it could still be half of a pair.
+    fn travel(&mut self, point: [f32; 2]) {
+        self.wandered |= (point[0] - self.origin[0]).abs() > IMAGE_DOUBLE_CLICK_SLOP_PX
+            || (point[1] - self.origin[1]).abs() > IMAGE_DOUBLE_CLICK_SLOP_PX;
+    }
+}
+
+/// **One click on a recording's picture, and how to put it back** (row 39) —
+/// see [`video_seat::ClickUndo`] for why the double click undoes rather than
+/// waits.
+///
+/// **The record answers for the one seat it was made on** (review round 2,
+/// 2026-10-23): `seat` is that seat's key ([`video_seat::VideoSeat::key`], a
+/// serial the window never reuses), and a pair whose surface holds any other
+/// seat by then — file travel opened the next recording there, or the still
+/// came back and was played again — puts nothing back.
+#[derive(Clone, Debug, PartialEq)]
+struct VideoPictureClick {
+    surface: PreviewSurface,
+    seat: String,
+    undo: PictureUndo,
+}
+
+/// What a click on a picture did that a double click puts back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PictureUndo {
+    /// The seat was already there and toggled.
+    Seat(video_seat::ClickUndo),
+    /// The click started a still, which opened its seat: closing it puts the
+    /// still back.
+    Opened,
+}
 
 #[derive(Default)]
 struct ImageClicks {
@@ -45807,6 +45873,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         compositor,
         web: BTreeMap::new(),
         video: video_seat::VideoSeats::default(),
+        video_click: None,
         animations: AnimationCache::with_budget(MAX_ANIMATION_CACHE_BYTES),
         animations_drawn: BTreeMap::new(),
         pictures_owe_a_frame: false,
@@ -57946,8 +58013,11 @@ mod mouse_trace_station_tests {
         // notice strip is swallowed, with its own `wheel_route taken=overlay
         // at=in-pane` line above it. 26 → 27 the same day: a notch on a band
         // painted above the panes that does not scroll is swallowed, with its
-        // own `wheel_route taken=overlay at=over-pane` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 28);
+        // own `wheel_route taken=overlay at=over-pane` line above it. 28 → 29 on
+        // 2026-10-23 (T-VIDEO-POINTER-AND-KEYS, row 40): a notch over a
+        // recording's picture is its volume, with its own `wheel_route taken=pane
+        // at=video-volume` line above it.
+        assert_every_exit_is_traced("mouse_wheel", 29);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
@@ -64079,7 +64149,7 @@ mod pty_drain_budget_tests {
             .find("let cards_owe = self.window.cards.owes_frame();")
             .expect("the tick asks whether a card is behind its pane");
         let folded = advance
-            .find("let owes_frame = owes_frame || pictures_owe || cards_owe;")
+            .find("let owes_frame = owes_frame || pictures_owe || cards_owe || bars_owe;")
             .expect("and folds it in beside the animations' own debts");
         let gate = advance
             .find("if !owes_frame && !panes_owe {")

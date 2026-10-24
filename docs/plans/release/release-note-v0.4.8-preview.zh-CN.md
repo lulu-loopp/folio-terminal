@@ -39,7 +39,7 @@
 
 ### 修复
 
-- **在缩放为 125%、150% 或 175% 的显示器上预览的 PDF** 不再出现笔画粗细不均、单词中间断开的文字；在这类显示器上，PDF 查看器自身的控件画得更大，窗格较窄时工具栏会缩短，也可能不显示。<!-- pending the refit check -->
+- **在缩放为 125%、150% 或 175% 的显示器上预览的 PDF** 不再出现笔画粗细不均、单词中间断开的文字；在这类显示器上，PDF 查看器自身的控件画得更大，窗格较窄时工具栏会缩短，也可能不显示。PDF 打开后再调整窗格大小，页面不会按新的宽度重新排布，重新打开该 PDF 才会；以前的版本也是如此。
 - **关机、重启或注销 Windows 时**，预览中未保存的编辑不再丢失；来不及写入的内容保留在 `recovered` 文件夹中，下次启动时会提示。
 - **在退出卡片上选择保存**不再让窗口卡住；保存后立即关闭会等待保存完成，不再询问是否放弃改动。
 - **Windows 上，程序短暂占用 Folio 的某个文件**不再导致更新回滚或无法完成：Folio 对每个文件最多等待十秒。
@@ -78,7 +78,7 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `folio-0.4.8-windows-x64.zip` | 十个归属文件，打包在一个文件夹中 — `sha256:<ZIP_SHA256>` |
+| `folio-0.4.8-windows-x64.zip` | 十个归属文件，打包在一个文件夹中 — `sha256:9512cbf99b569387de4a47bd6d143d32c068214989495a2eeaa2ae85ce6fc42f` |
 | `folio-windows-x64.zip` | 同一份压缩包，名称在各版本间固定不变 — 同一个 `sha256` |
 | `SHA256SUMS.txt` | 压缩包两个名称和物料清单的哈希，格式为 `sha256sum -c` 可读 |
 | `folio-0.4.8.cdx.json` | CycloneDX 物料清单 |
@@ -110,7 +110,7 @@ sha256sum -c SHA256SUMS.txt
 
 | 文件 | 说明 |
 | --- | --- |
-| `Folio-0.4.8-macos-arm64.dmg` | 应用程序，已签名并经过 Apple 公证 — `sha256:<DMG_SHA256>` |
+| `Folio-0.4.8-macos-arm64.dmg` | 应用程序，已签名并经过 Apple 公证 — `sha256:fd3d532160ce36abff881b5a3d7bd425b36a387b5d1c12b63f1999e90bf391ea` |
 | `Folio-macos-arm64.dmg` | 同一个磁盘映像，名称在各版本间固定不变 — 同一个 `sha256` |
 | `SHA256SUMS-macos.txt` | 磁盘映像两个名称的哈希，格式为 `shasum -c` 可读 |
 
@@ -132,4 +132,4 @@ shasum -c SHA256SUMS-macos.txt
 
 </details>
 
-完整列表见 [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.8-preview/CHANGELOG.md#048-preview--2026-10-DD) · [v0.4.7-preview…v0.4.8-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.7-preview...v0.4.8-preview)
+完整列表见 [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.8-preview/CHANGELOG.md#048-preview--2026-10-23) · [v0.4.7-preview…v0.4.8-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.7-preview...v0.4.8-preview)

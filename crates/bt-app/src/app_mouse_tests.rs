@@ -3661,7 +3661,7 @@ fn every_pointer_reader_below_the_in_pane_surfaces_reads_their_claim() {
     );
     assert!(
         moved.contains("self.in_pane_surface_at(position).is_none();")
-            && moved.contains("self.note_video_hover(on_the_picture.then_some(position));"),
+            && moved.contains("self.note_video_hover(on_the_picture.then_some(position))?;"),
         "video: a hand on a claimed point is not on the picture"
     );
     assert!(

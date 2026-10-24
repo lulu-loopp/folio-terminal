@@ -4332,7 +4332,7 @@ fn the_top_bar_drags_beside_the_toggle_when_the_tabs_are_in_the_rail() {
     let horizontal = seats::RailState::default();
     // The very list `refresh_chrome` hands the frame, built the way it
     // builds it — the boxes this window draws in its bar, on whole pixels.
-    let boxes = |rail| -> Vec<[i32; 4]> {
+    let boxes = |rail| -> Vec<bt_platform::TitleBarBox> {
         seats::title_bar_folio_boxes(
             width,
             scale,
@@ -4343,7 +4343,10 @@ fn the_top_bar_drags_beside_the_toggle_when_the_tabs_are_in_the_rail() {
             false,
         )
         .into_iter()
-        .map(|rect| rect.map(|edge| edge.ceil() as i32))
+        .map(|(role, rect)| bt_platform::TitleBarBox {
+            rect: rect.map(|edge| edge.ceil() as i32),
+            role,
+        })
         .collect()
     };
     let hit = |rail, x, y| {
@@ -4401,12 +4404,18 @@ fn the_top_bar_drags_beside_the_toggle_when_the_tabs_are_in_the_rail() {
     );
 
     // The strip's bar: every box in it is the application's and must not be
-    // draggable, which is the promise the vertical fix may not break.
+    // draggable, which is the promise the vertical fix may not break. The
+    // maximize box is the application's too, and the system is told which
+    // button it is (T-SNAP-LAYOUTS-MAXBUTTON).
     let strip = boxes(horizontal);
-    for rect in &strip {
+    for held in &strip {
+        let rect = held.rect;
         assert_eq!(
             hit(horizontal, (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2),
-            CustomFrameHit::Client,
+            match held.role {
+                bt_platform::TitleBarBoxRole::Own => CustomFrameHit::Client,
+                bt_platform::TitleBarBoxRole::MaximizeButton => CustomFrameHit::MaximizeButton,
+            },
             "a box this window draws at {rect:?} is not the window's to be \
                  dragged by — handing the tabs to the drag handler is the bug \
                  this boundary exists to prevent"
@@ -4415,13 +4424,14 @@ fn the_top_bar_drags_beside_the_toggle_when_the_tabs_are_in_the_rail() {
     // And what is left of the bar is the window's — including, since the
     // ruling, the air between two tabs.
     let held = |x: i32, y: i32| {
-        strip
-            .iter()
-            .any(|rect| x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3])
+        strip.iter().any(|held| {
+            let rect = held.rect;
+            x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3]
+        })
     };
     let first_tab = strip
         .iter()
-        .map(|rect| rect[0])
+        .map(|held| held.rect[0])
         .filter(|left| *left > 0)
         .min()
         .expect("a thirty-tab strip has tabs in it");
