@@ -1105,6 +1105,9 @@ impl<B: Backend> Runtime<'_, B> {
     ) -> Result<Option<PreviewBodyRung>> {
         for rung in PreviewBodyRung::LADDER {
             let taken = match rung {
+                PreviewBodyRung::VideoPicture => {
+                    self.press_video_picture([position.x as f32, position.y as f32])?
+                }
                 PreviewBodyRung::BodyThumb => self.press_preview_body_thumb(position)?,
                 PreviewBodyRung::BlockThumb => self.press_preview_block_thumb(position)?,
                 PreviewBodyRung::Picture => self.press_preview_image(position)?,
@@ -1615,18 +1618,25 @@ impl<B: Backend> Runtime<'_, B> {
         if self.drag_video_bar(position)? {
             return Ok(());
         }
+        // A press on a recording's picture is a click until it wanders past the
+        // double click's slop (row 38). Told and not consumed: the press is not a
+        // drag of anything, so every hover below still hears the move.
+        self.travel_video_picture_press([position.x as f32, position.y as f32]);
         // And every playing surface is told where the pointer is, before any
         // branch below can consume the move — the bar's reveal is armed by a
         // pointer settling on the picture and its dwell is ended by one that has
         // gone somewhere else, and a seat that only heard about moves nothing
         // else wanted would hold its bar up for ever.
         //
-        // **It asks for no frame of its own**, and that is deliberate: what a
-        // move can change is when the bar is *due* — an intent armed, a dwell
-        // restarted — and `strip_animation_work` reads exactly those two
-        // through `VideoSeats::bar_deadline` on the turn this move ends. A
-        // present forced here would be a repaint on every pointer move anywhere
-        // in the window for as long as anything is playing.
+        // **It asks for a frame only for a hand on a bar**, and that is
+        // deliberate: what a move elsewhere can change is when the bar is *due*
+        // — an intent armed, a dwell restarted — and `strip_animation_work`
+        // reads exactly those two through `VideoSeats::bar_deadline` on the
+        // turn this move ends. A present forced on every move would be a
+        // repaint on every pointer move anywhere in the window for as long as
+        // anything is playing. On a bar the scrubber's time stands over the
+        // hand (row 41), and a paused recording has no picture coming to draw
+        // it there, so that move owes its frame (review round 1, 2026-10-23).
         //
         // **A hand on a surface inside a pane is not on the picture under it**
         // (T-STRIP-HOVER-THROUGH): a pill standing over the bar must not light
@@ -1635,7 +1645,7 @@ impl<B: Backend> Runtime<'_, B> {
         // with no video pays nothing for it.
         let on_the_picture = self.window.video.iter().next().is_none()
             || self.in_pane_surface_at(position).is_none();
-        self.note_video_hover(on_the_picture.then_some(position));
+        self.note_video_hover(on_the_picture.then_some(position))?;
         // The glance card's thumb, ahead of everything: it is the topmost thing
         // on the glass, and a gesture in flight is not a hover. It owns the
         // pointer outside the card too — a drag that let go the moment it left
@@ -5765,10 +5775,30 @@ impl<B: Backend> Runtime<'_, B> {
         // branch below and scrolled a body with nothing in it.
         if let Some(position) = self.window.pointer_position
             && let Some((surface, body)) = self.preview_surface_at(position)
-            && self.window.git_graphs_shown.contains_key(&surface)
         {
-            self.mouse_trace(|| format!("wheel_route taken=pane at=git-graph surface={surface:?}"));
-            return self.scroll_git_graph(surface, body, delta);
+            if self.window.git_graphs_shown.contains_key(&surface) {
+                self.mouse_trace(|| {
+                    format!("wheel_route taken=pane at=git-graph surface={surface:?}")
+                });
+                return self.scroll_git_graph(surface, body, delta);
+            }
+            // **A notch over a recording's picture is its volume** (owner's
+            // ruling 2026-10-23, row 40), one step a notch as `↑`/`↓` step it —
+            // on a pane's or a floating window's picture, off its bar, and only
+            // with no modifier held: `Ctrl`-, `Shift`- and `Alt`-wheel go on to
+            // the routes that give them their window-wide meanings. Asked before
+            // the picture's zoom below, which a recording does not take.
+            if self.window.modifiers.is_empty()
+                && !wheel_points_sideways(delta)
+                && self.wheel_video_picture(
+                    surface,
+                    [position.x as f32, position.y as f32],
+                    wheel_zoom_notches(delta),
+                )?
+            {
+                self.mouse_trace(|| "wheel_route taken=pane at=video-volume".to_owned());
+                return Ok(());
+            }
         }
         // **A notch over a picture is a zoom** (user ruling 2026-08-16, ticket
         // #60). It is asked beside the document's branch and not inside it,

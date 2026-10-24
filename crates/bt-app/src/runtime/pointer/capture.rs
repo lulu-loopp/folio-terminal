@@ -17,7 +17,7 @@ use crate::window_seam::prelude::*;
 use crate::{
     App, DividerDrag, Drag, FilePeekPress, FloatDrag, FloatHeadPress, ImageDrag, MouseRoute,
     PanePress, PreviewBlockDrag, PreviewBodyDrag, PreviewSurface, PreviewTextDrag, RowPress,
-    Runtime, TabId, TabPress, TerminalColumnDrag, TerminalThumbDrag, settings,
+    Runtime, TabId, TabPress, TerminalColumnDrag, TerminalThumbDrag, VideoPicturePress, settings,
 };
 use winit::event::MouseButton;
 use winit::keyboard::ModifiersState;
@@ -71,6 +71,9 @@ pub(crate) enum CaptureOwner {
     SettingsSlider(settings::SettingsRow),
     /// C22, the settings sheet's menu bar, and where on it the hand took hold.
     SettingsMenuBar(f32),
+    /// C23, a press on a recording's picture, not yet a click (owner's ruling
+    /// 2026-10-23).
+    VideoPicture(VideoPicturePress),
 }
 
 /// **One latched gesture** (§2.2).
@@ -452,6 +455,18 @@ impl<B: Backend> Runtime<'_, B> {
 
     pub(crate) fn latch_video_bar_drag(&mut self, value: PreviewSurface) {
         gesture_door!(@window latch self VideoBar value)
+    }
+
+    pub(crate) fn held_video_picture_press_mut(&mut self) -> Option<&mut VideoPicturePress> {
+        gesture_door!(@window held_mut self VideoPicture)
+    }
+
+    pub(crate) fn take_video_picture_press(&mut self) -> Option<VideoPicturePress> {
+        gesture_door!(@window take self VideoPicture)
+    }
+
+    pub(crate) fn latch_video_picture_press(&mut self, value: VideoPicturePress) {
+        gesture_door!(@window latch self VideoPicture value)
     }
 
     pub(crate) fn held_settings_slider_drag(&self) -> Option<&settings::SettingsRow> {

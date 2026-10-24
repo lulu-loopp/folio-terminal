@@ -409,6 +409,35 @@ fn a_seek_moves_the_playhead_and_the_next_picture_comes_from_there() {
     engine.shutdown();
 }
 
+/// RED (T-VIDEO-POINTER-AND-KEYS, row 42) — **a recording says how many
+/// pictures a second it is made of**, on whichever engine this machine has.
+///
+/// One frame step is one of these, so the number is the stream's own declared
+/// rate and not a count of pictures arriving: both fixtures were made at five
+/// a second (`tests/assets/PROVENANCE.md`), and both engines read it off the
+/// file — `MF_MT_FRAME_RATE` through the media engine's own stream attributes,
+/// `AVAssetTrack.nominalFrameRate` on a Mac — before anything has played.
+///
+/// MUTATION: publish `frame_rate: None` from either arm's state and the wait
+/// below runs out on a state with no rate.
+fn a_recording_declares_its_frame_rate_on_either_machine() {
+    for name in ["folio-video-test.mp4", "folio-video-test.mov"] {
+        let Some(mut engine) = ready_engine(name) else {
+            continue;
+        };
+        let state = settle(&engine, |state| state.frame_rate.is_some());
+        let rate = state
+            .frame_rate
+            .unwrap_or_else(|| panic!("{name} declares no frame rate: {state:?}"));
+        assert!(
+            (rate - 5.0).abs() < 0.01,
+            "{name} was made at five pictures a second and says {rate}"
+        );
+        assert!(!state.playing, "{name}: read before anything played");
+        engine.shutdown();
+    }
+}
+
 /// RED — **pause stops the clock and stops the pictures; play starts both
 /// again.**
 ///
@@ -726,6 +755,10 @@ fn main() {
             the_still_and_the_playing_picture_are_the_same_colour,
         ),
         (
+            "a_recording_declares_its_frame_rate_on_either_machine",
+            a_recording_declares_its_frame_rate_on_either_machine,
+        ),
+        (
             "a_seek_moves_the_playhead_and_the_next_picture_comes_from_there",
             a_seek_moves_the_playhead_and_the_next_picture_comes_from_there,
         ),
@@ -761,5 +794,5 @@ fn main() {
         case();
         println!("{name}: ok");
     }
-    println!("video_playback: 10 cases, all ok");
+    println!("video_playback: 11 cases, all ok");
 }

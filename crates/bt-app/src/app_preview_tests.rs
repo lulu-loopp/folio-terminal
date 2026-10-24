@@ -3101,6 +3101,9 @@ fn a_press_on_a_floats_picture_climbs_the_docked_panes_ladder() {
     assert_eq!(
         PreviewBodyRung::LADDER.as_slice(),
         [
+            // A recording's picture first: a click there plays or pauses it on
+            // either host (T-VIDEO-POINTER-AND-KEYS, row 38).
+            PreviewBodyRung::VideoPicture,
             PreviewBodyRung::BodyThumb,
             PreviewBodyRung::BlockThumb,
             PreviewBodyRung::Picture,
@@ -3124,6 +3127,7 @@ fn a_press_on_a_floats_picture_climbs_the_docked_panes_ladder() {
     // glance card asks the block bar for its own body, which no preview surface
     // walk can see — `press_file_peek` is not one of the two hosts.)
     for rung in [
+        "press_video_picture",
         "press_preview_body_thumb",
         "press_preview_block_thumb",
         "press_preview_body",

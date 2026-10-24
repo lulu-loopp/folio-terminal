@@ -300,3 +300,102 @@ fn a_cards_open_rereads_and_its_teardown_lets_go_through_the_runtime() {
         "the failure a pane still shows stays"
     );
 }
+
+/// RED (T-VIDEO-POINTER-AND-KEYS review round 1, the card) — **a double click on the glance
+/// card's recording starts it there, inside the card, and the next double click pauses it**
+/// (user ruling 2026-08-28: 「点 ▶ 或双击画面进播放态」). The card is in none of that ticket's six
+/// rows, so its gesture stands; its first press is not taken, and stays the card's own click.
+///
+/// MUTATION: drop the `PreviewSurface::Peek` arms from `Runtime::press_video_at` — the pair
+/// starts nothing in the card and the second assertion goes red.
+#[test]
+fn a_double_click_on_the_cards_recording_starts_it_there() {
+    use crate::PreviewSurface;
+    let _ledger = crate::test_support::ledger_gate();
+    let before = bt_platform::video::engine::engines_outstanding();
+    let recording = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/assets/folio-video-test.mp4");
+    let tab = cross_tab(1, &["一 one"]);
+    let shell = tab.seats.terminals()[0];
+    let mut folio = HeadlessFolio::with_tabs("video-card-double", vec![tab], 0);
+    folio.window.file_peek = Some(card_over(
+        RowHost::Terminal(shell),
+        &recording,
+        PeekClock::Settling(Instant::now()),
+    ));
+    assert!(
+        folio
+            .runtime()
+            .mature_file_peek(Instant::now() + std::time::Duration::from_secs(5)),
+        "the card matures"
+    );
+    crate::lane::wait_until("the card shows its recording", || {
+        let _ = folio.runtime().turn(Instant::now(), true);
+        folio.draw();
+        folio.runtime().file_peek_subject().is_some()
+            && folio
+                .window
+                .file_peek
+                .as_ref()
+                .is_some_and(|peek| peek.body.is_some())
+    });
+    let scale = crate::window_seam::Glass::scale_factor(&folio.window.renderer) as f32;
+    let body = folio
+        .window
+        .file_peek
+        .as_ref()
+        .and_then(|peek| peek.body)
+        .expect("the card is laid out");
+    let picture = crate::file_peek::page_ground(body, scale);
+    let at = winit::dpi::PhysicalPosition::new(
+        f64::from(picture[0] + 20.0),
+        f64::from(picture[1] + (picture[3] - picture[1]) / 4.0),
+    );
+    let press = |folio: &mut HeadlessFolio| {
+        folio
+            .runtime()
+            .press_video_at(at)
+            .expect("a press on the card is answered")
+    };
+    let state = |folio: &HeadlessFolio,
+                 until: &dyn Fn(&bt_platform::video::engine::EngineState) -> bool| {
+        folio
+            .window
+            .video
+            .get(PreviewSurface::Peek)
+            .expect("the card is playing the recording")
+            .state_reaching(until)
+    };
+
+    assert!(
+        !press(&mut folio),
+        "the first press is the card's own click"
+    );
+    assert!(
+        press(&mut folio),
+        "the second of the pair is the card's double click"
+    );
+    let playing = state(&folio, &|state| state.playing);
+    assert!(
+        playing.playing,
+        "the recording plays inside the card: {playing:?}"
+    );
+
+    // The pair window runs out, as the clock would have moved it: the next press is a first one.
+    for tab in &mut folio.window.tabs {
+        if let Some((_, _, when)) = tab.preview_image_clicks.last.as_mut() {
+            *when = when
+                .checked_sub(crate::MULTI_CLICK_INTERVAL + std::time::Duration::from_millis(1))
+                .expect("the clock has run longer than one pair window");
+        }
+    }
+    assert!(!press(&mut folio), "a first press again");
+    assert!(press(&mut folio), "and its pair");
+    let paused = state(&folio, &|state| !state.playing);
+    assert!(
+        !paused.playing,
+        "a double click on a playing card pauses it: {paused:?}"
+    );
+    folio.window.video.shutdown_all();
+    crate::test_support::engines_settling_to(before);
+}

@@ -6,6 +6,15 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- Clicking a video's picture plays it or pauses it. <!-- zh: 单击视频画面即可播放或暂停。 -->
+- Double-clicking a video's picture zooms its pane, and the video goes on playing or stays paused as it was. <!-- zh: 双击视频画面会放大它所在的窗格，视频照旧播放或保持暂停。 -->
+- Turning the mouse wheel over a video's picture changes its volume, and the new volume shows for a moment above the control bar. <!-- zh: 在视频画面上滚动鼠标滚轮可调节音量，新的音量会在控制条上方短暂显示。 -->
+- Hovering over a video's progress bar shows the time under the pointer, and while you drag the playhead it shows where you are. <!-- zh: 鼠标停在视频进度条上时显示指针处的时间；拖动播放头时显示当前位置。 -->
+- `Home` and `End` go to a video's start and end, and while it is paused `,` and `.` step one frame back and forward. <!-- zh: `Home` 和 `End` 跳到视频的开头和结尾；暂停时，`,` 和 `.` 后退或前进一帧。 -->
+- A video that has ended plays again from the start, whether you press the play button, press Space or click the picture. <!-- zh: 已播完的视频再次播放时从头开始，无论是按播放按钮、按空格还是单击画面。 -->
+
 ### Fixed
 
 - On Windows 11, resting the pointer on the maximize button opens the snap layouts, and Win+Z shows them over the button. <!-- zh: pending T-SNAP-LAYOUTS-MAXBUTTON -->

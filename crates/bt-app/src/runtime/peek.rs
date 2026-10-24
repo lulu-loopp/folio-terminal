@@ -2082,8 +2082,10 @@ impl<B: Backend> Runtime<'_, B> {
                 // have this same defect, and for the same reason).
                 //
                 // `press_video_at` states the whole order — a play mark on a
-                // picture, then every control on a bar that is up, then a double
-                // click on the picture — and it is reached from
+                // picture, then every control on a bar that is up, then, on the
+                // card alone, a double click on the picture (a pane's and a
+                // window's picture answer theirs through the body ladder,
+                // `press_video_picture`) — and it is reached from
                 // `chrome_mouse_input`. A press inside the card never gets that
                 // far: `press_file_peek` is asked *above* the chrome router,
                 // which is what makes a card opaque to the layout beneath it,

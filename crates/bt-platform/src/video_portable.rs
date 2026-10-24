@@ -344,6 +344,9 @@ pub mod engine {
         /// Whether this source has a picture at all.
         pub has_video: bool,
         pub has_audio: bool,
+        /// The pictures per second the video stream declares, or `None` before
+        /// the metadata has arrived and for a source that declares none.
+        pub frame_rate: Option<f64>,
     }
 
     impl EngineState {

@@ -599,6 +599,9 @@ struct Machinery {
     /// wants them then.
     declared_secs: Option<f64>,
     native_size: Option<(u32, u32)>,
+    /// The first video track's `nominalFrameRate`, which AVFoundation answers
+    /// `0` for when the track declares none.
+    frame_rate: Option<f64>,
     has_video: bool,
     has_audio: bool,
     /// **The rate the reader asked for, which is not `AVPlayer.rate`.** On this
@@ -654,10 +657,14 @@ impl Machinery {
                 // early as it can be said rather than waited for.
                 return Err(EngineError::Unsupported);
             }
-            let native_size = video
+            let track = video.as_ref().and_then(|tracks| tracks.firstObject());
+            let native_size = track
                 .as_ref()
-                .and_then(|tracks| tracks.firstObject())
                 .and_then(|track| displayed_size(track.naturalSize(), track.preferredTransform()));
+            let frame_rate = track
+                .as_ref()
+                .map(|track| f64::from(track.nominalFrameRate()))
+                .filter(|rate| rate.is_finite() && *rate > 0.0);
             let declared_secs = declared_seconds(asset.duration());
 
             let item: Retained<AVPlayerItem> =
@@ -705,6 +712,7 @@ impl Machinery {
                 end_watch,
                 declared_secs,
                 native_size,
+                frame_rate,
                 has_video,
                 has_audio,
                 wanted_rate: 1.0,
@@ -918,6 +926,7 @@ impl Machinery {
                 ready: ready && !refused,
                 has_video: self.has_video,
                 has_audio: self.has_audio,
+                frame_rate: self.frame_rate.filter(|_| !refused),
             }
         };
         *shared.state.lock().unwrap_or_else(|held| held.into_inner()) = state;
