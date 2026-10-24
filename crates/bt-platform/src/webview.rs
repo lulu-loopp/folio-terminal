@@ -819,16 +819,22 @@ fn hide_new_controller(controller: &ICoreWebView2Controller) -> Result<(), Strin
     unsafe { controller.SetIsVisible(false) }
         .map_err(|error| failure("ICoreWebView2Controller::SetIsVisible(false)", &error))?;
     #[cfg(test)]
-    NEW_CONTROLLER_HIDES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    NEW_CONTROLLER_HIDES.with(|hides| hides.set(hides.get() + 1));
     Ok(())
 }
 
-/// The real-engine probe's receipt that the creation-edge hide was actually issued. The engine's
-/// current runtime can begin false on some machines, so `IsVisible == false` alone cannot prove
-/// the call whose regression the test is meant to catch.
 #[cfg(all(windows, test))]
-static NEW_CONTROLLER_HIDES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    /// The real-engine probe's receipt that the creation-edge hide was actually issued. The
+    /// engine's current runtime can begin false on some machines, so `IsVisible == false` alone
+    /// cannot prove the call whose regression the test is meant to catch.
+    ///
+    /// **Per thread** (T-TEST-ORDER-STRAYS): the creation callback is delivered on the thread
+    /// that made the environment, which is the probe's own (libtest runs each test on a thread
+    /// of its own), so a controller another probe makes in parallel counts on that probe's
+    /// thread. A process-wide counter was raised by both and the delta read one too many.
+    static NEW_CONTROLLER_HIDES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// **The spare web controller's parent: a window that exists and is never shown**
 /// (0.4.5 ticket 60; `docs/ARCHITECTURE.md` §6) — **the one `CreateWindowExW` in
@@ -3898,7 +3904,6 @@ mod engine_settings_tests {
 /// folders removed however the run ends.
 #[cfg(all(test, windows))]
 mod webview2_runtime_probe {
-    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
@@ -3907,8 +3912,9 @@ mod webview2_runtime_probe {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows,
-        GetClassNameW, GetWindowRect, IsWindowVisible, MSG, PM_REMOVE, PeekMessageW,
-        RegisterClassW, TranslateMessage, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+        GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, MSG, PM_REMOVE,
+        PeekMessageW, RegisterClassW, TranslateMessage, WNDCLASSW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_POPUP,
     };
     use windows::core::{BOOL, HSTRING, PCWSTR};
 
@@ -4085,18 +4091,29 @@ mod webview2_runtime_probe {
         }
     }
 
-    /// The runtime top-level windows a newly created controller added. A handle already present
-    /// before this probe is not this probe's window (the test runner may be sharing a cached
-    /// environment with another ignored probe).
-    fn new_visible_engine_windows(before: &HashSet<usize>) -> Vec<(usize, RECT)> {
-        struct Look<'a> {
-            before: &'a HashSet<usize>,
+    /// The visible WebView2 top-level windows of the browser process `process` that intersect a
+    /// monitor.
+    ///
+    /// **Attributed by owner** (T-TEST-ORDER-STRAYS): each probe opens its own profile, so its
+    /// engine runs in a browser process of its own, and a window is this probe's exactly when
+    /// that process owns it. A before/after diff of every `Chrome_WidgetWin_1` window on the
+    /// desktop counted the other probe's windows, and any Chromium program's (Edge, an Electron
+    /// editor) that opened one meanwhile.
+    fn visible_engine_windows_of(process: u32) -> Vec<(usize, RECT)> {
+        struct Look {
+            process: u32,
             found: Vec<(usize, RECT)>,
         }
 
         unsafe extern "system" fn keep(window: HWND, state: LPARAM) -> BOOL {
             // SAFETY: `state` points at `look` below for this synchronous enumeration.
-            let look = unsafe { &mut *(state.0 as *mut Look<'_>) };
+            let look = unsafe { &mut *(state.0 as *mut Look) };
+            let mut owner = 0u32;
+            // SAFETY: the HWND is supplied by EnumWindows and `owner` is a local out parameter.
+            unsafe { GetWindowThreadProcessId(window, Some(&mut owner)) };
+            if owner != look.process {
+                return BOOL(1);
+            }
             let mut class = [0u16; 64];
             // SAFETY: the HWND is supplied by EnumWindows and the buffer is writable.
             let length = unsafe { GetClassNameW(window, &mut class) };
@@ -4105,9 +4122,8 @@ mod webview2_runtime_probe {
             {
                 return BOOL(1);
             }
-            let key = window.0 as usize;
             // SAFETY: all reads use the live enumerated HWND and a local out parameter.
-            if look.before.contains(&key) || !unsafe { IsWindowVisible(window) }.as_bool() {
+            if !unsafe { IsWindowVisible(window) }.as_bool() {
                 return BOOL(1);
             }
             let mut rect = RECT::default();
@@ -4118,40 +4134,18 @@ mod webview2_runtime_probe {
             // fallback can turn an off-screen rectangle into an on-screen one.
             let monitor = unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) };
             if !monitor.is_invalid() {
-                look.found.push((key, rect));
+                look.found.push((window.0 as usize, rect));
             }
             BOOL(1)
         }
 
         let mut look = Look {
-            before,
+            process,
             found: Vec::new(),
         };
         // SAFETY: `keep` uses `look` only during this synchronous call.
         let _ = unsafe { EnumWindows(Some(keep), LPARAM((&raw mut look) as isize)) };
         look.found
-    }
-
-    /// Every current WebView2 top-level handle, visible or not, for a before/after attribution.
-    fn engine_window_handles() -> HashSet<usize> {
-        unsafe extern "system" fn keep(window: HWND, state: LPARAM) -> BOOL {
-            // SAFETY: `state` points at the set below for this synchronous enumeration.
-            let found = unsafe { &mut *(state.0 as *mut HashSet<usize>) };
-            let mut class = [0u16; 64];
-            // SAFETY: the HWND is supplied by EnumWindows and the buffer is writable.
-            let length = unsafe { GetClassNameW(window, &mut class) };
-            if length > 0
-                && String::from_utf16_lossy(&class[..length as usize]) == "Chrome_WidgetWin_1"
-            {
-                found.insert(window.0 as usize);
-            }
-            BOOL(1)
-        }
-
-        let mut found = HashSet::new();
-        // SAFETY: `keep` uses `found` only during this synchronous call.
-        let _ = unsafe { EnumWindows(Some(keep), LPARAM((&raw mut found) as isize)) };
-        found
     }
 
     /// The last title the document gave itself, which is where the page writes
@@ -4288,8 +4282,7 @@ mod webview2_runtime_probe {
             assert!(loop_running());
         }
 
-        let before = engine_window_handles();
-        let hides_before = NEW_CONTROLLER_HIDES.load(std::sync::atomic::Ordering::SeqCst);
+        let hides_before = NEW_CONTROLLER_HIDES.with(std::cell::Cell::get);
         let profile = Scratch::make_in_target("spare-profile");
         let parent = admitted::<doors::CompositorBirth, _>(spare_parent)
             .expect("admitted on the window thread")
@@ -4349,7 +4342,9 @@ mod webview2_runtime_probe {
                 .any(|event| matches!(event, WebEvent::NavigationCompleted { success: true, .. }))
         });
         pump_for(&host, &mut seen, Duration::from_millis(500));
-        let offenders = new_visible_engine_windows(&before);
+        let browser = host.browser_process_id();
+        assert_ne!(browser, 0, "the engine names its browser process");
+        let offenders = visible_engine_windows_of(browser);
         host.close();
         settle();
         // The cached environment owns COM interfaces too. Release it while this apartment is
@@ -4362,7 +4357,7 @@ mod webview2_runtime_probe {
             "creation delivered a hidden controller"
         );
         assert_eq!(
-            NEW_CONTROLLER_HIDES.load(std::sync::atomic::Ordering::SeqCst),
+            NEW_CONTROLLER_HIDES.with(std::cell::Cell::get),
             hides_before + 1,
             "the creation callback issued one SetIsVisible(false)"
         );
