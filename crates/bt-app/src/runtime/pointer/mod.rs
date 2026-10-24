@@ -25,9 +25,9 @@ pub(crate) use capture::{
     PressVerdict, ReleaseVerdict, cancel_then_route, press_against_the_slot,
     release_against_the_slot,
 };
-pub(crate) use ending::{Ending, Gone, Leaving, OwnerGone};
 #[cfg(test)]
 pub(crate) use ending::a_capture_still_holds_its_pointer;
+pub(crate) use ending::{Ending, Gone, Leaving, OwnerGone};
 
 #[cfg(test)]
 pub(crate) use router::{BANDS_THAT_TAKE_NO_POINTER, POINTER_LAYERS_TOP_FIRST, Visits};

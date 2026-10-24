@@ -283,14 +283,6 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 use bt_doc::Bias;
 #[cfg(test)]
 use bt_persist::WindowStateV1;
-// K2 (T-SPLIT-2B) moved these free functions into their `runtime/` topics; the root names them
-// again so that its callers, and its test modules through `use super::*`, read them as before.
-use runtime::platform_pointer_of;
-#[cfg(test)]
-use runtime::{
-    a_capture_still_holds_its_pointer, profile_menu_anchor, rescan_leaf_for_search,
-    resolved_theme_change, tab_surface_tip_boxes, tooltip_anchor_for,
-};
 use bt_platform::admission::{WaitToken, doors};
 use bt_pty::{
     OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PSREADLINE_PASTE_INPUT, PtyError, PtySession,
@@ -316,6 +308,14 @@ use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{
     HyperlinkHit, MathBlockAnchor, ViewSelection, ViewportFrame, ViewportProjection,
     horizontal::ContentColumn,
+};
+// K2 (T-SPLIT-2B) moved these free functions into their `runtime/` topics; the root names them
+// again so that its callers, and its test modules through `use super::*`, read them as before.
+use runtime::platform_pointer_of;
+#[cfg(test)]
+use runtime::{
+    a_capture_still_holds_its_pointer, profile_menu_anchor, rescan_leaf_for_search,
+    resolved_theme_change, tab_surface_tip_boxes, tooltip_anchor_for,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
