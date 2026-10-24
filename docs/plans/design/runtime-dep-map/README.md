@@ -115,11 +115,11 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 18 | `runtime/mouse.rs` | 49 (29 + 20) | 81 |
    | 19 | `runtime/preview.rs` | 91 (72 + 19) | 144 |
 
-   Batch 7 onward moves rows four shrink-only checks key by module or file
-   (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`, `check-env-doors.ps1`,
-   `check-window-seam-native.ps1`): those checks learn `check-dead-code.ps1`'s "a row
-   whose only change is where it lives is the same row moved" first, in a landing of
-   their own before that batch.
+   Batch 2 (`runtime/web.rs`) onward moves rows four shrink-only checks key by module
+   or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,
+   `check-env-doors.ps1`, `check-window-seam-native.ps1`): those checks learn
+   `check-dead-code.ps1`'s "a row whose only change is where it lives is the same row
+   moved" first, in a landing of their own before that batch.
 
 2. **The 395 items whose callers are mostly other `main.rs` items follow their
    callers.** Regenerate the map after each batch. An item whose callers have moved
