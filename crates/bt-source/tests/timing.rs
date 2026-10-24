@@ -63,8 +63,10 @@
 //!   reading or a measurement).
 //! * An edge the call graph leaves unresolved — `Dynamic`, `Ambiguous`,
 //!   `OtherArm` — any of whose candidates is a test-only callable of the test's
-//!   target that measures or reaches one that does; an unresolved path whose
-//!   last segment names such a callable; an unparsed body or a cutoff on the
+//!   target, callable from the caller under Rust's privacy, that measures or
+//!   reaches one that does, or of which that cannot be told (its body or a call
+//!   on its way is refused in turn); an unresolved path whose last segment names
+//!   such a callable; an unparsed body or a cutoff on the
 //!   walk; a macro whose `macro_rules!` definition in the package names
 //!   `elapsed` or `Instant`.
 //!
@@ -82,6 +84,15 @@
 //! * **A clock handed through a parameter.** A helper's `started: Instant`
 //!   parameter is a value the reading does not trace to a reading; an
 //!   `elapsed()` on it is still a measurement.
+//! * **A reading handed back by a call** (shape 2). `let deadline = deadline_in(secs);
+//!   while Instant::now() < deadline` compares one reading with the answer of a
+//!   call; the answer is not traced to the reading inside the callee, so this is
+//!   neither found nor refused. Review owns it.
+//! * **An instant handed under another name** (the handed-now guard). Only a
+//!   parameter named `now` of type `Instant`, `&Instant` or `Option<Instant>` is
+//!   read as the turn's instant; `at: Instant`, `deadline: Instant` (which a
+//!   function rightly compares with a fresh reading) and an instant carried in
+//!   another struct's field are not.
 //! * **`Instant` and `Duration` as values.** Most of the tree's tests build a
 //!   controlled clock from one `Instant::now()` plus `Duration::from_*` offsets,
 //!   and their verdict does not move with the machine's speed. That is exactly
@@ -92,7 +103,7 @@
 //! chosen by what the body calls, for a ticket that converts or removes tests
 //! to copy rows from — never to add them.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -396,15 +407,30 @@ fn scan_index(
     }
 }
 
+/// Whether a test-only callable measures or reaches, through test-only callables
+/// of the target, one that does, or why that cannot be told.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Reach {
+    Yes,
+    No,
+    /// Its body, or a call on its way, cannot be read: the reasons, by file and line.
+    CannotTell(Vec<String>),
+}
+
 /// **Shape 3**: the test-only helpers that measure, and the walk to them from a
 /// test through the call graph's resolved edges.
 struct Helpers<'r, 'i> {
     resolver: &'r Resolver<'i>,
     graph: CallGraph<'r, 'i>,
     readings: RefCell<HashMap<ItemId, Result<bool, String>>>,
-    reaches: RefCell<HashMap<ItemId, bool>>,
-    /// Per package, its test-only callables that measure.
-    measuring: RefCell<HashMap<String, Vec<ItemId>>>,
+    reaches: RefCell<HashMap<ItemId, Reach>>,
+    /// The callables whose reach is being asked now, outermost first: one asked
+    /// again on its own way answers `No` for that way, and an answer decided on
+    /// such an open one is not kept.
+    asking: RefCell<Vec<ItemId>>,
+    leaned_on_open: Cell<bool>,
+    /// Per package, its test-only callables.
+    test_callables: RefCell<HashMap<String, Vec<ItemId>>>,
 }
 
 impl<'r, 'i> Helpers<'r, 'i> {
@@ -414,7 +440,9 @@ impl<'r, 'i> Helpers<'r, 'i> {
             graph: CallGraph::new(resolver),
             readings: RefCell::default(),
             reaches: RefCell::default(),
-            measuring: RefCell::default(),
+            asking: RefCell::default(),
+            leaned_on_open: Cell::new(false),
+            test_callables: RefCell::default(),
         }
     }
 
@@ -479,34 +507,99 @@ impl<'r, 'i> Helpers<'r, 'i> {
         )
     }
 
-    /// `package`'s test-only callables that measure.
-    fn measuring(&self, package: &str) -> Vec<ItemId> {
-        if let Some(known) = self.measuring.borrow().get(package) {
+    /// `package`'s test-only callables.
+    fn test_callables(&self, package: &str) -> Vec<ItemId> {
+        if let Some(known) = self.test_callables.borrow().get(package) {
             return known.clone();
         }
         let found: Vec<ItemId> = self
             .resolver
             .callables(package)
             .into_iter()
-            .filter(|id| self.test_only(*id) && self.measures(*id) == Ok(true))
+            .filter(|id| self.test_only(*id))
             .collect();
-        self.measuring
+        self.test_callables
             .borrow_mut()
             .insert(package.to_owned(), found.clone());
         found
     }
 
     /// Whether test-only `id` measures or reaches, through test-only callables
-    /// of `within`, one that does.
-    fn reaches_a_measurement(&self, id: ItemId, within: &BTreeSet<String>) -> bool {
+    /// of `within`, one that does; what its own body or the walk from it cannot
+    /// decide makes the answer [`Reach::CannotTell`], never `No`.
+    fn reach(&self, id: ItemId, within: &BTreeSet<String>) -> Reach {
         if let Some(known) = self.reaches.borrow().get(&id) {
-            return *known;
+            return known.clone();
         }
-        self.reaches.borrow_mut().insert(id, false);
-        let (hits, _) = self.walk(id, within);
-        let answer = self.measures(id) == Ok(true) || !hits.is_empty();
-        self.reaches.borrow_mut().insert(id, answer);
+        if self.asking.borrow().contains(&id) {
+            self.leaned_on_open.set(true);
+            return Reach::No;
+        }
+        let outer = self.leaned_on_open.replace(false);
+        self.asking.borrow_mut().push(id);
+        let answer = match self.measures(id) {
+            Ok(true) => Reach::Yes,
+            Err(refusal) => Reach::CannotTell(vec![refusal]),
+            Ok(false) => {
+                let (hits, refusals) = self.walk(id, within);
+                if !hits.is_empty() {
+                    Reach::Yes
+                } else if refusals.is_empty() {
+                    Reach::No
+                } else {
+                    Reach::CannotTell(refusals)
+                }
+            }
+        };
+        self.asking.borrow_mut().pop();
+        let leaned = self.leaned_on_open.get();
+        if !leaned || self.asking.borrow().is_empty() {
+            self.reaches.borrow_mut().insert(id, answer.clone());
+        }
+        self.leaned_on_open.set(outer || leaned);
         answer
+    }
+
+    /// The reach of each of `candidates` the language lets `from` call, as a
+    /// refusal for `what` when any of them measures, reaches a measurement, or
+    /// cannot be told.
+    fn refuse_candidates(
+        &self,
+        candidates: impl IntoIterator<Item = ItemId>,
+        from: ItemId,
+        within: &BTreeSet<String>,
+        what: &str,
+    ) -> Option<String> {
+        let mut measuring = Vec::new();
+        let mut unknown = Vec::new();
+        for candidate in candidates {
+            if !self.test_only(candidate)
+                || !self.of_target(candidate, within)
+                || !self.visible_from(candidate, from)
+            {
+                continue;
+            }
+            match self.reach(candidate, within) {
+                Reach::Yes => measuring.push(self.name(candidate)),
+                Reach::No => {}
+                Reach::CannotTell(why) => {
+                    unknown.push(format!("{} ({})", self.name(candidate), why.join("; ")));
+                }
+            }
+        }
+        if !measuring.is_empty() {
+            return Some(format!(
+                "{what}, and a candidate measures real time or reaches a helper that does: {}",
+                measuring.join(", ")
+            ));
+        }
+        if !unknown.is_empty() {
+            return Some(format!(
+                "{what}, and whether a candidate reaches a measurement cannot be told: {}",
+                unknown.join(", ")
+            ));
+        }
+        None
     }
 
     /// From `root`, every test-only callable of `within` that measures and is
@@ -542,38 +635,30 @@ impl<'r, 'i> Helpers<'r, 'i> {
                         | Unresolved::Ambiguous { candidates, .. }
                         | Unresolved::OtherArm { candidates },
                     ) => {
-                        let measuring: Vec<String> = candidates
-                            .iter()
-                            .filter(|candidate| {
-                                self.test_only(**candidate)
-                                    && self.of_target(**candidate, within)
-                                    && self.visible_from(**candidate, at)
-                                    && self.reaches_a_measurement(**candidate, within)
-                            })
-                            .map(|candidate| self.name(*candidate))
-                            .collect();
-                        if !measuring.is_empty() {
-                            refusals.push(format!(
-                                "{}: a call to `{}` the call graph does not resolve, and a candidate measures real time or reaches a helper that does: {}",
-                                site(),
-                                edge.site.name,
-                                measuring.join(", ")
-                            ));
-                        }
+                        let what = format!(
+                            "{}: a call to `{}` the call graph does not resolve",
+                            site(),
+                            edge.site.name
+                        );
+                        refusals.extend(self.refuse_candidates(
+                            candidates.iter().copied(),
+                            at,
+                            within,
+                            &what,
+                        ));
                     }
                     Target::Unresolved(Unresolved::Path { written, .. }) => {
                         let last = written.rsplit("::").next().unwrap_or(written);
-                        let named = self.measuring(package).into_iter().any(|id| {
-                            self.resolver.record(id).name() == last
-                                && self.of_target(id, within)
-                                && self.visible_from(id, at)
-                        });
-                        if named {
-                            refusals.push(format!(
-                                "{}: the path `{written}` names nothing the call graph places, and a test-only helper of that name measures real time",
-                                site()
-                            ));
-                        }
+                        let named = self
+                            .test_callables(package)
+                            .into_iter()
+                            .filter(|id| self.resolver.record(*id).name() == last);
+                        let what = format!(
+                            "{}: the path `{written}` names nothing the call graph places, and is \
+                             read as any test-only callable of that name",
+                            site()
+                        );
+                        refusals.extend(self.refuse_candidates(named, at, within, &what));
                     }
                     Target::Unresolved(Unresolved::Unparsed { why }) => refusals.push(format!(
                         "{}: a body on the walk does not parse ({why})",
@@ -899,10 +984,19 @@ fn clock_arithmetic_is_two_readings_and_a_clock_in_an_unparsed_macro_is_refused(
 /// two; a helper whose readings only answer "too long?" is a wait and is not;
 /// an unresolved call whose candidates measure is refused by file and line.**
 ///
+/// Two untyped receivers deep (`probe.go()` whose `go` calls `ticker.tick()`),
+/// the outer call is refused because whether its candidate reaches a
+/// measurement cannot be told; an unresolved path naming a helper that only
+/// reaches a measurement (`crate::support::relay()`, `relay` calling `costs`) is
+/// refused as well (T-TIMING-BOUND-STRAYS review F1, F2).
+///
 /// MUTATIONS: in `reading::Walk::spend`, count a consumed measurement as kept —
 /// `a_stall_timer_in_a_helper` is found; in `Helpers::walk`, stop at the first
 /// test-only callable instead of following it — `a_budget_measured_two_helpers_down`
-/// is not found; skip the `Ambiguous` arm — the refusal is gone.
+/// is not found; skip the `Ambiguous` arm — the `cost` refusal is gone; in
+/// `Helpers::reach`, answer `No` where it answers `CannotTell` — the `go`
+/// refusal is gone; in the `Path` arm, ask `measures` instead of `reach` — the
+/// `relay` refusal is gone.
 #[test]
 fn a_budget_measured_in_a_helper_is_found_through_the_call_graph() {
     let index = fixture_named("timing_strays", "strays");
@@ -928,11 +1022,29 @@ fn a_budget_measured_in_a_helper_is_found_through_the_call_graph() {
         ],
         "the two budgets are found, through one helper and through two"
     );
-    assert_eq!(refusals.len(), 1, "{refusals:#?}");
-    assert!(
-        refusals[0].starts_with("crates/bt-source/tests/fixtures/timing_strays/lib.rs:")
-            && refusals[0].contains("Measured::cost"),
-        "the refusal names the call by file and line and the candidate that measures: {refusals:#?}"
+    assert_eq!(refusals.len(), 3, "{refusals:#?}");
+    let refused = |test_site: &str, says: &[&str]| {
+        assert!(
+            refusals.iter().any(|refusal| {
+                refusal.starts_with("crates/bt-source/tests/fixtures/timing_strays/lib.rs:")
+                    && refusal.contains(test_site)
+                    && says.iter().all(|said| refusal.contains(said))
+            }),
+            "{test_site}: {says:?} in {refusals:#?}"
+        );
+    };
+    refused("`cost`", &["a candidate measures", "Measured::cost"]);
+    refused(
+        "`go`",
+        &["cannot be told", "Probe::go", "`tick`", "Ticker::tick"],
+    );
+    refused(
+        "`support::relay`",
+        &[
+            "names nothing the call graph places",
+            "a candidate measures",
+            "relay",
+        ],
     );
 }
 
@@ -1050,7 +1162,7 @@ fn handed_now(indices: &[(&str, &Index)]) -> (BTreeMap<String, Vec<String>>, Vec
 /// # The grammar
 ///
 /// * **Handed**: a parameter named `now` whose type is a path ending `Instant`
-///   (or a reference to one), on a product function or method, or on a closure
+///   (or a reference to one, or an `Option` of either), on a product function or method, or on a closure
 ///   inside one; a closure parameter `now` with no written type whose body
 ///   reads the clock is refused, and so is a product type with a field `now`
 ///   of `Instant` (a function handed it would be this shape unseen).
@@ -1120,18 +1232,24 @@ fn the_handed_now_reading_finds_refuses_and_admits_what_it_says() {
     let index = fixture_named("timing_strays", "strays");
     let (found, refusals) = handed_now(&[("strays", &index)]);
     let names: Vec<&str> = found.keys().map(String::as_str).collect();
-    assert_eq!(names, ["strays crate::handed_and_read_again"]);
+    assert_eq!(
+        names,
+        [
+            "strays crate::handed_and_read_again",
+            "strays crate::handed_maybe_and_read_again"
+        ]
+    );
     assert_eq!(refusals.len(), 2, "{refusals:#?}");
     assert!(
         refusals
             .iter()
-            .any(|refusal| refusal.contains("lib.rs:74: ") && refusal.contains("closure")),
+            .any(|refusal| refusal.contains("lib.rs:80: ") && refusal.contains("closure")),
         "{refusals:#?}"
     );
     assert!(
         refusals
             .iter()
-            .any(|refusal| refusal.contains("lib.rs:82: ") && refusal.contains("Carries")),
+            .any(|refusal| refusal.contains("lib.rs:88: ") && refusal.contains("Carries")),
         "{refusals:#?}"
     );
 }
@@ -1874,6 +1992,24 @@ mod reading {
         }
     }
 
+    /// Whether a parameter of this type hands its body an instant: `Instant`,
+    /// `&Instant`, or an `Option` of either.
+    fn hands_an_instant(ty: &Type) -> bool {
+        if is_instant(ty) {
+            return true;
+        }
+        let Type::Path(path) = ty else { return false };
+        let Some(last) = path.path.segments.last() else {
+            return false;
+        };
+        let syn::PathArguments::AngleBracketed(arguments) = &last.arguments else {
+            return false;
+        };
+        last.ident == "Option"
+            && arguments.args.len() == 1
+            && matches!(&arguments.args[0], syn::GenericArgument::Type(inner) if is_instant(inner))
+    }
+
     /// Whether a signature hands its body `now: Instant`.
     fn signature_hands_now(signature: &syn::Signature) -> bool {
         signature.inputs.iter().any(|input| {
@@ -1881,7 +2017,7 @@ mod reading {
                 return false;
             };
             matches!(&*typed.pat, Pat::Ident(ident) if ident.ident == "now")
-                && is_instant(&typed.ty)
+                && hands_an_instant(&typed.ty)
         })
     }
 
@@ -1931,7 +2067,7 @@ mod reading {
                             Pat::Type(typed) => {
                                 if matches!(&*typed.pat, Pat::Ident(ident) if ident.ident == "now")
                                 {
-                                    handed = if is_instant(&typed.ty) {
+                                    handed = if hands_an_instant(&typed.ty) {
                                         Handedness::Yes
                                     } else {
                                         Handedness::No

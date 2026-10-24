@@ -62,6 +62,12 @@ pub fn handed_and_measured(now: Instant) -> u128 {
     began.elapsed().as_micros()
 }
 
+/// A product function handed the turn's instant as an `Option` that reads the clock again: a
+/// finding.
+pub fn handed_maybe_and_read_again(now: Option<Instant>) -> Instant {
+    now.unwrap_or_else(Instant::now).max(Instant::now())
+}
+
 /// A product function not handed an instant: nothing to say.
 pub fn not_handed() -> Instant {
     Instant::now()
@@ -178,6 +184,45 @@ mod tests {
     #[test]
     fn a_remaining_patience_handed_to_a_wait() {
         waits_out(Duration::from_secs(1));
+    }
+
+    /// A test-only ticker whose method measures, reached only through a receiver the call graph
+    /// cannot type.
+    pub struct Ticker;
+
+    impl Ticker {
+        pub fn tick(&self) -> Duration {
+            let started = Instant::now();
+            started.elapsed()
+        }
+    }
+
+    pub struct Probe;
+
+    impl Probe {
+        /// Calls the ticker through another receiver the call graph cannot type.
+        pub fn go(&self) {
+            let ask = |ticker| ticker.tick();
+            let _ = ask;
+        }
+    }
+
+    /// Refused: two untyped receivers deep, and the inner candidate measures.
+    #[test]
+    fn a_measurement_two_untyped_receivers_down() {
+        let ask = |probe| probe.go();
+        let _ = ask;
+    }
+
+    /// A helper that measures nothing itself and hands on one that does.
+    fn relay() -> Duration {
+        costs()
+    }
+
+    /// Refused: a path the call graph cannot place names a helper that reaches a measurement.
+    #[test]
+    fn a_path_nothing_places_naming_a_helper_that_reaches_one() {
+        let _ = crate::support::relay();
     }
 }
 

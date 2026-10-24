@@ -659,7 +659,10 @@ line admits exactly the rows a widening finds; `check-timing-bound.ps1` refuses
 any other growth. Its product half is
 `no_product_function_reads_again_the_clock_it_was_handed`: a product function
 handed `now: Instant` judges on that instant, and a second reading needs a
-listed reason (a real wait in between).
+listed reason (a real wait in between). Not read: a reading handed back by a
+call (`while Instant::now() < deadline_in(..)`), and an instant handed under any
+name but `now` (`deadline: Instant` rightly meets a fresh reading); a widening
+line counts only in a change that also changes the scan.
 
 ## Raw-effect and thread-door exceptions
 
