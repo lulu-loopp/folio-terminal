@@ -110,6 +110,12 @@ impl<B: Backend> Runtime<'_, B> {
     /// The file is the one the press named, resolved against its host's root as it stands now —
     /// the resolution a double click makes ([`files_row_activation`]). A host that went while
     /// the button was down never reaches here: its capture went with it (R-9).
+    ///
+    /// **The row is looked up again, by its key, before anything opens** — the left drag's
+    /// `row_payload` asks the same question at the same moment. A double click has no time
+    /// between reading its row and acting on it; a held press does, and in it a refresh can take
+    /// the file off the disk, or a new root can leave the key naming nothing. A press whose file
+    /// row is gone ends having opened nothing.
     pub(crate) fn release_files_row_middle(&mut self) -> Result<bool> {
         let Some(press) = self.take_row_middle_press() else {
             return Ok(false);
@@ -118,9 +124,15 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(true);
         }
         // The host's root as it stands now, through the one door both hosts' rows are read by.
-        let Some((root, _)) = self.host_rows(press.host) else {
+        let Some((root, rows)) = self.host_rows(press.host) else {
             return Ok(true);
         };
+        if !rows
+            .iter()
+            .any(|row| row.key == press.key && row.kind == files::RowKind::File)
+        {
+            return Ok(true);
+        }
         if let RowActivation::Preview(path) = files_row_activation(&root, &press.key) {
             self.open_preview_beside(path)?;
         }

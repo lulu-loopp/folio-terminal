@@ -5,9 +5,10 @@
 
 use crate::headless::{Headless, HeadlessFolio};
 use crate::test_support::{dir_entry, listed, seat_of, tab_with_a_files_column};
-use crate::{PreviewSurface, RowHost, TabId, preview, seats};
+use crate::{Motion, PreviewSurface, RowHost, TabId, preview, seats, toast};
 use bt_layout::SeatId;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton};
 
@@ -63,11 +64,21 @@ fn row_point(folio: &mut HeadlessFolio, seat: SeatId, name: &str) -> PhysicalPos
 
 /// The middle button down at `at` and up at `up`, with the pointer moving between them.
 fn middle_click(folio: &mut HeadlessFolio, at: PhysicalPosition<f64>, up: PhysicalPosition<f64>) {
+    middle_press(folio, at);
+    middle_release(folio, up);
+}
+
+/// The middle button down at `at`.
+fn middle_press(folio: &mut HeadlessFolio, at: PhysicalPosition<f64>) {
     folio.move_to(at);
     folio
         .runtime()
         .mouse_input(ElementState::Pressed, MouseButton::Middle)
         .expect("a headless press is answered");
+}
+
+/// The pointer moved to `up` and the middle button came up there.
+fn middle_release(folio: &mut HeadlessFolio, up: PhysicalPosition<f64>) {
     folio.move_to(up);
     folio
         .runtime()
@@ -354,4 +365,138 @@ fn a_middle_click_on_a_floating_trees_file_row_opens_it_beside_the_preview() {
     assert_eq!(shown_on(&runtime, current), Some(file(&root, NOTES)));
     assert_eq!(shown_on(&runtime, panes[1]), Some(file(&root, OTHER)));
     assert!(runtime.window.float.live(id).is_some(), "the float stays");
+}
+
+/// RED (review nit 1) — **a middle press that travels while a notice owns the hover is still no
+/// click**: the press is made on a file row, the pointer goes past the six pixels onto a notice
+/// card, whose hover returns early from `pointer_moved` before nearly every other arm, and the
+/// button comes up there. The release opens nothing.
+///
+/// MUTATION (observed red): tell the press of the move where it was first told, after the row
+/// drag's chain and below the notice's early return — the move never reaches the latch and the
+/// release opens the file beside the preview.
+#[test]
+fn a_middle_press_that_travels_onto_a_notice_opens_nothing() {
+    let (mut folio, column, root) = a_column("files-middle-toast");
+    folio
+        .runtime()
+        .open_preview(file(&root, NOTES))
+        .expect("the first file opens");
+    let card = {
+        let mut runtime = folio.runtime();
+        runtime.window.toasts.raise(
+            toast::ToastKind::Info,
+            toast::ToastAnchor::Window,
+            None,
+            "通知 notice",
+            None,
+            Motion::Full,
+            Instant::now(),
+        );
+        // The overlay's own layout pass, which is where a card's rectangle is recorded.
+        let _ = runtime.toast_layer();
+        runtime
+            .window
+            .toast_layouts
+            .first()
+            .map(|layout| layout.frame)
+            .expect("the notice is laid out")
+    };
+    let on_card = PhysicalPosition::new(
+        f64::from((card[0] + card[2]) / 2.0),
+        f64::from((card[1] + card[3]) / 2.0),
+    );
+    assert!(
+        folio
+            .runtime()
+            .drive_toast_hover(on_card)
+            .expect("the hover is answered"),
+        "the fixture's own precondition: the notice owns the hover there"
+    );
+    let at = row_point(&mut folio, column, OTHER);
+    middle_click(&mut folio, at, on_card);
+
+    let runtime = folio.runtime();
+    assert_eq!(runtime.seats.preview_seats().len(), 1, "no pane opened");
+    assert!(runtime.own_capture().is_none(), "and nothing is held");
+}
+
+/// RED (review nit 2) — **a file that leaves the tree while the button is down opens nothing**:
+/// the press names `另一篇 other.md`, a refresh then lists the folder without it (the file was
+/// deleted), and the release finds no file row under the key it holds.
+///
+/// MUTATION (observed red): open on the release without looking the row up again — a new pane
+/// opens on a path that is not there.
+#[test]
+fn a_middle_click_whose_file_went_while_held_opens_nothing() {
+    let (mut folio, column, root) = a_column("files-middle-gone");
+    folio
+        .runtime()
+        .open_preview(file(&root, NOTES))
+        .expect("the first file opens");
+    let at = row_point(&mut folio, column, OTHER);
+    middle_press(&mut folio, at);
+    std::fs::remove_file(root.join(OTHER)).expect("the file is deleted");
+    folio
+        .runtime()
+        .file_trees
+        .entry(column)
+        .or_default()
+        .accept(
+            "",
+            listed(vec![dir_entry(FOLDER, true), dir_entry(NOTES, false)]),
+        );
+    middle_release(&mut folio, at);
+
+    let runtime = folio.runtime();
+    assert_eq!(runtime.seats.preview_seats().len(), 1, "no pane opened");
+    assert_eq!(
+        shown_on(&runtime, runtime.seats.preview_seats()[0]),
+        Some(file(&root, NOTES)),
+        "and the preview keeps its file"
+    );
+    assert!(
+        runtime.own_capture().is_none(),
+        "the release ended the press"
+    );
+}
+
+/// RED (review nit 3) — **the row a new file is being named in opens nothing**: the column's
+/// new-file box stands in the list as a row, and it names no file on the disk until Enter.
+///
+/// MUTATION (observed red): drop the `if pending` refusal in `press_files_row_middle` — the
+/// unnamed row opens as a "file" in a new pane.
+#[test]
+fn a_middle_click_on_the_row_a_new_file_is_named_in_opens_nothing() {
+    let (mut folio, column, root) = a_column("files-middle-pending");
+    folio
+        .runtime()
+        .open_preview(file(&root, NOTES))
+        .expect("the first file opens");
+    folio
+        .runtime()
+        .open_files_row_new(RowHost::Column(column), "", false)
+        .expect("the new-file box opens");
+    let at = {
+        let mut runtime = folio.runtime();
+        let index = runtime
+            .files_trees(Instant::now())
+            .get(&column)
+            .and_then(|tree| tree.edit.as_ref())
+            .map(|edit| edit.at)
+            .expect("the box stands in the tree");
+        let rect = runtime
+            .row_geometry(RowHost::Column(column))
+            .expect("the column is laid out")
+            .row_rect(index);
+        PhysicalPosition::new(
+            f64::from((rect[0] + rect[2]) / 2.0),
+            f64::from((rect[1] + rect[3]) / 2.0),
+        )
+    };
+    middle_click(&mut folio, at, at);
+
+    let runtime = folio.runtime();
+    assert_eq!(runtime.seats.preview_seats().len(), 1, "no pane opened");
+    assert!(runtime.own_capture().is_none(), "and nothing is held");
 }

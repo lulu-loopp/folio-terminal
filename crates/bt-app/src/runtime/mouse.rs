@@ -1622,6 +1622,11 @@ impl<B: Backend> Runtime<'_, B> {
         // double click's slop (row 38). Told and not consumed: the press is not a
         // drag of anything, so every hover below still hears the move.
         self.travel_video_picture_press([position.x as f32, position.y as f32]);
+        // Row 45 — a middle press on a file row crosses the same six pixels and
+        // becomes nothing: past them it is no click. Told and not consumed, and
+        // told here, above every early return below — a move a toast, the palette
+        // or the settings sheet swallowed would otherwise leave the press a click.
+        self.travel_files_row_middle(position);
         // And every playing surface is told where the pointer is, before any
         // branch below can consume the move — the bar's reveal is armed by a
         // pointer settling on the picture and its dwell is ended by one that has
@@ -2057,9 +2062,6 @@ impl<B: Backend> Runtime<'_, B> {
                 .expect("a press that travelled is a press");
             self.begin_row_drag(press, position)?;
         }
-        // Row 45 — a middle press on a file row crosses the same six pixels and
-        // becomes nothing: past them it is no click. Told and not consumed.
-        self.travel_files_row_middle(position);
         // A drag owns the pointer outright, exactly as a divider drag does:
         // hover, the peek flyout, the hyperlink underline and the terminal's own
         // selection all go quiet for the length of the gesture.
