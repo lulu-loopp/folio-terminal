@@ -831,7 +831,7 @@ const LAYERS_THAT_ATE_RELEASES: [(&str, &str); 23] = [
 
 /// Every payload arm in the capture record, which the release dispatch names
 /// one by one.
-const CAPTURE_OWNER_ARMS: [&str; 21] = [
+const CAPTURE_OWNER_ARMS: [&str; 22] = [
     "Divider",
     "TabPress",
     "PanePress",
@@ -853,6 +853,7 @@ const CAPTURE_OWNER_ARMS: [&str; 21] = [
     "SettingsSlider",
     "SettingsMenuBar",
     "VideoPicture",
+    "RowMiddlePress",
 ];
 
 /// Owners of every ending policy the slot has had: a tab's surface, a

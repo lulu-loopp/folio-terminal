@@ -14,6 +14,7 @@ All notable changes to Folio are recorded here. The format follows
 - Hovering over a video's progress bar shows the time under the pointer, and while you drag the playhead it shows where you are. <!-- zh: 鼠标停在视频进度条上时显示指针处的时间；拖动播放头时显示当前位置。 -->
 - `Home` and `End` go to a video's start and end, and while it is paused `,` and `.` step one frame back and forward. <!-- zh: `Home` 和 `End` 跳到视频的开头和结尾；暂停时，`,` 和 `.` 后退或前进一帧。 -->
 - A video that has ended plays again from the start, whether you press the play button, press Space or click the picture. <!-- zh: 已播完的视频再次播放时从头开始，无论是按播放按钮、按空格还是单击画面。 -->
+- Middle-clicking a file in the files column opens it in a new preview pane beside the current one, which keeps what it shows. <!-- zh: 在文件列中用鼠标中键单击文件，会在当前预览窗格旁新开一个窗格显示它，当前窗格的内容保持不变。 -->
 
 ### Fixed
 

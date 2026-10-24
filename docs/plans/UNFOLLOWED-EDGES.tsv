@@ -4393,6 +4393,7 @@ crates/bt-app/src/runtime/pointer/router.rs	bt-app crate::runtime::pointer::rout
 crates/bt-app/src/runtime/pointer/router.rs	bt-app crate::runtime::pointer::router::modal_at	Dynamic	menu	4	
 crates/bt-app/src/runtime/pointer/router.rs	bt-app crate::runtime::pointer::router::overlay_layer_at	Ambiguous	map	8	
 crates/bt-app/src/runtime/pointer/router.rs	bt-app crate::runtime::pointer::router::walk_pointer_layers	Dynamic	plane	1	
+crates/bt-app/src/runtime/pointer/row_middle.rs	bt-app crate::runtime::pointer::row_middle::Runtime::press_files_row_middle	Ambiguous	is_some_and	1	2026-10-23: T-FILES-MIDDLE-CLICK-OPENS-BESIDE; Option::is_some_and over the column's pending-entry box (FilesRowEdit), comparing its row index, which reaches no door
 crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch::let_the_system_translate_touch	Ambiguous	borrow_mut	1	
 crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch::let_the_system_translate_touch	Ambiguous	push	1	
 crates/bt-app/src/runtime/pointer/touch.rs	bt-app crate::runtime::pointer::touch::let_the_system_translate_touch	Ambiguous	send_event	1	

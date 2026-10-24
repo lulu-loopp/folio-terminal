@@ -205,6 +205,10 @@ impl<B: Backend> Runtime<'_, B> {
             // **A press on a recording's picture is a click if it did not wander**, and the
             // release is where that is decided (row 38).
             CaptureOwner::VideoPicture(_) => self.release_video_picture(),
+            // **And a middle press on a file row is a click if it did not travel** — which
+            // opens the file beside the preview (row 45). Wherever the button comes up: the
+            // press named its row.
+            CaptureOwner::RowMiddlePress(_) => self.release_files_row_middle(),
             // "Pressed and let go without moving" is the absence of a gesture.
             CaptureOwner::FloatHeadPress(_) => {
                 self.drop_float_head_press();

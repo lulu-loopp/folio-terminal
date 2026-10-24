@@ -48,8 +48,9 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    FloatDragKind, LeafId, MouseRoute, PasteTarget, PreviewSurface, RowHost, Runtime, TabId,
-    UserInputKind, VideoPicturePress, a_capture_still_holds_its_pointer, float, input,
+    FloatDragKind, LeafId, MouseRoute, PasteTarget, PreviewSurface, RowHost, RowMiddlePress,
+    RowPress, Runtime, TabId, UserInputKind, VideoPicturePress, a_capture_still_holds_its_pointer,
+    float, input,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -214,6 +215,7 @@ impl CaptureOwner {
             Self::SettingsSlider(_) => "SettingsSlider",
             Self::SettingsMenuBar(_) => "SettingsMenuBar",
             Self::VideoPicture(_) => "VideoPicture",
+            Self::RowMiddlePress(_) => "RowMiddlePress",
         }
     }
 
@@ -230,6 +232,7 @@ impl CaptureOwner {
             | Self::TabPress(_)
             | Self::PanePress(..)
             | Self::RowPress(_)
+            | Self::RowMiddlePress(_)
             | Self::Drag(_)
             | Self::FloatHeadPress(_)
             | Self::FloatDrag(_)
@@ -245,7 +248,7 @@ impl CaptureOwner {
 
     /// **Whether the payload holds a pixel quantity taken at the press** (R-9's scale change): a
     /// press's origin, which its six-pixel travel is measured from (a press on a recording's
-    /// picture's among them); a grab inside a thumb, a
+    /// picture's and a middle press on a file row's among them); a grab inside a thumb, a
     /// floating window's head or a carried tab; a picture's last point. Each is a distance in the
     /// window's physical pixels, so a new scale makes it a distance in a space the window no
     /// longer has. A divider, a scrubber, a selection on the edit surface and a press on a cell
@@ -265,7 +268,8 @@ impl CaptureOwner {
             | Self::TerminalThumb(..)
             | Self::TerminalFootMark(..)
             | Self::SettingsMenuBar(_)
-            | Self::VideoPicture(_) => true,
+            | Self::VideoPicture(_)
+            | Self::RowMiddlePress(_) => true,
             Self::Drag(drag) => drag.tab_carry().is_some(),
             Self::FloatDrag(drag) => matches!(drag.kind, FloatDragKind::Move { .. }),
             Self::Divider(_)
@@ -290,9 +294,10 @@ impl CaptureOwner {
         match self {
             Self::Divider(_) => active == glass.tab,
             Self::PanePress(tab, press) => glass.takes(*tab, press.seat),
-            Self::RowPress(press) => match press.host {
+            Self::RowPress(RowPress { host, .. })
+            | Self::RowMiddlePress(RowMiddlePress { host, .. }) => match host {
                 RowHost::Column(seat) | RowHost::Git(seat) | RowHost::Terminal(seat) => {
-                    glass.takes(active, seat)
+                    glass.takes(active, *seat)
                 }
                 RowHost::Float(_) => false,
             },
@@ -333,7 +338,8 @@ impl CaptureOwner {
             Self::Divider(_) | Self::Route(MouseRoute::MathBlock) => the_tab(gone, active),
             Self::TabPress(press) => the_tab(gone, press.tab),
             Self::PanePress(tab, press) => the_tab(gone, *tab) || pane_of(gone, *tab, press.seat),
-            Self::RowPress(press) => match press.host {
+            Self::RowPress(RowPress { host, .. })
+            | Self::RowMiddlePress(RowMiddlePress { host, .. }) => match *host {
                 RowHost::Column(seat) | RowHost::Git(seat) | RowHost::Terminal(seat) => {
                     the_tab(gone, active) || pane_of(gone, active, seat)
                 }
@@ -510,10 +516,11 @@ impl<B: Backend> Runtime<'_, B> {
                 Ok(())
             }
             // A selection on the cells or the edit surface keeps what it selected; a press that
-            // had not become anything is dropped — a press on a picture included: a cancelled
-            // click is no click.
+            // had not become anything is dropped — a press on a picture and a middle press on a
+            // file row included: a cancelled click is no click.
             CaptureOwner::Route(MouseRoute::Local(_))
             | CaptureOwner::VideoPicture(_)
+            | CaptureOwner::RowMiddlePress(_)
             | CaptureOwner::EditSelection(..)
             | CaptureOwner::TabPress(_)
             | CaptureOwner::PanePress(..)
@@ -550,7 +557,8 @@ impl<B: Backend> Runtime<'_, B> {
             | CaptureOwner::Route(MouseRoute::Local(_) | MouseRoute::Forward { .. })
             | CaptureOwner::SettingsSlider(_)
             | CaptureOwner::SettingsMenuBar(_)
-            | CaptureOwner::VideoPicture(_) => {}
+            | CaptureOwner::VideoPicture(_)
+            | CaptureOwner::RowMiddlePress(_) => {}
         }
     }
 

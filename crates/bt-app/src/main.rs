@@ -37300,6 +37300,21 @@ struct RowPress {
     latch: DragLatch,
 }
 
+/// **A middle press being held on one file row of a files tree, not yet a click**
+/// (owner's ruling 2026-10-23, 0.4.9 plan row 45; capture C24).
+///
+/// The click is decided by the release, as a browser decides a middle click on a
+/// link: a press that travels past the row drag's own six pixels ([`DragLatch`],
+/// P81) is no click, and a middle press drags nothing. The row is named by its
+/// key for [`RowPress`]'s reason — an index is stale the moment a directory above
+/// it unfolds.
+#[derive(Clone, Debug)]
+struct RowMiddlePress {
+    host: RowHost,
+    key: String,
+    latch: DragLatch,
+}
+
 /// **The card's one clock**, and which of its two lives the card is in.
 ///
 /// [`tooltip::TooltipHost`]'s own shape (`settling`/`showing`, each a subject

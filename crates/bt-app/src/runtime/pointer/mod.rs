@@ -16,6 +16,7 @@ mod capture;
 mod ending;
 mod release;
 mod router;
+mod row_middle;
 pub(crate) mod touch;
 
 pub(crate) use capture::{ButtonSet, CaptureOwner, PointerCapture};

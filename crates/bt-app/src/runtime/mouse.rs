@@ -2057,6 +2057,9 @@ impl<B: Backend> Runtime<'_, B> {
                 .expect("a press that travelled is a press");
             self.begin_row_drag(press, position)?;
         }
+        // Row 45 — a middle press on a file row crosses the same six pixels and
+        // becomes nothing: past them it is no click. Told and not consumed.
+        self.travel_files_row_middle(position);
         // A drag owns the pointer outright, exactly as a divider drag does:
         // hover, the peek flyout, the hyperlink underline and the terminal's own
         // selection all go quiet for the length of the gesture.
@@ -5036,6 +5039,15 @@ impl<B: Backend> Runtime<'_, B> {
             self.window.pointer_position,
             self.window.pointer_last_seen,
         );
+        // **A middle press on a file row is the start of "open beside"** (owner's
+        // ruling 2026-10-23, row 45), on a column's tree or a floating one. Asked
+        // here, below every popup, the floating windows' own presses and the
+        // surfaces inside a pane, and above the chrome router, whose middle
+        // button answers only a tab. Its release is the slot's, so only the
+        // press is answered on this road.
+        if self.press_files_row_middle(state, button)? {
+            return Ok(());
+        }
         if let Some(position) = router_position
             && self.chrome_mouse_input(state, button, position)?
         {

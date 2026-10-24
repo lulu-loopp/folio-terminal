@@ -1031,7 +1031,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// because this is where the window's open editor and the tab's rows meet.
     /// A box on a tab, a preview head, a breadcrumb or an address answers `None`
     /// — those are not rows of any tree.
-    fn files_edit_place(&self) -> Option<FilesEditPlace<'_>> {
+    pub(in crate::runtime) fn files_edit_place(&self) -> Option<FilesEditPlace<'_>> {
         let active = self.window.tabs.get(self.window.active_tab)?.id;
         match self.window.rename.as_ref()?.subject {
             RenameSubject::FilesRow { leaf, ref key } if leaf.tab == active => {
@@ -3179,3 +3179,7 @@ mod volumes_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "files_tests.rs"]
+mod tests;

@@ -11,9 +11,9 @@ use crate::test_support::{buffer_saying, cross_tab, host_spelling, seat_of, tab_
 use crate::{
     DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragSource, FilePeekPress, FloatDrag,
     FloatHeadPress, ImageDrag, LeafSession, LocalImageActivation, PanePress, PreviewBlockDrag,
-    PreviewBodyDrag, PreviewTextDrag, RowPress, SelectionDrag, SelectionDragMode, SpringGate,
-    TabCarry, TabPress, TerminalColumnDrag, TerminalThumbDrag, VideoPicturePress, preview,
-    settings,
+    PreviewBodyDrag, PreviewTextDrag, RowMiddlePress, RowPress, SelectionDrag, SelectionDragMode,
+    SpringGate, TabCarry, TabPress, TerminalColumnDrag, TerminalThumbDrag, VideoPicturePress,
+    preview, settings,
 };
 use bt_doc::Bias;
 use bt_layout::{Axis, Ratio, SplitId};
@@ -156,6 +156,11 @@ fn every_owner(on: On) -> Vec<CaptureOwner> {
         CaptureOwner::Route(MouseRoute::MathBlock),
         CaptureOwner::SettingsSlider(settings::SettingsRow::Theme),
         CaptureOwner::SettingsMenuBar(3.0),
+        CaptureOwner::RowMiddlePress(RowMiddlePress {
+            host: RowHost::Column(seat),
+            key: "notes.md".to_owned(),
+            latch,
+        }),
     ]
 }
 
@@ -185,6 +190,7 @@ fn every_name() -> Vec<&'static str> {
         "Route::MathBlock",
         "SettingsSlider",
         "SettingsMenuBar",
+        "RowMiddlePress",
     ]
 }
 
@@ -295,10 +301,11 @@ fn each_owner_against_and_gone(
 }
 
 /// The owner kinds whose payload names a tab-bound surface (R-9's *off the glass*).
-const TAB_BOUND: [&str; 15] = [
+const TAB_BOUND: [&str; 16] = [
     "Divider",
     "PanePress",
     "RowPress",
+    "RowMiddlePress",
     "VideoBar",
     "VideoPicture",
     "PreviewBodyThumb",
@@ -402,6 +409,7 @@ fn each_door_ends_a_held_capture() {
             "TerminalFootMark",
             "SettingsMenuBar",
             "VideoPicture",
+            "RowMiddlePress",
         ],
         |runtime| every_owner(on_pane(runtime, 0)),
         |application| {
@@ -453,7 +461,7 @@ fn each_door_ends_a_held_capture() {
         &mut application,
         "a zoom",
         "off the glass",
-        &TAB_BOUND[..14],
+        &TAB_BOUND[..15],
         |runtime| every_owner(on_pane(runtime, 1)),
         |application| {
             let mut runtime = application.runtime();
@@ -505,6 +513,11 @@ fn each_door_ends_a_held_capture() {
             rect: [0.0; 4],
             latch: DragLatch::new(origin()),
         });
+        for owner in &mut owners {
+            if let CaptureOwner::RowMiddlePress(press) = owner {
+                press.host = RowHost::Float(on.float);
+            }
+        }
         owners
     };
     each_owner_against(
@@ -513,6 +526,7 @@ fn each_door_ends_a_held_capture() {
         "owner gone",
         &[
             "RowPress",
+            "RowMiddlePress",
             "FloatHeadPress",
             "FloatDrag",
             "VideoBar",
@@ -613,6 +627,7 @@ fn each_door_ends_a_held_capture() {
     let held_on_the_pane = [
         "PanePress",
         "RowPress",
+        "RowMiddlePress",
         "VideoBar",
         "VideoPicture",
         "PreviewBodyThumb",
@@ -666,6 +681,7 @@ fn each_door_ends_a_held_capture() {
             "TabPress",
             "PanePress",
             "RowPress",
+            "RowMiddlePress",
             "Drag",
             "VideoBar",
             "VideoPicture",

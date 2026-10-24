@@ -12532,6 +12532,45 @@ impl<B: Backend> Runtime<'_, B> {
         self.open_preview_at(path, None)
     }
 
+    /// **Open a file in a new preview pane beside the one it would otherwise
+    /// replace** — a middle click on a file row (owner's ruling 2026-10-23, 0.4.9
+    /// plan row 45), the browser's "open in a new tab".
+    ///
+    /// "The one it would replace" is the landing rule's own pane
+    /// ([`seats::Seats::landing_preview`]): the unlocked preview a double click
+    /// opens into. It is split on the road the pane menu's splits and a page's
+    /// own new window take ([`seats::Seats::split_preview`], in the direction
+    /// [`Self::settings_split_axis`] gives a split with no direction of its
+    /// own), so the new pane comes after it and the next double click still
+    /// lands where it always did. The file goes onto the new pane through
+    /// [`Self::open_preview_onto`], the lane fork a double click takes minus
+    /// the landing rule, and **the keyboard stays where it was**: the browser's
+    /// middle click does not switch tabs, and the page lane's "the pane it
+    /// chose takes the keyboard" belongs to a door that chose the pane the
+    /// reader is reading.
+    ///
+    /// **A tab with no unlocked preview opens as a double click does**
+    /// ([`Self::open_preview`]): with none at all there is nothing to stand
+    /// beside, and with every one locked the landing rule already makes a new
+    /// pane and leaves the locked ones as they are, which is this verb's whole
+    /// promise. A file already shown in a pane of this tab opens again in the
+    /// new one — the reader asked for another, as a browser opens a second tab
+    /// on a page it already has — and the two panes share the one buffer, as
+    /// any two panes on one file do.
+    pub(in crate::runtime) fn open_preview_beside(&mut self, path: PathBuf) -> Result<()> {
+        let arriving = self.seats.landing_preview().and_then(|current| {
+            let metrics = self.seat_metrics();
+            let dir = self.settings_split_axis(current);
+            self.seats.split_preview(&metrics, current, dir)
+        });
+        let Some(arriving) = arriving else {
+            return self.open_preview(path);
+        };
+        self.settle_seat_set_change()?;
+        self.mouse_trace(|| format!("open_preview_beside seat={arriving:?}"));
+        self.open_preview_onto(self.preview_here(arriving), path)
+    }
+
     /// [`Self::open_preview`] told **where in the file** the reference pointed
     /// (§7.1.5j, `path:line[:col]`).
     ///

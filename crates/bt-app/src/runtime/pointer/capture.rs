@@ -16,8 +16,9 @@
 use crate::window_seam::prelude::*;
 use crate::{
     App, DividerDrag, Drag, FilePeekPress, FloatDrag, FloatHeadPress, ImageDrag, MouseRoute,
-    PanePress, PreviewBlockDrag, PreviewBodyDrag, PreviewSurface, PreviewTextDrag, RowPress,
-    Runtime, TabId, TabPress, TerminalColumnDrag, TerminalThumbDrag, VideoPicturePress, settings,
+    PanePress, PreviewBlockDrag, PreviewBodyDrag, PreviewSurface, PreviewTextDrag, RowMiddlePress,
+    RowPress, Runtime, TabId, TabPress, TerminalColumnDrag, TerminalThumbDrag, VideoPicturePress,
+    settings,
 };
 use winit::event::MouseButton;
 use winit::keyboard::ModifiersState;
@@ -74,6 +75,10 @@ pub(crate) enum CaptureOwner {
     /// C23, a press on a recording's picture, not yet a click (owner's ruling
     /// 2026-10-23).
     VideoPicture(VideoPicturePress),
+    /// C24, a middle press on a file row, not yet a click (owner's ruling
+    /// 2026-10-23, 0.4.9 plan row 45). The one owner latched by the middle
+    /// button.
+    RowMiddlePress(RowMiddlePress),
 }
 
 /// **One latched gesture** (§2.2).
@@ -391,6 +396,20 @@ impl<B: Backend> Runtime<'_, B> {
 
     pub(crate) fn drop_row_press(&mut self) {
         gesture_door!(@window drop self RowPress)
+    }
+
+    pub(crate) fn held_row_middle_press_mut(&mut self) -> Option<&mut RowMiddlePress> {
+        gesture_door!(@window held_mut self RowMiddlePress)
+    }
+
+    pub(crate) fn take_row_middle_press(&mut self) -> Option<RowMiddlePress> {
+        gesture_door!(@window take self RowMiddlePress)
+    }
+
+    /// **Latched by the middle button**, which is the button whose release ends it: the slot
+    /// compares a release with the button that latched the capture.
+    pub(crate) fn latch_row_middle_press(&mut self, value: RowMiddlePress) {
+        self.latch_capture(CaptureOwner::RowMiddlePress(value), MouseButton::Middle);
     }
 
     pub(crate) fn held_float_head_press(&self) -> Option<&FloatHeadPress> {
