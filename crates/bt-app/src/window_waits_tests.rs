@@ -3818,16 +3818,57 @@ struct Pin {
     after: Option<&'static str>,
 }
 
+/// **One landmark of an owner's body, by the written shape it is read as**
+/// (T-LANDMARK-GUARD-BY-CALL). A landmark is a call, or a variant's path — never a bare identifier:
+/// a field, a binding or a parameter that happens to spell a landmark's name is not one.
+#[derive(Clone, Copy)]
+enum Landmark {
+    /// The path call `…::a::name(…)`: the written path ends in these segments, the last of them
+    /// the landmark's name.
+    Call(&'static [&'static str]),
+    /// The method call `receiver.name(…)`, its receiver written as these segments joined by `.`.
+    Method(&'static [&'static str], &'static str),
+    /// The variant path `…::Enum::Variant` of one variant: the landmark `Variant`.
+    Variant(&'static str, &'static str),
+    /// Every variant path `…::Enum::V` of the enum, each the landmark `V`.
+    Variants(&'static str),
+}
+
+impl Landmark {
+    /// The identifier the landmark's own token spells: the call's last segment, the method, the
+    /// variant, or — for every variant — the enum.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Call(path) => path[path.len() - 1],
+            Self::Method(_, name) | Self::Variant(_, name) | Self::Variants(name) => name,
+        }
+    }
+}
+
 /// Each owner's landmarks. A pinned call's position is the nearest of them written before it in
-/// the owner's body; `QuitStep::*` is every name written after `QuitStep::` — the arm it is in.
-const LANDMARKS: [(&str, &[&str]); 4] = [
+/// the owner's body ([`landmarks_in`] reads them); for `QuitStep`'s variants, the arm it is in.
+const LANDMARKS: [(&str, &[Landmark]); 4] = [
     (
         "bt-app crate::main",
-        &["parse", "hand_over", "build", "run_app"],
+        &[
+            Landmark::Call(&["cli", "parse"]),
+            Landmark::Call(&["launch_wire", "hand_over"]),
+            Landmark::Method(&["builder"], "build"),
+            Landmark::Method(&["event_loop"], "run_app"),
+        ],
     ),
-    ("bt-app crate::FolioApp::new_events", &["Init"]),
-    ("bt-app crate::App::finish", &["close"]),
-    ("bt-app crate::FolioApp::settle_quit", &["QuitStep::*"]),
+    (
+        "bt-app crate::FolioApp::new_events",
+        &[Landmark::Variant("StartCause", "Init")],
+    ),
+    (
+        "bt-app crate::App::finish",
+        &[Landmark::Method(&["self", "session_store"], "close")],
+    ),
+    (
+        "bt-app crate::FolioApp::settle_quit",
+        &[Landmark::Variants("QuitStep")],
+    ),
 ];
 
 /// The product's role and phase writer calls, as A1a–A1c landed them: `enter_window_thread` once
@@ -4002,34 +4043,319 @@ const CALLBACKS: [(&str, &str, &str, usize); 10] = [
     ("bt-render", "crate", "gpu-uncaptured-error", 1),
 ];
 
+/// The landmark a pinned call at `at` follows: the nearest of `landmarks` written before it in
+/// `record`'s body ([`landmarks_in`]) — or the refusal of a token the grammar cannot read.
 fn landmark_before(
     src: &Src,
     record: &ItemRecord,
     at: usize,
-    landmarks: &[&str],
-) -> Option<&'static str> {
-    let toks = src.lex(record.body()?.start(), at);
-    let mut found = None;
-    for (index, tok) in toks.iter().enumerate() {
-        if tok.kind != Kind::Ident {
-            continue;
+    landmarks: &[Landmark],
+) -> Result<Option<&'static str>, String> {
+    Ok(landmarks_in(src, record, landmarks)?
+        .into_iter()
+        .rev()
+        .find(|(start, _)| *start < at)
+        .map(|(_, name)| name))
+}
+
+/// What follows a token spelling a landmark's name.
+#[derive(Clone, Copy)]
+enum After {
+    /// `(`.
+    Called,
+    /// `::` and an identifier: the path goes on to that segment.
+    Segment(&'static str),
+    /// `::` and anything else: `::*`, `::{…}`, `::<…>`.
+    Unread,
+    Other,
+}
+
+/// **Where a token spelling a landmark's name is written**, by its neighbours: the shapes
+/// [`landmarks_in`]'s grammar reads.
+enum Shape {
+    /// `name as …`.
+    Rename,
+    /// `fn name`.
+    NestedFn,
+    /// `name!`.
+    Macro,
+    /// `.name(…)` or `.name::<…>(…)`, with its receiver when that is a plain path `a.b`.
+    Method(Option<Vec<&'static str>>),
+    /// `.name` not called, or `name:` directly inside braces after `{` or `,`.
+    Field,
+    /// A statement `let name =` / `let name:`, `mut` allowed.
+    Binding,
+    /// `…::name`, with the path written up to it when its segments are plain identifiers.
+    Path(Option<Vec<&'static str>>, After),
+    /// Anything else: a name no `::` or `.` qualifies.
+    Bare(After),
+}
+
+/// What one token spelling a landmark's name is, for one landmark of that name.
+enum Reading {
+    Landmark(&'static str),
+    Not,
+    /// A statement `let`: the name is a local from the end of its statement to its block's.
+    Binds,
+    Refused(&'static str),
+}
+
+/// The written path ending at `toks[index]`, outermost segment first — `None` when a segment
+/// before a `::` is not an identifier (generic arguments, a leading `::`).
+fn path_before(src: &Src, toks: &[Tok], index: usize) -> Option<Vec<&'static str>> {
+    let mut written = vec![src.text(toks[index])];
+    let mut at = index;
+    while at >= 2 && src.is(toks.get(at - 1), "::") {
+        let segment = toks[at - 2];
+        if segment.kind != Kind::Ident {
+            return None;
         }
-        let name = src.text(*tok);
-        let hit = landmarks
-            .iter()
-            .any(|landmark| match landmark.strip_suffix("::*") {
-                Some(prefix) => {
-                    index >= 2
-                        && src.text(toks[index - 1]) == "::"
-                        && src.text(toks[index - 2]) == prefix
-                }
-                None => *landmark == name,
-            });
-        if hit {
-            found = Some(name);
+        written.push(src.text(segment));
+        at -= 2;
+    }
+    written.reverse();
+    Some(written)
+}
+
+/// The receiver written before the `.` at `toks[dot]` when it is a plain path `a.b.c`, outermost
+/// segment first — `None` for a call's result, an index, a `?`, or a path's `::`.
+fn receiver_before(src: &Src, toks: &[Tok], dot: usize) -> Option<Vec<&'static str>> {
+    let mut written = Vec::new();
+    let mut at = dot;
+    loop {
+        at = at.checked_sub(1)?;
+        if toks[at].kind != Kind::Ident {
+            return None;
+        }
+        written.push(src.text(toks[at]));
+        match at.checked_sub(1).map(|before| toks[before]) {
+            Some(before) if src.is(Some(&before), ".") => at -= 1,
+            Some(before) if src.is(Some(&before), "::") => return None,
+            _ => break,
         }
     }
-    found
+    written.reverse();
+    Some(written)
+}
+
+/// The shape of `toks[index]`; `in_braces` says whether the innermost open delimiter is `{`.
+fn shape_of(src: &Src, toks: &[Tok], index: usize, in_braces: bool) -> Shape {
+    let spelled = |at: usize| {
+        toks.get(at)
+            .filter(|tok| tok.kind != Kind::Literal)
+            .map_or("", |tok| src.text(*tok))
+    };
+    let prev = index.checked_sub(1).map_or("", spelled);
+    let next = spelled(index + 1);
+    let after = match next {
+        "(" => After::Called,
+        "::" => match toks.get(index + 2) {
+            Some(tok) if tok.kind == Kind::Ident => After::Segment(src.text(*tok)),
+            _ => After::Unread,
+        },
+        _ => After::Other,
+    };
+    let statement_let = |at: Option<usize>| {
+        at.is_some_and(|at| {
+            spelled(at) == "let"
+                && at
+                    .checked_sub(1)
+                    .is_none_or(|before| matches!(spelled(before), "{" | ";" | "}"))
+        })
+    };
+    if next == "as" {
+        Shape::Rename
+    } else if prev == "fn" {
+        Shape::NestedFn
+    } else if next == "!" {
+        Shape::Macro
+    } else if prev == "." {
+        if matches!(next, "(" | "::") {
+            Shape::Method(receiver_before(src, toks, index - 1))
+        } else {
+            Shape::Field
+        }
+    } else if matches!(prev, "{" | ",") && next == ":" && in_braces {
+        Shape::Field
+    } else if prev == "::" {
+        Shape::Path(path_before(src, toks, index), after)
+    } else if matches!(next, "=" | ":")
+        && (statement_let(index.checked_sub(1))
+            || (prev == "mut" && statement_let(index.checked_sub(2))))
+    {
+        Shape::Binding
+    } else {
+        Shape::Bare(after)
+    }
+}
+
+/// What a token of `shape` is for `landmark`; `bound` says whether a statement `let` in scope
+/// binds the name. The table is [`landmarks_in`]'s grammar, row for row.
+fn read_landmark(landmark: Landmark, shape: &Shape, bound: bool) -> Reading {
+    match (landmark, shape) {
+        (_, Shape::Rename) => Reading::Refused("a rename (`as`)"),
+        (_, Shape::NestedFn) => Reading::Refused("a nested `fn` of the name"),
+        (_, Shape::Macro) => Reading::Refused("a macro of the name"),
+        (_, Shape::Field) => Reading::Not,
+        (_, Shape::Binding) => Reading::Binds,
+        (
+            Landmark::Variants(_),
+            Shape::Path(_, After::Segment(variant)) | Shape::Bare(After::Segment(variant)),
+        ) => Reading::Landmark(variant),
+        (Landmark::Variants(_), Shape::Path(_, After::Unread) | Shape::Bare(After::Unread)) => {
+            Reading::Refused(
+                "the enum's variants imported or written with generic arguments (`::*`, `::{…}`, \
+                 `::<…>`)",
+            )
+        }
+        (Landmark::Variants(_), _) => Reading::Not,
+        (Landmark::Method(receiver, name), Shape::Method(written)) => match written {
+            Some(written) if written.as_slice() == receiver => Reading::Landmark(name),
+            _ => Reading::Refused("a method call on a receiver the landmark does not name"),
+        },
+        (Landmark::Call(_) | Landmark::Variant(..), Shape::Method(_)) => Reading::Not,
+        (_, Shape::Path(None, _)) => Reading::Refused(
+            "a path the grammar does not read (generic arguments or a leading `::`)",
+        ),
+        (Landmark::Method(..), Shape::Path(..)) => Reading::Refused(
+            "a path naming the method, which may be the landmark called by its type",
+        ),
+        (Landmark::Call(path), Shape::Path(Some(written), after)) => {
+            if !written.ends_with(path) {
+                Reading::Not
+            } else if matches!(after, After::Called) {
+                Reading::Landmark(landmark.name())
+            } else {
+                Reading::Refused(
+                    "the landmark's path not called directly: a value, an import, a turbofish or \
+                     a longer path",
+                )
+            }
+        }
+        (Landmark::Variant(enum_name, variant), Shape::Path(Some(written), _)) => {
+            if written.len() >= 2 && written[written.len() - 2] == enum_name {
+                Reading::Landmark(variant)
+            } else {
+                Reading::Not
+            }
+        }
+        (_, Shape::Bare(_)) if bound => Reading::Not,
+        (_, Shape::Bare(_)) => Reading::Refused(
+            "a bare name no statement `let` in scope binds — a pattern, a parameter, an import or \
+             a value, which the guard cannot tell from the landmark",
+        ),
+    }
+}
+
+/// **The landmarks an owner's body writes, in order, each with its token's offset** — or the
+/// refusal of the first token that spells a landmark's name where the grammar cannot read it.
+///
+/// The grammar (T-LANDMARK-GUARD-BY-CALL). Every identifier token of the body that spells a
+/// landmark's [name](Landmark::name) is read by its neighbours ([`shape_of`], [`read_landmark`]),
+/// and is exactly one of:
+///
+/// - **the landmark**: a [`Landmark::Call`]'s path written before `(` (a longer qualification,
+///   `crate::cli::parse(`, ends in the same segments); a [`Landmark::Method`]'s `.name(` after its
+///   receiver written as a plain path of exactly those segments; a variant path `…Enum::V` of a
+///   [`Landmark::Variant`] or [`Landmark::Variants`];
+/// - **not one, decided**: a field (`.name` not called, or `name:` directly inside braces after
+///   `{` or `,` — an initialiser, a field pattern, a declaration); a statement `let name =` or
+///   `let name:` (`mut` allowed), and the bare `name` or `name(…)` that binding covers from the
+///   end of its statement to the end of its block; a path call of another path; a method call
+///   for a path call's or a variant's name, which neither ever is; another enum's variant; the
+///   enum of a [`Landmark::Variants`] not followed by `::` (a type);
+/// - **refused, with the name, the shape and the line**: everything else — a bare name no
+///   statement `let` in scope binds (a pattern, a parameter, an import's name, a value: an
+///   imported landmark cannot be told from another item), a method call on a receiver the
+///   landmark does not name, a path naming a method (the landmark called by its type), a
+///   landmark's path not called directly (a value, an import, a turbofish, a longer path), a path
+///   with generic arguments, `Enum::*` and `Enum::{…}`, a rename (`as`), a nested `fn` and a macro
+///   of the name.
+///
+/// A string and a comment are not code: the lexer gives no identifier inside either. Names are
+/// read as written: a `use … as` outside the body renaming a landmark's module, or a landmark
+/// called inside a helper, is not followed — the pinned call then follows an earlier landmark,
+/// which its pin does not name, and the guard is red.
+fn landmarks_in(
+    src: &Src,
+    record: &ItemRecord,
+    landmarks: &[Landmark],
+) -> Result<Vec<(usize, &'static str)>, String> {
+    let Some(body) = record.body() else {
+        return Ok(Vec::new());
+    };
+    let toks = src.lex(body.start(), body.end());
+    let mut open: Vec<&str> = Vec::new();
+    let mut locals: Vec<(&str, usize)> = Vec::new();
+    let mut pending: Vec<(&str, usize)> = Vec::new();
+    let mut found = Vec::new();
+    for (index, tok) in toks.iter().enumerate() {
+        let spelled = src.text(*tok);
+        match tok.kind {
+            Kind::Punct => match spelled {
+                "{" | "(" | "[" => open.push(spelled),
+                "}" | ")" | "]" => {
+                    open.pop();
+                    locals.retain(|(_, depth)| *depth <= open.len());
+                    pending.retain(|(_, depth)| *depth <= open.len());
+                }
+                ";" => {
+                    let depth = open.len();
+                    locals.extend(pending.iter().filter(|(_, at)| *at == depth));
+                    pending.retain(|(_, at)| *at != depth);
+                }
+                _ => {}
+            },
+            Kind::Ident => {
+                let named: Vec<Landmark> = landmarks
+                    .iter()
+                    .copied()
+                    .filter(|landmark| landmark.name() == spelled)
+                    .collect();
+                if named.is_empty() {
+                    continue;
+                }
+                let shape = shape_of(src, &toks, index, open.last() == Some(&"{"));
+                let bound = locals.iter().any(|(local, _)| *local == spelled);
+                let readings: Vec<Reading> = named
+                    .into_iter()
+                    .map(|landmark| read_landmark(landmark, &shape, bound))
+                    .collect();
+                if let Some(name) = readings.iter().find_map(|reading| match reading {
+                    Reading::Landmark(name) => Some(*name),
+                    _ => None,
+                }) {
+                    found.push((tok.start, name));
+                } else if let Some(why) = readings.iter().find_map(|reading| match reading {
+                    Reading::Refused(why) => Some(*why),
+                    _ => None,
+                }) {
+                    let excerpt: Vec<&str> = toks
+                        [index.saturating_sub(3)..(index + 4).min(toks.len())]
+                        .iter()
+                        .map(|tok| src.text(*tok))
+                        .collect();
+                    return Err(format!(
+                        "a landmark name appears where the guard cannot read it: `{spelled}` in \
+                         `{} {}` at {}, {why} (`{}`); a landmark is read only as the call or the \
+                         variant path it names, so rename what is not one or widen the grammar \
+                         in its own change",
+                        src.package,
+                        name_of(record),
+                        src.location(tok.start),
+                        excerpt.join(" ")
+                    ));
+                } else if readings
+                    .iter()
+                    .any(|reading| matches!(reading, Reading::Binds))
+                {
+                    pending.push((spelled, open.len()));
+                }
+            }
+            Kind::Literal | Kind::Lifetime => {}
+        }
+    }
+    Ok(found)
 }
 
 /// **The role and phase writers are called only where they are pinned**, each spelled as the
@@ -4039,6 +4365,9 @@ fn the_role_and_phase_writers_are_called_only_where_they_are_pinned(world: &Worl
     let mut failures = Vec::new();
     let writers: BTreeSet<&str> = PINS.iter().map(|pin| pin.writer).collect();
     let mut found: Vec<(String, String, Option<&str>)> = Vec::new();
+    // A pinned call whose owner's landmarks are refused is not placed: the refusal says why, once.
+    let mut refusals: BTreeSet<String> = BTreeSet::new();
+    let mut refused: BTreeSet<(String, String)> = BTreeSet::new();
     let mut callbacks: BTreeMap<(String, String, String), usize> = BTreeMap::new();
     for src in &world.srcs {
         for writer in writers.iter().copied().chain(["enter_callback"]) {
@@ -4082,8 +4411,15 @@ fn the_role_and_phase_writers_are_called_only_where_they_are_pinned(world: &Worl
                     .map_or(&[][..], |(_, landmarks)| *landmarks);
                 let landmark = src
                     .callable_at(at)
-                    .and_then(|record| landmark_before(src, record, at, landmarks));
-                found.push((writer.to_owned(), owner, landmark));
+                    .map(|record| landmark_before(src, record, at, landmarks))
+                    .transpose();
+                match landmark {
+                    Ok(landmark) => found.push((writer.to_owned(), owner, landmark.flatten())),
+                    Err(refusal) => {
+                        refusals.insert(refusal);
+                        refused.insert((writer.to_owned(), owner));
+                    }
+                }
             }
         }
     }
@@ -4099,7 +4435,11 @@ fn the_role_and_phase_writers_are_called_only_where_they_are_pinned(world: &Worl
             after.map(|l| format!(" after `{l}`")).unwrap_or_default()
         )
     };
-    for missing in wanted.iter().filter(|pin| !found.contains(pin)) {
+    failures.extend(refusals);
+    for missing in wanted
+        .iter()
+        .filter(|pin| !found.contains(pin) && !refused.contains(&(pin.0.clone(), pin.1.clone())))
+    {
         failures.push(format!("the pinned call {} is not there", said(missing)));
     }
     for extra in found.iter().filter(|site| !wanted.contains(site)) {
@@ -10674,6 +11014,200 @@ impl chain::Link3 for Near { fn prepare(&self) {} }
 pub struct Shape;
 impl Link20 for Shape { fn prepare(&self) {} }
 ",
+    );
+}
+
+/// The landmark the planted crate's `fn main` ([`planted_world`], after [`PLANTED_HOP_CHAIN`] and
+/// [`PLANTED_LANDMARK_ITEMS`]) places its `admission::enter_window_thread()` after, read with the
+/// product `main`'s landmarks ([`LANDMARKS`]) — or the reader's refusal.
+fn planted_main_landmark(tag: &str, main: &str) -> Result<Option<&'static str>, String> {
+    let world = planted_world(tag, &format!("{PLANTED_LANDMARK_ITEMS}{main}"));
+    let (at, record) = fixture(&world, "main");
+    let src = &world.srcs[at];
+    let body = record.body().expect("the planted `main` has a body");
+    let call = src
+        .lex(body.start(), body.end())
+        .into_iter()
+        .find(|tok| src.text(*tok) == "enter_window_thread")
+        .expect("the planted `main` calls `enter_window_thread`");
+    let landmarks = LANDMARKS
+        .iter()
+        .find(|(owner, _)| *owner == "bt-app crate::main")
+        .map(|(_, landmarks)| *landmarks)
+        .expect("the product `main` has landmarks");
+    landmark_before(src, record, call.start, landmarks)
+}
+
+/// The items a planted `main` calls, named as the product `main`'s landmarks name theirs.
+const PLANTED_LANDMARK_ITEMS: &str = r#"
+pub mod cli { pub fn parse() -> u8 { 0 } }
+pub mod launch_wire { pub fn hand_over() {} }
+pub mod admission { pub fn enter_window_thread() {} }
+pub struct FrontDoor<P, H> { pub parse: P, pub hand_over: H }
+pub fn loop_builder() -> Builder { Builder }
+pub struct Builder;
+impl Builder { pub fn build(self) {} }
+"#;
+
+/// The 1-based line of the planted crate's `lib.rs` on which `needle` first stands in `main`.
+fn planted_main_line(main: &str, needle: &str) -> usize {
+    let before = &main[..main
+        .find(needle)
+        .expect("the needle is in the planted `main`")];
+    PLANTED_HOP_CHAIN.matches('\n').count()
+        + PLANTED_LANDMARK_ITEMS.matches('\n').count()
+        + before.matches('\n').count()
+        + 1
+}
+
+/// RED (T-LANDMARK-GUARD-BY-CALL) — **a field that spells a landmark's name does not displace the
+/// landmark: the pinned call is placed by the call it follows.**
+///
+/// T-STARTUP-ORDER-SHARED's first draft handed `startup::begin` a struct literal whose field
+/// `hand_over: |request| { admission::enter_window_thread(); … }` holds the window thread's entry,
+/// after `parse: || cli::parse()`. Read by bare identifier, the field's `hand_over` was the nearest
+/// landmark and the guard went red for the wrong reason; read by the call, the entry follows
+/// `cli::parse(…)` — the field `parse` and the field `hand_over` are fields.
+///
+/// MUTATION: restore the identifier reading (any token spelling a landmark's name is one) — the
+/// entry is placed after `hand_over`.
+#[test]
+fn a_field_named_like_a_landmark_does_not_displace_the_call() {
+    let main = r#"
+pub fn main() {
+    let door = FrontDoor {
+        parse: || cli::parse(),
+        hand_over: |request: u8| {
+            admission::enter_window_thread();
+            launch_wire::hand_over();
+        },
+    };
+}
+"#;
+    assert_eq!(
+        planted_main_landmark("ww-landmark-field", main),
+        Ok(Some("parse")),
+        "the window thread's entry follows the call `cli::parse(…)`"
+    );
+}
+
+/// RED (T-LANDMARK-GUARD-BY-CALL) — **a landmark's name in a position the grammar does not read is
+/// refused with the name, the shape and the line, never picked as the landmark.**
+///
+/// `if let Some(parse) = …` binds `parse` in a pattern: a bare name no statement `let` binds, which
+/// the guard cannot tell from an imported `cli::parse`. The identifier reading took it as the
+/// `parse` landmark; the call reading refuses it.
+///
+/// MUTATION: read a bare name no statement `let` binds as no landmark ([`read_landmark`]'s last
+/// row `Reading::Not`) — the entry is placed after `cli::parse(…)` and nothing is refused.
+#[test]
+fn a_landmark_name_in_a_pattern_is_refused_with_its_position() {
+    let main = r#"
+pub fn main() {
+    cli::parse();
+    if let Some(parse) = Some(0) {}
+    admission::enter_window_thread();
+}
+"#;
+    let refusal = planted_main_landmark("ww-landmark-pattern", main)
+        .expect_err("a landmark name in a pattern is refused");
+    let line = planted_main_line(main, "if let");
+    assert!(
+        refusal.starts_with(
+            "a landmark name appears where the guard cannot read it: `parse` in `planted \
+             crate::main` at "
+        ) && refusal.contains(&format!(
+            "lib.rs:{line}, a bare name no statement `let` in scope binds — a pattern, a \
+             parameter, an import or a value, which the guard cannot tell from the landmark \
+             (`let Some ( parse ) = Some`)"
+        )),
+        "the refusal names the identifier, its shape and its line: {refusal}"
+    );
+}
+
+/// RED (T-LANDMARK-GUARD-BY-CALL) — **a method landmark is its receiver's call: the same method
+/// on a receiver the landmark does not name is refused, wherever it stands in the body.**
+///
+/// The product `main` builds its event loop as `builder.build()`. `loop_builder().build()` may be
+/// the same build written another way, and the guard cannot tell — so it refuses, though the call
+/// stands after the pinned entry.
+///
+/// MUTATION: read a method call on another receiver as no landmark ([`read_landmark`]'s
+/// `Landmark::Method` row) — the entry is placed after `cli::parse(…)` and nothing is refused.
+#[test]
+fn a_landmark_method_on_another_receiver_is_refused() {
+    let main = r#"
+pub fn main() {
+    cli::parse();
+    admission::enter_window_thread();
+    loop_builder().build();
+}
+"#;
+    let refusal = planted_main_landmark("ww-landmark-receiver", main)
+        .expect_err("a method landmark on another receiver is refused");
+    let line = planted_main_line(main, "loop_builder");
+    assert!(
+        refusal.contains("`build` in `planted crate::main` at "),
+        "the refusal names `build`: {refusal}"
+    );
+    assert!(
+        refusal.contains(&format!(
+            "lib.rs:{line}, a method call on a receiver the landmark does not name (`( ) . build \
+             ( ) ;`)"
+        )),
+        "the refusal names the shape and the line: {refusal}"
+    );
+}
+
+/// RED (T-LANDMARK-GUARD-BY-CALL) — **a statement `let` that spells a landmark's name binds a
+/// local over the rest of its block, and only there.**
+///
+/// The product `main` writes `let hand_over = || { … launch_wire::hand_over(…) … };` and then
+/// hands and calls the local `hand_over`: neither use is the landmark, which is the path call
+/// inside. In the first planted `main` the local's call before the entry leaves it after
+/// `cli::parse(…)`; in the second the local's block is closed before a bare `hand_over()`, which
+/// is then refused.
+///
+/// MUTATIONS: keep a local past its block (drop [`landmarks_in`]'s `locals.retain` on a closing
+/// delimiter) — the second `main` is read, not refused; read a statement `let` as no binding — the
+/// first is refused.
+#[test]
+fn a_local_named_like_a_landmark_covers_its_block_only() {
+    let local = r#"
+pub fn main() {
+    cli::parse();
+    let hand_over = || 1;
+    let handed = hand_over();
+    admission::enter_window_thread();
+    launch_wire::hand_over();
+}
+"#;
+    assert_eq!(
+        planted_main_landmark("ww-landmark-local", local),
+        Ok(Some("parse")),
+        "the local `hand_over` is not the landmark"
+    );
+    let closed = r#"
+pub fn main() {
+    cli::parse();
+    {
+        let hand_over = || 1;
+        hand_over();
+    }
+    hand_over();
+    admission::enter_window_thread();
+}
+"#;
+    let refusal = planted_main_landmark("ww-landmark-closed", closed)
+        .expect_err("a bare name past its local's block is refused");
+    let line = planted_main_line(closed, "    }\n    hand_over") + 1;
+    assert!(
+        refusal.contains("`hand_over` in `planted crate::main` at "),
+        "the refusal names `hand_over`: {refusal}"
+    );
+    assert!(
+        refusal.contains(&format!("lib.rs:{line}, a bare name")),
+        "the refusal is the bare call past the block: {refusal}"
     );
 }
 

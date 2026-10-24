@@ -422,6 +422,22 @@ wait from the window path or route it through an admitted worker; update the
 registry through `scripts/dev/generate-window-waits-table.ps1`, never by
 hand-editing the generated architecture region.
 
+The role and phase writers (`enter_window_thread`, `loop_running`, `exiting`,
+`quit_abandoned`, `enter_standalone_main`) are called only where `PINS` places
+them, each after the landmark of its owner's body that its pin names. A landmark
+is placed by the call it names (T-LANDMARK-GUARD-BY-CALL, 2026-10-24): a path
+call (`cli::parse(…)`, `launch_wire::hand_over(…)`), a method call on the
+receiver written in `LANDMARKS` (`builder.build()`, `event_loop.run_app(…)`,
+`self.session_store.close()`), or a variant's path (`StartCause::Init`, each
+`QuitStep::V`), never a bare identifier: a field, a statement `let` and the local
+it binds, another path's call and another enum's variant are not landmarks. Any
+other position of a landmark's name — a pattern, a parameter, an import, a value,
+a method call on another receiver, a path naming a method, a rename, a nested
+`fn` or a macro — is refused with the name, the shape and the line
+(`window_waits_tests::landmarks_in`; the planted cases are the
+`a_*landmark*` tests). When refused, rename what is not a landmark, or widen the
+grammar in its own change with a planted case.
+
 The registry's `# completions` section (S-1, 2026-10-11) is the side-effects
 contract's ledger, one row per request protocol, held by the
 `every_*completions*` tests (among them `every_worker_door_body_is_reached_from_a_completions_door`) and `every_conforming_request_door_holds_no_wait_of_its_own`
