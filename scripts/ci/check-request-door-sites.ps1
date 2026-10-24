@@ -49,7 +49,7 @@ $header = "file`titem`tkind`tname`tsites`tverdict`treason"
 $kinds = @("Dynamic", "Ambiguous", "Macro", "OtherArm", "Generated", "Path", "Effect", "Blocking",
     "OwnerDoor", "WorkerBody", "Entrance", "Inherits", "Unmet", "HandedCalled", "Implicit")
 # The commit that seeded the list (T-REQUEST-DOOR-GUARD).
-$seed = if ($Seed) { $Seed } else { "SEED-NOT-YET-PINNED" }
+$seed = if ($Seed) { $Seed } else { "442252733e85d7fff8662bc069d464f8f73af2e1" }
 
 function Format-Key([string]$key) {
     $columns = $key.Split("`t")
