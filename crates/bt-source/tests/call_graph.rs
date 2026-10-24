@@ -11,8 +11,8 @@ use bt_source::call_graph::{
     Arms, CallGraph, Edge, ItemId, Node, Resolver, Target, Unresolved, Via,
 };
 use bt_source::{
-    DiskScope, Index, TargetId, TargetKind, TargetRoot, Universe, Vendor, Workspace, is_vendored,
-    report, universes,
+    DiskScope, Index, Span, TargetId, TargetKind, TargetRoot, Universe, Vendor, Workspace,
+    is_vendored, report, universes,
 };
 
 fn fixtures() -> PathBuf {
@@ -444,6 +444,50 @@ fn a_closure_is_its_definers_and_a_stored_one_is_dynamic() {
     assert_eq!(
         at(&resolver, "root", "inside"),
         ["cg-closures crate::inside"; 2]
+    );
+}
+
+/// RED (R8, T-REQUEST-DOOR-GUARD) — **a closure literal written as a call's argument names the
+/// call it is handed to; a bound closure and one called in place name none; nested closures are
+/// listed outermost first.**
+///
+/// MUTATIONS: in `Walker::arguments`, hand the closure no call (`None`) — `worker`'s closure is not
+/// handed; record the argument as 0 — `inner`'s closure is handed to `submit`'s argument 0; keep
+/// only the innermost closure in `CallSite::closures` — `inner` is not under `spawn`'s closure.
+#[test]
+fn a_closure_names_the_call_it_is_handed_to() {
+    let index = fixture("handed");
+    let resolver = resolver("handed", &index);
+    let root = item(&resolver, "cg-handed", "root");
+    let edges = resolver.resolve_callees(root);
+    let site = |name: &str| -> &Edge {
+        let found: Vec<&Edge> = edges.iter().filter(|edge| edge.site.name == name).collect();
+        let [only] = found.as_slice() else {
+            panic!("one `{name}` call in `root`: {edges:?}");
+        };
+        only
+    };
+    let spawn = site("spawn").site.span;
+    let submit = site("submit").site.span;
+    let handed = |edge: &Edge| -> Vec<Option<(Span, usize)>> {
+        edge.site
+            .closures
+            .iter()
+            .map(|open| open.handed.map(|handed| (handed.call, handed.argument)))
+            .collect()
+    };
+    assert_eq!(handed(site("worker")), [Some((spawn, 0))]);
+    assert_eq!(handed(site("inner")), [Some((spawn, 0)), Some((submit, 1))]);
+    assert_eq!(
+        site("inner").site.closure,
+        site("inner").site.closures.last().map(|open| open.closure),
+        "`closure` is the innermost of `closures`"
+    );
+    assert_eq!(handed(site("bound")), [None]);
+    assert_eq!(handed(site("in_place")), [None]);
+    assert!(
+        handed(site("spawn")).is_empty(),
+        "`spawn` is written in no closure"
     );
 }
 
