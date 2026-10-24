@@ -6934,14 +6934,14 @@ crates/bt-app/src/webhost.rs	bt-app crate::webhost::refusal_sentence	Ambiguous	t
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::refusal_sentence	Ambiguous	to_owned	2	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::tell_all_seat_its_color_scheme	Ambiguous	get_or_insert	1	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	and_then	1	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	eq_ignore_ascii_case	1	2026-10-24: T-PDF-CONTENT-TYPE; a standard-library method (str, Option, RefCell, Result, windows::core::Interface) on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	is_empty	1	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	eq_ignore_ascii_case	1	2026-10-24: T-PDF-CONTENT-TYPE; `str::eq_ignore_ascii_case` on the trimmed media-type essence (a `&str`), on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	is_empty	2	2026-10-24: T-PDF-CONTENT-TYPE; `str::is_empty` on the media-type essence (an empty type is no type) and on the file's stem, on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	is_some_and	2	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	next	2	2026-10-24: T-PDF-CONTENT-TYPE; a standard-library method (str, Option, RefCell, Result, windows::core::Interface) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	next	2	2026-10-24: T-PDF-CONTENT-TYPE; `Iterator::next` on `str::split(';')` (the media type before its parameters) and on `str::rsplit('/')` (the address's last segment), on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	rsplit	1	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	rsplit_once	1	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	to_str	1	2026-10-22: T-PDF-TEXT-RENDERING; a standard-library method (str, Option, Path, OsStr) on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	unwrap_or	3	2026-10-24: T-PDF-CONTENT-TYPE; a standard-library method (str, Option, RefCell, Result, windows::core::Interface) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Ambiguous	unwrap_or	3	2026-10-24: T-PDF-CONTENT-TYPE; `Option::unwrap_or` after `Iterator::next` on `str::split`/`str::rsplit` and after `str::find` (the query and fragment cut), on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_document	Dynamic	pdf	1	2026-10-22: T-PDF-TEXT-RENDERING; a local closure (the extension test) called by name inside web_document, whose body is walked with it and calls no door
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_engine_folder	Ambiguous	is_empty	1	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_engine_folder	Ambiguous	join	4	
@@ -10332,9 +10332,9 @@ crates/bt-platform/src/webview.rs	bt-platform crate::webview::read_stream	Ambigu
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::read_stream	Ambiguous	ok	6	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::read_stream	Ambiguous	truncate	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::read_string	Dynamic	getter	1	
-crates/bt-platform/src/webview.rs	bt-platform crate::webview::same_resource	Ambiguous	unwrap_or	1	2026-10-24: T-PDF-CONTENT-TYPE; a standard-library method (str, Option, RefCell, Result, windows::core::Interface) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::same_resource	Ambiguous	unwrap_or	1	2026-10-24: T-PDF-CONTENT-TYPE; `Option::unwrap_or` after `str::find('#')` (the fragment cut), on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::same_resource	Dynamic	cut	2	2026-10-24: T-PDF-CONTENT-TYPE; a local closure that cuts an address at its fragment, which reaches no door
-crates/bt-platform/src/webview.rs	bt-platform crate::webview::serves_the_navigation	Ambiguous	contains	1	2026-10-24: T-PDF-CONTENT-TYPE; a standard-library method (str, Option, RefCell, Result, windows::core::Interface) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/webview.rs	bt-platform crate::webview::serves_the_navigation	Ambiguous	contains	1	2026-10-24: T-PDF-CONTENT-TYPE; `Range::contains` on the redirect status range `300..400` (a `Range<i32>`), on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::spare_parent	Ambiguous	map_err	1	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::spare_parent	Ambiguous	saturating_sub	2	
 crates/bt-platform/src/webview.rs	bt-platform crate::webview::warm_web_environment	Ambiguous	borrow_mut	1	
