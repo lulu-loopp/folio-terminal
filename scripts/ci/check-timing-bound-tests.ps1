@@ -56,6 +56,33 @@ try {
         $output = Run-Gate 1 "added row"
         if ($output -notmatch "only shrinks") { throw "addition was refused for the wrong reason: $output" }
 
+        $new = "crate::tests::new`tcrate`tanswer arrives within 2 s`tcontrolled receiver`n"
+        $other = "crate::tests::other`tcrate`tanswer arrives within 3 s`tcontrolled receiver`n"
+        $widened = "# widened 2026-10-24 by T-PLANT (+2 rows): a planted shape`n"
+        Write-List ($widened + $header + $row + $new + $other)
+        $output = Run-Gate 0 "widening with its count"
+        if ($output -notmatch "admits its 2 row") { throw "the widening pass was not loud: $output" }
+
+        Write-List ("# widened 2026-10-24 by T-PLANT (+1 row): a planted shape`n" + $header + $row + $new + $other)
+        $output = Run-Gate 1 "widening with the wrong count"
+        if ($output -notmatch "admits 1 row\(s\) and 2 were added") { throw "the wrong count was refused for the wrong reason: $output" }
+
+        Write-List ($widened + $header + $row)
+        $output = Run-Gate 1 "widening with nothing added"
+        if ($output -notmatch "admits 2 row\(s\) and 0 were added") { throw "the empty widening was refused for the wrong reason: $output" }
+
+        Write-List ($widened + "# widened 2026-10-25 by T-OTHER (+0 rows): another`n" + $header + $row + $new + $other)
+        $output = Run-Gate 1 "two widenings"
+        if ($output -notmatch "2 widening lines are new") { throw "two widenings were refused for the wrong reason: $output" }
+
+        Write-List ($widened + $header + $row)
+        & git add .
+        & git commit -q -m widened-base
+        & git update-ref refs/remotes/origin/main (& git rev-parse HEAD).Trim()
+        Write-List ($widened + $header + $row + $new + $other)
+        $output = Run-Gate 1 "widening line already at the base"
+        if ($output -notmatch "only shrinks") { throw "a base widening admitted rows: $output" }
+
         Write-List ($header + $row + $row)
         $output = Run-Gate 1 "duplicate test"
         if ($output -notmatch "more than once") { throw "duplicate was refused for the wrong reason: $output" }
@@ -66,5 +93,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-timing-bound: no-base, unchanged, shrink, growth and duplicate cases pass"
+Write-Host "check-timing-bound: no-base, unchanged, shrink, growth, widening (exact, wrong count, empty, two, already at base) and duplicate cases pass"
 exit 0

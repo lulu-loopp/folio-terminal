@@ -12,9 +12,19 @@
 # to the list both ways, so a new timing-bound test is red there if it is not
 # listed and red here if it is.
 #
-# Neither half sees a clock a test reaches only through a function it calls (a
-# helper that polls, a product function handed a deadline), nor a measurement
-# written as `Instant::now() - start`: review owns discovering those.
+# Neither half sees a clock a test reaches only through a product function it
+# calls (a product function handed a deadline): review owns discovering those.
+#
+# **A widening admits exactly its rows** (T-TIMING-BOUND-STRAYS, 2026-10-24).
+# When the scan's grammar is widened (clock arithmetic in a test's own body, a
+# budget measured in a test-only helper), the tests it newly sees are rows the
+# tree already had, not new liabilities. A comment line
+# `# widened <yyyy-mm-dd> by <ticket> (+<n> rows): <what>` that is new against
+# the merge base admits exactly <n> added rows; more than one new widening line,
+# a count that is not the number of rows added, or a widening line with no rows
+# added is refused, and rows added with no new widening line are refused as
+# before. Whether the admitted rows are the widened grammar's is the discovery
+# half's to hold: it lists exactly what the tree implies.
 
 param(
     [string]$Repo = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
@@ -31,6 +41,16 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 $list = Join-Path $Repo $Relative
 if (-not (Test-Path -LiteralPath $list)) {
     throw "$Relative is not in the tree - it is the timing-bound test census"
+}
+
+function Read-Widenings([string[]]$Lines) {
+    $found = @()
+    foreach ($line in $Lines) {
+        if ($line -match '^# widened (\d{4}-\d{2}-\d{2}) by (\S+) \(\+(\d+) rows?\)') {
+            $found += [pscustomobject]@{ Line = $line; Count = [int]$Matches[3] }
+        }
+    }
+    return , $found
 }
 
 function Read-TimingRows([string[]]$Lines) {
@@ -62,7 +82,9 @@ function Read-TimingRows([string[]]$Lines) {
 
 Push-Location $Repo
 try {
-    $now = Read-TimingRows ([IO.File]::ReadAllLines($list))
+    $lines = [IO.File]::ReadAllLines($list)
+    $now = Read-TimingRows $lines
+    $widenedNow = Read-Widenings $lines
     & git rev-parse --verify --quiet $MainRef *> $null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "no $MainRef in this clone - the timing comparison did not run"
@@ -80,7 +102,9 @@ try {
         Write-Host "$Relative is not in $base - no base list exists; current census has $($now.Count) rows. PASS"
         exit 0
     }
-    $before = Read-TimingRows ($text -split "`r?`n")
+    $baseLines = $text -split "`r?`n"
+    $before = Read-TimingRows $baseLines
+    $widenedBefore = @((Read-Widenings $baseLines) | ForEach-Object { $_.Line })
 } finally {
     Pop-Location
 }
@@ -99,6 +123,21 @@ foreach ($row in $now) {
 }
 $removed = $before.Count - ($now.Count - $added.Count)
 Write-Host "$Relative against $($base.Substring(0, 12)): $($before.Count) rows -> $($now.Count), $($added.Count) added, $removed removed."
+$widenings = @($widenedNow | Where-Object { $widenedBefore -notcontains $_.Line })
+if ($widenings.Count -gt 1) {
+    throw ("$($widenings.Count) widening lines are new against the base, and one change widens the scan once:" +
+        [Environment]::NewLine + (($widenings | ForEach-Object { "    $($_.Line)" }) -join [Environment]::NewLine))
+}
+if ($widenings.Count -eq 1) {
+    $widening = $widenings[0]
+    if ($widening.Count -ne $added.Count) {
+        throw ("the widening line admits $($widening.Count) row(s) and $($added.Count) were added:" +
+            [Environment]::NewLine + "    $($widening.Line)")
+    }
+    Write-Host "the widening admits its $($added.Count) row(s): $($widening.Line)"
+    Write-Host "timing-bound test census grew by exactly its widening. PASS"
+    exit 0
+}
 if ($added.Count -gt 0) {
     $details = ($added | ForEach-Object { "    $_" }) -join [Environment]::NewLine
     throw ("$($added.Count) timing-bound test row(s) were added, and this list only shrinks:" +

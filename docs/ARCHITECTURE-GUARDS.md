@@ -644,6 +644,23 @@ the product's `LOAD_BUDGET` and `IDLE_POLL_INTERVAL` so that it cannot end
 before the engine's own refusal lands, and handed to the engine's wait door —
 so it is not a row (T-VIDEO-ENGINE-NO-DURATION).
 
+2026-10-24 (T-TIMING-BOUND-STRAYS): the scan reads three shapes, not one. Besides
+a std real wait or `elapsed()` in the test's own body, it lists **clock
+arithmetic in the test's own body** (a comparison, a subtraction or a
+`duration_since` whose two sides hold different `Instant::now()` /
+`SystemTime::now()` readings, followed through the test's bindings; one reading
+and its offsets is not one) and **a budget measured in a test-only helper** (a
+test-only callable of the test's own target, reached through resolved call-graph
+edges, that keeps an `elapsed()` or a two-reading difference rather than only
+comparing or formatting it). Unresolved edges whose candidates measure, macro
+arguments that do not parse and name a clock, and bodies that do not parse are
+refused by file and line. The list's `# widened <date> by <ticket> (+<n> rows)`
+line admits exactly the rows a widening finds; `check-timing-bound.ps1` refuses
+any other growth. Its product half is
+`no_product_function_reads_again_the_clock_it_was_handed`: a product function
+handed `now: Instant` judges on that instant, and a second reading needs a
+listed reason (a real wait in between).
+
 ## Raw-effect and thread-door exceptions
 
 The rule: `bt-app` and `bt-platform` create workers through the admitted thread
