@@ -69,7 +69,7 @@ use webview2_com::{
     NewBrowserVersionAvailableEventHandler, NewWindowRequestedEventHandler,
     PermissionRequestedEventHandler, ProcessFailedEventHandler, ScriptDialogOpeningEventHandler,
     SourceChangedEventHandler, StatusBarTextChangedEventHandler, WebResourceRequestedEventHandler,
-    take_pwstr,
+    WebResourceResponseReceivedEventHandler, take_pwstr,
 };
 #[cfg(windows)]
 use windows::Win32::Foundation::{HWND, POINT, RECT};
@@ -253,6 +253,20 @@ pub enum WebEvent {
     SourceChanged {
         uri: String,
     },
+    /// **What the server said the main frame's document is** — the response's
+    /// `Content-Type`, as sent, for the navigation in flight (T-PDF-CONTENT-TYPE).
+    ///
+    /// `uri` is the address the response answered — after any redirect, without a
+    /// fragment — so the caller can tell the document it is about from the one
+    /// still on the glass: on Windows it arrives through `WebResourceResponseReceived`,
+    /// whose order against [`Self::SourceChanged`] the engine does not promise, and on
+    /// the Mac through `decidePolicyForNavigationResponse:`, before the commit. Only
+    /// a main-frame response that is not a redirect, and on the Mac only one the
+    /// engine will draw, is told; a response without the header is not told at all.
+    DocumentServed {
+        uri: String,
+        content_type: String,
+    },
     /// What a browser would put in its status bubble — the target of whatever
     /// the pointer is over, or empty when it is over nothing.
     ///
@@ -379,6 +393,33 @@ pub fn http_status_of(code: i32) -> Option<u16> {
     u16::try_from(code)
         .ok()
         .filter(|code| (100..=599).contains(code))
+}
+
+/// **Whether two addresses name the same resource**: equal once the fragment is cut
+/// from each (T-PDF-CONTENT-TYPE).
+///
+/// A fragment is never sent to a server, so the request a navigation to
+/// `…/download?id=7#page=2` makes is for `…/download?id=7`, and the response's
+/// address has no `#` while the navigation's and the committed one do.
+#[must_use]
+pub fn same_resource(one: &str, other: &str) -> bool {
+    let cut = |uri: &str| -> usize { uri.find('#').unwrap_or(uri.len()) };
+    one[..cut(one)] == other[..cut(other)]
+}
+
+/// **Whether a response is the main frame's document for the navigation in flight**
+/// (T-PDF-CONTENT-TYPE): its request is for the address the last navigation that went
+/// ahead was going to ([`same_resource`]), and it is not a redirect — a `3xx` says
+/// where the document is, not what it is, and the navigation that follows it is
+/// asked again under its own address.
+///
+/// `WebResourceResponseReceived` carries no resource context, so this is how the
+/// Windows host tells the document's response from a picture's or a script's; every
+/// other response costs the one comparison.
+#[must_use]
+pub fn serves_the_navigation(request_uri: &str, navigating_to: Option<&str>, status: i32) -> bool {
+    navigating_to.is_some_and(|navigating_to| same_resource(request_uri, navigating_to))
+        && !(300..400).contains(&status)
 }
 
 /// **How the host answers a page's request for a window of its own**, on both engines: the
@@ -1553,6 +1594,10 @@ struct Shared {
     /// this is only ever the belt: the same target is never rewritten twice in
     /// a row.
     rewriting_to: RefCell<Option<String>>,
+    /// **Where the last navigation that went ahead is going** — the address of the
+    /// last `NavigationStarting` not cancelled, redirects included, which is what
+    /// [`serves_the_navigation`] matches a response against (T-PDF-CONTENT-TYPE).
+    navigating_to: RefCell<Option<String>>,
     wake: Box<dyn Fn() + Send + Sync>,
 }
 
@@ -1689,6 +1734,7 @@ impl WebHost {
                 gate,
                 request_gate,
                 rewriting_to: RefCell::new(None),
+                navigating_to: RefCell::new(None),
                 wake,
             }),
             controller: None,
@@ -2311,6 +2357,9 @@ impl WebHost {
                                 true
                             }
                         };
+                        if !cancelled {
+                            *shared.navigating_to.borrow_mut() = Some(uri.clone());
+                        }
                         shared.push(WebEvent::NavigationStarting { uri, cancelled });
                         Ok(())
                     })),
@@ -2530,6 +2579,54 @@ impl WebHost {
                     &mut token,
                 )
                 .map_err(|error| failure("add_SourceChanged", &error))?;
+
+            // **What the server said the document is** (T-PDF-CONTENT-TYPE). Raised
+            // for every response the page receives, so the handler reads the
+            // request's address first and only the navigation's own response
+            // ([`serves_the_navigation`]) is read further: its `Content-Type` decides
+            // whether the seat holds a PDF, which `SourceChanged`'s address alone
+            // cannot tell for a server's `/download?id=7`.
+            let shared = Rc::clone(&self.shared);
+            let responses: ICoreWebView2_2 = webview
+                .cast()
+                .map_err(|error| failure("ICoreWebView2_2", &error))?;
+            responses
+                .add_WebResourceResponseReceived(
+                    &WebResourceResponseReceivedEventHandler::create(Box::new(move |_, args| {
+                        let Some(args) = args else { return Ok(()) };
+                        let uri = match args.Request() {
+                            Ok(request) => read_string(|out| request.Uri(out)),
+                            Err(_) => return Ok(()),
+                        };
+                        let Ok(response) = args.Response() else {
+                            return Ok(());
+                        };
+                        let status = read::<i32>(|out| response.StatusCode(out));
+                        let served = serves_the_navigation(
+                            &uri,
+                            shared.navigating_to.borrow().as_deref(),
+                            status,
+                        );
+                        if !served {
+                            return Ok(());
+                        }
+                        let Ok(headers) = response.Headers() else {
+                            return Ok(());
+                        };
+                        let mut value = PWSTR::null();
+                        if headers
+                            .GetHeader(&HSTRING::from("Content-Type"), &mut value)
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                        let content_type = take_pwstr(value);
+                        shared.push(WebEvent::DocumentServed { uri, content_type });
+                        Ok(())
+                    })),
+                    &mut token,
+                )
+                .map_err(|error| failure("add_WebResourceResponseReceived", &error))?;
 
             // The status bubble's text, with the engine's own bubble switched
             // off above: the preview's foot is already a band that says where
@@ -4917,6 +5014,53 @@ pub fn web_controller_visibility(host: &WebHost) -> Result<Option<bool>, String>
 #[cfg(test)]
 mod new_window_tests {
     use super::*;
+
+    /// RED (T-PDF-CONTENT-TYPE) — **only the navigation's own response, and not a redirect,
+    /// says what the document is.**
+    ///
+    /// MUTATION: answer `true` for every response, and a picture's `image/png` decides what a
+    /// PDF seat is; drop the `3xx` clause, and a redirect's `text/html` does.
+    #[test]
+    fn a_response_answers_the_navigation_only_for_its_own_address_and_not_a_redirect() {
+        let going = Some("https://example.com/download?id=7#page=2");
+        assert!(serves_the_navigation(
+            "https://example.com/download?id=7",
+            going,
+            200
+        ));
+        assert!(
+            serves_the_navigation("https://example.com/download?id=7", going, 404),
+            "a server's error page is still the document"
+        );
+        assert!(!serves_the_navigation(
+            "https://example.com/download?id=7",
+            going,
+            302
+        ));
+        assert!(!serves_the_navigation(
+            "https://example.com/logo.png",
+            going,
+            200
+        ));
+        assert!(!serves_the_navigation(
+            "https://example.com/download?id=8",
+            going,
+            200
+        ));
+        assert!(!serves_the_navigation(
+            "https://example.com/download?id=7",
+            None,
+            200
+        ));
+        assert!(same_resource(
+            "https://example.com/a#x",
+            "https://example.com/a"
+        ));
+        assert!(!same_resource(
+            "https://example.com/a",
+            "https://example.com/a?b"
+        ));
+    }
 
     /// RED (T-WEB-404-SAYS-UNKNOWN) — **a status code is a server's answer, and `0` is none.**
     ///
