@@ -892,6 +892,19 @@ define_class!(
                     // decision cannot be taken later — and what happens
                     // *instead* is the caller's, on its own turn.
                     if unsafe { response.canShowMIMEType() } {
+                        // **What the document is, as the server said it**
+                        // (T-PDF-CONTENT-TYPE): the main frame's response the
+                        // engine will draw, told before the commit. WebKit asks
+                        // this only of a final response, never of a redirect.
+                        if unsafe { response.isForMainFrame() } {
+                            let uri = raw.URL().and_then(|url| url.absoluteString());
+                            if let (Some(uri), Some(content_type)) = (uri, raw.MIMEType()) {
+                                self.shared_state().push(WebEvent::DocumentServed {
+                                    uri: uri.to_string(),
+                                    content_type: content_type.to_string(),
+                                });
+                            }
+                        }
                         return WKNavigationResponsePolicy::Allow;
                     }
                     let uri = raw.URL()

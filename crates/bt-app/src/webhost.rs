@@ -1046,20 +1046,37 @@ pub(crate) enum WebDocument {
     Pdf,
 }
 
-/// **The document an address commits to**: a PDF when the file it names ends in
-/// `.pdf` (any case), a page otherwise.
+/// **The document an address commits to**: what the server said it is, when it
+/// said ([`WebEvent::DocumentServed`]); otherwise a PDF when the file the address
+/// names ends in `.pdf` (any case), a page otherwise (T-PDF-CONTENT-TYPE).
 ///
-/// The address and not the response's media type, because the address is what
-/// the engine hands this seat at commit ([`WebEvent::SourceChanged`]) and the
-/// one road that opens PDFs in a pane — a local `.pdf` previewed — always names
-/// its file. A local address is read through [`crate::webnav::LocalFileUrl`],
-/// the one parser of those, so a percent-escaped name is judged by the name it
-/// decodes to; any other address by the last segment of its path, with its
-/// query and fragment cut away. A web server that answers `application/pdf` at
-/// an address with no `.pdf` in it is read as a page, and is drawn at the
-/// window's own scale exactly as before this existed.
-pub(crate) fn web_document(uri: &str) -> WebDocument {
+/// **The served media type decides both ways.** A server's `/download?id=7`
+/// answered `application/pdf` is a PDF, and an HTML page answered at an address
+/// ending in `.pdf` is a page — the bytes on the glass are what the engine was
+/// sent, and the address is only a name for them. Its essence is read, the part
+/// before any `;` parameter, trimmed, in any case.
+///
+/// The address is the answer only when no type is known: a local file (the
+/// engine's file responses are not relied on, and a local `.pdf` previewed always
+/// names its file), a page restored from history without a response, a server
+/// that sent no `Content-Type` or an empty one — Chromium reads an empty type as
+/// none and sniffs the body, so a `.pdf` sent that way still opens in its viewer.
+/// A local address is read through
+/// [`crate::webnav::LocalFileUrl`], the one parser of those, so a percent-escaped
+/// name is judged by the name it decodes to; any other address by the last
+/// segment of its path, with its query and fragment cut away.
+pub(crate) fn web_document(uri: &str, served: Option<&str>) -> WebDocument {
     let pdf = |extension: &str| extension.eq_ignore_ascii_case("pdf");
+    if let Some(served) = served {
+        let essence = served.split(';').next().unwrap_or(served).trim();
+        if !essence.is_empty() {
+            return if essence.eq_ignore_ascii_case("application/pdf") {
+                WebDocument::Pdf
+            } else {
+                WebDocument::Page
+            };
+        }
+    }
     let is_pdf = match crate::webnav::LocalFileUrl::parse(uri) {
         Some(local) => local
             .path()
@@ -2283,6 +2300,13 @@ pub(crate) struct WebSeat {
     /// the one fact besides the window's scale that decides what the engine is
     /// told about pixels ([`raster_scale`]). A page, until a PDF commits.
     document: WebDocument,
+    /// **What the server said the navigation in flight is** — the address its
+    /// response answered and that response's `Content-Type`
+    /// ([`WebEvent::DocumentServed`]; T-PDF-CONTENT-TYPE). Forgotten when a
+    /// navigation goes ahead, and read by [`web_document`] only for a commit to
+    /// the same address, so the document still on the glass is never judged by
+    /// the response of the one replacing it.
+    served: Option<(String, String)>,
     /// **What the compositor was last told about this page's pair** — its floor
     /// and, once there is one, its visual.
     ///
@@ -2542,6 +2566,7 @@ impl WebSeat {
             scale,
             rastered: None,
             document: WebDocument::Page,
+            served: None,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             #[cfg(test)]
@@ -2985,6 +3010,9 @@ impl WebSeat {
                         self.page.loading_since = Some(Instant::now());
                     }
                     self.page.loading = true;
+                    // A new document is on its way; what the last response said
+                    // was about the one before it.
+                    self.served = None;
                 }
                 WebEffect::Ignore
             }
@@ -3109,6 +3137,20 @@ impl WebSeat {
                 // page is rastered (T-PDF-TEXT-RENDERING).
                 if let Err(error) = self.document_committed(uri) {
                     outcomes.push(WebOutcome::Fault(error));
+                }
+                WebEffect::Ignore
+            }
+            // **What the server said the document is** (T-PDF-CONTENT-TYPE). Kept
+            // for the commit it belongs to; and when that commit is already in —
+            // the engine does not promise which of the two arrives first — the
+            // kind is decided again now, the same way the commit decides it.
+            WebEvent::DocumentServed { uri, content_type } => {
+                self.served = Some((uri.clone(), content_type.clone()));
+                if bt_platform::same_resource(uri, &self.page.url) {
+                    let committed = self.page.url.clone();
+                    if let Err(error) = self.document_committed(&committed) {
+                        outcomes.push(WebOutcome::Fault(error));
+                    }
                 }
                 WebEffect::Ignore
             }
@@ -3978,7 +4020,12 @@ impl WebSeat {
     /// the same sentence a display change says ([`Self::set_device_scale`]),
     /// because to the engine it is the same fact.
     fn document_committed(&mut self, uri: &str) -> Result<(), String> {
-        let document = web_document(uri);
+        let served = self
+            .served
+            .as_ref()
+            .filter(|(answered, _)| bt_platform::same_resource(answered, uri))
+            .map(|(_, content_type)| content_type.as_str());
+        let document = web_document(uri, served);
         if document == self.document {
             return Ok(());
         }
@@ -5277,6 +5324,7 @@ mod rehost_address_tests {
             scale: 1.0,
             rastered: None,
             document: WebDocument::Page,
+            served: None,
             placed: None,
             buttons: bt_platform::web_mouse_buttons::NONE,
             #[cfg(test)]
@@ -5939,7 +5987,7 @@ mod rasterization_tests {
             "https://example.com/papers/a.pdf",
             "https://example.com/papers/a.pdf?download=1#page=2",
         ] {
-            assert_eq!(web_document(pdf), WebDocument::Pdf, "{pdf}");
+            assert_eq!(web_document(pdf, None), WebDocument::Pdf, "{pdf}");
         }
         for page in [
             BLANK_PAGE,
@@ -5950,8 +5998,211 @@ mod rasterization_tests {
             "https://example.com/a.html?file=b.pdf",
             "https://example.com/.pdf",
         ] {
-            assert_eq!(web_document(page), WebDocument::Page, "{page}");
+            assert_eq!(web_document(page, None), WebDocument::Page, "{page}");
         }
+    }
+
+    /// **A seat whose navigation to `uri` goes ahead** — the engine's own event,
+    /// digested the way a live seat digests it.
+    fn navigating(seat: &mut WebSeat, uri: &str) {
+        let mut outcomes = Vec::new();
+        seat.digest(
+            &bt_platform::WebEvent::NavigationStarting {
+                uri: uri.to_owned(),
+                cancelled: false,
+            },
+            &mut outcomes,
+        );
+    }
+
+    /// **The server's answer for `uri`**, digested as a live seat digests it.
+    fn served(seat: &mut WebSeat, uri: &str, content_type: &str) {
+        let mut outcomes = Vec::new();
+        seat.digest(
+            &bt_platform::WebEvent::DocumentServed {
+                uri: uri.to_owned(),
+                content_type: content_type.to_owned(),
+            },
+            &mut outcomes,
+        );
+        assert!(
+            !outcomes
+                .iter()
+                .any(|outcome| matches!(outcome, WebOutcome::Fault(_))),
+            "a seat with no controller tells nothing and fails at nothing: {outcomes:?}"
+        );
+    }
+
+    const SERVED_PDF: &str = "https://example.com/download?id=7";
+
+    /// RED (T-PDF-CONTENT-TYPE) — **a server's PDF at an address with no `.pdf` in
+    /// it is told the whole scale**, its response arriving before the commit.
+    ///
+    /// MUTATION: decide by the address alone (drop the served type), and the
+    /// PDF from `/download?id=7` is a page owed 1.5 — drawn stretched.
+    #[test]
+    fn an_extensionless_address_served_as_pdf_is_owed_the_whole_scale() {
+        let mut seat = seat_at(1.5);
+        navigating(&mut seat, SERVED_PDF);
+        served(&mut seat, SERVED_PDF, "application/pdf");
+        committed(&mut seat, SERVED_PDF);
+        assert_eq!(seat.document, WebDocument::Pdf);
+        assert_eq!(seat.rasterization_owed(), Some(2.0));
+    }
+
+    /// RED (T-PDF-CONTENT-TYPE) — **a response that arrives after its commit
+    /// re-tells the scale**, as a display change does.
+    ///
+    /// MUTATION: only keep the served type for the next commit (no re-check at
+    /// `DocumentServed`), and the late PDF is a page owed 1.5.
+    #[test]
+    fn a_pdf_response_after_its_commit_retells_the_scale() {
+        let mut seat = seat_at(1.5);
+        navigating(&mut seat, SERVED_PDF);
+        committed(&mut seat, SERVED_PDF);
+        seat.rastered = Some(1.5);
+        assert_eq!(seat.rasterization_owed(), None, "a page, told 1.5");
+        served(&mut seat, SERVED_PDF, "application/pdf");
+        assert_eq!(seat.document, WebDocument::Pdf);
+        assert_eq!(seat.rasterization_owed(), Some(2.0));
+    }
+
+    /// RED (T-PDF-CONTENT-TYPE) — **a `.pdf` address served as a PDF is told once**:
+    /// the response and the commit agree, and a second of either owes nothing.
+    ///
+    /// MUTATION: read a served PDF as a page (invert the essence test), and the
+    /// `.pdf` the address rule always got right is owed 1.5.
+    #[test]
+    fn a_pdf_address_served_as_pdf_is_told_once() {
+        const ADDRESS: &str = "https://example.com/papers/a.pdf";
+        let mut seat = seat_at(1.5);
+        navigating(&mut seat, ADDRESS);
+        served(&mut seat, ADDRESS, "application/pdf");
+        committed(&mut seat, ADDRESS);
+        assert_eq!(seat.rasterization_owed(), Some(2.0));
+        seat.rastered = Some(2.0);
+        served(&mut seat, ADDRESS, "application/pdf");
+        committed(&mut seat, ADDRESS);
+        assert_eq!(seat.rasterization_owed(), None, "nothing twice");
+    }
+
+    /// RED (T-PDF-CONTENT-TYPE) — **an HTML page answered at a `.pdf` address is a
+    /// page**: the response wins the other way too.
+    ///
+    /// MUTATION: let the address rule win when it says PDF, and the HTML page is
+    /// owed 2.0 — drawn a third too large.
+    #[test]
+    fn html_served_at_a_pdf_address_is_a_page() {
+        const ADDRESS: &str = "https://example.com/papers/a.pdf";
+        let mut seat = seat_at(1.5);
+        navigating(&mut seat, ADDRESS);
+        served(&mut seat, ADDRESS, "text/html; charset=utf-8");
+        committed(&mut seat, ADDRESS);
+        assert_eq!(seat.document, WebDocument::Page);
+        assert_eq!(seat.rasterization_owed(), Some(1.5));
+    }
+
+    /// RED (T-PDF-CONTENT-TYPE) — **a new navigation forgets what the last response
+    /// said**: a commit with no response of its own is judged by its address, even
+    /// when it is the address the last response answered.
+    ///
+    /// MUTATION: never forget `served` at `NavigationStarting`, and the second
+    /// commit of `/download?id=7` is judged by the first one's `application/pdf` —
+    /// owed 2.0 for a document nobody said was a PDF.
+    #[test]
+    fn a_new_navigation_forgets_what_the_last_response_said() {
+        let mut seat = seat_at(1.5);
+        navigating(&mut seat, SERVED_PDF);
+        served(&mut seat, SERVED_PDF, "application/pdf");
+        committed(&mut seat, SERVED_PDF);
+        seat.rastered = Some(2.0);
+
+        navigating(&mut seat, SERVED_PDF);
+        committed(&mut seat, SERVED_PDF);
+        assert_eq!(seat.document, WebDocument::Page);
+        assert_eq!(seat.rasterization_owed(), Some(1.5));
+    }
+
+    /// RED (T-PDF-CONTENT-TYPE) — **the response for the next document never judges
+    /// the one still on the glass**; it waits for its own commit.
+    ///
+    /// MUTATION: apply a response to whatever is committed, and the PDF still on
+    /// the glass is re-told 1.5 the moment the next page's `text/html` arrives.
+    #[test]
+    fn the_next_documents_response_never_judges_the_one_on_the_glass() {
+        const NEXT: &str = "https://example.com/next";
+        let mut seat = seat_at(1.5);
+        navigating(&mut seat, SERVED_PDF);
+        served(&mut seat, SERVED_PDF, "application/pdf");
+        committed(&mut seat, SERVED_PDF);
+        seat.rastered = Some(2.0);
+
+        navigating(&mut seat, NEXT);
+        served(&mut seat, NEXT, "text/html");
+        assert_eq!(seat.document, WebDocument::Pdf);
+        assert_eq!(seat.rasterization_owed(), None);
+        committed(&mut seat, NEXT);
+        assert_eq!(seat.document, WebDocument::Page);
+        assert_eq!(seat.rasterization_owed(), Some(1.5));
+    }
+
+    /// **What a served media type says**, whatever the address: its essence, in any
+    /// case, parameters ignored; with none, or an empty one, the address decides.
+    ///
+    /// MUTATION: compare the whole header to `application/pdf`, and a server's
+    /// `application/pdf; charset=binary` is a page; read an empty type as a type,
+    /// and a `.pdf` sent with `Content-Type:` empty is a page owed 1.5.
+    #[test]
+    fn a_served_media_type_decides_both_ways() {
+        for served in [
+            "application/pdf",
+            "APPLICATION/PDF",
+            "application/pdf; charset=binary",
+            " application/pdf ",
+        ] {
+            assert_eq!(
+                web_document(SERVED_PDF, Some(served)),
+                WebDocument::Pdf,
+                "{served}"
+            );
+        }
+        for served in ["text/html", "application/octet-stream", "application/pdfx"] {
+            assert_eq!(
+                web_document("https://example.com/a.pdf", Some(served)),
+                WebDocument::Page,
+                "{served}"
+            );
+        }
+        assert_eq!(web_document(SERVED_PDF, None), WebDocument::Page);
+        assert_eq!(
+            web_document("https://example.com/a.pdf", None),
+            WebDocument::Pdf
+        );
+        for empty in ["", " ", "; charset=binary"] {
+            assert_eq!(
+                web_document("https://example.com/a.pdf", Some(empty)),
+                WebDocument::Pdf,
+                "an empty type is no type: {empty:?}"
+            );
+        }
+    }
+
+    /// RED (T-PDF-CONTENT-TYPE review) — **a served PDF whose address then changes
+    /// only its fragment stays a PDF**: `#page=3` is the same document, so the
+    /// response that said what it is still says so.
+    ///
+    /// MUTATION: match the served address to the commit exactly instead of as the
+    /// same resource, and the PDF re-decided by its address is a page owed 1.5.
+    #[test]
+    fn a_served_pdf_whose_fragment_changes_stays_a_pdf() {
+        let mut seat = seat_at(1.5);
+        navigating(&mut seat, SERVED_PDF);
+        served(&mut seat, SERVED_PDF, "application/pdf");
+        committed(&mut seat, SERVED_PDF);
+        seat.rastered = Some(2.0);
+        committed(&mut seat, &format!("{SERVED_PDF}#page=3"));
+        assert_eq!(seat.document, WebDocument::Pdf);
+        assert_eq!(seat.rasterization_owed(), None);
     }
 }
 

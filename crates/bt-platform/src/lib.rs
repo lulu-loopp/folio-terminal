@@ -9380,9 +9380,9 @@ pub use webview::{
     RehostOutcome, RehostSide, RehostStep, SpareParent, WEB_CLOSE_STEPS, WEB_SETTINGS, WebChord,
     WebColorScheme, WebDpiOwnership, WebEvent, WebGuards, WebHost, WebInstallReport, WebKey,
     WebMouseEvent, WebNavigationVerdict, WebRequestVerdict, WebSetting, WebSettingRule,
-    forget_web_environment, install_rollback, rehost_compensation, spare_parent,
-    warm_web_environment, web_controller_visibility, web_environment_epoch, web_mouse_buttons,
-    webview2_runtime_version,
+    forget_web_environment, install_rollback, rehost_compensation, same_resource,
+    serves_the_navigation, spare_parent, warm_web_environment, web_controller_visibility,
+    web_environment_epoch, web_mouse_buttons, webview2_runtime_version,
 };
 
 #[cfg(windows)]
