@@ -1059,7 +1059,9 @@ pub(crate) enum WebDocument {
 /// The address is the answer only when no type is known: a local file (the
 /// engine's file responses are not relied on, and a local `.pdf` previewed always
 /// names its file), a page restored from history without a response, a server
-/// that sent no `Content-Type`. A local address is read through
+/// that sent no `Content-Type` or an empty one — Chromium reads an empty type as
+/// none and sniffs the body, so a `.pdf` sent that way still opens in its viewer.
+/// A local address is read through
 /// [`crate::webnav::LocalFileUrl`], the one parser of those, so a percent-escaped
 /// name is judged by the name it decodes to; any other address by the last
 /// segment of its path, with its query and fragment cut away.
@@ -1067,11 +1069,13 @@ pub(crate) fn web_document(uri: &str, served: Option<&str>) -> WebDocument {
     let pdf = |extension: &str| extension.eq_ignore_ascii_case("pdf");
     if let Some(served) = served {
         let essence = served.split(';').next().unwrap_or(served).trim();
-        return if essence.eq_ignore_ascii_case("application/pdf") {
-            WebDocument::Pdf
-        } else {
-            WebDocument::Page
-        };
+        if !essence.is_empty() {
+            return if essence.eq_ignore_ascii_case("application/pdf") {
+                WebDocument::Pdf
+            } else {
+                WebDocument::Page
+            };
+        }
     }
     let is_pdf = match crate::webnav::LocalFileUrl::parse(uri) {
         Some(local) => local
@@ -6143,10 +6147,11 @@ mod rasterization_tests {
     }
 
     /// **What a served media type says**, whatever the address: its essence, in any
-    /// case, parameters ignored; with none, the address decides.
+    /// case, parameters ignored; with none, or an empty one, the address decides.
     ///
     /// MUTATION: compare the whole header to `application/pdf`, and a server's
-    /// `application/pdf; charset=binary` is a page.
+    /// `application/pdf; charset=binary` is a page; read an empty type as a type,
+    /// and a `.pdf` sent with `Content-Type:` empty is a page owed 1.5.
     #[test]
     fn a_served_media_type_decides_both_ways() {
         for served in [
@@ -6161,12 +6166,7 @@ mod rasterization_tests {
                 "{served}"
             );
         }
-        for served in [
-            "text/html",
-            "application/octet-stream",
-            "application/pdfx",
-            "",
-        ] {
+        for served in ["text/html", "application/octet-stream", "application/pdfx"] {
             assert_eq!(
                 web_document("https://example.com/a.pdf", Some(served)),
                 WebDocument::Page,
@@ -6178,6 +6178,31 @@ mod rasterization_tests {
             web_document("https://example.com/a.pdf", None),
             WebDocument::Pdf
         );
+        for empty in ["", " ", "; charset=binary"] {
+            assert_eq!(
+                web_document("https://example.com/a.pdf", Some(empty)),
+                WebDocument::Pdf,
+                "an empty type is no type: {empty:?}"
+            );
+        }
+    }
+
+    /// RED (T-PDF-CONTENT-TYPE review) — **a served PDF whose address then changes
+    /// only its fragment stays a PDF**: `#page=3` is the same document, so the
+    /// response that said what it is still says so.
+    ///
+    /// MUTATION: match the served address to the commit exactly instead of as the
+    /// same resource, and the PDF re-decided by its address is a page owed 1.5.
+    #[test]
+    fn a_served_pdf_whose_fragment_changes_stays_a_pdf() {
+        let mut seat = seat_at(1.5);
+        navigating(&mut seat, SERVED_PDF);
+        served(&mut seat, SERVED_PDF, "application/pdf");
+        committed(&mut seat, SERVED_PDF);
+        seat.rastered = Some(2.0);
+        committed(&mut seat, &format!("{SERVED_PDF}#page=3"));
+        assert_eq!(seat.document, WebDocument::Pdf);
+        assert_eq!(seat.rasterization_owed(), None);
     }
 }
 

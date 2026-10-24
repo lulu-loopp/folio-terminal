@@ -415,7 +415,8 @@ pub fn same_resource(one: &str, other: &str) -> bool {
 ///
 /// `WebResourceResponseReceived` carries no resource context, so this is how the
 /// Windows host tells the document's response from a picture's or a script's; every
-/// other response costs the one comparison.
+/// other response costs reading its request's address and its status, and one
+/// comparison.
 #[must_use]
 pub fn serves_the_navigation(request_uri: &str, navigating_to: Option<&str>, status: i32) -> bool {
     navigating_to.is_some_and(|navigating_to| same_resource(request_uri, navigating_to))
