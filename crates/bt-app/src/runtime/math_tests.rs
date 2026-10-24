@@ -196,11 +196,12 @@ fn a_frame_composed_for_any_reason_carries_the_formula_flight_it_is_built_from()
 #[test]
 fn a_flight_that_has_arrived_lands_on_a_turn_the_frame_gate_refuses() {
     let (mut folio, target, anchor) = a_typeset_formula("headless-landing");
-    let started = Instant::now()
+    // One reading: the flight began a second before the turn it is judged on.
+    let now = Instant::now();
+    let started = now
         .checked_sub(Duration::from_secs(1))
         .expect("the process is older than a second");
     let flight = a_flight(&mut folio, target, &anchor, started);
-    let now = Instant::now();
     let mut runtime = folio.runtime();
     assert!(flight.lands_at() <= now, "the fixture's flight has arrived");
     runtime.window.math_toggle = Some(flight);
@@ -232,11 +233,24 @@ fn a_flight_that_has_arrived_lands_on_a_turn_the_frame_gate_refuses() {
 ///
 /// MUTATIONS: answer only the travel's next frame from `Runtime::math_toggle_deadline` (drop
 /// `flight.lands_at()`) — the wake is a frame after the landing; answer only the landing (drop
-/// `frame.min(landing)`'s frame) — a flight just begun sleeps until it lands.
+/// `frame.min(landing)`'s frame) — a flight just begun sleeps until it lands; take the test's
+/// `now` from the real clock after the fixture (`Instant::now()`) rather than from the window's
+/// last present — the frame clock's next frame is measured from a present the product stamped
+/// itself, so the five milliseconds become five minus however late this line ran, and the wake
+/// is a frame the moment that is more than eleven (deterministically: `Instant::now() +
+/// Duration::from_millis(12)`).
+///
+/// **One clock** (T-TIMING-BOUND-STRAYS): the instant every answer below is measured from is the
+/// last present the fixture's draw put on the glass (`trace_present` stamps it), so the test's
+/// distances are distances on the frame clock's own reckoning however late the test runs.
 #[test]
 fn the_loop_is_woken_for_a_landing_on_its_own_clock() {
     let (mut folio, target, anchor) = a_typeset_formula("headless-landing-wake");
-    let now = Instant::now();
+    let now = folio
+        .runtime()
+        .window
+        .last_present_at
+        .expect("the fixture's pane has reached the glass");
     let span = a_flight(&mut folio, target, &anchor, now).lands_at() - now;
     let started = (now + Duration::from_millis(5))
         .checked_sub(span)

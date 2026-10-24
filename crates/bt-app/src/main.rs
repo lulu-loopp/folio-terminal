@@ -70419,7 +70419,7 @@ mod resident_run_tests {
     // `main` is the free function — and `about_to_wait` and `new_events` are not
     // inherent methods at all but `<FolioApp as ApplicationHandler<AppEvent>>`'s,
     // which is why they are asked for with `ItemQuery::method(..).of_trait(..)`.
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use bt_source::{Index, ItemQuery};
     use winit::event_loop::ControlFlow;
@@ -70460,9 +70460,16 @@ mod resident_run_tests {
     /// PIN (§1.5, parking) — **each `ControlFlow` is translated into what it
     /// owes this thread**, and the two that owe nothing are not the same as the
     /// one that owes a wake.
+    ///
+    /// **One clock** (T-TIMING-BOUND-STRAYS): the deadlines are written from the heartbeat's own
+    /// origin, so the milliseconds asserted are the heartbeat's reckoning exactly, however long
+    /// after the heartbeat was made this test reaches them. MUTATION: write the first deadline
+    /// from `Instant::now()` (the reading this test used to take) a second and a millisecond late
+    /// (`Instant::now() + Duration::from_millis(1_001)`) — it is red.
     #[test]
     fn every_control_flow_says_what_it_owes_the_window_thread() {
         let heart = hang_watch::Heartbeat::new();
+        let origin = heart.origin();
         assert_eq!(
             parking(ControlFlow::Wait, None, &heart),
             hang_watch::Park::Indefinite,
@@ -70475,28 +70482,25 @@ mod resident_run_tests {
             "a loop that hands nothing over is judged as one holding control"
         );
         let hang_watch::Park::Until(deadline) = parking(
-            ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5)),
+            ControlFlow::WaitUntil(origin + Duration::from_secs(5)),
             None,
             &heart,
         ) else {
             panic!("a deadline is a deadline");
         };
-        assert!(
-            (4_000..=6_000).contains(&deadline),
-            "five seconds from now, on the heartbeat's own clock, and not \
-             something in another epoch: {deadline}"
+        assert_eq!(
+            deadline, 5_000,
+            "five seconds on, on the heartbeat's own clock, and not something in another epoch"
         );
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(1))
-            .unwrap_or_else(Instant::now);
+        let past = origin.checked_sub(Duration::from_secs(1)).unwrap_or(origin);
         let hang_watch::Park::Until(already) = parking(ControlFlow::WaitUntil(past), None, &heart)
         else {
             panic!("a deadline is a deadline");
         };
-        assert!(
-            already <= 1,
-            "a deadline already in the past reads as overdue rather than as a \
-             number from before the run started: {already}"
+        assert_eq!(
+            already, 0,
+            "a deadline already in the past reads as overdue rather than as a number from \
+             before the run started"
         );
     }
 
