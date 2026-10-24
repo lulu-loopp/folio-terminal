@@ -285,6 +285,7 @@ use bt_doc::Bias;
 use bt_persist::WindowStateV1;
 // K2 (T-SPLIT-2B) moved these free functions into their `runtime/` topics; the root names them
 // again so that its callers, and its test modules through `use super::*`, read them as before.
+use runtime::platform_pointer_of;
 #[cfg(test)]
 use runtime::a_capture_still_holds_its_pointer;
 use bt_platform::admission::{WaitToken, doors};
@@ -71658,19 +71659,6 @@ fn dropped_files_seat_at(
         // unknown target is a refusal.
         Some(_) | None => None,
     }
-}
-
-/// **The platform's cursor, in the units a pointer event would have arrived in**
-/// (GitHub issue #1 ②; release review 0.4.2 X-10).
-///
-/// [`bt_platform::pointer_position_in_window`] answers whole physical pixels
-/// because that is what both systems count in; `CursorMoved` carries `f64`
-/// because a trackpad can land between two of them. The widening is the whole of
-/// this function, and it is a free one so the units can be read — and pinned —
-/// without a window, the native call above it being the one thing a test cannot
-/// reach.
-fn platform_pointer_of(queried: Option<(i32, i32)>) -> Option<PhysicalPosition<f64>> {
-    queried.map(|(x, y)| PhysicalPosition::new(f64::from(x), f64::from(y)))
 }
 
 /// **A dropped file's path is a copied file's path** (GitHub issue #1 ②).
