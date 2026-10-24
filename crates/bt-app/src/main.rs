@@ -68903,7 +68903,6 @@ impl<B: Backend> FolioApp<B> {
                 // (`AppEvent::DocumentsAnswered`, which leaves the answers to this arm while the
                 // quit holds the worker), and `Quit::deadline` wakes it at the phase's bound.
                 quit::QuitStep::Documents => {
-                    let now = Instant::now();
                     let step = self
                         .app
                         .as_mut()
@@ -68913,7 +68912,6 @@ impl<B: Backend> FolioApp<B> {
                     }
                 }
                 quit::QuitStep::Recovery => {
-                    let now = Instant::now();
                     let folder = persist::storage_dir().join(preview::RECOVERED_FOLDER);
                     let step = self
                         .app
@@ -68952,7 +68950,7 @@ impl<B: Backend> FolioApp<B> {
                         // on the turn the writer's wake brings (`AppEvent::DocumentsAnswered`),
                         // under `quit::UPDATE_RECEIPT_DEADLINE` — a bound read on the turn, not a
                         // wait. Only a verdict that leaves begins the way out.
-                        let Some(landed) = self.update_session_answer(Instant::now()) else {
+                        let Some(landed) = self.update_session_answer(now) else {
                             return Ok(());
                         };
                         if landed
@@ -68969,7 +68967,6 @@ impl<B: Backend> FolioApp<B> {
                         // `Quit::session_write_until`, and a quit with none left hands nothing
                         // over and leaves without a new flush.
                         bt_platform::admission::exiting();
-                        let now = Instant::now();
                         match self.app.as_mut() {
                             Some(app) => {
                                 let until = app
@@ -69062,6 +69059,10 @@ impl<B: Backend> FolioApp<B> {
                              apart: {refused}"
                         ),
                     }
+                    // **After a real wait, so the clock is read again** (T-TIMING-BOUND-STRAYS): the
+                    // wait for the panes above can take up to `pane_retirement_deadline`, and the
+                    // page teardown's bound is counted from when it ended, not from this turn's head.
+                    // Every other arm judges on the turn's own instant, the one it was handed.
                     let now = Instant::now();
                     // **The spare retires with the windows, under the run's one bound** (ticket 60).
                     if let Some(app) = self.app.as_mut() {
@@ -69075,7 +69076,7 @@ impl<B: Backend> FolioApp<B> {
                     // U-21, §C.3): an update whose session landed is handed over — `Handoff`
                     // durable, then the applier started, on the storage worker — and the loop
                     // comes back for the answer rather than waiting for it.
-                    if !self.hand_the_update_over(Instant::now()) {
+                    if !self.hand_the_update_over(now) {
                         return Ok(());
                     }
                     // The run's sentinel, dropped once — `App::finish`, spent
