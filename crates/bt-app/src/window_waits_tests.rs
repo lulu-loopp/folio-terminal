@@ -8817,9 +8817,22 @@ const REQUEST_DOOR_COLUMNS: [&str; 5] = ["door", "asked on", "boundary", "handed
 /// process (not walked: C1 is the window thread's).
 const ASKED_ON: [&str; 3] = ["window", "main (before the loop)", "door process"];
 
+/// **The doors the C1 guard does not walk, a closed list** (the review of T-REQUEST-DOOR-GUARD,
+/// H2): an `asked on` other than `window` drops a door's every key from the walk, so moving a line
+/// here is a reviewed diff this list names, never a free shrink of the request-door sites. A walked
+/// door that reaches one of these is a `NotWalked` violation in bt-source's guard.
+const NOT_WALKED: [(&str, &str); 5] = [
+    ("<Machine as World>::on_a_worker", "main (before the loop)"),
+    ("uninstall::run", "door process"),
+    ("uninstall::remover_standalone", "door process"),
+    ("main", "main (before the loop)"),
+    ("bt_platform::video::prewarm", "main (before the loop)"),
+];
+
 /// **What `# request-doors` refuses against `# completions`**: a request door (a row whose threads
 /// are not all [`OWNER_THREADS`]) with no line, a line whose door is no request door, a door on two
-/// lines, an `asked on` outside [`ASKED_ON`], and an empty cell.
+/// lines, an `asked on` outside [`ASKED_ON`], a door not walked that is not [`NOT_WALKED`]'s (or a
+/// [`NOT_WALKED`] door asked elsewhere or missing), and an empty cell.
 fn request_door_failures(completions: &[Completion], lines: &[Vec<&str>]) -> Vec<String> {
     let doors: BTreeSet<&str> = completions
         .iter()
@@ -8849,8 +8862,30 @@ fn request_door_failures(completions: &[Completion], lines: &[Vec<&str>]) -> Vec
                 cells[1]
             ));
         }
+        let listed = NOT_WALKED
+            .iter()
+            .find(|(listed, _)| *listed == door)
+            .map(|(_, asked)| *asked);
+        if cells[1] != "window" && listed != Some(cells[1]) {
+            failures.push(format!(
+                "`{door}` is asked `{}`, so not walked, and [`NOT_WALKED`] does not name it so",
+                cells[1]
+            ));
+        }
+        if cells[1] == "window" && listed.is_some() {
+            failures.push(format!(
+                "`{door}` is in [`NOT_WALKED`] and its line says it is asked on the window thread"
+            ));
+        }
         if cells.iter().any(|cell| cell.trim().is_empty()) {
             failures.push(format!("`{door}`: an empty cell (`—` is none)"));
+        }
+    }
+    for (door, _) in NOT_WALKED {
+        if !seen.contains(door) {
+            failures.push(format!(
+                "[`NOT_WALKED`]'s `{door}` has no `# request-doors` line"
+            ));
         }
     }
     for door in doors.difference(&seen) {
@@ -8865,7 +8900,8 @@ fn request_door_failures(completions: &[Completion], lines: &[Vec<&str>]) -> Vec
 /// line is a request door's** (the C1 guard's rows; the registry is the one ledger).
 ///
 /// MUTATION: delete the hand-off's line — `Runtime::hand_off` is named as a request door with no
-/// line; and a planted line for `diagnostics::note` (a window door) is refused.
+/// line; a planted line for `diagnostics::note` (a window door) is refused; and the hand-off's line
+/// moved to `door process` (out of the walk) is refused, as is `prewarm`'s moved to `window`.
 #[test]
 fn every_request_door_has_its_line() {
     let completions = completions();
@@ -8900,6 +8936,33 @@ fn every_request_door_has_its_line() {
             .iter()
             .any(|failure| failure.contains("`diagnostics::note` is on `# request-doors`")),
         "a window door's line is refused"
+    );
+    let moved = |door: &str, asked: &'static str| -> Vec<Vec<&str>> {
+        lines
+            .iter()
+            .map(|cells| {
+                let mut cells = cells.clone();
+                if cells[0] == door {
+                    cells[1] = asked;
+                }
+                cells
+            })
+            .collect()
+    };
+    assert!(
+        request_door_failures(&completions, &moved("Runtime::hand_off", "door process"))
+            .iter()
+            .any(|failure| failure.contains("`Runtime::hand_off` is asked `door process`")),
+        "a line moved out of the walk is refused"
+    );
+    assert!(
+        request_door_failures(
+            &completions,
+            &moved("bt_platform::video::prewarm", "window")
+        )
+        .iter()
+        .any(|failure| failure.contains("`bt_platform::video::prewarm` is in [`NOT_WALKED`]")),
+        "a closed-list door moved into the walk is refused"
     );
 }
 

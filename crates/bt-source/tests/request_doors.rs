@@ -6,36 +6,53 @@
 //! walked over `bt_source::call_graph` from its door to its boundary, and the walk fails on:
 //!
 //! * **(i) an effect**: a foreign callee that is a `# vocabulary` path, or under `std::fs`,
-//!   `std::net`, `std::process` or the `std::io` read and write traits and handles (C1 names the
-//!   file system; ruling Q3); a first-party `# vocabulary` entry reached;
+//!   `std::net`, `std::process`, `std::os::{windows, unix}::fs` or the `std::io` read and write
+//!   traits and handles, a `Path`'s question to the disk (`is_file`, `exists`, `metadata`, …), or
+//!   `std::env::set_current_dir` (C1 names the file system; ruling Q3); a
+//!   function of the `windows` crate's file-system, registry and I/O modules, or a shell call that
+//!   starts a process or opens a file (the coordinator's ruling extending Q3,
+//!   [`WIN32_EFFECT_MODULES`], [`EFFECT_FUNCTIONS`]); a first-party `# vocabulary` entry reached;
 //! * **(ii) an `# entrances` item** reached;
 //! * **(iii) an `owner-door-body`** of `# effects` reached, and **(iii-b) a `worker-door-body`**
 //!   reached (a worker body run inline), or a `handed` item called rather than named as a value;
 //! * **(iv) a blocking primitive** ([`BLOCKING`]) whose caller is not one of the row's `mailbox`
-//!   items;
+//!   items; and a call of a `mailbox` item that takes the lock as an argument (a generic helper,
+//!   `lane::lock(&Mutex<T>)`, which locks whatever its caller hands it) from an item that is not
+//!   itself one of the row's `mailbox` items: the cell names the methods that lock, and a helper is
+//!   exempt only through them;
 //! * **(v) every unresolved edge** ([`Unresolved`]) except a macro of [`ALLOWED_MACROS`] and a
 //!   callee a `derive` or `#[from]` generates (its body calls the derived trait's impls on the
 //!   fields, which (vii) walks); `Cutoff` and `Unparsed` fail always and no list excuses them;
 //! * **(vi) another ledger door reached** that runs on the window thread and does not conform (a
-//!   `row <n>` or `D-<n>` status), or an `owner-thread` door (C7, listable per (b)6);
+//!   `row <n>` or `D-<n>` status), or an `owner-thread` door (C7, listable per (b)6), or a door
+//!   this guard does not walk (asked before the loop or in a door process: `NotWalked`, which a
+//!   reach from the window thread contradicts);
 //! * **a boundary entry never met**: the row names a call its walk does not reach.
 //!
 //! **(vii)** every first-party impl of a foreign trait (`Resolver::implicit`: a `Drop`, an operator,
 //! a callback) is walked once as a root of its own under the union of every row's cells. Such an
 //! impl may run on any door's road or on none, so what it meets is the impl's, not the site's: one
-//! `Implicit` row per impl method, its `sites` the findings behind it.
+//! `Implicit` row per impl method, its `sites` the findings behind it; a row behind which is an
+//! effect, a blocking primitive or a door-level finding takes only `violation`, as that site would.
 //!
 //! The walk follows every resolved edge, an `Ambiguous` edge with exactly one candidate (the door
 //! reach's rule), and the items a reviewed row names (`follows`). A row's `boundary` names the calls
 //! at which its request leaves the thread (an enqueue, a notify, the thread door, a first-party
-//! item that hands a closure to a worker, or another request door): the walk does not enter a
-//! closure literal written as an argument of one ([`call_graph::Handed`]), which is the worker's,
-//! and walks the call's own body, which is not. `—` is a door that hands nothing over. A `handed`
+//! item that hands a closure to a worker, or another request door), and for a call that takes the
+//! worker's body, its argument (`lane::Executor::start_worker@2`, counted as
+//! [`call_graph::Handed::argument`] counts): the walk does not enter a closure literal written at
+//! that argument, which is the worker's; every other closure written at the call, which the
+//! boundary item may run on the caller's thread (`admit_between`'s `between`, a refusal's voice),
+//! and the call's own body are walked. `—` is a door that hands nothing over. A `handed`
 //! item (a worker's entry named as a value) is a stop. It does not enter a `const`'s or a plain
 //! `static`'s initializer, which the compiler evaluates (a function it names runs where that field
-//! is called, a `Dynamic` edge), and does enter a `LazyLock`'s, which runs on its first deref.
-//! Every other ledger door, an owner door's or a worker's body and an entrance are stops: the
-//! finding names the breach, and what runs behind it is judged by its own row.
+//! is called, a `Dynamic` edge), and does enter a `LazyLock`'s or a `OnceLock`'s, which runs on its
+//! first use. Every other ledger door, an owner door's or a worker's body and an entrance are stops:
+//! the finding names the breach, and what runs behind it is judged by its own row.
+//!
+//! A key of a row's cells names one item per `cfg` arm (`bt_platform::FolderPicker::request` is
+//! one per platform's module); a key that names two items on one arm (a bare name two modules
+//! declare) is refused, and so is a first-party `# vocabulary` or `# entrances` path naming nothing.
 //!
 //! Every failure is a row of `docs/plans/REQUEST-DOOR-SITES.tsv`, keyed by site (`file`, `item`,
 //! `kind`, `name`; no line), with its count, its verdict and its reason: `std` and `follows` (read,
@@ -101,7 +118,19 @@ const BLOCKING: &[&str] = &[
     "std::sync::mpsc::SyncSender::send",
     "std::sync::Barrier::wait",
     "std::thread::JoinHandle::join",
+    "std::thread::ScopedJoinHandle::join",
+    "std::thread::scope",
+    "std::thread::park",
+    "std::thread::park_timeout",
     "std::thread::sleep",
+    "std::sync::Once::call_once",
+    "std::sync::Once::call_once_force",
+    "windows::Win32::System::Threading::WaitForSingleObject",
+    "windows::Win32::System::Threading::WaitForSingleObjectEx",
+    "windows::Win32::System::Threading::WaitForMultipleObjects",
+    "windows::Win32::System::Threading::WaitForMultipleObjectsEx",
+    "windows::Win32::System::Threading::SignalObjectAndWait",
+    "windows::Win32::System::Threading::SleepEx",
 ];
 
 /// The namespaces C1 names whole (ruling Q3): the file system, the network, a child process, and
@@ -117,6 +146,49 @@ const EFFECT_NAMESPACES: &[&str] = &[
     "std::io::Stdin::",
     "std::io::Stdout::",
     "std::io::Stderr::",
+    "std::os::windows::fs::",
+    "std::os::unix::fs::",
+];
+
+/// Single functions C1 names: the file-system questions a path answers by asking the disk
+/// (`Path::is_file` is `fs::metadata`), the process's working directory, and the shell calls that
+/// start a process or open a file.
+const EFFECT_FUNCTIONS: &[&str] = &[
+    "std::path::Path::exists",
+    "std::path::Path::try_exists",
+    "std::path::Path::is_file",
+    "std::path::Path::is_dir",
+    "std::path::Path::is_symlink",
+    "std::path::Path::metadata",
+    "std::path::Path::symlink_metadata",
+    "std::path::Path::read_dir",
+    "std::path::Path::read_link",
+    "std::path::Path::canonicalize",
+    "std::path::PathBuf::exists",
+    "std::path::PathBuf::try_exists",
+    "std::path::PathBuf::is_file",
+    "std::path::PathBuf::is_dir",
+    "std::path::PathBuf::is_symlink",
+    "std::path::PathBuf::metadata",
+    "std::path::PathBuf::symlink_metadata",
+    "std::path::PathBuf::read_dir",
+    "std::path::PathBuf::read_link",
+    "std::path::PathBuf::canonicalize",
+    "std::env::set_current_dir",
+    "windows::Win32::UI::Shell::ShellExecuteW",
+    "windows::Win32::UI::Shell::ShellExecuteExW",
+    "windows::Win32::UI::Shell::SHCreateStreamOnFileEx",
+];
+
+/// The `windows` crate's modules of the file system, the registry and file I/O (the coordinator's
+/// ruling extending Q3, the modules the tree uses): a function written directly in one
+/// (`…::FileSystem::CreateFileW`, `…::Registry::RegSetValueExW`) is an effect. Its types and
+/// constants are the SDK's capitals (`FILE_SHARE_MODE`, `HKEY`), and a type's own method
+/// (`HKEY::default`) is not the module's function: neither is.
+const WIN32_EFFECT_MODULES: &[&str] = &[
+    "windows::Win32::Storage::FileSystem",
+    "windows::Win32::System::Registry",
+    "windows::Win32::System::IO",
 ];
 
 /// A list row's key: the site's file, the item (or value) it is written in, the kind and the name.
@@ -170,7 +242,14 @@ const DOOR_KINDS: &[&str] = &[
     "Inherits",
     "Unmet",
     "HandedCalled",
+    "NotWalked",
 ];
+
+/// Whether a row of `kind` is a breach whatever is read: an effect, a blocking primitive, a
+/// door-level finding.
+fn is_strict(kind: &str) -> bool {
+    DOOR_KINDS.contains(&kind) || kind == "Effect" || kind == "Blocking"
+}
 
 /// How another ledger door stands when a walk reaches it.
 #[derive(Clone, Debug)]
@@ -194,24 +273,29 @@ struct Rules {
     worker_bodies: BTreeMap<ItemId, String>,
     /// Every ledger door's items, with its key and standing.
     doors: BTreeMap<ItemId, (String, Standing)>,
+    /// The doors this guard does not walk (asked before the loop, or in a door process), by item,
+    /// with their label: a walked door that reaches one contradicts that row's `asked on`.
+    not_walked: BTreeMap<ItemId, String>,
 }
 
-/// One boundary entry of a row.
+/// One boundary entry of a row: the call, and the argument that is the worker's body.
 #[derive(Clone, Debug)]
-enum Entry {
+struct Entry {
+    /// The cell's spelling, `@N` included.
+    spelled: String,
+    callee: Callee,
+    /// The argument whose closure literal is the worker's body (`key@N`), counted as
+    /// [`call_graph::Handed::argument`] counts; `None` for a call that takes none.
+    worker: Option<usize>,
+}
+
+/// What a boundary entry calls.
+#[derive(Clone, Debug)]
+enum Callee {
     /// A foreign callee, by full path.
     Foreign(String),
-    /// A first-party call, by its key and items.
-    Items(String, BTreeSet<ItemId>),
-}
-
-impl Entry {
-    fn spelled(&self) -> &str {
-        match self {
-            Self::Foreign(path) => path,
-            Self::Items(key, _) => key,
-        }
-    }
+    /// A first-party call, by its items.
+    Items(BTreeSet<ItemId>),
 }
 
 /// One walked door: its roots and its row's cells.
@@ -221,6 +305,8 @@ struct DoorSpec {
     boundary: Vec<Entry>,
     handed: BTreeSet<ItemId>,
     mailbox: BTreeSet<ItemId>,
+    /// The `mailbox` items that take the lock as an argument: exempt only through a `mailbox` item.
+    lock_helpers: BTreeSet<ItemId>,
 }
 
 /// A failure the walk met, keyed for the list.
@@ -278,9 +364,13 @@ fn generated_is_covered(by: &str) -> bool {
 
 fn is_effect(rules: &Rules, path: &str) -> bool {
     rules.vocabulary.contains(path)
+        || EFFECT_FUNCTIONS.contains(&path)
         || EFFECT_NAMESPACES
             .iter()
             .any(|namespace| path.starts_with(namespace))
+        || path.rsplit_once("::").is_some_and(|(module, name)| {
+            WIN32_EFFECT_MODULES.contains(&module) && name.chars().any(|c| c.is_ascii_lowercase())
+        })
 }
 
 /// The workspace-relative file a node's site is written in.
@@ -393,27 +483,36 @@ impl Judge<'_, '_, '_> {
                 Node::Value(_) => judged.values += 1,
             }
             let edges = self.graph.edges(node);
-            let mut handed_to: BTreeSet<Span> = BTreeSet::new();
+            // The boundary calls met at this node, by site, with the arguments whose closure
+            // literal is the worker's body: that closure is not walked; every other closure written
+            // at the call runs where the boundary item runs it, and is.
+            let mut handed_to: BTreeMap<Span, BTreeSet<usize>> = BTreeMap::new();
             let mut next: Vec<ItemId> = Vec::new();
             let mut next_values = Vec::new();
             for edge in edges.iter() {
                 if edge.site.closures.iter().any(|open| {
-                    open.handed
-                        .is_some_and(|handed| handed_to.contains(&handed.call))
+                    open.handed.is_some_and(|handed| {
+                        handed_to
+                            .get(&handed.call)
+                            .is_some_and(|workers| workers.contains(&handed.argument))
+                    })
                 }) {
                     continue;
                 }
                 for (at, entry) in spec.boundary.iter().enumerate() {
-                    let hit = match (entry, &edge.to) {
-                        (Entry::Foreign(path), Target::Foreign(callee)) => {
+                    let hit = match (&entry.callee, &edge.to) {
+                        (Callee::Foreign(path), Target::Foreign(callee)) => {
                             callee.join("::") == *path
                         }
-                        (Entry::Items(_, items), Target::Item(id)) => items.contains(id),
+                        (Callee::Items(items), Target::Item(id)) => items.contains(id),
                         _ => false,
                     };
                     if hit {
                         met.insert(at);
-                        handed_to.insert(edge.site.span);
+                        handed_to
+                            .entry(edge.site.span)
+                            .or_default()
+                            .extend(entry.worker);
                     }
                 }
                 let site_key = |kind: &str, name: &str| -> SiteKey {
@@ -453,6 +552,30 @@ impl Judge<'_, '_, '_> {
                             }
                             continue;
                         }
+                        if let Some(door) = self.rules.not_walked.get(id) {
+                            judged.findings.push(Finding {
+                                key: (
+                                    self.item_file(*id),
+                                    owner_of(&path),
+                                    "NotWalked".to_owned(),
+                                    door.clone(),
+                                ),
+                                site: None,
+                                path: spell(&path),
+                                root: path[0],
+                                under: None,
+                            });
+                            continue;
+                        }
+                        // A helper that locks what it is handed is exempt only where a declared
+                        // mailbox item calls it: the cell cannot say which mutex another caller hands.
+                        if spec.lock_helpers.contains(id)
+                            && !matches!(edge.from, Node::Item(from) if spec.mailbox.contains(&from))
+                        {
+                            judged
+                                .findings
+                                .push(finding("Blocking", &resolver.key(*id)));
+                        }
                         if let Some((door, standing)) = self.rules.doors.get(id) {
                             let kind = match standing {
                                 Standing::PassThrough => None,
@@ -479,7 +602,7 @@ impl Judge<'_, '_, '_> {
                         }
                         next.push(*id);
                     }
-                    // A `LazyLock`'s initializer runs on its first deref, perhaps here. A `const`'s
+                    // A `LazyLock`'s or `OnceLock`'s initializer runs on its first use, perhaps here. A `const`'s
                     // or a plain `static`'s is evaluated by the compiler: nothing in it runs on
                     // this thread, and a function it names runs only where that field is called —
                     // a `Dynamic` edge, which the list reads.
@@ -567,7 +690,7 @@ impl Judge<'_, '_, '_> {
                             .unwrap_or_default(),
                         spec.key.clone(),
                         "Unmet".to_owned(),
-                        entry.spelled().to_owned(),
+                        entry.spelled.clone(),
                     ),
                     site: None,
                     path: Vec::new(),
@@ -597,11 +720,12 @@ fn count(findings: &[Finding]) -> BTreeMap<SiteKey, BTreeSet<Site>> {
 type Site = (Option<(Node, Span)>, Option<SiteKey>);
 
 /// What the list says against what the tree has: every difference, and every row whose verdict its
-/// kind does not admit.
+/// kind does not admit — an `Implicit` row by the kinds behind it (`under`).
 fn list_failures(
     tree: &BTreeMap<SiteKey, usize>,
     list: &BTreeMap<SiteKey, (usize, Verdict, String)>,
     doors: &BTreeMap<SiteKey, BTreeSet<String>>,
+    under: &BTreeMap<SiteKey, BTreeSet<String>>,
 ) -> Vec<String> {
     let met = |key: &SiteKey| {
         doors.get(key).map_or_else(String::new, |doors| {
@@ -635,17 +759,21 @@ fn list_failures(
         if !tree.contains_key(key) {
             failures.push(format!("on the list, not in the tree: {key:?}"));
         }
-        if (DOOR_KINDS.contains(&key.2.as_str()) || key.2 == "Effect" || key.2 == "Blocking")
+        let behind = under
+            .get(key)
+            .into_iter()
+            .flatten()
+            .find(|kind| is_strict(kind));
+        if (is_strict(&key.2) || (key.2 == "Implicit" && behind.is_some()))
             && *verdict != Verdict::Violation
         {
-            {
-                failures.push(format!(
-                    "{key:?}: a `{}` row is a C1 breach, not a call to read: its verdict is \
-                     `violation` with the finding named, never `{}`",
-                    key.2,
-                    verdict.spelled()
-                ));
-            }
+            failures.push(format!(
+                "{key:?}: a `{}` row{} is a C1 breach, not a call to read: its verdict is \
+                 `violation` with the finding named, never `{}`",
+                key.2,
+                behind.map_or_else(String::new, |kind| format!(" with a `{kind}` behind it")),
+                verdict.spelled()
+            ));
         }
         if key.2 == "Cutoff" || key.2 == "Unparsed" {
             failures.push(format!("{key:?}: a {} is never listable", key.2));
@@ -700,19 +828,29 @@ const LIST_HEADER: &str = "file\titem\tkind\tname\tsites\tverdict\treason";
 
 // ── the fixtures: the three mutations of (b)2 and the classes ─────────────
 
-fn fixture_index(directory: &str) -> Arc<Index> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+/// The fixtures' package: a first-party crate as `bt_source` names one.
+const FIXTURE_HOME: &str = "bt-rd";
+
+/// The workspace-relative path of the request-door fixture's source.
+const FIXTURE_LIB: &str = "crates/bt-source/tests/fixtures/call_graph/request_doors/lib.rs";
+
+fn fixture_root(directory: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
         .join("call_graph")
-        .join(directory);
+        .join(directory)
+}
+
+fn fixture_index(directory: &str) -> Arc<Index> {
+    let root = fixture_root(directory);
     let universe = Universe::declare(
         format!("the request-door guard's {directory} fixture"),
         vec![TargetRoot {
             id: TargetId {
-                package: "rd".to_owned(),
+                package: FIXTURE_HOME.to_owned(),
                 kind: TargetKind::Library,
-                name: "rd".to_owned(),
+                name: "bt_rd".to_owned(),
             },
             file: root.join("lib.rs"),
         }],
@@ -734,44 +872,16 @@ fn keyed(resolver: &Resolver<'_>) -> BTreeMap<String, ItemId> {
         .collect()
 }
 
-/// The fixture's callable `rd crate::<key>`.
-fn fixture_item(by_key: &BTreeMap<String, ItemId>, key: &str) -> ItemId {
-    *by_key
-        .get(&format!("rd crate::{key}"))
-        .unwrap_or_else(|| panic!("`{key}` is a callable of the fixture: {:?}", by_key.keys()))
+/// The fixture's registry, in `window_waits.tsv`'s shape: its rows are the fixture's doors.
+fn fixture_registry() -> String {
+    std::fs::read_to_string(fixture_root("request_doors").join("registry.tsv"))
+        .expect("the fixture's registry")
 }
 
-/// The fixture's door `door` judged: its findings' kinds and names, sorted, against the fixture's
-/// own reviewed rows.
-fn judge_fixture(door: &str) -> Vec<String> {
-    let index = fixture_index("request_doors");
-    let resolver = Resolver::new(&[("rd", &index)], Arms::product())
-        .unwrap_or_else(|refusals| panic!("{refusals:?}"));
-    let by_key = keyed(&resolver);
-    let item = |key: &str| fixture_item(&by_key, key);
-    let mut rules = Rules::default();
-    rules.vocabulary.insert("std::thread::sleep".to_owned());
-    rules
-        .owner_bodies
-        .insert(item("present"), "rd crate::present (Present)".to_owned());
-    rules
-        .worker_bodies
-        .insert(item("Lane::serve"), "rd crate::Lane::serve".to_owned());
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("the workspace root resolves");
-    let graph = CallGraph::new(&resolver);
-    // The fixture's reviewed rows: the stored refusal hook, and the calls on a lock's result and
-    // guard, which the census does not type (`LockResult::unwrap_or_else`, the guard's `len` and
-    // `push_back`) - read, as the real tree's list reads them.
-    let lib = file_of(
-        &resolver,
-        Node::Item(item("Lane::offer")),
-        resolver.record(item("Lane::offer")).whole().start(),
-        &root,
-    );
+/// The fixture's reviewed rows: the stored hooks, the closures a boundary item runs, and the calls
+/// on a lock's result and guard, which the census does not type (`LockResult::unwrap_or_else`, the
+/// guard's `len` and `push_back`) — read, as the real tree's list reads them.
+fn fixture_reviewed() -> BTreeMap<SiteKey, (Verdict, String)> {
     let mut reviewed = BTreeMap::new();
     for (owner, kind, name, why) in [
         ("Lane::offer", "Dynamic", "on_full", "the fixture's hook"),
@@ -794,6 +904,31 @@ fn judge_fixture(door: &str) -> Vec<String> {
             "a VecDeque's, under its guard",
         ),
         (
+            "Lane::mailbox_through",
+            "Ambiguous",
+            "push_back",
+            "a VecDeque's, under its guard",
+        ),
+        (
+            "Lane::admit_with",
+            "Ambiguous",
+            "unwrap_or_else",
+            "a LockResult's",
+        ),
+        (
+            "Lane::admit_with",
+            "Ambiguous",
+            "push_back",
+            "a VecDeque's, under its guard",
+        ),
+        (
+            "Lane::admit_with",
+            "Dynamic",
+            "between",
+            "runs the closure its caller writes, which is walked as the caller's",
+        ),
+        ("lock", "Ambiguous", "unwrap_or_else", "a LockResult's"),
+        (
             "Lane::peek",
             "Ambiguous",
             "unwrap_or_else",
@@ -811,40 +946,67 @@ fn judge_fixture(door: &str) -> Vec<String> {
             "work",
             "the thread door runs its argument on the thread it starts",
         ),
+        (
+            "spawn_with",
+            "Dynamic",
+            "say",
+            "runs the closure its caller writes, which is walked as the caller's",
+        ),
+        (
+            "spawn_with",
+            "Dynamic",
+            "work",
+            "the thread door runs its argument on the thread it starts",
+        ),
         ("SEED", "Ambiguous", "is_ok", "an io::Result's"),
     ] {
         reviewed.insert(
             (
-                lib.clone(),
-                format!("rd crate::{owner}"),
+                FIXTURE_LIB.to_owned(),
+                format!("{FIXTURE_HOME} crate::{owner}"),
                 kind.to_owned(),
                 name.to_owned(),
             ),
             (Verdict::Std, format!("2026-10-24: {why}")),
         );
     }
+    reviewed
+}
+
+/// The fixture's door `door` walked under `registry` (the fixture's own, or a planted copy).
+fn fixture_walk(registry: &str, door: &str) -> Judged {
+    let index = fixture_index("request_doors");
+    let resolver = Resolver::new(&[(FIXTURE_HOME, &index)], Arms::product())
+        .unwrap_or_else(|refusals| panic!("{refusals:?}"));
+    let by_key = keyed(&resolver);
+    let read = read_registry(&resolver, &by_key, registry, FIXTURE_HOME);
+    assert!(read.refused.is_empty(), "{:?}", read.refused);
+    let reviewed = fixture_reviewed();
+    let root = workspace_root()
+        .canonicalize()
+        .expect("the workspace root resolves");
+    let graph = CallGraph::new(&resolver);
     let judge = Judge {
         graph: &graph,
-        rules: &rules,
+        rules: &read.rules,
         reviewed: &reviewed,
         by_key: &by_key,
         root,
     };
-    let spec = DoorSpec {
-        key: format!("rd crate::{door}"),
-        roots: vec![item(door)],
-        boundary: vec![
-            Entry::Foreign("std::sync::Condvar::notify_one".to_owned()),
-            Entry::Items(
-                "rd crate::spawn".to_owned(),
-                std::iter::once(item("spawn")).collect(),
-            ),
-        ],
-        handed: BTreeSet::new(),
-        mailbox: std::iter::once(item("Lane::mailbox")).collect(),
-    };
-    let judged = judge.walk(&spec, false);
+    let spec = read
+        .specs
+        .iter()
+        .find(|spec| spec.key == door)
+        .unwrap_or_else(|| panic!("`{door}` is a door of the fixture's registry"));
+    judge.walk(spec, false)
+}
+
+/// The fixture's door `door` judged: its findings' kinds and names that no reviewed row reads,
+/// sorted.
+fn judge_fixture(door: &str) -> Vec<String> {
+    let judged = fixture_walk(&fixture_registry(), door);
     assert!(judged.refused.is_empty(), "{:?}", judged.refused);
+    let reviewed = fixture_reviewed();
     let mut found: Vec<String> = judged
         .findings
         .iter()
@@ -860,12 +1022,29 @@ fn judge_fixture(door: &str) -> Vec<String> {
     found
 }
 
+/// What the registry reader refuses in `registry` over the fixture.
+fn fixture_refusals(registry: &str) -> Vec<String> {
+    let index = fixture_index("request_doors");
+    let resolver = Resolver::new(&[(FIXTURE_HOME, &index)], Arms::product())
+        .unwrap_or_else(|refusals| panic!("{refusals:?}"));
+    let by_key = keyed(&resolver);
+    read_registry(&resolver, &by_key, registry, FIXTURE_HOME).refused
+}
+
+/// The number of items the fixture's key `key` names, or why it is refused.
+fn fixture_key(key: &str) -> Result<usize, String> {
+    let index = fixture_index("request_doors");
+    let resolver = Resolver::new(&[(FIXTURE_HOME, &index)], Arms::product())
+        .unwrap_or_else(|refusals| panic!("{refusals:?}"));
+    key_items(&resolver, FIXTURE_HOME, key).map(|items| items.len())
+}
+
 /// RED — **the clean door passes**: its mailbox lock, its notify, the worker closure it hands to
 /// `spawn` (whose body sleeps and locks the worker's own state) and its reviewed hook are all
 /// within C1.
 ///
-/// MUTATION: in `Judge::walk`, do not skip a closure handed to a boundary call — the handed
-/// worker's body, `Lane::serve`, is judged as run inline.
+/// MUTATION: in `Judge::walk`, do not skip a closure handed at a boundary call's worker argument —
+/// the handed worker's body, `Lane::serve`, is judged as run inline.
 #[test]
 fn a_door_that_only_enqueues_passes() {
     assert_eq!(judge_fixture("submit"), Vec::<String>::new());
@@ -909,14 +1088,14 @@ fn an_unlisted_dynamic_call_fails_the_door() {
 fn an_owner_door_or_an_inline_worker_fails_the_door() {
     assert_eq!(
         judge_fixture("submit_and_draw"),
-        ["OwnerDoor rd crate::present (Present)"]
+        ["OwnerDoor bt-rd crate::present (Present)"]
     );
     assert_eq!(
         judge_fixture("serve_inline"),
         [
-            "Unmet rd crate::spawn",
+            "Unmet spawn@0",
             "Unmet std::sync::Condvar::notify_one",
-            "WorkerBody rd crate::Lane::serve",
+            "WorkerBody bt-rd crate::Lane::serve",
         ]
     );
 }
@@ -933,10 +1112,205 @@ fn a_constant_runs_nothing_and_a_lazy_initializer_runs_here() {
     assert_eq!(judge_fixture("submit_seeded"), ["Effect std::fs::read"]);
 }
 
+/// RED (review H1) — **a closure the boundary item runs itself is the door's**: an enqueue that
+/// runs its caller's closure under the lock (`admit_between`'s shape), and a thread door's voice
+/// (a refusal's `say`, `wake`) beside its work: each closure's file write is the door's, and the
+/// work handed at the worker's argument is not.
+///
+/// MUTATION: in `Judge::walk`, skip every closure handed to a boundary call, whatever the argument
+/// (`.is_some_and(|workers| workers.contains(&handed.argument))` → `.is_some()`) — both pass.
+#[test]
+fn a_closure_the_boundary_item_runs_is_the_doors() {
+    assert_eq!(judge_fixture("submit_between"), ["Effect std::fs::write"]);
+    assert_eq!(
+        judge_fixture("submit_with_voice"),
+        ["Effect std::fs::write"]
+    );
+}
+
+/// RED (review H2) — **a walked door that reaches a door this guard does not walk fails**: a door
+/// asked before the loop (`video::prewarm`'s shape) reached from the window thread contradicts its
+/// row, and nothing behind it is judged.
+///
+/// MUTATION: drop the `not_walked` check in `Judge::walk` — `prewarm` is a ledger door and passes as
+/// a silent stop.
+#[test]
+fn a_door_reaching_a_door_not_walked_fails() {
+    assert_eq!(
+        judge_fixture("submit_prewarms"),
+        ["NotWalked prewarm (main (before the loop))"]
+    );
+}
+
+/// RED (review H3) — **a generic lock helper is exempt only through a declared mailbox method**:
+/// the mailbox taken through `lock(&self.jobs)` by `Lane::mailbox_through` passes; the worker's lock
+/// taken through `lock(&self.worker)` by `Lane::peek_through`, which no row declares, fails.
+///
+/// MUTATION: drop the lock-helper check in `Judge::walk` — the worker's lock passes.
+#[test]
+fn a_lock_helper_is_exempt_only_through_a_declared_method() {
+    assert_eq!(judge_fixture("submit_through"), Vec::<String>::new());
+    assert_eq!(
+        judge_fixture("submit_peeks_through"),
+        ["Blocking bt-rd crate::lock"]
+    );
+}
+
+/// RED — **(ii) an entrance and (i) a first-party vocabulary entry** reached each fail the door.
+///
+/// MUTATION: drop the `Entrance` check in `Judge::walk` — both pass.
+#[test]
+fn an_entrance_and_a_first_party_effect_fail_the_door() {
+    assert_eq!(
+        judge_fixture("submit_pokes"),
+        [
+            "Entrance entrance bt_rd::Lane::poke (the poke door)",
+            "Entrance vocabulary bt_rd::resize",
+        ]
+    );
+}
+
+/// RED — **(vi) a window door under repair is inherited** by the door that reaches it.
+///
+/// MUTATION: read every window door as `Standing::PassThrough` — `note` passes.
+#[test]
+fn a_window_door_under_repair_is_inherited() {
+    assert_eq!(judge_fixture("submit_noting"), ["Inherits note (row 20)"]);
+}
+
+/// RED — **a `handed` worker named as a value is the worker's; called on the road, it fails**.
+///
+/// MUTATION: in `Judge::walk`, let a `handed` item reached by a call pass as one named — the call
+/// passes.
+#[test]
+fn a_handed_worker_named_passes_and_called_fails() {
+    assert_eq!(judge_fixture("submit_handing"), Vec::<String>::new());
+    assert_eq!(
+        judge_fixture("submit_runs_handed"),
+        ["HandedCalled bt-rd crate::work_fn"]
+    );
+}
+
+/// RED (ruling Q6) — **a print macro fails; `format!` passes**.
+///
+/// MUTATION: add `eprintln` to [`ALLOWED_MACROS`] — the line passes.
+#[test]
+fn a_print_macro_fails_and_format_passes() {
+    assert_eq!(judge_fixture("submit_says"), ["Macro eprintln"]);
+}
+
+/// RED — **(v) every unresolved kind fails closed, a one-candidate call is followed, and a derive
+/// passes**: a name nothing holds (`Path`), a call on another arm (`OtherArm`), an untyped
+/// receiver's call (`Ambiguous`, whose one candidate's file write is then met); a `#[derive]`'s
+/// callee passes. The engine generates a `Generated` edge only for a derive or `#[from]`, both of
+/// which pass, so no other `Generated` exists to fail.
+///
+/// MUTATIONS: let a `Path` edge pass (`Unresolved::Path { .. } => continue`) — the two `Path` rows
+/// go; do not follow a one-candidate `Ambiguous` — the `Effect` goes; drop
+/// [`generated_is_covered`] — the derive fails.
+#[test]
+fn every_unresolved_kind_fails_closed_and_a_derive_passes() {
+    assert_eq!(
+        judge_fixture("submit_strays"),
+        [
+            "Ambiguous writes_once",
+            "Effect std::fs::write",
+            "OtherArm test_only",
+            "Path nowhere",
+            "Path nowhere_made",
+        ]
+    );
+    assert_eq!(judge_fixture("submit_copies"), Vec::<String>::new());
+}
+
+/// RED — **a `Cutoff` met in the walk is refused**, never listable (an `Unparsed` edge, the same
+/// road, has no fixture: the index refuses a file `syn` does not parse).
+///
+/// MUTATION: in `Judge::walk`, let a `Cutoff` fall through to an ordinary finding — the refusal is
+/// gone.
+#[test]
+fn a_cutoff_in_the_walk_is_refused() {
+    let judged = fixture_walk(&fixture_registry(), "submit_far");
+    assert!(
+        judged
+            .refused
+            .iter()
+            .any(|refusal| refusal.starts_with("a cutoff at `link20`")),
+        "{:?}",
+        judged.refused
+    );
+}
+
+/// RED (review nit 5) — **the effect and blocking lists cover the tree's Win32 file calls, a path's
+/// questions to the disk and a park**: `FileSystem::DeleteFileW`, `Path::exists` and
+/// `thread::park` fail; `FileSystem::FILE_SHARE_MODE(..)`, a type of the module, is no call of it.
+///
+/// MUTATION: drop the [`WIN32_EFFECT_MODULES`] arm of [`is_effect`] — `DeleteFileW` passes; drop
+/// its lowercase rule — `FILE_SHARE_MODE` fails.
+#[test]
+fn the_effect_and_blocking_lists_cover_win32_paths_and_parks() {
+    assert_eq!(
+        judge_fixture("submit_asks_the_disk"),
+        [
+            "Blocking std::thread::park",
+            "Effect std::path::Path::exists",
+            "Effect windows::Win32::Storage::FileSystem::DeleteFileW",
+        ]
+    );
+}
+
+/// RED (review nits 3, 4) — **the registry's cells read or are refused**: a bare key that names
+/// one name of two modules on one arm is refused, a key qualified by its module names one item,
+/// and a key naming one item per platform's module is admitted; a first-party `# vocabulary` path
+/// that names nothing is refused, as an `# entrances` one is; a boundary's worker argument past
+/// the item's arguments is refused.
+///
+/// MUTATIONS: drop the one-arm check in [`key_items`] — `twin` is admitted; drop the empty
+/// vocabulary refusal in [`read_registry`] — the planted path passes; drop the argument count —
+/// `spawn@5` passes.
+#[test]
+fn the_registry_refuses_a_key_on_two_modules_and_a_path_naming_nothing() {
+    let twin = fixture_key("twin");
+    assert!(
+        twin.as_ref()
+            .is_err_and(|why| why.contains("items on one `cfg` arm")),
+        "{twin:?}"
+    );
+    assert_eq!(fixture_key("a::twin"), Ok(1));
+    assert!(fixture_key("armed").is_ok());
+    let registry = fixture_registry();
+    assert_eq!(fixture_refusals(&registry), Vec::<String>::new());
+    let planted = registry.replacen(
+        "path\ttargets\treason\n",
+        "path\ttargets\treason\nbt_rd::nothing_here\tall\tplanted\n",
+        1,
+    );
+    assert_eq!(
+        fixture_refusals(&planted),
+        ["the vocabulary path `bt_rd::nothing_here` names no item"]
+    );
+    let past = registry.replacen(
+        "submit_with_voice\twindow\tspawn_with@1",
+        "submit_with_voice\twindow\tspawn_with@5",
+        1,
+    );
+    let refusals = fixture_refusals(&past);
+    assert!(
+        refusals
+            .iter()
+            .any(|refusal| refusal.contains("`spawn_with@5` names argument 5")),
+        "{refusals:?}"
+    );
+}
+
 /// RED — **the list refuses what it may not excuse**: a `Cutoff` row, and a door-level or effect
 /// row whose verdict is not `violation`.
 ///
-/// MUTATION: drop the verdict-by-kind check in [`list_failures`] — the `std` effect row passes.
+/// An `Implicit` row behind which is an effect (a `Drop` that writes a file) is held as the effect
+/// would be (review nit 1).
+///
+/// MUTATION: drop the verdict-by-kind check in [`list_failures`] — the `std` effect row passes; drop
+/// its `under` half — the `std` implicit row passes.
 #[test]
 fn the_list_refuses_a_cutoff_and_a_soft_verdict_on_an_effect() {
     let key = |kind: &str| -> SiteKey {
@@ -950,11 +1324,25 @@ fn the_list_refuses_a_cutoff_and_a_soft_verdict_on_an_effect() {
     let mut tree = BTreeMap::new();
     tree.insert(key("Effect"), 1);
     tree.insert(key("Cutoff"), 1);
+    tree.insert(key("Implicit"), 1);
     let mut list = BTreeMap::new();
     list.insert(key("Effect"), (1, Verdict::Std, String::new()));
     list.insert(key("Cutoff"), (1, Verdict::Unreviewed, String::new()));
-    let failures = list_failures(&tree, &list, &BTreeMap::new());
-    assert_eq!(failures.len(), 2, "{failures:?}");
+    list.insert(key("Implicit"), (1, Verdict::Std, String::new()));
+    let mut under = BTreeMap::new();
+    under.insert(
+        key("Implicit"),
+        std::iter::once("Effect".to_owned()).collect(),
+    );
+    let failures = list_failures(&tree, &list, &BTreeMap::new(), &under);
+    assert_eq!(failures.len(), 3, "{failures:?}");
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure.contains("\"Implicit\"")
+                && failure.contains("with a `Effect` behind it")),
+        "{failures:?}"
+    );
     assert!(
         failures
             .iter()
@@ -1020,14 +1408,15 @@ fn section<'r>(registry: &'r str, name: &str, columns: &[&str]) -> Vec<Vec<&'r s
         .collect()
 }
 
-/// A ledger key read as `window_waits_tests::door_key` reads it: an optional crate (`bt_…::`), an
-/// optional module path, an optional `impl` type (a capitalised segment) or `<Type as Trait>`, and
-/// the name. Its items are every admitted callable of that crate with that name, type, trait and
-/// module; a key naming items of more than one module is refused.
-fn key_items(resolver: &Resolver<'_>, key: &str) -> Result<BTreeSet<ItemId>, String> {
+/// A ledger key read as `window_waits_tests::door_key` reads it: an optional crate (`bt_…::`, else
+/// `home`), an optional module path, an optional `impl` type (a capitalised segment) or
+/// `<Type as Trait>`, and the name. Its items are every admitted callable of that crate with that
+/// name, type, trait and module, at most one per `cfg` arm ([`arm_of`]): a key naming two items on
+/// one arm (a bare name that two modules declare) is refused, and the module is to be written.
+fn key_items(resolver: &Resolver<'_>, home: &str, key: &str) -> Result<BTreeSet<ItemId>, String> {
     let (package, rest) = match key.split_once("::") {
         Some((first, rest)) if first.starts_with("bt_") => (first.replace('_', "-"), rest),
-        _ => ("bt-app".to_owned(), key),
+        _ => (home.to_owned(), key),
     };
     let (module, owner, trait_name, name) = if let Some(inner) = rest.strip_prefix('<')
         && let Some((owner, after)) = inner.split_once(" as ")
@@ -1069,12 +1458,77 @@ fn key_items(resolver: &Resolver<'_>, key: &str) -> Result<BTreeSet<ItemId>, Str
                     .is_none_or(|module| record.module_paths().contains(&module))
         })
         .collect();
-    // A key names one item per `cfg` arm (`bt_platform::FolderPicker::request` is three, one per
-    // platform's module); bt-app's `door_records` refuses two on one arm, so every item is walked.
     if found.is_empty() {
         return Err(format!("`{key}` names no item of the product"));
     }
+    // A key names one item per `cfg` arm (`bt_platform::FolderPicker::request` is three, one per
+    // platform's module), every one walked.
+    let mut arms: BTreeMap<String, Vec<ItemId>> = BTreeMap::new();
+    for id in &found {
+        arms.entry(arm_of(resolver, *id)).or_default().push(*id);
+    }
+    if let Some(two) = arms.values().find(|ids| ids.len() > 1) {
+        return Err(format!(
+            "`{key}` names {} items on one `cfg` arm ({}): write the module",
+            two.len(),
+            two.iter()
+                .map(|id| resolver.key(*id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     Ok(found)
+}
+
+/// The `cfg` arm an item stands on: the predicates of every declaration path that reaches its file,
+/// and those written inside the file.
+fn arm_of(resolver: &Resolver<'_>, id: ItemId) -> String {
+    let record = resolver.record(id);
+    let paths: Vec<&[String]> = record
+        .declaration_paths()
+        .iter()
+        .map(|path| path.predicates())
+        .collect();
+    format!("{paths:?} {:?}", record.variant())
+}
+
+/// The item's signature, read from its declaration (attributes, visibility, signature).
+fn signature(resolver: &Resolver<'_>, id: ItemId) -> Option<syn::Signature> {
+    let record = resolver.record(id);
+    let text = resolver.index_of(id).text(record.declaration());
+    syn::parse_str::<syn::ImplItemFn>(&format!("{} {{}}", text.trim_end().trim_end_matches(';')))
+        .ok()
+        .map(|function| function.sig)
+}
+
+/// The arguments a call writes for the item, its receiver not counted.
+fn argument_count(signature: &syn::Signature) -> usize {
+    signature
+        .inputs
+        .iter()
+        .filter(|input| matches!(input, syn::FnArg::Typed(_)))
+        .count()
+}
+
+/// Whether the item takes the lock it takes as an argument (`lane::lock<T>(&Mutex<T>)`): an
+/// argument's type, or a generic bound, names `Mutex` or `RwLock`. Such a helper locks whatever its
+/// caller hands it.
+fn takes_a_lock(signature: &syn::Signature) -> bool {
+    struct Names(bool);
+    impl<'ast> syn::visit::Visit<'ast> for Names {
+        fn visit_path_segment(&mut self, segment: &'ast syn::PathSegment) {
+            self.0 |= segment.ident == "Mutex" || segment.ident == "RwLock";
+            syn::visit::visit_path_segment(self, segment);
+        }
+    }
+    let mut names = Names(false);
+    for input in &signature.inputs {
+        if let syn::FnArg::Typed(typed) = input {
+            syn::visit::Visit::visit_type(&mut names, &typed.ty);
+        }
+    }
+    syn::visit::Visit::visit_generics(&mut names, &signature.generics);
+    names.0
 }
 
 /// A first-party path of `# vocabulary` or `# entrances` (`bt_pty::PtySession::resize`): every
@@ -1135,38 +1589,26 @@ fn sites_list() -> PathBuf {
         .join("REQUEST-DOOR-SITES.tsv")
 }
 
-/// RED — **every request door returns at once** (C1, the side-effects contract (b)2): each
-/// `# request-doors` row asked on the window thread, walked to its boundary, and the program's
-/// implicit impls walked once, meet nothing [`Judge::walk`] refuses that
-/// `docs/plans/REQUEST-DOOR-SITES.tsv` does not list — and the list is the tree's, key by key and
-/// count by count. Prints each door's numbers (`REQUEST_DOOR`) and the list's counts by verdict;
-/// leaves the rendering (the committed verdicts and reasons kept, a new key `unreviewed`) in
-/// `target/request-door-sites/`, which `scripts/generate-request-door-sites.ps1` copies.
-///
-/// MUTATIONS (the `gates-can-fail` canaries): a helper writing a file called from
-/// `handoff_lane::HandoffLane::submit`, and a `Box<dyn Fn()>` called there — each is a key in the
-/// tree and not on the list, and the test names it.
-#[test]
-fn every_request_door_returns_at_once() {
-    let registry = std::fs::read_to_string(
-        workspace_root()
-            .join("crates")
-            .join("bt-app")
-            .join("src")
-            .join("window_waits.tsv"),
-    )
-    .expect("the registry");
-    let held = real_tree();
-    let packages: Vec<(&str, &Index)> = held
-        .iter()
-        .map(|(name, index)| (name.as_str(), &**index))
-        .collect();
-    let resolver =
-        Resolver::new(&packages, Arms::product()).unwrap_or_else(|refusals| panic!("{refusals:?}"));
-    let by_key = keyed(&resolver);
+/// The registry read: the rules every walk is judged against, the walked doors, the doors not
+/// walked, and every cell that does not read.
+struct Registry {
+    rules: Rules,
+    specs: Vec<DoorSpec>,
+    not_walked: Vec<String>,
+    refused: Vec<String>,
+}
+
+/// `registry` (`window_waits.tsv`'s shape: `# vocabulary`, `# entrances`, `# effects`,
+/// `# completions`, `# request-doors`) read over `resolver`; a key without a crate is `home`'s.
+fn read_registry(
+    resolver: &Resolver<'_>,
+    by_key: &BTreeMap<String, ItemId>,
+    registry: &str,
+    home: &str,
+) -> Registry {
     let mut refused: Vec<String> = Vec::new();
     let resolve = |key: &str, refused: &mut Vec<String>| -> BTreeSet<ItemId> {
-        key_items(&resolver, key).unwrap_or_else(|why| {
+        key_items(resolver, home, key).unwrap_or_else(|why| {
             refused.push(why);
             BTreeSet::new()
         })
@@ -1174,9 +1616,12 @@ fn every_request_door_returns_at_once() {
 
     // The rules, from the registry.
     let mut rules = Rules::default();
-    for cells in section(&registry, "vocabulary", &["path", "targets", "reason"]) {
-        match exported_items(&resolver, cells[0]) {
+    for cells in section(registry, "vocabulary", &["path", "targets", "reason"]) {
+        match exported_items(resolver, cells[0]) {
             Some(items) => {
+                if items.is_empty() {
+                    refused.push(format!("the vocabulary path `{}` names no item", cells[0]));
+                }
                 for id in items {
                     rules
                         .entrances
@@ -1188,8 +1633,8 @@ fn every_request_door_returns_at_once() {
             }
         }
     }
-    for cells in section(&registry, "entrances", &["path", "door"]) {
-        let items = exported_items(&resolver, cells[0]).unwrap_or_default();
+    for cells in section(registry, "entrances", &["path", "door"]) {
+        let items = exported_items(resolver, cells[0]).unwrap_or_default();
         if items.is_empty() {
             refused.push(format!("the entrance `{}` names no item", cells[0]));
         }
@@ -1200,7 +1645,7 @@ fn every_request_door_returns_at_once() {
         }
     }
     let effects = section(
-        &registry,
+        registry,
         "effects",
         &[
             "crate",
@@ -1238,8 +1683,8 @@ fn every_request_door_returns_at_once() {
     }
 
     // The ledger's doors and the request doors' rows.
-    let completions = section(&registry, "completions", &COMPLETION_COLUMNS);
-    let rows = section(&registry, "request-doors", &REQUEST_DOOR_COLUMNS);
+    let completions = section(registry, "completions", &COMPLETION_COLUMNS);
+    let rows = section(registry, "request-doors", &REQUEST_DOOR_COLUMNS);
     let request_doors: BTreeSet<&str> = rows.iter().map(|cells| cells[0]).collect();
     for cells in &completions {
         let threads: Vec<&str> = cells[2]
@@ -1277,7 +1722,11 @@ fn every_request_door_returns_at_once() {
         match cells[1] {
             "window" => {}
             "main (before the loop)" | "door process" => {
-                not_walked.push(format!("{} ({})", cells[0], cells[1]));
+                let label = format!("{} ({})", cells[0], cells[1]);
+                for id in resolve(cells[0], &mut refused) {
+                    rules.not_walked.insert(id, label.clone());
+                }
+                not_walked.push(label);
                 continue;
             }
             other => {
@@ -1286,17 +1735,70 @@ fn every_request_door_returns_at_once() {
             }
         }
         let mut boundary = Vec::new();
-        for entry in cell_list(cells[2]) {
-            if entry.starts_with("std::") || entry.starts_with("core::") {
-                boundary.push(Entry::Foreign(entry.to_owned()));
+        for spelled in cell_list(cells[2]) {
+            let (written, worker) = match spelled.rsplit_once('@') {
+                Some((written, at)) => match at.parse::<usize>() {
+                    Ok(at) => (written, Some(at)),
+                    Err(_) => {
+                        refused.push(format!(
+                            "`{}`: `{spelled}`'s argument is not a number",
+                            cells[0]
+                        ));
+                        continue;
+                    }
+                },
+                None => (spelled, None),
+            };
+            let callee = if written.starts_with("std::") || written.starts_with("core::") {
+                Callee::Foreign(written.to_owned())
             } else {
-                boundary.push(Entry::Items(entry.to_owned(), resolve(entry, &mut refused)));
-            }
+                let items = resolve(written, &mut refused);
+                for id in items.iter().filter(|_| worker.is_some()) {
+                    let count = signature(resolver, *id).as_ref().map(argument_count);
+                    if count.is_none_or(|count| worker.is_some_and(|at| at >= count)) {
+                        refused.push(format!(
+                            "`{}`: `{spelled}` names argument {}, and `{}` takes {}",
+                            cells[0],
+                            worker.unwrap_or_default(),
+                            resolver.key(*id),
+                            count.map_or_else(
+                                || "no signature the guard reads".to_owned(),
+                                |count| format!("{count}")
+                            )
+                        ));
+                    }
+                }
+                Callee::Items(items)
+            };
+            boundary.push(Entry {
+                spelled: spelled.to_owned(),
+                callee,
+                worker,
+            });
         }
         // `—`: the door hands nothing to another thread (it arms a wait, or answers from what it
         // holds); its walk is judged all the same.
         if boundary.is_empty() && cells[2] != "—" {
             refused.push(format!("`{}` names no boundary", cells[0]));
+        }
+        let mailbox: BTreeSet<ItemId> = cell_list(cells[4])
+            .into_iter()
+            .flat_map(|key| resolve(key, &mut refused))
+            .collect();
+        let mut lock_helpers = BTreeSet::new();
+        for id in &mailbox {
+            match signature(resolver, *id) {
+                Some(signature) => {
+                    if takes_a_lock(&signature) {
+                        lock_helpers.insert(*id);
+                    }
+                }
+                None => refused.push(format!(
+                    "`{}`: the mailbox item `{}` has no signature the guard reads",
+                    cells[0],
+                    resolver.key(*id)
+                )),
+            }
         }
         specs.push(DoorSpec {
             key: cells[0].to_owned(),
@@ -1306,12 +1808,53 @@ fn every_request_door_returns_at_once() {
                 .into_iter()
                 .flat_map(|key| resolve(key, &mut refused))
                 .collect(),
-            mailbox: cell_list(cells[4])
-                .into_iter()
-                .flat_map(|key| resolve(key, &mut refused))
-                .collect(),
+            mailbox,
+            lock_helpers,
         });
     }
+    Registry {
+        rules,
+        specs,
+        not_walked,
+        refused,
+    }
+}
+
+/// RED — **every request door returns at once** (C1, the side-effects contract (b)2): each
+/// `# request-doors` row asked on the window thread, walked to its boundary, and the program's
+/// implicit impls walked once, meet nothing [`Judge::walk`] refuses that
+/// `docs/plans/REQUEST-DOOR-SITES.tsv` does not list — and the list is the tree's, key by key and
+/// count by count. Prints each door's numbers (`REQUEST_DOOR`) and the list's counts by verdict;
+/// leaves the rendering (the committed verdicts and reasons kept, a new key `unreviewed`) in
+/// `target/request-door-sites/`, which `scripts/generate-request-door-sites.ps1` copies.
+///
+/// MUTATIONS (the `gates-can-fail` canaries): a helper writing a file called from
+/// `handoff_lane::HandoffLane::submit`, and a `Box<dyn Fn()>` called there — each is a key in the
+/// tree and not on the list, and the test names it.
+#[test]
+fn every_request_door_returns_at_once() {
+    let registry = std::fs::read_to_string(
+        workspace_root()
+            .join("crates")
+            .join("bt-app")
+            .join("src")
+            .join("window_waits.tsv"),
+    )
+    .expect("the registry");
+    let held = real_tree();
+    let packages: Vec<(&str, &Index)> = held
+        .iter()
+        .map(|(name, index)| (name.as_str(), &**index))
+        .collect();
+    let resolver =
+        Resolver::new(&packages, Arms::product()).unwrap_or_else(|refusals| panic!("{refusals:?}"));
+    let by_key = keyed(&resolver);
+    let Registry {
+        rules,
+        specs,
+        not_walked,
+        refused,
+    } = read_registry(&resolver, &by_key, &registry, "bt-app");
     assert!(
         refused.is_empty(),
         "the registry's request doors are not read:\n  {}",
@@ -1391,6 +1934,10 @@ fn every_request_door_returns_at_once() {
             .iter()
             .flat_map(|spec| spec.mailbox.iter().copied())
             .collect(),
+        lock_helpers: specs
+            .iter()
+            .flat_map(|spec| spec.lock_helpers.iter().copied())
+            .collect(),
     };
     let judged = judge.walk(&implicit, true);
     eprintln!(
@@ -1459,8 +2006,9 @@ fn every_request_door_returns_at_once() {
          # number of sites behind it. Verdicts: std / follows <key>; ... (read: nothing behind it),\n\
          # unreviewed (not read yet), violation (a C1 breach; the reason names its finding). Held equal to\n\
          # the tree by the test; shrink-only against the merge base by\n\
-         # scripts/ci/check-request-door-sites.ps1 - a key added or grown, or a verdict that softens\n\
-         # nothing but moves to unreviewed or violation, carries a reason 'YYYY-MM-DD: <why>'.\n",
+         # scripts/ci/check-request-door-sites.ps1 - a key added or grown, a verdict moved to unreviewed\n\
+         # or violation or away from violation, or a follows row re-pointed, carries a new reason\n\
+         # 'YYYY-MM-DD: <why>'. An unread row's reason is the one Q8 (B) gives the seed.\n",
     );
     rendering.push_str(LIST_HEADER);
     rendering.push('\n');
@@ -1505,7 +2053,30 @@ fn every_request_door_returns_at_once() {
         tree.len(),
         tree.values().sum::<usize>()
     );
-    let failures = list_failures(&tree, &list, &doors_of);
+    // What stands behind each implicit impl's row: its verdict is held by those kinds.
+    let mut under: BTreeMap<SiteKey, BTreeSet<String>> = BTreeMap::new();
+    for finding in &findings {
+        if let Some(behind) = &finding.under {
+            under
+                .entry(finding.key.clone())
+                .or_default()
+                .insert(behind.2.clone());
+        }
+    }
+    // For the reader of an `Implicit` row: the kinds behind it.
+    let mut behind = String::new();
+    for (key, kinds) in &under {
+        behind.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            key.0,
+            key.1,
+            key.2,
+            key.3,
+            kinds.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    std::fs::write(out.join("implicit-under.tsv"), &behind).expect("the implicit rows' kinds");
+    let failures = list_failures(&tree, &list, &doors_of, &under);
     assert!(
         failures.is_empty(),
         "docs/plans/REQUEST-DOOR-SITES.tsv and the tree disagree ({} differences; the rendering is in \

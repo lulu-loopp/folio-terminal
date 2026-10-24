@@ -222,8 +222,10 @@ pub struct Enclosing {
 }
 
 /// **The call a closure literal is an argument of**: the call's site span (the name called, as
-/// its own edges' [`CallSite::span`]) and the argument's position, from 0 (a method's receiver is
-/// not counted).
+/// its own edges' [`CallSite::span`]) and the argument's position among the arguments written in
+/// the parentheses, from 0. A method call's receiver is written before the dot and is not counted
+/// (`pool.submit(1, f)`: `f` is 1); a path call counts every argument written, so in the same call
+/// spelled `Pool::submit(&pool, 1, f)` the receiver is argument 0 and `f` is 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Handed {
     pub call: Span,
