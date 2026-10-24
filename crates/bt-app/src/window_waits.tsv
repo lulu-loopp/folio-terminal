@@ -412,3 +412,86 @@ window focus	Runtime::open_from_notification	window	return	a refusal is discarde
 where the window is	Runtime::observe_window_place	window (row 13)	return	a refusal keeps the last answer	once per turn	—	D-94
 font family lookup	settings::monospace_family_files	window (row 5)	return	a refusal reads as no files	one per stored face	—	owner-thread
 watch steward	EarHandle::want	watch-steward	WatchStewardAnswered	a failed start is a member's report; a refused spawn leaves the work marked, one line; a panic in the steward is contained (`contained_panic::contain`): the worker is marked gone and the next request starts another, which serves every open ear; a watch the steward retires has its directory handle closed before the round's reports are published — but a watcher still inside the kernel past `bt_platform::DIR_WATCH_RETIRE_BUDGET`, which is let go with its handles, never closed under it (D-40), and said once (T-ANSWER-AFTER-THE-FILE-IS-CLOSED)	the wanted set; the worker serves the current state	a closed ear's reports are removed	D-86
+
+## `# request-doors` — the C1 guard's rows (T-REQUEST-DOOR-GUARD, side-effects contract (b)2): one line
+## per `# completions` door whose thread is not the window's or `main`'s own, by `door` (held equal both
+## ways by `hang_watch::window_waits_tests`). `asked on` is `window` — walked by bt-source's
+## `request_doors::every_request_door_returns_at_once` — or `main (before the loop)` or `door process`:
+## not walked, because C1 is the window thread's and there is no loop yet, or no window at all, to
+## block. `boundary` names the calls the request leaves the thread by, each one the walk must meet: a
+## foreign callee by its full path (`std::sync::mpsc::Sender::send`, `std::sync::Condvar::notify_one`)
+## or a first-party item by its key (the thread door `bt_platform::spawn_at_priority`, an item that
+## hands a closure on to a worker such as `lane::Executor::start_worker`, an enqueue such as
+## `persist::StorageLane::admit_between`, or another request door); a closure literal written as an
+## argument of a boundary call is the worker's and is not walked, and the call's own body is. `—` is a
+## door that hands nothing over (it arms a wait). `handed` names the worker functions the door names
+## as values (`LocaleCell::new(read_system_locale_declaration, …)`), never called on the road;
+## `mailbox` names the items whose own body may take a lock, each held only for a queue operation, a
+## copy or an update that waits on nothing (a declaration the guard cannot prove: the engine reads no
+## flow). `—` is none; a cell of several is `, `-separated. What the walk meets beyond them is
+## `docs/plans/REQUEST-DOOR-SITES.tsv`.
+
+# request-doors
+door	asked on	boundary	handed	mailbox
+pty_door::request_shell	window	pty_door::request, bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock, pty_door::births
+Runtime::reap_exited_tabs	window	std::sync::Condvar::notify_one, std::sync::Condvar::notify_all, bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, trace_sink::Queue::offer	—	lane::lock
+Runtime::close_pane	window	std::sync::Condvar::notify_one, std::sync::Condvar::notify_all, bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, trace_sink::Queue::offer	—	lane::lock
+spawn_profile_observation	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, shell_integration::profile_runtime::start_profile_observation	—	lane::lock
+request_page_environment	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock, shell_integration::page_environment_cell
+attention_copilot::begin_probe	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	attention_copilot::run_probe	lane::lock, attention_copilot::CopilotProbe::lock
+locale_declaration::ask	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	bt_platform::read_system_locale_declaration	lane::lock, locale_declaration::LocaleCell::lock
+foreground_program::request	window	std::sync::mpsc::Sender::send	—	lane::lock
+programs_lane::request	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker	—	lane::lock, programs_lane::ProgramsLane::lock, profiles::Registry::table
+request_font_walk	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker	settings::walk_the_machine	lane::lock
+taskbar_lane::request	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker	taskbar_lane::ask_the_shell	lane::lock, taskbar_lane::TaskbarLane::ask
+install_channel::begin	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock
+recovered::ask	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock
+explorer_menu::begin_probe	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, explorer_menu::start_probe_with	—	lane::lock, explorer_menu::remember, explorer_menu::state
+explorer_menu::request	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker	—	lane::lock, explorer_menu::state
+LayoutTables::shifted_character	window	std::sync::mpsc::SyncSender::try_send	—	lane::lock
+FilesWorker::request	window	std::sync::mpsc::Sender::send	—	lane::lock
+PreviewWorker::request	window	std::sync::mpsc::Sender::send	—	lane::lock
+GitWorker::request	window	std::sync::mpsc::Sender::send	—	lane::lock
+GitMutationLane::ask	window	std::sync::Condvar::notify_all, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, git_mutation_lane::GitMutationLane::ask_through	—	lane::lock, git_mutation_lane::locked
+IndexWorker::request	window	std::sync::mpsc::Sender::send	—	lane::lock
+dispatch_decoration_task	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker	run_decoration_worker, scale_door, path_door	lane::lock, computation_lane::locked, bt_render::theme::active_schemes
+Runtime::reload_background_picture	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock
+Runtime::hand_off	window	std::sync::Condvar::notify_one, std::sync::mpsc::Sender::send, bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, trace_sink::Queue::offer	—	lane::lock
+SessionStore::flush_if_due	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, persist::StorageLane::admit_between	—	lane::lock, persist::lane_lock, update_trial::Gate::state
+SessionStore::queue_launch_backup	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, persist::StorageLane::admit_between	—	lane::lock, persist::lane_lock
+SessionStore::hand_over_final	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, persist::StorageLane::admit_between	—	lane::lock, persist::lane_lock, update_trial::Gate::state
+SessionStore::write_receipt	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, persist::StorageLane::admit_between	—	lane::lock, persist::lane_lock
+FolioApp::hand_the_update_over	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, persist::StorageLane::admit_between	—	lane::lock, persist::lane_lock, update_handoff::record_the_applier
+PreviewBuffer::request_save	window	persist::StorageLane::admit_between	—	lane::lock, persist::lane_lock
+close_wait_over	window	—	—	lane::lock
+Quit::saves_handed_over	window	—	—	lane::lock
+DocumentState::send_owed	window	persist::StorageLane::admit_between	—	lane::lock, persist::lane_lock, update_trial::Gate::state
+DocumentState::ask_read	window	persist::StorageLane::admit_between	—	lane::lock, persist::lane_lock
+StorageLane::send_recovered	window	persist::StorageLane::admit_between	—	lane::lock, persist::lane_lock
+shell_integration::profile_runtime::begin_profile_install	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker	—	lane::lock
+shell_integration::profile_runtime::begin_removal	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker	—	lane::lock, shell_integration::profile_runtime::answer_removal
+shell_integration::language::begin_language_question	window	std::sync::Condvar::notify_all, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker	—	lane::lock, shell_integration::language::LanguageCell::state
+psreadline::begin_legacy_observation	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker	—	lane::lock
+psreadline::begin_legacy_removal	window	bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker	—	lane::lock, update_trial::Gate::state
+spawn_powershell_preparation	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock
+schedule_parse_retry	window	spawn_powershell_preparation	—	lane::lock
+Runtime::submit_clipboard_write	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, trace_sink::Queue::offer	—	lane::lock
+Runtime::copy_math_latex	window	Runtime::submit_clipboard_write	—	lane::lock
+Runtime::ask_for_a_paste	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, trace_sink::Queue::offer	—	lane::lock
+Runtime::paste_into_field	window	Runtime::ask_for_a_paste	—	lane::lock
+Runtime::paste_into_preview	window	Runtime::ask_for_a_paste	—	lane::lock
+Runtime::paste_from_clipboard_into	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack, Runtime::ask_for_a_paste	—	lane::lock
+Runtime::save_clipboard_picture	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack, lane::Executor::start_worker, trace_sink::Queue::offer	—	lane::lock
+update::spawn_check	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock, update_trial::Gate::state
+Job::answer_verb	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock, update_job::Job::stop_the_driver
+Job::consider	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock
+update_trial::begin_watch	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock
+<Machine as World>::on_a_worker	main (before the loop)	—	—	—
+uninstall::run	door process	—	—	—
+uninstall::remover_standalone	door process	—	—	—
+main	main (before the loop)	—	—	—
+bt_platform::video::prewarm	main (before the loop)	—	—	—
+VideoSeats::open	window	bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock
+trace_sink::stderr_line	window	trace_sink::Queue::offer	—	lane::lock
+PageShrinker::send	window	std::sync::mpsc::Sender::send	—	lane::lock
+EarHandle::want	window	std::sync::Condvar::notify_one, bt_platform::spawn_at_priority, bt_platform::spawn_at_priority_with_stack	—	lane::lock, watch_steward::lock

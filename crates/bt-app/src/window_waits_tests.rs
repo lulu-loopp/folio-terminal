@@ -7525,7 +7525,7 @@ fn the_effects_section_is_the_effect_functions_inside_the_doors() {
 /// The registry's sections, each headed `# <name>` once, in this order: a closed list, so a section
 /// misspelled, unknown or written twice — a second `# graphs` after the first, which
 /// [`section_in`] would never read — is refused by name rather than read past.
-const REGISTRY_SECTIONS: [&str; 10] = [
+const REGISTRY_SECTIONS: [&str; 11] = [
     "rows",
     "doors",
     "vocabulary",
@@ -7536,6 +7536,7 @@ const REGISTRY_SECTIONS: [&str; 10] = [
     "emergency",
     "owners",
     "completions",
+    "request-doors",
 ];
 
 /// **The registry's section headers are the closed list** [`REGISTRY_SECTIONS`]: every line that
@@ -8806,6 +8807,100 @@ fn app_event_variants(world: &World) -> BTreeSet<&'static str> {
         })
         .map(ItemRecord::name)
         .collect()
+}
+
+/// The registry's `# request-doors` section (T-REQUEST-DOOR-GUARD): the C1 guard's row per request
+/// door, read by bt-source's `request_doors::every_request_door_returns_at_once`.
+const REQUEST_DOOR_COLUMNS: [&str; 5] = ["door", "asked on", "boundary", "handed", "mailbox"];
+
+/// Where a request door is asked: the window thread (walked), or before the loop or in a door
+/// process (not walked: C1 is the window thread's).
+const ASKED_ON: [&str; 3] = ["window", "main (before the loop)", "door process"];
+
+/// **What `# request-doors` refuses against `# completions`**: a request door (a row whose threads
+/// are not all [`OWNER_THREADS`]) with no line, a line whose door is no request door, a door on two
+/// lines, an `asked on` outside [`ASKED_ON`], and an empty cell.
+fn request_door_failures(completions: &[Completion], lines: &[Vec<&str>]) -> Vec<String> {
+    let doors: BTreeSet<&str> = completions
+        .iter()
+        .filter(|row| {
+            row.threads
+                .iter()
+                .any(|thread| !OWNER_THREADS.contains(thread))
+        })
+        .map(|row| row.door)
+        .collect();
+    let mut failures = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for cells in lines {
+        let door = cells[0];
+        if !seen.insert(door) {
+            failures.push(format!("`{door}` has two `# request-doors` lines"));
+        }
+        if !doors.contains(door) {
+            failures.push(format!(
+                "`{door}` is on `# request-doors` and is no `# completions` request door (a row whose \
+                 thread is not the window's or `main`'s)"
+            ));
+        }
+        if !ASKED_ON.contains(&cells[1]) {
+            failures.push(format!(
+                "`{door}`: `asked on` is `{}`, not one of {ASKED_ON:?}",
+                cells[1]
+            ));
+        }
+        if cells.iter().any(|cell| cell.trim().is_empty()) {
+            failures.push(format!("`{door}`: an empty cell (`—` is none)"));
+        }
+    }
+    for door in doors.difference(&seen) {
+        failures.push(format!(
+            "`{door}` is a `# completions` request door with no `# request-doors` line"
+        ));
+    }
+    failures
+}
+
+/// RED (T-REQUEST-DOOR-GUARD) — **every request door has its one `# request-doors` line, and every
+/// line is a request door's** (the C1 guard's rows; the registry is the one ledger).
+///
+/// MUTATION: delete the hand-off's line — `Runtime::hand_off` is named as a request door with no
+/// line; and a planted line for `diagnostics::note` (a window door) is refused.
+#[test]
+fn every_request_door_has_its_line() {
+    let completions = completions();
+    let lines = section("request-doors", &REQUEST_DOOR_COLUMNS);
+    let failures = request_door_failures(&completions, &lines);
+    assert!(
+        failures.is_empty(),
+        "`# request-doors` and `# completions`:\n  {}",
+        failures.join("\n  ")
+    );
+    let without: Vec<Vec<&str>> = lines
+        .iter()
+        .filter(|cells| cells[0] != "Runtime::hand_off")
+        .cloned()
+        .collect();
+    assert!(
+        request_door_failures(&completions, &without).iter().any(
+            |failure| failure.contains("`Runtime::hand_off` is a `# completions` request door")
+        ),
+        "a missing line is refused"
+    );
+    let mut planted = lines.clone();
+    planted.push(vec![
+        "diagnostics::note",
+        "window",
+        "std::sync::mpsc::Sender::send",
+        "—",
+        "—",
+    ]);
+    assert!(
+        request_door_failures(&completions, &planted)
+            .iter()
+            .any(|failure| failure.contains("`diagnostics::note` is on `# request-doors`")),
+        "a window door's line is refused"
+    );
 }
 
 /// RED (S-1) — **every `# completions` row is one protocol, entered by an item of the product.**
