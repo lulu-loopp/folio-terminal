@@ -1242,6 +1242,17 @@ jobs:
           ./scripts/ci/check-unfollowed-edges-tests.ps1
           ./scripts/ci/check-unfollowed-edges.ps1
 
+      # T-REQUEST-DOOR-GUARD (C1, a request door returns at once): what each request door of
+      # window_waits.tsv's `# request-doors` meets before its boundary, by site: bt-source's
+      # `request_doors` test holds the code to docs/plans/REQUEST-DOOR-SITES.tsv, and this holds the
+      # list to the merge base's: no key added or grown, and no verdict moved to `unreviewed` or
+      # `violation`, without a new dated reason; the two debts' counts are printed.
+      - name: the request-door sites only shrink
+        shell: pwsh
+        run: |
+          ./scripts/ci/check-request-door-sites-tests.ps1
+          ./scripts/ci/check-request-door-sites.ps1
+
       # T-HEADLESS-RUNTIME-SEAM: the places bt-app names a backend holder for the
       # native backend are listed, and the list is held to the merge base's (or
       # its seed): no row added.
