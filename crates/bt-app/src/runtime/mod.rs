@@ -42,6 +42,8 @@ pub(crate) use windows::recent_term_leaf_seed;
 pub(crate) use pointer::a_capture_still_holds_its_pointer;
 #[cfg(test)]
 pub(crate) use diagnostics::resolved_theme_change;
+#[cfg(test)]
+pub(crate) use profiles::profile_menu_anchor;
 pub(crate) use pointer::platform_pointer_of;
 mod terminal;
 mod tooltips;

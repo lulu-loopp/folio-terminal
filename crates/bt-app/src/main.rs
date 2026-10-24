@@ -287,7 +287,7 @@ use bt_persist::WindowStateV1;
 // again so that its callers, and its test modules through `use super::*`, read them as before.
 use runtime::platform_pointer_of;
 #[cfg(test)]
-use runtime::{a_capture_still_holds_its_pointer, resolved_theme_change};
+use runtime::{a_capture_still_holds_its_pointer, profile_menu_anchor, resolved_theme_change};
 use bt_platform::admission::{WaitToken, doors};
 use bt_pty::{
     OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PSREADLINE_PASTE_INPUT, PtyError, PtySession,
@@ -53351,29 +53351,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ── P143-P150: the glance card ──────────────────────────────────────────
 
-    /// **The folders the root menu offers as "a terminal is here"**, read once as it opens
-    /// (T-CWD-FROM-PROCESS): every terminal pane of the tab in front of you, each through
-    /// [`LeafSession::folder`] — its report, else its shell process's folder, else where it was
-    /// opened.
-    ///
-    /// The shells' folders are read here rather than in `profiles` because that is where the
-    /// sessions are: red line L1's argument, one layer up. Every pane of the tab in front of you
-    /// gets a say, not only the focused one — "a terminal is here" is true of all of them, and the
-    /// whole point of the list is to name the places you are already standing.
-    fn shell_folders_for_the_root_menu(
-        &self,
-        door: &dyn pane_folder::ProcessFolders,
-    ) -> Vec<String> {
-        let tab = &self.window.tabs[self.window.active_tab];
-        tab.seats
-            .terminals()
-            .iter()
-            .filter_map(|seat| tab.sessions.get(seat))
-            .filter_map(|leaf: &LeafSession| leaf.folder(door).into_folder())
-            .map(|cwd| cwd.display().to_string())
-            .collect()
-    }
-
     /// The places this column could be pointed at (E54): its own root, the home folder, the
     /// shells' folders the menu took as it opened ([`Self::shell_folders_for_the_root_menu`]) and
     /// the remembered folders, the kept ones first.
@@ -72341,73 +72318,6 @@ fn display_title(
         announcements,
     )
     .0
-}
-
-/// The same walk, keeping the answer to "which layer won?" that
-/// [`display_title`] throws away.
-///
-/// One function with two readers rather than two functions agreeing: the tab's
-/// tooltip states the provenance out loud (M140, mock-up 4197-4199), and a
-/// second walk of the same stack would be a second set of precedence rules to
-/// keep in step — including the sanitiser's fall-through, which is exactly the
-/// subtlety a copy would lose. `None` is the fourth layer, which is nobody's
-/// claim: the profile's own name is what a tab is called when no one has said
-/// anything about it, and it has no provenance to report.
-/// **Which button the profile picker hangs off** — the fifth reader of the one
-/// fact [`tab_surface_tip_boxes`]'s doc lists four readers of, and the first one
-/// that got it wrong in a way nothing could see.
-///
-/// The rule is one sentence: **ask the column first, and if it answered that is
-/// the answer**; only a window with no focus column falls through to the two
-/// ordinary surfaces, where a vertical layout hangs the menu off the rail and a
-/// horizontal one off the strip. `None` means there is no button on screen to
-/// hang it off at all, which is a real state — a vertical layout whose rail is
-/// not being drawn — and not a failure.
-///
-/// **Pure, and that is the fix.** The live version computed the column's answer
-/// and then wrote `self.rail_geometry_now(now)?` on the way to a fallback it was
-/// never going to use: in focus mode `seats::rail_geometry` answers `None` by
-/// design, so the `?` returned out of the whole function and the picker's layout
-/// came back `None` while its state said open. The chevron flipped to `^`,
-/// `refresh_overlay` drew nothing, the press router had no rectangles to hit —
-/// a dead switch you could not even click away, in exactly one configuration
-/// (focus mode over a vertical rail). Precedence expressed as data cannot make
-/// that mistake, because there is no early return between the two answers.
-fn profile_menu_anchor(
-    focus_column: Option<&seats::FocusRailGeometry>,
-    rail: Option<&seats::RailGeometry>,
-    strip_new_tab_menu: [f32; 4],
-    state: seats::RailState,
-) -> Option<([f32; 4], profiles::MenuSide)> {
-    // **The side is not decided here** (§7.1.6e, 2026-08-20). Which way the
-    // picker hangs is a fact about the posture and is answered by
-    // `RailState::profile_menu_side`, because the `˅` itself and the tween that
-    // turns it need that same fact without needing a rectangle — and three
-    // spellings of one precedence is how the chevron came to point at a menu
-    // that was somewhere else. What is left here is the half only this function
-    // wants: *which box*.
-    let side = state.profile_menu_side()?;
-    // **And neither is the precedence** (§7.1.6e″, 2026-08-25). *Which* of the
-    // three surfaces holds the `+` is [`tab_surface`]'s one sentence, for the
-    // reason the side is `profile_menu_side`'s: [`popup_owner`] needs that same
-    // answer without needing a rectangle, and two spellings of one precedence is
-    // how the menu and the panel it belongs to came to disagree about which
-    // button they were talking about. What is left here is the half only this
-    // function wants: *which box*.
-    let anchor = match tab_surface(focus_column.is_some(), state.layout) {
-        // §7.1.6b′: the focus column keeps the panel's `+` and its `˅`, and
-        // `hit_focus_rail` answers `NewTabMenu` for it — so in focus mode the
-        // button that opened this menu is not the one either arm below
-        // describes.
-        TabSurface::FocusColumn => focus_column.map(|column| column.new_tab_menu),
-        // Q181: a parked rail has no chevron — 28px of it would leave the `+`
-        // nothing — so the `+` is what the menu hangs off there. The two share a
-        // right edge and a top, so the menu does not jump when the panel slides
-        // open and the chevron reappears.
-        TabSurface::Rail => rail.map(|rail| rail.new_tab_menu.unwrap_or(rail.new_tab)),
-        TabSurface::Strip => Some(strip_new_tab_menu),
-    }?;
-    Some((anchor, side))
 }
 
 /// **Which surface this window is drawing its tab list on** — §7.1.6e″'s one
