@@ -44,6 +44,8 @@ pub(crate) use pointer::a_capture_still_holds_its_pointer;
 pub(crate) use diagnostics::resolved_theme_change;
 #[cfg(test)]
 pub(crate) use profiles::profile_menu_anchor;
+#[cfg(test)]
+pub(crate) use search::rescan_leaf_for_search;
 pub(crate) use pointer::platform_pointer_of;
 mod terminal;
 mod tooltips;
