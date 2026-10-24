@@ -3109,6 +3109,128 @@ pub(crate) fn scratch_png_named(tag: &str) -> PathBuf {
     directory.join(format!("{}.png", bt_testpath::unique_name(tag)))
 }
 
+/// **A scratch folder of one test's own, removed with everything in it when the test lets go of
+/// it** — on a red as on a green: `Drop` runs while a failing test unwinds (T-TEST-ORDER-STRAYS).
+///
+/// A folder named by `bt_testpath` is never reused, so nothing but this removes it: without the
+/// guard every run leaves its folders behind. A folder the code under test makes elsewhere and
+/// names after this one (an attention test's marks folder) goes with it: [`Self::also_removing`].
+pub(crate) struct ScratchFolder {
+    path: PathBuf,
+    also: Vec<PathBuf>,
+}
+
+impl ScratchFolder {
+    /// The folder at `path`, made empty and created; held by its canonical spelling.
+    pub(crate) fn create(path: PathBuf) -> Self {
+        // A process killed outright leaves its folders behind; a later process with its id must
+        // not start from them.
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("a scratch folder under the build directory");
+        Self {
+            path: std::fs::canonicalize(&path).expect("the scratch folder just made"),
+            also: Vec::new(),
+        }
+    }
+
+    /// This folder, and `other` removed with it — a folder the code under test may make there.
+    pub(crate) fn also_removing(mut self, other: PathBuf) -> Self {
+        self.also.push(other);
+        self
+    }
+}
+
+impl std::ops::Deref for ScratchFolder {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for ScratchFolder {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchFolder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+        for other in &self.also {
+            let _ = std::fs::remove_dir_all(other);
+        }
+    }
+}
+
+/// An attention test's per-copy marks folder for the configuration file `path`:
+/// `target/tb-test-marks/<family>/<root>`, where `<root>` is the test's own scratch folder, the
+/// ancestor of `path` that stands directly in `target/tb-tests`. Named after the root, so two
+/// tests never share one (a configuration file's own folder can be a fixed name, `hooks`), and
+/// the root's [`ScratchFolder`] removes it ([`ScratchFolder::also_removing`]).
+pub(crate) fn attention_marks_folder(family: &str, path: &Path) -> PathBuf {
+    let root = path
+        .ancestors()
+        .find(|ancestor| {
+            ancestor
+                .parent()
+                .is_some_and(|parent| parent.ends_with("tb-tests"))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "{} is not under a scratch folder of target/tb-tests",
+                path.display()
+            )
+        });
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/tb-test-marks")
+        .join(family)
+        .join(root.file_name().expect("a scratch folder has a name"))
+}
+
+/// RED (T-TEST-ORDER-STRAYS review H1) — **a scratch folder, and the folder it was told to take
+/// with it, are gone once its test lets go of it, on a green and on a panic**, with a read-only
+/// file and a subfolder in each, as the attention fixtures leave.
+///
+/// MUTATION: delete `impl Drop for ScratchFolder` and both folders are still there.
+#[test]
+fn a_scratch_folder_is_removed_when_its_test_lets_go_even_on_a_panic() {
+    let under = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tb-tests");
+    let fill = |folder: &Path| {
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        let file = folder.join("sub").join("protected.json");
+        std::fs::write(&file, b"{}").unwrap();
+        let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&file, permissions).unwrap();
+    };
+    let companion = under.join(bt_testpath::unique_name("scratch-companion"));
+    let green = ScratchFolder::create(under.join(bt_testpath::unique_name("scratch-green")))
+        .also_removing(companion.clone());
+    let path = green.to_path_buf();
+    fill(&green);
+    fill(&companion);
+    drop(green);
+    assert!(!path.exists(), "{} is left behind", path.display());
+    assert!(
+        !companion.exists(),
+        "{} is left behind",
+        companion.display()
+    );
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let red = std::thread::spawn(move || {
+        let folder = ScratchFolder::create(under.join(bt_testpath::unique_name("scratch-red")));
+        sender.send(folder.to_path_buf()).unwrap();
+        fill(&folder);
+        panic!("a red test unwinds through its scratch folder");
+    })
+    .join();
+    assert!(red.is_err(), "the thread panicked");
+    let path = receiver.recv().unwrap();
+    assert!(!path.exists(), "{} is left behind by a red", path.display());
+}
+
 /// **A scratch file a test wrote, removed when the test lets go of it** — on a red as on a green.
 pub(crate) struct ScratchFile(pub(crate) PathBuf);
 

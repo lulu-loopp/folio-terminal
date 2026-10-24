@@ -308,16 +308,16 @@ mod tests {
         ]
     }
 
-    /// A fresh folder of this test's own under the build directory, named by `bt_testpath`: two
-    /// tests that pass one name (`stranger-claude` was two) get two folders, and nothing an
-    /// earlier run left there is an input to this one.
-    fn root(name: &str) -> PathBuf {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/tb-tests")
-            .join(bt_testpath::unique_name(name));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).unwrap();
-        fs::canonicalize(path).unwrap()
+    /// A fresh folder of this test's own under the build directory, named by `bt_testpath` and
+    /// removed when the test lets go of it: two tests that pass one name (`stranger-claude` was
+    /// two) get two folders, nothing an earlier run left there is an input to this one, and no
+    /// run leaves its folders behind.
+    fn root(name: &str) -> crate::test_support::ScratchFolder {
+        crate::test_support::ScratchFolder::create(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tb-tests")
+                .join(bt_testpath::unique_name(name)),
+        )
     }
 
     /// A copy of Folio at `<root>/<folder>/folio.exe`.
@@ -495,7 +495,7 @@ mod tests {
             check(&owners, &here, &Decision::TakeOver(vec![])),
             Err(Outcome::TakeOverRequired(owners.clone()))
         );
-        let mut pending = Pending::new(Some(root.clone()), owners.clone());
+        let mut pending = Pending::new(Some(root.to_path_buf()), owners.clone());
         assert_eq!(
             next_decision(&mut pending, true, Some(&root)),
             Decision::TakeOver(owners.clone())
@@ -504,12 +504,12 @@ mod tests {
             next_decision(&mut pending, true, Some(&root)),
             Decision::Install
         );
-        pending = Pending::new(Some(root.clone()), owners.clone());
+        pending = Pending::new(Some(root.to_path_buf()), owners.clone());
         assert_eq!(
             next_decision(&mut pending, true, Some(&owner)),
             Decision::Install
         );
-        pending = Pending::new(Some(root.clone()), owners);
+        pending = Pending::new(Some(root.to_path_buf()), owners);
         pending.as_mut().unwrap().shown -= std::time::Duration::from_secs(31);
         assert_eq!(
             next_decision(&mut pending, true, Some(&root)),
