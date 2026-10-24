@@ -3072,6 +3072,67 @@ fn the_digit_stops_land_where_the_double_click_lands() {
     );
 }
 
+/// RED (T-PICTURE-KEYS-PAN-AND-ZOOM) — **a floating window's picture answers the same keys**: torn
+/// off and holding the keyboard, a zoomed picture pans one step at `→`, and `0` and `1` land where
+/// the window's own double click lands.
+///
+/// MUTATION: drop the pan arm from `Runtime::preview_browse_key` — the float's `→` pans nothing.
+#[test]
+fn a_floating_windows_picture_pans_and_stops_on_the_same_keys() {
+    let (mut folio, surface) = a_large_picture_beside_a_shell("picture-float", "悬浮 float", true);
+    let PreviewSurface::Seat(leaf) = surface else {
+        unreachable!("a docked pane")
+    };
+    folio
+        .runtime()
+        .pop_out_preview(leaf.seat)
+        .expect("the picture is torn off");
+    folio.draw();
+    let win = folio
+        .window
+        .float
+        .live_windows_mut()
+        .next()
+        .expect("a window holds the picture");
+    win.focused = true;
+    let float = PreviewSurface::Float(win.id());
+    folio.draw();
+    assert_eq!(
+        folio.runtime().preview_keyboard_surface(),
+        Some(float),
+        "the fixture's own precondition: the window holds the keyboard"
+    );
+    let body = picture_body(&mut folio, float);
+    let centre = PhysicalPosition::new(
+        f64::from((body[0] + body[2]) / 2.0),
+        f64::from((body[1] + body[3]) / 2.0),
+    );
+
+    click(&mut folio, centre);
+    click(&mut folio, centre);
+    let clicked = zoom_of(&mut folio, float);
+    assert_eq!(
+        clicked,
+        crate::ImageZoom::scaled(1.0),
+        "the fixture's own precondition: the window's double click is 100 %"
+    );
+    assert!(digit(&mut folio, "0", KeyCode::Digit0));
+    assert!(zoom_of(&mut folio, float).is_fit(), "`0` is Fit");
+    assert!(digit(&mut folio, "1", KeyCode::Digit1));
+    assert_eq!(
+        zoom_of(&mut folio, float),
+        clicked,
+        "`1` is the double click's 100 %"
+    );
+
+    assert!(arrow(&mut folio, NamedKey::ArrowRight, KeyCode::ArrowRight));
+    let pan = zoom_of(&mut folio, float).pan;
+    assert!(
+        close_to(pan[0], -(body[2] - body[0]) / 8.0) && close_to(pan[1], 0.0),
+        "`→` pans the window's picture one step: {pan:?}"
+    );
+}
+
 /// CONTROL (T-PICTURE-KEYS-PAN-AND-ZOOM) — **a digit or an arrow typed while the shell holds the
 /// keyboard is the shell's**: the preview beside it does not take it and its picture does not
 /// move.
