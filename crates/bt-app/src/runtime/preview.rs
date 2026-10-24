@@ -33,12 +33,12 @@ use crate::{
     files_row_display_name, float, float_dock_label, folded_levels, foot_revealed_label,
     forget_a_picture, forget_standing_answers, git_panel, graph_key_of, hang_watch, hex_peek,
     highlight, i18n, image_clamped_pan, image_destination, image_is_pannable, image_meta_sentence,
-    image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale, image_zoom_settles,
-    image_zoom_toggled, ime_owner, input, markdown_empty_page_offset, markdown_prose_composition,
-    markdown_prose_paragraphs, markdown_runs, markdown_source_cell, markdown_source_offset_at,
-    marks, measure_preview_links, notice, owe_sharpened_rasters, page_address_hand_off,
-    page_destination, page_foot_flash, page_foot_lead, page_source_file, peek_scale_task,
-    picture_channel_owner, picture_errand, picture_files_of, pictures_awaited_by,
+    image_pan_key, image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale,
+    image_zoom_settles, image_zoom_toggled, ime_owner, input, markdown_empty_page_offset,
+    markdown_prose_composition, markdown_prose_paragraphs, markdown_runs, markdown_source_cell,
+    markdown_source_offset_at, marks, measure_preview_links, notice, owe_sharpened_rasters,
+    page_address_hand_off, page_destination, page_foot_flash, page_foot_lead, page_source_file,
+    peek_scale_task, picture_channel_owner, picture_errand, picture_files_of, pictures_awaited_by,
     pictures_need_handing_over, place_preview_math, preedit_caret_byte, present_diagnostics,
     preview, preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_prose,
     preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
@@ -7014,6 +7014,26 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(false);
         };
+        // **A picture zoomed past its box pans on the arrows** (T-PICTURE-KEYS-
+        // PAN-AND-ZOOM, owner's request 2026-10-23), asked before file travel
+        // because the two share `←`/`→` and this is the one that knows which of
+        // them a press means: while anything of the picture is hidden every
+        // arrow is the pan's, at an edge too, and a picture that fits answers
+        // `None` here so its arrows go on to travel the folder exactly as they
+        // did. A video never zooms (`picture_takes_zoom`), so its zoom reads Fit
+        // and this never takes a player's arrow.
+        if let Some((body, image_px)) = self.preview_image_geometry(surface)
+            && let Some(panned) = image_pan_key(
+                self.preview_image_zoom(surface),
+                &event.logical_key,
+                self.window.modifiers,
+                body,
+                image_px,
+            )
+        {
+            self.set_preview_image_zoom(surface, panned)?;
+            return Ok(true);
+        }
         // File travel owns plain arrows even while a video is playing. Shift
         // arrows continue through to the player's existing seek commands.
         if let Some(direction) = self.preview_picture(surface).and_then(|image| {

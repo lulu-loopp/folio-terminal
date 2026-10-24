@@ -27820,6 +27820,77 @@ fn image_zoom_key(
     }
 }
 
+/// **How far one arrow carries a zoomed picture**: an eighth of the body on that
+/// axis (T-PICTURE-KEYS-PAN-AND-ZOOM, owner's request 2026-10-23).
+///
+/// A fraction of the box rather than a count of pixels, so the step feels the
+/// same in a small floating window and in a pane across a 4K display; and in
+/// **screen** pixels rather than the picture's, because what the eye follows is
+/// how far the picture moved on the glass — a step in picture pixels would jump
+/// eight times as far at 800 % as at 100 %. An eighth leaves seven eighths of
+/// what was on screen still there after the press, which is what lets the eye
+/// keep its place, and a held arrow crosses one whole box in eight repeats.
+const IMAGE_PAN_KEY_STEP: f32 = 1.0 / 8.0;
+
+/// `Shift`+arrow: half the box, the reading keys' page — half of what was on
+/// screen stays as the overlap that says where you came from.
+const IMAGE_PAN_KEY_SHIFT_STEP: f32 = 1.0 / 2.0;
+
+/// **The arrows' pan over a picture zoomed past its box**, or `None` when they
+/// are not the picture's to spend (T-PICTURE-KEYS-PAN-AND-ZOOM).
+///
+/// The arrows move the **view** the way they point, as every scroller's arrow
+/// does: `→` shows more of the right side, so the picture travels left. The
+/// carried pan goes through [`image_clamped_pan`] — the drag's clamp, not a
+/// second one — so at an edge the press is answered with the pan it already had.
+///
+/// **`None` while the picture fits its body on both axes** ([`image_is_pannable`],
+/// the drag's and the grab cursor's own condition, so the hand and the keys say
+/// one fact), and that is the whole of how the arrows are shared: a picture with
+/// nothing hidden has nothing to pan, and its `←`/`→` keep travelling the folder
+/// ([`preview_neighbours::key`]). Once it is drawn larger than its body on
+/// *either* axis every arrow is the pan's, including the axis that does not
+/// move: a reader zoomed into a tall picture who presses `←` is asking to look
+/// left, not for the previous file. `Ctrl`, `Alt` and the command key are not
+/// taken, so a chord keeps whatever it means elsewhere.
+fn image_pan_key(
+    zoom: ImageZoom,
+    key: &Key,
+    modifiers: ModifiersState,
+    body: [f32; 4],
+    image_px: [u32; 2],
+) -> Option<ImageZoom> {
+    let towards: [f32; 2] = match key {
+        Key::Named(NamedKey::ArrowLeft) => [-1.0, 0.0],
+        Key::Named(NamedKey::ArrowRight) => [1.0, 0.0],
+        Key::Named(NamedKey::ArrowUp) => [0.0, -1.0],
+        Key::Named(NamedKey::ArrowDown) => [0.0, 1.0],
+        _ => return None,
+    };
+    let step = if modifiers.is_empty() {
+        IMAGE_PAN_KEY_STEP
+    } else if modifiers == ModifiersState::SHIFT {
+        IMAGE_PAN_KEY_SHIFT_STEP
+    } else {
+        return None;
+    };
+    if !image_is_pannable(body, image_px, zoom) {
+        return None;
+    }
+    let extent = [body[2] - body[0], body[3] - body[1]];
+    let carried = ImageZoom {
+        pan: [
+            zoom.pan[0] - towards[0] * extent[0] * step,
+            zoom.pan[1] - towards[1] * extent[1] * step,
+        ],
+        ..zoom
+    };
+    Some(ImageZoom {
+        pan: image_clamped_pan(body, image_px, carried),
+        ..carried
+    })
+}
+
 /// **What a picture surface has to draw with**, once the decode store and the
 /// answer the surface is already standing on have both been asked (§7.1.3u ③).
 ///
