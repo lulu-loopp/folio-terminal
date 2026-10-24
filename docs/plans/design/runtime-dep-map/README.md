@@ -64,8 +64,8 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **811 items, 602 free functions and 209 `Runtime`
-  methods**, still in `main.rs`.
+- **unclassified.tsv**: **836 items, 626 free functions and 210 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 1's head; 846, 634 and 212 before it).
   - The plan's "106 unclassified" was the 2026-09-18 theme-regex count of
     `Runtime` methods whose names no theme matched (112 on 2026-09-21). The name
     sort is retired.
@@ -79,51 +79,66 @@ first. A row's home is the first topic in its `called_from`. The move does not
 change behaviour, and the window-waits, test-shells and census guards must read the
 same facts after it.
 
-1. **The 408 items whose callers are mostly in one `runtime/*` topic move into that
+Read at batch 1's head (2026-10-24; batch 1 moved the first six topics' ten items,
+`docs/plans/design/runtime-dep-map/` regenerated with it). K2's rulings (2026-10-24):
+the six smallest topics landed as one batch, one commit per topic, and every later
+topic is a landing of its own; a row whose first `called_from` place is tied goes to
+the tied topic `docs/ARCHITECTURE.md` §13's "owns" column names for it, written in the
+batch's record; a moved free function is re-exported from `runtime/mod.rs` and named
+again at the crate root by `use runtime::{…}`, so no caller changes.
+
+1. **The 410 items whose callers are mostly in one `runtime/*` topic move into that
    topic, one batch per topic.** Order the batches by the sum of their items'
-   `called_by`, smallest first. Each batch opens `main.rs` and its topic.
+   `called_by`, smallest first (equal sums by file name). Each batch opens `main.rs`
+   and its topic.
 
    | # | topic | items (functions + methods) | call sites in |
    |---:|---|---:|---:|
-   | 1 | `runtime/diagnostics.rs` | 1 (1 + 0) | 1 |
-   | 2 | `runtime/profiles.rs` | 1 (1 + 0) | 1 |
-   | 3 | `runtime/attention.rs` | 2 (2 + 0) | 2 |
-   | 4 | `runtime/search.rs` | 2 (1 + 1) | 3 |
-   | 5 | `runtime/tooltips.rs` | 3 (3 + 0) | 3 |
-   | 6 | `runtime/web.rs` | 9 (7 + 2) | 9 |
-   | 7 | `runtime/dpi.rs` | 6 (5 + 1) | 10 |
-   | 8 | `runtime/palette.rs` | 7 (1 + 6) | 14 |
-   | 9 | `runtime/terminal.rs` | 14 (12 + 2) | 15 |
-   | 10 | `runtime/git.rs` | 14 (11 + 3) | 21 |
-   | 11 | `runtime/clipboard.rs` | 15 (13 + 2) | 25 |
-   | 12 | `runtime/peek.rs` | 11 (10 + 1) | 26 |
-   | 13 | `runtime/files.rs` | 18 (16 + 2) | 35 |
-   | 14 | `runtime/floats.rs` | 15 (6 + 9) | 37 |
-   | 15 | `runtime/windows.rs` | 19 (18 + 1) | 41 |
-   | 16 | `runtime/math.rs` | 18 (12 + 6) | 45 |
-   | 17 | `runtime/frame.rs` | 34 (16 + 18) | 46 |
-   | 18 | `runtime/keyboard.rs` | 26 (12 + 14) | 49 |
-   | 19 | `runtime/tabs.rs` | 20 (16 + 4) | 54 |
-   | 20 | `runtime/panes.rs` | 33 (24 + 9) | 64 |
-   | 21 | `runtime/mouse.rs` | 50 (30 + 20) | 82 |
-   | 22 | `runtime/preview.rs` | 90 (72 + 18) | 132 |
+   | 1 | `runtime/pointer/ending.rs`, `runtime/pointer/mod.rs`, `runtime/diagnostics.rs`, `runtime/profiles.rs`, `runtime/search.rs`, `runtime/tooltips.rs` | moved by batch 1 | — |
+   | — | `runtime/profiles.rs` | 1 (1 + 0): `tab_surface`, tied with `runtime/tabs.rs` | 2 |
+   | 2 | `runtime/web.rs` | 9 (7 + 2) | 9 |
+   | 3 | `runtime/dpi.rs` | 6 (5 + 1) | 10 |
+   | 4 | `runtime/attention.rs` | 5 (4 + 1) | 11 |
+   | 5 | `runtime/palette.rs` | 7 (1 + 6) | 14 |
+   | 6 | `runtime/terminal.rs` | 14 (12 + 2) | 15 |
+   | 7 | `runtime/git.rs` | 14 (11 + 3) | 19 |
+   | 8 | `runtime/peek.rs` | 14 (14 + 0) | 21 |
+   | 9 | `runtime/clipboard.rs` | 16 (13 + 3) | 27 |
+   | 10 | `runtime/floats.rs` | 15 (7 + 8) | 34 |
+   | 11 | `runtime/files.rs` | 19 (17 + 2) | 38 |
+   | 12 | `runtime/windows.rs` | 19 (18 + 1) | 42 |
+   | 13 | `runtime/frame.rs` | 33 (15 + 18) | 45 |
+   | 14 | `runtime/keyboard.rs` | 27 (13 + 14) | 50 |
+   | 15 | `runtime/math.rs` | 18 (12 + 6) | 50 |
+   | 16 | `runtime/tabs.rs` | 20 (16 + 4) | 54 |
+   | 17 | `runtime/panes.rs` | 33 (24 + 9) | 65 |
+   | 18 | `runtime/mouse.rs` | 49 (29 + 20) | 81 |
+   | 19 | `runtime/preview.rs` | 91 (72 + 19) | 144 |
 
-2. **The 379 items whose callers are mostly other `main.rs` items follow their
+   Batch 7 onward moves rows four shrink-only checks key by module or file
+   (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`, `check-env-doors.ps1`,
+   `check-window-seam-native.ps1`): those checks learn `check-dead-code.ps1`'s "a row
+   whose only change is where it lives is the same row moved" first, in a landing of
+   their own before that batch.
+
+2. **The 395 items whose callers are mostly other `main.rs` items follow their
    callers.** Regenerate the map after each batch. An item whose callers have moved
    now shows a `runtime/*` home and joins the next batch for that topic. Repeat
    until no batch is left.
-3. **The 10 items whose callers are mostly in a module outside `runtime/`** go
+3. **The 15 items whose callers are mostly in a module outside `runtime/`** go
    beside those callers, as ordinary module functions:
+   - `window_seam.rs` (5)
    - `preview_viewport.rs` (3)
    - `preview_neighbours.rs`, `update_job.rs`, `restore.rs`, `file_peek.rs`,
      `explorer_menu.rs`, `preview_wrap.rs`, `ime_outbound.rs` (1 each)
-4. **The 14 items with no measured caller stay put or go with their topic:**
+4. **The 16 items with no measured caller stay put or go with their topic:**
    - `Runtime`'s `Deref`/`DerefMut` stay with the struct.
    - `main` stays.
-   - The four `PointerHost` methods go with the settings topic (D-30).
+   - The four `PointerHost` methods stay in `main.rs` until D-30 opens the settings
+     topic (ruled 2026-10-24: K2 opens no `runtime/settings.rs`).
    - The rest are reached only as function values or through a receiver the map
-     does not type (`web_page_cursor`, `seeded_tab`, …). Read their call sites
-     before moving them.
+     does not type (`web_page_cursor`, `seeded_tab`, `path_door`, `scale_door`, …).
+     Read their call sites before moving them.
 
 ## O-2…O-5: the field moves, in order, with the files each opens
 
