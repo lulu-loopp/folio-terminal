@@ -46,6 +46,8 @@ pub(crate) use diagnostics::resolved_theme_change;
 pub(crate) use profiles::profile_menu_anchor;
 #[cfg(test)]
 pub(crate) use search::rescan_leaf_for_search;
+#[cfg(test)]
+pub(crate) use tooltips::{tab_surface_tip_boxes, tooltip_anchor_for};
 pub(crate) use pointer::platform_pointer_of;
 mod terminal;
 mod tooltips;
