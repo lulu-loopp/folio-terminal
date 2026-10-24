@@ -11194,13 +11194,13 @@ pub fn main() {
         let hand_over = || 1;
         hand_over();
     }
-    hand_over();
+    hand_over(); // past the block
     admission::enter_window_thread();
 }
 "#;
     let refusal = planted_main_landmark("ww-landmark-closed", closed)
         .expect_err("a bare name past its local's block is refused");
-    let line = planted_main_line(closed, "    }\n    hand_over") + 1;
+    let line = planted_main_line(closed, "// past the block");
     assert!(
         refusal.contains("`hand_over` in `planted crate::main` at "),
         "the refusal names `hand_over`: {refusal}"
