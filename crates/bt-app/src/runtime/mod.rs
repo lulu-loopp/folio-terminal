@@ -36,6 +36,10 @@ pub(crate) use tabs::owe_birth_death_fallback_resize;
 pub(crate) use windows::AfterTheWait;
 #[cfg(test)]
 pub(crate) use windows::recent_term_leaf_seed;
+// K2 (T-SPLIT-2B): the free functions moved out of `main.rs`, named at the crate root again by
+// its `use runtime::{…}` lines so that no caller changes.
+#[cfg(test)]
+pub(crate) use pointer::a_capture_still_holds_its_pointer;
 mod terminal;
 mod tooltips;
 mod update_card;

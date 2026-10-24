@@ -283,6 +283,10 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 use bt_doc::Bias;
 #[cfg(test)]
 use bt_persist::WindowStateV1;
+// K2 (T-SPLIT-2B) moved these free functions into their `runtime/` topics; the root names them
+// again so that its callers, and its test modules through `use super::*`, read them as before.
+#[cfg(test)]
+use runtime::a_capture_still_holds_its_pointer;
 use bt_platform::admission::{WaitToken, doors};
 use bt_pty::{
     OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PSREADLINE_PASTE_INPUT, PtyError, PtySession,
@@ -22662,29 +22666,6 @@ impl PtyInput {
     const fn queued(self) -> bool {
         matches!(self, Self::Queued | Self::HeldForBirth | Self::HeldForPaste)
     }
-}
-
-/// **Whether the hand that began a gesture is still on it** (Codex review 2026-09-17, for the
-/// divider; T-POINTER-CAPTURE cut 5, R-9, for every gesture).
-///
-/// Two samples of one platform fact — which window of this thread holds the pointer — taken at the
-/// press and now. Equality is the whole predicate, and it has to be equality rather than "this
-/// window holds it": on macOS the answer is `None` at both ends, because AppKit has no per-thread
-/// capture to report, and a rule phrased as "we hold it" would cancel every gesture on that
-/// platform on its first turn. Two `None`s mean nothing was taken away, which is the truth there.
-///
-/// The gesture this ends is the one no event reports. Windows says capture loss with
-/// `WM_CAPTURECHANGED`; winit 0.30.13 answers it by zeroing its own capture count and emitting
-/// nothing, and a steal need not blur this window, so `Focused(false)` — the path that already
-/// ends a gesture — may never come. What is left is a capture that stays held for the rest of the
-/// window's life: a divider that `flush_pending_pty_resize` reads as a hand still on the geometry,
-/// so that no pane of this window can release a resize to its child, and a thumb, a selection or a
-/// press that goes on following a hand nobody is holding down.
-fn a_capture_still_holds_its_pointer(
-    at_the_press: Option<bt_platform::NativeWindow>,
-    now: Option<bt_platform::NativeWindow>,
-) -> bool {
-    at_the_press == now
 }
 
 /// What one released resize actually moved, so the window can decide what it owes the screen.

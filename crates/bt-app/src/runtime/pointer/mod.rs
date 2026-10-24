@@ -26,6 +26,8 @@ pub(crate) use capture::{
     release_against_the_slot,
 };
 pub(crate) use ending::{Ending, Gone, Leaving, OwnerGone};
+#[cfg(test)]
+pub(crate) use ending::a_capture_still_holds_its_pointer;
 
 #[cfg(test)]
 pub(crate) use router::{BANDS_THAT_TAKE_NO_POINTER, POINTER_LAYERS_TOP_FIRST, Visits};
