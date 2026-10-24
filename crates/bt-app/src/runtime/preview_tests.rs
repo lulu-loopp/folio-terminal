@@ -3011,6 +3011,67 @@ fn a_picture_that_fits_keeps_the_arrows_for_the_folder() {
     );
 }
 
+/// PIN (T-PICTURE-KEYS-PAN-AND-ZOOM; the keys are ticket #60's) — **`1` and `0` land exactly where
+/// the double click lands**: `1` from Fit is the double click's 100 %, centred, and `0` from a
+/// panned 300 % is the double click's Fit.
+///
+/// MUTATION: drop the `"1"` arm (or the `"0"` arm) from `image_zoom_key` — the digit falls
+/// through to the swallow and the zoom stays where it was.
+#[test]
+fn the_digit_stops_land_where_the_double_click_lands() {
+    let (mut folio, surface) = a_large_picture_beside_a_shell("picture-stops", "两站 stops", true);
+    let body = picture_body(&mut folio, surface);
+    let centre = PhysicalPosition::new(
+        f64::from((body[0] + body[2]) / 2.0),
+        f64::from((body[1] + body[3]) / 2.0),
+    );
+    let double_click = |folio: &mut HeadlessFolio| {
+        click(folio, centre);
+        click(folio, centre);
+    };
+    let panned = crate::ImageZoom {
+        pan: [90.0, -40.0],
+        ..crate::ImageZoom::scaled(3.0)
+    };
+    let set = |folio: &mut HeadlessFolio, zoom: crate::ImageZoom| {
+        folio
+            .runtime()
+            .set_preview_image_zoom(surface, zoom)
+            .expect("the zoom lands");
+    };
+
+    double_click(&mut folio);
+    let clicked_from_fit = zoom_of(&mut folio, surface);
+    assert_eq!(
+        clicked_from_fit,
+        crate::ImageZoom::scaled(1.0),
+        "the fixture's own precondition: the double click from Fit is 100 %, centred"
+    );
+    set(&mut folio, crate::ImageZoom::FIT);
+    assert!(digit(&mut folio, "1", KeyCode::Digit1));
+    assert_eq!(
+        zoom_of(&mut folio, surface),
+        clicked_from_fit,
+        "`1` is that stop"
+    );
+
+    set(&mut folio, panned);
+    double_click(&mut folio);
+    let clicked_from_zoomed = zoom_of(&mut folio, surface);
+    assert_eq!(
+        clicked_from_zoomed,
+        crate::ImageZoom::FIT,
+        "the fixture's own precondition: the double click from 300 % is Fit"
+    );
+    set(&mut folio, panned);
+    assert!(digit(&mut folio, "0", KeyCode::Digit0));
+    assert_eq!(
+        zoom_of(&mut folio, surface),
+        clicked_from_zoomed,
+        "`0` is that stop"
+    );
+}
+
 /// CONTROL (T-PICTURE-KEYS-PAN-AND-ZOOM) — **a digit or an arrow typed while the shell holds the
 /// keyboard is the shell's**: the preview beside it does not take it and its picture does not
 /// move.
