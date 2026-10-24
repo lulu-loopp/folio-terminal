@@ -109,7 +109,7 @@ try {
     $baseLines = $text -split "`r?`n"
     $before = Read-TimingRows $baseLines
     $widenedBefore = @((Read-Widenings $baseLines) | ForEach-Object { $_.Line })
-    & git diff --quiet $base -- $Scan 2>$null
+    & git diff --quiet $base HEAD -- $Scan 2>$null
     $scanChanged = $LASTEXITCODE -ne 0
 } finally {
     Pop-Location
