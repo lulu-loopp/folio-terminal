@@ -644,6 +644,27 @@ the product's `LOAD_BUDGET` and `IDLE_POLL_INTERVAL` so that it cannot end
 before the engine's own refusal lands, and handed to the engine's wait door —
 so it is not a row (T-VIDEO-ENGINE-NO-DURATION).
 
+## Test order and shared fixtures
+
+The rule: a test's verdict does not hang on a file another build step made, on the
+process's directory or environment, or on a fixture folder another test or an
+earlier run shares (T-TEST-ORDER-STRAYS, 2026-10-24).
+
+Where and what to do: `crates/bt-source/tests/test_order.rs` is the gate and
+`docs/plans/TEST-ORDER-EXCEPTIONS.tsv` its register. It refuses, in test code, a
+`CARGO_BIN_EXE_` read outside an integration test (A1), a path derived from the
+test executable's folder with no `bt_testpath` name (A2), a
+`set_current_dir`/`set_var`/`remove_var` call (C1), and a create under the
+temporary folder or the build directory with no `bt_testpath` name (D1), and a
+module-level `use` that brings `env::temp_dir` in or globs `env` (D0: a bare
+`temp_dir()` call could then not be told from a test's own helper). When red,
+name the path with `bt_testpath::unique_name`/`temp_path`, locate a bin through
+`CARGO_BIN_EXE_<name>` in an integration test (cargo builds it for that target),
+or, when the fixed name is the subject, add a row saying why. A process-global that
+two tests touch is not in its grammar: review owns it. An `#[ignore]`d test that
+must run alone or serially says so on its line of `scripts/ci/ignored-tests.txt`
+(`run=alone`, `run=serial`).
+
 ## Raw-effect and thread-door exceptions
 
 The rule: `bt-app` and `bt-platform` create workers through the admitted thread
