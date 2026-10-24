@@ -17,7 +17,7 @@ use crate::test_support::{
 use bt_render::LIGHT_CHROME;
 use bt_source::{ItemQuery, Pattern, Scope, View, needle};
 use std::time::Duration;
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 /// **G-0 — the content section's bytes did not move when the identity did.**
 ///
@@ -3239,6 +3239,74 @@ fn the_four_zoom_keys_step_about_the_body_centre_and_name_the_two_ends() {
             image
         ),
         None
+    );
+}
+
+/// RED (T-PICTURE-KEYS-PAN-AND-ZOOM, row 44) — **an arrow carries a zoomed picture by a fraction
+/// of its box**: an eighth of the body on that axis, half of it with `Shift`, the view moving the
+/// way the arrow points, cut by the drag's clamp at an edge; and the arrows are not the
+/// picture's while it fits, nor with `Ctrl` or `Alt` held.
+///
+/// MUTATION: swap the two step constants — the plain step lands on half the box; drop the
+/// `image_is_pannable` test in `image_pan_key` — the picture at Fit answers `Some`.
+#[test]
+fn the_arrows_step_a_zoomed_picture_by_a_fraction_of_its_box() {
+    let image = [400_u32, 300];
+    let arrow = |named: NamedKey| Key::Named(named);
+    let none = ModifiersState::empty();
+    let pan = |zoom: ImageZoom, named: NamedKey, modifiers: ModifiersState| {
+        image_pan_key(zoom, &arrow(named), modifiers, ZOOM_BODY, image).map(|moved| moved.pan)
+    };
+    // 1600 × 1200 in a 1000 × 500 body: 300 to spare each way across, 350 down.
+    let zoomed = ImageZoom::scaled(4.0);
+    assert_eq!(
+        pan(ImageZoom::FIT, NamedKey::ArrowRight, none),
+        None,
+        "a picture that fits leaves its arrows to the folder"
+    );
+    assert_eq!(
+        pan(zoomed, NamedKey::ArrowRight, none),
+        Some([-125.0, 0.0]),
+        "`→` shows an eighth of the box more of the right side"
+    );
+    assert_eq!(pan(zoomed, NamedKey::ArrowDown, none), Some([0.0, -62.5]));
+    assert_eq!(
+        pan(zoomed, NamedKey::ArrowUp, ModifiersState::SHIFT),
+        Some([0.0, 250.0]),
+        "`Shift` is half the box"
+    );
+    assert_eq!(
+        pan(zoomed, NamedKey::ArrowLeft, ModifiersState::SHIFT),
+        Some([300.0, 0.0]),
+        "and half the box past the left edge stops at the edge"
+    );
+    let at_the_right = ImageZoom {
+        pan: [-300.0, 0.0],
+        ..zoomed
+    };
+    assert_eq!(
+        pan(at_the_right, NamedKey::ArrowRight, none),
+        Some([-300.0, 0.0]),
+        "at the edge the key is still the picture's and moves nothing"
+    );
+    for modifiers in [
+        ModifiersState::CONTROL,
+        ModifiersState::ALT,
+        ModifiersState::SUPER,
+    ] {
+        assert_eq!(pan(zoomed, NamedKey::ArrowRight, modifiers), None);
+    }
+    assert_eq!(
+        image_pan_key(zoomed, &Key::Character("j".into()), none, ZOOM_BODY, image),
+        None
+    );
+    // 1600 × 400 in a 1000 × 500 body: hidden across only.
+    let wide = [400_u32, 100];
+    assert_eq!(
+        image_pan_key(zoomed, &arrow(NamedKey::ArrowDown), none, ZOOM_BODY, wide)
+            .map(|moved| moved.pan),
+        Some([0.0, 0.0]),
+        "a picture hidden on one axis keeps every arrow, the still axis included"
     );
 }
 
