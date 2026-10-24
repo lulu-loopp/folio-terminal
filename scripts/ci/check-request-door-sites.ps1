@@ -11,11 +11,13 @@
 # `follows <key>; ...` (read: nothing behind it), `unreviewed` (not read yet) or `violation` (a C1
 # breach, the finding named in the reason).
 #
-# **Against the merge base, a key added, a key whose `sites` grew, and a key whose verdict moved to
-# `unreviewed` or `violation` from another are refused unless its `reason` is dated** -
-# `YYYY-MM-DD: <why>`, a real day, the why not blank - **and, for a key the baseline had, other than
-# the reason its row had there**. A key that disappeared or shrank, or a verdict that moved to `std`
-# or `follows` (a site read), is the list shrinking. The script prints the `unreviewed` and
+# **Against the merge base, a key added, a key whose `sites` grew, a key whose verdict moved to
+# `unreviewed` or `violation` from another, a key whose verdict moved away from `violation` (a
+# ticketed breach leaving the list), and a `follows` row whose keys changed (what the walk follows)
+# are refused unless its `reason` is dated** - `YYYY-MM-DD: <why>`, a real day, the why not blank -
+# **and, for a key the baseline had, other than the reason its row had there**. A key that
+# disappeared or shrank, or an `unreviewed` verdict that moved to `std` or `follows` (a site read),
+# is the list shrinking. The script prints the `unreviewed` and
 # `violation` counts against the baseline's: both are counted debts that only shrink but for a
 # dated arrival.
 #
@@ -47,7 +49,7 @@ $repo = if ($Repo) { $Repo } else { Split-Path -Parent (Split-Path -Parent $PSSc
 $relative = "docs/plans/REQUEST-DOOR-SITES.tsv"
 $header = "file`titem`tkind`tname`tsites`tverdict`treason"
 $kinds = @("Dynamic", "Ambiguous", "Macro", "OtherArm", "Generated", "Path", "Effect", "Blocking",
-    "OwnerDoor", "WorkerBody", "Entrance", "Inherits", "Unmet", "HandedCalled", "Implicit")
+    "OwnerDoor", "WorkerBody", "Entrance", "Inherits", "Unmet", "HandedCalled", "NotWalked", "Implicit")
 # The commit that seeded the list (T-REQUEST-DOOR-GUARD).
 $seed = if ($Seed) { $Seed } else { "442252733e85d7fff8662bc069d464f8f73af2e1" }
 
@@ -84,7 +86,7 @@ function Read-Sites([string[]]$lines, [string]$where) {
         if (-not $verdict) { throw "$where has a row whose verdict is not std, follows <key>, unreviewed or violation: $line" }
         $key = $columns[0..3] -join "`t"
         if ($rows.ContainsKey($key)) { throw "$where carries $(Format-Key $key) on two rows; each key has one row" }
-        $rows[$key] = [pscustomobject]@{ Sites = $sites; Verdict = $verdict; Reason = $columns[6] }
+        $rows[$key] = [pscustomobject]@{ Sites = $sites; Verdict = $verdict; Cell = $columns[5]; Reason = $columns[6] }
     }
     if (-not $seen) { throw "$where has no column header" }
     return $rows
@@ -154,8 +156,11 @@ foreach ($key in $now.Keys) {
         $then = $before[$key]
         if ($row.Sites -gt $then.Sites) { $changes += "grown from $($then.Sites) to $($row.Sites) site(s)" }
         elseif ($row.Sites -lt $then.Sites) { $shrunk += 1 }
-        if (($row.Verdict -ceq "unreviewed" -or $row.Verdict -ceq "violation") -and $row.Verdict -cne $then.Verdict) {
+        if (($row.Verdict -ceq "unreviewed" -or $row.Verdict -ceq "violation" -or $then.Verdict -ceq "violation") -and
+            $row.Verdict -cne $then.Verdict) {
             $changes += "its verdict moved from $($then.Verdict) to $($row.Verdict)"
+        } elseif ($row.Verdict -ceq "follows" -and $then.Verdict -ceq "follows" -and $row.Cell -cne $then.Cell) {
+            $changes += "what it follows changed from '$($then.Cell)' to '$($row.Cell)'"
         }
     }
     if ($changes.Count -eq 0) { continue }

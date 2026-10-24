@@ -1,7 +1,8 @@
 # The planted cases of check-request-door-sites.ps1: each list against a baseline, with the verdict
-# the gate must give. An added or grown key, or a verdict moved to unreviewed or violation, without
-# a dated reason is refused; with a new dated one, it passes; a change under the row's old reason is
-# refused; a shrunk or removed key and a verdict moved to std passes; a malformed reason, row,
+# the gate must give. An added or grown key, a verdict moved to unreviewed or violation or away
+# from violation, or a follows row re-pointed, without a dated reason is refused; with a new dated
+# one, it passes; a change under the row's old reason is refused; a shrunk or removed key and an
+# unreviewed verdict moved to std or follows passes; a malformed reason, row,
 # kind, verdict or header is refused. The git road is planted in a scratch repository: a missing
 # list, no origin/main, a merge base without the list read against the seed (and an unreadable
 # seed) each give their verdict.
@@ -51,6 +52,12 @@ try {
     Invoke-Case "to-unreviewed-undated" @($header, "$f`t2`tunreviewed`t", $base[3]) $false $read
     Invoke-Case "to-violation-old-reason" @($header, "$f`t2`tviolation`t2026-10-20: a Vec's len", $base[3]) $false $read
     Invoke-Case "to-violation-dated" @($header, "$f`t2`tviolation`t2026-10-24: (d) the receiver is a lock", $base[3]) $true $read
+    Invoke-Case "violation-to-std-old-reason" @($header, $base[2], "$g`t1`tstd`t2026-10-24: (a) the finding") $false
+    Invoke-Case "violation-to-std-dated" @($header, $base[2], "$g`t1`tstd`t2026-10-25: the write moved to the worker") $true
+    $follows = @("# baseline", $header, "$f`t2`tfollows a crate::Lane::len`t2026-10-20: the lane's len", $base[3])
+    Invoke-Case "follows-repointed-old-reason" @($header, "$f`t2`tfollows a crate::Other::len`t2026-10-20: the lane's len", $base[3]) $false $follows
+    Invoke-Case "follows-repointed-dated" @($header, "$f`t2`tfollows a crate::Other::len`t2026-10-25: the other len", $base[3]) $true $follows
+    Invoke-Case "not-walked-kind" @($header, $base[2], $base[3], "crates/a/src/lib.rs`ta crate::d`tNotWalked`tprewarm`t1`tviolation`t2026-10-25: (f) a door asked before the loop") $true
     Invoke-Case "wrong-header" @("file`titem`tkind`tname`tsites`treason", $base[2]) $false
     Invoke-Case "six-columns" @($header, "$f`t2`tunreviewed") $false
     Invoke-Case "bad-kind" @($header, "crates/a/src/lib.rs`ta crate::f`tCutoff`tx`t1`tunreviewed`t") $false
