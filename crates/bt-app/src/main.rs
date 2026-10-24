@@ -68903,7 +68903,6 @@ impl<B: Backend> FolioApp<B> {
                 // (`AppEvent::DocumentsAnswered`, which leaves the answers to this arm while the
                 // quit holds the worker), and `Quit::deadline` wakes it at the phase's bound.
                 quit::QuitStep::Documents => {
-                    let now = Instant::now();
                     let step = self
                         .app
                         .as_mut()
@@ -68913,7 +68912,6 @@ impl<B: Backend> FolioApp<B> {
                     }
                 }
                 quit::QuitStep::Recovery => {
-                    let now = Instant::now();
                     let folder = persist::storage_dir().join(preview::RECOVERED_FOLDER);
                     let step = self
                         .app
@@ -68952,7 +68950,7 @@ impl<B: Backend> FolioApp<B> {
                         // on the turn the writer's wake brings (`AppEvent::DocumentsAnswered`),
                         // under `quit::UPDATE_RECEIPT_DEADLINE` — a bound read on the turn, not a
                         // wait. Only a verdict that leaves begins the way out.
-                        let Some(landed) = self.update_session_answer(Instant::now()) else {
+                        let Some(landed) = self.update_session_answer(now) else {
                             return Ok(());
                         };
                         if landed
@@ -68969,7 +68967,6 @@ impl<B: Backend> FolioApp<B> {
                         // `Quit::session_write_until`, and a quit with none left hands nothing
                         // over and leaves without a new flush.
                         bt_platform::admission::exiting();
-                        let now = Instant::now();
                         match self.app.as_mut() {
                             Some(app) => {
                                 let until = app
@@ -69062,6 +69059,10 @@ impl<B: Backend> FolioApp<B> {
                              apart: {refused}"
                         ),
                     }
+                    // **After a real wait, so the clock is read again** (T-TIMING-BOUND-STRAYS): the
+                    // wait for the panes above can take up to `pane_retirement_deadline`, and the
+                    // page teardown's bound is counted from when it ended, not from this turn's head.
+                    // Every other arm judges on the turn's own instant, the one it was handed.
                     let now = Instant::now();
                     // **The spare retires with the windows, under the run's one bound** (ticket 60).
                     if let Some(app) = self.app.as_mut() {
@@ -69075,7 +69076,7 @@ impl<B: Backend> FolioApp<B> {
                     // U-21, §C.3): an update whose session landed is handed over — `Handoff`
                     // durable, then the applier started, on the storage worker — and the loop
                     // comes back for the answer rather than waiting for it.
-                    if !self.hand_the_update_over(Instant::now()) {
+                    if !self.hand_the_update_over(now) {
                         return Ok(());
                     }
                     // The run's sentinel, dropped once — `App::finish`, spent
@@ -70419,7 +70420,7 @@ mod resident_run_tests {
     // `main` is the free function — and `about_to_wait` and `new_events` are not
     // inherent methods at all but `<FolioApp as ApplicationHandler<AppEvent>>`'s,
     // which is why they are asked for with `ItemQuery::method(..).of_trait(..)`.
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use bt_source::{Index, ItemQuery};
     use winit::event_loop::ControlFlow;
@@ -70460,9 +70461,16 @@ mod resident_run_tests {
     /// PIN (§1.5, parking) — **each `ControlFlow` is translated into what it
     /// owes this thread**, and the two that owe nothing are not the same as the
     /// one that owes a wake.
+    ///
+    /// **One clock** (T-TIMING-BOUND-STRAYS): the deadlines are written from the heartbeat's own
+    /// origin, so the milliseconds asserted are the heartbeat's reckoning exactly, however long
+    /// after the heartbeat was made this test reaches them. MUTATION: write the first deadline
+    /// from `Instant::now()` (the reading this test used to take) a second and a millisecond late
+    /// (`Instant::now() + Duration::from_millis(1_001)`) — it is red.
     #[test]
     fn every_control_flow_says_what_it_owes_the_window_thread() {
         let heart = hang_watch::Heartbeat::new();
+        let origin = heart.origin();
         assert_eq!(
             parking(ControlFlow::Wait, None, &heart),
             hang_watch::Park::Indefinite,
@@ -70475,28 +70483,25 @@ mod resident_run_tests {
             "a loop that hands nothing over is judged as one holding control"
         );
         let hang_watch::Park::Until(deadline) = parking(
-            ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5)),
+            ControlFlow::WaitUntil(origin + Duration::from_secs(5)),
             None,
             &heart,
         ) else {
             panic!("a deadline is a deadline");
         };
-        assert!(
-            (4_000..=6_000).contains(&deadline),
-            "five seconds from now, on the heartbeat's own clock, and not \
-             something in another epoch: {deadline}"
+        assert_eq!(
+            deadline, 5_000,
+            "five seconds on, on the heartbeat's own clock, and not something in another epoch"
         );
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(1))
-            .unwrap_or_else(Instant::now);
+        let past = origin.checked_sub(Duration::from_secs(1)).unwrap_or(origin);
         let hang_watch::Park::Until(already) = parking(ControlFlow::WaitUntil(past), None, &heart)
         else {
             panic!("a deadline is a deadline");
         };
-        assert!(
-            already <= 1,
-            "a deadline already in the past reads as overdue rather than as a \
-             number from before the run started: {already}"
+        assert_eq!(
+            already, 0,
+            "a deadline already in the past reads as overdue rather than as a number from \
+             before the run started"
         );
     }
 

@@ -99,8 +99,11 @@ fn main() {
         resource.display()
     );
     // `link.exe` takes a `.res` as an ordinary input file. `-bins` and not the
-    // whole crate: a test binary linking the icon would be harmless and would
-    // also be a second executable on the machine wearing the product's face.
+    // whole crate: it reaches every unit of the bin target, the bin's own
+    // unit-test executable included (`update_archive::tests::
+    // the_product_door_reads_the_manifest_out_of_this_test_executable` relies on
+    // it), and keeps the resource out of the integration and library tests, each
+    // of which would otherwise be one more executable wearing the product's face.
     if env("CARGO_CFG_TARGET_ENV") == "msvc" {
         println!("cargo:rustc-link-arg-bins={}", resource.display());
     }

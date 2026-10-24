@@ -1,0 +1,35 @@
+# TEST-ORDER-EXCEPTIONS — test code in a shape crates/bt-source/tests/test_order.rs refuses,
+# kept on purpose (T-TEST-ORDER-STRAYS, 2026-10-24).
+#
+# The shapes: A1 a bin located by CARGO_BIN_EXE_ outside an integration test; A2 a path derived
+# from the test executable's folder with no bt_testpath name; C1 the process's directory or
+# environment changed; D1 a folder or file created under the temporary folder or the build
+# directory by a fixed name; D0 a module-level use of env::temp_dir or env::*. The guard holds this list to its refusals both ways: an unlisted
+# refusal is red, a row that no longer refuses is red. A row says why the fixed name or the
+# location is the test's subject, or what guarantees the file it reads.
+file	item	shape	reason
+crates/bt-app/src/attention_ownership.rs	crate::attention_ownership::tests::attention_an_operation_resolves_its_configuration_once	D1	the literal "target" names a subfolder of the test's own bt_testpath root, not the build directory
+crates/bt-app/src/input.rs	crate::input::tests::the_key_encoding_document_is_the_table	D1	the single writer of a rendering a generate-* script copies into the repository; no other test names the file (target/key-encoding.md, scripts/dev/generate-key-encoding-table.ps1)
+crates/bt-app/src/input.rs	crate::input::tests::the_windows_us_records_file_is_what_the_encoder_writes	D1	the single writer of a rendering a generate-* script copies into the repository; no other test names the file (target/key-records-windows-us.tsv)
+crates/bt-app/src/marks.rs	crate::marks::tests::the_symbol_sheet_is_written_for_a_person_to_look_at	D1	ignored; writes a picture into target/ for a person to look at and asserts nothing; the only writer of that file
+crates/bt-app/src/pointer_app_tests.rs	crate::pointer_app_tests::every_pointer_read_is_the_routers_or_a_captures	D1	the single writer of a rendering a generate-* script copies into the repository; no other test names the file (target/pointer-debt.tsv)
+crates/bt-app/src/shell_integration.rs	crate::shell_integration::tests::retired_trial_removes_its_powershell_script_root	D1	the folder is named by a transaction id minted by update_job::mint_txn, as the product names it, under the temporary folder
+crates/bt-app/src/shortcuts.rs	crate::shortcuts::tests::docs_shortcuts_md_is_the_bindings_table	D1	the single writer of a rendering a generate-* script copies into the repository; no other test names the file (target/shortcuts-table.md)
+crates/bt-app/src/update_apply_windows_tests.rs	crate::update_apply_windows::tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers	A2	parent() is of its own Install home (a bt_testpath::temp_path root), and current_exe() is the program copied in, not a build output read beside it
+crates/bt-app/src/update_archive_tests.rs	crate::update_archive::tests::this_builds_own_members_expand_whole_under_its_embedded_manifest	A2	reads the ConPTY sidecar bt-pty's build script writes into deps/ beside every test binary before any test of the package compiles; the bin itself is read only by tests/built_folio_manifest.rs
+crates/bt-app/src/window_waits_tests.rs	crate::hang_watch::window_waits_tests::every_bare_site_is_a_row_and_every_row_a_site	D1	the single writer of a rendering the failure message names for the reader; no other test names the file (target/window-thread-bare-sites.tsv)
+crates/bt-app/src/window_waits_tests.rs	crate::hang_watch::window_waits_tests::the_architecture_table_is_the_registry	D1	the single writer of a rendering a generate-* script copies into the repository; no other test names the file (target/window-waits-table.md, target/window-waits-completions.md, scripts/dev/generate-window-waits-table.ps1)
+crates/bt-platform/src/instance.rs	crate::instance::tests::the_sweep_removes_only_empty_unheld_lock_files_older_than_an_hour	D1	"target" is a file name inside the test's own scratch folder
+crates/bt-platform/src/lib.rs	crate::dir_watch_tests::a_named_watch_reports_the_entry_that_moved	D1	"target" is a subfolder of the test's own Scratch
+crates/bt-platform/src/lib.rs	crate::running_image_tests::linked_executable	A2	the link is made in a folder its caller names with bt_testpath::unique_name; parent() is the junction's target, the test executable's own folder, which is read and never written
+crates/bt-platform/tests/macos_app_delegate.rs	crate::mac::enclosing_bundle	A2	macOS harness=false test gated on BT_MAC_GUI: finds the .app bundle the launcher script wraps around this binary; a single main, no parallel tests
+crates/bt-platform/tests/macos_dock_menu.rs	crate::mac::enclosing_bundle	A2	macOS harness=false test gated on BT_MAC_GUI: finds the .app bundle the launcher script wraps around this binary; a single main, no parallel tests
+crates/bt-platform/tests/macos_hotkey.rs	crate::mac::enclosing_bundle	A2	macOS harness=false test gated on BT_MAC_GUI: finds the .app bundle the launcher script wraps around this binary; a single main, no parallel tests
+crates/bt-platform/tests/macos_notifications.rs	crate::mac::enclosing_bundle	A2	macOS harness=false test gated on BT_MAC_GUI: finds the .app bundle the launcher script wraps around this binary; a single main, no parallel tests
+crates/bt-platform/tests/macos_services.rs	crate::mac::enclosing_bundle	A2	macOS harness=false test gated on BT_MAC_GUI: finds the .app bundle the launcher script wraps around this binary; a single main, no parallel tests
+crates/bt-platform/tests/macos_webview.rs	crate::mac::enclosing_bundle	A2	macOS harness=false test gated on BT_MAC_GUI: finds the .app bundle the launcher script wraps around this binary; a single main, no parallel tests
+crates/bt-source/tests/call_graph.rs	crate::the_unfollowed_edges_are_the_committed_list	D1	the single writer of a rendering a generate-* script copies into the repository; no other test names the file (target/unfollowed-edges/, scripts/generate-unfollowed-edges.ps1)
+crates/bt-source/tests/census.rs	crate::leave_renderings	D1	the single writer of a rendering a generate-* script copies into the repository; no other test names the file (target/ownership-census/); called by one test
+crates/bt-source/tests/census.rs	crate::the_committed_runtime_dep_map_is_the_code	D1	the single writer of a rendering a generate-* script copies into the repository; no other test names the file (target/depmap/)
+crates/bt-source/tests/env_doors.rs	crate::no_library_reads_a_bt_door_outside_the_entry_list	D1	the single writer of a rendering the failure message names for the reader; no other test names the file (target/env-doors/found.tsv)
+crates/bt-source/tests/timing.rs	crate::leave_rendering	D1	the single writer of a rendering left for a person to copy rows from; no other test names the file (target/timing-bound-tests/); called by one test

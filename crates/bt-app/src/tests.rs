@@ -73,8 +73,13 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+    // The test's own file under the build directory (T-TEST-ORDER-STRAYS), not one fixed name
+    // every run of the binary shares. The hook stays installed after the test and writes every
+    // later panic of the process here, so the file is left in place; it goes with `target/`.
     let log = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/math-robustness-panic-test.log");
+        .join("../../target")
+        .join(bt_testpath::unique_name("math-robustness-panic-test"))
+        .with_extension("log");
     std::fs::write(&log, "").unwrap();
     let fatal_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls = fatal_calls.clone();

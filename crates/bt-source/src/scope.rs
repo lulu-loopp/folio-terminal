@@ -163,11 +163,23 @@ pub enum FileScoped {
     /// `licensing` job, which builds nothing, and is a PowerShell gate that cannot ask this
     /// crate's index.
     ThePsReadLineArtefactGate,
+    /// `scripts/ci/check-timing-bound.ps1`, the timing-bound list's history half,
+    /// naming `crates/bt-source/tests/timing.rs` (T-TIMING-BOUND-STRAYS).
+    ///
+    /// A `# widened ... (+n rows)` line lets rows into a list that otherwise only
+    /// shrinks, and a widening is by definition a change to the scan's grammar:
+    /// the gate asks `git diff` whether the scan's file differs from the merge
+    /// base's, so that a change adding only a comment line cannot let a new
+    /// waiting test in. Whether a committed file changed between two commits is
+    /// a fact about that file, with no item to ask about; the grammar is the
+    /// whole test file, not one item in it. It is a PowerShell gate and cannot
+    /// ask this crate's index.
+    TheTimingWideningGate,
 }
 
 impl FileScoped {
     /// Every entry. The allowlist is small enough to be an array and only shrinks.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::VendoredAddedFiles,
         Self::TheTripwireItself,
         Self::TheDeadCodeGate,
@@ -178,6 +190,7 @@ impl FileScoped {
         Self::TheTopicMover,
         Self::TheGateCanaries,
         Self::ThePsReadLineArtefactGate,
+        Self::TheTimingWideningGate,
     ];
 
     /// Where the reader lives, from the workspace root, with forward slashes.
@@ -194,6 +207,7 @@ impl FileScoped {
             Self::TheTopicMover => "scripts/dev/bt-app-move-topic.py",
             Self::TheGateCanaries => ".github/workflows/ci.yml",
             Self::ThePsReadLineArtefactGate => "scripts/ci/check-psreadline-artefact.ps1",
+            Self::TheTimingWideningGate => "scripts/ci/check-timing-bound.ps1",
         }
     }
 
@@ -244,6 +258,11 @@ impl FileScoped {
                 "a PSReadLine pin is written in three files and the gate holds their text to the \
                  package: the build script's table, as written, is one of the three; a \
                  PowerShell gate in a job that builds nothing"
+            }
+            Self::TheTimingWideningGate => {
+                "a widening line admits rows only in a change to the scan's grammar, and whether \
+                 the scan's file differs from the merge base's is a fact about that file; a \
+                 PowerShell gate"
             }
         }
     }

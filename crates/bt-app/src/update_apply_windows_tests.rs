@@ -2961,6 +2961,13 @@ fn armed(tag: &str) -> Option<Install> {
 ///
 /// MUTATION: in `update_apply::write_journal`, return the first failure
 /// (no retry).
+///
+/// **The journal-held window is out of this test's reach** (T-TIMING-BOUND-STRAYS): the same
+/// window bounds the applier's wait for the trial watch to acknowledge its decision
+/// (`update_apply::note_unkept_after_trial_decision`), which is not what this test asserts, and
+/// at the suite's two seconds a loaded run ended the update `CommittedWithDebt` before the watch
+/// thread came round. The hold this test does assert ends by its own `drop`, long inside the
+/// suite's patience.
 #[test]
 fn a_journal_write_refused_for_a_moment_is_asked_again_and_the_update_completes() {
     let Some(install) = armed("refused-once") else {
@@ -2980,7 +2987,10 @@ fn a_journal_write_refused_for_a_moment_is_asked_again_and_the_update_completes(
         .unwrap()
         .unwrap();
     let applier = start(
-        install.road(limits(20_000, 20_000)),
+        install.road(Limits {
+            journal_held_within: crate::lane::PATIENCE,
+            ..limits(20_000, 20_000)
+        }),
         install.txn,
         install.applier,
         install.world(Trial::Answers),

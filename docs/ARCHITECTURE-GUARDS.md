@@ -722,6 +722,48 @@ the product's `LOAD_BUDGET` and `IDLE_POLL_INTERVAL` so that it cannot end
 before the engine's own refusal lands, and handed to the engine's wait door —
 so it is not a row (T-VIDEO-ENGINE-NO-DURATION).
 
+2026-10-24 (T-TIMING-BOUND-STRAYS): the scan reads three shapes, not one. Besides
+a std real wait or `elapsed()` in the test's own body, it lists **clock
+arithmetic in the test's own body** (a comparison, a subtraction or a
+`duration_since` whose two sides hold different `Instant::now()` /
+`SystemTime::now()` readings, followed through the test's bindings; one reading
+and its offsets is not one) and **a budget measured in a test-only helper** (a
+test-only callable of the test's own target, reached through resolved call-graph
+edges, that keeps an `elapsed()` or a two-reading difference rather than only
+comparing or formatting it). Unresolved edges whose candidates measure, macro
+arguments that do not parse and name a clock, and bodies that do not parse are
+refused by file and line. The list's `# widened <date> by <ticket> (+<n> rows)`
+line admits exactly the rows a widening finds; `check-timing-bound.ps1` refuses
+any other growth. Its product half is
+`no_product_function_reads_again_the_clock_it_was_handed`: a product function
+handed `now: Instant` judges on that instant, and a second reading needs a
+listed reason (a real wait in between). Not read: a reading handed back by a
+call (`while Instant::now() < deadline_in(..)`), and an instant handed under any
+name but `now` (`deadline: Instant` rightly meets a fresh reading); a widening
+line counts only in a change that also changes the scan.
+
+## Test order and shared fixtures
+
+The rule: a test's verdict does not hang on a file another build step made, on the
+process's directory or environment, or on a fixture folder another test or an
+earlier run shares (T-TEST-ORDER-STRAYS, 2026-10-24).
+
+Where and what to do: `crates/bt-source/tests/test_order.rs` is the gate and
+`docs/plans/TEST-ORDER-EXCEPTIONS.tsv` its register. It refuses, in test code, a
+`CARGO_BIN_EXE_` literal outside an integration test's folder, in a body, a `const` initializer or product code alike (A1), a path derived from the
+test executable's folder with no `bt_testpath` name (A2), a
+`set_current_dir`/`set_var`/`remove_var` call (C1), and a create under the
+temporary folder or the build directory with no `bt_testpath` name (D1), and a
+module-level `use` that brings `env::temp_dir` in, globs `env` or renames `env`, or a
+`use` inside a test body that does one of those (D0: a bare `temp_dir()` call could then
+not be told from a test's own helper). A row listed twice is refused. When red,
+name the path with `bt_testpath::unique_name`/`temp_path`, locate a bin through
+`CARGO_BIN_EXE_<name>` in an integration test (cargo builds it for that target),
+or, when the fixed name is the subject, add a row saying why. A process-global that
+two tests touch is not in its grammar: review owns it. An `#[ignore]`d test that
+must run alone or serially says so on its line of `scripts/ci/ignored-tests.txt`
+(`run=alone`, `run=serial`).
+
 ## Raw-effect and thread-door exceptions
 
 The rule: `bt-app` and `bt-platform` create workers through the admitted thread
