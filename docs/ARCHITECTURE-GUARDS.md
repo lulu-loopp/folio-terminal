@@ -476,29 +476,54 @@ T-REQUEST-DOOR-GUARD, S-2b). Each door is a row of `crates/bt-app/src/window_wai
 `# request-doors` (`door`, `asked on`, `boundary`, `handed`, `mailbox`), one per `# completions`
 door whose thread is not the window's or `main`'s (`window_waits_tests::every_request_door_has_its_line`
 holds the equality both ways). A `window` row is walked over `bt_source::call_graph` from the door to
-its boundary: the calls its request leaves the thread by, each of which the walk must meet; a
-closure literal written as an argument of one is the worker's (`CallSite::closures`, `Handed`), and
-the call's own body is walked. A row asked `main (before the loop)` or in a `door process` is
-printed as not walked. The walk fails on an effect (a `# vocabulary` path, or under `std::fs`,
-`std::net`, `std::process` or the `std::io` read and write handles), an `# entrances` item, an
-owner door's or a worker's body, a blocking primitive outside the row's `mailbox` items, another
-window door that does not conform (`Inherits`, by its status), a boundary never met, and every
-unresolved edge but an allowed macro and a derive's or `#[from]`'s callee; `Cutoff` and
-`Unparsed` are never listable. Every first-party impl of a foreign trait is walked once as a root
-of its own, one `Implicit` row per impl. A `const`'s initializer is not walked (the compiler runs
-it); a `LazyLock`'s is.
+its boundary: the calls its request leaves the thread by, each of which the walk must meet. A
+call that takes the worker's body names that argument, `key@N` (`lane::Executor::start_worker@2`,
+counted as `Handed::argument` counts: a method's receiver not counted, a UFCS path call's every
+written argument counted); a closure literal written there is the worker's and is not walked
+(`CallSite::closures`, `Handed`), while every other closure written at the call (one the boundary
+item runs on the caller's thread: `admit_between`'s `between`, a refusal's voice) and the call's own
+body are walked as the door's. A first-party boundary item is walked, not a stop: a stop would hide
+the enqueue's own locks. `—` is a door that hands nothing over (it arms a wait); its walk is judged
+all the same, with no boundary to meet. A row asked `main (before the loop)` or in a `door
+process` is not walked, and those rows are a closed list (`window_waits_tests::NOT_WALKED`): a
+walked door that reaches one is a `NotWalked` violation, since the reach contradicts the row, and
+moving a row out of the walk is a diff that list names. The walk fails on an effect (a
+`# vocabulary` path; under `std::fs`, `std::net`, `std::process`, `std::os::{windows, unix}::fs` or
+the `std::io` read and write handles; a `Path`'s or `PathBuf`'s question to the disk (`is_file`,
+`exists`, `metadata`, `read_dir`, `canonicalize`, …); `std::env::set_current_dir`; a function of the `windows`
+crate's `Storage::FileSystem`, `System::Registry` and `System::IO` modules, or the shell's
+`ShellExecute(Ex)W` and `SHCreateStreamOnFileEx`), an `# entrances` item, an owner door's or a
+worker's body, a blocking primitive outside the row's `mailbox` items (the `std::sync` and
+`std::thread` waits, joins, parks, scopes and `Once`, and the Win32 `WaitFor*Object*`,
+`SignalObjectAndWait` and `SleepEx`), another window door that does not conform (`Inherits`, by its
+status), a boundary never met, and every unresolved edge but an allowed macro (never the print,
+write or `dbg!` family) and a derive's or `#[from]`'s callee; `Cutoff` and `Unparsed` are never
+listable. A `mailbox` item that takes the lock as an argument (`lane::lock(&Mutex<T>)`, read from
+its signature) locks whatever its caller hands it: it is exempt only where another `mailbox` item of
+the row calls it, so the cell names the methods that lock through it. Every first-party impl of a
+foreign trait is walked once as a root of its own, one `Implicit` row per impl *method*, its
+verdict held by what stands behind it (an effect, a blocking primitive or a door-level finding
+behind it takes only `violation`). A `const`'s and a plain `static`'s initializer are not walked
+(the compiler evaluates them; a function one names runs where it is called, a `Dynamic` edge); a
+`LazyLock`'s or `OnceLock`'s is. A key in any cell names one item per `cfg` arm (one per
+platform's module); two items on one arm (a bare name two modules declare) are refused, and so is
+a first-party `# vocabulary` or `# entrances` path naming nothing.
 
 **The sites, by site.** `docs/plans/REQUEST-DOOR-SITES.tsv` lists every failure keyed by file,
 item, kind and name (no line), with `sites`, a verdict and a reason: `std` or `follows <key>; …`
 (read: nothing behind it, or the named items, which the walk then follows), `unreviewed` (not read
 yet, counted), or `violation` (a C1 breach; an effect, a blocking primitive and every door-level
-kind take no other verdict, the reason naming its finding). At the seed: 7 959 keys, 28 463
-sites; 52 `std`, 7 596 `unreviewed`, 311 `violation`. The violations are four findings, each a
-ticket: (a) the window thread's `diagnostics::note` (row 20) inherited by 16 request doors and the
-gesture doors; (b) the trace sink and stderr written on the calling thread; (c) the seven gesture
-doors that answer and draw inline (`Runtime::hand_off`, the clipboard doors, pane reap and close);
-(d) two lazy initializers that touch the file system on first use (`profiles::registry`,
-`persist::storage_dir`).
+kind take no other verdict, the reason naming its finding; an unread row's reason is
+`2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))`). After the review's fold: 7 991 keys,
+28 589 sites; 53 `std`, 7 546 `unreviewed`, 392 `violation`; 29 of the 57 walked doors breach C1.
+The violations are six findings, each a ticket: (a) the window thread's `diagnostics::note` (row
+20) inherited by 16 request doors and the gesture doors; (b) the trace sink and stderr written on
+the calling thread; (c) the seven gesture doors that answer and draw inline (`Runtime::hand_off`,
+the clipboard doors, pane reap and close), measured over each gesture's whole road; (d) two lazy
+initializers that touch the file system on first use (`profiles::registry`, `persist::storage_dir`);
+(e) the implicit impls behind which is an effect, a blocking primitive or a door, unproven to stay
+off a request door's road; (f) `explorer_menu`'s request and probe asking the disk for the package
+file on the window thread.
 
 Where and what to do: `crates/bt-source/tests/request_doors.rs` —
 `every_request_door_returns_at_once` (one index of the tree, about 20 s; prints `REQUEST_DOOR` per
@@ -506,8 +531,8 @@ door) holds the list equal to the tree, naming the doors that meet a key it does
 fixture tests (`tests/fixtures/call_graph/request_doors/`) hold each class, each red under a named
 mutation. `scripts/ci/check-request-door-sites.ps1` (its planted cases in
 `check-request-door-sites-tests.ps1`) holds the list to the merge base's: a key added or grown,
-or a verdict moved to `unreviewed` or `violation`, takes a new reason `YYYY-MM-DD: <why>`; it
-prints both debts' counts. `gates-can-fail` plants a file write and a stored `Box<dyn Fn()>` call
+a verdict moved to `unreviewed` or `violation` or away from `violation`, or a `follows` row
+re-pointed, takes a new reason `YYYY-MM-DD: <why>`; it prints both debts' counts. `gates-can-fail` plants a file write and a stored `Box<dyn Fn()>` call
 in `HandoffLane::submit` and requires each refused by file, site and door. When red: keep the
 door from reaching it, or correct the row's cells (a hand-over call the boundary misses walks a
 worker's closure as the door's), and regenerate with `scripts/generate-request-door-sites.ps1`,
