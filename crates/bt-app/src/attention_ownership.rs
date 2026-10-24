@@ -308,10 +308,14 @@ mod tests {
         ]
     }
 
+    /// A fresh folder of this test's own under the build directory, named by `bt_testpath`: two
+    /// tests that pass one name (`stranger-claude` was two) get two folders, and nothing an
+    /// earlier run left there is an input to this one.
     fn root(name: &str) -> PathBuf {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/tb-tests")
-            .join(name);
+            .join(bt_testpath::unique_name(name));
+        let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         fs::canonicalize(path).unwrap()
     }

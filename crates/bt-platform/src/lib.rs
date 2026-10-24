@@ -7719,9 +7719,11 @@ mod probe_child_tests {
         if std::env::var(HELPER_MODE).as_deref() != Ok("compare") {
             return;
         }
+        // The test's own folder (T-TEST-ORDER-STRAYS): two runs of the helper at once shared
+        // one fixed name.
         let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/tb-tests")
-            .join("probe twin \u{4e2d}\u{6587}");
+            .join(bt_testpath::unique_name("probe twin \u{4e2d}\u{6587}"));
         std::fs::create_dir_all(&directory).expect("the twin's working directory");
         let by_std = described_by_std(twin(&directory));
         let by_probe = Described::read(
@@ -7749,6 +7751,7 @@ mod probe_child_tests {
             println!("compare: {difference}");
         }
         std::io::stdout().flush().expect("flush the comparison");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// **The probe's child is given exactly what the standard library would

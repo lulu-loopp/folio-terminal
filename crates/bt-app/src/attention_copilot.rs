@@ -1424,7 +1424,8 @@ mod tests {
     fn attention_two_live_copies_require_takeover_and_preserve_bytes() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/tb-tests")
-            .join(concat!("copilot-", "two-copies"));
+            .join(bt_testpath::unique_name(concat!("copilot-", "two-copies")));
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         // **Two folders, one file name.** An operand is Folio's only if its file name is one
         // Folio installs itself under, which is how two real copies differ: same program, two

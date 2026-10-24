@@ -73,8 +73,9 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-    let log = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/math-robustness-panic-test.log");
+    // The test's own file (T-TEST-ORDER-STRAYS), not one fixed name every run of the binary
+    // shares; the hook keeps writing to it after the test, so it is left in place.
+    let log = bt_testpath::temp_path("math-robustness-panic-test").with_extension("log");
     std::fs::write(&log, "").unwrap();
     let fatal_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let calls = fatal_calls.clone();
