@@ -493,7 +493,7 @@ item, kind and name (no line), with `sites`, a verdict and a reason: `std` or `f
 (read: nothing behind it, or the named items, which the walk then follows), `unreviewed` (not read
 yet, counted), or `violation` (a C1 breach; an effect, a blocking primitive and every door-level
 kind take no other verdict, the reason naming its finding). At the seed: 7 959 keys, 28 463
-sites; 45 `std`, 7 596 `unreviewed`, 318 `violation`. The violations are four findings, each a
+sites; 52 `std`, 7 596 `unreviewed`, 311 `violation`. The violations are four findings, each a
 ticket: (a) the window thread's `diagnostics::note` (row 20) inherited by 16 request doors and the
 gesture doors; (b) the trace sink and stderr written on the calling thread; (c) the seven gesture
 doors that answer and draw inline (`Runtime::hand_off`, the clipboard doors, pane reap and close);

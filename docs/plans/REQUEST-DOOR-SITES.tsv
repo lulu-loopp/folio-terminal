@@ -1325,7 +1325,7 @@ crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Ambiguous	write_all	1	
 crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Dynamic	ink	3	unreviewed	
 crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Effect	std::fs::OpenOptions::create	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
 crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Effect	std::fs::OpenOptions::new	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
-crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Macro	writeln	4	violation	2026-10-24: (b) the trace sink and stderr: a sink-less run writes stderr, and a trace run opens and appends the trace file, under its lock, on the calling thread; (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
+crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Macro	writeln	4	std	2026-10-24: formats into a String it owns, no stream (a file write after it is its own key)
 crates/bt-app/src/main.rs	bt-app crate::dump_focus_thumb_frame	Ambiguous	as_deref	1	unreviewed	
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Ambiguous	append	1	unreviewed	
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Ambiguous	open	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write: a file, process or thread call
@@ -1333,7 +1333,7 @@ crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Ambiguous	write_all	1
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Dynamic	ink	3	unreviewed	
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Effect	std::fs::OpenOptions::create	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Effect	std::fs::OpenOptions::new	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
-crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Macro	writeln	6	violation	2026-10-24: (b) the trace sink and stderr: a sink-less run writes stderr, and a trace run opens and appends the trace file, under its lock, on the calling thread; (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
+crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Macro	writeln	6	std	2026-10-24: formats into a String it owns, no stream (a file write after it is its own key)
 crates/bt-app/src/main.rs	bt-app crate::end_leaves_of	Dynamic	reach	1	unreviewed	
 crates/bt-app/src/main.rs	bt-app crate::ensure_metrics_match_authoritative_scale	Macro	ensure	1	unreviewed	
 crates/bt-app/src/main.rs	bt-app crate::ensure_swapchain_matches_inner	Macro	ensure	1	unreviewed	
@@ -1559,7 +1559,7 @@ crates/bt-app/src/marks.rs	bt-app crate::marks::MarkColour::from_wire	Ambiguous	
 crates/bt-app/src/marks.rs	bt-app crate::marks::MarkColour::from_wire	Ambiguous	into_iter	1	unreviewed	
 crates/bt-app/src/marks.rs	bt-app crate::marks::MarkColour::from_wire	Ambiguous	wire	1	unreviewed	
 crates/bt-app/src/marks.rs	bt-app crate::marks::mark_key	Ambiguous	push_str	1	unreviewed	
-crates/bt-app/src/marks.rs	bt-app crate::marks::mark_key	Macro	write	11	violation	2026-10-24: (b) the trace sink and stderr: a sink-less run writes stderr, and a trace run opens and appends the trace file, under its lock, on the calling thread; (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
+crates/bt-app/src/marks.rs	bt-app crate::marks::mark_key	Macro	write	11	std	2026-10-24: formats into a String it owns, no stream (a file write after it is its own key)
 crates/bt-app/src/marks.rs	bt-app crate::marks::svg_document	Ambiguous	alpha	1	unreviewed	
 crates/bt-app/src/marks.rs	bt-app crate::marks::svg_document	Ambiguous	fold	1	unreviewed	
 crates/bt-app/src/marks.rs	bt-app crate::marks::svg_document	Ambiguous	iter	1	unreviewed	
@@ -4138,7 +4138,7 @@ crates/bt-app/src/shortcuts.rs	bt-app crate::shortcuts::fold_caps	Ambiguous	coun
 crates/bt-app/src/shortcuts.rs	bt-app crate::shortcuts::fold_caps	Ambiguous	unwrap_or	1	unreviewed	
 crates/bt-app/src/shortcuts.rs	bt-app crate::shortcuts::folded_key_cap	Ambiguous	count	1	unreviewed	
 crates/bt-app/src/shortcuts.rs	bt-app crate::shortcuts::folded_key_cap	Ambiguous	then	1	unreviewed	
-crates/bt-app/src/shortcuts.rs	bt-app crate::shortcuts::format_chord_on	Macro	write	1	violation	2026-10-24: (b) the trace sink and stderr: a sink-less run writes stderr, and a trace run opens and appends the trace file, under its lock, on the calling thread; (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::reap_exited_tabs
+crates/bt-app/src/shortcuts.rs	bt-app crate::shortcuts::format_chord_on	Macro	write	1	std	2026-10-24: formats into a String it owns, no stream (a file write after it is its own key)
 crates/bt-app/src/shortcuts.rs	bt-app crate::shortcuts::note_the_summon_is_taken	Ambiguous	text	1	unreviewed	
 crates/bt-app/src/shortcuts.rs	bt-app crate::shortcuts::noting_the_shell	Path	text	1	unreviewed	
 crates/bt-app/src/shortcuts.rs	bt-app crate::shortcuts::parse_chord_in	Ambiguous	contains	1	unreviewed	
@@ -4459,7 +4459,7 @@ crates/bt-app/src/webhost.rs	bt-app crate::webhost::refusal_sentence	Ambiguous	t
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::refusal_sentence	Ambiguous	to_owned	2	unreviewed	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::refusal_sentence	Path	WebFailAddressInvalidSay	1	unreviewed	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::refusal_sentence	Path	WebFailBlockedSay	1	unreviewed	
-crates/bt-app/src/webhost.rs	bt-app crate::webhost::search_url	Macro	write	1	violation	2026-10-24: (b) the trace sink and stderr: a sink-less run writes stderr, and a trace run opens and appends the trace file, under its lock, on the calling thread; (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
+crates/bt-app/src/webhost.rs	bt-app crate::webhost::search_url	Macro	write	1	std	2026-10-24: formats into a String it owns, no stream (a file write after it is its own key)
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_engine_folder	Ambiguous	filter	1	unreviewed	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_engine_folder	Ambiguous	is_empty	1	unreviewed	
 crates/bt-app/src/webhost.rs	bt-app crate::webhost::web_engine_folder	Ambiguous	join	4	std	2026-10-24: a slice's, a string list's or a path's join: no file, no wait
@@ -6698,7 +6698,7 @@ crates/bt-term/src/session.rs	bt-term crate::session::DualPlaneSession::trace_de
 crates/bt-term/src/session.rs	bt-term crate::session::DualPlaneSession::trace_decorations	Ambiguous	write_all	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write: a file, process or thread call
 crates/bt-term/src/session.rs	bt-term crate::session::DualPlaneSession::trace_decorations	Effect	std::fs::OpenOptions::create	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
 crates/bt-term/src/session.rs	bt-term crate::session::DualPlaneSession::trace_decorations	Effect	std::fs::OpenOptions::new	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
-crates/bt-term/src/session.rs	bt-term crate::session::DualPlaneSession::trace_decorations	Macro	write	3	violation	2026-10-24: (b) the trace sink and stderr: a sink-less run writes stderr, and a trace run opens and appends the trace file, under its lock, on the calling thread; (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
+crates/bt-term/src/session.rs	bt-term crate::session::DualPlaneSession::trace_decorations	Macro	write	3	std	2026-10-24: formats into a String it owns, no stream (a file write after it is its own key)
 crates/bt-term/src/session.rs	bt-term crate::session::DualPlaneSession::trace_resize_event	Ambiguous	as_micros	1	unreviewed	
 crates/bt-term/src/session.rs	bt-term crate::session::DualPlaneSession::trace_resize_event	Ambiguous	min	1	unreviewed	
 crates/bt-term/src/session.rs	bt-term crate::session::DualPlaneSession::try_handoff_live_artifact	Ambiguous	clone	1	unreviewed	
@@ -7934,7 +7934,7 @@ vendor/vte/src/ansi.rs	vte crate::ansi::<Performer as crate::Perform>::osc_dispa
 vendor/vte/src/ansi.rs	vte crate::ansi::<Performer as crate::Perform>::osc_dispatch	Ambiguous	trim	1	unreviewed	
 vendor/vte/src/ansi.rs	vte crate::ansi::<Performer as crate::Perform>::osc_dispatch	Ambiguous	unwrap_or_default	2	unreviewed	
 vendor/vte/src/ansi.rs	vte crate::ansi::<Performer as crate::Perform>::osc_dispatch	Macro	debug	2	unreviewed	
-vendor/vte/src/ansi.rs	vte crate::ansi::<Performer as crate::Perform>::osc_dispatch	Macro	write	1	violation	2026-10-24: (b) the trace sink and stderr: a sink-less run writes stderr, and a trace run opens and appends the trace file, under its lock, on the calling thread; (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
+vendor/vte/src/ansi.rs	vte crate::ansi::<Performer as crate::Perform>::osc_dispatch	Macro	write	1	std	2026-10-24: formats into a String it owns, no stream (a file write after it is its own key)
 vendor/vte/src/ansi.rs	vte crate::ansi::<Performer as crate::Perform>::put	Macro	debug	1	unreviewed	
 vendor/vte/src/ansi.rs	vte crate::ansi::<Performer as crate::Perform>::unhook	Macro	debug	1	unreviewed	
 vendor/vte/src/ansi.rs	vte crate::ansi::<Rgb as Display>::fmt	Implicit	Display	1	unreviewed	
