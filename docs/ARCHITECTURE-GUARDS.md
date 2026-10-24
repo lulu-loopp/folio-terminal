@@ -425,18 +425,30 @@ hand-editing the generated architecture region.
 The role and phase writers (`enter_window_thread`, `loop_running`, `exiting`,
 `quit_abandoned`, `enter_standalone_main`) are called only where `PINS` places
 them, each after the landmark of its owner's body that its pin names. A landmark
-is placed by the call it names (T-LANDMARK-GUARD-BY-CALL, 2026-10-24): a path
-call (`cli::parse(…)`, `launch_wire::hand_over(…)`), a method call on the
-receiver written in `LANDMARKS` (`builder.build()`, `event_loop.run_app(…)`,
-`self.session_store.close()`), or a variant's path (`StartCause::Init`, each
-`QuitStep::V`), never a bare identifier: a field, a statement `let` and the local
-it binds, another path's call and another enum's variant are not landmarks. Any
-other position of a landmark's name — a pattern, a parameter, an import, a value,
-a method call on another receiver, a path naming a method, a rename, a nested
-`fn` or a macro — is refused with the name, the shape and the line
-(`window_waits_tests::landmarks_in`; the planted cases are the
-`a_*landmark*` tests). When refused, rename what is not a landmark, or widen the
-grammar in its own change with a planted case.
+is placed by the call it names (T-LANDMARK-GUARD-BY-CALL, 2026-10-24): the call
+of a path or a name that resolves to the landmark's item, however it is spelled
+(`cli::parse(…)`, `launch_wire::hand_over(…)`, an alias such as `wire::hand_over(…)`
+after `use crate::launch_wire as wire;`, a re-export), followed through the
+crate's `use` declarations; a method call on the receiver written in `LANDMARKS`
+(`builder.build()`, `event_loop.run_app(…)`, `self.session_store.close()`); or a
+variant's path (`StartCause::Init`, each declared variant `QuitStep::V`). Never a
+bare identifier: a field, a statement `let` or a parameter of the owner and the
+local it binds, a path that resolves to another item, another enum's variant
+and an enum's associated item are not landmarks. Any other position of a
+landmark's name is refused with the name, the shape and the line: a path that
+resolves to no item of the crate or to the landmark and another item at once
+(globs), a pattern, a parameter (a closure's too), an import, a value, a method
+call on another receiver, a path naming a method, a landmark's path not called
+directly, a path with generic arguments or a leading `::`, `Enum::*` /
+`Enum::{…}`, a rename, a macro or a nested `fn` of the name, and the landmark
+itself written inside a nested `fn`'s body or the arguments of a macro other than
+the standard ones that run them in place (`IN_PLACE_MACROS`: `matches!`,
+`assert!`, `format!`, …) (`window_waits_tests::landmarks_in`; the planted cases are the `a_*landmark*`
+tests, and `a_refused_landmark_fails_the_pinned_writers_guard` runs the whole
+guard). Not followed: a landmark called inside a helper the owner calls, which
+for a landmark no pin names (`hand_over`) can leave a moved writer reading the
+earlier landmark its pin names. When refused, rename what is not a landmark, or
+widen the grammar in its own change with a planted case.
 
 The registry's `# completions` section (S-1, 2026-10-11) is the side-effects
 contract's ledger, one row per request protocol, held by the
