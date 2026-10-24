@@ -1,0 +1,47 @@
+## The request-door guard's fixture registry: window_waits.tsv's sections the guard reads.
+
+# vocabulary
+path	targets	reason
+std::thread::sleep	all	the fixture's foreign effect
+bt_rd::resize	all	the fixture's first-party effect
+
+# entrances
+path	door
+bt_rd::Lane::poke	the poke door
+
+# effects
+crate	arm	item	effects	kind	authority	door
+bt-rd	all	crate::present	draws	owner-door-body	the window	Present
+bt-rd	all	crate::Lane::serve	works	worker-door-body	the worker	
+
+# completions
+class	door	thread	signal	failure	supersession	sink	status
+a note	note	window	return	—	—	—	row 20
+a warm-up	prewarm	video	Warmed	—	—	—	conforms
+
+# request-doors
+door	asked on	boundary	handed	mailbox
+submit	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_writes	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_peeks	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_calls_back	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_and_draw	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+serve_inline	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_with_hooks	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_seeded	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_between	window	Lane::admit_with	—	Lane::admit_with
+submit_with_voice	window	spawn_with@1	—	—
+submit_through	window	std::sync::Condvar::notify_one, spawn@0	—	lock, Lane::mailbox_through
+submit_peeks_through	window	std::sync::Condvar::notify_one, spawn@0	—	lock, Lane::mailbox_through
+submit_peeks_through_alias	window	std::sync::Condvar::notify_one, spawn@0	—	lock, lock_cell, Lane::mailbox_through
+submit_prewarms	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_noting	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_pokes	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_handing	window	std::sync::Condvar::notify_one, spawn@0	work_fn	Lane::mailbox
+submit_runs_handed	window	std::sync::Condvar::notify_one, spawn@0	work_fn	Lane::mailbox
+submit_says	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_strays	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_copies	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_far	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_asks_the_disk	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+prewarm	main (before the loop)	—	—	—

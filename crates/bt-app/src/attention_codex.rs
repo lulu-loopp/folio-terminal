@@ -495,10 +495,15 @@ mod tests {
 
     #[test]
     fn attention_two_live_copies_require_takeover_and_preserve_bytes() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/tb-tests")
-            .join(concat!("codex-", "two-copies"));
-        std::fs::create_dir_all(&root).unwrap();
+        // The test's own folders, removed when it lets go of them (T-TEST-ORDER-STRAYS): the
+        // root, and the marks folder `apply_to` names after it.
+        let root = crate::test_support::ScratchFolder::create(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tb-tests")
+                .join(bt_testpath::unique_name(concat!("codex-", "two-copies"))),
+        );
+        let marks = crate::test_support::attention_marks_folder("codex", &root);
+        let root = root.also_removing(marks);
         // **Two folders, one file name.** An operand is Folio's only if its file name is one
         // Folio installs itself under, which is how two real copies differ: same program, two
         // places. The odd characters this fixture exists for move to the folder.
@@ -532,9 +537,7 @@ mod tests {
             path,
             install.into(),
             exe,
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/tb-test-marks/codex")
-                .join(path.parent().unwrap().file_name().unwrap()),
+            &crate::test_support::attention_marks_folder("codex", path),
         )
     }
 
@@ -851,13 +854,15 @@ mod tests {
     }
 
     /// A scratch directory of this test's own. Never anywhere near a real `~/.codex`.
-    fn scratch(name: &str) -> PathBuf {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/tb-tests")
-            .join(bt_testpath::unique_name(&format!("folio-codex-{name}")));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a scratch directory");
-        dir
+    /// A scratch folder of this test's own, removed with its marks folder when the test lets go.
+    fn scratch(name: &str) -> crate::test_support::ScratchFolder {
+        let dir = crate::test_support::ScratchFolder::create(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tb-tests")
+                .join(bt_testpath::unique_name(&format!("folio-codex-{name}"))),
+        );
+        let marks = crate::test_support::attention_marks_folder("codex", &dir);
+        dir.also_removing(marks)
     }
 
     /// Every name in a directory, sorted — what a reader who opened it would find.

@@ -8477,7 +8477,7 @@ fn the_effects_section_is_the_effect_functions_inside_the_doors() {
 /// The registry's sections, each headed `# <name>` once, in this order: a closed list, so a section
 /// misspelled, unknown or written twice — a second `# graphs` after the first, which
 /// [`section_in`] would never read — is refused by name rather than read past.
-const REGISTRY_SECTIONS: [&str; 10] = [
+const REGISTRY_SECTIONS: [&str; 11] = [
     "rows",
     "doors",
     "vocabulary",
@@ -8488,6 +8488,7 @@ const REGISTRY_SECTIONS: [&str; 10] = [
     "emergency",
     "owners",
     "completions",
+    "request-doors",
 ];
 
 /// **The registry's section headers are the closed list** [`REGISTRY_SECTIONS`]: every line that
@@ -9758,6 +9759,456 @@ fn app_event_variants(world: &World) -> BTreeSet<&'static str> {
         })
         .map(ItemRecord::name)
         .collect()
+}
+
+/// The registry's `# request-doors` section (T-REQUEST-DOOR-GUARD): the C1 guard's row per request
+/// door, read by bt-source's `request_doors::every_request_door_returns_at_once`.
+const REQUEST_DOOR_COLUMNS: [&str; 5] = ["door", "asked on", "boundary", "handed", "mailbox"];
+
+/// Where a request door is asked: the window thread (walked), or before the loop or in a door
+/// process (not walked: C1 is the window thread's).
+const ASKED_ON: [&str; 3] = ["window", "main (before the loop)", "door process"];
+
+/// **The doors the C1 guard does not walk, a closed list** (the review of T-REQUEST-DOOR-GUARD,
+/// H2): an `asked on` other than `window` drops a door's every key from the walk, so moving a line
+/// here is a reviewed diff this list names, never a free shrink of the request-door sites. A walked
+/// door that reaches one of these is a `NotWalked` violation in bt-source's guard.
+const NOT_WALKED: [(&str, &str); 5] = [
+    ("<Machine as World>::on_a_worker", "main (before the loop)"),
+    ("uninstall::run", "door process"),
+    ("uninstall::remover_standalone", "door process"),
+    ("main", "main (before the loop)"),
+    ("bt_platform::video::prewarm", "main (before the loop)"),
+];
+
+/// **What `# request-doors` refuses against `# completions`**: a request door (a row whose threads
+/// are not all [`OWNER_THREADS`]) with no line, a line whose door is no request door, a door on two
+/// lines, an `asked on` outside [`ASKED_ON`], a door not walked that is not [`NOT_WALKED`]'s (or a
+/// [`NOT_WALKED`] door asked elsewhere or missing), and an empty cell.
+fn request_door_failures(completions: &[Completion], lines: &[Vec<&str>]) -> Vec<String> {
+    let doors: BTreeSet<&str> = completions
+        .iter()
+        .filter(|row| {
+            row.threads
+                .iter()
+                .any(|thread| !OWNER_THREADS.contains(thread))
+        })
+        .map(|row| row.door)
+        .collect();
+    let mut failures = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for cells in lines {
+        let door = cells[0];
+        if !seen.insert(door) {
+            failures.push(format!("`{door}` has two `# request-doors` lines"));
+        }
+        if !doors.contains(door) {
+            failures.push(format!(
+                "`{door}` is on `# request-doors` and is no `# completions` request door (a row whose \
+                 thread is not the window's or `main`'s)"
+            ));
+        }
+        if !ASKED_ON.contains(&cells[1]) {
+            failures.push(format!(
+                "`{door}`: `asked on` is `{}`, not one of {ASKED_ON:?}",
+                cells[1]
+            ));
+        }
+        let listed = NOT_WALKED
+            .iter()
+            .find(|(listed, _)| *listed == door)
+            .map(|(_, asked)| *asked);
+        if cells[1] != "window" && listed != Some(cells[1]) {
+            failures.push(format!(
+                "`{door}` is asked `{}`, so not walked, and [`NOT_WALKED`] does not name it so",
+                cells[1]
+            ));
+        }
+        if cells[1] == "window" && listed.is_some() {
+            failures.push(format!(
+                "`{door}` is in [`NOT_WALKED`] and its line says it is asked on the window thread"
+            ));
+        }
+        if cells.iter().any(|cell| cell.trim().is_empty()) {
+            failures.push(format!("`{door}`: an empty cell (`—` is none)"));
+        }
+    }
+    for (door, _) in NOT_WALKED {
+        if !seen.contains(door) {
+            failures.push(format!(
+                "[`NOT_WALKED`]'s `{door}` has no `# request-doors` line"
+            ));
+        }
+    }
+    for door in doors.difference(&seen) {
+        failures.push(format!(
+            "`{door}` is a `# completions` request door with no `# request-doors` line"
+        ));
+    }
+    failures
+}
+
+/// RED (T-REQUEST-DOOR-GUARD) — **every request door has its one `# request-doors` line, and every
+/// line is a request door's** (the C1 guard's rows; the registry is the one ledger).
+///
+/// MUTATION: delete the hand-off's line — `Runtime::hand_off` is named as a request door with no
+/// line; a planted line for `diagnostics::note` (a window door) is refused; and the hand-off's line
+/// moved to `door process` (out of the walk) is refused, as is `prewarm`'s moved to `window`.
+#[test]
+fn every_request_door_has_its_line() {
+    let completions = completions();
+    let lines = section("request-doors", &REQUEST_DOOR_COLUMNS);
+    let failures = request_door_failures(&completions, &lines);
+    assert!(
+        failures.is_empty(),
+        "`# request-doors` and `# completions`:\n  {}",
+        failures.join("\n  ")
+    );
+    let without: Vec<Vec<&str>> = lines
+        .iter()
+        .filter(|cells| cells[0] != "Runtime::hand_off")
+        .cloned()
+        .collect();
+    assert!(
+        request_door_failures(&completions, &without).iter().any(
+            |failure| failure.contains("`Runtime::hand_off` is a `# completions` request door")
+        ),
+        "a missing line is refused"
+    );
+    let mut planted = lines.clone();
+    planted.push(vec![
+        "diagnostics::note",
+        "window",
+        "std::sync::mpsc::Sender::send",
+        "—",
+        "—",
+    ]);
+    assert!(
+        request_door_failures(&completions, &planted)
+            .iter()
+            .any(|failure| failure.contains("`diagnostics::note` is on `# request-doors`")),
+        "a window door's line is refused"
+    );
+    let moved = |door: &str, asked: &'static str| -> Vec<Vec<&str>> {
+        lines
+            .iter()
+            .map(|cells| {
+                let mut cells = cells.clone();
+                if cells[0] == door {
+                    cells[1] = asked;
+                }
+                cells
+            })
+            .collect()
+    };
+    assert!(
+        request_door_failures(&completions, &moved("Runtime::hand_off", "door process"))
+            .iter()
+            .any(|failure| failure.contains("`Runtime::hand_off` is asked `door process`")),
+        "a line moved out of the walk is refused"
+    );
+    assert!(
+        request_door_failures(
+            &completions,
+            &moved("bt_platform::video::prewarm", "window")
+        )
+        .iter()
+        .any(|failure| failure.contains("`bt_platform::video::prewarm` is in [`NOT_WALKED`]")),
+        "a closed-list door moved into the walk is refused"
+    );
+}
+
+/// **The mailbox items, a closed list, each with its dated reason** (the re-check of the review of
+/// T-REQUEST-DOOR-GUARD, R1): a `mailbox` item's own lock is exempt on every door's road whose row
+/// names it, a declaration the guard cannot prove (the engine reads no flow). So the exemption is
+/// a reviewed diff: a `# request-doors` cell that names an item this list does not is refused, and
+/// so is a line here no cell names. The reason is the item's, whichever door's road meets it: what
+/// its body holds its lock across, and why the window thread waits on no worker for longer.
+const MAILBOX: [(&str, &str); 35] = [
+    (
+        "lane::lock",
+        "2026-10-24: the lane's lock helper (`Mutex::lock`, a poison read through); it holds \
+         nothing itself, and is exempt only where another mailbox item of the row calls it \
+         (review H3)",
+    ),
+    (
+        "lane::Ledger::mint",
+        "2026-10-24: the ledger's book, held to check the fault and the bound and insert one entry",
+    ),
+    (
+        "lane::Ledger::publish",
+        "2026-10-24: the ledger's book, held to end one identity and its twins; the lines are said \
+         and the sinks run after the lock is let go (`release`)",
+    ),
+    (
+        "lane::Ledger::say_not_started",
+        "2026-10-24: the ledger's book, held to read and set the streak; the line is said after \
+         the lock is let go",
+    ),
+    (
+        "lane::Ledger::take",
+        "2026-10-24: the ledger's book, held to remove one delivered terminal; said and sunk after \
+         the lock is let go",
+    ),
+    (
+        "lane::Ledger::worker_ended",
+        "2026-10-24: the ledger's book, held to end the owed identities and set the fault; said, \
+         sunk and woken after the lock is let go",
+    ),
+    (
+        "lane::Ledger::earliest_owed",
+        "2026-10-24: the ledger's book, held for one scan of its entries",
+    ),
+    (
+        "lane::Queue::ask",
+        "2026-10-24: the queue's line, held across the worker's start on the first request (the \
+         worker takes the line only to pop a job, its condvar wait letting it go) and one \
+         admission; a refused start is said after the lock is let go",
+    ),
+    (
+        "lane::Queue::withdraw",
+        "2026-10-24: the queue's line, held to remove one waiting job; published after the lock is \
+         let go",
+    ),
+    (
+        "lane::Coalescing::ask",
+        "2026-10-24: the coalescing lane's book, held across the worker's start on the first \
+         request (the worker takes the book only to take the run waiting, its condvar wait \
+         letting it go) and one admission or join; a refused start is said after the lock is let \
+         go",
+    ),
+    (
+        "persist::lane_lock",
+        "2026-10-24: the storage lane's lock helper (`Mutex::lock`, a poison read through); \
+         exempt only where another mailbox item of the row calls it (review H3)",
+    ),
+    (
+        "persist::SessionWriter::start",
+        "2026-10-24: holds the lane's `worker` across the writer thread's start; safe only because \
+         no worker takes `worker` (the writer's body takes `ends`, `ahead` and `requests`, never \
+         `worker`), so the window thread never waits on a worker for it",
+    ),
+    (
+        "persist::StorageLane::admit_between",
+        "2026-10-24: holds the lane's `requests` across the caller's `between` (walked as the \
+         door's) and one unbounded channel send, which does not wait; the writer takes \
+         `requests` only at its end",
+    ),
+    (
+        "git_mutation_lane::locked",
+        "2026-10-24: the git mutation lane's lock helper (`Mutex::lock`, a poison read through); \
+         exempt only where another mailbox item of the row calls it (review H3)",
+    ),
+    (
+        "git_mutation_lane::GitMutationLane::ask_through",
+        "2026-10-24: holds `shares` across a new share's worker start and a refused start's line \
+         (said by `Queue::ask` while `shares` is held); safe only because no worker takes \
+         `shares` (the worker's closure holds the queue, the ledger, the turns and the wake, \
+         never the lane), so the window thread never waits on a worker for it",
+    ),
+    (
+        "git_mutation_lane::RepoTurns::hold",
+        "2026-10-24: the turns' state, held to push one share, notified after; a verb's turn waits \
+         on the condvar, which lets the lock go",
+    ),
+    (
+        "computation_lane::locked",
+        "2026-10-24: the computation lane's lock helper (`Mutex::lock`, a poison read through); \
+         exempt only where another mailbox item of the row calls it (review H3)",
+    ),
+    (
+        "computation_lane::ShareOf::ask",
+        "2026-10-24: the share's `held` map, held to insert one request after `Queue::ask` \
+         returned",
+    ),
+    (
+        "bt_render::theme::active_schemes",
+        "2026-10-24: the process schemes' `RwLock`, read for one copy",
+    ),
+    (
+        "attention_copilot::CopilotProbe::lock",
+        "2026-10-24: the probe's state (`Mutex::lock`), taken by its door for a read or an update \
+         of the state",
+    ),
+    (
+        "locale_declaration::LocaleCell::lock",
+        "2026-10-24: the locale cell's state (`Mutex::lock`), taken by its door for a read or an \
+         update of the state",
+    ),
+    (
+        "programs_lane::ProgramsLane::lock",
+        "2026-10-24: the program lane's asks (`Mutex::lock`), taken by its door for a read or an \
+         update of them",
+    ),
+    (
+        "profiles::Registry::table",
+        "2026-10-24: the registry's table `RwLock`, read for one `Arc` clone",
+    ),
+    (
+        "pty_door::births",
+        "2026-10-24: the births mailbox (`Mutex::lock`), taken by its door for a read or an update \
+         of the answers",
+    ),
+    (
+        "explorer_menu::state",
+        "2026-10-24: the known package state, held for one clone",
+    ),
+    (
+        "explorer_menu::remember",
+        "2026-10-24: the known package state, held for one store",
+    ),
+    (
+        "shell_integration::page_environment_cell",
+        "2026-10-24: the page environment's mailbox (`Mutex::lock`), taken by its door for a read \
+         or an update",
+    ),
+    (
+        "shell_integration::language::LanguageCell::state",
+        "2026-10-24: the language cell's state (`Mutex::lock`), taken by its door for a read or \
+         an update",
+    ),
+    (
+        "shell_integration::profile_runtime::answer_removal",
+        "2026-10-24: the removal's outcome, held for one store; the wake runs after the lock is \
+         let go",
+    ),
+    (
+        "taskbar_lane::TaskbarLane::ask",
+        "2026-10-24: the last request's instant, held for one store and let go before \
+         `Coalescing::ask`",
+    ),
+    (
+        "update_handoff::record_the_applier",
+        "2026-10-24: the armed exit guard, held to replace the transaction it hands over with one \
+         that records the applier",
+    ),
+    (
+        "update_job::Job::stop_the_driver",
+        "2026-10-24: the staged slot, held for one take; what it held is dropped after the lock is \
+         let go",
+    ),
+    (
+        "update_trial::Gate::state",
+        "2026-10-24: the trial gate's state (`Mutex::lock`), taken for a read or an update of the \
+         gate",
+    ),
+    (
+        "watch_steward::lock",
+        "2026-10-24: the steward's lock helper (`Mutex::lock`); exempt only where another mailbox \
+         item of the row calls it (review H3)",
+    ),
+    (
+        "watch_steward::Steward::lock",
+        "2026-10-24: the steward's asks, taken by the ear's door for a want's update; the worker \
+         takes them once a round",
+    ),
+];
+
+/// **What the `mailbox` cells refuse against [`MAILBOX`]**: a cell's item the list does not name,
+/// a line no cell names, an item on two lines, and a reason not dated `YYYY-MM-DD: why`.
+fn mailbox_failures(lines: &[Vec<&str>], mailbox: &[(&str, &str)]) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut listed: BTreeSet<&str> = BTreeSet::new();
+    for (item, reason) in mailbox {
+        if !listed.insert(item) {
+            failures.push(format!("[`MAILBOX`] names `{item}` twice"));
+        }
+        let dated = reason.split_once(": ").is_some_and(|(date, why)| {
+            let parts: Vec<&str> = date.split('-').collect();
+            parts.len() == 3
+                && [4, 2, 2].iter().zip(&parts).all(|(len, part)| {
+                    part.len() == *len && part.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                && !why.trim().is_empty()
+        });
+        if !dated {
+            failures.push(format!(
+                "[`MAILBOX`]'s `{item}` has no dated reason (`YYYY-MM-DD: why`)"
+            ));
+        }
+    }
+    let mut named: BTreeSet<&str> = BTreeSet::new();
+    for cells in lines {
+        for item in cells[4].split(", ").filter(|item| *item != "—") {
+            named.insert(item);
+            if !listed.contains(item) {
+                failures.push(format!(
+                    "`{}`'s mailbox names `{item}`, which [`MAILBOX`] does not: a new mailbox item \
+                     needs its dated reason there",
+                    cells[0]
+                ));
+            }
+        }
+    }
+    for item in listed.difference(&named) {
+        failures.push(format!(
+            "[`MAILBOX`]'s `{item}` is in no `# request-doors` mailbox cell"
+        ));
+    }
+    failures
+}
+
+/// RED (re-check of the review of T-REQUEST-DOOR-GUARD, R1) — **every mailbox item has its dated
+/// reason, and every reason its item**: a mailbox cell's exemption is a reviewed diff, as moving a
+/// door out of the walk is ([`NOT_WALKED`]).
+///
+/// MUTATION: plant `diagnostics::note` in the hand-off's mailbox — refused as unlisted; drop
+/// `explorer_menu::remember` from its one cell — its line is refused as unused; strip a reason's
+/// date — refused as undated.
+#[test]
+fn every_mailbox_item_has_its_reason() {
+    let lines = section("request-doors", &REQUEST_DOOR_COLUMNS);
+    let failures = mailbox_failures(&lines, &MAILBOX);
+    assert!(
+        failures.is_empty(),
+        "`# request-doors` mailbox cells and [`MAILBOX`]:\n  {}",
+        failures.join("\n  ")
+    );
+    let edited = |door: &str, edit: &dyn Fn(&str) -> String| -> Vec<Vec<String>> {
+        lines
+            .iter()
+            .map(|cells| {
+                let mut cells: Vec<String> = cells.iter().map(|cell| (*cell).to_owned()).collect();
+                if cells[0] == door {
+                    cells[4] = edit(&cells[4]);
+                }
+                cells
+            })
+            .collect()
+    };
+    let failures_of = |owned: &[Vec<String>]| -> Vec<String> {
+        let lines: Vec<Vec<&str>> = owned
+            .iter()
+            .map(|cells| cells.iter().map(String::as_str).collect())
+            .collect();
+        mailbox_failures(&lines, &MAILBOX)
+    };
+    let planted = edited("Runtime::hand_off", &|cell| {
+        format!("{cell}, diagnostics::note")
+    });
+    assert!(
+        failures_of(&planted).iter().any(|failure| {
+            failure.contains("names `diagnostics::note`, which [`MAILBOX`] does not")
+        }),
+        "an unlisted mailbox item is refused"
+    );
+    let dropped = edited("explorer_menu::begin_probe", &|cell| {
+        cell.replace(", explorer_menu::remember", "")
+    });
+    assert!(
+        failures_of(&dropped)
+            .iter()
+            .any(|failure| failure.contains("`explorer_menu::remember` is in no")),
+        "a line no cell names is refused"
+    );
+    let mut undated = MAILBOX;
+    undated[1].1 = "the ledger's book";
+    assert!(
+        mailbox_failures(&lines, &undated)
+            .iter()
+            .any(|failure| failure.contains("`lane::Ledger::mint` has no dated reason")),
+        "an undated reason is refused"
+    );
 }
 
 /// RED (S-1) — **every `# completions` row is one protocol, entered by an item of the product.**

@@ -31,6 +31,12 @@
 .PARAMETER Allowlist
     The file naming every test that may be `#[ignore]`d. One name per line;
     blank lines and `#` comments are skipped.
+
+    2026-10-24 (T-TEST-ORDER-STRAYS): a name may be followed by a tab and the
+    run condition the test needs, `run=serial` or `run=alone`, and by nothing
+    else. Only the name takes part in the comparison; the condition is checked
+    for its spelling here and read by the person who runs the test. Any other
+    second field, or a third, is refused by line.
 #>
 
 [CmdletBinding()]
@@ -63,12 +69,28 @@ $found = @(
 if (-not (Test-Path -LiteralPath $Allowlist)) {
     throw "the allowlist is missing: $Allowlist"
 }
-$expected = @(
-    Get-Content -LiteralPath $Allowlist |
-        ForEach-Object { $_.Trim() } |
-        Where-Object { $_ -and -not $_.StartsWith('#') } |
-        Sort-Object -Unique
-)
+# A row is `name` or `name<TAB>run=serial|alone` (see .PARAMETER Allowlist).
+$conditions = @('run=serial', 'run=alone')
+$rows = @(Get-Content -LiteralPath $Allowlist)
+$names = [System.Collections.Generic.List[string]]::new()
+$malformed = [System.Collections.Generic.List[string]]::new()
+for ($line = 0; $line -lt $rows.Count; $line++) {
+    $row = $rows[$line].Trim()
+    if (-not $row -or $row.StartsWith('#')) {
+        continue
+    }
+    $fields = $row -split "`t"
+    if ($fields.Count -gt 2 -or ($fields.Count -eq 2 -and $fields[1] -cnotin $conditions)) {
+        $malformed.Add("  line $($line + 1): $row")
+        continue
+    }
+    $names.Add($fields[0].Trim())
+}
+if ($malformed.Count -gt 0) {
+    $malformed | Write-Host
+    throw "$($malformed.Count) row(s) of $Allowlist are not a name, or a name, a tab and one of $($conditions -join ', ')"
+}
+$expected = @($names | Sort-Object -Unique)
 
 $difference = @(Compare-Object -ReferenceObject $expected -DifferenceObject $found)
 if ($difference.Count -gt 0) {

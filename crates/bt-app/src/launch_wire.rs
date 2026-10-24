@@ -3081,7 +3081,10 @@ mod tests {
     /// [`Copies`] for one test, named by `tag`.
     fn copies_folder(tag: &str) -> Copies {
         let this = std::env::current_exe().unwrap();
-        let folder = this.parent().unwrap().join(format!("launch-wire-{tag}"));
+        let folder = this
+            .parent()
+            .unwrap()
+            .join(bt_testpath::unique_name(&format!("launch-wire-{tag}")));
         let _ = std::fs::remove_dir_all(&folder);
         Copies(folder)
     }
