@@ -8,9 +8,10 @@
 //! hand the reader a [`Given`] manifest source: the text the test built, and a
 //! record of the path it was asked about, which each test holds to the staged
 //! executable's bytes. The door itself is held on the real `folio.exe` this
-//! workspace builds, by
-//! [`the_manifest_is_read_out_of_a_built_folio_exe_without_running_it`], which
-//! also runs a whole archive of this build's own members through both doors.
+//! workspace builds by the integration test `tests/built_folio_manifest.rs`
+//! (cargo builds the bin for it), and a whole archive of this build's own
+//! members goes through the reader under the manifest `build.rs` embedded in
+//! [`this_builds_own_members_expand_whole_under_its_embedded_manifest`].
 
 use super::{
     ARCHIVE_MAX_BYTES, ARCHIVE_MAX_FILES, Deadline, EmbeddedManifest, Expanded, Expected, Inflate,
@@ -985,27 +986,24 @@ fn an_existing_name_in_staging_is_never_replaced() {
     );
 }
 
-/// RED (U-14) — **the manifest is read out of the `folio.exe` this workspace
-/// builds, as a data file, and is the manifest `build.rs` embedded; and an
-/// archive of this build's own members goes through both doors whole.**
+/// RED (U-14; split by T-TEST-ORDER-STRAYS) — **an archive of this build's own members goes
+/// through the reader whole, under the manifest `build.rs` embedded, and the manifest is asked of
+/// the staged `folio.exe`.**
 ///
-/// E-14's experiment, run on every Windows test job: `LoadLibraryExW` with
-/// `LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE` maps the built
-/// executable, which is never started, and `FindResourceW` finds
-/// `FOLIO_RELEASE_MANIFEST`. Then the real producer end to end: the members
-/// `archive-members.txt` lists, from where `build.rs` hashed them (the
-/// executable and the ConPTY files beside it, the checkout's `packaging/` and
-/// root), packed in `package.ps1`'s layout, expanded through
-/// [`EmbeddedManifest`] and the exclusive-create door. `folio.msix` is not in
-/// a debug build; synthetic bytes stand in, which the manifest does not list.
-/// Off Windows no build carries a manifest and the door has no loader.
+/// The real producer end to end: the members `archive-members.txt` lists, from where `build.rs`
+/// hashed them (the ConPTY files `bt-pty`'s build script writes into this profile's folder, the
+/// checkout's `packaging/` and root), packed in `package.ps1`'s layout and expanded through the
+/// exclusive-create door, the manifest source handing back the very text `build.rs` embedded
+/// (`FOLIO_RELEASE_MANIFEST`). `folio.exe` and `folio.msix` are not in the manifest, so
+/// synthetic bytes stand in for both. That the door reads that text out of the real built
+/// executable is the integration test `tests/built_folio_manifest.rs`, which is the one place
+/// a run is guaranteed to have built the bin; here nothing hangs on a file another build step
+/// made. Off Windows no build carries a manifest and the door has no loader.
 ///
-/// MUTATION: read the resource with `FindResourceW(…, RT_RCDATA)` under
-/// another name and the door answers `NotFound`.
+/// MUTATION: skip the final rename loop in `expand_from` and nothing stands under its own name.
 #[test]
-fn the_manifest_is_read_out_of_a_built_folio_exe_without_running_it() {
+fn this_builds_own_members_expand_whole_under_its_embedded_manifest() {
     let this = std::env::current_exe().unwrap();
-    let built = this.parent().and_then(Path::parent).unwrap().to_path_buf();
     let Some(path) = option_env!("FOLIO_RELEASE_MANIFEST") else {
         assert_ne!(
             bt_platform::host_platform(),
@@ -1019,21 +1017,19 @@ fn the_manifest_is_read_out_of_a_built_folio_exe_without_running_it() {
         return;
     };
     let embedded = std::fs::read_to_string(path).unwrap();
-    let executable = built.join("folio.exe");
-    let text = EmbeddedManifest
-        .manifest_text(&executable)
-        .unwrap_or_else(|error| panic!("{}: {error}", executable.display()));
-    assert_eq!(text, embedded, "the door reads what build.rs embedded");
-    let manifest = Manifest::parse(&text).unwrap();
+    let manifest = Manifest::parse(&embedded).unwrap();
+    // `bt-pty`'s build script writes the sidecar into the profile folder and its `deps` folder,
+    // and this test binary stands in `deps`: the sidecar beside it is the one build.rs hashed.
+    let profile = this.parent().unwrap();
 
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let list = std::fs::read_to_string(workspace.join(MEMBER_LIST)).unwrap();
+    let stand_in = b"not this build's executable; the manifest does not list it".to_vec();
     let mut items = Vec::new();
     for listed in parse_member_list(&list).unwrap() {
         let data = match listed.source {
-            Source::Exe => std::fs::read(&executable).unwrap(),
-            Source::Msix => b"not a package; the manifest does not list it".to_vec(),
-            Source::Sidecar => std::fs::read(built.join(&listed.name)).unwrap(),
+            Source::Exe | Source::Msix => stand_in.clone(),
+            Source::Sidecar => std::fs::read(profile.join(&listed.name)).unwrap(),
             Source::Packaging => {
                 std::fs::read(workspace.join("packaging").join(&listed.name)).unwrap()
             }
@@ -1041,17 +1037,16 @@ fn the_manifest_is_read_out_of_a_built_folio_exe_without_running_it() {
         };
         let mut member = item(&listed.name, &data);
         member.entry = format!("{}/{}", manifest.archive_root, listed.name);
-        if listed.source == Source::Exe {
-            // A debug `folio.exe` is about 90 MB; stored, the test does not
-            // spend its time in a debug-built deflater.
-            member.method = 0;
-        }
         items.push(member);
     }
     let root = scratch("built");
     let archive = root.join("release.zip");
     std::fs::write(&archive, zip_of(&items)).unwrap();
     let staging = Directory::open(&root.join("staging")).unwrap();
+    let given = Given {
+        text: embedded,
+        asked: RefCell::new(Vec::new()),
+    };
     let expanded = expand(
         &archive,
         &Expected {
@@ -1060,11 +1055,34 @@ fn the_manifest_is_read_out_of_a_built_folio_exe_without_running_it() {
             updater: MIN_UPDATER,
         },
         &staging,
-        &EmbeddedManifest,
+        &given,
         &Deadline::at(far()),
     )
     .unwrap_or_else(|refusal| panic!("this build's own release: {refusal}"));
     assert_eq!(expanded.manifest, manifest);
     assert_eq!(expanded.members.len(), items.len());
     assert!(!staged(&root).iter().any(|name| name.starts_with('~')));
+    let asked = given.asked.borrow();
+    assert_eq!(asked.len(), 1, "the manifest is read once");
+    assert_eq!(asked[0].0, root.join("staging").join("~folio.exe"));
+    assert_eq!(asked[0].1, stand_in, "from the staged executable");
+}
+
+/// RED (T-TEST-ORDER-STRAYS) — **the cap the product reads the manifest under admits the
+/// manifest this build embedded.** The integration test that reads the real executable cannot
+/// see the product's private cap, so the cap is held to the embedded text here.
+///
+/// MUTATION: set `MANIFEST_MAX_BYTES` to 64 and this is red on Windows.
+#[test]
+fn the_product_cap_admits_this_builds_manifest() {
+    let Some(path) = option_env!("FOLIO_RELEASE_MANIFEST") else {
+        return;
+    };
+    let embedded = std::fs::read(path).unwrap();
+    assert!(
+        embedded.len() <= super::MANIFEST_MAX_BYTES,
+        "the embedded manifest is {} bytes and the product reads at most {}",
+        embedded.len(),
+        super::MANIFEST_MAX_BYTES
+    );
 }
