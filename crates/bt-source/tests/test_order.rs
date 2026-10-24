@@ -15,15 +15,18 @@
 //! test path names and the one place `temp_dir()` becomes a test's path; `bt-source`'s
 //! `tests/fixtures/` are source about compilation and are not read.
 //!
-//! # The grammar: five shapes, each judged on one body
+//! # The grammar: five shapes, each judged on one body or one literal
 //!
 //! The **owner calls** are `unique_name(`, `temp_path(` and `link_free_temp_dir(` — the
 //! `bt_testpath` doors, whose names no two calls of one process share.
 //!
 //! * **A1 — a bin located by `CARGO_BIN_EXE_`.** A string literal whose value begins
-//!   `CARGO_BIN_EXE_` in a file outside its package's `tests/` folder. Cargo sets that variable,
-//!   and builds the bin it names, only for an integration test; read anywhere else it is a file
-//!   another step may or may not have made. Refused.
+//!   `CARGO_BIN_EXE_` in a file outside its package's `tests/` folder — in a body, in a `const`
+//!   or `static` initializer, in product code alike: judged on the literal, keyed by the
+//!   innermost item that holds it (`literal` when no item does). Cargo sets that variable, and
+//!   builds the bin it names, only for an integration test; read anywhere else it is a file
+//!   another step may or may not have made, or an `option_env!` that is `None` and turns the
+//!   test into one that tests nothing. Refused.
 //! * **A2 — a path beside the test executable.** A body that calls `current_exe(` and `parent(`
 //!   is deriving a path from the executable's folder: the profile folder cargo builds into. It
 //!   is accepted when the body also makes an owner call (a scratch folder of its own beside the
@@ -41,10 +44,15 @@
 //!   test that passes the same one shares the folder, and what an earlier run left there is this
 //!   run's input. Refused.
 //!
-//! * **D0 — the temporary folder imported.** A module-level `use` that brings
-//!   `std::env::temp_dir` in (under any name) or globs `std::env`, in any file, product or test:
-//!   D1 reads the folder by its path, and a bare `temp_dir()` after such an import would be a
-//!   root it cannot see. Refused, by the module that writes it (`<module>::use`).
+//! * **D0 — the temporary folder imported.** D1 reads the folder by its path `env::temp_dir`;
+//!   an import makes it a root D1 cannot see. Refused:
+//!   * a module-level `use` that brings `std::env::temp_dir` in (under any name), globs
+//!     `std::env`, or brings `std::env` in under another name (`use std::env as e;`, then
+//!     `e::temp_dir()`), in any file, product or test — by the module that writes it
+//!     (`<module>::use`);
+//!   * a `use` written inside a test-code body (the index records module-level imports only)
+//!     whose tree, read up to its `;`, names `env` and `temp_dir`, globs beside `env`, or
+//!     renames `env` — `use std::env::{temp_dir, var};` inside a test — by the body's item.
 //!
 //! **Undecided is refused, never silent**: a body in one of these shapes whose path is in fact
 //! made unique some other way, or whose fixed name is the point (a file written for a person to
@@ -210,6 +218,25 @@ struct Hit {
     shape: &'static str,
 }
 
+/// Whether the `use` whose keyword is at `keyword` brings the temporary folder into reach: its
+/// tree, up to the `;`, names `env` and `temp_dir`, globs (`*`) beside `env`, or renames `env`
+/// (`env as`).
+fn a_use_brings_the_folder(index: &Index, keyword: Span) -> bool {
+    let file = index
+        .file_at(keyword.start())
+        .expect("a token of the index stands in one of its files");
+    let text = &index.text(file.span())[keyword.start() - file.span().start()..];
+    let tree = &text[..text.find(';').unwrap_or(text.len())];
+    let words: Vec<&str> = tree
+        .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.contains(&"env")
+        && (words.contains(&"temp_dir")
+            || tree.contains('*')
+            || words.windows(2).any(|pair| pair == ["env", "as"]))
+}
+
 /// Every refusal of the grammar in `index`. `root` is what file paths are written relative to,
 /// and `tests` is the package's integration-test folder.
 fn scan(index: &Index, root: &Path, tests: &Path) -> BTreeSet<Hit> {
@@ -226,16 +253,16 @@ fn scan(index: &Index, root: &Path, tests: &Path) -> BTreeSet<Hit> {
     roots.sort();
 
     let mut found = BTreeSet::new();
-    // D0: the one spelling of the temporary folder D1 cannot see is a module that imports it.
+    // D0: the spelling of the temporary folder D1 cannot see is a module that imports it, or
+    // imports `env` under another name.
     for import in index.uses() {
-        let brings_it = import
-            .names()
+        let brings_it = import.names().iter().any(|(bound, path)| {
+            path.ends_with(&["env".to_owned(), "temp_dir".to_owned()])
+                || (path.ends_with(&["env".to_owned()]) && bound != "env")
+        }) || import
+            .globs()
             .iter()
-            .any(|(_, path)| path.ends_with(&["env".to_owned(), "temp_dir".to_owned()]))
-            || import
-                .globs()
-                .iter()
-                .any(|path| path.ends_with(&["env".to_owned()]));
+            .any(|path| path.ends_with(&["env".to_owned()]));
         if !brings_it {
             continue;
         }
@@ -250,6 +277,55 @@ fn scan(index: &Index, root: &Path, tests: &Path) -> BTreeSet<Hit> {
             });
         }
     }
+    // A1: on the literal itself, wherever it stands outside `tests/`.
+    for literal in &bin_exe {
+        let file = index
+            .file_at(literal.start())
+            .expect("a literal of the index stands in one of its files");
+        if is_inside(file.path(), tests) {
+            continue;
+        }
+        // The innermost holder: a function, a type or a `const`/`static`.
+        let mut holders: Vec<(Span, Vec<String>)> = index
+            .items()
+            .iter()
+            .filter(|item| literal.within(item.whole()))
+            .map(|item| {
+                let names = item
+                    .identities()
+                    .map(|identity| format!("{}::{}", identity.module_path, identity.name))
+                    .collect();
+                (item.whole(), names)
+            })
+            .collect();
+        holders.extend(
+            index
+                .values()
+                .iter()
+                .filter(|value| literal.within(value.whole()))
+                .map(|value| {
+                    let names = value
+                        .module_paths()
+                        .into_iter()
+                        .map(|module| format!("{module}::{}", value.name()))
+                        .collect();
+                    (value.whole(), names)
+                }),
+        );
+        let names = holders
+            .into_iter()
+            .min_by_key(|(whole, _)| whole.len())
+            .map_or_else(|| vec!["literal".to_owned()], |(_, names)| names);
+        let file = relative(file.path(), root);
+        for item in names {
+            found.insert(Hit {
+                file: file.clone(),
+                item,
+                shape: "A1",
+            });
+        }
+    }
+    let body_use = spans(index, Pattern::identifier("use"));
     for item in index.items() {
         let Some(body) = item.body() else { continue };
         if !item.kind().is_callable() || !is_test_code(item) {
@@ -257,9 +333,6 @@ fn scan(index: &Index, root: &Path, tests: &Path) -> BTreeSet<Hit> {
         }
         let file_path = index.file_of(item).path();
         let mut shapes = Vec::new();
-        if any_inside(&bin_exe, body) && !is_inside(file_path, tests) {
-            shapes.push("A1");
-        }
         let owned = any_inside(&owner, body);
         if any_inside(&current_exe, body) && any_inside(&parent, body) && !owned {
             shapes.push("A2");
@@ -269,6 +342,13 @@ fn scan(index: &Index, root: &Path, tests: &Path) -> BTreeSet<Hit> {
         }
         if any_inside(&creates, body) && any_inside(&roots, body) && !owned {
             shapes.push("D1");
+        }
+        if body_use
+            .iter()
+            .filter(|span| span.within(body))
+            .any(|span| a_use_brings_the_folder(index, *span))
+        {
+            shapes.push("D0");
         }
         if shapes.is_empty() {
             continue;
@@ -319,9 +399,13 @@ fn workspace_hits() -> (BTreeSet<Hit>, usize) {
     (hits, read)
 }
 
-/// The register's rows as hits, refusing a malformed line by number.
+/// The register's rows as hits.
 fn register() -> BTreeSet<Hit> {
-    let text = std::fs::read_to_string(workspace_root().join(LIST)).expect("the register");
+    rows_of(&std::fs::read_to_string(workspace_root().join(LIST)).expect("the register"))
+}
+
+/// The rows of a register's text, refusing a malformed line, and a row listed twice, by number.
+fn rows_of(text: &str) -> BTreeSet<Hit> {
     let mut rows = BTreeSet::new();
     let mut header = false;
     for (number, line) in text.lines().enumerate() {
@@ -350,14 +434,27 @@ fn register() -> BTreeSet<Hit> {
             "{LIST}:{}: a row says why",
             number + 1
         );
-        rows.insert(Hit {
+        let fresh = rows.insert(Hit {
             file: file.to_owned(),
             item: item.to_owned(),
             shape,
         });
+        assert!(fresh, "{LIST}:{}: listed twice: {line}", number + 1);
     }
     assert!(header, "{LIST} has its header");
     rows
+}
+
+/// RED (T-TEST-ORDER-STRAYS review N3) — **a row listed twice is refused by its line**, even
+/// with another reason: the rows are a set, and a second one would vanish into the first.
+///
+/// MUTATION: drop the `fresh` assertion in `rows_of` and this does not panic.
+#[test]
+#[should_panic(expected = "4: listed twice")]
+fn a_row_listed_twice_is_refused() {
+    let _ = rows_of(&format!(
+        "# a register\n{HEADER}\na.rs\tcrate::f\tD1\tone reason\na.rs\tcrate::f\tD1\tanother\n"
+    ));
 }
 
 fn listed(hits: &BTreeSet<Hit>) -> String {
@@ -438,7 +535,8 @@ fn fixture() -> (Index, PathBuf) {
 ///
 /// MUTATION: drop the owner check from D1 and `a_fixture_named_by_the_owner` is refused; read
 /// product code and `product_writes_its_own_files` is refused; drop the `tests/` exemption from
-/// A1 and `beside::a_bin_located_where_cargo_built_it` is refused.
+/// A1 and `beside::a_bin_located_where_cargo_built_it` is refused; judge A1 on bodies again and
+/// `BIN` is not; drop D0's body rule and `a_folder_imported_inside_the_body` is not.
 #[test]
 fn the_grammar_refuses_each_shape_and_accepts_its_twin() {
     let (index, directory) = fixture();
@@ -449,10 +547,13 @@ fn the_grammar_refuses_each_shape_and_accepts_its_twin() {
     assert_eq!(
         found,
         [
+            "lib.rs crate::tests::BIN A1",
             "lib.rs crate::tests::a_bin_located_outside_an_integration_test A1",
             "lib.rs crate::tests::a_build_output_beside_the_test_executable A2",
             "lib.rs crate::tests::a_fixed_fixture_in_the_build_directory D1",
             "lib.rs crate::tests::a_fixed_fixture_in_the_temporary_folder D1",
+            "lib.rs crate::tests::a_folder_imported_inside_the_body D0",
+            "lib.rs crate::tests::aliased::use D0",
             "lib.rs crate::tests::imported::use D0",
             "lib.rs crate::tests::the_environment_changed C1",
             "lib.rs crate::tests::the_process_directory_changed C1",

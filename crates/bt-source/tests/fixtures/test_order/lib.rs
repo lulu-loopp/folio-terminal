@@ -13,6 +13,16 @@ pub fn product_writes_its_own_files() {
 
 #[cfg(test)]
 mod tests {
+    /// Outside an integration target this is `None`, and the test below passes having tested
+    /// nothing.
+    const BIN: Option<&str> = option_env!("CARGO_BIN_EXE_folio");
+
+    #[test]
+    fn a_bin_that_is_never_there() {
+        let Some(bin) = BIN else { return };
+        let _ = std::fs::read(bin);
+    }
+
     #[test]
     fn a_bin_located_outside_an_integration_test() {
         let _ = std::path::Path::new(env!("CARGO_BIN_EXE_folio"));
@@ -73,10 +83,43 @@ mod tests {
 
     #[test]
     fn a_helper_named_like_the_folder_is_not_it() {
+        use std::io::Write as _;
         fn temp_dir(tag: &str) -> std::path::PathBuf {
             bt_testpath::temp_path(tag)
         }
         std::fs::create_dir_all(temp_dir("helper")).unwrap();
+    }
+
+    #[test]
+    fn a_folder_imported_inside_the_body() {
+        use std::env::{temp_dir, var};
+        let _ = var("PATH");
+        std::fs::create_dir_all(temp_dir().join("hidden")).unwrap();
+    }
+
+    #[test]
+    fn a_body_that_imports_something_else() {
+        use std::io::Write;
+        let mut sink = std::io::sink();
+        sink.write_all(b"").unwrap();
+    }
+
+    mod aliased {
+        use std::env as e;
+
+        #[test]
+        fn a_bare_folder_through_an_alias() {
+            std::fs::create_dir_all(e::temp_dir().join("hidden")).unwrap();
+        }
+    }
+
+    mod not_aliased {
+        use std::env;
+
+        #[test]
+        fn the_folder_by_its_path() {
+            let _ = env::var("PATH");
+        }
     }
 
     mod imported {

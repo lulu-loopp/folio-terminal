@@ -652,12 +652,13 @@ earlier run shares (T-TEST-ORDER-STRAYS, 2026-10-24).
 
 Where and what to do: `crates/bt-source/tests/test_order.rs` is the gate and
 `docs/plans/TEST-ORDER-EXCEPTIONS.tsv` its register. It refuses, in test code, a
-`CARGO_BIN_EXE_` read outside an integration test (A1), a path derived from the
+`CARGO_BIN_EXE_` literal outside an integration test's folder, in a body, a `const` initializer or product code alike (A1), a path derived from the
 test executable's folder with no `bt_testpath` name (A2), a
 `set_current_dir`/`set_var`/`remove_var` call (C1), and a create under the
 temporary folder or the build directory with no `bt_testpath` name (D1), and a
-module-level `use` that brings `env::temp_dir` in or globs `env` (D0: a bare
-`temp_dir()` call could then not be told from a test's own helper). When red,
+module-level `use` that brings `env::temp_dir` in, globs `env` or renames `env`, or a
+`use` inside a test body that does one of those (D0: a bare `temp_dir()` call could then
+not be told from a test's own helper). A row listed twice is refused. When red,
 name the path with `bt_testpath::unique_name`/`temp_path`, locate a bin through
 `CARGO_BIN_EXE_<name>` in an integration test (cargo builds it for that target),
 or, when the fixed name is the subject, add a row saying why. A process-global that
