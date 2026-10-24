@@ -52,7 +52,8 @@
 //!     (`<module>::use`);
 //!   * a `use` written inside a test-code body (the index records module-level imports only)
 //!     whose tree, read up to its `;`, names `env` and `temp_dir`, globs beside `env`, or
-//!     renames `env` — `use std::env::{temp_dir, var};` inside a test — by the body's item.
+//!     renames `env` (`env as e`, `env::{self as e}`) — `use std::env::{temp_dir, var};` inside
+//!     a test — by the body's item.
 //!
 //! **Undecided is refused, never silent**: a body in one of these shapes whose path is in fact
 //! made unique some other way, or whose fixed name is the point (a file written for a person to
@@ -220,7 +221,7 @@ struct Hit {
 
 /// Whether the `use` whose keyword is at `keyword` brings the temporary folder into reach: its
 /// tree, up to the `;`, names `env` and `temp_dir`, globs (`*`) beside `env`, or renames `env`
-/// (`env as`).
+/// (`env as`, or `env::{self as …}`: any `self as` in a tree that names `env`).
 fn a_use_brings_the_folder(index: &Index, keyword: Span) -> bool {
     let file = index
         .file_at(keyword.start())
@@ -234,7 +235,9 @@ fn a_use_brings_the_folder(index: &Index, keyword: Span) -> bool {
     words.contains(&"env")
         && (words.contains(&"temp_dir")
             || tree.contains('*')
-            || words.windows(2).any(|pair| pair == ["env", "as"]))
+            || words
+                .windows(2)
+                .any(|pair| pair == ["env", "as"] || pair == ["self", "as"]))
 }
 
 /// Every refusal of the grammar in `index`. `root` is what file paths are written relative to,
@@ -553,6 +556,7 @@ fn the_grammar_refuses_each_shape_and_accepts_its_twin() {
             "lib.rs crate::tests::a_fixed_fixture_in_the_build_directory D1",
             "lib.rs crate::tests::a_fixed_fixture_in_the_temporary_folder D1",
             "lib.rs crate::tests::a_folder_imported_inside_the_body D0",
+            "lib.rs crate::tests::a_folder_through_a_renamed_self D0",
             "lib.rs crate::tests::aliased::use D0",
             "lib.rs crate::tests::imported::use D0",
             "lib.rs crate::tests::the_environment_changed C1",

@@ -1076,6 +1076,11 @@ fn this_builds_own_members_expand_whole_under_its_embedded_manifest() {
 #[test]
 fn the_product_cap_admits_this_builds_manifest() {
     let Some(path) = option_env!("FOLIO_RELEASE_MANIFEST") else {
+        assert_ne!(
+            bt_platform::host_platform(),
+            bt_platform::HostPlatform::Windows,
+            "a Windows build always embeds the release manifest"
+        );
         return;
     };
     let embedded = std::fs::read(path).unwrap();
@@ -1097,6 +1102,11 @@ fn the_product_cap_admits_this_builds_manifest() {
 #[test]
 fn the_product_door_reads_the_manifest_out_of_this_test_executable() {
     let Some(path) = option_env!("FOLIO_RELEASE_MANIFEST") else {
+        assert_ne!(
+            bt_platform::host_platform(),
+            bt_platform::HostPlatform::Windows,
+            "a Windows build always embeds the release manifest"
+        );
         return;
     };
     let embedded = std::fs::read_to_string(path).unwrap();

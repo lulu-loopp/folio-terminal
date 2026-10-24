@@ -98,6 +98,12 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_through_a_renamed_self() {
+        use std::env::{self as e};
+        std::fs::create_dir_all(e::temp_dir().join("hidden")).unwrap();
+    }
+
+    #[test]
     fn a_body_that_imports_something_else() {
         use std::io::Write;
         let mut sink = std::io::sink();
