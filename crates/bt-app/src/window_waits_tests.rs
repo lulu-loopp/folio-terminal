@@ -4283,11 +4283,14 @@ impl LandmarkScope {
             })
     }
 
-    /// Every path the written path `written` at `at` in `module` may be: [`Names::paths`], and —
-    /// for a path of two or more segments whose first is neither an import, a module of `module`
-    /// nor a declared type, which `Names::paths` keeps as written — each glob in scope's reading
-    /// of it too.
-    fn readings(&self, written: &[&str], at: usize, module: &str) -> Vec<Vec<String>> {
+    /// **Every path the written path `written` at `at` in `module` may be, in groups by
+    /// precedence**, as Rust looks a name up: the first group that names something is what the
+    /// path is. [`Names::paths`]'s first reading — an import, a module, an item of the module — is
+    /// one group and its globs' readings the next. A path of two or more segments whose first is
+    /// neither an import, a module of `module` nor a declared type, which `Names::paths` keeps as
+    /// written, is read first through each glob in scope and only then as written — a crate, a
+    /// primitive type: a glob's name wins over those.
+    fn readings(&self, written: &[&str], at: usize, module: &str) -> Vec<Vec<Vec<String>>> {
         let names = &self.names;
         let mut paths = names.paths(written, at, module);
         let first = written[0];
@@ -4297,17 +4300,21 @@ impl LandmarkScope {
             && !names.module_paths.contains(&format!("{module}::{first}"))
             && !names.types.contains(first)
         {
-            for glob in names.globs(at, module) {
-                paths.push(
+            let globs = names
+                .globs(at, module)
+                .into_iter()
+                .map(|glob| {
                     glob.path
                         .iter()
                         .cloned()
                         .chain(written.iter().map(|segment| (*segment).to_owned()))
-                        .collect(),
-                );
-            }
+                        .collect()
+                })
+                .collect();
+            return vec![globs, paths];
         }
-        paths
+        let globs = paths.split_off(1.min(paths.len()));
+        vec![paths, globs]
     }
 }
 
@@ -4419,9 +4426,8 @@ fn one_of(readings: impl IntoIterator<Item = Resolved>) -> Resolved {
 /// (absolute, led by the crate's identifier). Every reading ([`LandmarkScope::readings`]) is
 /// followed ([`through_uses`]) and each path it ends at is the landmark, another item — one the
 /// crate declares, or one led by a [root](LandmarkScope) outside it — or nothing; the globs one
-/// reading passes are [`one_of`] it. A first reading that names something (an import, a module's
-/// item, an item of the module, a root) shadows the globs' readings behind it, which are otherwise
-/// [`one_of`] the rest.
+/// reading passes are [`one_of`] it, and so are the readings of one precedence group. The first
+/// group that names something is the answer.
 fn call_resolution(
     scope: &LandmarkScope,
     written: &[&str],
@@ -4430,32 +4436,30 @@ fn call_resolution(
     landmark: &[String],
 ) -> Resolved {
     let names = &scope.names;
-    let readings: Vec<Resolved> = scope
+    let reading = |path: Vec<String>| {
+        one_of(
+            through_uses(scope, absolute_in(names, path, module), USE_HOPS)
+                .into_iter()
+                .map(|path| match path {
+                    Some(path) if path == landmark => Resolved::Landmark,
+                    Some(path) if path[0] == names.crate_ident => {
+                        if scope.declares(&path) {
+                            Resolved::Other
+                        } else {
+                            Resolved::Nothing
+                        }
+                    }
+                    Some(path) if scope.roots.contains(&path[0]) => Resolved::Other,
+                    _ => Resolved::Nothing,
+                }),
+        )
+    };
+    scope
         .readings(written, at, module)
         .into_iter()
-        .map(|path| {
-            one_of(
-                through_uses(scope, absolute_in(names, path, module), USE_HOPS)
-                    .into_iter()
-                    .map(|path| match path {
-                        Some(path) if path == landmark => Resolved::Landmark,
-                        Some(path) if path[0] == names.crate_ident => {
-                            if scope.declares(&path) {
-                                Resolved::Other
-                            } else {
-                                Resolved::Nothing
-                            }
-                        }
-                        Some(path) if scope.roots.contains(&path[0]) => Resolved::Other,
-                        _ => Resolved::Nothing,
-                    }),
-            )
-        })
-        .collect();
-    match readings.first() {
-        Some(first) if *first != Resolved::Nothing => *first,
-        _ => one_of(readings),
-    }
+        .map(|group| one_of(group.into_iter().map(reading)))
+        .find(|resolved| *resolved != Resolved::Nothing)
+        .unwrap_or(Resolved::Nothing)
 }
 
 /// What a token of `shape` is for `landmark`, whose name it spells; `bound` says whether a
@@ -4536,6 +4540,7 @@ fn follows_to(
     scope
         .readings(written, at, module)
         .into_iter()
+        .flatten()
         .flat_map(|path| through_uses(scope, absolute_in(&scope.names, path, module), USE_HOPS))
         .any(|path| path.as_deref() == Some(landmark))
 }
@@ -11923,14 +11928,17 @@ pub fn main() {
 /// `wire` = `crate::launch_wire` makes `wire::hand_over(…)` the hand-over; so does a glob
 /// re-export (`pub mod b { pub use crate::a::*; }`) of an item alias. Read as written, both
 /// paths were led by an unknown `wire` / reached `b::give` with no explicit `use`, and were
-/// decided another crate's item. A path led by a root ([`LandmarkScope`]: here `std`) is another
-/// crate's; one led by an unknown name is refused.
+/// decided another crate's item. A path led by a root ([`LandmarkScope`]: here `std`, and the
+/// primitive `str`) is another item; one led by an unknown name is refused; a glob that brings in
+/// a name spelled like a root (`str` = `crate::launch_wire`) wins over the root, as in Rust.
 ///
 /// MUTATIONS: count every first segment outside the crate as another crate's
 /// ([`call_resolution`]'s root check) — the glob's `wire::hand_over(…)` is decided another
 /// crate's and the entry reads `parse`, the green the re-check found; read no glob for a
 /// multi-segment path ([`LandmarkScope::readings`]) and follow no glob import ([`through_uses`]) —
-/// the same call resolves to nothing and is refused.
+/// the same call resolves to nothing and is refused; read the as-written root ahead of the globs —
+/// the glob's `str::hand_over(…)` is another item and the entry reads `parse`; no primitive among
+/// the roots — `str::parse("1")` resolves to nothing and is refused.
 #[test]
 fn a_landmark_brought_in_through_a_glob_is_the_landmark() {
     for (tag, main) in [
@@ -11969,13 +11977,28 @@ pub fn main() {
 pub fn main() {
     cli::parse();
     std::hand_over();
+    let _: Result<u8, _> = str::parse("1");
     admission::enter_window_thread();
 }
 "#;
     assert_eq!(
         planted_main_landmark("ww-landmark-rooted", rooted),
         Ok(Some("parse")),
-        "a path led by `std` is another crate's item"
+        "a path led by `std` or by a primitive type is another item"
+    );
+    let shadowing = r#"
+pub mod prelude { pub use crate::launch_wire as str; }
+use prelude::*;
+pub fn main() {
+    cli::parse();
+    str::hand_over();
+    admission::enter_window_thread();
+}
+"#;
+    assert_eq!(
+        planted_main_landmark("ww-landmark-glob-over-root", shadowing),
+        Ok(Some("hand_over")),
+        "a glob's `str` wins over the primitive type: the call is the `hand_over` landmark"
     );
     let unknown = r#"
 pub fn main() {
