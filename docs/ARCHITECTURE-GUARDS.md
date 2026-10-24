@@ -480,7 +480,8 @@ its boundary: the calls its request leaves the thread by, each of which the walk
 call that takes the worker's body names that argument, `key@N` (`lane::Executor::start_worker@2`,
 counted as `Handed::argument` counts: a method's receiver not counted, a UFCS path call's every
 written argument counted); a closure literal written there is the worker's and is not walked
-(`CallSite::closures`, `Handed`), while every other closure written at the call (one the boundary
+(`CallSite::closures`, `Handed`; an `@N` on a foreign `std::`/`core::` callee is refused, its
+signature unread), while every other closure written at the call (one the boundary
 item runs on the caller's thread: `admit_between`'s `between`, a refusal's voice) and the call's own
 body are walked as the door's. A first-party boundary item is walked, not a stop: a stop would hide
 the enqueue's own locks. `—` is a door that hands nothing over (it arms a wait); its walk is judged
@@ -498,9 +499,15 @@ worker's body, a blocking primitive outside the row's `mailbox` items (the `std:
 `SignalObjectAndWait` and `SleepEx`), another window door that does not conform (`Inherits`, by its
 status), a boundary never met, and every unresolved edge but an allowed macro (never the print,
 write or `dbg!` family) and a derive's or `#[from]`'s callee; `Cutoff` and `Unparsed` are never
-listable. A `mailbox` item that takes the lock as an argument (`lane::lock(&Mutex<T>)`, read from
-its signature) locks whatever its caller hands it: it is exempt only where another `mailbox` item of
-the row calls it, so the cell names the methods that lock through it. Every first-party impl of a
+listable. Every `mailbox` item is a dated line of a closed list (`window_waits_tests::MAILBOX`),
+which says what the item holds its lock across: naming a new item in a cell needs its line, and a
+line no cell names is refused. Four hold their lock across a thread start (`lane::Queue::ask`,
+`lane::Coalescing::ask`, `GitMutationLane::ask_through`, `persist::SessionWriter::start`); the last
+two hold a lock no worker takes, which is what makes them safe. A `mailbox` item that takes the lock
+as an argument (`lane::lock(&Mutex<T>)`, read from its signature, as written or through a type
+alias, which the resolver follows: `Resolver::argument_type_paths`) locks whatever its caller hands
+it: it is exempt only where another `mailbox` item of the row calls it, so the cell names the methods
+that lock through it. Every first-party impl of a
 foreign trait is walked once as a root of its own, one `Implicit` row per impl *method*, its
 verdict held by what stands behind it (an effect, a blocking primitive or a door-level finding
 behind it takes only `violation`). A `const`'s and a plain `static`'s initializer are not walked
