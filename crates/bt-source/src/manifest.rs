@@ -89,6 +89,8 @@ pub struct Package {
     name: String,
     directory: PathBuf,
     targets: Vec<TargetRoot>,
+    /// The targets whose table says `harness = false` (T-TEST-PROCESS-GLOBALS).
+    without_harness: Vec<TargetId>,
 }
 
 impl Package {
@@ -107,6 +109,14 @@ impl Package {
     #[must_use]
     pub fn targets(&self) -> &[TargetRoot] {
         &self.targets
+    }
+
+    /// Whether `target` runs without libtest: its table in the manifest says
+    /// `harness = false`, so the target's own `main` is the whole run and no two of its
+    /// cases share the process on parallel threads (T-TEST-PROCESS-GLOBALS).
+    #[must_use]
+    pub fn runs_without_harness(&self, target: &TargetId) -> bool {
+        self.without_harness.contains(target)
     }
 }
 
@@ -205,6 +215,7 @@ fn read_package(directory: &Path) -> Result<Package, Rejection> {
         .to_owned();
 
     let mut targets: BTreeMap<PathBuf, TargetRoot> = BTreeMap::new();
+    let mut without_harness = Vec::new();
     let mut claim = |kind: TargetKind, target: String, file: PathBuf| {
         targets.entry(normalized(&file)).or_insert(TargetRoot {
             id: TargetId {
@@ -224,6 +235,13 @@ fn read_package(directory: &Path) -> Result<Package, Rejection> {
             || directory.join("src").join("lib.rs"),
             |path| directory.join(path),
         );
+        if table.booleans.get("harness") == Some(&false) {
+            without_harness.push(TargetId {
+                package: name.clone(),
+                kind: TargetKind::Library,
+                name: name.clone(),
+            });
+        }
         claim(TargetKind::Library, name.clone(), file);
     }
     for (section, kind) in [
@@ -244,6 +262,13 @@ fn read_package(directory: &Path) -> Result<Package, Rejection> {
                 });
             };
             let target = table.string("name").unwrap_or(path).to_owned();
+            if table.booleans.get("harness") == Some(&false) {
+                without_harness.push(TargetId {
+                    package: name.clone(),
+                    kind,
+                    name: target.clone(),
+                });
+            }
             claim(kind, target, directory.join(path));
         }
     }
@@ -296,10 +321,12 @@ fn read_package(directory: &Path) -> Result<Package, Rejection> {
 
     let mut targets: Vec<TargetRoot> = targets.into_values().collect();
     targets.sort();
+    without_harness.sort();
     Ok(Package {
         name,
         directory: directory.to_path_buf(),
         targets,
+        without_harness,
     })
 }
 

@@ -138,9 +138,18 @@ pub(crate) const QUIT_WAITS_FOR_ITS_SAVES: Duration = crate::restore::CLOSE_WAIT
 /// quit**: the storage worker is inside its write, and a copy queued behind it could
 /// not land. Like [`UPDATE_RECEIPT_DEADLINE`], a clock read on each turn
 /// ([`Quit::deadline`]), never a wait.
-pub(crate) const QUIT_DOCUMENTS_BY: Duration = crate::persist::SESSION_SAVE_BUDGET
-    .checked_div(2)
-    .expect("the session budget halves");
+///
+/// **The product's value of [`Quit::documents_by`]** (T-QUIT-FLUSH-BUDGET-PER-QUIT): each
+/// quit carries its own budget and derives this bound from it ([`documents_by_of`]); every
+/// quit the product begins carries `SESSION_SAVE_BUDGET`, and a test pins that this is what
+/// it then answers.
+#[cfg(test)]
+pub(crate) const QUIT_DOCUMENTS_BY: Duration = documents_by_of(crate::persist::SESSION_SAVE_BUDGET);
+
+/// Half of a quit's budget: when its documents phase ends.
+const fn documents_by_of(budget: Duration) -> Duration {
+    budget.checked_div(2).expect("the session budget halves")
+}
 
 /// **When a quit's recovery phase ends, measured from the start of its documents
 /// phase** (revision (c)2): five sixths of [`crate::persist::SESSION_SAVE_BUDGET`],
@@ -149,10 +158,19 @@ pub(crate) const QUIT_DOCUMENTS_BY: Duration = crate::persist::SESSION_SAVE_BUDG
 ///
 /// A copy that has no receipt by this bound cancels the quit, as a refused copy
 /// does: the change it carries is in no file and in no copy.
-pub(crate) const QUIT_RECOVERY_BY: Duration = crate::persist::SESSION_SAVE_BUDGET
-    .saturating_mul(5)
-    .checked_div(6)
-    .expect("the session budget divides by six");
+///
+/// **The product's value of [`Quit::recovery_by`]**, as [`QUIT_DOCUMENTS_BY`] is of
+/// [`Quit::documents_by`].
+#[cfg(test)]
+pub(crate) const QUIT_RECOVERY_BY: Duration = recovery_by_of(crate::persist::SESSION_SAVE_BUDGET);
+
+/// Five sixths of a quit's budget: when its recovery phase ends.
+const fn recovery_by_of(budget: Duration) -> Duration {
+    budget
+        .saturating_mul(5)
+        .checked_div(6)
+        .expect("the session budget divides by six")
+}
 
 /// **How long the way out waits for the hand-over's answer** (U-21; sized by
 /// U-34): fifteen seconds.
@@ -566,6 +584,13 @@ pub struct Quit {
     /// [`crate::persist::SESSION_SAVE_BUDGET`] the documents, their copies and the
     /// session write share. Set by the phase's first turn.
     documents_from: Option<Instant>,
+    /// **The one budget itself** (T-QUIT-FLUSH-BUDGET-PER-QUIT):
+    /// [`crate::persist::SESSION_SAVE_BUDGET`] from [`Self::begin_for`] for every quit the
+    /// product begins. The documents phase ends at half of it, the recovery phase at five
+    /// sixths, and the session write's wait at all of it, each from `documents_from`
+    /// ([`Self::documents_by`], [`Self::recovery_by`], [`Self::session_write_until`]).
+    /// Only a test changes it ([`Self::set_budget`]).
+    budget: Duration,
     /// The documents the documents phase could not write, each with why: the
     /// recovery phase copies these, and a cancellation names them.
     unsaved: Vec<Unsaved>,
@@ -662,6 +687,7 @@ impl Quit {
             phase,
             reason,
             documents_from: None,
+            budget: crate::persist::SESSION_SAVE_BUDGET,
             unsaved: Vec::new(),
             cancelled: None,
             merged_lines: Vec::new(),
@@ -671,6 +697,40 @@ impl Quit {
             names,
             hover: None,
         }
+    }
+
+    /// **Tests only: this quit's one budget is `budget` instead of
+    /// [`crate::persist::SESSION_SAVE_BUDGET`]** — the documents phase's bound, the recovery
+    /// phase's and the session write's, all derived from it as the product's are.
+    ///
+    /// For a test whose subject is not the budget: one that writes a real session and asks
+    /// whether it landed sets the suite's patience (`lane::PATIENCE`), so a loaded machine
+    /// answers the same thing later rather than a timeout — the quit's half of what
+    /// `persist::SessionStore::set_save_budget` is for the store. This quit alone.
+    #[cfg(test)]
+    pub(crate) fn set_budget(&mut self, budget: Duration) {
+        self.budget = budget;
+    }
+
+    /// This quit's one budget.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn budget(&self) -> Duration {
+        self.budget
+    }
+
+    /// **When the documents phase ends, measured from its start**: half of this quit's
+    /// budget — [`QUIT_DOCUMENTS_BY`] for every quit the product begins.
+    #[must_use]
+    pub(crate) fn documents_by(&self) -> Duration {
+        documents_by_of(self.budget)
+    }
+
+    /// **When the recovery phase ends, measured from the documents phase's start**: five
+    /// sixths of this quit's budget — [`QUIT_RECOVERY_BY`] for every quit the product begins.
+    #[must_use]
+    pub(crate) fn recovery_by(&self) -> Duration {
+        recovery_by_of(self.budget)
     }
 
     /// Why this quit began.
@@ -956,7 +1016,7 @@ impl Quit {
             .iter()
             .any(|(_, standing)| matches!(standing, Standing::Waiting | Standing::Unsent));
         if waiting {
-            if now >= start + QUIT_DOCUMENTS_BY {
+            if now >= start + self.documents_by() {
                 let unsaved = standings
                     .iter()
                     .filter_map(|(file, standing)| {
@@ -1038,7 +1098,7 @@ impl Quit {
         let waiting = copies
             .iter()
             .any(|(_, copy)| matches!(copy, CopyStanding::Waiting));
-        if refused || (waiting && now >= start + QUIT_RECOVERY_BY) {
+        if refused || (waiting && now >= start + self.recovery_by()) {
             let unsaved = std::mem::take(&mut self.unsaved)
                 .into_iter()
                 .map(|unsaved| {
@@ -1223,10 +1283,9 @@ impl Quit {
     /// budget is spent, and the write is not handed over at all.
     #[must_use]
     pub(crate) fn session_write_until(&self, now: Instant) -> Instant {
-        let own = now + crate::persist::SESSION_SAVE_BUDGET;
-        self.documents_from.map_or(own, |start| {
-            (start + crate::persist::SESSION_SAVE_BUDGET).min(own)
-        })
+        let own = now + self.budget;
+        self.documents_from
+            .map_or(own, |start| (start + self.budget).min(own))
     }
 
     /// Whether the receipt's bound has run out — the clock read on the turn.
@@ -1369,8 +1428,8 @@ impl Quit {
     pub fn deadline(&self) -> Option<Instant> {
         match self.phase {
             // The two phases' bounds, both measured from the documents phase's start.
-            Phase::Documents => self.documents_from.map(|start| start + QUIT_DOCUMENTS_BY),
-            Phase::Recovery => self.documents_from.map(|start| start + QUIT_RECOVERY_BY),
+            Phase::Documents => self.documents_from.map(|start| start + self.documents_by()),
+            Phase::Recovery => self.documents_from.map(|start| start + self.recovery_by()),
             Phase::Saving { until: Some(until) }
             | Phase::Waiting { until }
             | Phase::Writing {

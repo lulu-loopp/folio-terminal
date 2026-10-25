@@ -3770,16 +3770,16 @@ crates/bt-app/src/quake.rs	bt-app crate::quake::typed_into_a_prompt	Ambiguous	co
 crates/bt-app/src/quake.rs	bt-app crate::quake::typed_into_a_prompt	Ambiguous	is_control	1	
 crates/bt-app/src/quake.rs	bt-app crate::quake::typed_into_a_prompt	Ambiguous	is_empty	1	
 crates/bt-app/src/quake.rs	bt-app crate::quake::typed_into_a_prompt	Ambiguous	push	1	
-crates/bt-app/src/quit.rs	bt-app crate::quit::QUIT_DOCUMENTS_BY	Ambiguous	expect	1	
-crates/bt-app/src/quit.rs	bt-app crate::quit::QUIT_RECOVERY_BY	Ambiguous	checked_div	1	
-crates/bt-app/src/quit.rs	bt-app crate::quit::QUIT_RECOVERY_BY	Ambiguous	expect	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Quit::recovery	Ambiguous	collect	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Quit::recovery	Ambiguous	into_iter	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Quit::recovery	Ambiguous	map	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Quit::settle_held_release	Ambiguous	collect	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Quit::settle_held_release	Ambiguous	into_iter	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Raised::press	Ambiguous	chosen	1	
+crates/bt-app/src/quit.rs	bt-app crate::quit::documents_by_of	Ambiguous	expect	1	2026-10-24: T-QUIT-FLUSH-BUDGET-PER-QUIT; the phase-bound derivation moved from the `QUIT_DOCUMENTS_BY`/`QUIT_RECOVERY_BY` consts (now test-only) into this const fn; `Option::expect` on what `Duration::checked_div` answers, a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/quit.rs	bt-app crate::quit::dropped_on_begin	Ambiguous	unwrap_or_default	1	
+crates/bt-app/src/quit.rs	bt-app crate::quit::recovery_by_of	Ambiguous	checked_div	1	2026-10-24: T-QUIT-FLUSH-BUDGET-PER-QUIT; the phase-bound derivation moved from the `QUIT_DOCUMENTS_BY`/`QUIT_RECOVERY_BY` consts (now test-only) into this const fn; `Duration::checked_div` on what `Duration::saturating_mul` answers, a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/quit.rs	bt-app crate::quit::recovery_by_of	Ambiguous	expect	1	2026-10-24: T-QUIT-FLUSH-BUDGET-PER-QUIT; the phase-bound derivation moved from the `QUIT_DOCUMENTS_BY`/`QUIT_RECOVERY_BY` consts (now test-only) into this const fn; `Option::expect` on what `Duration::checked_div` answers, a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders::from_persisted	Ambiguous	is_empty	1	
 crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders::record	Ambiguous	is_empty	1	
 crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders::record	Ambiguous	is_none_or	1	

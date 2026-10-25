@@ -1708,3 +1708,84 @@ fn a_quit_that_completes_after_a_merge_says_it_in_diagnostics() {
     assert!(quit.take_merged_lines().is_empty(), "and not again");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// RED (T-QUIT-FLUSH-BUDGET-PER-QUIT) — **a quit's three bounds are its own budget's**: the
+/// documents phase ends at half of it, the recovery phase at five sixths and the session
+/// write's wait at all of it, each from the documents phase's start — for a quit whose budget
+/// is not the product's as for one whose budget is.
+///
+/// MUTATION: read `persist::SESSION_SAVE_BUDGET` in `Quit::session_write_until` instead of the
+/// quit's own budget — a turn 4 s in finds no budget left; derive `Quit::documents_by` or
+/// `Quit::recovery_by` from the constant — the phase's bound is the product's 1.5 s or 2.5 s.
+#[test]
+fn a_quits_bounds_are_its_own_budgets() {
+    let budget = crate::lane::PATIENCE;
+    let start = Instant::now();
+
+    let mut documents = Quit::begin(Vec::new());
+    documents.set_budget(budget);
+    assert_eq!(
+        documents.documents(&[("settings.json", Standing::Waiting)], start),
+        QuitStep::Documents
+    );
+    assert_eq!(
+        documents.deadline(),
+        Some(start + budget / 2),
+        "the documents phase ends at half of this quit's budget"
+    );
+
+    let mut recovery = Quit::begin(Vec::new());
+    recovery.set_budget(budget);
+    assert_eq!(
+        recovery.documents(
+            &[("settings.json", Standing::Terminal("refused".to_owned()))],
+            start
+        ),
+        QuitStep::Recovery
+    );
+    assert_eq!(
+        recovery.recovery(&[("settings.json", CopyStanding::Waiting)], start),
+        QuitStep::Recovery
+    );
+    assert_eq!(
+        recovery.deadline(),
+        Some(start + budget * 5 / 6),
+        "the recovery phase ends at five sixths of it"
+    );
+
+    let mut write = Quit::begin(Vec::new());
+    write.set_budget(budget);
+    assert_eq!(write.documents(&[], start), QuitStep::Photograph);
+    let turn = start + persist::SESSION_SAVE_BUDGET + std::time::Duration::from_secs(1);
+    assert_eq!(
+        write.session_write_until(turn),
+        start + budget,
+        "the session write's wait ends at all of it, past the product's three seconds"
+    );
+}
+
+/// RED (T-QUIT-FLUSH-BUDGET-PER-QUIT) — **every quit the product begins carries
+/// `SESSION_SAVE_BUDGET`**, whatever its reason, and so its bounds are the product's:
+/// `QUIT_DOCUMENTS_BY` (1.5 s) and `QUIT_RECOVERY_BY` (2.5 s).
+///
+/// MUTATION: begin a quit in `Quit::begin_for` with any other budget — the quit carries it.
+#[test]
+fn every_quit_the_product_begins_carries_the_session_budget() {
+    let txn = crate::update_txn::TxnId::new([0x49; 16]);
+    for reason in [
+        Reason::Asked,
+        Reason::LaunchWireQuit,
+        Reason::UpdateRestart { txn },
+    ] {
+        let quit = Quit::begin_for(Vec::new(), reason);
+        assert_eq!(quit.budget(), persist::SESSION_SAVE_BUDGET, "{reason:?}");
+        assert_eq!(quit.documents_by(), QUIT_DOCUMENTS_BY, "{reason:?}");
+        assert_eq!(quit.recovery_by(), QUIT_RECOVERY_BY, "{reason:?}");
+    }
+    assert_eq!(
+        persist::SESSION_SAVE_BUDGET,
+        std::time::Duration::from_secs(3)
+    );
+    assert_eq!(QUIT_DOCUMENTS_BY, std::time::Duration::from_millis(1_500));
+    assert_eq!(QUIT_RECOVERY_BY, std::time::Duration::from_millis(2_500));
+}
