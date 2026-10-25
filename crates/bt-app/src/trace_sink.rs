@@ -133,6 +133,14 @@ impl Queue {
 
     /// One line for a named trace's file. Never waits; a line that does not fit
     /// is counted.
+    /// One line for the console a trace run kept, on this queue (see [`offer_stderr_line`]).
+    pub(crate) fn offer_stderr_line(&self, text: String) -> bool {
+        self.offer(Line {
+            destination: Destination::Stderr,
+            text,
+        })
+    }
+
     pub(crate) fn offer_file_line(&self, file: Arc<TraceFile>, text: String) {
         self.offer(Line {
             destination: Destination::File(file),
@@ -238,10 +246,7 @@ pub fn offer_stderr_line(text: String) -> bool {
     let Some(sink) = sink() else {
         return false;
     };
-    sink.queue.offer(Line {
-        destination: Destination::Stderr,
-        text,
-    })
+    sink.queue.offer_stderr_line(text)
 }
 
 /// One line for a named trace's file, queued for the sink's writer — or, in a
@@ -311,6 +316,7 @@ fn open(console: bool) -> Option<Sink> {
     if !a_destination_is_kept(console, crate::trace::installed_files()) {
         return None;
     }
+    let reports = the_reports_road(console);
     let (lines, waiting) = sync_channel(QUEUE_DEPTH);
     let (done, finished) = sync_channel::<()>(0);
     let dropped = Arc::new(AtomicU64::new(0));
@@ -322,7 +328,7 @@ fn open(console: bool) -> Option<Sink> {
         "bt-trace-sink",
         bt_platform::ThreadPriority::BelowNormal,
         move |_ctx| {
-            run(&waiting, &counted);
+            run(&waiting, &counted, reports);
             // The one thing that makes `flush`'s wait a wait on this body.
             drop(done);
         },
@@ -345,8 +351,68 @@ fn open(console: bool) -> Option<Sink> {
 /// pending before it goes, because the reading two traces of one run support is
 /// a merge on their first column, and that merge is only sound while the order
 /// the lines were *offered* in is the order they come out in.
-fn run(lines: &Receiver<Line>, dropped: &AtomicU64) {
-    run_to(lines, dropped, &mut ProcessStderr);
+fn run(lines: &Receiver<Line>, dropped: &AtomicU64, reports: Reports) {
+    match reports {
+        Reports::Console => run_to(lines, dropped, &mut ProcessStderr),
+        Reports::TheLogsRoad => run_to(
+            lines,
+            dropped,
+            &mut LineByLine::to(crate::diagnostics::stderr_line),
+        ),
+    }
+}
+
+/// **Where the writer's own reports go** — the count of the lines it lost, a trace file it could
+/// not open (T-TRACE-SINK-OFF-THE-CALLING-THREAD, review F1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reports {
+    /// A console run: its `stderr` is the console, which the writer already writes.
+    Console,
+    /// Any other run: `stderr` is `diagnostics.log` (or nothing), whose one writer is
+    /// `diagnostics`' — so each report is a line handed to [`crate::diagnostics::stderr_line`],
+    /// queued with the run's notes and covered by the way out's fence, never a second writer of
+    /// that file.
+    TheLogsRoad,
+}
+
+fn the_reports_road(console: bool) -> Reports {
+    if console {
+        Reports::Console
+    } else {
+        Reports::TheLogsRoad
+    }
+}
+
+/// **The writer's reports, one whole line at a time, handed to a road** — for a run whose
+/// `stderr` is not the sink's to write. `writeln!` reaches a writer in pieces, so a line is handed
+/// over at its end and not before.
+struct LineByLine {
+    say: fn(String),
+    pending: Vec<u8>,
+}
+
+impl LineByLine {
+    fn to(say: fn(String)) -> Self {
+        Self {
+            say,
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl std::io::Write for LineByLine {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.pending.extend_from_slice(bytes);
+        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=end).collect();
+            (self.say)(String::from_utf8_lossy(&line[..end]).into_owned());
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// **This run's standard error, written without the lock every other writer of
@@ -488,6 +554,19 @@ impl Capture {
     /// The queue a test's [`crate::trace::Trace`] is created on.
     pub(crate) fn queue(&self) -> &'static Queue {
         self.queue
+    }
+
+    /// The console lines offered so far, taken off the queue in order (a file line is put out).
+    pub(crate) fn stderr_lines(&self) -> Vec<String> {
+        let mut said = Vec::new();
+        let mut batch = String::new();
+        while let Ok(line) = self.waiting.try_recv() {
+            match line.destination {
+                Destination::Stderr => said.push(line.text),
+                Destination::File(_) => take(line, &mut batch, &mut ProcessStderr),
+            }
+        }
+        said
     }
 
     /// Everything offered so far, written where it was going.
@@ -703,7 +782,7 @@ mod tests {
         let (lines, waiting) = sync_channel(QUEUE_DEPTH);
         let dropped = Arc::new(AtomicU64::new(0));
         let counted = Arc::clone(&dropped);
-        let writer = std::thread::spawn(move || run(&waiting, &counted));
+        let writer = std::thread::spawn(move || run(&waiting, &counted, Reports::Console));
         let queue = Queue::new(lines, dropped);
         for index in 0..500 {
             queue.offer(Line {
@@ -795,7 +874,7 @@ mod tests {
         let counted = Arc::clone(&dropped);
         let (done, finished) = sync_channel::<()>(1);
         let writer = std::thread::spawn(move || {
-            run(&waiting, &counted);
+            run(&waiting, &counted, Reports::Console);
             let _ = done.send(());
         });
         let queue = Queue::new(lines, dropped);
@@ -858,7 +937,7 @@ mod tests {
         let counted = Arc::clone(&dropped);
         let (done, finished) = sync_channel::<()>(1);
         let writer = std::thread::spawn(move || {
-            run(&waiting, &counted);
+            run(&waiting, &counted, Reports::Console);
             let _ = done.send(());
         });
         let queue = Queue::new(lines, dropped);
@@ -986,6 +1065,41 @@ mod tests {
             false,
             Some(&crate::trace::TraceFiles::default())
         ));
+    }
+
+    /// RED (review F1; mutation: [`the_reports_road`] answering `Console` for a run without one,
+    /// which puts the reports through `write_std_error` into `diagnostics.log` beside its writer,
+    /// or [`LineByLine`] handing over a piece of a line) — **in a run without a console the sink's
+    /// own reports are lines on the log's road**: a trace file it could not open and the count of
+    /// the lines it lost each reach the road whole, as one line, from the writer's body — so in a
+    /// Log run (`BT_GLYPH_CENSUS` or `BT_FOCUS_THUMB_DUMP` alone) they are queued with the run's
+    /// notes, under the way out's fence, and the file keeps one writer.
+    #[test]
+    fn a_run_without_a_console_hands_the_writers_reports_to_the_logs_road() {
+        static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        fn road(line: String) {
+            SAID.lock().unwrap().push(line);
+        }
+        assert_eq!(the_reports_road(false), Reports::TheLogsRoad);
+        assert_eq!(the_reports_road(true), Reports::Console);
+        let folder = bt_testpath::temp_path("bt-sink-reports-a-folder-not-a-file");
+        std::fs::create_dir_all(&folder).unwrap();
+        let failing = Arc::new(TraceFile::new(&folder, Some("# header")));
+        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
+        let dropped = Arc::new(AtomicU64::new(3));
+        let queue = Queue::new(lines, Arc::clone(&dropped));
+        queue.offer_file_line(failing, "a census line".to_owned());
+        drop(queue);
+        run_to(&waiting, &dropped, &mut LineByLine::to(road));
+        let said = SAID.lock().unwrap().clone();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(
+            said[0].starts_with(&folder.display().to_string())
+                && said[0].contains("could not be opened for the trace"),
+            "{said:?}"
+        );
+        assert_eq!(said[1], "BT_PERF_TRACE dropped=3");
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     /// RED (mutation: [`file_line`] writing the line where it is made when no

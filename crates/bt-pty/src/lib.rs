@@ -3,8 +3,10 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 // Every `stderr` line goes to the writer that owns where `stderr` points, never written by the
 // thread that said it (T-TRACE-SINK-OFF-THE-CALLING-THREAD): `bt-app`'s `diagnostics::stderr_line`, or
-// the road `fn main` installs in a crate below it. Tests: `clippy.toml`'s `allow-print-in-tests`.
+// the road `fn main` installs in a crate below it. `stdout` is the same file in a Log run, so no
+// product line goes there either. Tests: `clippy.toml`'s `allow-print-in-tests`.
 #![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 
 use std::{
     collections::VecDeque,
@@ -2953,8 +2955,9 @@ pub(crate) fn say(line: String) {
 }
 
 /// **Say once that `what` was dropped without `door`, and what that leaves behind**, through the
-/// installed road ([`say_skipped_doors_through`]) — standard error only before one is installed
-/// (a test, a probe) — and count it on the dropping thread. Never a wait.
+/// installed road ([`say_skipped_doors_through`]) — before one is installed, through this crate's
+/// line road ([`say`]), which in a process that installed neither (a test, a probe) says it to
+/// nobody — and count it on the dropping thread. Never a wait.
 fn door_skipped(what: &str, door: &str, left: &str) {
     let _ = DOORS_SKIPPED.try_with(|skipped| skipped.set(skipped.get() + 1));
     let line = format!("{what} was dropped without {door}, and did not wait: {left}");

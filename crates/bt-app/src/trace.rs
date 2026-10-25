@@ -280,13 +280,21 @@ impl Gate {
 
     /// This process's trace for this door, resolving its path on first ask —
     /// on the sink's queue, so a door with no sink to write it is closed.
+    ///
+    /// Only an answer is kept: a door with no file, or the trace on the sink's
+    /// queue. A door asked before the sink has started is closed for that ask
+    /// and asked again the next time (review F7), so no station's first ask
+    /// decides the whole run by coming before `trace_sink::start`.
     pub fn get(&'static self) -> Option<&'static Trace> {
+        if let Some(answer) = self.trace.get() {
+            return answer.as_ref();
+        }
+        let Some(path) = installed(self.door) else {
+            return self.trace.get_or_init(|| None).as_ref();
+        };
+        let queue = trace_sink::queue()?;
         self.trace
-            .get_or_init(|| {
-                let path = installed(self.door)?;
-                let queue = trace_sink::queue()?;
-                Some(Trace::create(path, self.header, queue))
-            })
+            .get_or_init(|| Some(Trace::create(path, self.header, queue)))
             .as_ref()
     }
 }

@@ -1,7 +1,9 @@
 // Every `stderr` line goes to the writer that owns where `stderr` points, never written by the
 // thread that said it (T-TRACE-SINK-OFF-THE-CALLING-THREAD): `bt-app`'s `diagnostics::stderr_line`, or
-// the road `fn main` installs in a crate below it. Tests: `clippy.toml`'s `allow-print-in-tests`.
+// the road `fn main` installs in a crate below it. `stdout` is the same file in a Log run, so no
+// product line goes there either. Tests: `clippy.toml`'s `allow-print-in-tests`.
 #![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 // **A window, not a console** (user report 2026-08-18: double-clicking
 // `folio.exe` first raised a Windows Terminal window, because a
 // console-subsystem binary is handed a console host before its own `main`
@@ -77325,7 +77327,8 @@ fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync 
             &Backtrace::force_capture().to_string(),
         );
         if let Err(error) = append_panic_report(&path, &report) {
-            diagnostics::on_the_panic_road(&format!(
+            // Before the fatal road's fence, which covers it: a line on the run's `stderr` road.
+            diagnostics::stderr_line(format!(
                 "failed to write panic report {}: {error}",
                 path.display()
             ));
@@ -78165,11 +78168,26 @@ fn main() -> Result<()> {
             // The way out from before the loop: the trace writer is retired through its flush
             // door, which is an exit door (§5.3 row 17), so the phase says so first (D-78).
             bt_platform::admission::exiting();
-            // What the run said is on the disk before the error that ends it (row 30).
-            let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(
-                diagnostics::settle,
-            );
-            let _ = trace_shutdown.flush_through_its_door();
+            // What the run said is on the disk before the error that ends it (row 30), in the
+            // way out's order (`diagnostics::way_out`): the trace retired before the settle
+            // unless the trace is the console. The error itself is std's to write, once `main`
+            // has returned it: `Error: …` on `stderr`, after the fence and with no footer.
+            let mut trace = Some(trace_shutdown);
+            for step in diagnostics::way_out(channel) {
+                match step {
+                    diagnostics::WayOut::TraceFlush => {
+                        if let Some(trace) = trace.take() {
+                            let _ = trace.flush_through_its_door();
+                        }
+                    }
+                    diagnostics::WayOut::Settle => {
+                        let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(
+                            diagnostics::settle,
+                        );
+                    }
+                    diagnostics::WayOut::Lines => {}
+                }
+            }
             return Err(anyhow::Error::new(error).context("create winit event loop"));
         }
     };
@@ -78263,38 +78281,59 @@ fn main() -> Result<()> {
     // value of the line is that it is the last thing in the file when something
     // between it and the process's death goes wrong.
     //
-    // **And everything the run said, on the disk above the footer** (§5.3 row 30,
+    // **The last three acts, in the way out's order** (`diagnostics::way_out`, review F1): in a
+    // run whose trace is not the console the trace is retired first, so its writer's last reports
+    // are on the log's queue before the settle; in a console run the way out's lines are queued on
+    // the trace, and its flush comes last.
+    //
+    // **The settle: everything the run said, on the disk above the footer** (§5.3 row 30,
     // T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD): `diagnostics.log`'s writer answers a fence
     // once every line handed over before it is written, within `diagnostics::SETTLE_WITHIN`.
     // An owner-thread door (`doors::DiagnosticsSettle`), admitted on the way out.
-    let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(diagnostics::settle);
-    let code = match &outcome {
-        Ok(()) => 0,
-        Err(error) => {
-            diagnostics::way_out_line(format!("{APP_NAME} stopped: {error:#}"));
-            1
-        }
-    };
-    // **The run's budget, from its atomics** (0.4.6 A3): every turn's wall time, waits,
-    // unexplained time and scheduling delay, every door's calls, and the detail lines lost —
-    // whole however many of those lines the watchdog never got to write.
-    for line in hang_watch::budget_summary() {
-        diagnostics::way_out_line(line);
-    }
-    diagnostics::way_out_line(diagnostics::run_footer(
-        &hang_watch::utc_timestamp(std::time::SystemTime::now()),
-        code,
-        bt_platform::admission::refusals(),
-    ));
-    // **And what the trace still has queued, before the process goes**
+    //
+    // **The trace flush: what the trace still has queued, before the process goes**
     // (T-TRACE-OFF-THREAD). Under a bound — see `trace_sink::FLUSH_TIMEOUT`:
     // the failure that queue exists for is a writer stuck in a kernel write,
     // and waiting on it forever here would move the hang to the end of the run.
-    //
     // An owner-thread door (`doors::TraceFlush`, row 17), admitted on the way out, through the
     // writer's own door (D-78). A refusal loses what is still queued, as the flush's own timeout
     // does.
-    let _ = trace_shutdown.flush_through_its_door();
+    let code = match &outcome {
+        Ok(()) => 0,
+        Err(_) => 1,
+    };
+    let mut trace = Some(trace_shutdown);
+    for step in diagnostics::way_out(channel) {
+        match step {
+            diagnostics::WayOut::TraceFlush => {
+                if let Some(trace) = trace.take() {
+                    let _ = trace.flush_through_its_door();
+                }
+            }
+            diagnostics::WayOut::Settle => {
+                let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(
+                    diagnostics::settle,
+                );
+            }
+            diagnostics::WayOut::Lines => {
+                if let Err(error) = &outcome {
+                    diagnostics::way_out_line(format!("{APP_NAME} stopped: {error:#}"));
+                }
+                // **The run's budget, from its atomics** (0.4.6 A3): every turn's wall time,
+                // waits, unexplained time and scheduling delay, every door's calls, and the
+                // detail lines lost — whole however many of those lines the watchdog never got
+                // to write.
+                for line in hang_watch::budget_summary() {
+                    diagnostics::way_out_line(line);
+                }
+                diagnostics::way_out_line(diagnostics::run_footer(
+                    &hang_watch::utc_timestamp(std::time::SystemTime::now()),
+                    code,
+                    bt_platform::admission::refusals(),
+                ));
+            }
+        }
+    }
     // **The uninstaller, after *Uninstall* on the Settings card, is the very last
     // act** (T-UNINSTALL-UX): started detached, with `--after-pid` naming this
     // process, so it touches nothing until this process has gone. Nothing for any
