@@ -7,8 +7,8 @@ use crate::computation_lane::Asking;
 use crate::runtime::git::git_document_question;
 use crate::window_seam::prelude::*;
 use crate::{
-    ClickIntent, PeekCache, PreviewDocument, PreviewOpenLane, TabState, computation_lane,
-    documents_held_in, lane, peek_cache_key_for_decode, preview_open_lane, unstarted_pixels,
+    ClickIntent, DECODE_UNSTARTED, PeekCache, PreviewDocument, PreviewOpenLane, TabState,
+    computation_lane, documents_held_in, lane, preview_open_lane,
 };
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
@@ -2967,6 +2967,31 @@ impl<B: Backend> Runtime<'_, B> {
         let peek = self.window.file_peek.as_ref()?;
         let head = peek.head.filter(|_| peek.clock.is_shown())?;
         file_peek::contains(head, [at.x as f32, at.y as f32]).then_some(FloatGrasp::Head)
+    }
+}
+
+/// **What a file's pixels are filed as when the lane's thread could not be started**: a failed
+/// decode, in the decoder error's words, so every surface reading the window's cache agrees and
+/// asks again only on its own new input.
+fn unstarted_pixels() -> PeekCacheEntry {
+    PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
+        DECODE_UNSTARTED.to_owned(),
+    ))
+}
+
+/// The `peek_cache` identity a decoration-worker decode must be remembered under, so that the
+/// hover which later asks for the same picture finds it instead of asking the disk again.
+///
+/// It is `PeekSubject`'s own rule, stated once: a named file is its normalized path, a stream
+/// payload is the decoder's content key. Deriving it here rather than at the two call sites is what
+/// makes "verification warms the peek" a fact about one key rather than a coincidence between two.
+pub(crate) fn peek_cache_key_for_decode(
+    source: &bt_term::InlineImageSource,
+    decoded: &bt_term::DecodedInlineImage,
+) -> String {
+    match source {
+        bt_term::InlineImageSource::Osc1337(_) => decoded.key.clone(),
+        bt_term::InlineImageSource::LocalPath(path) => normalized_local_image_path_key(path),
     }
 }
 

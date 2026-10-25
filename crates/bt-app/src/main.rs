@@ -322,18 +322,20 @@ use runtime::platform_pointer_of;
 use runtime::{
     a_capture_still_holds_its_pointer, a_page_is_off_the_glass, a_page_still_has_a_pane,
     a_page_was_replaced, a_retirement_happens_on_this_turn, answer_attention_in,
-    apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels, drain_may_take_another_slice,
-    file_peek_promotion, float_git_page_shown, git_answer_notice, git_full_path,
-    git_roots_on_glass, git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, graph_key_of,
-    hole_for, in_drain_feed_turn, let_go_unnamed_peek_records, local_image_activation,
-    merge_notice_card, next_attention_stop, peek_body_kind, peek_card_opened, peek_files_named,
-    peek_foot_press, peek_page_texture_key, peek_reads_the_file, peek_scale_task, preview_body_bar,
-    profile_menu_anchor, raise_cancelled_quit_card_on, recall_flash, reference_card,
-    reference_run_rect, remember_decode, rescan_leaf_for_search, resize_worth_solving,
-    resolved_theme_change, restart_seed, revived_page_of, seat_holds_the_keyboard,
-    should_copy_on_select_release, step_leaf_text_scale, stepped_command_mark,
-    tab_surface_tip_boxes, take_psreadline_resize_reanchor_input, terminal_link_answers_a_press,
-    tooltip_anchor_for,
+    apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels, clear_copied_selection,
+    drain_may_take_another_slice, file_peek_promotion, float_git_page_shown, git_answer_notice,
+    git_full_path, git_roots_on_glass, git_surfaces_the_kernel_moved, git_surfaces_wanting_reread,
+    graph_key_of, hole_for, in_drain_feed_turn, input_line_needs_a_space_first,
+    let_go_unnamed_peek_records, local_image_activation, merge_notice_card, next_attention_stop,
+    paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept, paste_target_is_live,
+    peek_body_kind, peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
+    peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
+    prepare_dropped_paste, preview_body_bar, profile_menu_anchor, raise_cancelled_quit_card_on,
+    recall_flash, reference_card, reference_run_rect, remember_decode, rescan_leaf_for_search,
+    resize_worth_solving, resolved_theme_change, restart_seed, revived_page_of,
+    seat_holds_the_keyboard, selection_to_copy, should_copy_on_select_release, stage_paste,
+    step_leaf_text_scale, stepped_command_mark, tab_surface_tip_boxes, take_pending_paste,
+    take_psreadline_resize_reanchor_input, terminal_link_answers_a_press, tooltip_anchor_for,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
@@ -1126,27 +1128,6 @@ fn next_incarnation() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// **The rule [`Runtime::live_paste_target`] turns on**, as a function of the
-/// two facts it reads and nothing else (review X-1).
-///
-/// A named function rather than a run of `if`s inside the method, on the wheel
-/// ruling's own footing: this is a claim about a decision, and a decision that
-/// cannot be named cannot be pinned. Everything the method needs a window for —
-/// the tab list, the session map — happens before this is called, so the part
-/// that is a rule is testable and the part that is a lookup is not asked to be.
-///
-/// `standing` is the incarnation of whatever shell is in that seat now, and
-/// `None` is "no shell there at all" — a pane that was closed, or a seat that
-/// was never a terminal. Both answer the same way, because both mean the
-/// address names nothing.
-const fn paste_target_is_live(on_top: TabId, standing: Option<u64>, target: PasteTarget) -> bool {
-    on_top.0 == target.tab.0
-        && match standing {
-            Some(incarnation) => incarnation == target.incarnation,
-            None => false,
-        }
-}
-
 /// **Which shell a paste was promised to** (review X-1).
 ///
 /// A `SeatId` on its own is not an address. Seats are numbered inside their tab
@@ -1372,63 +1353,6 @@ enum PasteBody<'a> {
     InputLine(&'a [u8]),
 }
 
-/// **Decide, and hold the paste if the answer is "ask"** — `Runtime::deliver_paste`'s decision,
-/// with the window taken out so the rule and its effect can be run on a real tab.
-///
-/// **A second multi-line paste replaces the pending one** (design note §2): a question about text
-/// nobody answered is not a question anyone asked, so every other leaf's pending paste in this tab
-/// is dropped as the new one is held. The card is modal, so in practice there is never a first.
-fn stage_paste(
-    tab: &mut TabState,
-    target: PasteTarget,
-    text: String,
-    clipboard_text: bool,
-    ask: bool,
-    host: bt_platform::HostPlatform,
-    context: &'static str,
-) -> StagedPaste {
-    let Some(leaf) = tab.sessions.get(&target.seat) else {
-        return StagedPaste::Send(text);
-    };
-    let mark = line_continuation_mark(leaf.paste_recipient.encoder.grammar);
-    match paste_road(&text, PasteFacts::of(leaf, clipboard_text, ask, host)) {
-        PasteRoad::AsTyped => StagedPaste::Send(text),
-        PasteRoad::InputLine => StagedPaste::InputLine(powershell_input_line(&text)),
-        PasteRoad::Ask { lines } => {
-            for leaf in tab.sessions.values_mut() {
-                leaf.pending_paste = None;
-            }
-            if let Some(leaf) = tab.sessions.get_mut(&target.seat) {
-                let continued = mark.filter(|mark| input::continued_by(&text, *mark));
-                leaf.pending_paste = Some(PendingPaste {
-                    target,
-                    text,
-                    lines,
-                    continued,
-                    moved_focus: None,
-                    context,
-                });
-            }
-            StagedPaste::Held
-        }
-    }
-}
-
-/// The pane in this tab holding a paste that waits for an answer, and the paste.
-fn pending_paste_in(tab: &TabState) -> Option<(SeatId, &PendingPaste)> {
-    tab.sessions
-        .iter()
-        .find_map(|(seat, leaf)| leaf.pending_paste.as_ref().map(|pending| (*seat, pending)))
-}
-
-/// Take the waiting paste out of this tab, which is what every answer does first — `Cancel`
-/// included, and a spent answer cannot be spent twice.
-fn take_pending_paste(tab: &mut TabState) -> Option<PendingPaste> {
-    tab.sessions
-        .values_mut()
-        .find_map(|leaf| leaf.pending_paste.take())
-}
-
 /// **The three answers the paste card takes** (owner's rulings 2026-09-22 and 2026-09-23).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PasteAnswer {
@@ -1438,18 +1362,6 @@ enum PasteAnswer {
     Join,
     /// `Esc` or `×`: nothing is sent and the clipboard is not touched.
     Cancel,
-}
-
-/// **What a spent answer writes**, or nothing for `Cancel`.
-fn paste_answer_text(pending: &PendingPaste, answer: PasteAnswer) -> Option<String> {
-    match answer {
-        PasteAnswer::RunLineByLine => Some(pending.text.clone()),
-        PasteAnswer::Join => Some(match pending.continued {
-            Some(mark) => input::join_continued_lines(&pending.text, mark),
-            None => input::join_lines(&pending.text),
-        }),
-        PasteAnswer::Cancel => None,
-    }
 }
 
 /// **What a key does on the paste card** — answer it, or move its focus.
@@ -1483,19 +1395,6 @@ fn paste_card_key(
         Key::Named(NamedKey::Enter) => Some(PasteCardKey::Answer(focus)),
         Key::Named(NamedKey::Escape) => Some(PasteCardKey::Answer(PasteAnswer::Cancel)),
         _ => None,
-    }
-}
-
-/// **One key on the card, spent on the pending paste** — the focus moves on the paste itself, and
-/// an answer comes back for the caller to spend. The whole of the card's keyboard, so a test runs
-/// the very step the window runs.
-fn paste_card_step(pending: &mut PendingPaste, key: PasteCardKey) -> Option<PasteAnswer> {
-    match key {
-        PasteCardKey::Answer(answer) => Some(answer),
-        PasteCardKey::Focus(to) => {
-            pending.moved_focus = Some(to);
-            None
-        }
     }
 }
 
@@ -10525,29 +10424,6 @@ impl ChevronGates {
             gate.menu_gone();
         }
     }
-}
-
-/// Whether the cell in front of the cursor is something the path would be
-/// welded onto.
-///
-/// **The screen is the only honest witness.** The mock-up could ask its model
-/// what the input line held; a real shell keeps that string inside itself, and
-/// nothing this window can ask will get it. What this window *does* own is the
-/// grid the shell has drawn on, and the character immediately left of the cursor
-/// is the last one the input line put there — which is precisely the thing the
-/// rule is about. At column zero there is nothing in front to weld to, and an
-/// unwritten cell reads as a blank, so both answer "no space needed" without a
-/// special case.
-fn input_line_needs_a_space_first(session: &bt_term::DualPlaneSession) -> bool {
-    let cursor = session.terminal().cursor();
-    let Some(column) = (cursor.column as usize).checked_sub(1) else {
-        return false;
-    };
-    session
-        .terminal()
-        .visible_row(cursor.row)
-        .and_then(|row| row.cells.get(column).map(|cell| cell.text.clone()))
-        .is_some_and(|text| !text.chars().all(char::is_whitespace) && !text.is_empty())
 }
 
 /// Where a row's name opens (K156).
@@ -25272,15 +25148,6 @@ enum PeekAsk {
     Refused,
 }
 
-/// **What a file's pixels are filed as when the lane's thread could not be started**: a failed
-/// decode, in the decoder error's words, so every surface reading the window's cache agrees and
-/// asks again only on its own new input.
-fn unstarted_pixels() -> PeekCacheEntry {
-    PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
-        DECODE_UNSTARTED.to_owned(),
-    ))
-}
-
 /// **What this window's decoded pictures live in** — see [`MAX_PEEK_CACHE_BYTES`].
 type PeekCache = bt_term::BoundedCache<String, PeekCacheEntry>;
 
@@ -27384,22 +27251,6 @@ impl PeekThumbnail {
             pointer_x: pointer.x as f32,
             pointer_y: pointer.y as f32,
         }
-    }
-}
-
-/// The `peek_cache` identity a decoration-worker decode must be remembered under, so that the
-/// hover which later asks for the same picture finds it instead of asking the disk again.
-///
-/// It is `PeekSubject`'s own rule, stated once: a named file is its normalized path, a stream
-/// payload is the decoder's content key. Deriving it here rather than at the two call sites is what
-/// makes "verification warms the peek" a fact about one key rather than a coincidence between two.
-fn peek_cache_key_for_decode(
-    source: &bt_term::InlineImageSource,
-    decoded: &bt_term::DecodedInlineImage,
-) -> String {
-    match source {
-        bt_term::InlineImageSource::Osc1337(_) => decoded.key.clone(),
-        bt_term::InlineImageSource::LocalPath(path) => normalized_local_image_path_key(path),
     }
 }
 
@@ -34398,38 +34249,6 @@ const fn glass_allows_a_drop(glass: GlassHere) -> bool {
 /// motion, which is the reading the release already distrusts.
 const fn glass_allows_a_text_write(glass: GlassHere) -> bool {
     matches!(glass, GlassHere::Ours)
-}
-
-/// **Every condition a dragged path must clear before a byte is written**, in
-/// one place and as a function of four plain facts.
-///
-/// **`modal` is the fifth** (review 2026-09-17 P1-b), and it is here rather than
-/// only on the external road because the two roads must answer one question the
-/// same way. A press cannot *start* a row drag under a modal — `chrome_mouse_input`
-/// swallows every press for the quit card, the dirty gate and the first-run card
-/// and returns above the drag routing — but a card that came up *during* a drag
-/// leaves a gesture in flight over a window that is now waiting for a keystroke,
-/// and the keystroke after a drop is `Enter`.
-///
-/// Written as one function so that the answer can be read, and tested, without
-/// a window — and so that no caller can satisfy four of the five and reach the
-/// write. [`Runtime::paste_offer_kept`] is what gathers the facts; this is what
-/// they mean, and it hands back the **address** rather than a `bool` so that a
-/// caller cannot take the verdict from here and the destination from somewhere
-/// older.
-fn paste_offer_is_kept(
-    glass: GlassHere,
-    promised: Option<PasteOffer>,
-    at_release: Option<PasteOffer>,
-    plan_fits: bool,
-    modal: bool,
-) -> Option<PasteTarget> {
-    let at_release = at_release?;
-    (glass_allows_a_text_write(glass)
-        && plan_fits
-        && !modal
-        && paste_offer_survives(promised, Some(at_release)))
-    .then_some(at_release.target)
 }
 
 impl RowVerb {
@@ -53833,23 +53652,6 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
-    /// **What the window looks like to the Edit menu's clipboard rows**
-    /// (T-MAC-EDIT-CLIPBOARD).
-    ///
-    /// The two questions [`Runtime::keyboard_input`] asks before it lets a
-    /// `Cmd+C` reach the terminal, asked again in the same words — which is what
-    /// `every_surface_the_menu_defers_to_stands_above_the_clipboard_rung` holds
-    /// the two functions to.
-    fn clipboard_focus(&mut self) -> menubar::ClipboardFocus {
-        let rung = ime_owner(self.keyboard_owner());
-        clipboard_focus_of(
-            rung,
-            self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
-            self.settings_field_holds_the_keyboard(),
-            self.preview_edit_focus().is_some(),
-        )
-    }
-
     /// Observe focus without changing IME, native focus, or composition state.
     fn observe_ime_focus(&mut self, focused: bool) {
         self.window.ime_report.focus(focused, ime_report::now_ms());
@@ -69280,31 +69082,6 @@ fn ime_commit_bytes(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
 
-/// **The text a copy of this pane's selection puts on the clipboard**, or `None` when there is no
-/// selection — or, for copy-on-select (`ignore_empty`), when it is empty. `Ctrl+C` writes an
-/// empty selection as the empty text it is.
-fn selection_to_copy(session: &DualPlaneSession, ignore_empty: bool) -> Option<String> {
-    session
-        .selection_text()
-        .filter(|text| !(ignore_empty && text.is_empty()))
-}
-
-/// **`Ctrl+C`'s selection, taken down once its copy has landed** — only while the selection is
-/// still the text that was copied: a selection made again between the press and the clipboard's
-/// answer is the person's newer one, and stays. Answers whether it was taken down.
-fn clear_copied_selection(
-    session: &mut DualPlaneSession,
-    projection: &mut ViewportProjection,
-    copied: &str,
-) -> bool {
-    if session.selection_text().as_deref() != Some(copied) {
-        return false;
-    }
-    session.set_view_selection(None);
-    projection.set_selection(None);
-    true
-}
-
 /// **The copy tick's own clock, read in one place** (audit 2026-09-15, RB-1).
 ///
 /// `Some(the one instant the acknowledgement is due to come down)` while it is
@@ -69439,26 +69216,6 @@ fn dropped_files_seat_at(
     }
 }
 
-/// **A dropped file's path is a copied file's path** (GitHub issue #1 ②).
-///
-/// One line, and the line is the whole point: a drop hands this process the same
-/// thing a copy does — a list of paths — so it is turned into the same payload
-/// and spelled by the same code. Nothing here decides anything. The day somebody
-/// wants a drop quoted differently from a copy, this function is where that
-/// decision would have to be written down, and
-/// `a_dropped_path_is_spelled_like_a_copied_one` is what would go red first.
-fn prepare_dropped_paste(
-    paths: Vec<PathBuf>,
-    recipient: &shell_literal::Recipient,
-    leading_space: bool,
-) -> PreparedClipboardPaste {
-    prepare_clipboard_paste(
-        bt_platform::ClipboardPayload::Files(paths),
-        recipient,
-        leading_space,
-    )
-}
-
 /// Deliver one string to a shell the way a paste is delivered.
 ///
 /// Shared by terminal clipboard routing and K144 rather than copied because the files
@@ -69500,19 +69257,6 @@ fn paste_spelled<T>(
     projection.set_selection(None);
     projection.scroll_to_bottom();
     write(bytes)
-}
-
-/// [`paste_text`] or [`paste_spelled`], as the body says.
-fn paste_body<T>(
-    session: &mut DualPlaneSession,
-    projection: &mut ViewportProjection,
-    body: PasteBody<'_>,
-    write: impl FnOnce(&[u8]) -> Result<T>,
-) -> Result<T> {
-    match body {
-        PasteBody::Text(text) => paste_text(session, projection, text, write),
-        PasteBody::InputLine(bytes) => paste_spelled(session, projection, bytes, write),
-    }
 }
 
 /// **Which shape a recalled command's arrival takes** (DESIGN.md §7.55 ⑨).

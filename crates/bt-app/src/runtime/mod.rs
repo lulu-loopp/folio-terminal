@@ -43,6 +43,12 @@ pub(crate) use attention::{
     answer_attention_in, merge_notice_card, next_attention_stop, raise_cancelled_quit_card_on,
 };
 #[cfg(test)]
+pub(crate) use clipboard::{
+    clear_copied_selection, input_line_needs_a_space_first, paste_answer_text, paste_body,
+    paste_card_step, paste_offer_is_kept, paste_target_is_live, pending_paste_in,
+    prepare_dropped_paste, selection_to_copy, stage_paste, take_pending_paste,
+};
+#[cfg(test)]
 pub(crate) use diagnostics::resolved_theme_change;
 #[cfg(test)]
 pub(crate) use dpi::{
@@ -58,8 +64,8 @@ pub(crate) use palette::recall_flash;
 #[cfg(test)]
 pub(crate) use peek::{
     ask_for_peek_pixels, file_peek_promotion, let_go_unnamed_peek_records, peek_body_kind,
-    peek_card_opened, peek_files_named, peek_foot_press, peek_page_texture_key,
-    peek_reads_the_file, peek_scale_task, preview_body_bar, remember_decode,
+    peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
+    peek_page_texture_key, peek_reads_the_file, peek_scale_task, preview_body_bar, remember_decode,
 };
 #[cfg(test)]
 pub(crate) use pointer::a_capture_still_holds_its_pointer;

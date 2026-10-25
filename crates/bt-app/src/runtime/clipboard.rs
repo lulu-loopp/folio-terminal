@@ -11,16 +11,19 @@ use crate::window_seam::prelude::*;
 use crate::{
     ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
     PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
-    TextFieldSeat, UserInputKind, clear_copied_selection, i18n, input_line_needs_a_space_first,
-    menubar, offer_pty_input, paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept,
-    paste_target_is_live, pending_paste_in, prepare_clipboard_paste, prepare_dropped_paste,
-    profile_banner_name, restore, seats, selection_to_copy, stage_paste, take_pending_paste,
-    text_field, toast,
+    TextFieldSeat, UserInputKind, i18n, menubar, offer_pty_input, prepare_clipboard_paste,
+    profile_banner_name, restore, seats, text_field, toast,
+};
+use crate::{
+    GlassHere, PasteFacts, PasteRoad, PendingPaste, TabId, TabState, clipboard_focus_of,
+    glass_allows_a_text_write, ime_owner, input, line_continuation_mark, paste_offer_survives,
+    paste_road, paste_spelled, paste_text, powershell_input_line, shell_literal,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};
-use bt_viewport::MathBlockAnchor;
+use bt_term::DualPlaneSession;
+use bt_viewport::{MathBlockAnchor, ViewportProjection};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use winit::event::Ime;
@@ -1191,6 +1194,246 @@ impl<B: Backend> Runtime<'_, B> {
             },
         );
         Some(restore::paste_card_layout(&content, width, height, scale).with_ring(ring))
+    }
+
+    /// **What the window looks like to the Edit menu's clipboard rows**
+    /// (T-MAC-EDIT-CLIPBOARD).
+    ///
+    /// The two questions [`Runtime::keyboard_input`] asks before it lets a
+    /// `Cmd+C` reach the terminal, asked again in the same words — which is what
+    /// `every_surface_the_menu_defers_to_stands_above_the_clipboard_rung` holds
+    /// the two functions to.
+    pub(crate) fn clipboard_focus(&mut self) -> menubar::ClipboardFocus {
+        let rung = ime_owner(self.keyboard_owner());
+        clipboard_focus_of(
+            rung,
+            self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
+            self.settings_field_holds_the_keyboard(),
+            self.preview_edit_focus().is_some(),
+        )
+    }
+}
+
+/// **The rule [`Runtime::live_paste_target`] turns on**, as a function of the
+/// two facts it reads and nothing else (review X-1).
+///
+/// A named function rather than a run of `if`s inside the method, on the wheel
+/// ruling's own footing: this is a claim about a decision, and a decision that
+/// cannot be named cannot be pinned. Everything the method needs a window for —
+/// the tab list, the session map — happens before this is called, so the part
+/// that is a rule is testable and the part that is a lookup is not asked to be.
+///
+/// `standing` is the incarnation of whatever shell is in that seat now, and
+/// `None` is "no shell there at all" — a pane that was closed, or a seat that
+/// was never a terminal. Both answer the same way, because both mean the
+/// address names nothing.
+pub(crate) const fn paste_target_is_live(
+    on_top: TabId,
+    standing: Option<u64>,
+    target: PasteTarget,
+) -> bool {
+    on_top.0 == target.tab.0
+        && match standing {
+            Some(incarnation) => incarnation == target.incarnation,
+            None => false,
+        }
+}
+
+/// **Decide, and hold the paste if the answer is "ask"** — `Runtime::deliver_paste`'s decision,
+/// with the window taken out so the rule and its effect can be run on a real tab.
+///
+/// **A second multi-line paste replaces the pending one** (design note §2): a question about text
+/// nobody answered is not a question anyone asked, so every other leaf's pending paste in this tab
+/// is dropped as the new one is held. The card is modal, so in practice there is never a first.
+pub(crate) fn stage_paste(
+    tab: &mut TabState,
+    target: PasteTarget,
+    text: String,
+    clipboard_text: bool,
+    ask: bool,
+    host: bt_platform::HostPlatform,
+    context: &'static str,
+) -> StagedPaste {
+    let Some(leaf) = tab.sessions.get(&target.seat) else {
+        return StagedPaste::Send(text);
+    };
+    let mark = line_continuation_mark(leaf.paste_recipient.encoder.grammar);
+    match paste_road(&text, PasteFacts::of(leaf, clipboard_text, ask, host)) {
+        PasteRoad::AsTyped => StagedPaste::Send(text),
+        PasteRoad::InputLine => StagedPaste::InputLine(powershell_input_line(&text)),
+        PasteRoad::Ask { lines } => {
+            for leaf in tab.sessions.values_mut() {
+                leaf.pending_paste = None;
+            }
+            if let Some(leaf) = tab.sessions.get_mut(&target.seat) {
+                let continued = mark.filter(|mark| input::continued_by(&text, *mark));
+                leaf.pending_paste = Some(PendingPaste {
+                    target,
+                    text,
+                    lines,
+                    continued,
+                    moved_focus: None,
+                    context,
+                });
+            }
+            StagedPaste::Held
+        }
+    }
+}
+
+/// The pane in this tab holding a paste that waits for an answer, and the paste.
+pub(crate) fn pending_paste_in(tab: &TabState) -> Option<(SeatId, &PendingPaste)> {
+    tab.sessions
+        .iter()
+        .find_map(|(seat, leaf)| leaf.pending_paste.as_ref().map(|pending| (*seat, pending)))
+}
+
+/// Take the waiting paste out of this tab, which is what every answer does first — `Cancel`
+/// included, and a spent answer cannot be spent twice.
+pub(crate) fn take_pending_paste(tab: &mut TabState) -> Option<PendingPaste> {
+    tab.sessions
+        .values_mut()
+        .find_map(|leaf| leaf.pending_paste.take())
+}
+
+/// **What a spent answer writes**, or nothing for `Cancel`.
+pub(crate) fn paste_answer_text(pending: &PendingPaste, answer: PasteAnswer) -> Option<String> {
+    match answer {
+        PasteAnswer::RunLineByLine => Some(pending.text.clone()),
+        PasteAnswer::Join => Some(match pending.continued {
+            Some(mark) => input::join_continued_lines(&pending.text, mark),
+            None => input::join_lines(&pending.text),
+        }),
+        PasteAnswer::Cancel => None,
+    }
+}
+
+/// **One key on the card, spent on the pending paste** — the focus moves on the paste itself, and
+/// an answer comes back for the caller to spend. The whole of the card's keyboard, so a test runs
+/// the very step the window runs.
+pub(crate) fn paste_card_step(
+    pending: &mut PendingPaste,
+    key: PasteCardKey,
+) -> Option<PasteAnswer> {
+    match key {
+        PasteCardKey::Answer(answer) => Some(answer),
+        PasteCardKey::Focus(to) => {
+            pending.moved_focus = Some(to);
+            None
+        }
+    }
+}
+
+/// Whether the cell in front of the cursor is something the path would be
+/// welded onto.
+///
+/// **The screen is the only honest witness.** The mock-up could ask its model
+/// what the input line held; a real shell keeps that string inside itself, and
+/// nothing this window can ask will get it. What this window *does* own is the
+/// grid the shell has drawn on, and the character immediately left of the cursor
+/// is the last one the input line put there — which is precisely the thing the
+/// rule is about. At column zero there is nothing in front to weld to, and an
+/// unwritten cell reads as a blank, so both answer "no space needed" without a
+/// special case.
+pub(crate) fn input_line_needs_a_space_first(session: &bt_term::DualPlaneSession) -> bool {
+    let cursor = session.terminal().cursor();
+    let Some(column) = (cursor.column as usize).checked_sub(1) else {
+        return false;
+    };
+    session
+        .terminal()
+        .visible_row(cursor.row)
+        .and_then(|row| row.cells.get(column).map(|cell| cell.text.clone()))
+        .is_some_and(|text| !text.chars().all(char::is_whitespace) && !text.is_empty())
+}
+
+/// **Every condition a dragged path must clear before a byte is written**, in
+/// one place and as a function of four plain facts.
+///
+/// **`modal` is the fifth** (review 2026-09-17 P1-b), and it is here rather than
+/// only on the external road because the two roads must answer one question the
+/// same way. A press cannot *start* a row drag under a modal — `chrome_mouse_input`
+/// swallows every press for the quit card, the dirty gate and the first-run card
+/// and returns above the drag routing — but a card that came up *during* a drag
+/// leaves a gesture in flight over a window that is now waiting for a keystroke,
+/// and the keystroke after a drop is `Enter`.
+///
+/// Written as one function so that the answer can be read, and tested, without
+/// a window — and so that no caller can satisfy four of the five and reach the
+/// write. [`Runtime::paste_offer_kept`] is what gathers the facts; this is what
+/// they mean, and it hands back the **address** rather than a `bool` so that a
+/// caller cannot take the verdict from here and the destination from somewhere
+/// older.
+pub(crate) fn paste_offer_is_kept(
+    glass: GlassHere,
+    promised: Option<PasteOffer>,
+    at_release: Option<PasteOffer>,
+    plan_fits: bool,
+    modal: bool,
+) -> Option<PasteTarget> {
+    let at_release = at_release?;
+    (glass_allows_a_text_write(glass)
+        && plan_fits
+        && !modal
+        && paste_offer_survives(promised, Some(at_release)))
+    .then_some(at_release.target)
+}
+
+/// **The text a copy of this pane's selection puts on the clipboard**, or `None` when there is no
+/// selection — or, for copy-on-select (`ignore_empty`), when it is empty. `Ctrl+C` writes an
+/// empty selection as the empty text it is.
+pub(crate) fn selection_to_copy(session: &DualPlaneSession, ignore_empty: bool) -> Option<String> {
+    session
+        .selection_text()
+        .filter(|text| !(ignore_empty && text.is_empty()))
+}
+
+/// **`Ctrl+C`'s selection, taken down once its copy has landed** — only while the selection is
+/// still the text that was copied: a selection made again between the press and the clipboard's
+/// answer is the person's newer one, and stays. Answers whether it was taken down.
+pub(crate) fn clear_copied_selection(
+    session: &mut DualPlaneSession,
+    projection: &mut ViewportProjection,
+    copied: &str,
+) -> bool {
+    if session.selection_text().as_deref() != Some(copied) {
+        return false;
+    }
+    session.set_view_selection(None);
+    projection.set_selection(None);
+    true
+}
+
+/// **A dropped file's path is a copied file's path** (GitHub issue #1 ②).
+///
+/// One line, and the line is the whole point: a drop hands this process the same
+/// thing a copy does — a list of paths — so it is turned into the same payload
+/// and spelled by the same code. Nothing here decides anything. The day somebody
+/// wants a drop quoted differently from a copy, this function is where that
+/// decision would have to be written down, and
+/// `a_dropped_path_is_spelled_like_a_copied_one` is what would go red first.
+pub(crate) fn prepare_dropped_paste(
+    paths: Vec<PathBuf>,
+    recipient: &shell_literal::Recipient,
+    leading_space: bool,
+) -> PreparedClipboardPaste {
+    prepare_clipboard_paste(
+        bt_platform::ClipboardPayload::Files(paths),
+        recipient,
+        leading_space,
+    )
+}
+
+/// [`paste_text`] or [`paste_spelled`], as the body says.
+pub(crate) fn paste_body<T>(
+    session: &mut DualPlaneSession,
+    projection: &mut ViewportProjection,
+    body: PasteBody<'_>,
+    write: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
+    match body {
+        PasteBody::Text(text) => paste_text(session, projection, text, write),
+        PasteBody::InputLine(bytes) => paste_spelled(session, projection, bytes, write),
     }
 }
 
