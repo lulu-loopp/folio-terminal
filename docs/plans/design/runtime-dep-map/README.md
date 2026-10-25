@@ -116,6 +116,13 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 18 | `runtime/mouse.rs` | 49 (29 + 20) | 81 |
    | 19 | `runtime/preview.rs` | 91 (72 + 19) | 144 |
 
+   **An item stays in `main.rs`, whatever its `called_from` row proposes, when moving it would make a field it
+   writes a multi-writer fact** (the ownership census refuses a new one without a ruled owner; the standing rule is
+   that such a move goes back through the original single writer). `release_due_leaf_resize` is the first: it writes
+   `LeafSession.birth` and `LeafSession.grid`, whose other writers stay at the root, and batch 3 moved it back. It
+   stays in `main.rs` until an owner is ruled for those two facts; `unclassified.tsv` keeps proposing
+   `runtime/dpi.rs` for it (that column is generated), and no later batch retries the move.
+
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,
    `check-env-doors.ps1`, `check-window-seam-native.ps1`, `check-embedded-spaces.ps1`):
