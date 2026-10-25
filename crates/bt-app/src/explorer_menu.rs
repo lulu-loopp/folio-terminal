@@ -125,6 +125,7 @@ use bt_platform::admission::WorkerCtx;
 use bt_platform::msix::{self, PACKAGE_FILE_NAME};
 
 use crate::i18n::Text;
+use crate::startup::{Settled, SettledOnce};
 
 /// What this user's deployment database says about Folio's package.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -579,19 +580,62 @@ pub fn supported() -> bool {
     *SUPPORTED.get_or_init(answer)
 }
 
-/// `folio.msix`, beside the executable, when it is there.
+/// `folio.msix`, beside the executable, **as this start found it** ([`settle_package`]).
 ///
 /// The package file ships **in the archive** rather than being downloaded or
 /// generated, so "is it beside the exe" is the same question as "did the whole
 /// archive get extracted". A machine where it is missing can still have the
 /// classic verb and cannot have this one, and the row says which.
+///
+/// **A read, not a look** (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD; C1): the
+/// Settings dialog asks this on every frame it is up, its apply and the first-run
+/// card ask it on the window thread, and until 2026-10-25 each ask was an
+/// `is_file` (and the first one opened the running image). The archive's folder
+/// does not change under a running Folio — an update replaces it only after this
+/// process has gone — so the start's answer is the run's. The one change a
+/// person can still make, deleting the file by hand, is met by the deployment's
+/// own look on its worker ([`start_request`]), which answers
+/// [`Text::ExplorerFirstPageNoPackage`].
+///
+/// # Panics
+///
+/// Before [`settle_package`] ran in this process.
 #[must_use]
-pub fn package_file() -> Option<PathBuf> {
-    let beside = bt_platform::running_image()
-        .ok()?
-        .folder()?
-        .join(PACKAGE_FILE_NAME);
-    beside.is_file().then_some(beside)
+pub fn package_file() -> Option<&'static Path> {
+    PACKAGE.get().as_deref()
+}
+
+/// [`package_file`]'s cell, settled by [`settle_package`].
+#[cfg(not(test))]
+static PACKAGE: SettledOnce<Option<PathBuf>> = SettledOnce::new(PACKAGE_IS);
+
+/// A test process has no `main`: its first read settles the cell with the look `main` settles
+/// it with, beside the test binary.
+#[cfg(test)]
+static PACKAGE: SettledOnce<Option<PathBuf>> =
+    SettledOnce::settled_in_a_test_by(PACKAGE_IS, look_beside_this_image);
+
+/// What [`PACKAGE`] holds, for the panic of a read before it is settled.
+const PACKAGE_IS: &str = "the package file beside the executable (explorer_menu::package_file)";
+
+/// **Settle [`package_file`]: one look beside the running image, before the loop**
+/// (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD; C1). `fn main` calls this in the loop's
+/// process right after the running image is resolved (its pin in `window_waits_tests`), so no
+/// reader on the window thread pays for the look. A later call answers the first.
+pub(crate) fn settle_package() -> Settled<Option<PathBuf>> {
+    PACKAGE.settle(look_beside_this_image)
+}
+
+/// The look [`settle_package`] makes: `folio.msix` in this executable's folder.
+fn look_beside_this_image() -> Option<PathBuf> {
+    package_in(this_folder().as_deref(), &|path| path.is_file())
+}
+
+/// **`folio.msix` in `folder`, when `is_file` finds it there** — the one look, made by
+/// [`settle_package`] before the loop and by a probe's or a deployment's worker for itself.
+fn package_in(folder: Option<&Path>, is_file: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+    let beside = folder?.join(PACKAGE_FILE_NAME);
+    is_file(&beside).then_some(beside)
 }
 
 /// What the row is drawn from.
@@ -621,11 +665,17 @@ fn remember(state: PackageState) {
 /// asked; `bt_platform::msix::registered` exists there too and answers
 /// `Ok(None)`, so nothing below needs a platform arm of its own.
 fn read_state() -> PackageState {
+    read_state_from(&ThisMachine)
+}
+
+/// [`read_state`] of a deployment database handed in — this machine's there, a test's own in
+/// the suite.
+fn read_state_from(deployment: &impl Deployment) -> PackageState {
     if !supported() {
         return PackageState::Unsupported;
     }
     state_of(
-        msix::registered(),
+        deployment.registered(),
         this_folder().as_deref(),
         &is_this_executable,
     )
@@ -1445,7 +1495,7 @@ fn dotted(version: msix::PackageVersion) -> String {
 pub(crate) struct Start<'a> {
     /// The folder this executable is in.
     pub(crate) here: Option<PathBuf>,
-    /// `folio.msix` beside the executable, when it is there ([`package_file`]).
+    /// `folio.msix` beside the executable, when it is there ([`package_in`]).
     pub(crate) package: Option<PathBuf>,
     /// Whether registering this folder would put this executable behind the
     /// menu item — see [`reassert_wanted`].
@@ -1464,7 +1514,9 @@ impl Start<'static> {
                 .as_deref()
                 .map(package_exe_in)
                 .is_some_and(|exe| is_this_executable(&exe)),
-            package: package_file(),
+            // The probe's own look, on its worker: an update's commit runs it again later in
+            // the run, and it asks the folder as it is then ([`package_file`] is the start's).
+            package: package_in(here.as_deref(), &|path| path.is_file()),
             here,
             this_build: this_package_version(),
             ours: &is_this_executable,
@@ -1816,12 +1868,35 @@ fn run_request(install: bool) {
 /// or handed to a press written down meanwhile. The switch is still there, so the same press asks
 /// again. A job that panics is answered the same way, with the sentence that claims nothing about
 /// what it did.
+///
+/// **Nothing is looked at before the start** (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD; C1):
+/// the press arrives on the window thread, so the package file is looked for by the job, on its
+/// worker, as it registers — the folder as it is now, not as the frame that offered the answer
+/// saw it ([`package_file`]), so a `folio.msix` deleted since is
+/// [`Text::ExplorerFirstPageNoPackage`].
 fn start_request(
     executor: &crate::lane::Executor,
     say: impl Fn(&str) + Send + Sync + 'static,
     install: bool,
 ) -> bool {
-    let package = package_file();
+    start_request_with(
+        executor,
+        say,
+        install,
+        std::sync::Arc::new(ThisMachine),
+        |path| path.is_file(),
+    )
+}
+
+/// [`start_request`] with the deployment database and the job's look for the package file
+/// handed in — this machine's and `is_file` there, a test's own in the suite.
+fn start_request_with<D: Deployment + Send + Sync + 'static>(
+    executor: &crate::lane::Executor,
+    say: impl Fn(&str) + Send + Sync + 'static,
+    install: bool,
+    deployment: std::sync::Arc<D>,
+    is_file: impl Fn(&Path) -> bool + Send + 'static,
+) -> bool {
     let job = std::sync::Arc::new(JobExit::default());
     let ended = std::sync::Arc::clone(&job);
     executor
@@ -1834,12 +1909,15 @@ fn start_request(
             }),
             move |_ctx| {
                 let outcome = if install {
+                    // The job's own look, here on its worker: the folder as it is now.
+                    let package = package_in(this_folder().as_deref(), &is_file);
                     match package.as_deref().and_then(|package| {
                         // The file, and the folder to register it against. Either being
                         // absent is the same answer, so they are fetched as one.
                         Some((package, package.parent()?))
                     }) {
-                        Some((package, here)) => msix::register(package, here)
+                        Some((package, here)) => deployment
+                            .register(package, here)
                             .map_err(|message| PressFailure::Windows {
                                 install: true,
                                 message,
@@ -1863,7 +1941,7 @@ fn start_request(
                     // package" would report success over a package that is still
                     // registered. This thread can afford the question; the one that took
                     // the press could not.
-                    let state = read_state();
+                    let state = read_state_from(&*deployment);
                     match removal_for(&state) {
                         // **A question Windows refused is not an answer** (R2-20).
                         // Reporting success here would put the row on `Off` over a
@@ -1892,7 +1970,7 @@ fn start_request(
                         Removal::AlreadyGone => Ok(false),
                     }
                 };
-                let state = read_state();
+                let state = read_state_from(&*deployment);
                 // A press that worked left the registration where the reader asked
                 // for it, so a refusal of this start's renewal is no longer the
                 // row's news (U-25).
@@ -3449,6 +3527,194 @@ mod tests {
         );
         said_once(&said);
         assert!(!job_in_flight(), "and the latch is let go");
+    }
+
+    /// A job's look for the package file that answers `found` and sends the thread it ran on.
+    fn counted_look(
+        found: bool,
+    ) -> (
+        impl Fn(&Path) -> bool + Send + 'static,
+        std::sync::mpsc::Receiver<std::thread::ThreadId>,
+    ) {
+        let (looked, looks) = std::sync::mpsc::channel();
+        (
+            move |_: &Path| {
+                looked.send(std::thread::current().id()).unwrap();
+                found
+            },
+            looks,
+        )
+    }
+
+    /// The row's cells as a test found them, put back after a job that wrote them: they are the
+    /// process's, and other tests draw the row.
+    fn forget_the_job() {
+        *KNOWN.lock().unwrap() = None;
+        REGISTERED_HERE.store(false, Ordering::Release);
+        remember_renewal_refusal(None);
+    }
+
+    /// RED (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD; C1) — **a press asks nothing of the
+    /// disk on the thread that pressed; its job looks, once, on its worker.** A press whose start
+    /// the door refused looked at nothing; a press that started looked once, on a thread that is
+    /// not the asker's, and a package file gone since the frame that offered the answer is
+    /// [`Text::ExplorerFirstPageNoPackage`] with nothing registered. Before, `start_request`
+    /// asked `package_file()` — an `is_file`, and on the first call the running image — on the
+    /// window thread before it started the job.
+    ///
+    /// MUTATION: make the look in `start_request_with` before `start_worker` and hand the path
+    /// into the body (the shape before) — the refused press counts one look on the asking thread,
+    /// and the started one's look is the asker's.
+    #[test]
+    fn a_press_looks_for_the_package_on_its_worker_and_never_on_the_asking_thread() {
+        let _turn = DEPLOYMENT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let asking = std::thread::current().id();
+
+        let (executor, say, said) = refusing();
+        let (look, looks) = counted_look(false);
+        assert!(
+            !BUSY.swap(true, Ordering::AcqRel),
+            "the press takes the latch"
+        );
+        let deployment = std::sync::Arc::new(FakeDeployment::holding(None));
+        assert!(
+            !start_request_with(
+                &executor,
+                say,
+                true,
+                std::sync::Arc::clone(&deployment),
+                look
+            ),
+            "the door refused the start"
+        );
+        assert_eq!(
+            looks.iter().count(),
+            0,
+            "a press the door refused looked at nothing"
+        );
+        said_once(&said);
+        assert_eq!(
+            take_outcome(),
+            Some(Err(PressFailure::Folio(
+                Text::ChangeNotStarted.text().to_owned()
+            )))
+        );
+        assert!(!job_in_flight());
+
+        let executor =
+            crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default()));
+        let (look, looks) = counted_look(false);
+        assert!(
+            !BUSY.swap(true, Ordering::AcqRel),
+            "the press takes the latch"
+        );
+        assert!(
+            start_request_with(
+                &executor,
+                |_: &str| {},
+                true,
+                std::sync::Arc::clone(&deployment),
+                look
+            ),
+            "the job started"
+        );
+        // The look goes with the job's body, so the channel ends when the job has ended.
+        let looked = looks.iter().collect::<Vec<_>>();
+        assert_eq!(looked.len(), 1, "the job looked once: {looked:?}");
+        assert_ne!(looked[0], asking, "on its worker, not on the asking thread");
+        assert_eq!(
+            take_outcome(),
+            Some(Err(PressFailure::Folio(
+                Text::ExplorerFirstPageNoPackage.text().to_owned()
+            ))),
+            "a package file gone since the start is the job's own answer"
+        );
+        assert!(deployment.calls().is_empty(), "and nothing was registered");
+        assert!(!job_in_flight(), "and the latch is let go");
+        forget_the_job();
+    }
+
+    /// RED (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD) — **a press registers the file its job
+    /// found, against the folder it found it in** — this executable's, where the job looked — and
+    /// not a path carried in from the press. The suite's binary has no `folio.msix` beside it, so
+    /// the start's settled answer is "none", and only the job's own look finds one.
+    ///
+    /// MUTATION: register the settled `package_file()` in the job instead of its own look — the
+    /// job answers [`Text::ExplorerFirstPageNoPackage`] and registers nothing.
+    #[test]
+    fn a_press_registers_the_file_its_job_found_beside_this_executable() {
+        let _turn = DEPLOYMENT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let here = this_folder().expect("the suite's binary is in a folder");
+        assert_eq!(
+            package_file(),
+            None,
+            "the suite ships no package beside its binary"
+        );
+        let executor =
+            crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default()));
+        let (look, looks) = counted_look(true);
+        let deployment = std::sync::Arc::new(FakeDeployment::holding(None));
+        assert!(
+            !BUSY.swap(true, Ordering::AcqRel),
+            "the press takes the latch"
+        );
+        assert!(start_request_with(
+            &executor,
+            |_: &str| {},
+            true,
+            std::sync::Arc::clone(&deployment),
+            look
+        ));
+        assert_eq!(looks.iter().count(), 1, "the job looked once");
+        assert_eq!(take_outcome(), Some(Ok(true)), "and registered");
+        assert_eq!(
+            deployment.calls(),
+            vec![(here.join(PACKAGE_FILE_NAME), here)],
+            "the file the job found, against its folder"
+        );
+        assert!(!job_in_flight());
+        forget_the_job();
+    }
+
+    /// RED (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD) — **the row is drawn from the folder as
+    /// the start found it**: `folio.msix` there offers the first page and says so on the row's
+    /// line; gone, or no folder at all, greys it with the missing-package line. The window's
+    /// readers ([`package_file`]) answer the start's look, which a test process makes on its
+    /// first read as `main` makes it before the loop.
+    ///
+    /// MUTATION: drop the `is_file` from `package_in` — the folder without the file still offers
+    /// the first page.
+    #[test]
+    fn the_row_is_drawn_from_the_folder_as_the_start_found_it() {
+        let folder = install_folder("settled-package");
+        let found = package_in(Some(&folder), &|path| path.is_file());
+        assert_eq!(found, Some(folder.join(PACKAGE_FILE_NAME)));
+        assert!(first_page_offered(true, found.is_some()));
+        assert_eq!(
+            description_for(true, found.is_some(), false, false, false),
+            Text::DescExplorerMenu
+        );
+
+        std::fs::remove_file(folder.join(PACKAGE_FILE_NAME)).unwrap();
+        let gone = package_in(Some(&folder), &|path| path.is_file());
+        assert_eq!(gone, None, "a folder without the file has no package");
+        assert!(!first_page_offered(true, gone.is_some()));
+        assert_ne!(
+            description_for(true, gone.is_some(), false, false, false),
+            Text::DescExplorerMenu
+        );
+        assert_eq!(package_in(None, &|_| true), None, "no folder, no package");
+
+        assert_eq!(
+            package_file().map(Path::to_path_buf),
+            look_beside_this_image(),
+            "the window reads the start's look"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// RED (T-PROFILE-INSTALL-REFUSED-START) — **a probe that panicked while it held the

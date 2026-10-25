@@ -48538,8 +48538,10 @@ impl<B: Backend> Runtime<'_, B> {
             // dialog is up is not a cost worth a second store.
             explorer_first_page: explorer_menu::state().registered(),
             // **What the machine could do, beside what it has done.** Both halves
-            // are cheap here — one `OnceLock` and one `is_file` — and neither can
-            // be answered by the row itself, which is why the answer is handed in.
+            // are cheap here — one remembered kernel answer and one cell the start
+            // settled (`explorer_menu::package_file`), nothing asked of the disk —
+            // and neither can be answered
+            // by the row itself, which is why the answer is handed in.
             explorer_first_page_offered: explorer_menu::first_page_offered(
                 explorer_menu::supported(),
                 explorer_menu::package_file().is_some(),
@@ -65293,14 +65295,17 @@ fn rebuild_every_native_surface(
 
 impl<B: Backend> FolioApp<B> {
     /// `_storage` and `_profiles` are the witnesses that `main` settled the data directory and the
-    /// profile table (`startup::Settled`, T-LAZY-INITIALIZERS-BEFORE-THE-LOOP): nothing is read
-    /// from them; that they exist is the proof the loop does not start before either.
+    /// profile table (`startup::Settled`, T-LAZY-INITIALIZERS-BEFORE-THE-LOOP), `_package` that it
+    /// settled whether `folio.msix` is beside the executable
+    /// (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD): nothing is read from them; that they exist
+    /// is the proof the loop does not start before any of them.
     fn new(
         proxy: LoopProxy,
         cli: cli::CliRequest,
         delegate: Option<bt_platform::AppDelegate>,
         _storage: startup::Settled<persist::DataDirectory>,
         _profiles: startup::Settled<profiles::Registry>,
+        _package: startup::Settled<Option<PathBuf>>,
     ) -> Self {
         Self {
             app: None,
@@ -77984,6 +77989,11 @@ fn main() -> Result<()> {
         diagnostics::note(&note);
     }
     bt_pty::use_sidecars_in(bt_platform::own_files_folder());
+    // **And whether the package file came with it, looked at once here and not by a frame**
+    // (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD; C1): the Settings dialog, its apply and the
+    // first-run card read the answer on the window thread, and a press's job looks again for
+    // itself on its worker.
+    let package = explorer_menu::settle_package();
     // **And from here no trace line is written by the thread that made it**
     // (T-TRACE-OFF-THREAD). `trace_sink` starts one writer thread — and only
     // for a run that asked for a trace — behind a bounded queue that drops and
@@ -78200,6 +78210,7 @@ fn main() -> Result<()> {
         delegate,
         settled,
         registry,
+        package,
     );
     let outcome = event_loop
         .run_app(&mut application)
