@@ -4,6 +4,7 @@
 use super::pointer::{Gone, OwnerGone};
 use crate::computation_lane::{Asking, ComputationId};
 use crate::input::Keystroke;
+use crate::runtime::git::graph_key_of;
 use crate::window_seam::prelude::*;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
@@ -31,14 +32,14 @@ use crate::{
     deliver_clipboard_picture, diagnostics, documents_held_in, documents_held_mut_in,
     documents_pictures, earliest_deadline, file_peek, files, files_a_tab_stands_on,
     files_row_display_name, float, float_dock_label, folded_levels, foot_revealed_label,
-    forget_a_picture, forget_standing_answers, git_panel, graph_key_of, hang_watch, hex_peek,
-    highlight, i18n, image_clamped_pan, image_destination, image_is_pannable, image_meta_sentence,
-    image_pan_key, image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale,
-    image_zoom_settles, image_zoom_toggled, ime_owner, input, markdown_empty_page_offset,
-    markdown_prose_composition, markdown_prose_paragraphs, markdown_runs, markdown_source_cell,
-    markdown_source_offset_at, marks, measure_preview_links, notice, owe_sharpened_rasters,
-    page_address_hand_off, page_destination, page_foot_flash, page_foot_lead, page_source_file,
-    peek_scale_task, picture_channel_owner, picture_errand, picture_files_of, pictures_awaited_by,
+    forget_a_picture, forget_standing_answers, git_panel, hang_watch, hex_peek, highlight, i18n,
+    image_clamped_pan, image_destination, image_is_pannable, image_meta_sentence, image_pan_key,
+    image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale, image_zoom_settles,
+    image_zoom_toggled, ime_owner, input, markdown_empty_page_offset, markdown_prose_composition,
+    markdown_prose_paragraphs, markdown_runs, markdown_source_cell, markdown_source_offset_at,
+    marks, measure_preview_links, notice, owe_sharpened_rasters, page_address_hand_off,
+    page_destination, page_foot_flash, page_foot_lead, page_source_file, peek_scale_task,
+    picture_channel_owner, picture_errand, picture_files_of, pictures_awaited_by,
     pictures_need_handing_over, place_preview_math, preedit_caret_byte, present_diagnostics,
     preview, preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_prose,
     preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,

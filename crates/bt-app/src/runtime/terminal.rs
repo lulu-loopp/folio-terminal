@@ -16,10 +16,9 @@ use crate::{
 };
 use crate::{
     ClickIntent, DRAIN_SLICES_PER_TURN, DRAIN_TURN_BUDGET, HyperlinkActivation, LeafSeed, TabState,
-    TextScale, apply_leaf_metrics, drain_leaf_pty, hyperlink_activation, link_target_to_ask_about,
-    profiles, seat_holds_the_keyboard,
+    TextScale, drain_leaf_pty, hyperlink_activation, link_target_to_ask_about, profiles,
 };
-use crate::{LeafView, TextStep, pane_cell_metrics};
+use crate::{LeafView, TextStep, cell_width_subpixels, pane_cell_metrics};
 use anyhow::Context;
 use anyhow::Result;
 use bt_doc::Bias;
@@ -1763,6 +1762,85 @@ impl<B: Backend> Runtime<'_, B> {
             leaf.session.re_ask_about_link_target(path);
         }
     }
+}
+
+/// **Whether one seat's shell is, right now, the true owner of the keyboard** —
+/// the thing DEC 1004's `CSI I`/`CSI O` means, and the whole of what slice A0.5
+/// reports (attention plan §3.0, §10.10; Q8 ruled 2026-08-25).
+///
+/// Four bits and a conjunction, and every one of them is a way for the answer to
+/// be no:
+///
+/// - `window_focused` — this window has the desktop's keyboard at all.
+/// - `tab_is_active` — this tab is the one on screen. A pane in a background tab
+///   is not being typed into however the window stands.
+/// - `seat_is_focused_leaf` — of the panes this tab holds, this is the one. A
+///   three-seat tab has one keyboard and two agents who ought to know they are
+///   not holding it (§3.0's D10: that is why the report is per pane and not per
+///   window).
+/// - `owner_is_a_shell` — the keyboard is in a *terminal* and not in a preview,
+///   a page, a files tree, a search capsule, a rename field or a menu.
+///
+/// **The fourth bit is the one the first draft was missing** (evidence in
+/// §10.10). [`TabState::focused_leaf`] names *the shell the keyboard falls back
+/// to* — it is written for seats that are in `sessions`, which is to say for
+/// terminals — so it goes on naming a pane while a page beside it is being typed
+/// into. Click a files tree and the window's focus has not moved a bit; a
+/// predicate written on three bits would say the shell still has the keyboard,
+/// and the agent inside it would go on believing you were reading it.
+///
+/// **Visibility is not one of the bits, deliberately.** A tab becoming visible
+/// while something else holds the keyboard sends nothing: the protocol reports
+/// input focus, not eyes (§10.10, and the v1 leaning it supplies the reason
+/// for). Focus mode adds no bit either — it does not mint a keyboard owner of
+/// its own, and a card taking the stage still resolves to `focused_leaf`.
+///
+/// `sessions.contains_key(seat)` is an address guard rather than a fifth fact
+/// about the product, and stays out of here for that reason: a seat with no
+/// session has no PTY to be told anything.
+pub(crate) fn seat_holds_the_keyboard(
+    window_focused: bool,
+    tab_is_active: bool,
+    seat_is_focused_leaf: bool,
+    owner_is_a_shell: bool,
+) -> bool {
+    window_focused && tab_is_active && seat_is_focused_leaf && owner_is_a_shell
+}
+
+/// **The one apply operation** (ticket 37): put freshly derived metrics on one leaf.
+///
+/// Every road that changes what a pane is drawn at comes through here — a size step, a Settings
+/// change, a display change and a transfer to another window — so the things that carry the
+/// metrics move together: the leaf's own record ([`LeafSession::metrics`]), the session's cell
+/// height, width and baseline, its face size (which re-keys its math through `set_layout_key`),
+/// and the projection, refreshed so a wheel or a scroll read after this sees the new rows. All of
+/// it happens **even when the integer grid is unchanged**: a larger face on the same grid is a new
+/// picture, and the frame it projects carries the new face size in its `layout_key`. The grid
+/// itself is the caller's to re-derive afterwards, through the existing resize transaction
+/// (`schedule_leaf_grid_change` → `release_due_leaf_resize` → `commit_leaf_resize`).
+///
+/// Answers whether anything moved. When the metrics are the ones the leaf already has — a step
+/// the clamp swallowed — it touches nothing and answers `false`, so no reflow, no PTY and no
+/// present follow.
+///
+/// Writers of the rung: `Runtime::step_pane_text_scale` (the door) and construction. Readers:
+/// [`pane_cell_metrics`] and the pane head's indicator. Clearers: none — a view that ends takes
+/// its rung with it.
+pub(crate) fn apply_leaf_metrics(leaf: &mut LeafSession, metrics: bt_render::CellMetrics) -> bool {
+    if leaf.metrics == metrics {
+        return false;
+    }
+    leaf.metrics = metrics;
+    leaf.session
+        .set_cell_height_subpixels(metrics.cell_height_subpixels());
+    leaf.session
+        .set_cell_width_subpixels(cell_width_subpixels(metrics));
+    leaf.session
+        .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+    leaf.session
+        .set_font_size_subpixels(metrics.font_size_subpixels());
+    leaf.session.refresh_projection(&mut leaf.projection);
+    true
 }
 
 /// **What a `Restart shell…` spawns** — `docs/M2-restart-shell-contract.md`

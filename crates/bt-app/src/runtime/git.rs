@@ -7,22 +7,19 @@ use crate::{
     Ask, Fading, FilesFocusArrival, GitMenuDraw, GitMenuState, GitOrigin, GitPromptDraw,
     GitPromptState, GitRowKey, GraphFilterMenuState, GraphView, LeafId, MarkdownCaretPaint,
     MarkdownCaretSeat, MenuPaint, Popup, PreviewDocument, PreviewSurface, ProseParagraph,
-    RenameExit, Runtime, TextFieldSeat, TransferRefusal, answers_for, cli, float, float_git_hover,
-    float_git_page_shown, float_graph_hover, git, git_answer_notice, git_document_answer,
-    git_document_question, git_full_path, git_graph, git_panel, git_roots_on_glass,
-    git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, graph_key_of, i18n, input,
-    markdown_gap_paragraph, marks, preview, profiles, restore, seats, settling, text_field, toast,
-    web_thumb,
+    RenameExit, Runtime, TextFieldSeat, TransferRefusal, answers_for, cli, float, git, git_graph,
+    git_panel, i18n, input, markdown_gap_paragraph, marks, preview, profiles, restore, seats,
+    settling, text_field, toast, web_thumb,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::{Ime, MouseScrollDelta};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 impl<B: Backend> Runtime<'_, B> {
     /// **Git is somewhere else now** (T-PROGRAMS-REFRESH): a program walk found git where there
@@ -4636,5 +4633,432 @@ impl<B: Backend> Runtime<'_, B> {
             self.write_ime_observation("first-focus+1s");
         }
         self.window.ime_report_due
+    }
+
+    /// Turn one commit's file list over (R15).
+    ///
+    /// The toggle is the column's ([`seats::FilesLeafState::git_expanded`]) and
+    /// the list is the cache's, which is the same split the whole page is built
+    /// on: what the repository said, and what this column is looking at.
+    fn expand_commit(&mut self, seat: SeatId, hash: &str) -> Result<()> {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let Some(state) = self.window.tabs[active].files.get_mut(&seat) else {
+            return Ok(());
+        };
+        let opened = git_panel::toggled_expansion(state.git_expanded.as_deref(), hash);
+        state.git_expanded.clone_from(&opened);
+        // Shutting one asks nothing: the answer stays in the cache, so pressing
+        // the same commit again draws its files without a second subprocess.
+        if let Some(hash) = opened
+            && let Some(cache) = self.window.tabs[active].git_trees.get_mut(&seat)
+            && let Some((asker, question)) = cache
+                .begin_commit_files(&hash)
+                .map(|question| (cache.id(), question))
+            && !self.app.git_worker.request(git::GitRequest {
+                window: self.window_id(),
+                host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+                asker,
+                buffer: None,
+                question,
+            })
+        {
+            self.disable_git_worker();
+        }
+        // The list is chrome, so it is asked for the chrome way — see
+        // [`Self::set_files_view`] for what happens when it is not.
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The next fifty commits (R16).
+    ///
+    /// A second press while the first page is still in flight costs one wasted
+    /// subprocess and cannot corrupt the list: the answer carries the `skip` it
+    /// was asked for, and `GitCache::accept` files a later page only when it
+    /// starts exactly where the list currently ends — so the duplicate is
+    /// dropped rather than appended twice.
+    fn load_more_commits(&mut self, seat: SeatId) -> Result<()> {
+        let active = self.window.active_tab;
+        let tab_id = self.window.tabs[active].id;
+        let Some(cache) = self.window.tabs[active].git_trees.get(&seat) else {
+            return Ok(());
+        };
+        let asker = cache.id();
+        let Some(question) = cache.more_commits() else {
+            return Ok(());
+        };
+        if !self.app.git_worker.request(git::GitRequest {
+            window: self.window_id(),
+            host: git::GitHost::Column(LeafId { tab: tab_id, seat }),
+            asker,
+            buffer: None,
+            question,
+        }) {
+            self.disable_git_worker();
+        }
+        Ok(())
+    }
+
+    /// **The way back onto a branch** (user ruling, 2026-08-19).
+    ///
+    /// The branch is re-derived from the cache at the moment of the press rather
+    /// than read off the frame that drew the button, on this window's usual rule:
+    /// the picture is a reading and the cache is what the repository said, and
+    /// between the paint and the press the repository may have been read again.
+    /// A door whose branch has gone in the meantime does nothing rather than
+    /// checking out a name that is not there.
+    fn leave_detached_head(&mut self, surface: PreviewSurface) -> Result<()> {
+        let tab = self.preview_tab_index(surface);
+        let Some(root) = self.window.tabs[tab]
+            .git_graph_view
+            .get(&surface)
+            .map(|view| view.root.clone())
+        else {
+            return Ok(());
+        };
+        let Some(branch) = self.window.tabs[tab]
+            .git_graphs
+            .get(&root)
+            .and_then(|state| git_graph::leave_detached_branch(&state.cache))
+        else {
+            return Ok(());
+        };
+        let origin = GitOrigin::Graph(root.clone());
+        let said = branch.clone();
+        self.ask_to_checkout(&origin, root, branch, said, restore::GitCheckoutKind::Stand)
+    }
+}
+
+/// A path in git's grammar, joined onto the repository root in the platform's.
+///
+/// git speaks forward slashes on every machine; Explorer's `/select` and the
+/// clipboard both want what a person would type. One function so the two callers
+/// cannot spell the same file two ways.
+pub(crate) fn git_full_path(root: &Path, path: &str) -> PathBuf {
+    root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR))
+}
+
+/// Whether a floating window is showing its **Git page** — [`column_keyboard`]'s
+/// question, asked of the host that is not in a tab.
+///
+/// The two facts a column's `git_pages_shown` entry is made of, and for a float
+/// they are the whole of it: a window has no seat layout to be collapsed out of
+/// and no tab to be switched away from. The master switch decides whether the
+/// page is *reachable* at all; the view decides which page this window was left
+/// on — the split §7.1.6g ② draws, restated here because a window keeps its page
+/// while the switch is off and gets it back when the switch comes on, exactly as
+/// a column does.
+///
+/// One reader for the paint, the hit test, the wheel and — the day a float takes
+/// the keyboard — the keys. That arrangement *is* the fix: the docked bug was
+/// three surfaces agreeing on which page was drawn while a fourth, the keyboard,
+/// never asked.
+pub(crate) fn float_git_page_shown(git_panel_on: bool, view: seats::FilesView) -> bool {
+    git_panel_on && view == seats::FilesView::Git
+}
+
+/// What a floating Git page's painter needs to know about the pointer.
+///
+/// The chassis reports one part; the page wants the pair — which row, and which
+/// verb on it — because a verb is drawn *inside* the row it belongs to and both
+/// answers come from the same hit. A hand on a verb is still a hand on its row,
+/// which is what keeps the row lit under a pointer that has reached its buttons.
+fn float_git_hover(part: Option<float::FloatPart>) -> git_panel::GitHover {
+    match part {
+        Some(float::FloatPart::Row(row)) => git_panel::GitHover {
+            row: Some(row),
+            act: None,
+        },
+        Some(float::FloatPart::GitAct { index, act }) => git_panel::GitHover {
+            row: Some(index),
+            act: Some(act),
+        },
+        _ => git_panel::GitHover::default(),
+    }
+}
+
+/// The same translation for a floating **commit graph** (user report,
+/// 2026-08-20).
+///
+/// The chassis speaks [`float::FloatPart`] and the picture speaks
+/// [`git_graph::GraphHover`], and the seat's own translation is the three
+/// `match`es in `seats::push_seat_chrome` over `ChromeTarget`. This is those
+/// three, once, for the host that has no chrome targets.
+fn float_graph_hover(part: Option<float::FloatPart>) -> git_graph::GraphHover {
+    match part {
+        Some(float::FloatPart::GraphTool(tool)) => git_graph::GraphHover {
+            tool: Some(tool),
+            row: None,
+            part: None,
+        },
+        Some(float::FloatPart::GraphRow(index)) => git_graph::GraphHover {
+            tool: None,
+            row: Some(index),
+            part: None,
+        },
+        // The block lights as a whole *and* the part inside it lights, which is
+        // what the docked reading does: `GitGraphDetail` answers both the `row`
+        // arm and the `part` arm there.
+        Some(float::FloatPart::GraphDetail { index, part }) => git_graph::GraphHover {
+            tool: None,
+            row: Some(index),
+            part: Some(part),
+        },
+        _ => git_graph::GraphHover::default(),
+    }
+}
+
+/// Which of the graph's six verbs a physical key is, if any (V14).
+///
+/// The translation lives here, beside the window that reads winit, and the rule
+/// it translates into lives in [`git_graph::graph_key`] — the same split
+/// `files::tree_command` makes, and for the same reason: what `↓` *does* at the
+/// end of a loaded page is a property of the list and has to be assertable
+/// without a keyboard.
+///
+/// **Bare keys, and therefore not rows of `shortcuts::BINDINGS`.** That table is
+/// the chord registry the future editing panel edits, and every row in it is a
+/// chord — a modifier and a key — precisely because a chord is a thing this
+/// window *claims* from the shell. These six are not claimed from anything: they
+/// only exist while a graph holds the keyboard, at which point there is no shell
+/// listening, and they are the same six keys every list on this platform answers.
+/// The files column's own arrows are out of the table for the identical reason
+/// and were left out by the same audit (`files::tree_command`); putting one of
+/// the two families in and not the other would be the audit saying two things.
+pub(crate) fn graph_key_of(key: &Key, modifiers: ModifiersState) -> Option<git_graph::GraphKey> {
+    match key {
+        Key::Named(NamedKey::ArrowUp) => Some(git_graph::GraphKey::Up),
+        Key::Named(NamedKey::ArrowDown) => Some(git_graph::GraphKey::Down),
+        Key::Named(NamedKey::Home) => Some(git_graph::GraphKey::Home),
+        Key::Named(NamedKey::End) => Some(git_graph::GraphKey::End),
+        // The one place a modifier is read here (D6), and only for this key: the
+        // other five are the same six keys every list on this platform answers
+        // however the modifiers happen to stand, and narrowing them now would be
+        // this ticket quietly re-ruling V14.
+        Key::Named(NamedKey::Enter) if modifiers.control_key() => {
+            Some(git_graph::GraphKey::Compare)
+        }
+        Key::Named(NamedKey::Enter) => Some(git_graph::GraphKey::Enter),
+        Key::Named(NamedKey::Escape) => Some(git_graph::GraphKey::Escape),
+        _ => None,
+    }
+}
+
+/// **R31's third invalidation moment, as a list**: which of the git surfaces on
+/// screen are to be read again, and why they are the only candidates.
+///
+/// The master switch and the "is it showing" gate are asked here for
+/// [`columns_wanting_git`]'s reason — they are promises about what is *not* read,
+/// and a promise that can only be checked by starting a window is a promise
+/// nothing checks. What is new is the third fact:
+///
+/// - `standing_in: Some(cwds)` — **a shell finished a command** (OSC 133;D). The
+///   surface is re-read only if one of those shells is standing inside the
+///   repository it is showing ([`git::should_reread`]). A `cargo build` in an
+///   unrelated tree is not news about this one.
+/// - `standing_in: None` — **the window came back**. Every showing surface is
+///   re-read, because what happened while the window was away happened *outside*
+///   this process and left no cwd to compare against. That is exactly the case
+///   the command-end trigger cannot see, and the reason there are two triggers
+///   rather than one.
+///
+/// A surface that is not showing is never in the answer under either reading. A
+/// page nobody has switched to costs what it always cost: no process at all.
+#[must_use]
+pub(crate) fn git_surfaces_wanting_reread(
+    panel_on: bool,
+    surfaces: &[(GitOrigin, PathBuf, bool)],
+    standing_in: Option<&[PathBuf]>,
+) -> Vec<GitOrigin> {
+    if !panel_on {
+        return Vec::new();
+    }
+    surfaces
+        .iter()
+        .filter(|(_, root, showing)| match standing_in {
+            None => *showing,
+            Some(cwds) => cwds
+                .iter()
+                .any(|cwd| git::should_reread(root, Some(cwd), *showing)),
+        })
+        .map(|(origin, _, _)| origin.clone())
+        .collect()
+}
+
+/// **R31's fourth moment, the window's half: the repositories this window
+/// wants the kernel's news about** — the roots of its surfaces that are drawn.
+///
+/// The seat a window holds in [`git_watch::GitWatch`] is exactly this set, so a
+/// surface that is not on the glass (a column on its Files page, a page in a tab
+/// that is not on screen, which `Runtime::git_surfaces_on_screen` never lists)
+/// subscribes to nothing and is told nothing.
+#[must_use]
+pub(crate) fn git_roots_on_glass(surfaces: &[(GitOrigin, PathBuf, bool)]) -> BTreeSet<PathBuf> {
+    surfaces
+        .iter()
+        .filter(|(_, _, showing)| *showing)
+        .map(|(_, root, _)| root.clone())
+        .collect()
+}
+
+/// **And which of those surfaces the news it took is about**: every drawn
+/// surface standing on a repository the kernel said moved. Two columns and a
+/// graph can be looking at one repository, and all three are out of date
+/// together.
+#[must_use]
+pub(crate) fn git_surfaces_the_kernel_moved(
+    surfaces: &[(GitOrigin, PathBuf, bool)],
+    moved: &BTreeSet<PathBuf>,
+) -> Vec<GitOrigin> {
+    surfaces
+        .iter()
+        .filter(|(_, root, showing)| *showing && moved.contains(root))
+        .map(|(origin, _, _)| origin.clone())
+        .collect()
+}
+
+/// **Which git answers raise a notice** (user ruling, 2026-08-16), and what it
+/// says.
+///
+/// The whole of the transient/persistent split, in one function so that it is
+/// one rule rather than a decision repeated at every arm of the filing match.
+///
+/// A **write** and a **checkout** are the two things this window *asks a
+/// repository to do*, and a refusal of either is a thing that just happened to
+/// something you just pressed: transient, worth one card, gone in six seconds.
+///
+/// Everything else here is a **read**. A repository probe, a status, a branch
+/// list, a history: when one of those fails, nothing about it will be different
+/// in six seconds — no git on the machine, a repository git will not open, a
+/// question it would not finish. A card that appeared and left would say "this
+/// just went wrong" about a condition that has been wrong since before you
+/// looked, and would then take the report away again. Those keep the page's own
+/// quiet sentence instead, standing where the rows would be (`git_panel::build`).
+///
+/// The words are always git's own, through [`git::fault_sentence`] — this window
+/// does not paraphrase a program that has already explained itself.
+pub(crate) fn git_answer_notice(answer: &git::GitAnswer) -> Option<String> {
+    match answer {
+        git::GitAnswer::Write {
+            outcome: Err(fault),
+            ..
+        }
+        | git::GitAnswer::Checkout {
+            outcome: Err(fault),
+            ..
+        } => Some(git::fault_sentence(fault)),
+        _ => None,
+    }
+}
+
+/// **Which git answers are documents, and which buffer each belongs in** (G-3).
+///
+/// The one place the two lanes part. Four of the seven answers are a column's —
+/// they are rows, and they are filed into that column's [`git::GitCache`]. Two
+/// are *documents*: a file's diff and a commit's reading of a file, both of
+/// which go to the tab's preview pool against the [`preview::PreviewSource`]
+/// they were opened under.
+///
+/// The source is **rebuilt from the answer's own fields** rather than carried
+/// along with the question, and that is the whole reason every answer brings its
+/// subject back with it: an answer that could not say which document it is about
+/// could only be filed by faith into whatever the pane happens to be showing —
+/// which, by the time a cold `git show` returns, may be a different file
+/// entirely.
+///
+/// `Err` hands the answer back untouched, so the caller can go on and file it
+/// the other way. A `Result` and not an `Option` because the answer is not
+/// `Copy` and the caller still needs it.
+#[allow(clippy::result_large_err)]
+fn git_document_answer(
+    answer: git::GitAnswer,
+) -> Result<(preview::PreviewSource, git::GitOutcome<Vec<u8>>), git::GitAnswer> {
+    match answer {
+        git::GitAnswer::Diff {
+            root,
+            path,
+            against,
+            outcome,
+        } => Ok((
+            preview::PreviewSource::GitDiff {
+                root,
+                path,
+                against,
+            },
+            outcome,
+        )),
+        git::GitAnswer::Show {
+            root,
+            hash,
+            path,
+            outcome,
+        } => Ok((
+            preview::PreviewSource::GitShow { root, hash, path },
+            outcome,
+        )),
+        git::GitAnswer::DiffRange {
+            root,
+            a,
+            b,
+            path,
+            outcome,
+        } => Ok((
+            preview::PreviewSource::GitDiffRange { root, a, b, path },
+            outcome,
+        )),
+        answer => Err(answer),
+    }
+}
+
+/// **Which git question fills a document buffer** — [`git_document_answer`]'s
+/// mirror, and the reason it is one function is that the two are one mapping
+/// read in two directions.
+///
+/// It was written twice before v2 ② — once for a document opened from a column
+/// and once for one opened from a graph — and the two copies differed: the
+/// graph's knew only about `GitShow`, so the very first `GitDiffRange` opened
+/// from a compare block would have arrived at a pane that never asked git
+/// anything and sat on "Loading …" forever. What differs between the two doors
+/// is only which cache the answer must come home to, and that is the caller's
+/// to say; what the *question* is is a fact about the source.
+///
+/// `None` for the two sources that are not documents on this lane: the graph
+/// composes itself, and a file is not this door's business at all.
+pub(crate) fn git_document_question(
+    source: &preview::PreviewSource,
+    renamed_from: Option<String>,
+) -> Option<git::GitQuestion> {
+    match source {
+        preview::PreviewSource::GitDiff {
+            root,
+            path,
+            against,
+        } => Some(git::GitQuestion::Diff {
+            root: root.clone(),
+            path: path.clone(),
+            against: *against,
+            renamed_from,
+        }),
+        preview::PreviewSource::GitShow { root, hash, path } => Some(git::GitQuestion::Show {
+            root: root.clone(),
+            hash: hash.clone(),
+            path: path.clone(),
+            renamed_from,
+        }),
+        preview::PreviewSource::GitDiffRange { root, a, b, path } => {
+            Some(git::GitQuestion::DiffRange {
+                root: root.clone(),
+                a: a.clone(),
+                b: b.clone(),
+                path: path.clone(),
+                renamed_from,
+            })
+        }
+        preview::PreviewSource::File(_)
+        | preview::PreviewSource::GitGraph { .. }
+        | preview::PreviewSource::Web(_) => None,
     }
 }

@@ -49,6 +49,11 @@ pub(crate) use dpi::{
     apply_tabs_leaf_metrics, resize_worth_solving, take_psreadline_resize_reanchor_input,
 };
 #[cfg(test)]
+pub(crate) use git::{
+    float_git_page_shown, git_answer_notice, git_full_path, git_roots_on_glass,
+    git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, graph_key_of,
+};
+#[cfg(test)]
 pub(crate) use palette::recall_flash;
 #[cfg(test)]
 pub(crate) use pointer::a_capture_still_holds_its_pointer;
@@ -59,9 +64,10 @@ pub(crate) use profiles::profile_menu_anchor;
 pub(crate) use search::rescan_leaf_for_search;
 #[cfg(test)]
 pub(crate) use terminal::{
-    drain_may_take_another_slice, in_drain_feed_turn, local_image_activation, reference_card,
-    reference_run_rect, restart_seed, should_copy_on_select_release, step_leaf_text_scale,
-    stepped_command_mark, terminal_link_answers_a_press,
+    apply_leaf_metrics, drain_may_take_another_slice, in_drain_feed_turn, local_image_activation,
+    reference_card, reference_run_rect, restart_seed, seat_holds_the_keyboard,
+    should_copy_on_select_release, step_leaf_text_scale, stepped_command_mark,
+    terminal_link_answers_a_press,
 };
 #[cfg(test)]
 pub(crate) use tooltips::{tab_surface_tip_boxes, tooltip_anchor_for};
