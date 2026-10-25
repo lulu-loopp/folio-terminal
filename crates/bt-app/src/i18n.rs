@@ -3219,6 +3219,9 @@ text_entries! {
     UpdateFailedMount,
     /// The new build is not the offered, signed Folio (`update_job::Stop::Identity`).
     UpdateFailedIdentity,
+    /// A signature's revocation could not be checked without the network (`update_job::Stop::Offline`;
+    /// 0.4.9 T-UPDATE-OFFLINE-IDENTITY-CARD).
+    UpdateFailedOffline,
     /// The new build could not be copied off the image (`update_job::Stop::Copy`).
     UpdateFailedCopy,
     /// The rescue copy of the running build could not be made (`update_job::Stop::Clone`).
@@ -6264,6 +6267,11 @@ impl Text {
             Self::UpdateFailedIdentity => {
                 pick(lang, "The update is not verified.", "更新未通过验证。")
             }
+            Self::UpdateFailedOffline => pick(
+                lang,
+                "The update could not be verified without a network.",
+                "没有网络，无法验证更新。",
+            ),
             Self::UpdateFailedCopy => {
                 pick(lang, "The update could not be copied.", "更新无法复制。")
             }

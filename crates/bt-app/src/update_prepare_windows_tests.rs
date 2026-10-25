@@ -203,7 +203,17 @@ struct Scene {
 impl Scene {
     /// The scene, or `None` off Windows, where no test root can sign.
     fn new(tag: &str) -> Option<Self> {
-        let ca = TestCa::new().ok()?;
+        Self::under(tag, TestCa::new().ok()?)
+    }
+
+    /// [`Scene::new`], **every leaf naming where its revocation list is
+    /// published** (`TestCa::naming_its_crls`): under a policy holding no
+    /// list, its revocation is offline, as on a machine with no network.
+    fn naming_its_crls(tag: &str) -> Option<Self> {
+        Self::under(tag, TestCa::naming_its_crls().ok()?)
+    }
+
+    fn under(tag: &str, ca: TestCa) -> Option<Self> {
         let root = bt_testpath::temp_path(&format!("bt-u20-{tag}"));
         let scratch = Scratch(root.clone());
         let install = root.join("Folio");
@@ -248,10 +258,15 @@ impl Scene {
     }
 
     fn driver(&self, tools: TestTools) -> WinPrepare {
+        self.driver_under(self.ca.policy(), tools)
+    }
+
+    /// [`Scene::driver`] under `policy`.
+    fn driver_under(&self, policy: Policy, tools: TestTools) -> WinPrepare {
         WinPrepare::with(
             self.exe.clone(),
             Some(Channel::Ours),
-            self.ca.policy(),
+            policy,
             Arc::new(tools),
         )
     }
@@ -641,6 +656,108 @@ fn mutated_asset_hash_pair_refuses_before_swap() {
         scene.installed(),
         before,
         "a Prepare changes nothing installed"
+    );
+}
+
+/// RED (0.4.9 T-UPDATE-OFFLINE-IDENTITY-CARD) — **when the identity check
+/// cannot reach revocation, the card says the network was the reason; a
+/// revoked signature still says "not verified"; a reachable one passes — and
+/// nothing changes in either refusal.**
+///
+/// Found on the clean machine `folio-win10`, which has no network adapter
+/// (0.4.8 G3 `happy`, `W1`): the running build's own signature is read first,
+/// its chain said revocation offline, and the card said only *The update is
+/// not verified. / Nothing changed.* — a bad signature and a missing network
+/// read the same. Here every leaf names its revocation list and the engine
+/// retrieves nothing, so a policy holding no list is that machine.
+///
+/// MUTATION: in `trust_refused`, drop the `RevocationOffline` arm — the
+/// offline press fails with `Stop::Identity` and *The update is not
+/// verified.*
+#[test]
+fn an_unreachable_revocation_says_the_network_was_the_reason() {
+    let Some(scene) = Scene::naming_its_crls("offline") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    let release = || Arc::new(Release::of(scene.archive.clone()));
+    let heading = |job: &Job<u32>| {
+        crate::update_card::paint(job.state())
+            .expect("a failed card")
+            .heading
+    };
+
+    let offline = scene.driver_under(
+        scene.ca.policy_without_revocation_lists(),
+        TestTools::real(),
+    );
+    let job = press(&offline, release(), 1);
+    failed_with(&job, 1, Stop::Offline);
+    assert_eq!(
+        heading(&job).as_deref(),
+        Some(Text::UpdateFailedOffline.text())
+    );
+    let home = scene.install.join(crate::update_txn::WINDOWS_HOME);
+    assert!(
+        !home.exists(),
+        "the running build is read before anything is written"
+    );
+
+    let revoked = scene.driver_under(scene.ca.policy_revoking_every_leaf(), TestTools::real());
+    let job = press(&revoked, release(), 2);
+    failed_with(&job, 2, Stop::Identity);
+    assert_eq!(
+        heading(&job).as_deref(),
+        Some(Text::UpdateFailedIdentity.text())
+    );
+    assert!(!home.exists(), "nothing was written");
+
+    let job = press(&scene.driver(TestTools::real()), release(), 3);
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "a reachable revocation passes: {:?}",
+        job.state()
+    );
+    assert_eq!(scene.installed(), before, "nothing installed was changed");
+}
+
+/// PIN (0.4.9 T-UPDATE-OFFLINE-IDENTITY-CARD) — **every refusal of `trust`
+/// in the Prepare is one line naming what was checked, the refusal and
+/// Windows' code, and only an unreachable revocation is `Stop::Offline`.**
+///
+/// The diagnostics line said nothing before: every trust call threw its
+/// refusal away for `Stop::Identity`.
+#[test]
+fn a_trust_refusal_is_named_with_its_code_and_only_offline_is_offline() {
+    let offline = Refusal::RevocationOffline { code: 0x0100_0040 };
+    assert_eq!(
+        trust_refused_line("the running build", &offline),
+        "Folio: update job — the identity check of the running build refused: revocation-offline: 0x01000040"
+    );
+    assert_eq!(
+        trust_refused("folio.exe", &offline, Stop::Identity),
+        Stop::Offline
+    );
+    assert_eq!(
+        trust_refused("the rescue copy", &offline, Stop::Clone),
+        Stop::Offline
+    );
+    for refusal in [
+        Refusal::RevocationUnknown { code: 0x40 },
+        Refusal::Revoked,
+        Refusal::Untrusted {
+            code: 0x800B_0109_u32.cast_signed(),
+        },
+    ] {
+        assert_eq!(
+            trust_refused("folio.exe", &refusal, Stop::Identity),
+            Stop::Identity,
+            "{refusal}"
+        );
+    }
+    assert_eq!(
+        trust_refused("the running build", &Refusal::Unsigned, Stop::NotOurs),
+        Stop::NotOurs
     );
 }
 
