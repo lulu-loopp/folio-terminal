@@ -1381,6 +1381,7 @@ crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting:
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	and_then	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	checked_sub	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	get	1	
+crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	is_some	1	2026-10-25: T-IDLE-TURN-COST: Option::is_some on the turn's staleness handed to the census, no door
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	ok	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::offer	Ambiguous	checked_sub	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::offer	Ambiguous	len	1	
@@ -1401,6 +1402,37 @@ crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting:
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::said	Ambiguous	collect	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::said	Ambiguous	line	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::said	Ambiguous	map	1	
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Cause::from_byte	Ambiguous	find	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::app_event	Ambiguous	find	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::app_event	Ambiguous	len	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::app_event	Ambiguous	to_owned	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::app_event	Ambiguous	unwrap_or	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	and_then	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	as_str	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	map	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	map_or	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	map_or_else	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	ok	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	unwrap_or	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	unwrap_or_else	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Dynamic	owner	2	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::named	Ambiguous	expect	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::OWNERS	Ambiguous	len	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Round::tick	Ambiguous	as_str	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Round::tick	Ambiguous	clone	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Round::tick	Dynamic	perf	2	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Round::tick	Dynamic	threads	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	chars	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	collect	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	is_whitespace	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	join	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	map	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	then_with	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::turns_line	Ambiguous	collect	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::turns_line	Ambiguous	is_empty	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::turns_line	Ambiguous	join	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::turns_line	Ambiguous	map	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::turns_line	Ambiguous	then	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
 crates/bt-app/src/hang_watch_detail.rs	bt-app crate::hang_watch::detail::Ledger::attempt	Ambiguous	store	1	
 crates/bt-app/src/hang_watch_detail.rs	bt-app crate::hang_watch::detail::Ledger::enter	Ambiguous	all	1	
 crates/bt-app/src/hang_watch_detail.rs	bt-app crate::hang_watch::detail::Ledger::enter	Ambiguous	fold	1	
@@ -8577,11 +8609,11 @@ crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::processor_time	Ambi
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::processor_time	Dynamic	count	4	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::read_the_settlement	Ambiguous	collect	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	as_mut_ptr	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	as_raw_handle	3	
+crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	as_raw_handle	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	assume_init	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	cast	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	expect	2	
-crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	is_ok	3	
+crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	expect	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	is_ok	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	kind	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	si_pid	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::wait_within	Dynamic	rest	2	
@@ -9911,6 +9943,31 @@ crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::answer	Dyn
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::SessionEndWatch::install	Ambiguous	as_bool	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::session_end_subclass	Ambiguous	is_null	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::session_end_subclass	Dynamic	(value)	1	
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Ambiguous	as_raw_handle	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Ambiguous	expect	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Ambiguous	is_break	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Ambiguous	is_ok	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Dynamic	pid	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Dynamic	visit	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	and_then	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	as_mut_ptr	3	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	as_raw_handle	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	assume_init	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	cast	4	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	collect	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	expect	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	into_iter	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	into_owned	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	is_empty	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	iter	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	map	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	map_err	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	ok	3	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	take_while	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	to_ne_bytes	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	to_string	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	truncate	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	unwrap_or	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
 crates/bt-platform/src/touch_pan.rs	bt-platform crate::touch_pan::PanTrack::step	Ambiguous	then_some	1	
 crates/bt-platform/src/trust.rs	bt-platform crate::trust::FileVersion::parse_four	Ambiguous	next	2	
 crates/bt-platform/src/trust.rs	bt-platform crate::trust::FileVersion::parse_four	Ambiguous	ok	1	
@@ -10398,9 +10455,11 @@ crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::shutdown	Dynamic	try_wait	2
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	as_mut	2	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	clone	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	close	1	
+crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	expect	2	2026-10-25: T-IDLE-TURN-COST: the pty reader and writer threads named through thread::Builder
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	is_some	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	map_err	4	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	openpty	1	
+crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	spawn	2	2026-10-25: T-IDLE-TURN-COST: the pty reader and writer threads named through thread::Builder
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	spawn_command	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	take_writer	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	try_clone_reader	1	
