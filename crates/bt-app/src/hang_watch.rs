@@ -3656,14 +3656,14 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace
             &bt_platform::file_reads::LEDGER,
             bt_platform::file_reads::take_input,
             |line| crate::diagnostics::note(&line),
-            crate::trace_sink::stderr_line,
+            crate::diagnostics::stderr_line,
         );
         census.tick(
             now_ms,
             trace_perf,
             &heart.accounts.census,
             bt_platform::threads::of_this_process,
-            crate::trace_sink::stderr_line,
+            crate::diagnostics::stderr_line,
         );
     }
 }
@@ -3817,10 +3817,10 @@ pub fn run_selftest_if_due() {
     if SELFTEST_FIRED.swap(true, Ordering::Relaxed) {
         return;
     }
-    eprintln!(
+    crate::diagnostics::stderr_line(format!(
         "BT_HANG_SELFTEST: holding the window thread for {}s on purpose",
         hold.as_secs()
-    );
+    ));
     at(Station::SelfTest);
     std::thread::sleep(hold);
 }

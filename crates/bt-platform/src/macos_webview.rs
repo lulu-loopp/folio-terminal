@@ -154,7 +154,9 @@ fn guarded<T>(what: &str, refusal: T, body: impl FnOnce() -> T) -> T {
                 .map(|text| (*text).to_owned())
                 .or_else(|| panic.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| String::from("a panic with no message"));
-            eprintln!("BT_MAC_WEB a panic inside {what} became a refusal: {said}");
+            crate::stderr_road::say(format!(
+                "BT_MAC_WEB a panic inside {what} became a refusal: {said}"
+            ));
             refusal
         }
     }
@@ -280,7 +282,7 @@ impl Shared {
             .map(|text| text.to_string())
             .unwrap_or_default();
         let described = error.localizedDescription().to_string();
-        eprintln!("BT_MAC_WEB a navigation failed: {described}");
+        crate::stderr_road::say(format!("BT_MAC_WEB a navigation failed: {described}"));
         self.push(WebEvent::NavigationCompleted {
             uri,
             success: false,
@@ -301,7 +303,9 @@ impl Shared {
     fn load(&self, web_view: &WKWebView, url: &str) {
         let text = NSString::from_str(url);
         let Some(address) = NSURL::URLWithString(&text) else {
-            eprintln!("BT_MAC_WEB an address Foundation would not parse: {url}");
+            crate::stderr_road::say(format!(
+                "BT_MAC_WEB an address Foundation would not parse: {url}"
+            ));
             return;
         };
         if address.isFileURL() {
@@ -310,12 +314,12 @@ impl Shared {
             // file URL built back from that path, which is the form
             // `loadFileURL:` wants.
             let Some(path) = address.path() else {
-                eprintln!("BT_MAC_WEB a file URL with no path: {url}");
+                crate::stderr_road::say(format!("BT_MAC_WEB a file URL with no path: {url}"));
                 return;
             };
             let file = NSURL::fileURLWithPath(&path);
             let Some(folder) = file.URLByDeletingLastPathComponent() else {
-                eprintln!("BT_MAC_WEB a file URL with no folder: {url}");
+                crate::stderr_road::say(format!("BT_MAC_WEB a file URL with no folder: {url}"));
                 return;
             };
             // SAFETY: a live view and two live file URLs, on the main thread.
@@ -729,16 +733,16 @@ fn compile_is_stale(door: &Rc<ThirdDoor>, mint: u64, compiled_from: &str) -> boo
         return false;
     }
     if page_moved {
-        eprintln!(
+        crate::stderr_road::say(format!(
             "BT_MAC_WEB a rule list compiled for page {mint} arrived after page {} took over; \
              it is dropped and the current page is compiled for",
             door.mint.get()
-        );
+        ));
     } else {
-        eprintln!(
+        crate::stderr_road::say(format!(
             "BT_MAC_WEB a rule list compiled for a resource rule the seat has moved off arrived \
              for page {mint}; it is dropped and the rule the seat states now is compiled for"
-        );
+        ));
     }
     compile(door);
     true
@@ -780,7 +784,9 @@ fn rules_compiled(door: &Rc<ThirdDoor>, outcome: Result<String, String>) {
             // one.
             *door.attached.borrow_mut() = None;
             door.stands.set(false);
-            eprintln!("BT_MAC_WEB the page's resource rules would not compile: {reason}");
+            crate::stderr_road::say(format!(
+                "BT_MAC_WEB the page's resource rules would not compile: {reason}"
+            ));
             *door.refused.borrow_mut() = Some(reason);
             door.answer_what_waited();
         }
@@ -2180,7 +2186,9 @@ fn release_the_view(view: &WKWebView) {
         // Nothing here is safe off the window's thread, and a close that refused
         // would be a close nobody could perform on the way out of a process. The
         // view is dropped by the caller either way.
-        eprintln!("BT_MAC_WEB a page was let go of off the window's thread");
+        crate::stderr_road::say(
+            "BT_MAC_WEB a page was let go of off the window's thread".to_owned(),
+        );
         return;
     }
     // SAFETY: a live view on the main thread.

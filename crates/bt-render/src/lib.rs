@@ -1,6 +1,12 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+// Every `stderr` line goes to the writer that owns where `stderr` points, never written by the
+// thread that said it (T-TRACE-SINK-OFF-THE-CALLING-THREAD): `bt-app`'s `diagnostics::stderr_line`, or
+// the road `fn main` installs in a crate below it. `stdout` is the same file in a Log run, so no
+// product line goes there either. Tests: `clippy.toml`'s `allow-print-in-tests`.
+#![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 
 mod cjk_fonts;
 use cjk_fonts::{CjkFace, FontSystem, match_cjk_attrs, match_grid_attrs, proportional_cjk_family};
@@ -59,7 +65,8 @@ use unicode_script::UnicodeScript;
 use wgpu::util::DeviceExt;
 
 /// Install the process-wide trace destination before constructing a renderer.
-/// A standalone renderer keeps the stderr fallback when no writer is installed.
+/// A renderer in a process that installed none (a test, a tool) says its lines
+/// to nobody: `bt_viewport::trace::line` has no fallback.
 pub fn set_trace_writer(writer: impl Fn(String) + Send + Sync + 'static) {
     bt_viewport::trace::set_writer(writer);
 }
@@ -4131,10 +4138,10 @@ fn text_upload_refused(
             // Once per **lane**, not once per run: see [`GlyphRefusalLog`].
             if !log.reported.contains(lane) {
                 log.reported.insert(lane);
-                eprintln!(
+                bt_viewport::trace::line(format!(
                     "Folio glyph atlas reached the device limit on the {} lane; presenting without text and retrying",
                     lane.name()
-                );
+                ));
             }
             log.frames += 1;
             *text_complete = false;
@@ -4474,7 +4481,7 @@ impl DeviceLossPilot {
             self.spent += 1;
             match machine.rebuild() {
                 Ok(()) => {
-                    eprintln!("{}", note_a_rebuilt_device(&mut self.rebuilds));
+                    bt_viewport::trace::line(note_a_rebuilt_device(&mut self.rebuilds));
                     return Flight::Rebuilt(self.rebuilds);
                 }
                 Err(error) => last = Some(error),
@@ -4654,10 +4661,10 @@ fn count_surface_failure(failure: SurfaceFailure) {
         SurfaceFailure::Outdated | SurfaceFailure::Lost | SurfaceFailure::Validation => return,
     };
     if a_decade_was_reached(reached) {
-        eprintln!(
+        bt_viewport::trace::line(format!(
             "Folio skipped {reached} frames because {why} — surface acquires: {}",
             surface_failure_tally()
-        );
+        ));
     }
 }
 
@@ -6969,7 +6976,7 @@ impl DeviceResources {
                     DEVICE_LOST_HEADLINE,
                     &what_the_lost_device_said(reason, &message, driver()),
                 ) {
-                    eprintln!("{line}");
+                    bt_viewport::trace::line(line.to_string());
                 }
             });
         }
@@ -6990,7 +6997,7 @@ impl DeviceResources {
                 if let Some(line) =
                     note_what_the_device_said(&latch, DEVICE_FAULT_HEADLINE, &error.to_string())
                 {
-                    eprintln!("{line}");
+                    bt_viewport::trace::line(line.to_string());
                 }
             }));
         }
@@ -8130,7 +8137,7 @@ impl GpuContext {
                 // the numbering — see [`note_a_repack`]. A re-pack the log does
                 // not carry is a re-pack nobody on the machine it happened on
                 // can count, and the count is the whole diagnosis.
-                eprintln!("{}", note_a_repack(&mut self.glyph_atlas_refits));
+                bt_viewport::trace::line(note_a_repack(&mut self.glyph_atlas_refits));
             }
             // A refused frame on a packing that is already fresh, and the four
             // ends that say nothing about text at all (a swapchain skipped
@@ -26162,7 +26169,7 @@ mod tests {
             "a refusal names its lane for the trace"
         );
         assert!(
-            exit.contains("eprintln!("),
+            exit.contains("bt_viewport::trace::line(format!("),
             "a refusal is said out loud once"
         );
     }

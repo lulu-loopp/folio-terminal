@@ -3476,9 +3476,16 @@ pub(crate) fn on_the_window_thread_exiting() {
 /// Answers `true` in the child, where the caller goes on to make its claim, and `false` in the
 /// parent once the child has passed.
 pub(crate) fn alone_in_a_process(selector: &str, stdin: &[u8]) -> bool {
+    alone_in_a_process_with_its_stderr(selector, stdin).is_none()
+}
+
+/// [`alone_in_a_process`], answering `None` in the child and, in the parent once the child has
+/// passed, what the child wrote to its standard error — for a claim about what a process says
+/// there.
+pub(crate) fn alone_in_a_process_with_its_stderr(selector: &str, stdin: &[u8]) -> Option<String> {
     const CHILD: &str = "BT_STANDALONE_ENTRY_TEST_CHILD";
     if std::env::var_os(CHILD).is_some_and(|named| named == selector) {
-        return true;
+        return None;
     }
     let mut child = bt_platform::quiet_command(std::env::current_exe().unwrap())
         .args(["--exact", selector, "--nocapture", "--test-threads=1"])
@@ -3512,7 +3519,7 @@ pub(crate) fn alone_in_a_process(selector: &str, stdin: &[u8]) -> bool {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
-    false
+    Some(String::from_utf8_lossy(&output.stderr).into_owned())
 }
 
 // ── the storage pass's window, over the four real stores (T-STORE-NOTICE)

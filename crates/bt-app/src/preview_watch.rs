@@ -587,7 +587,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// before you can ask it. Set-but-empty is off, on `BT_PERF_TRACE`'s own rule.
 fn trace(message: &str) {
     if crate::entry_doors::installed().git {
-        eprintln!("preview watch: {message}");
+        crate::diagnostics::stderr_line(format!("preview watch: {message}"));
     }
 }
 

@@ -450,7 +450,9 @@ fn adopt_platform_chrome(
     match crate::macos_impl::adopt_window_chrome(window, bar_logical_px, wake) {
         Ok(adopted) => adopted,
         Err(reason) => {
-            eprintln!("bt-platform: {reason}; the window keeps the title bar the system gave it");
+            crate::stderr_road::say(format!(
+                "bt-platform: {reason}; the window keeps the title bar the system gave it"
+            ));
             (crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR, None)
         }
     }
@@ -1837,6 +1839,14 @@ pub fn leave_process(code: i32) -> ! {
 /// refused launch runs before there is any application at all. A controlled
 /// stop's lost configuration change (T-QUIT-DOCUMENTS) is said here too.
 #[cfg(not(any(windows, target_os = "macos")))]
+#[expect(
+    clippy::print_stderr,
+    reason = "the last-resort fault report, written where it is said: a panic's box comes after the \
+              panic road's fence, where a queued line would leave with the process; for the other \
+              caller that reaches it in a resident run, bt-app's SystemBox::say (the stop's lost \
+              configuration change), the synchronous write is a known limit, to be routed through \
+              stderr_line by plan row 66 (T-STOP-NOTICE-BOX-QUERY-MACOS)"
+)]
 pub fn message_box(title: &str, text: &str) {
     eprintln!("{title}");
     eprintln!("{text}");

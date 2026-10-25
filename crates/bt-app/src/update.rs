@@ -1513,7 +1513,9 @@ pub fn release_trial() {
         return;
     };
     if let Err(error) = owner.release_trial() {
-        eprintln!("BT_UPDATE_TRIAL update-check.json was not written: {error}");
+        crate::diagnostics::stderr_line(format!(
+            "BT_UPDATE_TRIAL update-check.json was not written: {error}"
+        ));
     }
     begin();
 }

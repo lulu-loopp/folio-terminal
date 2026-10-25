@@ -111,7 +111,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// The surface's own refusal words: its stderr line, and the files notice.
     fn say_refusal(&mut self, words: RefusalWords) -> Result<()> {
         if let Some(line) = words.line {
-            eprintln!("{line}");
+            crate::diagnostics::stderr_line(line.to_string());
         }
         if let Some(notice) = words.notice {
             self.window.files_notice = Some((notice.to_owned(), Instant::now()));

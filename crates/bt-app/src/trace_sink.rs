@@ -5,16 +5,21 @@
 //! format and timestamp their lines, then try to enqueue them without waiting.
 //! Overflow and lock contention drop lines; the writer reports their count.
 //!
-//! Only a run with a nonempty trace or dump variable starts the writer. File
-//! opens, headers, and writes happen on that thread. Shutdown drains under a
-//! one-second deadline, because a writer stalled in the kernel cannot be joined
-//! indefinitely. Tests without a sink retain synchronous output.
+//! **Its destinations are the ones a reader can stall: the console a trace run
+//! kept, and the named trace files** (T-TRACE-SINK-OFF-THE-CALLING-THREAD). Only
+//! a run that kept its console, or whose entry named a trace file, starts the
+//! writer; every file open, header and write happens on that thread, and no
+//! other thread writes a trace file at all — a line offered where there is no
+//! sink is not written. Shutdown drains under a one-second deadline, because a
+//! writer stalled in the kernel cannot be joined indefinitely.
 //!
-//! Ordinary diagnostics and the hold logger are outside this queue: they go to
-//! `diagnostics.log` by a path of their own — see [`crate::diagnostics::note`] —
-//! so that neither the watchdog nor a resident UI diagnostic ever waits for
-//! whoever is reading a trace. The exit footer shares the queue when active so
-//! stderr contention cannot prevent shutdown from reaching the bounded flush.
+//! `diagnostics.log` is outside this queue: it has a writer of its own —
+//! [`crate::diagnostics::note`], and in a run whose `stderr` is that file every
+//! `stderr` line ([`crate::diagnostics::stderr_line`]) — so that neither the
+//! watchdog nor a resident UI diagnostic ever waits for whoever is reading a
+//! trace. A console run's `stderr` lines, the exit footer among them, share this
+//! queue, so stderr contention cannot prevent shutdown from reaching the bounded
+//! flush.
 //!
 //! **Nothing but the writer thread ever waits on this sink** (X-7). Producers
 //! `try_lock` and `try_send`, and the writer puts its batch on this process's
@@ -27,7 +32,6 @@
 //! ([`TraceFile`]'s open takes it as an argument), once, and never re-queued.
 
 use std::fmt::Write as _;
-use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock, TryLockError};
@@ -61,8 +65,9 @@ pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Where one queued line is going.
 pub enum Destination {
-    /// This run's `stderr` — the console when a trace variable named one, and
-    /// `diagnostics.log` otherwise. See `crate::diagnostics`.
+    /// The console a trace run kept (`crate::diagnostics::Channel::Console`).
+    /// A run whose `stderr` is `diagnostics.log` hands its lines to that file's
+    /// own writer instead (`crate::diagnostics::stderr_line`).
     Stderr,
     /// A named trace destination. Held as an `Arc` and not a borrow because
     /// the line outlives the call that made it: it is written by the sink's
@@ -83,7 +88,7 @@ struct Line {
 }
 
 /// The producer's half: a bounded sender and the tally of what would not fit.
-struct Queue {
+pub(crate) struct Queue {
     /// `None` once [`flush`] has let the sender go.
     ///
     /// Producers only try this lock; contention drops a line too. The writer
@@ -126,6 +131,23 @@ impl Queue {
         queued
     }
 
+    /// One line for a named trace's file. Never waits; a line that does not fit
+    /// is counted.
+    /// One line for the console a trace run kept, on this queue (see [`offer_stderr_line`]).
+    pub(crate) fn offer_stderr_line(&self, text: String) -> bool {
+        self.offer(Line {
+            destination: Destination::Stderr,
+            text,
+        })
+    }
+
+    pub(crate) fn offer_file_line(&self, file: Arc<TraceFile>, text: String) {
+        self.offer(Line {
+            destination: Destination::File(file),
+            text,
+        });
+    }
+
     /// Let the sender go, which is what ends the writer's `recv` once the queue
     /// behind it is empty.
     fn close(&self) -> bool {
@@ -158,19 +180,14 @@ struct Sink {
 /// [`open`]'s answer, resolved once.
 static SINK: OnceLock<Option<Sink>> = OnceLock::new();
 
-/// Whether startup has resolved the sink, including a run with tracing off.
-pub fn started() -> bool {
-    SINK.get().is_some()
-}
-
-/// **Start the writer thread, if this run asked for a trace.**
+/// **Start the writer thread, if this run has a destination for it.**
 ///
-/// Called once, from `main`, beside `diagnostics::enter_resident_run` — and it
-/// is **the only thing that opens [`SINK`]**, which is what makes "is there a
-/// queue" a fact about the program rather than about the environment a binary
-/// happens to inherit. A test binary and `bt-replay` never call it, so their
-/// lines are written where they are made, synchronously, the way they always
-/// were; nothing in a test has to wait for a thread it did not start.
+/// Called once, from `main`, after `diagnostics::enter_resident_run` has said
+/// whether the run kept its console — and it is **the only thing that opens
+/// [`SINK`]**, which is what makes "is there a queue" a fact about the program
+/// rather than about the environment a binary happens to inherit. A test binary
+/// never calls it: a test that writes a trace drives a queue of its own
+/// ([`Capture`]), and nothing in a test has to wait for a thread it did not start.
 ///
 /// **The writer is retired through its admitted flush door, never by a drop**
 /// (T-DROP-DOORS, D-78): `main` calls [`Shutdown::flush_through_its_door`] on
@@ -210,41 +227,40 @@ impl Drop for Shutdown {
     }
 }
 
-pub fn start() -> Shutdown {
-    let _ = SINK.get_or_init(open);
+pub fn start(console: bool) -> Shutdown {
+    let _ = SINK.get_or_init(|| open(console));
     Shutdown { retired: false }
 }
 
-/// One line for `stderr`, queued or written here.
-pub fn stderr_line(text: String) {
-    write_line(Destination::Stderr, text);
-}
-
-/// **One line for `stderr` if this run has a queue, and nothing at all if it
-/// does not** (X-7).
+/// **One line for the console a trace run kept, if this run has a queue, and
+/// nothing at all if it does not** (X-7).
 ///
-/// [`stderr_line`]'s pair for the callers that must never write here: a run
-/// without a sink writes the line on the calling thread, which is right for the
-/// traces that road serves and wrong for [`crate::diagnostics::note`], whose
-/// entire reason for existing is that the calling thread must not touch a
-/// console. So this one queues or gives up, and never writes.
+/// The console's half of [`crate::diagnostics::stderr_line`] and of
+/// [`crate::diagnostics::note`]: neither the calling thread nor anybody else
+/// writes the line here, so this queues or gives up.
 ///
 /// Answers whether the line was taken. `false` is a run with no sink, a full
 /// queue or a contended sender — all of which mean the same thing to the
-/// caller, which has already written the line where it really belongs.
+/// caller, which has already said the line where it really belongs.
 pub fn offer_stderr_line(text: String) -> bool {
     let Some(sink) = sink() else {
         return false;
     };
-    sink.queue.offer(Line {
-        destination: Destination::Stderr,
-        text,
-    })
+    sink.queue.offer_stderr_line(text)
 }
 
-/// One line for a named trace's file, queued or written here.
+/// One line for a named trace's file, queued for the sink's writer — or, in a
+/// run with no sink, not written at all: a trace file is written by that thread
+/// and by no other.
 pub fn file_line(file: Arc<TraceFile>, text: String) {
-    write_line(Destination::File(file), text);
+    if let Some(queue) = queue() {
+        queue.offer_file_line(file, text);
+    }
+}
+
+/// This run's queue, once [`start`] has opened one.
+pub(crate) fn queue() -> Option<&'static Queue> {
+    sink().map(|sink| &sink.queue)
 }
 
 /// **Write everything already said, then stop.**
@@ -291,41 +307,16 @@ fn flush_sink(sink: &Sink, timeout: Duration) {
     }
 }
 
-fn write_line(destination: Destination, text: String) {
-    let Some(sink) = sink() else {
-        // No sink: a test binary, `bt-replay`, or a run that named no trace at
-        // all. Straight to the destination, the way every one of these lines was
-        // written before there was a queue.
-        write_here(&destination, &text);
-        return;
-    };
-    sink.queue.offer(Line { destination, text });
-}
-
-fn write_here(destination: &Destination, text: &str) {
-    match destination {
-        Destination::Stderr => {
-            let _ = writeln!(std::io::stderr(), "{text}");
-        }
-        Destination::File(file) => file.append(text, &mut ProcessStderr),
-    }
-}
-
 /// This run's sink, or `None` in a run that has not [`start`]ed one.
 fn sink() -> Option<&'static Sink> {
     SINK.get().and_then(Option::as_ref)
 }
 
-fn open() -> Option<Sink> {
-    // The names the entry read with a value (`entry_doors`): empty values are already out.
-    if !a_trace_was_asked_for(
-        crate::entry_doors::installed()
-            .named_with_a_value
-            .iter()
-            .cloned(),
-    ) {
+fn open(console: bool) -> Option<Sink> {
+    if !a_destination_is_kept(console, crate::trace::installed_files()) {
         return None;
     }
+    let reports = the_reports_road(console);
     let (lines, waiting) = sync_channel(QUEUE_DEPTH);
     let (done, finished) = sync_channel::<()>(0);
     let dropped = Arc::new(AtomicU64::new(0));
@@ -337,7 +328,7 @@ fn open() -> Option<Sink> {
         "bt-trace-sink",
         bt_platform::ThreadPriority::BelowNormal,
         move |_ctx| {
-            run(&waiting, &counted);
+            run(&waiting, &counted, reports);
             // The one thing that makes `flush`'s wait a wait on this body.
             drop(done);
         },
@@ -360,8 +351,70 @@ fn open() -> Option<Sink> {
 /// pending before it goes, because the reading two traces of one run support is
 /// a merge on their first column, and that merge is only sound while the order
 /// the lines were *offered* in is the order they come out in.
-fn run(lines: &Receiver<Line>, dropped: &AtomicU64) {
-    run_to(lines, dropped, &mut ProcessStderr);
+fn run(lines: &Receiver<Line>, dropped: &AtomicU64, reports: Reports) {
+    match reports {
+        Reports::Console => run_to(lines, dropped, &mut ProcessStderr),
+        Reports::TheLogsRoad => run_to(
+            lines,
+            dropped,
+            &mut LineByLine::to(crate::diagnostics::stderr_line),
+        ),
+    }
+}
+
+/// **Where the writer's own reports go** — the count of the lines it lost, a trace file it could
+/// not open (T-TRACE-SINK-OFF-THE-CALLING-THREAD, review F1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reports {
+    /// A console run: its `stderr` is the console, which the writer already writes.
+    Console,
+    /// Any other run: `stderr` is `diagnostics.log` (or nothing), whose one writer is
+    /// `diagnostics`' — so each report is a line handed to [`crate::diagnostics::stderr_line`],
+    /// queued with the run's notes and covered by the way out's fence, never a second writer of
+    /// that file.
+    TheLogsRoad,
+}
+
+fn the_reports_road(console: bool) -> Reports {
+    if console {
+        Reports::Console
+    } else {
+        Reports::TheLogsRoad
+    }
+}
+
+/// **The writer's reports, one whole line at a time, handed to a road** — for a run whose
+/// `stderr` is not the sink's to write. `writeln!` reaches a writer in pieces, so a line is handed
+/// over at its end and not before.
+struct LineByLine {
+    say: fn(String),
+    pending: Vec<u8>,
+}
+
+impl LineByLine {
+    fn to(say: fn(String)) -> Self {
+        Self {
+            say,
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl std::io::Write for LineByLine {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.pending.extend_from_slice(bytes);
+        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=end).collect();
+            (self.say)(std::borrow::Cow::into_owned(String::from_utf8_lossy(
+                &line[..end],
+            )));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// **This run's standard error, written without the lock every other writer of
@@ -410,17 +463,7 @@ fn run_to(lines: &Receiver<Line>, dropped: &AtomicU64, stderr: &mut impl std::io
         };
         let mut line = first;
         for index in 0..256 {
-            let Line { destination, text } = line;
-            match destination {
-                Destination::Stderr => {
-                    batch.push_str(&text);
-                    batch.push('\n');
-                }
-                Destination::File(file) => {
-                    put(&mut batch, stderr);
-                    file.append(&text, stderr);
-                }
-            }
+            take(line, &mut batch, stderr);
             // Bound the batch too: a continuously replenished queue must not
             // turn into an unbounded String or postpone its write forever.
             if index == 255 || batch.len() >= 64 * 1024 {
@@ -438,6 +481,23 @@ fn run_to(lines: &Receiver<Line>, dropped: &AtomicU64, stderr: &mut impl std::io
         put(&mut batch, stderr);
     }
     let _ = stderr.flush();
+}
+
+/// One line, where it is going: a console line into the batch, a file line
+/// after the batch before it has gone out — so the order the lines were offered
+/// in is the order they come out in.
+fn take(line: Line, batch: &mut String, stderr: &mut impl std::io::Write) {
+    let Line { destination, text } = line;
+    match destination {
+        Destination::Stderr => {
+            batch.push_str(&text);
+            batch.push('\n');
+        }
+        Destination::File(file) => {
+            put(batch, stderr);
+            file.append(&text, stderr);
+        }
+    }
 }
 
 fn report_drops(batch: &mut String, dropped: &AtomicU64, said: &mut u64) {
@@ -461,15 +521,64 @@ fn put(batch: &mut String, stderr: &mut impl std::io::Write) {
     batch.clear();
 }
 
-/// Trace switches plus the focus-thumbnail file dump use this sink. Other
-/// dumps, such as the PTY byte capture, have their own writers and need no idle
-/// sink thread. Names are supplied separately so tests never mutate the process
-/// environment; `open` hands it the names the entry read with a value.
-fn a_trace_was_asked_for<I: IntoIterator<Item = std::ffi::OsString>>(names: I) -> bool {
-    names.into_iter().any(|name| {
-        let name = name.to_string_lossy().to_ascii_uppercase();
-        name.starts_with("BT_") && (name.contains("TRACE") || name == "BT_FOCUS_THUMB_DUMP")
-    })
+/// **Whether this run has a destination for the sink**: the console a trace run
+/// kept, or any trace file the entry named ([`crate::trace::TraceFiles`]).
+///
+/// Read from the two facts the destinations are, and not from the shape of a
+/// variable's name: `BT_GLYPH_CENSUS` names a file and mentions no `TRACE`, and
+/// a gate on the name left that file opened and appended on the window thread,
+/// every frame. Other dumps, such as the PTY byte capture, have their own
+/// writers and need no idle sink thread.
+fn a_destination_is_kept(console: bool, files: Option<&crate::trace::TraceFiles>) -> bool {
+    console || files.is_some_and(crate::trace::TraceFiles::names_any)
+}
+
+/// **A queue a test writes through, and the writer's own body to put it out
+/// with** — the way a test reads a trace now that no thread but the writer
+/// writes one: the lines a station offers wait in the queue until
+/// [`Capture::write_out`] hands them, in order, to [`take`], exactly as the
+/// sink's thread does.
+#[cfg(test)]
+pub(crate) struct Capture {
+    queue: &'static Queue,
+    waiting: Receiver<Line>,
+}
+
+#[cfg(test)]
+impl Capture {
+    pub(crate) fn new() -> Self {
+        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
+        // Leaked: a trace holds its queue for as long as the process, as the sink's does.
+        let queue = Box::leak(Box::new(Queue::new(lines, Arc::new(AtomicU64::new(0)))));
+        Self { queue, waiting }
+    }
+
+    /// The queue a test's [`crate::trace::Trace`] is created on.
+    pub(crate) fn queue(&self) -> &'static Queue {
+        self.queue
+    }
+
+    /// The console lines offered so far, taken off the queue in order (a file line is put out).
+    pub(crate) fn stderr_lines(&self) -> Vec<String> {
+        let mut said = Vec::new();
+        let mut batch = String::new();
+        while let Ok(line) = self.waiting.try_recv() {
+            match line.destination {
+                Destination::Stderr => said.push(line.text),
+                Destination::File(_) => take(line, &mut batch, &mut ProcessStderr),
+            }
+        }
+        said
+    }
+
+    /// Everything offered so far, written where it was going.
+    pub(crate) fn write_out(&self) {
+        let mut batch = String::new();
+        while let Ok(line) = self.waiting.try_recv() {
+            take(line, &mut batch, &mut ProcessStderr);
+        }
+        put(&mut batch, &mut ProcessStderr);
+    }
 }
 
 /// **A sink whose writer is parked inside its write**, for the tests — here and
@@ -675,7 +784,7 @@ mod tests {
         let (lines, waiting) = sync_channel(QUEUE_DEPTH);
         let dropped = Arc::new(AtomicU64::new(0));
         let counted = Arc::clone(&dropped);
-        let writer = std::thread::spawn(move || run(&waiting, &counted));
+        let writer = std::thread::spawn(move || run(&waiting, &counted, Reports::Console));
         let queue = Queue::new(lines, dropped);
         for index in 0..500 {
             queue.offer(Line {
@@ -767,7 +876,7 @@ mod tests {
         let counted = Arc::clone(&dropped);
         let (done, finished) = sync_channel::<()>(1);
         let writer = std::thread::spawn(move || {
-            run(&waiting, &counted);
+            run(&waiting, &counted, Reports::Console);
             let _ = done.send(());
         });
         let queue = Queue::new(lines, dropped);
@@ -830,7 +939,7 @@ mod tests {
         let counted = Arc::clone(&dropped);
         let (done, finished) = sync_channel::<()>(1);
         let writer = std::thread::spawn(move || {
-            run(&waiting, &counted);
+            run(&waiting, &counted, Reports::Console);
             let _ = done.send(());
         });
         let queue = Queue::new(lines, dropped);
@@ -936,22 +1045,92 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// RED (T-TRACE-SINK-OFF-THE-CALLING-THREAD; mutation: the old gate on a
+    /// variable's name, `BT_` + `TRACE` or `BT_FOCUS_THUMB_DUMP`) — **a run whose
+    /// only trace is a file starts the sink**, whatever the file's variable is
+    /// called: `BT_GLYPH_CENSUS` alone left its file written on the window
+    /// thread. A console run starts it with no file; a run with neither does not.
     #[test]
-    fn the_gate_is_the_shape_of_a_trace_variable() {
-        let names = |names: &[&str]| -> Vec<std::ffi::OsString> {
-            names.iter().map(std::ffi::OsString::from).collect()
+    fn a_run_with_a_trace_file_or_a_console_starts_the_sink() {
+        let census = crate::trace::TraceFiles {
+            glyph_census: Some(PathBuf::from("census.log")),
+            ..crate::trace::TraceFiles::default()
         };
-        assert!(a_trace_was_asked_for(names(&["PATH", "BT_PERF_TRACE"])));
-        assert!(a_trace_was_asked_for(names(&["BT_CARD_TRACE"])));
-        assert!(a_trace_was_asked_for(names(&["BT_FOCUS_THUMB_DUMP"])));
-        assert!(!a_trace_was_asked_for(names(&["BT_PTY_DUMP"])));
-        // A made-up name tests the shape without declaring a real switch to
-        // the environment-document check's whole-literal scan.
-        assert!(a_trace_was_asked_for(names(&[concat!(
-            "BT_",
-            "SOMETHING_TRACE_V9"
-        )])));
-        assert!(!a_trace_was_asked_for(names(&["PATH", "APPDATA", "BT_BG"])));
+        assert!(a_destination_is_kept(false, Some(&census)));
+        assert!(a_destination_is_kept(true, None));
+        assert!(a_destination_is_kept(
+            true,
+            Some(&crate::trace::TraceFiles::default())
+        ));
+        assert!(!a_destination_is_kept(false, None));
+        assert!(!a_destination_is_kept(
+            false,
+            Some(&crate::trace::TraceFiles::default())
+        ));
+    }
+
+    /// RED (review F1; mutation: [`the_reports_road`] answering `Console` for a run without one,
+    /// which puts the reports through `write_std_error` into `diagnostics.log` beside its writer,
+    /// or [`LineByLine`] handing over a piece of a line) — **in a run without a console the sink's
+    /// own reports are lines on the log's road**: a trace file it could not open and the count of
+    /// the lines it lost each reach the road whole, as one line, from the writer's body — so in a
+    /// Log run (`BT_GLYPH_CENSUS` or `BT_FOCUS_THUMB_DUMP` alone) they are queued with the run's
+    /// notes, under the way out's fence, and the file keeps one writer.
+    #[test]
+    fn a_run_without_a_console_hands_the_writers_reports_to_the_logs_road() {
+        static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        fn road(line: String) {
+            SAID.lock().unwrap().push(line);
+        }
+        assert_eq!(the_reports_road(false), Reports::TheLogsRoad);
+        assert_eq!(the_reports_road(true), Reports::Console);
+        let folder = bt_testpath::temp_path("bt-sink-reports-a-folder-not-a-file");
+        std::fs::create_dir_all(&folder).unwrap();
+        let failing = Arc::new(TraceFile::new(&folder, Some("# header")));
+        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
+        let dropped = Arc::new(AtomicU64::new(3));
+        let queue = Queue::new(lines, Arc::clone(&dropped));
+        queue.offer_file_line(failing, "a census line".to_owned());
+        drop(queue);
+        run_to(&waiting, &dropped, &mut LineByLine::to(road));
+        let said = SAID.lock().unwrap().clone();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(
+            said[0].starts_with(&folder.display().to_string())
+                && said[0].contains("could not be opened for the trace"),
+            "{said:?}"
+        );
+        assert_eq!(said[1], "BT_PERF_TRACE dropped=3");
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// RED (mutation: [`file_line`] writing the line where it is made when no
+    /// sink runs, the arm it had) — **a trace file is written by the sink's
+    /// writer and by nobody else**: a line offered on a queue is not in the file
+    /// until the writer's body takes it, and in a process with no sink a line is
+    /// not written at all.
+    #[test]
+    fn a_trace_line_is_queued_and_written_only_by_the_writer() {
+        let path = scratch("only-the-writer");
+        let file = Arc::new(TraceFile::new(&path, Some("# header")));
+        let capture = Capture::new();
+        capture
+            .queue()
+            .offer_file_line(Arc::clone(&file), "queued".to_owned());
+        assert!(!path.exists(), "the producer wrote the trace file");
+        capture.write_out();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# header\nqueued\n"
+        );
+        // This test binary started no sink: the global road writes nothing.
+        file_line(Arc::clone(&file), "unqueued".to_owned());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# header\nqueued\n"
+        );
+        drop(file);
+        std::fs::remove_file(path).unwrap();
     }
 
     /// RED (A1d, row 17; T-DROP-DOORS, D-78) — **the trace's flush is one admitted `TraceFlush`

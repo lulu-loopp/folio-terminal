@@ -1,6 +1,12 @@
 //! ConPTY ownership and the bounded PTY-to-Term transport from DESIGN.md §1.3.
 
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+// Every `stderr` line goes to the writer that owns where `stderr` points, never written by the
+// thread that said it (T-TRACE-SINK-OFF-THE-CALLING-THREAD): `bt-app`'s `diagnostics::stderr_line`, or
+// the road `fn main` installs in a crate below it. `stdout` is the same file in a Log run, so no
+// product line goes there either. Tests: `clippy.toml`'s `allow-print-in-tests`.
+#![deny(clippy::print_stderr)]
+#![deny(clippy::print_stdout)]
 
 use std::{
     collections::VecDeque,
@@ -400,7 +406,7 @@ impl PtyDump {
             recording.output.clone(),
             recording.input.clone(),
             || (Instant::now(), unix_millis()),
-            &mut |line| eprintln!("{line}"),
+            &mut |line| crate::say(str::to_owned(line)),
         )
     }
 
@@ -491,7 +497,10 @@ impl PtyDump {
         };
         dump.publish()?;
         spawn_dump_publisher(&dump)?;
-        eprintln!("BT_PTY_DUMP recording {ordinal} to {}", dump.path.display());
+        crate::say(format!(
+            "BT_PTY_DUMP recording {ordinal} to {}",
+            dump.path.display()
+        ));
         Ok(dump)
     }
 
@@ -802,7 +811,9 @@ pub fn retire_session(session: PtySession) {
     retire_within(RETIREMENT_BUDGET, move || {
         let mut session = session;
         if let Err(error) = session.take_apart() {
-            eprintln!("a closing pane's child did not go quietly: {error}");
+            crate::say(format!(
+                "a closing pane's child did not go quietly: {error}"
+            ));
         }
     });
 }
@@ -826,10 +837,10 @@ fn retire_within(budget: Duration, teardown: impl FnOnce() + Send + 'static) {
             teardown();
             let spent = started.elapsed();
             if spent > budget {
-                eprintln!(
+                crate::say(format!(
                     "a pane took {} ms to close, on a thread of its own rather than the window's",
                     spent.as_millis()
-                );
+                ));
             }
             retirements().end();
         });
@@ -948,7 +959,7 @@ fn read_pty_output_with_dump(
             .map_err(|_| std::io::Error::other("dump mutex poisoned"))
             .and_then(|mut dump| dump.write_chunk(&buffer[..count]));
         if let Err(error) = write_result {
-            eprintln!("BT_PTY_DUMP disabled after write failure: {error}");
+            crate::say(format!("BT_PTY_DUMP disabled after write failure: {error}"));
             if output.push_read(buffer[..count].to_vec(), capped).is_ok() {
                 wake();
                 read_pty_output_without_dump(reader, output, wake);
@@ -966,7 +977,7 @@ fn read_pty_output_with_dump(
         .map_err(|_| std::io::Error::other("dump mutex poisoned"))
         .and_then(|mut dump| dump.finish());
     if let Err(error) = closed {
-        eprintln!("BT_PTY_DUMP could not close its manifest: {error}");
+        crate::say(format!("BT_PTY_DUMP could not close its manifest: {error}"));
     }
 }
 
@@ -2603,7 +2614,7 @@ impl PtySession {
             let mut dump = dump.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let elapsed_us = u64::try_from(dump.started.elapsed().as_micros()).unwrap_or(u64::MAX);
             if let Err(error) = dump.write_input_at(bytes, reason, elapsed_us) {
-                eprintln!("BT_PTY_INPUT_DUMP write failed: {error}");
+                crate::say(format!("BT_PTY_INPUT_DUMP write failed: {error}"));
             }
         }
         Ok(())
@@ -2619,7 +2630,7 @@ impl PtySession {
             && let Ok(mut dump) = dump.lock()
             && let Err(error) = dump.write_resize(size.columns.get(), size.rows.get())
         {
-            eprintln!("BT_PTY_DUMP resize marker failed: {error}");
+            crate::say(format!("BT_PTY_DUMP resize marker failed: {error}"));
         }
         self.master
             .as_ref()
@@ -2770,7 +2781,7 @@ impl PtySession {
                 .into_inner()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Err(error) = dump.finish() {
-                eprintln!("BT_PTY_INPUT_DUMP finish failed: {error}");
+                crate::say(format!("BT_PTY_INPUT_DUMP finish failed: {error}"));
             }
         }
         self.shutdown()
@@ -2880,9 +2891,10 @@ impl PtySession {
             match join_within(READER_EXIT_BUDGET, reader) {
                 ReaderExit::Ended => {}
                 ReaderExit::StillReading => {
-                    eprintln!(
+                    crate::say(
                         "a pane closed while its reader was still inside a read on the \
                          pseudoconsole, and it was left to end with the pipe"
+                            .to_owned(),
                     );
                 }
             }
@@ -2929,15 +2941,38 @@ pub fn say_skipped_doors_through(say: fn(&str)) {
     let _ = SKIPPED_DOOR_ROAD.set(say);
 }
 
+/// Where this crate's `stderr` lines go: the application's, once it installs its road
+/// ([`say_lines_through`]).
+static LINE_ROAD: OnceLock<fn(String)> = OnceLock::new();
+
+/// **Where this crate's `stderr` lines go from here on** (T-TRACE-SINK-OFF-THE-CALLING-THREAD,
+/// 0.4.9 plan row 51) — the shape of [`say_skipped_doors_through`] and of `bt-platform`'s
+/// `stderr_road`, which this crate cannot name. `bt-app`'s `main` installs
+/// `diagnostics::stderr_line`, which hands the line to whichever writer owns the run's `stderr`, so
+/// a session retired on the window thread writes nothing there. Installed once; a second install
+/// is ignored.
+pub fn say_lines_through(say: fn(String)) {
+    let _ = LINE_ROAD.set(say);
+}
+
+/// One line for this run's `stderr`, handed to the installed road ([`say_lines_through`]) — or,
+/// in a process that installed none (a test, a tool), to nobody. Never a write on this thread.
+pub(crate) fn say(line: String) {
+    if let Some(road) = LINE_ROAD.get() {
+        road(line);
+    }
+}
+
 /// **Say once that `what` was dropped without `door`, and what that leaves behind**, through the
-/// installed road ([`say_skipped_doors_through`]) — standard error only before one is installed
-/// (a test, a probe) — and count it on the dropping thread. Never a wait.
+/// installed road ([`say_skipped_doors_through`]) — before one is installed, through this crate's
+/// line road ([`say`]), which in a process that installed neither (a test, a probe) says it to
+/// nobody — and count it on the dropping thread. Never a wait.
 fn door_skipped(what: &str, door: &str, left: &str) {
     let _ = DOORS_SKIPPED.try_with(|skipped| skipped.set(skipped.get() + 1));
     let line = format!("{what} was dropped without {door}, and did not wait: {left}");
     match SKIPPED_DOOR_ROAD.get() {
         Some(say) => say(&line),
-        None => eprintln!("{line}"),
+        None => crate::say(line),
     }
 }
 

@@ -73,7 +73,9 @@ impl<B: Backend> Runtime<'_, B> {
                     None => Err("this window has no save dialog".to_owned()),
                 };
                 if let Err(error) = asked {
-                    eprintln!("recoverable save dialog failure: {error}");
+                    crate::diagnostics::stderr_line(format!(
+                        "recoverable save dialog failure: {error}"
+                    ));
                 }
             }
             settings::ConfigurationDoor::Import => match self.window.image_picker.request(
@@ -84,7 +86,9 @@ impl<B: Backend> Runtime<'_, B> {
                 Ok(true) => self.window.image_pick_pending = Some(FilePick::SettingsImport),
                 // Already queued or already open: whoever asked first keeps it.
                 Ok(false) => {}
-                Err(error) => eprintln!("recoverable settings file chooser failure: {error}"),
+                Err(error) => crate::diagnostics::stderr_line(format!(
+                    "recoverable settings file chooser failure: {error}"
+                )),
             },
             settings::ConfigurationDoor::Folder => {
                 self.reveal_in_explorer(&persist::storage_dir())?;
@@ -113,7 +117,9 @@ impl<B: Backend> Runtime<'_, B> {
             Ok(None) => Ok(()),
             Ok(Some(path)) => self.export_settings_to(&path),
             Err(error) => {
-                eprintln!("recoverable save dialog failure: {error}");
+                crate::diagnostics::stderr_line(format!(
+                    "recoverable save dialog failure: {error}"
+                ));
                 Ok(())
             }
         }
@@ -148,7 +154,10 @@ impl<B: Backend> Runtime<'_, B> {
                 path.display().to_string(),
             )?,
             Err(error) => {
-                eprintln!("BT_PERSIST export to {} failed: {error}", path.display());
+                crate::diagnostics::stderr_line(format!(
+                    "BT_PERSIST export to {} failed: {error}",
+                    path.display()
+                ));
                 self.toast(
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
@@ -181,7 +190,10 @@ impl<B: Backend> Runtime<'_, B> {
         let parts = match bt_persist::read_export(path) {
             Ok(parts) => parts,
             Err(refusal) => {
-                eprintln!("BT_PERSIST import of {} refused: {refusal}", path.display());
+                crate::diagnostics::stderr_line(format!(
+                    "BT_PERSIST import of {} refused: {refusal}",
+                    path.display()
+                ));
                 return self.toast(
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
@@ -614,7 +626,10 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         }
         for fault in faults {
-            eprintln!("BT_PERSIST skipped {}: {}", fault.what, fault.reason);
+            crate::diagnostics::stderr_line(format!(
+                "BT_PERSIST skipped {}: {}",
+                fault.what, fault.reason
+            ));
         }
         let names: Vec<&str> = faults.iter().map(|fault| fault.what.as_str()).collect();
         self.toast(
@@ -664,7 +679,7 @@ impl<B: Backend> settings_merge::MergeWindow for MergeTurn<'_, '_, B> {
     }
 
     fn merge_say(&mut self, line: &str) {
-        eprintln!("{line}");
+        crate::diagnostics::stderr_line(line.to_string());
     }
 
     fn merge_present(&mut self) -> Result<()> {
@@ -703,7 +718,7 @@ impl<B: Backend> keybindings_merge::KeybindingsWindow for MergeTurn<'_, '_, B> {
     }
 
     fn keybindings_say(&mut self, line: &str) {
-        eprintln!("{line}");
+        crate::diagnostics::stderr_line(line.to_string());
     }
 
     fn keybindings_present(&mut self) -> Result<()> {
@@ -745,7 +760,7 @@ impl<B: Backend> table_merge::TableMergeWindow for MergeTurn<'_, '_, B> {
     }
 
     fn table_merge_say(&mut self, line: &str) {
-        eprintln!("{line}");
+        crate::diagnostics::stderr_line(line.to_string());
     }
 }
 

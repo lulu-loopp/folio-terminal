@@ -1300,7 +1300,9 @@ pub fn disable_files_worker_state(running: &mut bool, notice_pending: &mut bool)
     }
     *running = false;
     *notice_pending = true;
-    eprintln!("directory reading worker stopped; terminal input and output remain available");
+    crate::diagnostics::stderr_line(
+        "directory reading worker stopped; terminal input and output remain available".to_owned(),
+    );
     true
 }
 

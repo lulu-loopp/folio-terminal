@@ -2171,7 +2171,7 @@ fn walk_the_machine(generation: u64) -> Result<FontAnswer, String> {
     let monospace = bt_platform::monospace_font_families()
         .map_err(|error| format!("the monospaced families could not be listed: {error}"))?;
     if traced {
-        crate::trace_sink::stderr_line(format!(
+        crate::diagnostics::stderr_line(format!(
             "BT_PERF_TRACE monospace_enumeration_us={} families={} generation={generation}",
             start.elapsed().as_micros(),
             monospace.len()
@@ -2182,7 +2182,7 @@ fn walk_the_machine(generation: u64) -> Result<FontAnswer, String> {
     let cjk = bt_platform::cjk_font_families()
         .map_err(|error| format!("the CJK families could not be listed: {error}"))?;
     if traced {
-        crate::trace_sink::stderr_line(format!(
+        crate::diagnostics::stderr_line(format!(
             "BT_PERF_TRACE cjk_enumeration_us={} families={}",
             start.elapsed().as_micros(),
             cjk.len()

@@ -117,9 +117,13 @@ install_for_program: ProfileRevision::read
 # `Written::publish` is keyed by its file: `publish` is a name several items declare.
 shell_integration/profile_runtime.rs: publish: ProfileRevision::read
 ProfileRevision::carries_the_line: profile_marks::Decoded::read
-TraceFile::append: .open
-Trace::create: .open
 TraceFile::open: .open
+# A trace file is opened only on the trace sink's writer (T-TRACE-SINK-OFF-THE-CALLING-THREAD):
+# `TraceFile::append` opens it at its first line, through `TraceFile::open`; `start` is the
+# sink's own `open`, which builds the queue and the writer, not a file. `append` and `start`
+# are names other items in the crate also declare, so both rows are keyed by their file.
+trace.rs: append: .open
+trace_sink.rs: start: open
 Claim::take: .open
 VideoSeat::open: Engine::open
 VideoSeats::open: VideoSeat::open

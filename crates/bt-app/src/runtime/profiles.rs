@@ -772,7 +772,10 @@ impl<B: Backend> Runtime<'_, B> {
         let moved = profiles::profile_revision() != revision;
         for fault in faults {
             let sentence = i18n::profile_entry_fault(&fault);
-            eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
+            crate::diagnostics::stderr_line(format!(
+                "BT_PERSIST {}: {sentence}",
+                persist::PROFILES_FILE_NAME
+            ));
             self.toast(
                 toast::ToastKind::Error,
                 toast::ToastAnchor::Window,

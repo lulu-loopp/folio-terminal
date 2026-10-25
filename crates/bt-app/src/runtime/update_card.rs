@@ -192,7 +192,9 @@ impl<B: Backend> Runtime<'_, B> {
                 if let Ok(effect) = answered
                     && let Err(error) = update_card::spend(effect, update::skip)
                 {
-                    eprintln!("BT_UPDATE the skipped version was not written: {error}");
+                    crate::diagnostics::stderr_line(format!(
+                        "BT_UPDATE the skipped version was not written: {error}"
+                    ));
                 }
             }
             update_card::Asks::Quit => {

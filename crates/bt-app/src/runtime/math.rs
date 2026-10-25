@@ -13,7 +13,7 @@ use crate::{
     hold_failed_in_tabs, i18n, leaf_session_mut, marks, math_copy_window, math_em_milli,
     new_tab_tip, nonzero_u32, preview, preview_select, preview_text_command, preview_trace,
     profiles, quit, rail_overlay_layer, restore, retire_spent_math_copy, search, seats, settings,
-    tooltip, trace_sink, window_layout_key,
+    tooltip, window_layout_key,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -1931,7 +1931,7 @@ impl<B: Backend> Runtime<'_, B> {
 
     pub(in crate::runtime) fn trace_math_band(&self, line: Option<String>) {
         if let Some(line) = line {
-            trace_sink::stderr_line(format!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERF_TRACE math_band frame={} {line}",
                 self.window.renderer.perf_frame(),
             ));
@@ -2241,7 +2241,7 @@ impl<B: Backend> Runtime<'_, B> {
                 (Some(_), Motion::Reduced) => ("one_frame_reduced_motion", 0, 0),
                 (None, _) => ("one_frame_unmeasurable", 0, 0),
             };
-            trace_sink::stderr_line(format!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERF_TRACE toggle plane={plane} road={road} rendered_subpixels={from} source_subpixels={to}"
             ));
         }
@@ -2567,11 +2567,15 @@ impl<B: Backend> Runtime<'_, B> {
         match (result, anchor) {
             (Ok(true), Some((target, anchor))) => self.copy_math_latex(target, &anchor)?,
             (Ok(true), None) => {
-                eprintln!("recoverable formula context-menu result had no pending anchor");
+                crate::diagnostics::stderr_line(
+                    "recoverable formula context-menu result had no pending anchor".to_owned(),
+                );
             }
             (Ok(false), _) => {}
             (Err(error), _) => {
-                eprintln!("recoverable formula context-menu failure: {error}");
+                crate::diagnostics::stderr_line(format!(
+                    "recoverable formula context-menu failure: {error}"
+                ));
             }
         }
         Ok(())

@@ -2462,10 +2462,10 @@ pub fn page_environment() -> Option<Vec<(OsString, OsString)>> {
         match end {
             PageEnvironmentEnd::Done(block) => cell.current = Some(block),
             PageEnvironmentEnd::Failed(reason) => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "Profiles page: the current environment could not be read ({reason}); \
                      its rows are composed over Folio's own (request {asked})"
-                );
+                ));
                 cell.current = Some(std::env::vars_os().collect());
             }
             PageEnvironmentEnd::Superseded { .. } => {}
@@ -3316,7 +3316,7 @@ fn publish_profile_observation(program: &Path, observation: u64, observed: Profi
             .get_or_init(Default::default)
             .first(program, observed.location)
     {
-        eprintln!("{line}");
+        crate::diagnostics::stderr_line(line);
     }
     file_observation(
         &mut PROFILE_OBSERVATIONS

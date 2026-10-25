@@ -392,7 +392,14 @@ mod tests {
             let folder = PathBuf::from(folder);
             let doors = EntryDoors::at_the_entry().install();
             crate::ime_outbound::install();
+            // The trace files are the sink's to write, as in `fn main`: started once the entry
+            // has said which files there are, and flushed through its door on the way out.
+            let trace = crate::trace_sink::start(false);
             walk_every_station();
+            crate::test_support::on_the_window_thread_exiting();
+            trace
+                .flush_through_its_door()
+                .expect("the trace flush is admitted on the way out");
             let at = |door: &str| Some(folder.join(format!("{door}.log")));
             assert_eq!(
                 doors.recording,

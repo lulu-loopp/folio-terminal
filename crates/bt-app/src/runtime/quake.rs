@@ -52,7 +52,7 @@ impl<B: Backend> Runtime<'_, B> {
         // function of two things read off the machine at the moment of the press,
         // and a photograph of a window in the wrong place cannot say which of
         // them was wrong. Printed once per summon.
-        eprintln!(
+        crate::diagnostics::stderr_line(format!(
             "BT_QUAKE work={},{} {}x{} rect={},{} {}x{}",
             work.left,
             work.top,
@@ -62,7 +62,7 @@ impl<B: Backend> Runtime<'_, B> {
             rect.top,
             rect.right - rect.left,
             rect.bottom - rect.top,
-        );
+        ));
         // **`stand_window_at` and not `set_window_outer_rect`** (§7.54, measured
         // 2026-09-02). Every other caller places a window on the monitor it is
         // already on; a summon routinely names a different one, and across a dpi
@@ -76,10 +76,10 @@ impl<B: Backend> Runtime<'_, B> {
         // shown anyway: it is standing somewhere, and a summon a few pixels off is
         // enormously better than a summon that refused to come down.
         if let Err(error) = self.window.window.stand_at(rect) {
-            eprintln!("BT_QUAKE {error}");
+            crate::diagnostics::stderr_line(format!("BT_QUAKE {error}"));
         }
         if let Err(error) = self.window.window.set_topmost(true) {
-            eprintln!("recoverable always-on-top failure: {error}");
+            crate::diagnostics::stderr_line(format!("recoverable always-on-top failure: {error}"));
         }
         // Never maximized: this window's shape *is* the rectangle above, and a
         // maximize would throw it away for the one Windows keeps.

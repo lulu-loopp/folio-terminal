@@ -4,7 +4,7 @@
 use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, LeafOnStage, Runtime, card_trace, coalesce, resolve_theme_mode,
-    schedule_leaf_grid_change, system_os_theme, trace_sink,
+    schedule_leaf_grid_change, system_os_theme,
 };
 use anyhow::Result;
 use bt_persist::ThemeModeV1;
@@ -110,7 +110,7 @@ impl<B: Backend> Runtime<'_, B> {
                 "capped",
             ),
         };
-        trace_sink::stderr_line(format!(
+        crate::diagnostics::stderr_line(format!(
             "BT_PERF_TRACE drain slices={slices} bytes={bytes} capped={} ring_pending={} sync_open={} \
              sync_closed={} owed_us={} publish={publish} deferred_us={deferred_us} reason={reason}",
             arrival.ends_capped,

@@ -53,6 +53,7 @@ impl TerminalQueries {
 }
 
 fn main() -> Result<()> {
+    bt_corpus::say_lines_on_stderr();
     // The ConPTY pair is looked for where this program's own file is (G-SWEEP-048).
     bt_pty::use_sidecars_in(bt_platform::own_files_folder());
     let mut args = env::args().skip(1);

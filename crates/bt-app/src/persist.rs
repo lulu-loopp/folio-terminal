@@ -120,7 +120,7 @@ impl DocumentWrites {
             && let Err(error) = &result
         {
             // §5.3: one line per failure streak, not one per attempt.
-            eprintln!("BT_PERSIST could not write {file}: {error}");
+            crate::diagnostics::stderr_line(format!("BT_PERSIST could not write {file}: {error}"));
         }
         if landed {
             self.streak = 0;
@@ -139,7 +139,7 @@ impl DocumentWrites {
     /// first occurrence, not after a streak — and, like any refusal, once per
     /// streak.
     pub(crate) fn refused_for_good(&mut self, file: &str, error: String) {
-        eprintln!("BT_PERSIST could not write {file}: {error}");
+        crate::diagnostics::stderr_line(format!("BT_PERSIST could not write {file}: {error}"));
         self.failures.record(false);
         self.streak = self.streak.saturating_add(1);
         self.say(file);
@@ -255,7 +255,9 @@ pub(crate) fn read_fault(
     let ReadReport::FellBackToDefaults { reason, kept } = report else {
         return None;
     };
-    eprintln!("BT_PERSIST {file} fell back to defaults: {reason:?} kept={kept:?}");
+    crate::diagnostics::stderr_line(format!(
+        "BT_PERSIST {file} fell back to defaults: {reason:?} kept={kept:?}"
+    ));
     let sentence = in_force(file);
     Some(match kept {
         Some(kept) => crate::i18n::persisted_file_kept_copy(
@@ -456,10 +458,10 @@ pub(crate) fn adopt_claim(directory: &Path, claim: bt_platform::instance::DataDi
         std::collections::hash_map::Entry::Occupied(row) => Some(row.get().is_some()),
     };
     if let Some(was_writer) = earlier {
-        eprintln!(
+        crate::diagnostics::stderr_line(format!(
             "BT_PERSIST a claim was adopted for {name} after this process had already answered \
              whether it writes there (writer={was_writer}); the earlier answer stands"
-        );
+        ));
     }
     debug_assert!(
         earlier.is_none(),
@@ -831,7 +833,7 @@ fn quit_budget_spent() -> String {
 
 /// Say it once, in the words the log is read in.
 fn report_save_did_not_finish(budget: Duration) {
-    eprintln!("Folio: {}", save_did_not_finish(budget));
+    crate::diagnostics::stderr_line(format!("Folio: {}", save_did_not_finish(budget)));
 }
 
 /// **Why a judged save did not land, and what a quit is entitled to do about it**
@@ -2043,7 +2045,7 @@ impl SessionStore {
             crate::i18n::session_file_unreadable,
         );
         if !degradation.is_clean() {
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERSIST session.json degraded: {} clamped ratios, {} unknown leaves, \
                  {} windows, {} tabs and {} panes past the ceiling, {} impossible commands",
                 degradation.clamped_ratios,
@@ -2052,7 +2054,7 @@ impl SessionStore {
                 degradation.dropped_tabs,
                 degradation.dropped_panes,
                 degradation.dropped_commands
-            );
+            ));
         }
         // **Only the ceiling is said out loud** (review row R4-9). A clamped
         // ratio and an unknown leaf are already visible — the divider sits where
@@ -2062,7 +2064,9 @@ impl SessionStore {
             fault.get_or_insert_with(|| crate::i18n::session_file_trimmed(SESSION_FILE_NAME));
         }
         if previous_exit == ExitState::Crashed {
-            eprintln!("BT_PERSIST previous session did not reach its clean-exit path");
+            crate::diagnostics::stderr_line(
+                "BT_PERSIST previous session did not reach its clean-exit path".to_owned(),
+            );
         }
         // An update's trial arms no sentinel until it is committed
         // (`update_trial`, F-7): `session.lock` is a file in O's folder.
@@ -2667,7 +2671,7 @@ impl SessionStore {
         self.retry_on_trigger = false;
         self.send_again = false;
         let said = quit_budget_spent();
-        eprintln!("Folio: {said}");
+        crate::diagnostics::stderr_line(format!("Folio: {said}"));
         Err(SaveRefusal::TimedOut(said))
     }
 
@@ -4335,11 +4339,11 @@ fn relocated_storage_dir() -> PathBuf {
     match relocate(&previous, &current) {
         Relocation::Nothing | Relocation::AlreadyHere => current,
         Relocation::Moved => {
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERSIST moved {} to {}",
                 previous.display(),
                 current.display()
-            );
+            ));
             current
         }
         Relocation::Failed(error) => {
@@ -4348,12 +4352,12 @@ fn relocated_storage_dir() -> PathBuf {
             // keeps reading and writing the files they already have.
             // Starting fresh beside them would present as "the terminal
             // forgot everything" while the data sat one directory away.
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERSIST could not move {} to {}: {error} — continuing in the old \
                  directory",
                 previous.display(),
                 current.display()
-            );
+            ));
             previous
         }
     }

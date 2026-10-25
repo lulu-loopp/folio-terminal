@@ -1371,7 +1371,9 @@ impl Quit {
             // Said out loud rather than swallowed: a browser that outlived the
             // bound is a fact about this machine, and the picture on disk is
             // already safe either way.
-            eprintln!("BT_WEB quit left with a page still holding its browser process");
+            crate::diagnostics::stderr_line(
+                "BT_WEB quit left with a page still holding its browser process".to_owned(),
+            );
             self.phase = Phase::Leaving { handoff };
         }
         self.step()

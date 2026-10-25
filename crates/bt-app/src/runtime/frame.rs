@@ -12,7 +12,7 @@ use crate::{
     hang_watch, hyperlink_activation, ime_outbound, mark_leaf_painted, math_copy_window,
     present_diagnostics, present_gate, preview, pty_drain_says_nothing_new, pty_frame_is_unchanged,
     sample_window_place, seats, settings, settling, startup_poll_delay, take_math_worker_notice,
-    toast, trace_sink, trace_unchanged_present, update, webhost,
+    toast, trace_unchanged_present, update, webhost,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -249,7 +249,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // the frame before this one, which is the answer to a different
                 // question than the one the reader is holding the log for.
                 if let Some(project_us) = project_us {
-                    trace_sink::stderr_line(format!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_PERF_TRACE projection source={:?} project_us={project_us} lines_measured={} projected_lines={} rebuilt={} band_moved={} scroll_offset_subpixels={} scroll_extent_subpixels={} bottom_relief_subpixels={}",
                         trigger.source,
                         leaf.projection
@@ -279,7 +279,7 @@ impl<B: Backend> Runtime<'_, B> {
             // it shows is not filed this turn either (design T-COMPOSE-CRATE §3.2, step 4).
             if projected.hold_requested && self.window.last_presented_frame.is_some() {
                 if self.app.trace_perf {
-                    trace_sink::stderr_line(format!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
                         trigger.source,
                         u8::from(self.shell().projection.review_hold()),
@@ -410,7 +410,7 @@ impl<B: Backend> Runtime<'_, B> {
                     let digest = frame_content_digest(&composed.frame);
                     let alternate_screen = frame_is_alternate_screen(&composed.frame);
                     let digest_elapsed = digest_started.elapsed();
-                    trace_sink::stderr_line(format!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={} present_unchanged={} slot_overwrites={}",
                         trigger.source,
                         digest.content_fnv,
@@ -558,7 +558,7 @@ impl<B: Backend> Runtime<'_, B> {
         if published || !sync_open {
             self.pending_keyboard_at = None;
         } else if self.app.trace_perf {
-            trace_sink::stderr_line("BT_PERF_TRACE defer=synchronized-update".to_owned());
+            crate::diagnostics::stderr_line("BT_PERF_TRACE defer=synchronized-update".to_owned());
         }
         Ok(())
     }
@@ -978,7 +978,7 @@ impl<B: Backend> Runtime<'_, B> {
         if self.app.trace_perf {
             hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
                 let native = self.window.window.present_facts();
-                trace_sink::stderr_line(
+                crate::diagnostics::stderr_line(
                     attempt.line(
                         native,
                         self.window.window_shown,
@@ -1063,7 +1063,7 @@ impl<B: Backend> Runtime<'_, B> {
         // because building the fields is part of what a trace costs a frame,
         // and stops once the sink has the line.
         let trace_started = Instant::now();
-        trace_sink::stderr_line(format!(
+        crate::diagnostics::stderr_line(format!(
             "BT_PERF_TRACE present source={source:?} retained={} event_to_present_us={} event_to_submit_us={} submit_to_present_us={} since_previous_us={} composed={} slot_overwrites={} wheel_events={} wheel_routings={} pace_interval_us={} pace_skipped={} trace_us={}",
             u8::from(retained),
             latency.event_to_present_call.as_micros(),
@@ -1442,7 +1442,7 @@ impl<B: Backend> Runtime<'_, B> {
                         && matches!(trigger.source, FrameSource::Resize)
                         && let Some(Ok(latency)) = latency
                     {
-                        trace_sink::stderr_line(format!(
+                        crate::diagnostics::stderr_line(format!(
                             "BT_RESIZE present={}us columns={} rows={}",
                             latency.event_to_present_call.as_micros(),
                             frame.columns,
@@ -1458,15 +1458,13 @@ impl<B: Backend> Runtime<'_, B> {
                         if let Some(receipt) = crate::update_trial::receipt_due() {
                             match self.app.session_store.write_receipt(receipt) {
                                 Some(answer) => crate::update_trial::receipt_handed(answer),
-                                None => eprintln!(
-                                    "BT_UPDATE_TRIAL no storage worker to write the receipt; this trial stays unconfirmed"
-                                ),
+                                None => crate::diagnostics::stderr_line("BT_UPDATE_TRIAL no storage worker to write the receipt; this trial stays unconfirmed".to_owned()),
                             }
                         }
                         if self.app.trace_startup {
                             let text_visible = self.app.startup_started.elapsed();
                             self.window.first_text_visible = Some(text_visible);
-                            trace_sink::stderr_line(format!(
+                            crate::diagnostics::stderr_line(format!(
                                 "BT_STARTUP first_text_present={}ms",
                                 text_visible.as_millis()
                             ));
@@ -2552,7 +2550,7 @@ impl<B: Backend> Runtime<'_, B> {
             && let Some((owner, at)) = wake
             && at.saturating_duration_since(now) < Duration::from_millis(100)
         {
-            trace_sink::stderr_line(format!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERF_TRACE idle_wake owner={:?} in_us={}",
                 WakeOwner::name(owner),
                 at.saturating_duration_since(now).as_micros(),

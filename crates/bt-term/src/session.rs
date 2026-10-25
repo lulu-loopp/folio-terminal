@@ -2173,9 +2173,9 @@ fn semantic_witness_rematch(
             .collect::<Vec<_>>();
         let ordered = ordered_semantic_matches(&regions, &candidates);
         if semantic_trace() {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "SEMANTIC_ORDERED witness={witness:?} regions={regions:?} candidates={candidates:?} matched={ordered:?}"
-            );
+            ));
         }
         matches.extend(ordered);
     }
@@ -7108,12 +7108,12 @@ impl DualPlaneSession {
         // Under the same switch `semantic_witness_rematch` traces through, because the two answer
         // the same question about the same event and a reader chasing one wants both.
         if semantic_trace() {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "REFLOW_RESEAT placed={} of {} over {} lines",
                 placements.len(),
                 witnesses.len(),
                 corpus.len()
-            );
+            ));
         }
         for (id, anchor) in placements {
             let _ = self.document.replace_anchor(id, anchor);

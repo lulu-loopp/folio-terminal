@@ -200,7 +200,9 @@ impl PictureSource for WindowsPictures {
             // two rungs the picture was read from and why this one was passed.
             return clipboard_bitmap()
                 .inspect_err(|reason| {
-                    eprintln!("clipboard picture: CF_BITMAP passed over: {reason}")
+                    crate::stderr_road::say(format!(
+                        "clipboard picture: CF_BITMAP passed over: {reason}"
+                    ))
                 })
                 .ok();
         }
@@ -414,7 +416,7 @@ pub fn clipboard_payload(worker: &WorkerCtx) -> Result<ClipboardPayload, String>
     // SAFETY: diagnostic context only. Delayed rendering may advance this value successfully;
     // equality after GetClipboardData would reject that success (design ruling ④).
     let sequence = unsafe { GetClipboardSequenceNumber() };
-    eprintln!("clipboard read: sequence={sequence}");
+    crate::stderr_road::say(format!("clipboard read: sequence={sequence}"));
     read_payload(&mut WindowsClipboard {
         worker,
         opened: false,

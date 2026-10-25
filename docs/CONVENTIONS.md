@@ -459,7 +459,11 @@ A string literal that wraps continues with `\` at the end of the line, so the br
 | `unreachable_pub` | 未统计 | 收益高噪音低，模块拆分后尤其有价值 |
 | `missing_debug_implementations` | `TerminalAdapter`、`DualPlaneSession` 会命中 | 只用于第一方 |
 
-**不采用**：`print_stdout`（`bt-replay` 的 `println` 是 CLI 的正常输出，不是调试残留）、`needless_pass_by_value`（pedantic，会逼着改所有权和公开 API，收益偏低）。
+**不采用**：`needless_pass_by_value`（pedantic，会逼着改所有权和公开 API，收益偏低）。
+
+### A product `stderr` line is handed to a writer, never written by the thread that said it (T-TRACE-SINK-OFF-THE-CALLING-THREAD, 2026-10-25)
+
+`clippy::print_stderr` and `clippy::print_stdout` are denied in each product crate's root (`#![deny(clippy::print_stderr)]` and `#![deny(clippy::print_stdout)]` in `bt-app`'s `main.rs` and in the `lib.rs` of every crate below it that the app links; `stdout` is the same file as `stderr` in a Log run), not in `[workspace.lints]`: the tools and the integration tests print to `stderr` as their output, and `clippy.toml`'s `allow-print-in-tests` lets a unit test print. A line goes to `crate::diagnostics::stderr_line` in `bt-app`, to `bt_platform::stderr_road::say` in `bt-platform`, to `bt_pty`'s `say` in `bt-pty`, and to `bt_viewport::trace::line` in the crates that already depend on `bt-viewport`; `fn main` installs the one writer behind every road before anything can speak. It is a function call, not a macro: the request-door guard follows a call, and a macro would be a key of its own at every site. The arms that must write where they are said — the front door before the run has a channel (`diagnostics::at_the_front_door`), the panic road after its fence (`diagnostics::on_the_panic_road`), and the last-resort fault report of a platform with no box to raise (`bt_platform`'s macOS `say_to_stderr` and Linux `message_box`; its panic-fence reason holds for the fatal caller only, and `bt-app`'s `SystemBox::say` reaching it in a resident run is a known limit until plan row 66, T-STOP-NOTICE-BOX-QUERY-MACOS) — say why in an `#[expect(clippy::print_stderr, reason = "…")]`; a new one needs the same.
 
 ### 【提示】`#[allow]` / `#[expect]`
 

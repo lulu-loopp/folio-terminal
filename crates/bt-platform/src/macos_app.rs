@@ -237,12 +237,17 @@ extern "C-unwind" fn open_urls(
         // escapes in the URL are the file system representation's own bytes,
         // and `-[NSURL path]` is an `NSString` round trip past them.
         let Some(spelling) = url.absoluteString() else {
-            eprintln!("BT_MAC_APP application:openURLs: was handed a URL with no absolute form");
+            crate::stderr_road::say(
+                "BT_MAC_APP application:openURLs: was handed a URL with no absolute form"
+                    .to_owned(),
+            );
             continue;
         };
         match path_from_file_url(&spelling.to_string()) {
             Ok(path) => paths.push(path),
-            Err(reason) => eprintln!("BT_MAC_APP application:openURLs: {reason}"),
+            Err(reason) => {
+                crate::stderr_road::say(format!("BT_MAC_APP application:openURLs: {reason}"))
+            }
         }
     }
     if paths.is_empty() {

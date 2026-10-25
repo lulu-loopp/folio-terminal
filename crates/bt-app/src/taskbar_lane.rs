@@ -263,7 +263,7 @@ fn run_taskbar_lane(ctx: &WorkerCtx, lane: &TaskbarLane) {
         if crate::entry_doors::installed().perf
             && let Terminal::Done(auto_hidden) = terminal
         {
-            crate::trace_sink::stderr_line(format!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERF_TRACE taskbar_state_us={} auto_hidden={} generation={}",
                 start.elapsed().as_micros(),
                 u8::from(auto_hidden),

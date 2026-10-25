@@ -54,7 +54,9 @@ impl<B: Backend> Runtime<'_, B> {
         match self.window.folder_picker.request(start.as_deref()) {
             Ok(true) => self.window.folder_pick = Some(FolderPick::ProfileStart(index)),
             Ok(false) => {}
-            Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
+            Err(error) => crate::diagnostics::stderr_line(format!(
+                "recoverable folder chooser failure: {error}"
+            )),
         }
     }
 
@@ -3068,10 +3070,10 @@ impl<B: Backend> Runtime<'_, B> {
             // is the whole of what answers it. A coordinate and never a path:
             // the names in a drop are the reader's files.
             None => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "dropped files landed on no shell; opened at {:?}",
                     batch.point
-                );
+                ));
                 Ok(())
             }
         };

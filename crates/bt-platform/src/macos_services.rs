@@ -123,10 +123,8 @@ define_class!(
         ) {
             let paths = paths_on(pasteboard);
             if paths.is_empty() {
-                eprintln!(
-                    "BT_MAC_APP openInFolio:userData:error: was handed a selection with no local \
-                     file in it"
-                );
+                crate::stderr_road::say("BT_MAC_APP openInFolio:userData:error: was handed a selection with no local \
+                     file in it".to_owned());
                 return;
             }
             crate::macos_app::post(
@@ -169,7 +167,7 @@ fn paths_on(pasteboard: &NSPasteboard) -> Vec<std::path::PathBuf> {
     let urls = match crate::macos_file_urls::urls_on(pasteboard) {
         Ok(urls) => urls,
         Err(reason) => {
-            eprintln!("BT_MAC_APP openInFolio: {reason}");
+            crate::stderr_road::say(format!("BT_MAC_APP openInFolio: {reason}"));
             return Vec::new();
         }
     };
@@ -180,10 +178,10 @@ fn paths_on(pasteboard: &NSPasteboard) -> Vec<std::path::PathBuf> {
         match crate::clipboard::file_urls([url]) {
             crate::clipboard::Candidate::Present(mut selected) => paths.append(&mut selected),
             crate::clipboard::Candidate::Absent => {
-                eprintln!("BT_MAC_APP selected item is not a local file")
+                crate::stderr_road::say("BT_MAC_APP selected item is not a local file".to_owned())
             }
             crate::clipboard::Candidate::Unreadable(reason) => {
-                eprintln!("BT_MAC_APP openInFolio: {reason}")
+                crate::stderr_road::say(format!("BT_MAC_APP openInFolio: {reason}"))
             }
         }
     }

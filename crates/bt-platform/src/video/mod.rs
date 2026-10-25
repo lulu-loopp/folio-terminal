@@ -667,12 +667,12 @@ pub fn shutdown_media_session(token: WaitToken<'_, doors::MediaQuiet>) {
     while counts.outstanding() > 0 {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            eprintln!(
+            crate::stderr_road::say(format!(
                 "video: {} engine thread(s) still running {:?} after the last window told \
                  them to stop; shutting Media Foundation down over them",
                 counts.outstanding(),
                 engine::SHUTDOWN_BUDGET
-            );
+            ));
             break;
         }
         let (next, _) = engine_ledger::moved()
@@ -693,10 +693,10 @@ pub fn shutdown_media_session(token: WaitToken<'_, doors::MediaQuiet>) {
     // close, and its ending is honest: the line says the platform went down over
     // somebody.
     if !READERS.quiet_within(MEDIA_QUIET_BUDGET) {
-        eprintln!(
+        crate::stderr_road::say(format!(
             "video: shutting Media Foundation down with a reader still inside it \
              after {MEDIA_QUIET_BUDGET:?}"
-        );
+        ));
     }
     // SAFETY: paired with the one `MFStartup` in `media_session`, on a process
     // that has stopped asking questions.

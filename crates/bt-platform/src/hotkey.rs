@@ -849,10 +849,10 @@ impl SummonTrace {
             // it has to be told — and is not a reason for the terminal to refuse
             // to start.
             Err(error) => {
-                eprintln!(
+                crate::stderr_road::say(format!(
                     "the hotkey trace names {} but it could not be opened: {error}",
                     path.display()
-                );
+                ));
                 None
             }
         }
