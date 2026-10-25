@@ -2804,7 +2804,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 822 (616 free functions, 206 methods) after batch 3. The table
+into their topics batch by batch: 823 (617 free functions, 206 methods) after batch 3. The table
 below is the 2026-09-21 manifest's sort of the 201 methods then left
 (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
 
