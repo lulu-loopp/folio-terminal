@@ -16046,6 +16046,19 @@ The U-14 entry's `update_archive::tests::the_manifest_is_read_out_of_a_built_fol
 
 **Pinned by** `trust::tests::{offline_revocation_is_named_apart_from_unknown, revocation_unknown_is_a_refusal}` (with the Windows world's `a_test_signed_file_naming_an_unreachable_list_is_revocation_offline`), `update_prepare_windows::tests::{an_unreachable_revocation_says_the_network_was_the_reason, a_trust_refusal_is_named_with_its_code_and_only_offline_is_offline}` and `update_card::tests::an_offline_identity_check_says_the_network_was_the_reason`.
 
+### 2026-10-25 — The Explorer row's package half is what the start found; a press looks again on its own thread (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD, 0.4.9 plan row 55; addendum to the 2026-09-07 entries above on the greyed answer and the retired `folio.msix` card)
+
+**What changed.** The row asks whether `folio.msix` is beside `folio.exe` to decide two things: whether the first-page answer is greyed (`first_page_offered`), and which sentence the row's second line says. Until now that was an `is_file` on the window thread on every frame the Settings dialog was up, on its apply, and on the first-run card. The first such call also opened the running image. Now `fn main` asks once, before the loop (`explorer_menu::settle_package`, pinned after the hand-over), and every one of those readers reads that answer (`explorer_menu::package_file`).
+
+**What a person can see.** Nothing, in every ordinary run. An update replaces the folder only after this process has gone, so the folder the start looked at is the run's folder. The one difference is a file changed by hand while Folio runs:
+
+- **`folio.msix` deleted mid-run.** The row keeps offering On, with the first page, until the next start. A press then looks for the file itself, on the deployment's own thread. It finds nothing, registers nothing, and answers with the card's existing sentence, `folio.msix is not beside folio.exe` (`Text::ExplorerFirstPageNoPackage`). That is the case the 2026-09-07 entry kept the sentence for. The window between offering the answer and acting on it was one frame; now it is the whole run.
+- **`folio.msix` added mid-run.** The row stays greyed until the next start, and On means the classic verb only, as the row says. An update's commit runs the launch probe again; that probe looks for the file itself, but the row's greyed half is still the start's answer.
+
+The press's promise is unchanged. It acts on the folder as it is when it runs, and when it cannot act it says why.
+
+**Pinned by** `explorer_menu::tests::{a_press_looks_for_the_package_on_its_worker_and_never_on_the_asking_thread, a_press_registers_the_file_its_job_found_beside_this_executable, the_row_is_drawn_from_the_folder_as_the_start_found_it, the_settings_values_read_the_start_s_package_answer_and_ask_the_disk_nothing}`, the settle's pin in `window_waits_tests`, the witness `FolioApp::new` takes, and bt-source's `request_doors`, where neither Explorer door meets the disk any more.
+
 ### 2026-10-25 — No fragment stage branches, and a lost device is let go of before a new one is asked for (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE, 0.4.9 plan row 35; amends the overlay-group entry of 2026-09-24 and the device-loss rebuild)
 
 **What the clean Windows 10 VM showed.** Its only adapter is the Microsoft Basic Render Driver (WARP behind the display path, driver 10.0.19041). On 0.4.8 it lost its device about 1.3 s after a first start and again when Settings opened. The rebuild then failed with "dx12 found no adapters", and Folio closed. The web engine's warm-up failure on that machine (`0x80070002`, no runtime) is unrelated: it appears in about twenty runs that kept their device, and the loss comes before the warm-up's 5 s. The Windows 11 VM's WARP never lost its device.
