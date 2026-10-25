@@ -3,8 +3,8 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    PreviewSurface, Runtime, WebHeadVerb, git_graph, git_panel, i18n, marks, pane_control_tip,
-    seats, tab_surface_tip_boxes, tooltip, tooltip_anchor_for, update,
+    PreviewSurface, Runtime, WebHeadVerb, git_graph, git_panel, i18n, icons, marks, seats, tooltip,
+    update,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -706,4 +706,190 @@ impl<B: Backend> Runtime<'_, B> {
         self.window.tooltip_drawn_opacity = Some(opacity);
         tooltip::build(&layout, &palette, scale, opacity, face)
     }
+}
+
+/// **What one control of a pane's own run says it does** (user ruling
+/// 2026-08-27 — 「头/轨上每一枚可点的东西都必须有 tooltip,且由注册表守着」).
+///
+/// **It reads the registry**, which is the second half of the ruling: the words
+/// a verb wears live in `icons::ActionIcon::bare_tip` beside the shape it
+/// wears, and this only spends them. None of a pane run's four changes with the
+/// state, so the first entry is the whole of what each has to say — the two
+/// controls on this window that do change (a preview's padlock and a page's
+/// reload) are the head's and the rail's, and their own passes choose between
+/// the two words the registry lists for them.
+///
+/// A free function, so a gate can read the same table without a live window.
+/// The empty string is unreachable: the gate walks every verb a run can answer
+/// with and fails the build if one has no words.
+fn pane_control_tip(verb: icons::ActionIcon) -> &'static str {
+    verb.bare_tip()
+        .and_then(|words| words.first())
+        .map_or("", |text| text.text())
+}
+
+/// The tooltip anchor a window-chrome target answers to, for the boxes the title
+/// bar owns: the caption run, and the panel toggle when the bar carries one.
+///
+/// A function rather than a `From`, because it is deliberately partial: most of
+/// [`seats::ChromeTarget`] names something a click does that nothing hovers for
+/// (a divider, a pane head), and the two enums are separate precisely so neither
+/// has to grow entries for the other's questions.
+pub(crate) fn tooltip_anchor_for(target: seats::ChromeTarget) -> Option<tooltip::TooltipAnchorId> {
+    match target {
+        seats::ChromeTarget::Settings => Some(tooltip::TooltipAnchorId::Settings),
+        seats::ChromeTarget::Minimize => Some(tooltip::TooltipAnchorId::Minimize),
+        seats::ChromeTarget::Maximize => Some(tooltip::TooltipAnchorId::Maximize),
+        seats::ChromeTarget::CloseWindow => Some(tooltip::TooltipAnchorId::CloseWindow),
+        seats::ChromeTarget::PanelToggle => Some(tooltip::TooltipAnchorId::PanelToggle),
+        _ => None,
+    }
+}
+
+/// Every tippable box of the **tab surface** that is actually on screen, in
+/// innermost-first order.
+///
+/// One function for two surfaces, and the layout picks which. That is the whole
+/// of the bug it exists to close: `tab_strip_geometry` is a pure function of a
+/// width and a trailer list and knows nothing about a rail being on screen, so
+/// asking it unconditionally — which is what the tooltip rebuild used to do —
+/// yields a full run of tab, pin and mark boxes lying across the top bar in
+/// vertical layout, where the only thing actually drawn is the app's name and
+/// the sidebar toggle. [`tooltip::TooltipAnchors`] is first-match-wins and those
+/// phantoms are pushed before the window chrome, so the visible toggle answered
+/// with some tab's name. `layout_peek_layer`, `profile_menu_layout` and
+/// `chrome_target_at` each already carry a comment about meeting this in their
+/// own corner; this is the fourth, and the last of the four to be told.
+///
+/// Pure, and that is deliberate: the *words* need a live window (which tab is
+/// running what), the *boxes* need only two geometries, and separating them is
+/// what makes "vertical registers nothing from the strip" a claim a test can
+/// make without a GPU. [`Runtime::tab_surface_tip_text`] is the other half.
+///
+/// `renaming` is the index of the tab whose name is being edited, if any: the
+/// editor IS the answer (mock-up 4193-4196), and a box telling you what the name
+/// currently is would be covering the box you are typing it into.
+pub(crate) fn tab_surface_tip_boxes(
+    layout: seats::TabLayoutMode,
+    strip: &seats::TabStripGeometry,
+    rail: Option<&seats::RailGeometry>,
+    scale: f32,
+    profile_menu_open: bool,
+    renaming: Option<usize>,
+) -> Vec<(tooltip::TooltipAnchorId, [f32; 4])> {
+    let mut boxes = Vec::new();
+    // Per row: the trailing controls and the mark first, then the body they sit
+    // in — the innermost-first order `TooltipAnchors` reproduces `closest()`
+    // with.
+    //
+    // **The close `×` is here now** (user ruling 2026-08-28, §7.37). It used to
+    // be deliberately absent, on the argument that `tabTrailer` writes no `title`
+    // on it (mock-up 4207) so a pointer there falls through to the tab — the tip
+    // you wanted anyway. The ruling overturns that on the same ground the pane
+    // head's `×` was: an idiom can say "this is a cross", it cannot say the cross
+    // closes *the tab* and not the document or the window. It registers exactly
+    // where the tab draws one — `slot.close` is `Some` — which is exactly where
+    // `hit_tab_chrome` answers `TabClose`, so a pinned tab (pin in the slot, no
+    // `×`) and a squeezed one (no room for one) tip nothing there and fall
+    // through as before.
+    //
+    // Each box is handed in already measured against its surface's own clip,
+    // because "cropped away" is the one thing the two surfaces answer
+    // differently — the strip clips on X, the rail on Y.
+    let mut row = |index: usize, parts: [(tooltip::TooltipAnchorId, Option<[f32; 4]>); 5]| {
+        if renaming == Some(index) {
+            return;
+        }
+        boxes.extend(parts.into_iter().filter_map(|(id, rect)| Some((id, rect?))));
+    };
+    let (new_tab, new_tab_menu) = match layout {
+        seats::TabLayoutMode::Horizontal => {
+            // What is cropped away is not there to be tipped, exactly as it is
+            // not there to be clicked (`hit_tab_chrome`). The strip scrolls on X.
+            let visible =
+                |rect: [f32; 4]| rect[0] >= strip.viewport[0] && rect[2] <= strip.viewport[1];
+            for (index, slot) in strip.tabs.iter().enumerate() {
+                row(
+                    index,
+                    [
+                        (
+                            tooltip::TooltipAnchorId::TabFiles(index),
+                            slot.files.filter(|files| visible(*files)),
+                        ),
+                        (
+                            tooltip::TooltipAnchorId::TabPin(index),
+                            slot.pin.filter(|pin| visible(*pin)),
+                        ),
+                        (
+                            tooltip::TooltipAnchorId::TabClose(index),
+                            slot.close.filter(|close| visible(*close)),
+                        ),
+                        (
+                            tooltip::TooltipAnchorId::TabIcon(index),
+                            Some(seats::tab_mark_box(slot, scale)).filter(|rect| visible(*rect)),
+                        ),
+                        (
+                            tooltip::TooltipAnchorId::Tab(index),
+                            Some(slot.body).filter(|rect| visible(*rect)),
+                        ),
+                    ],
+                );
+            }
+            (
+                Some(strip.new_tab).filter(|rect| visible(*rect)),
+                Some(strip.new_tab_menu).filter(|rect| visible(*rect)),
+            )
+        }
+        // `None` is a real answer here as everywhere else the rail is asked: a
+        // collapsed rail puts no list on screen, so there is nothing to be over.
+        seats::TabLayoutMode::Vertical => match rail {
+            None => (None, None),
+            Some(rail) => {
+                // The rail scrolls on Y, so its clip is a band rather than a pair
+                // of X bounds — the same rule on the other axis.
+                let visible =
+                    |rect: [f32; 4]| rect[1] >= rail.viewport[0] && rect[3] <= rail.viewport[1];
+                for (index, slot) in rail.tabs.iter().enumerate() {
+                    row(
+                        index,
+                        [
+                            (
+                                tooltip::TooltipAnchorId::TabFiles(index),
+                                slot.files.filter(|files| visible(*files)),
+                            ),
+                            (
+                                tooltip::TooltipAnchorId::TabPin(index),
+                                slot.pin.filter(|pin| visible(*pin)),
+                            ),
+                            (
+                                tooltip::TooltipAnchorId::TabClose(index),
+                                slot.close.filter(|close| visible(*close)),
+                            ),
+                            (
+                                tooltip::TooltipAnchorId::TabIcon(index),
+                                Some(slot.mark).filter(|rect| visible(*rect)),
+                            ),
+                            (
+                                tooltip::TooltipAnchorId::Tab(index),
+                                Some(slot.body).filter(|rect| visible(*rect)),
+                            ),
+                        ],
+                    );
+                }
+                // The `+` row is `position: sticky` and never scrolls out from
+                // under the list, so it is not measured against that band.
+                (Some(rail.new_tab), rail.new_tab_menu)
+            }
+        },
+    };
+    if let Some(rect) = new_tab {
+        boxes.push((tooltip::TooltipAnchorId::NewTab, rect));
+    }
+    // I94: the chevron's own tip is silenced while its menu is up. You just
+    // clicked it and the answer is on screen, so the question is closed and the
+    // tip would be noise sitting on top of the answer.
+    if let Some(rect) = new_tab_menu.filter(|_| !profile_menu_open) {
+        boxes.push((tooltip::TooltipAnchorId::NewTabMenu, rect));
+    }
+    boxes
 }
