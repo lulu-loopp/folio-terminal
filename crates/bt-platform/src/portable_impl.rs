@@ -1839,9 +1839,14 @@ pub fn leave_process(code: i32) -> ! {
 /// refused launch runs before there is any application at all. A controlled
 /// stop's lost configuration change (T-QUIT-DOCUMENTS) is said here too.
 #[cfg(not(any(windows, target_os = "macos")))]
+#[expect(
+    clippy::print_stderr,
+    reason = "the last-resort fault report: written where it is said, because a panic's box comes "
+              "after the panic road's fence and a queued line would leave with the process"
+)]
 pub fn message_box(title: &str, text: &str) {
-    crate::stderr_road::say(title.to_string());
-    crate::stderr_road::say(text.to_string());
+    eprintln!("{title}");
+    eprintln!("{text}");
 }
 
 /// **A box from a process that has no application** (U-32) — the two lines,

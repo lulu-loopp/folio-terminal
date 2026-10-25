@@ -895,10 +895,17 @@ fn an_alert_would_be_seen(mtm: MainThreadMarker) -> bool {
             .any(|window| window.isVisible())
 }
 
-/// The two lines, when there is no alert to raise them in.
+/// The two lines, when there is no alert to raise them in — written here, synchronously, as
+/// [`crate::portable_impl`]'s `message_box` writes them: the last-resort report is not deferred
+/// (T-TRACE-SINK-OFF-THE-CALLING-THREAD keeps it off the `stderr` road for that reason).
+#[expect(
+    clippy::print_stderr,
+    reason = "the last-resort fault report: written where it is said, because a panic's box comes "
+              "after the panic road's fence and a queued line would leave with the process"
+)]
 fn say_to_stderr(title: &str, text: &str) {
-    crate::stderr_road::say(title.to_string());
-    crate::stderr_road::say(text.to_string());
+    eprintln!("{title}");
+    eprintln!("{text}");
 }
 
 /// **Say one thing in a box from a process that has no application** — the
