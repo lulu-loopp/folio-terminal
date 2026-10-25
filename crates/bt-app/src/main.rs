@@ -77625,6 +77625,9 @@ fn install_panic_log_hook() {
         // the hand-over leaves the applier or starts Folio again, as the
         // process's ordinary end does.
         let _ = update_handoff::leave_in_panic();
+        // What the run said before the panic, above the footer: the writer's fence on the
+        // panic hook's road, which no door admits (an `# emergency` holder).
+        diagnostics::settle_in_panic();
         eprintln!(
             "{}",
             diagnostics::run_footer(
@@ -78482,6 +78485,10 @@ fn main() -> Result<()> {
             // The way out from before the loop: the trace writer is retired through its flush
             // door, which is an exit door (§5.3 row 17), so the phase says so first (D-78).
             bt_platform::admission::exiting();
+            // What the run said is on the disk before the error that ends it (row 30).
+            let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(
+                diagnostics::settle,
+            );
             let _ = trace_shutdown.flush_through_its_door();
             return Err(anyhow::Error::new(error).context("create winit event loop"));
         }
@@ -78571,6 +78578,12 @@ fn main() -> Result<()> {
     // The footer is written **before** the call and not after, because the whole
     // value of the line is that it is the last thing in the file when something
     // between it and the process's death goes wrong.
+    //
+    // **And everything the run said, on the disk above the footer** (§5.3 row 30,
+    // T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD): `diagnostics.log`'s writer answers a fence
+    // once every line handed over before it is written, within `diagnostics::SETTLE_WITHIN`.
+    // An owner-thread door (`doors::DiagnosticsSettle`), admitted on the way out.
+    let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(diagnostics::settle);
     let code = match &outcome {
         Ok(()) => 0,
         Err(error) => {

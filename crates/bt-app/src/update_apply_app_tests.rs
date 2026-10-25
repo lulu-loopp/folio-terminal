@@ -119,6 +119,7 @@ fn every_owner_door_takes_its_own_token_by_value() {
     let _: fn(WaitToken<'_, doors::PlaceExposure>, &std::sync::Arc<Window>) -> bool =
         window_is_exposed;
     let _: fn(WaitToken<'_, doors::TraceFlush>) = trace_sink::flush;
+    let _: fn(WaitToken<'_, doors::DiagnosticsSettle>) = diagnostics::settle;
     let _: fn(WaitToken<'_, doors::UpdateLeave>) -> Option<crate::update_apply::Left> =
         crate::update_handoff::leave_armed;
     let _: fn(WaitToken<'_, doors::MediaQuiet>) = bt_platform::video::shutdown_media_session;

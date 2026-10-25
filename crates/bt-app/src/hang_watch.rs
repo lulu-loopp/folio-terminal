@@ -328,7 +328,7 @@ const NS_PER_MS: u64 = 1_000_000;
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 223;
+const STATION_COUNT: usize = 224;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -1066,8 +1066,12 @@ pub enum Station {
     /// **The media session's way out** — `bt_platform::video::shutdown_media_session`, after
     /// the loop: the engines the windows let go of, then the first-frame readers, waited for
     /// within their bounds before `MFShutdown` (§5.3 row 27; door `MediaQuiet`, T-DROP-DOORS).
-    /// Byte 222, the run's end since `UpdateLeave` took byte 112.
+    /// Byte 222, the run's end from `UpdateLeave`'s move to byte 112 until `DiagnosticsSettle`.
     MediaQuiet = 222,
+    /// **`diagnostics.log`'s writer settled on the way out** — `diagnostics::settle`, before
+    /// the run's footer (§5.3 row 30; door `DiagnosticsSettle`,
+    /// T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD). Byte 223, the run's end.
+    DiagnosticsSettle = 223,
 }
 
 impl Station {
@@ -1298,6 +1302,7 @@ impl Station {
             Self::UpdateJobProgress => "update_job::Job::drain_progress",
             Self::UpdateLeave => "update_handoff::leave_armed",
             Self::MediaQuiet => "video::shutdown_media_session",
+            Self::DiagnosticsSettle => "diagnostics::settle",
         }
     }
 
@@ -1542,6 +1547,7 @@ impl Station {
             220 => Self::UpdateJobOffer,
             221 => Self::UpdateJobProgress,
             222 => Self::MediaQuiet,
+            223 => Self::DiagnosticsSettle,
             _ => Self::Starting,
         }
     }
