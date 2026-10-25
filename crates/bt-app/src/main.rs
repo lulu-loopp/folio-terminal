@@ -77625,9 +77625,6 @@ fn install_panic_log_hook() {
         // the hand-over leaves the applier or starts Folio again, as the
         // process's ordinary end does.
         let _ = update_handoff::leave_in_panic();
-        // What the run said before the panic, above the footer: the writer's fence on the
-        // panic hook's road, which no door admits (an `# emergency` holder).
-        diagnostics::settle_in_panic();
         eprintln!(
             "{}",
             diagnostics::run_footer(
@@ -77678,9 +77675,24 @@ fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync 
         if the_hook_lets_this_panic_unwind() {
             return;
         }
-        previous(info);
-        fatal(&path);
+        the_fatal_road(
+            diagnostics::settle_in_panic,
+            || previous(info),
+            || fatal(&path),
+        );
     }));
+}
+
+/// **The panic hook's fatal road, in its order**: `diagnostics.log`'s writer settled
+/// first — the writer's fence on the panic hook's road, which no door admits (an
+/// `# emergency` holder) — so every line said before the panic is above the panic
+/// message the previous hook writes to `stderr` (in a Log run, the same file), and above
+/// the footer `fatal` writes after it (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD, review
+/// H1).
+fn the_fatal_road(settle: impl FnOnce(), previous: impl FnOnce(), fatal: impl FnOnce()) {
+    settle();
+    previous();
+    fatal();
 }
 
 /// **Whether the panic hook returns and lets this thread's panic unwind** to the

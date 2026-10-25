@@ -56,8 +56,9 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, SystemTime};
 
 use bt_platform::admission::{WaitToken, WorkerCtx, doors};
@@ -366,37 +367,54 @@ pub fn open_run_log(storage: &Path, now: &str, process_id: u32) -> Option<System
 /// Before [`enter_resident_run`] there is no resident log and this says nothing:
 /// the front door's output is [`eprintln!`]'s business and always was.
 pub fn note(text: &str) {
-    if let Some(log) = RESIDENT_LOG.get() {
-        Queue::offer(
-            WRITER.get_or_init(|| Queue::start(PathBuf::clone(log))),
-            text.to_owned(),
-        );
+    if let Some(log) = RESIDENT_LOG.get()
+        && let Some(queue) = writer(log)
+    {
+        Queue::offer(queue, text.to_owned());
     }
     if resident_channel() == Some(Channel::Console) {
         crate::trace_sink::offer_stderr_line(text.to_owned());
     }
 }
 
+/// **This run's writer, started by its first line without anybody waiting for it.**
+///
+/// Not `OnceLock::get_or_init`, which would hold every other caller while one thread
+/// is inside the thread start: two first lines on two threads may each start a writer,
+/// one is kept, and the other's queue goes with its loser, whose thread then ends on a
+/// queue nobody holds. Both lines are handed to the one that was kept.
+fn writer(log: &Path) -> Option<&'static Queue> {
+    if Option::is_none(&std::sync::OnceLock::get(&WRITER)) {
+        let _ = std::sync::OnceLock::set(&WRITER, Queue::start(Path::to_path_buf(log)));
+    }
+    std::sync::OnceLock::get(&WRITER)
+}
+
 /// **Everything said so far, on the disk, before the run's footer** — the way out's
 /// bounded wait for `diagnostics.log`'s writer (`doors::DiagnosticsSettle`, §5.3 row
 /// 30), admitted only on the way out, minted in `fn main` on its two ways out.
 ///
-/// A fence, not a second road to the file: one more entry on the same queue, which
-/// the writer answers once every line handed over before it is written, so the
-/// order of the file is the order the lines were said. Past [`SETTLE_WITHIN`] — a
-/// disk that stopped taking writes — what is still queued is let go with the
-/// process, the bargain of the trace's flush beside it (row 17). A run whose writer
-/// never started has nothing to settle.
+/// A fence, not a second road to the file: one more entry on the same queue, in room
+/// kept for fences, which the writer answers once every line handed over before it is
+/// written, so the order of the file is the order the lines were said. Past
+/// [`SETTLE_WITHIN`] — a disk that stopped taking writes — what is still queued is let
+/// go with the process, the bargain of the trace's flush beside it (row 17).
+///
+/// A writer that could not be started is said here, once, through `stderr`, above the
+/// footer: the one line that says this run's notes are not in the file.
 pub fn settle(token: WaitToken<'_, doors::DiagnosticsSettle>) {
     if let Some(queue) = WRITER.get() {
+        if let Some(why) = &queue.unstarted {
+            crate::trace_sink::stderr_line(unstarted_line(why));
+        }
         Queue::settle(queue, token, SETTLE_WITHIN);
     }
 }
 
 /// [`settle`] on the panic hook's fatal road, which can run on any thread and in any
 /// phase, so no door admits it: the panic report's third emergency holder (revision
-/// (l)5), before the footer the hook writes, so the lines said before the panic are
-/// above it.
+/// (l)5), before the panic message the previous hook writes and the footer after it,
+/// so the lines said before the panic are above both.
 pub fn settle_in_panic() {
     if let Some(queue) = WRITER.get() {
         Queue::settle_in_panic(queue, SETTLE_WITHIN);
@@ -411,6 +429,23 @@ pub const SETTLE_WITHIN: Duration = crate::trace_sink::FLUSH_TIMEOUT;
 /// **How many lines may wait for the writer before one is dropped**: the trace
 /// queue's depth, a shock absorber for a disk that stopped for a moment.
 pub const QUEUE_DEPTH: usize = crate::trace_sink::QUEUE_DEPTH;
+
+/// **The room kept beside the lines for fences**: a line never takes it, so a way
+/// out's fence always gets in behind a full queue and waits its bound. Four is more
+/// than can be asked at once (one way out of `fn main`, one panic hook) with a fence
+/// left over from a settle that ran out of time.
+pub const FENCE_ROOM: usize = 4;
+
+/// **What a settle came to.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Settled {
+    /// Every line handed over before the fence is on the disk.
+    Written,
+    /// The fence is in the queue and the writer did not reach it within the bound.
+    OutOfTime,
+    /// No writer to answer: none was started, it ended, or the fence room is spent.
+    Unanswered,
+}
 
 /// One entry of the writer's queue, with how many lines had been lost when it was handed
 /// over — so the writer says a loss above the first entry that came after it, which is
@@ -429,19 +464,27 @@ enum Said {
 }
 
 /// **`diagnostics.log`'s queue, the producers' half**: a bounded sender, taken by
-/// `try_send` and never by `send`, and the count of what would not fit.
+/// `try_send` and never by `send`, the count of the lines in it, and the count of what
+/// would not fit.
 ///
 /// No lock in front of the sender (a `SyncSender` is shared as it is), so two
 /// threads saying something at once both get their line in; only a full queue
-/// drops one.
+/// drops one. The channel holds `depth` lines and [`FENCE_ROOM`] fences: a line is
+/// refused when `depth` lines are waiting, whatever room the channel still has.
 pub(crate) struct Queue {
     entries: SyncSender<Entry>,
+    lines: Arc<AtomicUsize>,
+    depth: usize,
     dropped: AtomicU64,
+    /// Why the writer thread could not be started, said once at the way out.
+    unstarted: Option<String>,
 }
 
-/// **The writer's half**: the queue's receiver and the log.
+/// **The writer's half**: the queue's receiver, the count of lines it takes from, and
+/// the log.
 pub(crate) struct Drain {
     entries: Receiver<Entry>,
+    lines: Arc<AtomicUsize>,
     log: PathBuf,
 }
 
@@ -451,61 +494,86 @@ impl Queue {
         Self::with_depth(log, QUEUE_DEPTH)
     }
 
-    /// [`Queue::new`] with `depth` entries' room, so a test can fill it.
+    /// [`Queue::new`] with room for `depth` lines, so a test can fill it.
     pub(crate) fn with_depth(log: PathBuf, depth: usize) -> (Self, Drain) {
-        let (entries, waiting) = sync_channel(depth);
-        let dropped = AtomicU64::new(0);
+        let (entries, waiting) = sync_channel(depth + FENCE_ROOM);
+        let lines = Arc::new(AtomicUsize::new(0));
         let drain = Drain {
             entries: waiting,
+            lines: Arc::clone(&lines),
             log,
         };
-        (Self { entries, dropped }, drain)
+        let queue = Self {
+            entries,
+            lines,
+            depth,
+            dropped: AtomicU64::new(0),
+            unstarted: None,
+        };
+        (queue, drain)
     }
 
     /// The queue, with its writer thread started on the thread door.
     ///
     /// A thread that could not be started leaves a queue with no reader: every line
-    /// is then dropped and counted, and nothing waits — the writer is the one thing
-    /// that could have said so.
+    /// is then dropped and counted, nothing waits, and [`settle`] says why at the way
+    /// out.
     fn start(log: PathBuf) -> Self {
-        let (queue, drain) = Self::new(log);
-        let _ = bt_platform::spawn_at_priority(
+        let (mut queue, drain) = Self::new(log);
+        if let Err(error) = bt_platform::spawn_at_priority(
             "bt-diagnostics",
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| drain.serve(ctx),
-        );
+        ) {
+            queue.unstarted = Some(error.to_string());
+        }
         queue
     }
 
     /// **Hand one line over, or count it lost. Never wait.**
     pub(crate) fn offer(&self, text: String) -> bool {
-        let queued = matches!(self.entries.try_send(self.entry(Said::Line(text))), Ok(()));
+        let queued = self.lines.fetch_add(1, Ordering::AcqRel) < self.depth
+            && matches!(self.entries.try_send(self.entry(Said::Line(text))), Ok(()));
         if !queued {
+            self.lines.fetch_sub(1, Ordering::AcqRel);
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
         queued
     }
 
     /// The door's wait: the fence handed over, then its answer within `within`.
-    /// Answers whether every line handed over before it is on the disk.
     pub(crate) fn settle(
         &self,
         token: WaitToken<'_, doors::DiagnosticsSettle>,
         within: Duration,
-    ) -> bool {
+    ) -> Settled {
         let _ = token;
-        self.fence()
-            .is_some_and(|answered| matches!(answered.recv_timeout(within), Ok(())))
+        match self.fence() {
+            None => Settled::Unanswered,
+            Some(answered) => match answered.recv_timeout(within) {
+                Ok(()) => Settled::Written,
+                Err(RecvTimeoutError::Timeout) => Settled::OutOfTime,
+                Err(RecvTimeoutError::Disconnected) => Settled::Unanswered,
+            },
+        }
     }
 
     /// [`Queue::settle`] for the panic hook's fatal road ([`settle_in_panic`]).
-    pub(crate) fn settle_in_panic(&self, within: Duration) -> bool {
-        self.fence()
-            .is_some_and(|answered| matches!(answered.recv_timeout(within), Ok(())))
+    pub(crate) fn settle_in_panic(&self, within: Duration) -> Settled {
+        match self.fence() {
+            None => Settled::Unanswered,
+            Some(answered) => match answered.recv_timeout(within) {
+                Ok(()) => Settled::Written,
+                Err(RecvTimeoutError::Timeout) => Settled::OutOfTime,
+                Err(RecvTimeoutError::Disconnected) => Settled::Unanswered,
+            },
+        }
     }
 
-    /// The fence on the queue, and where its answer will come. `None` for a queue
-    /// that is full or has no writer: then nothing behind it can be waited for.
+    /// The fence on the queue, in the room lines never take, and where its answer will
+    /// come. `None` for a queue with no writer, or one whose fence room is spent by
+    /// [`FENCE_ROOM`] fences nobody has answered: then nothing behind it can be waited
+    /// for.
     fn fence(&self) -> Option<Receiver<()>> {
         let (answer, answered) = sync_channel(1);
         match self.entries.try_send(self.entry(Said::Fence(answer))) {
@@ -526,17 +594,19 @@ impl Drain {
     /// **The writer thread's whole body**: each entry in the order it was handed
     /// over — a line appended by [`append_note`], a fence answered — and, above the
     /// first entry handed over after a loss, one line that says how many lines the
-    /// run has lost so far.
+    /// run has lost so far. Two producers meeting a full queue can hand entries over
+    /// with their counts out of order; only a count past the last one said is said.
     pub(crate) fn serve(self, ctx: &WorkerCtx) {
         let _ = ctx;
         let mut said = 0_u64;
         while let Ok(Entry { what, lost_before }) = self.entries.recv() {
-            if lost_before != said {
+            if lost_before > said {
                 said = lost_before;
                 append_note(&self.log, &lost_line(lost_before));
             }
             match what {
                 Said::Line(text) => {
+                    self.lines.fetch_sub(1, Ordering::AcqRel);
                     append_note(&self.log, &text);
                 }
                 Said::Fence(answer) => {
@@ -550,6 +620,13 @@ impl Drain {
 /// The line the writer says a loss with: the run's total so far.
 fn lost_line(lost: u64) -> String {
     format!("Folio: {lost} diagnostics lines were lost while this file was not taking writes")
+}
+
+/// The line the way out says a writer that never started with.
+fn unstarted_line(why: &str) -> String {
+    format!(
+        "Folio: the diagnostics writer could not start ({why}), so this run's notes are not in this file"
+    )
 }
 
 /// This run's `diagnostics.log` writer, started by the run's first line.
@@ -786,8 +863,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Channel, Drain, LOG_ROTATE_AT, Queue, append_note, console_was_asked_for, named_file,
-        names_a_crash_report, newest_crash_report, rotate_if_oversized, switched_on,
+        Channel, Drain, LOG_ROTATE_AT, Queue, Settled, append_note, console_was_asked_for,
+        named_file, names_a_crash_report, newest_crash_report, rotate_if_oversized, switched_on,
     };
     use bt_platform::admission::doors;
     use bt_source::ItemQuery;
@@ -981,7 +1058,7 @@ mod tests {
 
     /// [`Queue::settle`] admitted as the way out admits it: on a window thread of the
     /// test's own, in `Exiting`.
-    fn settled(queue: &Queue, within: Duration) -> bool {
+    fn settled(queue: &Queue, within: Duration) -> Settled {
         std::thread::scope(|threads| {
             threads
                 .spawn(|| {
@@ -1027,7 +1104,7 @@ mod tests {
             lines_of(&log)
         );
         go.send(()).expect("the writer is waiting");
-        assert!(settled(&queue, Duration::from_secs(5)));
+        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
         assert_eq!(lines_of(&log), ["a clipboard picture could not be saved"]);
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1052,16 +1129,18 @@ mod tests {
         let (go, writer) = a_held_writer(drain);
         assert!(queue.offer("the first".to_owned()));
         assert!(queue.offer("the second".to_owned()));
-        assert!(
-            !settled(&queue, Duration::from_millis(50)),
+        assert_eq!(
+            settled(&queue, Duration::from_millis(50)),
+            Settled::OutOfTime,
             "a settle was answered with nothing written"
         );
         assert!(lines_of(&log).is_empty());
         go.send(()).expect("the writer is waiting");
-        assert!(settled(&queue, Duration::from_secs(5)));
+        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
         assert_eq!(lines_of(&log), ["the first", "the second"]);
-        assert!(
+        assert_eq!(
             queue.settle_in_panic(Duration::from_secs(5)),
+            Settled::Written,
             "the panic hook's settle is answered by the same writer"
         );
         drop(queue);
@@ -1088,10 +1167,85 @@ mod tests {
             "a full queue refuses at once"
         );
         go.send(()).expect("the writer is waiting");
-        assert!(settled(&queue, Duration::from_secs(5)));
+        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
         assert!(queue.offer("four".to_owned()));
-        assert!(settled(&queue, Duration::from_secs(5)));
+        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
         assert_eq!(lines_of(&log), ["one", "two", &super::lost_line(1), "four"]);
+        drop(queue);
+        writer.join().expect("the writer ends with its queue");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED (review H2) — **a full queue still takes the way out's fence, so the settle
+    /// waits its bound behind the lines and the loss is written above the fence.**
+    ///
+    /// The fence used to need a line's room: behind a full queue the settle came back at
+    /// once, the footer could be written above every line still queued, and the count of
+    /// what was lost — carried by the fence — never reached the file.
+    ///
+    /// MUTATION: size the channel at the lines' depth alone (no `FENCE_ROOM`) and the
+    /// settle with the writer held is `Unanswered`, not `OutOfTime`.
+    #[test]
+    fn a_full_queue_still_takes_the_fence_and_the_loss_is_written_above_it() {
+        let directory = a_reports_directory("full-fence");
+        let log = directory.join(super::LOG_FILENAME);
+        let (queue, drain) = Queue::with_depth(log.clone(), 2);
+        let (go, writer) = a_held_writer(drain);
+        assert!(queue.offer("one".to_owned()));
+        assert!(queue.offer("two".to_owned()));
+        assert!(
+            !queue.offer("three".to_owned()),
+            "a full queue refuses a line"
+        );
+        assert_eq!(
+            settled(&queue, Duration::from_millis(50)),
+            Settled::OutOfTime,
+            "the fence did not get in behind a full queue"
+        );
+        go.send(()).expect("the writer is waiting");
+        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        assert_eq!(lines_of(&log), ["one", "two", &super::lost_line(1)]);
+        drop(queue);
+        writer.join().expect("the writer ends with its queue");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED (review H1) — **on the panic hook's fatal road the writer is settled before the
+    /// previous hook writes the panic message**, which in a Log run goes to the same file:
+    /// the line said before the panic stands above the message.
+    ///
+    /// The writer is held until the settle itself lets it go, so a road that wrote the
+    /// message first finds the line not yet written.
+    ///
+    /// MUTATION: call `previous` before `settle` in `the_fatal_road` and the message is
+    /// above the line.
+    #[test]
+    fn the_fatal_road_settles_the_log_before_the_panic_message() {
+        let directory = a_reports_directory("fatal-road");
+        let log = directory.join(super::LOG_FILENAME);
+        let (queue, drain) = Queue::new(log.clone());
+        let (go, writer) = a_held_writer(drain);
+        assert!(queue.offer("the refusal said just before the panic".to_owned()));
+        crate::the_fatal_road(
+            || {
+                go.send(()).expect("the writer is waiting");
+                assert_eq!(
+                    queue.settle_in_panic(Duration::from_secs(5)),
+                    Settled::Written
+                );
+            },
+            || {
+                assert!(append_note(&log, "thread 'bt-x' panicked at the line"));
+            },
+            || {},
+        );
+        assert_eq!(
+            lines_of(&log),
+            [
+                "the refusal said just before the panic",
+                "thread 'bt-x' panicked at the line"
+            ]
+        );
         drop(queue);
         writer.join().expect("the writer ends with its queue");
         let _ = std::fs::remove_dir_all(&directory);
@@ -1124,7 +1278,7 @@ mod tests {
         });
         let (go, writer) = a_held_writer(drain);
         go.send(()).expect("the writer is waiting");
-        assert!(settled(&queue, Duration::from_secs(30)));
+        assert_eq!(settled(&queue, Duration::from_secs(30)), Settled::Written);
         let lines = lines_of(&log);
         assert_eq!(lines.len(), 2 * EACH, "lines went missing");
         for name in ["left", "right"] {

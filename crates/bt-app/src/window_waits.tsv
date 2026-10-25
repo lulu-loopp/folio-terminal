@@ -276,7 +276,7 @@ bt-platform	[windows]	crate::instance::<DataDirectoryClaim as Drop>::drop	2026-1
 crate	arm	item	since	reason	ruling
 bt-app	-	crate::append_panic_report	2026-10-17	the panic hook's report, written synchronously because the process may end next and the report is the case the hook exists for (revision (l)5)	T-A2-BARE-SITE-LINT 2026-10-17
 bt-platform	[windows]	crate::windows_impl::write_to_console	2026-10-17	the panic hook's fatal road announces on the console before the process leaves (revision (l)5)	T-A2-BARE-SITE-LINT 2026-10-17
-bt-app	-	crate::diagnostics::Queue::settle_in_panic	2026-10-24	the panic hook's fatal road settles diagnostics.log's writer before the run's footer, so the lines said before the panic stand above it (revision (l)5)	T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD 2026-10-24
+bt-app	-	crate::diagnostics::Queue::settle_in_panic	2026-10-24	the panic hook's fatal road settles diagnostics.log's writer before the panic message and the run's footer, so the lines said before the panic stand above both (revision (l)5)	T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD 2026-10-24
 
 # owners
 construct	owner	count
