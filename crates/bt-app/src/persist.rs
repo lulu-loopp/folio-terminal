@@ -4274,7 +4274,7 @@ pub(crate) struct DataDirectory(PathBuf);
 
 impl DataDirectory {
     /// The folder.
-    pub(crate) fn path(&self) -> &Path {
+    pub(crate) fn data_folder(&self) -> &Path {
         &self.0
     }
 

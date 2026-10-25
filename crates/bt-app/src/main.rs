@@ -77886,7 +77886,7 @@ fn main() -> Result<()> {
             // `FolioApp::new`, so the loop cannot start on an unsettled directory and no reader
             // can be the one that moves it.
             let settled = persist::settle_storage_dir();
-            let storage = settled.value().path().to_path_buf();
+            let storage = settled.value().data_folder().to_path_buf();
             //
             // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
             // only in `Starting`. A refusal is one more `None`: carry on and open a window.
@@ -77947,7 +77947,7 @@ fn main() -> Result<()> {
     // console this process borrowed is very often a pane inside another Folio.
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
-    let storage = settled.value().path();
+    let storage = settled.value().data_folder();
     let channel = diagnostics::enter_resident_run(storage);
     // A start whose hand-over gave up says why where this run's diagnostics go
     // (0.4.8 D3), above the line that says its window saves nothing.
