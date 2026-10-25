@@ -317,7 +317,7 @@ use runtime::{
     a_capture_still_holds_its_pointer, a_page_is_off_the_glass, a_page_still_has_a_pane,
     a_page_was_replaced, a_retirement_happens_on_this_turn, answer_attention_in,
     apply_tabs_leaf_metrics, hole_for, merge_notice_card, next_attention_stop, profile_menu_anchor,
-    raise_cancelled_quit_card_on, rescan_leaf_for_search, resize_worth_solving,
+    raise_cancelled_quit_card_on, recall_flash, rescan_leaf_for_search, resize_worth_solving,
     resolved_theme_change, revived_page_of, tab_surface_tip_boxes,
     take_psreadline_resize_reanchor_input, tooltip_anchor_for,
 };
@@ -54924,190 +54924,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ── the command palette (DESIGN.md §7.55) ──────────────────────────────
 
-    /// **The shortcut table, filtered to what this focus can reach.**
-    ///
-    /// Read from [`shortcuts::Shortcuts::rows`] rather than from
-    /// `editor_rows`, and the difference is the one thing worth writing down:
-    /// the editor's projection folds a contiguous family into a single line
-    /// (`Ctrl Shift [1 – 9]`) and carries no [`shortcuts::Action`], because it
-    /// exists to be *read* on a page. A palette row has to be *run*, and
-    /// neither half of that projection survives the trip — a folded family is
-    /// nine verbs printed as one, and a line with no action has nothing for
-    /// `run_shortcut` to be given.
-    fn push_action_candidates(&self, into: &mut Vec<palette::Candidate>) {
-        let Some(state) = self.window.palette.as_ref() else {
-            return;
-        };
-        let focus = state.focus();
-        for binding in self.app.shortcuts.rows() {
-            // A row whose scope does not hold is a verb that would do nothing
-            // if it were pressed, and a row whose machine has not arrived is
-            // the same thing said a different way. Neither belongs in a list of
-            // what this window can do.
-            if !binding.scope.holds(focus) || binding.action.is_pending() {
-                continue;
-            }
-            into.push(palette::Candidate {
-                section: palette::Section::Actions,
-                label: binding.title.text().to_owned(),
-                hint: binding
-                    .chord
-                    .as_ref()
-                    .map(|chord| shortcuts::chord_caps(chord).join("+")),
-                mark: None,
-                awaiting: false,
-                verb: palette::Verb::Run(binding.action),
-            });
-        }
-        // The pane menu's recovery verb, which is not a row of the shortcut
-        // table: see `palette::reset_terminal_modes_candidate` for when it is
-        // offered and how it is addressed.
-        let tab = &self.window.tabs[self.window.active_tab];
-        let session = tab
-            .sessions
-            .contains_key(&tab.focused_leaf)
-            .then_some(tab.focused_leaf);
-        into.extend(palette::reset_terminal_modes_candidate(
-            focus, tab.id, session,
-        ));
-    }
-
-    /// **Every pane of this window**, tab by tab.
-    ///
-    /// The walk is `jump_to_attention`'s — `tabs × sessions` — because it is
-    /// the same question asked with a different filter, and this window has one
-    /// answer to "where are the panes".
-    ///
-    /// **A tab in another window is not on this list** (DESIGN.md §7.55 ②). A
-    /// window has no name of its own yet, so a row naming a pane in one would
-    /// have to say *which* window with nothing to say it with; the row would be
-    /// a place the reader could not tell from the identically-named place in
-    /// front of them.
-    fn push_place_candidates(&self, into: &mut Vec<palette::Candidate>) {
-        for tab in &self.window.tabs {
-            for (seat, leaf) in &tab.sessions {
-                let label = tab
-                    .terminal_name(*seat)
-                    .unwrap_or_else(|| tab.display_title());
-                let hint = leaf
-                    .folder(&pane_folder::SystemProcessFolders)
-                    .folder()
-                    .map(|cwd| cwd.display().to_string())
-                    .or_else(|| {
-                        leaf.program
-                            .as_ref()
-                            .and_then(|path| path.file_name())
-                            .map(|name| name.to_string_lossy().into_owned())
-                    });
-                into.push(palette::Candidate {
-                    section: palette::Section::Places,
-                    label,
-                    hint,
-                    mark: Some(profiles::identity_mark(&tab.leaf_profile(*seat))),
-                    awaiting: leaf.attention.ticket().is_some(),
-                    verb: palette::Verb::Go {
-                        tab: tab.id,
-                        seat: *seat,
-                    },
-                });
-            }
-        }
-    }
-
-    /// **Every command this window has run, newest first.**
-    ///
-    /// The first aggregation of command marks across panes this product has
-    /// had: the rail is one pane's ledger drawn beside that pane, and reaching
-    /// for its `Stack` here would be a second aggregation of the same facts.
-    /// So the ledgers are read directly (§7.1.6b′'s rule about not writing a
-    /// second fold), and the only thing invented is the order.
-    ///
-    /// The order is the newest end of each ledger interleaved by clock. A
-    /// [`std::time::Instant`] is monotonic and process-wide, so marks from two
-    /// panes are genuinely comparable; a mark that never began has no clock at
-    /// all and sorts last, which is where a command nobody has run belongs.
-    fn push_command_candidates(&self, into: &mut Vec<palette::Candidate>) {
-        let mut found: Vec<(Option<Instant>, palette::Candidate)> = Vec::new();
-        for tab in &self.window.tabs {
-            for (seat, leaf) in &tab.sessions {
-                let pane = tab
-                    .terminal_name(*seat)
-                    .unwrap_or_else(|| tab.display_title());
-                for mark in leaf.session.command_marks() {
-                    // A draft nobody has typed into is not a command that ran.
-                    if mark.command_text.is_empty() {
-                        continue;
-                    }
-                    let when = mark.finished_at.or(mark.executed_at);
-                    found.push((
-                        when,
-                        palette::Candidate {
-                            section: palette::Section::Commands,
-                            label: mark.command_text.clone(),
-                            hint: Some(i18n::palette_command_hint(
-                                mark.is_running(),
-                                mark.exit_code,
-                                mark.duration(),
-                                &pane,
-                            )),
-                            mark: None,
-                            awaiting: false,
-                            verb: palette::Verb::Recall {
-                                tab: tab.id,
-                                seat: *seat,
-                                mark: mark.id,
-                            },
-                        },
-                    ));
-                }
-            }
-        }
-        // Newest first, and a mark with no clock behind every mark that has
-        // one — `None` is smaller than every `Some`, so reversing the key puts
-        // it last without a second comparison to get backwards.
-        found.sort_by(|left, right| right.0.cmp(&left.0));
-        into.extend(found.into_iter().map(|(_, candidate)| candidate));
-    }
-
-    /// **The files under this tab's columns**, out of the bounded index.
-    fn push_file_candidates(&self, into: &mut Vec<palette::Candidate>) {
-        for root in self.palette_files_roots() {
-            let Some(index) = self.app.file_indexes.get(&root) else {
-                continue;
-            };
-            if index.is_empty() {
-                continue;
-            }
-            into.reserve(index.len());
-            for file in index.files() {
-                into.push(palette::Candidate {
-                    section: palette::Section::Files,
-                    label: file.name.clone(),
-                    hint: Some(file.relative.clone()),
-                    mark: Some(icons::ActionIcon::FileObject.mark()),
-                    awaiting: false,
-                    verb: palette::Verb::Open(file.path.clone()),
-                });
-            }
-        }
-    }
-
-    /// **Every row the settings dialog would draw**, on the same list the
-    /// dialog itself is built from — so a row this window cannot show is a row
-    /// the palette cannot offer either.
-    fn push_settings_candidates(&self, into: &mut Vec<palette::Candidate>) {
-        for row in settings::visible_rows(self.window.rail.layout) {
-            into.push(palette::Candidate {
-                section: palette::Section::Settings,
-                label: row.title().to_owned(),
-                hint: Some(row.category().nav_label().to_owned()),
-                mark: Some(icons::ActionIcon::OpenSettings.mark()),
-                awaiting: false,
-                verb: palette::Verb::Adjust(row),
-            });
-        }
-    }
-
     /// **Open the settings dialog on one row.**
     ///
     /// Three bricks that were all already here — open, choose the page, scroll
@@ -71189,16 +71005,6 @@ enum RecallFlash {
     Row,
     /// Light the pane and scroll nothing.
     Pane,
-}
-
-/// The rule itself, as a function of the two facts and nothing else — so it can
-/// be read, tested and mutated without a window, a GPU and a shell.
-const fn recall_flash(running: bool, alternate_screen: bool) -> RecallFlash {
-    if running || alternate_screen {
-        RecallFlash::Pane
-    } else {
-        RecallFlash::Row
-    }
 }
 
 /// What one wheel notch does, once it is known which pane it landed in.
