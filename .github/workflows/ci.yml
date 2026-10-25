@@ -644,6 +644,13 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-timing-bound-tests.ps1
 
+      # The test process-globals register (T-TEST-PROCESS-GLOBALS) admits an added row of a class
+      # the guard checks, and a by-hand row only under a widening line. Its scratch-repository
+      # suite plants each verdict, admitted and refused.
+      - name: the test-globals gate can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-test-globals-tests.ps1
+
       # The PSReadLine artefact gate holds the vendored package, its README, the build script's
       # pinned table and Folio's manifest to one another (T-INTEGRATION-INJECT-2-BUILD). Its
       # scratch-copy suite moves each pin alone, and puts a `.psm1` and a `FormatsToProcess`
@@ -1232,6 +1239,10 @@ jobs:
       - name: the timing-bound test list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-timing-bound.ps1
+
+      - name: the test-globals register grows only by rows the guard checks
+        shell: pwsh
+        run: ./scripts/ci/check-test-globals.ps1
 
       # The lane contract's declared failures (`lane::EXPECTED_FAILURES`): no
       # lane gains one against the merge base; a claim new to the suite brings
