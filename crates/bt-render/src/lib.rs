@@ -4229,6 +4229,71 @@ fn note_what_the_device_said(
 /// The headline over what the driver said when it took a device away.
 const DEVICE_LOST_HEADLINE: &str = "Folio lost the GPU device";
 
+/// **The driver's own reason for taking a device away, asked of the driver** —
+/// a reader that answers `None` while the device is still here, or on a backend
+/// that keeps no reason.
+///
+/// wgpu's loss callback carries `Unknown: Device is lost` for every removal the
+/// D3D12 backend notices (`wgpu-hal-30.0.0` `auxil/dxgi/result.rs` maps
+/// `DXGI_ERROR_DEVICE_REMOVED` to `DeviceError::Lost` and drops the code), and
+/// that sentence is the same for a driver reset, a hung queue and a command the
+/// driver refused. The clean Win10 VM lost its device on the first-run card and
+/// on the Settings sheet, four runs out of four, and the log could not say which
+/// of those it was. `ID3D12Device::GetDeviceRemovedReason` can: it answers the
+/// `HRESULT` the runtime removed the device with — `0x887A0006` hung,
+/// `0x887A0005` removed, `0x887A0007` reset, `0x887A0020` an internal driver
+/// error, `0x887A0001` an invalid call.
+///
+/// Built before the loss callback is armed and moved into it, because the
+/// callback is handed no device. What it holds is one more reference to the
+/// D3D12 device, inside the callback the wgpu device owns: it goes when that
+/// device goes, so it never keeps a device alive that would otherwise have been
+/// released.
+///
+/// **Two `unsafe` calls, and the only two in this crate outside
+/// [`create_surface`].** `as_hal` because wgpu cannot know what a caller does
+/// with the backend's own object — here, one `AddRef` and nothing else — and
+/// `GetDeviceRemovedReason` because every COM call is `unsafe` in the bindings;
+/// it reads one `HRESULT` off a device this closure holds a reference to.
+#[allow(unsafe_code)]
+fn driver_removal_reason(device: &wgpu::Device) -> impl Fn() -> Option<String> + Send + Sync + 'static {
+    #[cfg(target_os = "windows")]
+    {
+        // SAFETY: the hal device is only read — its raw `ID3D12Device` is
+        // cloned (`AddRef`) and the guard is dropped at the end of this
+        // statement, so no wgpu lock is held past it. A device on any other
+        // backend answers `None` and nothing is kept.
+        let raw = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }
+            .map(|hal| hal.raw_device().clone());
+        move || {
+            let raw = raw.as_ref()?;
+            // SAFETY: a call on a live COM reference this closure owns;
+            // `ID3D12Device` is free-threaded.
+            unsafe { raw.GetDeviceRemovedReason() }
+                .err()
+                .map(|error| format!("{:#010X} {}", error.code().0, error.message().trim()))
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = device;
+        || None
+    }
+}
+
+/// **The sentence the loss callback latches**: wgpu's reason and message, and
+/// the driver's own reason after them when it gave one.
+fn what_the_lost_device_said(
+    reason: wgpu::DeviceLostReason,
+    message: &str,
+    driver: Option<String>,
+) -> String {
+    match driver {
+        Some(driver) => format!("{reason:?}: {message} (the driver's reason: {driver})"),
+        None => format!("{reason:?}: {message}"),
+    }
+}
+
 /// The headline over an error wgpu could attribute to no call of ours.
 ///
 /// A different sentence from [`DEVICE_LOST_HEADLINE`] because it is a different
@@ -6886,6 +6951,7 @@ impl DeviceResources {
         let device_loss: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
         {
             let latch = Arc::clone(&device_loss);
+            let driver = driver_removal_reason(device);
             device.set_device_lost_callback(move |reason, message| {
                 // wgpu's choice of thread: the window thread when it notices during a call made
                 // there, a backend thread otherwise (design note 2026-09-26, revision (c)7).
@@ -6893,7 +6959,7 @@ impl DeviceResources {
                 if let Some(line) = note_what_the_device_said(
                     &latch,
                     DEVICE_LOST_HEADLINE,
-                    &format!("{reason:?}: {message}"),
+                    &what_the_lost_device_said(reason, &message, driver()),
                 ) {
                     eprintln!("{line}");
                 }
@@ -7697,6 +7763,48 @@ impl GpuContext {
     #[cfg(all(test, target_os = "windows"))]
     fn lose_the_device_on_purpose(&self) {
         self.device.destroy();
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+    }
+
+    /// **Have the D3D12 runtime remove this context's device**, the way a driver
+    /// reset or a hung queue does — and unlike [`Self::lose_the_device_on_purpose`],
+    /// which leaves the D3D12 device itself healthy.
+    ///
+    /// `ID3D12Device5::RemoveDevice` puts the device in the removed state; the
+    /// next call wgpu makes that the runtime answers — a resource's creation —
+    /// returns `DXGI_ERROR_DEVICE_REMOVED`, and
+    /// wgpu raises the same `Unknown: Device is lost` the clean Win10 VM logged.
+    ///
+    /// **Process-wide on one adapter**: D3D12 keeps one device per adapter per
+    /// process, so every context of this test binary on the same adapter is
+    /// removed with it. Only the software adapter is removed this way, and only
+    /// under the GPU test lock, which every headless device is taken through.
+    #[cfg(all(test, target_os = "windows"))]
+    #[allow(unsafe_code)]
+    fn remove_the_device_for_real(&self) {
+        use windows::Win32::Graphics::Direct3D12::ID3D12Device5;
+        use windows::core::Interface;
+        // SAFETY: the hal device is read for one clone of its raw COM pointer.
+        let raw = unsafe { self.device.as_hal::<wgpu::hal::api::Dx12>() }
+            .map(|hal| hal.raw_device().clone())
+            .expect("a D3D12 device");
+        let five: ID3D12Device5 = raw.cast().expect("ID3D12Device5 (Windows 10 1809 or later)");
+        // SAFETY: a call on a live COM reference; removal is what is asked for.
+        unsafe { five.RemoveDevice() };
+        drop(five);
+        drop(raw);
+        // The runtime says so to the next call that returns an `HRESULT`: a resource's
+        // creation always does, where a poll of a queue with nothing in flight may not ask.
+        let _ = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("the call that hears the removal"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.submit(std::iter::empty());
         let _ = self.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
@@ -33948,6 +34056,40 @@ mod tests {
         /// non-existent resource BufferId(1,1)` — which is exactly the shape
         /// §7.1.3m named: a resource handed out quietly and the *use* of it
         /// blamed, several calls away from what actually went wrong.
+        /// **A device the driver removes says the driver's reason in its one line**
+        /// (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE).
+        ///
+        /// The clean Win10 VM lost its device four runs out of four and its log said
+        /// `Unknown: Device is lost` each time — wgpu's sentence for every removal the
+        /// D3D12 backend notices, the code dropped on the way. The device here is
+        /// removed by the D3D12 runtime itself (`RemoveDevice`), on the adapter that VM
+        /// had, so the loss arrives through the same callback with the same words, and
+        /// the line has to carry what `GetDeviceRemovedReason` answers:
+        /// `DXGI_ERROR_DEVICE_REMOVED`, `0x887A0005`.
+        ///
+        /// RED (without the driver's reason read in the callback): the latch held
+        /// `Unknown: Device is lost` and nothing after it.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_device_the_driver_removes_says_the_drivers_reason() {
+            let Some(gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            assert!(gpu.device_loss().is_none(), "a device that is still here");
+            gpu.remove_the_device_for_real();
+            let said = gpu
+                .device_loss()
+                .expect("wgpu's own callback says a removed device went away");
+            assert!(
+                said.starts_with("Unknown: Device is lost"),
+                "wgpu's own words come first, as before: {said}"
+            );
+            assert!(
+                said.contains("(the driver's reason: 0x887A0005 "),
+                "the driver's HRESULT is on the line: {said}"
+            );
+        }
+
         #[cfg(target_os = "windows")]
         #[test]
         fn a_device_that_is_really_taken_away_is_rebuilt_and_the_window_says_it_again() {
