@@ -316,9 +316,9 @@ use runtime::platform_pointer_of;
 use runtime::{
     a_capture_still_holds_its_pointer, a_page_is_off_the_glass, a_page_still_has_a_pane,
     a_page_was_replaced, a_retirement_happens_on_this_turn, apply_tabs_leaf_metrics, hole_for,
-    profile_menu_anchor, release_due_leaf_resize, rescan_leaf_for_search, resize_worth_solving,
-    resolved_theme_change, revived_page_of, tab_surface_tip_boxes,
-    take_psreadline_resize_reanchor_input, tooltip_anchor_for,
+    profile_menu_anchor, rescan_leaf_for_search, resize_worth_solving, resolved_theme_change,
+    revived_page_of, tab_surface_tip_boxes, take_psreadline_resize_reanchor_input,
+    tooltip_anchor_for,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
@@ -22803,6 +22803,57 @@ fn schedule_leaf_grid_change(
         .context(context)?;
     leaf.grid = reflow;
     Ok(true)
+}
+
+/// Release whatever this one pane's quiet window has made due, and say when it could next be due.
+///
+/// The counterpart of [`schedule_leaf_grid_change`], and the only place `conpty_grid` moves: what
+/// the child was *told* is written exactly where it is told, so a drag that wanders out and comes
+/// back cancels its own request instead of replaying an intermediate size.
+fn release_due_leaf_resize(
+    leaf: &mut LeafSession,
+    now: Instant,
+    hand_on_the_geometry: bool,
+) -> Result<(Option<LeafResizeCommit>, Option<Instant>)> {
+    let (due, wake) =
+        service_pending_pty_resize(&mut leaf.pending_pty_resize, now, hand_on_the_geometry);
+    let Some(pending) = due else {
+        return Ok((None, wake));
+    };
+    let local_grid = leaf.grid;
+    let conpty_grid = leaf.conpty_grid;
+    let integration = leaf.integration;
+    let commit = commit_leaf_resize(
+        &mut leaf.session,
+        leaf.pty.as_mut(),
+        ResizeReanchor {
+            pending: &mut leaf.pending_psreadline_resize_reanchor,
+            integration,
+        },
+        ReleaseGrids {
+            local: local_grid,
+            conpty: conpty_grid,
+            next: pending.grid,
+        },
+        pending.physical,
+        now,
+    )?;
+    leaf.grid = pending.grid;
+    leaf.conpty_grid = pending.grid;
+    // **A shell still being born is owed this size when it lands** (T-BIRTH-OFF-WINDOW,
+    // T-FALLBACK-OWED-RESIZE): it was asked for at the grid of its request, and nothing above
+    // could tell it. A pane's first birth and a birth-death fallback carry the same landing fact.
+    if commit.told_the_child {
+        if let Some(PaneBirth {
+            waiting: BirthWait::Shell(landing),
+            ..
+        }) = leaf.birth.as_mut()
+        {
+            landing.owed_physical = Some(pending.physical);
+        }
+        runtime::owe_birth_death_fallback_resize(leaf, pending.physical);
+    }
+    Ok((Some(commit), wake))
 }
 
 /// **Where a button event is answered from** (user report, 2026-09-10).

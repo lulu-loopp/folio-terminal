@@ -2195,17 +2195,17 @@ A new size reaches a pane's grid at once and its shell at the quiet boundary.
 | hop | crate | entry | carries | lane |
 |---|---|---|---|---|
 | ingress | `bt-app` | `FolioApp::window_event` → `FolioApp::on_window_event` → `Runtime::resized` or `Runtime::scale_factor_changed` → `Runtime::resize`; the other ingresses join at the next two rows: a divider drag (`Runtime::drive_divider_drag` → `Runtime::commit_seat_geometry`), a split (`Runtime::split_seat`), a pane zoom (`Runtime::toggle_pane_zoom`), a tab switch (`Runtime::activate_tab`), a pane's text size (`Runtime::step_pane_text_scale`) | the window's new physical size | window thread |
-| solve | `bt-app` | `resize_worth_solving` (a minimised or empty rectangle solves nothing), `Runtime::resolve_seat_layout` → `size_authority_for_rectangle`, `solve_seats` | `bt_layout::solve::SeatLayout` | window thread |
+| solve | `bt-app` | `runtime::dpi::resize_worth_solving` (a minimised or empty rectangle solves nothing), `Runtime::resolve_seat_layout` → `size_authority_for_rectangle`, `solve_seats` | `bt_layout::solve::SeatLayout` | window thread |
 | per-leaf plan | `bt-app` | `Runtime::resize_leaves_to_layout` (refused while the DPI rectangle may not cut a grid) → `leaf_resize_plan` → `LeafSession::grid_for` | `LeafResizeTarget` | window thread |
 | schedule | `bt-app` | `schedule_leaf_grid_change` (the focused leaf last, through `Runtime::schedule_grid_change`) → `plan_grid_change` → `coalesce_pty_resize_on_grid_change` → `coalesce_pty_resize` | `PendingPtyResize`, the newest grid with the quiet deadline | window thread |
 | reflow | `bt-term` | `DualPlaneSession::resize_at` → `lifecycle::plan_resize` → `TerminalAdapter::resize` | `lifecycle::ResizePlan` | window thread: in the same turn for a shown pane, at the release for a hidden one |
 | release | `bt-app` | `Runtime::turn` → `Runtime::flush_pending_pty_resize` → `release_due_leaf_resize` → `service_pending_pty_resize` (`take_due_pty_resize`, `pty_resize_wake_deadline`) | `PendingPtyResize` | window thread, once per turn, after every other task that can change a session |
 | commit | `bt-app` | `commit_leaf_resize` → `pty_size` → `pty_door::resize`, then `bt_term::DualPlaneSession::mark_pty_resize_requested_at` (or, with nothing to tell, `bt_term::DualPlaneSession::mark_resize_settled_unchanged_at`); `replace_psreadline_resize_reanchor_debt` | `bt_pty::PtySize` | window thread, admitted as the PtyResize door (§5.3 row 12) |
 | pseudoconsole | `bt-pty` | `PtySession::resize` | `PtySize` | window thread, synchronous: the ResizePseudoConsole round trip into conhost |
-| close | `bt-app` | `Runtime::finish_resize_if_quiescent` → `bt_term::DualPlaneSession::finish_resize_if_quiescent`; an owed PSReadLine repair through `take_psreadline_resize_reanchor_input` → `write_pty_input` | the repair's bytes | window thread, a later turn (it runs before the release in `Runtime::turn`) |
+| close | `bt-app` | `Runtime::finish_resize_if_quiescent` → `bt_term::DualPlaneSession::finish_resize_if_quiescent`; an owed PSReadLine repair through `runtime::dpi::take_psreadline_resize_reanchor_input` → `write_pty_input` | the repair's bytes | window thread, a later turn (it runs before the release in `Runtime::turn`) |
 | a birth's missed size | `bt-app` | `Runtime::land_births` → `Runtime::land_own_shell` (or, for a restart's successor, `Runtime::land_restart` → `land_successor`) → `land_shell_birth` → `apply_owed_shell_resize` → `pty_door::resize`; a silent birth death's last-resort shell through `Runtime::land_birth_death_fallback` → `runtime::tabs::land_birth_death_fallback` → `land_birth_death_fallback_shell` → `apply_owed_shell_resize` | `bt_pty::PtySize` | window thread, when the `bt-pty-birth` worker's shell lands |
 
-The free functions in `main.rs` that sequence it, in call order:
+The free functions that sequence it, in call order:
 `resize_worth_solving`, `size_authority_for_rectangle`, `solve_seats`,
 `leaf_resize_plan`, `schedule_leaf_grid_change`, `plan_grid_change`,
 `coalesce_pty_resize_on_grid_change`, `coalesce_pty_resize`,
@@ -2213,7 +2213,9 @@ The free functions in `main.rs` that sequence it, in call order:
 `pty_resize_wake_deadline`, `commit_leaf_resize`, `pty_size`,
 `replace_psreadline_resize_reanchor_debt`,
 `take_psreadline_resize_reanchor_input`, and at a birth's landing `land_shell_birth`,
-`land_birth_death_fallback_shell` and `apply_owed_shell_resize`. The `Runtime` methods around them (`resize`,
+`land_birth_death_fallback_shell` and `apply_owed_shell_resize`. All are in `main.rs`
+except `resize_worth_solving` and `take_psreadline_resize_reanchor_input`, which K2
+batch 3 (T-SPLIT-2B) moved into `runtime/dpi.rs` beside their callers. The `Runtime` methods around them (`resize`,
 `resolve_seat_layout`, `resize_leaves_to_layout`, `flush_pending_pty_resize`,
 `finish_resize_if_quiescent`) are in `runtime/dpi.rs`, `runtime/panes.rs` and
 `runtime/diagnostics.rs`.

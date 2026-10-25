@@ -3,15 +3,13 @@
 
 use super::pointer::Ending;
 use crate::pane_cell_metrics;
-use crate::runtime;
 use crate::window_seam::prelude::*;
 use crate::{
-    BirthWait, LeafResizeCommit, LeafSession, PaneBirth, ReleaseGrids, ResizeReanchor, Runtime,
-    TabState, TextScale, apply_leaf_metrics, card_trace, commit_leaf_resize, dpi_snapshot,
+    ResizeReanchor, Runtime, TabState, TextScale, apply_leaf_metrics, card_trace, dpi_snapshot,
     earliest_deadline, ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner,
     files_float_content_height, float, focus_thumb, hang_watch, log_dpi_snapshot,
-    presentation_physical_size, psreadline_resize_repaint_input, scale_factors_match, seats,
-    service_pending_pty_resize, trace_sink, trace_surface_size_clamp, write_pty_input,
+    presentation_physical_size, psreadline_resize_repaint_input, release_due_leaf_resize,
+    scale_factors_match, seats, trace_sink, trace_surface_size_clamp, write_pty_input,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -736,57 +734,6 @@ pub(crate) fn take_psreadline_resize_reanchor_input(
     std::mem::take(reanchor.pending)
         .then(|| psreadline_resize_repaint_input(reanchor.integration, prompt_the_shell_opened))
         .flatten()
-}
-
-/// Release whatever this one pane's quiet window has made due, and say when it could next be due.
-///
-/// The counterpart of [`schedule_leaf_grid_change`], and the only place `conpty_grid` moves: what
-/// the child was *told* is written exactly where it is told, so a drag that wanders out and comes
-/// back cancels its own request instead of replaying an intermediate size.
-pub(crate) fn release_due_leaf_resize(
-    leaf: &mut LeafSession,
-    now: Instant,
-    hand_on_the_geometry: bool,
-) -> Result<(Option<LeafResizeCommit>, Option<Instant>)> {
-    let (due, wake) =
-        service_pending_pty_resize(&mut leaf.pending_pty_resize, now, hand_on_the_geometry);
-    let Some(pending) = due else {
-        return Ok((None, wake));
-    };
-    let local_grid = leaf.grid;
-    let conpty_grid = leaf.conpty_grid;
-    let integration = leaf.integration;
-    let commit = commit_leaf_resize(
-        &mut leaf.session,
-        leaf.pty.as_mut(),
-        ResizeReanchor {
-            pending: &mut leaf.pending_psreadline_resize_reanchor,
-            integration,
-        },
-        ReleaseGrids {
-            local: local_grid,
-            conpty: conpty_grid,
-            next: pending.grid,
-        },
-        pending.physical,
-        now,
-    )?;
-    leaf.grid = pending.grid;
-    leaf.conpty_grid = pending.grid;
-    // **A shell still being born is owed this size when it lands** (T-BIRTH-OFF-WINDOW,
-    // T-FALLBACK-OWED-RESIZE): it was asked for at the grid of its request, and nothing above
-    // could tell it. A pane's first birth and a birth-death fallback carry the same landing fact.
-    if commit.told_the_child {
-        if let Some(PaneBirth {
-            waiting: BirthWait::Shell(landing),
-            ..
-        }) = leaf.birth.as_mut()
-        {
-            landing.owed_physical = Some(pending.physical);
-        }
-        runtime::owe_birth_death_fallback_resize(leaf, pending.physical);
-    }
-    Ok((Some(commit), wake))
 }
 
 /// **Every terminal leaf of `tabs`, re-derived from its own rung and re-applied** (ticket 37) —
