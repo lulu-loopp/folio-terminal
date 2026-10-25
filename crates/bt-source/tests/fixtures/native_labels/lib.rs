@@ -190,6 +190,12 @@ impl Surface {
         let _guard = reach::Guard;
     }
 
+    /// (4) The second hop: `reach::Outer`'s `Drop` names `reach::Inner`, whose own `Drop` runs
+    /// in turn. PLANTED (in `reach::Inner`).
+    pub fn through_a_second_implicit_call(&self) {
+        let _outer = reach::Outer;
+    }
+
     /// (5) The functions of item-position macros: one by its selector, the ones of a type a path
     /// names, a `thread_local!`'s initializer. PLANTED (in `reach`), with the dynamic call and the
     /// unplaced path the type's functions write. The selector of no function of the package
@@ -202,11 +208,14 @@ impl Surface {
     }
 
     /// (6) Macro arguments the call graph does not parse: with a call, PLANTED; `msg_send!`'s
-    /// `part: argument` list, read (PLANTED in `reach`); with no call or path, PASSES. A
+    /// `part: argument` list, read — a call in a closure and in a nested macro there too (PLANTED
+    /// in `reach`, each); with no call or path, PASSES. A
     /// `macro_rules!` of the package with no literal whose expansion calls a helper. PLANTED.
     pub fn through_macro_arguments(&self, target: &Object) {
         foreign::render!(rows => reach::macro_argument_label());
         let _: () = objc2::msg_send![target, setTitle: reach::message_label()];
+        let _: () = objc2::msg_send![target, setAction: Some(1).map(|_| reach::closure_label())];
+        let _: () = objc2::msg_send![target, setToolTip: format!("{}", reach::nested_label())];
         foreign::table!(rows => columns);
         calls_helper!();
     }

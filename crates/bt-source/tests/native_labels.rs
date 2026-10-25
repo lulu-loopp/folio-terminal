@@ -25,7 +25,9 @@
 //!   function of its name (and of what a package `use` renames it from); `Owner::f` the package
 //!   functions of that type or module, refused when the package names `Owner` and none is `f` (a
 //!   variant is a constructor); a method call every package method of its name; a package
-//!   `const` or `static` named is read, refused when its initializer calls or names a path; a
+//!   `const` or `static` named is read, refused when its initializer calls, names a path or names
+//!   a value of the package; a free call no package function answers is refused when a package
+//!   `use` brings its name in or the package gives the name to something that is not a type; a
 //!   call of a binding or of a value that is not a path is refused. An item-position macro in the
 //!   scope whose tokens do not parse as items is refused by its line.
 //! * **Edges the guard cannot follow**, by kind: an ambiguous method, a call on another arm and a
@@ -53,10 +55,11 @@
 //! * **Not a label, by its place** — the closed list; any other diagnostic-looking text is a row:
 //!   - a literal inside an attribute (`#[…]`, a doc comment included);
 //!   - an ABI's name right after `extern`;
-//!   - an error text: inside the argument list of `Err(…)`, `.map_err(…)` or `.ok_or_else(…)`;
-//!   - a programmer's text: inside the argument list of `.expect(…)` or of one of
-//!     [`PROGRAMMER_MACROS`] (`panic!`, `unreachable!`, `assert!`, `assert_eq!`, `assert_ne!`,
-//!     `debug_assert!`, `debug_assert_eq!`, `debug_assert_ne!`).
+//!   - an error text: inside the argument list of one of [`ERROR_CALLS`] (`Err(…)`, `.map_err(…)`,
+//!     `.ok_or_else(…)`);
+//!   - a programmer's text: inside the argument list of one of [`PROGRAMMER_CALLS`]
+//!     (`.expect(…)`) or of one of [`PROGRAMMER_MACROS`] (`panic!`, `unreachable!`, `assert!`,
+//!     `assert_eq!`, `assert_ne!`, `debug_assert!`, `debug_assert_eq!`, `debug_assert_ne!`).
 //!
 //!   The place is the parenthesis (or macro) group the literal sits in, at any depth.
 //! * **Allowed by row, one use each**: [`ALLOWED`] — a literal that must stay, by the file it is
@@ -66,8 +69,9 @@
 //!   excuses one edge. A row no use takes is refused.
 //! * **The lists are history-checked** (`scripts/ci/check-native-labels.ps1`, against the merge
 //!   base): the four row lists only shrink, [`FILES`], [`TYPES`] and [`FUNCTIONS`] only grow,
-//!   and [`PROGRAMMER_MACROS`] only shrinks; a row added, a scope entry taken off or an exempt
-//!   macro added needs a dated `// widened` line, counting them, in a change to this grammar.
+//!   and the exempt lists [`ERROR_CALLS`], [`PROGRAMMER_CALLS`] and [`PROGRAMMER_MACROS`] only
+//!   shrink; a row added, a scope entry taken off or an exempt entry added needs a dated
+//!   `// widened` line, counting them, in a change to this grammar.
 //! * **Unreadable, refused by its line**: a literal the index holds no record of.
 //! * **The lists are checked**: an entry of [`FILES`], [`TYPES`] or [`FUNCTIONS`] that names
 //!   nothing in the index is refused, so a renamed item cannot drop out of the guard silently.
@@ -77,7 +81,8 @@
 //! A literal `bt-app` passes in (the caller's table is the subject of `bt-app`'s own runtime
 //! tests); a character literal; the expansion of a `macro_rules!` on [`MACROS`]; what a foreign
 //! function or a foreign macro's expansion does with the words; an item a derive or an attribute
-//! macro generates.
+//! macro generates; **a blanket impl** (`impl<T: Bound> Trait for T`): its self type is no name a
+//! body writes, so an implicit call that runs one is never taken in.
 //!
 //! The fixture under `tests/fixtures/native_labels/` plants each case; the last test holds
 //! `bt-platform` itself.
@@ -129,9 +134,10 @@ const FUNCTIONS: &[&str] = &[
     "toast_xml",
 ];
 
-// widened 2026-10-25 by T-NATIVE-LABELS-GUARD-REACH (+104 rows): every literal with a word is a
+// widened 2026-10-25 by T-NATIVE-LABELS-GUARD-REACH (+108 rows): every literal with a word is a
 // label and the scope is what the call graph, the implicit impls and the item-position macros
-// reach (43 ALLOWED, 39 BOUNDARY, 14 UNREAD, 8 PROGRAMMER_MACROS)
+// reach (43 ALLOWED, 39 BOUNDARY, 14 UNREAD, 3 ERROR_CALLS, 1 PROGRAMMER_CALLS,
+// 8 PROGRAMMER_MACROS)
 /// **The literals that must stay**, by the file they are written in (a path suffix) and their
 /// text as written, each with its reason: one row per literal, so a text written twice has two.
 /// The list only shrinks (`scripts/ci/check-native-labels.ps1`).
@@ -724,6 +730,15 @@ enum Place {
     Abi,
 }
 
+/// The calls whose argument list is an error text, not a label: the closed list. A name with a
+/// leading `.` is a method (`.map_err(…)`), one without a path (`Err(…)`). It only shrinks
+/// (`scripts/ci/check-native-labels.ps1`).
+const ERROR_CALLS: &[&str] = &["Err", ".map_err", ".ok_or_else"];
+
+/// The calls whose argument list is a programmer's text, not a label, spelled as
+/// [`ERROR_CALLS`]: the closed list. It only shrinks.
+const PROGRAMMER_CALLS: &[&str] = &[".expect"];
+
 /// The macros whose arguments are a programmer's text, not a label: the closed list. It only
 /// shrinks (`scripts/ci/check-native-labels.ps1`).
 const PROGRAMMER_MACROS: &[&str] = &[
@@ -786,6 +801,13 @@ fn group_place(trees: &[TokenTree], at: usize, delimiter: Delimiter) -> Place {
     let is_punct = |tree: Option<&TokenTree>, ch: char| matches!(tree, Some(TokenTree::Punct(punct)) if punct.as_char() == ch);
     let is_ident = |tree: Option<&TokenTree>, name: &str| matches!(tree, Some(TokenTree::Ident(ident)) if ident == name);
     let is_one_of = |tree: Option<&TokenTree>, names: &[&str]| matches!(tree, Some(TokenTree::Ident(ident)) if names.iter().any(|name| ident == name));
+    // A call of the list: `.name(` for a method entry, `name(` not after a `.` for a path one.
+    let is_call = |calls: &[&str]| {
+        calls.iter().any(|call| match call.strip_prefix('.') {
+            Some(method) => is_ident(before(1), method) && is_punct(before(2), '.'),
+            None => is_ident(before(1), call) && !is_punct(before(2), '.'),
+        })
+    };
     match delimiter {
         Delimiter::Bracket
             if is_punct(before(1), '#')
@@ -793,16 +815,8 @@ fn group_place(trees: &[TokenTree], at: usize, delimiter: Delimiter) -> Place {
         {
             Place::Attribute
         }
-        Delimiter::Parenthesis if is_ident(before(1), "Err") => Place::ErrorText,
-        Delimiter::Parenthesis
-            if (is_ident(before(1), "map_err") || is_ident(before(1), "ok_or_else"))
-                && is_punct(before(2), '.') =>
-        {
-            Place::ErrorText
-        }
-        Delimiter::Parenthesis if is_ident(before(1), "expect") && is_punct(before(2), '.') => {
-            Place::ProgrammerText
-        }
+        Delimiter::Parenthesis if is_call(ERROR_CALLS) => Place::ErrorText,
+        Delimiter::Parenthesis if is_call(PROGRAMMER_CALLS) => Place::ProgrammerText,
         _ if is_punct(before(1), '!') && is_one_of(before(2), PROGRAMMER_MACROS) => {
             Place::ProgrammerText
         }
@@ -1211,7 +1225,7 @@ fn macro_items(index: &Index, package: &str) -> MacroItems {
 /// an item-position macro, or a macro's arguments the graph could not parse.
 enum Read {
     /// `name(…)`.
-    Free { name: String },
+    Free { at: usize, name: String },
     /// `Owner::name(…)` or `module::name(…)`: the segment before the last, and the last.
     Assoc {
         at: usize,
@@ -1273,7 +1287,10 @@ impl<'ast> Visit<'ast> for BodyReader<'_> {
                         at,
                         what: format!("`{name}`, a binding, called"),
                     }),
-                    [name] => self.reads.push(Read::Free { name: name.clone() }),
+                    [name] => self.reads.push(Read::Free {
+                        at,
+                        name: name.clone(),
+                    }),
                     [.., owner, name] => self.reads.push(Read::Assoc {
                         at,
                         owner: owner.clone(),
@@ -1536,6 +1553,26 @@ impl<'r, 'i> Names<'r, 'i> {
             })
             .filter_map(|(_, path)| path.last().cloned())
             .collect()
+    }
+
+    /// The paths the `use` items of `module` bring in as `name`.
+    fn imports_in(&self, module: &str, name: &str) -> Vec<Vec<String>> {
+        self.index
+            .uses()
+            .iter()
+            .filter(|record| record.module_paths().contains(&module))
+            .flat_map(|record| record.names().iter())
+            .filter(|(local, _)| local == name)
+            .map(|(_, path)| path.clone())
+            .collect()
+    }
+
+    /// Whether `name` is a variant of a package enum.
+    fn is_a_variant(&self, name: &str) -> bool {
+        self.index
+            .items()
+            .iter()
+            .any(|item| item.kind() == ItemKind::Variant && item.name() == name)
     }
 
     /// Whether the package names `owner` as a type or a module.
@@ -2078,14 +2115,43 @@ fn place_reads(
     let index = names.index;
     for read in reads {
         match read {
-            Read::Free { name } => {
+            Read::Free { at, name } => {
                 let mut wanted = names.imported_as(&name);
-                wanted.push(name);
-                for name in &wanted {
-                    pass.adds.items.extend(
-                        names.callables_named(name, |record| record.type_owner().is_none()),
+                wanted.push(name.clone());
+                let mut found = false;
+                for wanted in &wanted {
+                    let callables =
+                        names.callables_named(wanted, |record| record.type_owner().is_none());
+                    found |= !callables.is_empty();
+                    pass.adds.items.extend(callables);
+                    found |= names.take_macro_item(&mut pass.adds, wanted, site.owner);
+                }
+                // No package function answers: a foreign one, or a constructor, passes; a name
+                // a `use` of the package's own brings in, or one the package gives something
+                // that is not a type, is a function this reading cannot place (a macro's).
+                let imports = names.imports_in(site.module, &name);
+                let from_the_package = imports.iter().any(|path| {
+                    path.first()
+                        .is_some_and(|first| matches!(first.as_str(), "crate" | "self" | "super"))
+                });
+                let a_package_name = imports.is_empty()
+                    && names.package_names.contains(&name)
+                    && !names.names_a_type_or_module(&name)
+                    && !names.is_a_variant(&name);
+                if !found && (from_the_package || a_package_name) {
+                    refuse(
+                        pass,
+                        guarded,
+                        index,
+                        at,
+                        site.caller,
+                        &name,
+                        "path",
+                        &format!(
+                            "an unplaced call `{name}` (the package names it, or a `use` of the \
+                             package's brings it in, and no function of the package answers)"
+                        ),
                     );
-                    names.take_macro_item(&mut pass.adds, name, site.owner);
                 }
             }
             Read::Assoc { at, owner, name } => {
@@ -2165,7 +2231,7 @@ fn place_reads(
                     let text = text_of(index, whole);
                     let initializer = text.find('=').map_or("", |equals| &text[equals + 1..]);
                     let calls = TokenStream::from_str(initializer)
-                        .is_ok_and(|stream| holds_a_call_or_path(stream, &BTreeSet::new()));
+                        .is_ok_and(|stream| holds_a_call_or_path(stream, &names.package_names));
                     if calls {
                         refuse(
                             pass,
@@ -2177,7 +2243,8 @@ fn place_reads(
                             "path",
                             &format!(
                                 "the `const` or `static` `{last}`, named from a body read by \
-                                 syntax, whose initializer calls or names a path"
+                                 syntax, whose initializer calls, names a path or names a value \
+                                 of the package"
                             ),
                         );
                     }
@@ -2554,11 +2621,14 @@ fn what_a_guarded_item_reaches_is_read() {
 }
 
 /// RED (planted) — **what runs with no call edge and what the call graph does not parse is
-/// read**: (4) a `Drop` impl of a type a reached body names; (5) the functions an
+/// read**: (4) a `Drop` impl of a type a reached body names, and the one its own body names;
+/// (5) the functions an
 /// item-position macro writes (`define_class!`), by their selector and by their type, and a
-/// `thread_local!`'s initializer, each read by syntax with its dynamic call and its unplaced path
-/// refused; (6) a macro's arguments the graph does not parse — refused when they hold a call,
-/// read as `msg_send!`'s list — and a `macro_rules!` of the package with no literal. Their twins
+/// `thread_local!`'s initializer, each read by syntax with its dynamic call, its unplaced path,
+/// its call a package `use` brings in and its `const` naming a `const` refused; (6) a macro's
+/// arguments the graph does not parse — refused when they hold a call, read as `msg_send!`'s
+/// list, a closure and a nested macro there included — and a `macro_rules!` of the package with
+/// no literal. Their twins
 /// pass: a `Drop` of a type nothing names, a class function nothing names, a foreign selector,
 /// macro arguments with no call.
 #[test]
@@ -2611,11 +2681,29 @@ fn what_runs_with_no_call_edge_is_read() {
         "`calls_helper!` is a `macro_rules!` of the package",
         "(6) a package macro with no literal",
     );
+    expect_one("\"Copy from a second drop\"", "(4) the second implicit hop");
+    expect_one(
+        "an unplaced call `made_by_a_macro`",
+        "(5) a free call a package `use` brings in that no function answers",
+    );
+    expect_one(
+        "the `const` or `static` `CHAINED`, named from a body read by syntax",
+        "(5) a `const` whose initializer names another",
+    );
+    expect_one(
+        "\"Copy from a closure\"",
+        "(6) a closure in `msg_send!`'s arguments",
+    );
+    expect_one(
+        "\"Copy from a nested macro\"",
+        "(6) a macro nested in `msg_send!`'s arguments",
+    );
     assert_eq!(
         refusals.len(),
-        9,
+        14,
         "nothing else is refused — the unnamed `Drop`, the unused class function, the foreign \
-         selector and the arguments with no call pass: {refusals:#?}"
+         selector, the foreign `swap`, the literal `const` and the arguments with no call pass: \
+         {refusals:#?}"
     );
 }
 

@@ -10,7 +10,8 @@
 # name, kind, reason) reviews it. Each row allows one use. The guard holds the tree to the lists
 # both ways (a row nothing uses is refused there); this script is the history half: it compares
 # the lists with the merge base's, so the four row lists only shrink, the scope lists `FILES`,
-# `TYPES` and `FUNCTIONS` only grow, and the exempt list `PROGRAMMER_MACROS` only shrinks. A
+# `TYPES` and `FUNCTIONS` only grow, and the exempt lists `ERROR_CALLS`, `PROGRAMMER_CALLS` and
+# `PROGRAMMER_MACROS` only shrink. A
 # list the base does not have is empty there.
 #
 # A row is its list and its columns but the reason; a reason reworded is the same row. A scope
@@ -106,7 +107,7 @@ function Read-Rows([string]$Text, [string]$Name, [int]$Arity) {
 $lists = [ordered]@{ ALLOWED = 3; MACROS = 2; BOUNDARY = 4; UNREAD = 4 }
 
 # The lists of names: the scope only grows, the exempt list only shrinks.
-$names = [ordered]@{ FILES = "grows"; TYPES = "grows"; FUNCTIONS = "grows"; PROGRAMMER_MACROS = "shrinks" }
+$names = [ordered]@{ FILES = "grows"; TYPES = "grows"; FUNCTIONS = "grows"; ERROR_CALLS = "shrinks"; PROGRAMMER_CALLS = "shrinks"; PROGRAMMER_MACROS = "shrinks" }
 
 # The entries of one list of names (`const X: &[&str] = &[ "a", "b" ];`); none when the text
 # has no such list.

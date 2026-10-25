@@ -1126,7 +1126,10 @@ functions, `static`s and `const`s an item-position macro writes (`define_class!`
 or by a path — read by syntax: a free call takes in every package function of its
 name, `Owner::f` the functions of that type or module (refused when the package names
 `Owner` and none is `f`), a method call every package method of its name, and a call
-of a binding is refused; an item-position macro in the scope whose tokens do not parse
+of a binding is refused, and so is a free call no package function answers whose name
+a package `use` brings in or the package gives to something that is not a type; a
+`const` named there whose initializer calls, names a path or names a package value is
+refused; an item-position macro in the scope whose tokens do not parse
 as items is refused by its line. An ambiguous, other-arm or dynamic call with
 candidates is followed into every candidate but the ones a `BOUNDARY` row drops
 (caller, name called, candidate, reason: a `.push` on a `Vec` never runs a
@@ -1143,15 +1146,17 @@ lands in an expansion the reading cannot see. **A string literal that holds a le
 is a label** — plain, raw, byte or C, each piece of `concat!`, read with its `&`
 mnemonics taken out and its ends trimmed, so `"&Copy"`, `" copy"` and `"Save &"` are
 labels too — and is refused, except by its place, a closed list: inside an attribute
-(a doc comment, a class or link name), right after `extern` (an ABI), inside `Err(…)`,
-a `.map_err(…)` or an `.ok_or_else(…)` (an error text), and inside `.expect(…)` or a
-macro of the guard's `PROGRAMMER_MACROS` (`panic!`, `unreachable!`, the `assert`
-macros: a programmer's text). Any other diagnostic-looking text is a row. A literal
+(a doc comment, a class or link name), right after `extern` (an ABI), inside a call of
+the guard's `ERROR_CALLS` (`Err(…)`, `.map_err(…)`, `.ok_or_else(…)`: an error text),
+and inside a call of its `PROGRAMMER_CALLS` (`.expect(…)`) or a macro of its
+`PROGRAMMER_MACROS` (`panic!`, `unreachable!`, the `assert` macros: a programmer's
+text). Any other diagnostic-looking text is a row. A literal
 that must stay is a row of the guard's `ALLOWED` (file, text as written, reason), one
 row per literal. Every row allows one use and a row nothing uses is refused. The lists
 are held to the merge base's by `scripts/ci/check-native-labels.ps1` (its plants in
 `check-native-labels-tests.ps1`): the four row lists only shrink, the `FILES`,
-`TYPES` and `FUNCTIONS` scope only grows and `PROGRAMMER_MACROS` only shrinks; an
+`TYPES` and `FUNCTIONS` scope only grows and the exempt lists `ERROR_CALLS`,
+`PROGRAMMER_CALLS` and `PROGRAMMER_MACROS` only shrink; an
 honest move of an `ALLOWED` row to another file passes (`moved-rows.ps1`), and a row
 added, a scope entry taken off or an exempt macro added needs a new dated
 `// widened <date> by <ticket> (+<n> rows): <what>` line, counting them, in a change
@@ -1167,7 +1172,9 @@ the guard's `FILES`, `TYPES` or `FUNCTIONS` that names nothing in the index is r
 by name, so a renamed item cannot drop out silently, and a literal the index holds no
 record of is refused by its line. Not seen, as limits: a literal `bt-app` passes in
 (the caller's table is `bt-app`'s runtime tests' subject), a character literal, the
-expansion of a macro on `MACROS`, an item a derive or an attribute macro generates, and
+expansion of a macro on `MACROS`, an item a derive or an attribute macro generates, a
+blanket impl (`impl<T: Bound> Trait for T`, whose self type no body names, so an
+implicit call running one is never taken in), and
 what a foreign function or a foreign macro's expansion does with the words.
 
 ## Machine-independent paths

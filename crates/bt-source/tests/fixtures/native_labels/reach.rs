@@ -1,5 +1,8 @@
 //! What `Dialog` reaches outside the guarded scope: no list names this module.
 
+use crate::made_by_a_macro;
+use std::mem::swap;
+
 /// (1) A label defined outside the scope. PLANTED where `Dialog::from_a_const` names it.
 pub const OUTSIDE_LABEL: &str = "Copy from a const";
 
@@ -127,6 +130,19 @@ objc2::define_class!(
             let _ = crate::Dialog::missing();
             label()
         }
+
+        /// (5) A free call a package `use` brings in that no function of the package answers (a
+        /// macro's, say). PLANTED. A foreign one a `use` brings in. PASSES.
+        fn generated(&self) {
+            made_by_a_macro();
+            swap(&mut 1, &mut 2);
+        }
+
+        /// (5) A `const` whose initializer names another: the other is not read. PLANTED. A
+        /// `const` whose initializer is a literal. PASSES.
+        fn from_consts(&self) -> [&'static str; 2] {
+            [CHAINED, PLAIN]
+        }
     }
 );
 
@@ -153,4 +169,41 @@ pub fn macro_argument_label() -> &'static str {
 /// (6) Called from `msg_send!`'s argument list, which is read. PLANTED.
 pub fn message_label() -> &'static str {
     "Copy from a message"
+}
+
+/// (5) Named from `Panel::from_consts`: its initializer names `CHAINED_LABEL`. PLANTED there.
+pub const CHAINED: &str = CHAINED_LABEL;
+
+/// Not read: `CHAINED`'s refusal stands for it.
+pub const CHAINED_LABEL: &str = "Copy from a chained const";
+
+/// (5) A literal initializer with no word. PASSES.
+pub const PLAIN: &str = "*.*";
+
+/// (4) The first hop: its `Drop` names `Inner`.
+pub struct Outer;
+
+impl Drop for Outer {
+    fn drop(&mut self) {
+        let _inner = Inner;
+    }
+}
+
+/// (4) The second hop. PLANTED.
+pub struct Inner;
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let _ = "Copy from a second drop";
+    }
+}
+
+/// (6) Called from a closure inside `msg_send!`'s arguments. PLANTED.
+pub fn closure_label() -> &'static str {
+    "Copy from a closure"
+}
+
+/// (6) Called from a macro nested inside `msg_send!`'s arguments. PLANTED.
+pub fn nested_label() -> &'static str {
+    "Copy from a nested macro"
 }
