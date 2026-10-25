@@ -8,12 +8,15 @@ use crate::{
     LeafId, MenuPaint, OwnTrigger, PAGE_SPINNER_STROKE_LOGICAL_PX, PointerTarget, PopoverTrigger,
     Popup, PopupOwner, PopupsUp, PreviewDocument, PreviewHeadFrame, PreviewImageState, PreviewPane,
     PreviewRailFrame, PreviewSurface, RevealedFoot, RowActivation, RowHost, Runtime, TabRename,
-    TabSurface, TermMenuState, card_trace, chevron_turn_target, display_title, dump_chrome_frame,
-    favicon, file_menu_powers, files, files_float_content_height, files_row_activation,
-    files_row_menu_subject, float, float_viewport_rect, git, git_graph, git_panel, hang_watch,
-    i18n, indeterminate_start_milliturns, marks, menubar, page_keepsake_icon, popup_owner, preview,
-    preview_select, profiles, refused_preview_card, restore, revealable_preview_file, risen_frame,
-    seats, shown_address, update, webhost, webnav,
+    TabSurface, TermMenuState, card_trace, display_title, favicon, files, files_row_activation,
+    files_row_menu_subject, float, git, git_graph, git_panel, hang_watch, i18n,
+    indeterminate_start_milliturns, marks, menubar, page_keepsake_icon, popup_owner, preview,
+    preview_select, profiles, restore, revealable_preview_file, risen_frame, seats, shown_address,
+    update, webhost, webnav,
+};
+use crate::{
+    FilesRoot, RESIZING_CARD_TRANSITION, ReferenceCard, RevealTween, TerminalReference,
+    entry_doors, files_root_of, pane_folder,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -3640,6 +3643,432 @@ impl<B: Backend> Runtime<'_, B> {
         }
         Ok(())
     }
+
+    /// **B22 — bring the resizing cards up to date with the hand.**
+    ///
+    /// Derived from [`WindowRuntime::divider_drag`] rather than mirrored into the tween
+    /// at every place a drag starts and ends, and for the reason `refresh_chrome`
+    /// already gives about `body.dragging`: a drag ends by four doors — the
+    /// button coming up, Esc, losing the mouse capture, and the layout being torn
+    /// down under it — and a mirror goes wrong the moment a fifth is added and
+    /// forgets. There is exactly one fact here ("is a divider being held?"), and
+    /// this reads it.
+    ///
+    /// [`RevealTween::retarget`] does the rest: a grab aims the transition at 1.0,
+    /// a release aims it at 0.0, and a reversal mid-flight turns around from where
+    /// the cards actually are rather than from an end they never reached — which
+    /// is what a CSS transition interrupted mid-flight does, and the whole reason
+    /// the same type serves the pin, the dock box and the arriving pane.
+    ///
+    /// The split is dropped in two cases and only two: the run-down has finished,
+    /// or the split is no longer in the solve. The second is not a tidy-up — a
+    /// divider that was released and then had its pane closed leaves a card
+    /// running down around a rectangle that no longer exists, and the honest
+    /// picture of that is no card at all.
+    fn sync_resizing_cards(&mut self, now: Instant) {
+        let motion = self.app.motion;
+        if let Some(drag) = self.held_divider_drag().copied() {
+            self.window.resizing_card_split = Some(drag.split);
+            self.window
+                .resizing_card_transition
+                .retarget(1.0, now, motion);
+            return;
+        }
+        let Some(split) = self.window.resizing_card_split else {
+            return;
+        };
+        self.window
+            .resizing_card_transition
+            .retarget(0.0, now, motion);
+        let (inset, moving) = self.window.resizing_card_transition.sample(now, motion);
+        let still_there = self
+            .seats
+            .split_slots(&self.seat_layout)
+            .iter()
+            .any(|slot| slot.id == split);
+        if (!moving && inset <= 0.0) || !still_there {
+            self.window.resizing_card_split = None;
+            self.window.resizing_card_transition = RevealTween::over(RESIZING_CARD_TRANSITION);
+        }
+    }
+
+    /// The box a trigger occupies **right now** (G86/E60).
+    ///
+    /// Re-derived from this frame's geometry every time rather than remembered
+    /// from the press, and E60 is the judgement it comes from: a press bubbles
+    /// and may re-render, a re-rendered control is a *detached* control, and a
+    /// detached node measures `(0, 0)` — which is how the mock-up's menus kept
+    /// opening in the window's top-left corner, three separate times. Asking the
+    /// live geometry by identity is the shape that cannot have that bug.
+    pub(crate) fn trigger_rect(&self, trigger: float::FloatTrigger) -> Option<[f32; 4]> {
+        match trigger {
+            float::FloatTrigger::Tab(id) => {
+                let index = self.window.tabs.iter().position(|tab| tab.id == id)?;
+                let scale = self.window.renderer.scale_factor() as f32;
+                match self.window.rail.layout {
+                    seats::TabLayoutMode::Vertical => {
+                        let rail = self.rail_geometry_now(Instant::now())?;
+                        rail.tabs.get(index).and_then(|row| row.files)
+                    }
+                    _ => {
+                        let (width, _) =
+                            self.window.renderer.presentation_geometry().swapchain_size;
+                        seats::tab_strip_geometry(
+                            width as f32,
+                            scale,
+                            self.platform_chrome(),
+                            &self.tab_trailers(Instant::now()),
+                            self.window.active_tab,
+                            self.window.tab_scroll,
+                        )
+                        .tabs
+                        .get(index)
+                        .and_then(|tab| tab.files)
+                    }
+                }
+            }
+            // **Two rectangles, one question** (user proposal, Claude 认可
+            // 2026-08-25): the folder is in the head on a split pane and beside
+            // the corner ghost on a lone one, and `seats::pane_files_box`
+            // answers which. Asking `pane_head_geometry` here regardless is what
+            // this used to do, and on a headless pane it measured a head that is
+            // not drawn — an anchor in empty air, which is E60's own bug wearing
+            // a different hat.
+            float::FloatTrigger::Pane(leaf) => {
+                if self.window.tabs[self.window.active_tab].id != leaf.tab {
+                    return None;
+                }
+                let scale = self.window.renderer.scale_factor() as f32;
+                seats::pane_files_box(
+                    &self.seats,
+                    &self.seat_layout,
+                    leaf.seat,
+                    scale,
+                    self.window.search.seat(),
+                )
+            }
+            // **The run the folder is printed on**, read back off the frame that
+            // is drawing it now — E60's own rule reaching the one trigger that
+            // is not a control at all. A reference that has scrolled away, been
+            // overwritten, or stopped being a folder answers `None`, which is
+            // how [`Self::advance_float`] learns that the peek hanging off it
+            // has nothing left to hang from.
+            float::FloatTrigger::Reference { leaf, cell } => {
+                if self.window.tabs[self.window.active_tab].id != leaf.tab {
+                    return None;
+                }
+                let reference = self.terminal_reference_at(leaf.seat, cell)?;
+                matches!(reference.card, ReferenceCard::Folder(_)).then_some(reference.rect)
+            }
+        }
+    }
+
+    /// The folder a trigger speaks for, read at the instant it is asked.
+    ///
+    /// **Captured, never followed** (A7/R-g): §7.1.2 says the root is taken from
+    /// the cwd of the terminal the trigger belongs to *at summon time*, and the
+    /// float then stays there. A tree that re-roots itself as you `cd` is, in
+    /// this design's own words, 整个生态独立判定最惊吓的行为.
+    fn trigger_root(&self, trigger: float::FloatTrigger) -> FilesRoot {
+        // **A reference names its own folder**, so it does not go through the
+        // cwd below at all: the two buttons speak for a *terminal* and borrow
+        // the place that terminal is standing in, while this one speaks for a
+        // path that is written on the glass. Read back off the frame for
+        // `trigger_rect`'s reason, and the same `None` — a reference that has
+        // gone — falls through to the ordinary answer rather than inventing one,
+        // because by then the rectangle has already refused and no window will
+        // be opened with it.
+        if let float::FloatTrigger::Reference { leaf, cell } = trigger
+            && let Some(TerminalReference {
+                card: ReferenceCard::Folder(path),
+                ..
+            }) = self.terminal_reference_at(leaf.seat, cell)
+        {
+            return FilesRoot::known(path.display().to_string());
+        }
+        let seat = match trigger {
+            float::FloatTrigger::Tab(id) => self
+                .window
+                .tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .filter(|tab| tab.seats.is_lone_terminal())
+                .map(|tab| (tab, tab.seats.identity())),
+            float::FloatTrigger::Pane(leaf) | float::FloatTrigger::Reference { leaf, .. } => self
+                .window
+                .tabs
+                .iter()
+                .find(|tab| tab.id == leaf.tab)
+                .map(|tab| (tab, leaf.seat)),
+        };
+        files_root_of(
+            seat.and_then(|(tab, seat)| tab.sessions.get(&seat))
+                .map(|leaf| leaf.folder(&pane_folder::SystemProcessFolders)),
+            &bt_pty::SystemShellEnvironment,
+        )
+    }
+
+    /// **The pictures the panes under a modal draw** — one per page the dialog
+    /// took off the glass, at the rectangle the page itself had (§7.8 ⑩).
+    ///
+    /// Empty on every frame with no dialog up, and empty for a page whose frame
+    /// has not arrived — the first frame or two of a dialog, a page that has
+    /// never been photographed, a capture the engine refused, a pane past the
+    /// ceiling. What those all draw is the pane's own ground with the scrim over
+    /// it, which is what this defect's *first* frame looks like and is the
+    /// honest picture: this window does not invent pixels for a page it has
+    /// never seen.
+    ///
+    /// Floats are left out here and drawn on their own layer — see
+    /// [`PageKeepsake::float`].
+    fn page_keepsake_icons(&self) -> Vec<bt_render::ChromeIcon> {
+        self.window
+            .page_keepsakes
+            .iter()
+            .filter(|keepsake| keepsake.float.is_none())
+            .filter_map(|keepsake| {
+                let picture = self.window.web_thumbs.frame(keepsake.leaf)?;
+                Some(page_keepsake_icon(picture, keepsake.rect))
+            })
+            .collect()
+    }
+}
+
+/// **What the host behind a file menu can carry out** (adversarial review
+/// 2026-09-11, row D7) — [`files_row_menu_subject`]'s other half.
+///
+/// The subject says what the menu is about and this says who would have to do
+/// it, and [`profiles::file_menu`] needs both: a floating tree draws the same
+/// rows a docked column draws, but [`Runtime::open_files_row_rename`],
+/// [`Runtime::open_files_row_new`] and [`Runtime::delete_files_row`] all answer
+/// only [`RowHost::Column`] — an inline editor is measured into a column's own
+/// box and a refusal is reported on that column, and a float has neither.
+///
+/// **Derived from the row rather than stored beside it.** The host that would
+/// act is already written down once, in [`FileMenuTarget::row`], and
+/// [`Runtime::run_file_menu_row`] dispatches on that same field — so reading the
+/// powers out of it is what makes "the rows this menu shows" and "the host that
+/// will be handed them" one fact rather than two that can drift.
+///
+/// A menu with no row behind it — a preview's breadcrumb, the `…` chip — has no
+/// host to ask about and gets the powerless set, which is right in both
+/// directions: neither of those faces has a row that writes.
+pub(crate) fn file_menu_powers(row: Option<&FileMenuTreeRow>) -> profiles::FileMenuPowers {
+    profiles::FileMenuPowers {
+        writes_rows: matches!(
+            row,
+            Some(FileMenuTreeRow {
+                host: RowHost::Column(_),
+                ..
+            })
+        ),
+    }
+}
+
+/// **The card a surface with nothing to draw wears** (owner's ruling
+/// 2026-09-12) — its sentence, and under it the one way out.
+///
+/// One shape for the two pages that reach it, and one function so that they
+/// cannot drift apart: the file nothing here reads — a `folio.exe`, the
+/// mock-up's own `.pv-unknown` — and the file this window *refused to draw*,
+/// which said its sentence in the middle of an empty pane and offered nothing.
+/// The owner's ruling is that the second is the first: a preview the pane cannot
+/// show hands the file to the machine exactly as an executable does. So the
+/// caller brings the sentence and the verdict, and everything else about the
+/// card — the mark, the button's caption, where the button is drawn and what
+/// pressing it means — is decided here, once.
+///
+/// `offers_the_default_app` is the caller's own answer and not a constant,
+/// because R1-12 is still true of both pages: a refusal about *where* a file is
+/// rather than about what is in it has nothing the machine's handler could be
+/// offered for, and the absence travels as an absence so the layout takes the
+/// row back rather than leaving a hole where a control was.
+pub(crate) fn refused_preview_card(
+    notice: String,
+    offers_the_default_app: bool,
+    open_label: &str,
+) -> CardWords {
+    CardWords {
+        notice,
+        address: String::new(),
+        address_line: String::new(),
+        detail: String::new(),
+        detail_lines: Vec::new(),
+        verb: offers_the_default_app.then(|| open_label.to_owned()),
+        mark: marks::ChromeMark::File,
+        // Not a page's fault: this button hands a *file* to the system, which is
+        // where the press goes.
+        fault: false,
+        width: 0.0,
+    }
+}
+
+/// The ground a float may stand on: the client area with the title bar taken
+/// off the top (user ruling 2026-08-12).
+///
+/// The strip is measured with the same `(logical * scale).round()` the title bar
+/// is *drawn* with, because the two have to be the same edge — a float allowed
+/// to start half a pixel higher than the caption ends is a float that can take
+/// the drag band away, which is the one thing the ruling forbids.
+///
+/// A window shorter than its own caption keeps a one-pixel floor, mirroring
+/// `seats.rs`'s own guard: an inverted rectangle would let every clamp below it
+/// resolve to nonsense, and the tiny-window ladder already promises the strip
+/// degrades rather than turns inside out.
+pub(crate) fn float_viewport_rect(width: u32, height: u32, scale: f32) -> [f32; 4] {
+    let height = height as f32;
+    let caption = (bt_render::WINDOW_TITLE_BAR_LOGICAL_PX * scale)
+        .round()
+        .min((height - 1.0).max(0.0));
+    [0.0, caption, width as f32, height]
+}
+
+/// How tall a floating **tree** wants to be — its rows, or the kind's own
+/// maximum while it still has no idea how many rows there are.
+///
+/// # The bare strip in the corner (user report, 2026-08-13)
+///
+/// Every float is summoned with an empty [`files::DirCache`] — `open_float`
+/// hands `DirCache::default()` in by construction, because a peek is a fresh
+/// throwaway view of a tree (G81) — so on the frame the window is placed,
+/// `tree_view` has exactly one row in it: the `Loading` notice standing in for
+/// however many names the worker is about to send. Sizing to that row opened
+/// every hover peek and every folder button as a title bar with a foot under it
+/// and nothing in between, hard against whichever corner the clamp pushed it
+/// into, until the answer came back.
+///
+/// The fix is **not** a second sizing path and pointedly not a minimum: the one
+/// [`float::float_opening_size`] is still the only thing that turns a content
+/// height into a frame. What changes is the content height it is asked about. A
+/// view that is still loading has no content height to give, and the honest
+/// stand-in for "as many rows as this could turn out to be" is the most rows
+/// this window would ever be allowed to show — [`float::float_height_cap`] —
+/// after which [`Runtime::resize_floats_to_content`] shrinks it to the real
+/// answer through that very same door the moment the rows land. A window that
+/// opens at its cap and settles down is the ordinary shape of `height: auto`
+/// arriving late; a window that opens as a strip and grows is a window that was
+/// never the size it said it was.
+/// **A window on its Git page opens at that cap too** (user ruling,
+/// 2026-08-19), which is why `git_page` is asked rather than derived from
+/// `state.view`: whether that page is *reachable* is the master switch's answer
+/// and this function is in no position to read a setting.
+///
+/// It is the same stand-in for a sharper version of the same reason. A tree that
+/// has not settled has no content height *yet*; a Git page has none this
+/// function could ever take — its rows are six different heights and the tallest
+/// of them is measured in a font held by the renderer — and a repository's page
+/// is longer than a window may be in every case anybody has looked at.
+/// [`Runtime::resize_floats_to_content`] would shrink it through this very door
+/// on the day that stops being true.
+pub(crate) fn files_float_content_height(
+    state: &seats::FilesLeafState,
+    cache: &files::DirCache,
+    git_page: bool,
+    viewport: [f32; 4],
+    scale: f32,
+) -> f32 {
+    if git_page {
+        return float::float_height_cap(viewport, scale, float::FloatSizing::files());
+    }
+    let view = files::tree_view(state, cache);
+    if !view.settled() {
+        return float::float_height_cap(viewport, scale, float::FloatSizing::files());
+    }
+    float::float_height_for_body(
+        seats::files_tree_content_height(view.rows.len(), scale),
+        scale,
+    )
+}
+
+/// **Diagnostic scaffolding: write this frame's chrome to a file.**
+///
+/// Off unless `BT_CHROME_DUMP` names a path, and then every rebuild of the seat
+/// chrome appends one block to it: each quad's rectangle and ink, each sprite's
+/// mark, rectangle, ink and opacity, each label's rectangle, ink and text. Run
+/// the window with it set, reproduce whatever is on screen that should not be,
+/// and the offending channel names itself — a colour that is in no palette entry,
+/// or a mark drawn in a box that belongs to another pane.
+///
+/// It exists because a picture cannot be grepped. The maroon chip reported over
+/// the files tree on 2026-08-13 was chased through the palette, the tooltip, the
+/// selection inks and every `ChromeMark` variant by reading code, and none of
+/// them matched the pixels — at which point the honest move is to make the frame
+/// say what it contains rather than to keep guessing at it.
+///
+/// Appends rather than truncates, so the frames either side of a gesture are both
+/// in the file; a run that wants a clean one deletes it first. Failures are
+/// swallowed whole: a diagnostic that can take the window down with it is a
+/// second bug wearing the first one's clothes.
+fn dump_chrome_frame(chrome: &seats::ChromeGroup) {
+    let Some(path) = entry_doors::installed().chrome_dump.clone() else {
+        return;
+    };
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let ink = |color: [u8; 3]| format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]);
+    let _ = writeln!(
+        out,
+        "--- chrome frame: {} quads, {} sprites, {} labels",
+        chrome.quads.len(),
+        chrome.sprites.len(),
+        chrome.labels.len()
+    );
+    for quad in &chrome.quads {
+        // The surface class is printed because a quad that *is* the window and a
+        // quad struck on one are the same four numbers and the same colour on
+        // screen until the window goes translucent — which is exactly the report
+        // this line was added for (§7.1.6c-4f).
+        let _ = writeln!(
+            out,
+            "quad   {:?} {} {:?}",
+            quad.rect,
+            ink(quad.color),
+            quad.surface
+        );
+    }
+    for sprite in &chrome.sprites {
+        let _ = writeln!(
+            out,
+            "sprite {:?} {} opacity={:.3} grayscale={} mark={:?}",
+            sprite.rect,
+            ink(sprite.color),
+            sprite.opacity,
+            sprite.grayscale,
+            sprite.mark
+        );
+    }
+    for label in &chrome.labels {
+        let _ = writeln!(
+            out,
+            "label  {:?} {} {:?}",
+            label.rect,
+            ink(label.color),
+            label.text
+        );
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write as _;
+        let _ = file.write_all(out.as_bytes());
+    }
+}
+
+/// **Where the `˅`'s turn is aimed** — `true` for "all the way over".
+///
+/// §7.1.6e's criterion applied to the *clock* rather than to the picture, and
+/// read from the one place that states it
+/// ([`profiles::MenuSide::turns_the_chevron`]). Hiding the angle at paint time
+/// would be enough to stop the lie, and would still leave a tween running for
+/// 140ms, asking for a repaint on each of its frames, on its way to a number no
+/// surface is going to draw.
+///
+/// `None` is not a third rule: a window with no new-tab button on screen has no
+/// arrow to aim.
+pub(crate) fn chevron_turn_target(open: bool, side: Option<profiles::MenuSide>) -> bool {
+    open && side.is_some_and(profiles::MenuSide::turns_the_chevron)
 }
 
 /// **The menu verb's doors are the keystroke's** ([`menubar::ClipboardDoors`]).

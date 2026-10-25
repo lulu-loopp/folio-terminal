@@ -44,15 +44,22 @@ pub(crate) use attention::{
 };
 #[cfg(test)]
 pub(crate) use clipboard::{
-    clear_copied_selection, input_line_needs_a_space_first, paste_answer_text, paste_body,
-    paste_card_step, paste_offer_is_kept, paste_target_is_live, pending_paste_in,
-    prepare_dropped_paste, selection_to_copy, stage_paste, take_pending_paste,
+    clear_copied_selection, clipboard_focus_of, glass_allows_a_text_write,
+    input_line_needs_a_space_first, paste_answer_text, paste_body, paste_card_step,
+    paste_offer_is_kept, paste_target_is_live, paste_text, pending_paste_in,
+    prepare_clipboard_paste, prepare_dropped_paste, selection_to_copy, stage_paste,
+    take_pending_paste,
 };
 #[cfg(test)]
 pub(crate) use diagnostics::resolved_theme_change;
 #[cfg(test)]
 pub(crate) use dpi::{
     apply_tabs_leaf_metrics, resize_worth_solving, take_psreadline_resize_reanchor_input,
+};
+#[cfg(test)]
+pub(crate) use floats::{
+    chevron_turn_target, file_menu_powers, files_float_content_height, float_viewport_rect,
+    refused_preview_card,
 };
 #[cfg(test)]
 pub(crate) use git::{

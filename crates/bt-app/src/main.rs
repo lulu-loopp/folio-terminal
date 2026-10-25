@@ -290,10 +290,7 @@ use bt_doc::Bias;
 #[cfg(test)]
 use bt_persist::WindowStateV1;
 use bt_platform::admission::{WaitToken, doors};
-use bt_pty::{
-    OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PSREADLINE_PASTE_INPUT, PtyError, PtySession,
-    PtySize,
-};
+use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtyError, PtySession, PtySize};
 use bt_render::{
     ChromePalette, CursorStyle, DEVICE_REBUILD_ATTEMPTS, DeviceLossPilot, Flight, FrameSource,
     FrameTrigger, GpuContext, GridSize, ImeCursorArea, LatestFrameSlot, LostDevice,
@@ -322,19 +319,22 @@ use runtime::platform_pointer_of;
 use runtime::{
     a_capture_still_holds_its_pointer, a_page_is_off_the_glass, a_page_still_has_a_pane,
     a_page_was_replaced, a_retirement_happens_on_this_turn, answer_attention_in,
-    apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels, clear_copied_selection,
-    drain_may_take_another_slice, file_peek_promotion, float_git_page_shown, git_answer_notice,
-    git_full_path, git_roots_on_glass, git_surfaces_the_kernel_moved, git_surfaces_wanting_reread,
-    graph_key_of, hole_for, in_drain_feed_turn, input_line_needs_a_space_first,
-    let_go_unnamed_peek_records, local_image_activation, merge_notice_card, next_attention_stop,
-    paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept, paste_target_is_live,
-    peek_body_kind, peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
+    apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels, chevron_turn_target,
+    clear_copied_selection, clipboard_focus_of, drain_may_take_another_slice, file_menu_powers,
+    file_peek_promotion, files_float_content_height, float_git_page_shown, float_viewport_rect,
+    git_answer_notice, git_full_path, git_roots_on_glass, git_surfaces_the_kernel_moved,
+    git_surfaces_wanting_reread, glass_allows_a_text_write, graph_key_of, hole_for,
+    in_drain_feed_turn, input_line_needs_a_space_first, let_go_unnamed_peek_records,
+    local_image_activation, merge_notice_card, next_attention_stop, paste_answer_text, paste_body,
+    paste_card_step, paste_offer_is_kept, paste_target_is_live, paste_text, peek_body_kind,
+    peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
     peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
-    prepare_dropped_paste, preview_body_bar, profile_menu_anchor, raise_cancelled_quit_card_on,
-    recall_flash, reference_card, reference_run_rect, remember_decode, rescan_leaf_for_search,
-    resize_worth_solving, resolved_theme_change, restart_seed, revived_page_of,
-    seat_holds_the_keyboard, selection_to_copy, should_copy_on_select_release, stage_paste,
-    step_leaf_text_scale, stepped_command_mark, tab_surface_tip_boxes, take_pending_paste,
+    prepare_clipboard_paste, prepare_dropped_paste, preview_body_bar, profile_menu_anchor,
+    raise_cancelled_quit_card_on, recall_flash, reference_card, reference_run_rect,
+    refused_preview_card, remember_decode, rescan_leaf_for_search, resize_worth_solving,
+    resolved_theme_change, restart_seed, revived_page_of, seat_holds_the_keyboard,
+    selection_to_copy, should_copy_on_select_release, stage_paste, step_leaf_text_scale,
+    stepped_command_mark, tab_surface_tip_boxes, take_pending_paste,
     take_psreadline_resize_reanchor_input, terminal_link_answers_a_press, tooltip_anchor_for,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
@@ -1225,51 +1225,6 @@ impl PasteFacts {
     }
 }
 
-/// **The one rule for whether a paste asks** (owner's rulings 2026-09-22, 0.4.4 ticket 02).
-///
-/// `setting on ∧ payload was text ∧ !bracketed ∧ more than one line`, with ticket 03's PowerShell
-/// road standing in front of the question. The cheap facts are read first, so a bracketed paste
-/// or a path is never scanned, and a single line is scanned once and allocates nothing.
-fn paste_road(text: &str, facts: PasteFacts) -> PasteRoad {
-    if !facts.clipboard_text || facts.bracketed {
-        return PasteRoad::AsTyped;
-    }
-    let lines = input::pasted_line_count(text);
-    if lines <= 1 {
-        return PasteRoad::AsTyped;
-    }
-    if facts.powershell_prompt_open && facts.through_conpty {
-        return PasteRoad::InputLine;
-    }
-    if facts.ask {
-        PasteRoad::Ask { lines }
-    } else {
-        PasteRoad::AsTyped
-    }
-}
-
-/// **What a multi-line paste into a PowerShell prompt writes** (0.4.4 ticket 03) — one write,
-/// whichever of the spike's two proven roads the text needs.
-///
-/// * **C1, the clipboard road** — the one byte [`PSREADLINE_PASTE_INPUT`] (Ctrl+V), and
-///   PSReadLine reads the clipboard itself and inserts the block without accepting it. Taken
-///   when [`input::psreadline_pastes_it_unchanged`]: what lands is then what Folio's cleanup
-///   would have sent. Only [`paste_road`] sends a paste here, and it does so only for the
-///   clipboard's own text, so the shell re-reads the very text Folio read — never a path Folio
-///   spelled or a picture it saved. **A known limit, accepted** (2026-09-23 spike, A4): a third
-///   program that rewrites the clipboard in the ~20 ms between this write and the shell's read
-///   gets its text pasted instead; Folio does not read the clipboard a second time to check.
-/// * **C2, Folio's own bytes** — [`input::input_line_bytes`]: today's sanitized text with every
-///   break as a Shift+Enter record. Taken for text Folio has to change (a control character it
-///   drops, a lone `\r` PSReadLine would delete), because C1 would bypass that cleanup.
-fn powershell_input_line(text: &str) -> std::borrow::Cow<'static, [u8]> {
-    if input::psreadline_pastes_it_unchanged(text) {
-        std::borrow::Cow::Borrowed(PSREADLINE_PASTE_INPUT)
-    } else {
-        std::borrow::Cow::Owned(input::input_line_bytes(text))
-    }
-}
-
 /// **A multi-line paste waiting for its answer** — the one fact the paste card is a projection of
 /// (0.4.4 ticket 02).
 ///
@@ -1316,21 +1271,6 @@ impl PendingPaste {
     /// card opened on (owner's ruling 2026-09-23).
     fn focus(&self) -> PasteAnswer {
         self.moved_focus.unwrap_or_else(|| self.default_answer())
-    }
-}
-
-/// **The mark a line of this shell ends with when its command goes on to the next line** (0.4.4
-/// ticket 45): cmd's `^`, PowerShell's backtick, a POSIX shell's and fish's backslash. Nushell
-/// has none (a command spans lines inside brackets, not after a mark), and an agent's prompt is
-/// not a shell.
-fn line_continuation_mark(grammar: shell_literal::ShellGrammar) -> Option<char> {
-    match grammar {
-        shell_literal::ShellGrammar::Cmd => Some('^'),
-        shell_literal::ShellGrammar::PowerShell => Some('`'),
-        shell_literal::ShellGrammar::Posix
-        | shell_literal::ShellGrammar::Fish
-        | shell_literal::ShellGrammar::Csh => Some('\\'),
-        shell_literal::ShellGrammar::Nushell | shell_literal::ShellGrammar::Agent => None,
     }
 }
 
@@ -10967,37 +10907,6 @@ fn files_row_menu_subject(kind: files::RowKind) -> Option<profiles::FileMenuSubj
             Some(profiles::FileMenuSubject::Folder { expanded: open })
         }
         files::RowKind::Cycle | files::RowKind::Notice(_) => None,
-    }
-}
-
-/// **What the host behind a file menu can carry out** (adversarial review
-/// 2026-09-11, row D7) — [`files_row_menu_subject`]'s other half.
-///
-/// The subject says what the menu is about and this says who would have to do
-/// it, and [`profiles::file_menu`] needs both: a floating tree draws the same
-/// rows a docked column draws, but [`Runtime::open_files_row_rename`],
-/// [`Runtime::open_files_row_new`] and [`Runtime::delete_files_row`] all answer
-/// only [`RowHost::Column`] — an inline editor is measured into a column's own
-/// box and a refusal is reported on that column, and a float has neither.
-///
-/// **Derived from the row rather than stored beside it.** The host that would
-/// act is already written down once, in [`FileMenuTarget::row`], and
-/// [`Runtime::run_file_menu_row`] dispatches on that same field — so reading the
-/// powers out of it is what makes "the rows this menu shows" and "the host that
-/// will be handed them" one fact rather than two that can drift.
-///
-/// A menu with no row behind it — a preview's breadcrumb, the `…` chip — has no
-/// host to ask about and gets the powerless set, which is right in both
-/// directions: neither of those faces has a row that writes.
-fn file_menu_powers(row: Option<&FileMenuTreeRow>) -> profiles::FileMenuPowers {
-    profiles::FileMenuPowers {
-        writes_rows: matches!(
-            row,
-            Some(FileMenuTreeRow {
-                host: RowHost::Column(_),
-                ..
-            })
-        ),
     }
 }
 
@@ -20822,44 +20731,6 @@ struct PreviewHeadFrame {
     content: seats::PreviewHeadContent<'static>,
 }
 
-/// **The card a surface with nothing to draw wears** (owner's ruling
-/// 2026-09-12) — its sentence, and under it the one way out.
-///
-/// One shape for the two pages that reach it, and one function so that they
-/// cannot drift apart: the file nothing here reads — a `folio.exe`, the
-/// mock-up's own `.pv-unknown` — and the file this window *refused to draw*,
-/// which said its sentence in the middle of an empty pane and offered nothing.
-/// The owner's ruling is that the second is the first: a preview the pane cannot
-/// show hands the file to the machine exactly as an executable does. So the
-/// caller brings the sentence and the verdict, and everything else about the
-/// card — the mark, the button's caption, where the button is drawn and what
-/// pressing it means — is decided here, once.
-///
-/// `offers_the_default_app` is the caller's own answer and not a constant,
-/// because R1-12 is still true of both pages: a refusal about *where* a file is
-/// rather than about what is in it has nothing the machine's handler could be
-/// offered for, and the absence travels as an absence so the layout takes the
-/// row back rather than leaving a hole where a control was.
-fn refused_preview_card(
-    notice: String,
-    offers_the_default_app: bool,
-    open_label: &str,
-) -> CardWords {
-    CardWords {
-        notice,
-        address: String::new(),
-        address_line: String::new(),
-        detail: String::new(),
-        detail_lines: Vec::new(),
-        verb: offers_the_default_app.then(|| open_label.to_owned()),
-        mark: marks::ChromeMark::File,
-        // Not a page's fault: this button hands a *file* to the system, which is
-        // where the press goes.
-        fault: false,
-        width: 0.0,
-    }
-}
-
 /// One preview rail's owned strings and the measurement they were taken with
 /// (user ruling 2026-08-24).
 ///
@@ -21150,25 +21021,6 @@ fn text_field_holding(rung: ImeOwner, settings_field: bool) -> Option<TextFieldS
         ImeOwner::Search => Some(TextFieldSeat::FindBar),
         ImeOwner::Modal => settings_field.then_some(TextFieldSeat::Settings),
         ImeOwner::FilesTree | ImeOwner::Preview | ImeOwner::Shell => None,
-    }
-}
-
-/// **What the clipboard verbs read of the keyboard**, for the rung that holds it
-/// (`Runtime::clipboard_focus`): whether a surface above the clipboard rung
-/// swallows every key, the one-line field on the rung, whether the quick edit
-/// has the keyboard, and whether the rung is the shell's.
-#[must_use]
-fn clipboard_focus_of(
-    rung: ImeOwner,
-    swallowing: bool,
-    settings_field: bool,
-    preview_edit: bool,
-) -> menubar::ClipboardFocus {
-    menubar::ClipboardFocus {
-        swallowing,
-        field: text_field_holding(rung, settings_field),
-        preview_edit,
-        shell: rung == ImeOwner::Shell,
     }
 }
 
@@ -33314,26 +33166,6 @@ enum FloatGrasp {
     Carrying,
 }
 
-/// The ground a float may stand on: the client area with the title bar taken
-/// off the top (user ruling 2026-08-12).
-///
-/// The strip is measured with the same `(logical * scale).round()` the title bar
-/// is *drawn* with, because the two have to be the same edge — a float allowed
-/// to start half a pixel higher than the caption ends is a float that can take
-/// the drag band away, which is the one thing the ruling forbids.
-///
-/// A window shorter than its own caption keeps a one-pixel floor, mirroring
-/// `seats.rs`'s own guard: an inverted rectangle would let every clamp below it
-/// resolve to nonsense, and the tiny-window ladder already promises the strip
-/// degrades rather than turns inside out.
-fn float_viewport_rect(width: u32, height: u32, scale: f32) -> [f32; 4] {
-    let height = height as f32;
-    let caption = (bt_render::WINDOW_TITLE_BAR_LOGICAL_PX * scale)
-        .round()
-        .min((height - 1.0).max(0.0));
-    [0.0, caption, width as f32, height]
-}
-
 /// Where a float actually stands this frame — its box displaced by however much
 /// of `flyIn`'s `translateY(-5px)` it has left to travel.
 ///
@@ -33353,139 +33185,6 @@ fn float_sizing_of(win: &float::FloatWin) -> float::FloatSizing {
         float::FloatSizing::preview()
     } else {
         float::FloatSizing::files()
-    }
-}
-
-/// How tall a floating **tree** wants to be — its rows, or the kind's own
-/// maximum while it still has no idea how many rows there are.
-///
-/// # The bare strip in the corner (user report, 2026-08-13)
-///
-/// Every float is summoned with an empty [`files::DirCache`] — `open_float`
-/// hands `DirCache::default()` in by construction, because a peek is a fresh
-/// throwaway view of a tree (G81) — so on the frame the window is placed,
-/// `tree_view` has exactly one row in it: the `Loading` notice standing in for
-/// however many names the worker is about to send. Sizing to that row opened
-/// every hover peek and every folder button as a title bar with a foot under it
-/// and nothing in between, hard against whichever corner the clamp pushed it
-/// into, until the answer came back.
-///
-/// The fix is **not** a second sizing path and pointedly not a minimum: the one
-/// [`float::float_opening_size`] is still the only thing that turns a content
-/// height into a frame. What changes is the content height it is asked about. A
-/// view that is still loading has no content height to give, and the honest
-/// stand-in for "as many rows as this could turn out to be" is the most rows
-/// this window would ever be allowed to show — [`float::float_height_cap`] —
-/// after which [`Runtime::resize_floats_to_content`] shrinks it to the real
-/// answer through that very same door the moment the rows land. A window that
-/// opens at its cap and settles down is the ordinary shape of `height: auto`
-/// arriving late; a window that opens as a strip and grows is a window that was
-/// never the size it said it was.
-/// **A window on its Git page opens at that cap too** (user ruling,
-/// 2026-08-19), which is why `git_page` is asked rather than derived from
-/// `state.view`: whether that page is *reachable* is the master switch's answer
-/// and this function is in no position to read a setting.
-///
-/// It is the same stand-in for a sharper version of the same reason. A tree that
-/// has not settled has no content height *yet*; a Git page has none this
-/// function could ever take — its rows are six different heights and the tallest
-/// of them is measured in a font held by the renderer — and a repository's page
-/// is longer than a window may be in every case anybody has looked at.
-/// [`Runtime::resize_floats_to_content`] would shrink it through this very door
-/// on the day that stops being true.
-fn files_float_content_height(
-    state: &seats::FilesLeafState,
-    cache: &files::DirCache,
-    git_page: bool,
-    viewport: [f32; 4],
-    scale: f32,
-) -> f32 {
-    if git_page {
-        return float::float_height_cap(viewport, scale, float::FloatSizing::files());
-    }
-    let view = files::tree_view(state, cache);
-    if !view.settled() {
-        return float::float_height_cap(viewport, scale, float::FloatSizing::files());
-    }
-    float::float_height_for_body(
-        seats::files_tree_content_height(view.rows.len(), scale),
-        scale,
-    )
-}
-
-/// **Diagnostic scaffolding: write this frame's chrome to a file.**
-///
-/// Off unless `BT_CHROME_DUMP` names a path, and then every rebuild of the seat
-/// chrome appends one block to it: each quad's rectangle and ink, each sprite's
-/// mark, rectangle, ink and opacity, each label's rectangle, ink and text. Run
-/// the window with it set, reproduce whatever is on screen that should not be,
-/// and the offending channel names itself — a colour that is in no palette entry,
-/// or a mark drawn in a box that belongs to another pane.
-///
-/// It exists because a picture cannot be grepped. The maroon chip reported over
-/// the files tree on 2026-08-13 was chased through the palette, the tooltip, the
-/// selection inks and every `ChromeMark` variant by reading code, and none of
-/// them matched the pixels — at which point the honest move is to make the frame
-/// say what it contains rather than to keep guessing at it.
-///
-/// Appends rather than truncates, so the frames either side of a gesture are both
-/// in the file; a run that wants a clean one deletes it first. Failures are
-/// swallowed whole: a diagnostic that can take the window down with it is a
-/// second bug wearing the first one's clothes.
-fn dump_chrome_frame(chrome: &seats::ChromeGroup) {
-    let Some(path) = entry_doors::installed().chrome_dump.clone() else {
-        return;
-    };
-    use std::fmt::Write as _;
-    let mut out = String::new();
-    let ink = |color: [u8; 3]| format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]);
-    let _ = writeln!(
-        out,
-        "--- chrome frame: {} quads, {} sprites, {} labels",
-        chrome.quads.len(),
-        chrome.sprites.len(),
-        chrome.labels.len()
-    );
-    for quad in &chrome.quads {
-        // The surface class is printed because a quad that *is* the window and a
-        // quad struck on one are the same four numbers and the same colour on
-        // screen until the window goes translucent — which is exactly the report
-        // this line was added for (§7.1.6c-4f).
-        let _ = writeln!(
-            out,
-            "quad   {:?} {} {:?}",
-            quad.rect,
-            ink(quad.color),
-            quad.surface
-        );
-    }
-    for sprite in &chrome.sprites {
-        let _ = writeln!(
-            out,
-            "sprite {:?} {} opacity={:.3} grayscale={} mark={:?}",
-            sprite.rect,
-            ink(sprite.color),
-            sprite.opacity,
-            sprite.grayscale,
-            sprite.mark
-        );
-    }
-    for label in &chrome.labels {
-        let _ = writeln!(
-            out,
-            "label  {:?} {} {:?}",
-            label.rect,
-            ink(label.color),
-            label.text
-        );
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        use std::io::Write as _;
-        let _ = file.write_all(out.as_bytes());
     }
 }
 
@@ -34181,28 +33880,6 @@ struct PasteOffer {
     target: PasteTarget,
 }
 
-/// **Whether the release may keep the offer the box made** — the whole of the
-/// text write's safety, as one comparison of two readings taken at two moments.
-///
-/// `promised` is what the last survey put on screen; `at_release` is the same
-/// question asked again at the point the platform says the hand is, against the
-/// window as it stands now. Anything other than "these are the same offer" is a
-/// refusal, and a refusal is the dashed outline the drop table already draws —
-/// **never a redirection**. A text write that lands somewhere other than where
-/// the box said is the one failure this gesture cannot afford, so the rule is
-/// equality and not a nearest match.
-///
-/// **Equality over the whole offer is what makes this one rule and not four.**
-/// The landing differing is the hand having moved or the tree having reflowed
-/// under it; the tab or the incarnation differing is the pane having been
-/// replaced under a still hand. `at_release` being `None` is the aim no longer
-/// naming a live shell at all. And a missing `promised` refuses as loudly as a
-/// mismatch: it is a release whose box never promised a paste in the first
-/// place.
-fn paste_offer_survives(promised: Option<PasteOffer>, at_release: Option<PasteOffer>) -> bool {
-    promised.is_some() && promised == at_release
-}
-
 /// **Whose glass a point is on**, as the window manager answers it — kept at
 /// three values because the two gestures that ask want opposite things from the
 /// third one.
@@ -34228,27 +33905,6 @@ enum GlassHere {
 /// and undo by dragging it again.
 const fn glass_allows_a_drop(glass: GlassHere) -> bool {
     !matches!(glass, GlassHere::Theirs)
-}
-
-/// **A text write happens only when the glass is certainly ours** (review
-/// 2026-09-17 round 2).
-///
-/// The opposite default to [`glass_allows_a_drop`], and the asymmetry is the
-/// ruling rather than an inconsistency: bytes on a command line are not visible
-/// as a mistake and cannot be undone by repeating the gesture, so the answer
-/// this window does not have is the answer it refuses on.
-///
-/// **What it is defending against.** The pointer is captured for the whole of a
-/// drag, so a release is delivered to the window that started it wherever the
-/// hand actually is — and the survey reads this window's own geometry, which
-/// goes on describing a pane that an always-on-top window is sitting in front
-/// of. Hover a visible part of a terminal's middle, move into the part another
-/// window covers, let go: every identity is unchanged, the plan fits, and
-/// without this the path is typed into a terminal nobody could see. Neither the
-/// broker's aim nor its pointer closes it — both are refreshed by *delivered*
-/// motion, which is the reading the release already distrusts.
-const fn glass_allows_a_text_write(glass: GlassHere) -> bool {
-    matches!(glass, GlassHere::Ours)
 }
 
 impl RowVerb {
@@ -45956,54 +45612,6 @@ impl<B: Backend> Runtime<'_, B> {
         self.present_chrome_change()
     }
 
-    /// **B22 — bring the resizing cards up to date with the hand.**
-    ///
-    /// Derived from [`WindowRuntime::divider_drag`] rather than mirrored into the tween
-    /// at every place a drag starts and ends, and for the reason `refresh_chrome`
-    /// already gives about `body.dragging`: a drag ends by four doors — the
-    /// button coming up, Esc, losing the mouse capture, and the layout being torn
-    /// down under it — and a mirror goes wrong the moment a fifth is added and
-    /// forgets. There is exactly one fact here ("is a divider being held?"), and
-    /// this reads it.
-    ///
-    /// [`RevealTween::retarget`] does the rest: a grab aims the transition at 1.0,
-    /// a release aims it at 0.0, and a reversal mid-flight turns around from where
-    /// the cards actually are rather than from an end they never reached — which
-    /// is what a CSS transition interrupted mid-flight does, and the whole reason
-    /// the same type serves the pin, the dock box and the arriving pane.
-    ///
-    /// The split is dropped in two cases and only two: the run-down has finished,
-    /// or the split is no longer in the solve. The second is not a tidy-up — a
-    /// divider that was released and then had its pane closed leaves a card
-    /// running down around a rectangle that no longer exists, and the honest
-    /// picture of that is no card at all.
-    fn sync_resizing_cards(&mut self, now: Instant) {
-        let motion = self.app.motion;
-        if let Some(drag) = self.held_divider_drag().copied() {
-            self.window.resizing_card_split = Some(drag.split);
-            self.window
-                .resizing_card_transition
-                .retarget(1.0, now, motion);
-            return;
-        }
-        let Some(split) = self.window.resizing_card_split else {
-            return;
-        };
-        self.window
-            .resizing_card_transition
-            .retarget(0.0, now, motion);
-        let (inset, moving) = self.window.resizing_card_transition.sample(now, motion);
-        let still_there = self
-            .seats
-            .split_slots(&self.seat_layout)
-            .iter()
-            .any(|slot| slot.id == split);
-        if (!moving && inset <= 0.0) || !still_there {
-            self.window.resizing_card_split = None;
-            self.window.resizing_card_transition = RevealTween::over(RESIZING_CARD_TRANSITION);
-        }
-    }
-
     /// **B22 — which split wears cards this frame, and how far in**, for
     /// [`seats::ChromeContent::resizing_cards`].
     ///
@@ -47836,33 +47444,6 @@ impl<B: Backend> Runtime<'_, B> {
             )?;
         }
         Ok(())
-    }
-
-    /// **Whether a text field of the settings dialog holds the keyboard** — the
-    /// one fact [`text_field_holding`] needs beyond the rung (B-AUDIT-046 RT-1).
-    ///
-    /// The conditions under which the ladder reaches
-    /// [`Self::settings_field_key`] and it answers, asked in the ladder's own
-    /// words: no card stands above the dialog (each of those has its rung above
-    /// the dialog's), no chord is being recorded (the recorder takes every key),
-    /// no picker is open over the field, and the focus is a text field.
-    fn settings_field_holds_the_keyboard(&self) -> bool {
-        let card_above = self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
-            || self.window.dirty_gate.is_open()
-            || self.window.first_run.is_open()
-            || self.paste_card_seat().is_some()
-            || self.update_card_is_up()
-            || self.uninstall_card_is_up();
-        !card_above
-            && self.window.settings.is_open()
-            && self.window.settings.recording_row().is_none()
-            && self.window.settings.menu().is_none()
-            && self.window.settings.row_menu().is_none()
-            && self
-                .window
-                .settings
-                .focus()
-                .is_some_and(|target| self.window.settings.text_field(target).is_some())
     }
 
     /// **One paste into the focused settings field**, written through to the
@@ -51120,83 +50701,6 @@ impl<B: Backend> Runtime<'_, B> {
         });
     }
 
-    /// **How solid each card head's hover-revealed run is this frame** — the `×`
-    /// and the offer to pin, in Cards mode (`bt_render::HOVER_CHROME_FADE`).
-    ///
-    /// [`Self::settled_head_ink`] on the card column and [`Self::settled_tab_ink`]
-    /// in shape: keyed by [`TabId`] inside for the register's sake and by index
-    /// outside because that is what the painter walks, translated here because
-    /// this is the one place that can do both on the same frame.
-    ///
-    /// **The list is whatever is hovered plus whatever is still leaving**, which
-    /// is what makes it a list rather than the one card under the pointer: a hand
-    /// crossing from one card to the next leaves two entries for ninety
-    /// milliseconds, one coming up and one going down.
-    ///
-    /// **Nothing is pulled toward `1.0` outside Cards mode.** This register is the
-    /// card's alone, and a hover in another layout must not leave an entry in it
-    /// that the column would then draw with when the mode is turned on. The
-    /// *width* half of a card head's reveal is not in here at all: it is
-    /// `TabTrailer::reveal`, the same tween the strip and the rail open their
-    /// pins with, driven off the very [`Self::hovered_tab`] this function reads
-    /// (owner ruling 2026-09-14 — a card head is a tab head, slide included).
-    fn settled_card_ink(&mut self, now: Instant) -> Vec<(usize, f32)> {
-        let motion = self.app.motion;
-        let showing = self.sampled_rail(now).draws_focus_rail();
-        let hovered = showing.then(|| self.hovered_tab()).flatten();
-        let places: BTreeMap<TabId, usize> = self
-            .window
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(index, tab)| (tab.id, index))
-            .collect();
-        let mut wanted: Vec<TabId> = self
-            .window
-            .settling
-            .held()
-            .into_iter()
-            .filter_map(|key| match key {
-                Fading::CardHead(tab) => Some(tab),
-                _ => None,
-            })
-            .collect();
-        // A card whose tab has been closed mid-fade is forgotten rather than
-        // eased: there is nothing left on the glass for a fade home to be drawn
-        // on — `settled_tab_ink`'s own argument, one surface along.
-        for gone in wanted
-            .iter()
-            .copied()
-            .filter(|tab| !places.contains_key(tab))
-            .collect::<Vec<_>>()
-        {
-            self.window.settling.forget(&Fading::CardHead(gone));
-        }
-        wanted.retain(|tab| places.contains_key(tab));
-        if let Some(index) = hovered
-            && let Some(tab) = self.window.tabs.get(index).map(|tab| tab.id)
-            && !wanted.contains(&tab)
-        {
-            wanted.push(tab);
-        }
-        wanted
-            .into_iter()
-            .map(|tab| {
-                let ink = self.window.settling.settle(
-                    &Fading::CardHead(tab),
-                    0.0,
-                    settling::Toward::eased(
-                        f32::from(u8::from(hovered == Some(places[&tab]))),
-                        bt_render::HOVER_CHROME_FADE,
-                    ),
-                    now,
-                    motion,
-                );
-                (places[&tab], ink)
-            })
-            .collect()
-    }
-
     /// **The two facts a pane head's run is drawn and hit-tested by**, read off
     /// this window once (裁4, 2026-08-26).
     ///
@@ -51895,122 +51399,6 @@ impl<B: Backend> Runtime<'_, B> {
             labels,
             sprites,
         }
-    }
-
-    /// The box a trigger occupies **right now** (G86/E60).
-    ///
-    /// Re-derived from this frame's geometry every time rather than remembered
-    /// from the press, and E60 is the judgement it comes from: a press bubbles
-    /// and may re-render, a re-rendered control is a *detached* control, and a
-    /// detached node measures `(0, 0)` — which is how the mock-up's menus kept
-    /// opening in the window's top-left corner, three separate times. Asking the
-    /// live geometry by identity is the shape that cannot have that bug.
-    fn trigger_rect(&self, trigger: float::FloatTrigger) -> Option<[f32; 4]> {
-        match trigger {
-            float::FloatTrigger::Tab(id) => {
-                let index = self.window.tabs.iter().position(|tab| tab.id == id)?;
-                let scale = self.window.renderer.scale_factor() as f32;
-                match self.window.rail.layout {
-                    seats::TabLayoutMode::Vertical => {
-                        let rail = self.rail_geometry_now(Instant::now())?;
-                        rail.tabs.get(index).and_then(|row| row.files)
-                    }
-                    _ => {
-                        let (width, _) =
-                            self.window.renderer.presentation_geometry().swapchain_size;
-                        seats::tab_strip_geometry(
-                            width as f32,
-                            scale,
-                            self.platform_chrome(),
-                            &self.tab_trailers(Instant::now()),
-                            self.window.active_tab,
-                            self.window.tab_scroll,
-                        )
-                        .tabs
-                        .get(index)
-                        .and_then(|tab| tab.files)
-                    }
-                }
-            }
-            // **Two rectangles, one question** (user proposal, Claude 认可
-            // 2026-08-25): the folder is in the head on a split pane and beside
-            // the corner ghost on a lone one, and `seats::pane_files_box`
-            // answers which. Asking `pane_head_geometry` here regardless is what
-            // this used to do, and on a headless pane it measured a head that is
-            // not drawn — an anchor in empty air, which is E60's own bug wearing
-            // a different hat.
-            float::FloatTrigger::Pane(leaf) => {
-                if self.window.tabs[self.window.active_tab].id != leaf.tab {
-                    return None;
-                }
-                let scale = self.window.renderer.scale_factor() as f32;
-                seats::pane_files_box(
-                    &self.seats,
-                    &self.seat_layout,
-                    leaf.seat,
-                    scale,
-                    self.window.search.seat(),
-                )
-            }
-            // **The run the folder is printed on**, read back off the frame that
-            // is drawing it now — E60's own rule reaching the one trigger that
-            // is not a control at all. A reference that has scrolled away, been
-            // overwritten, or stopped being a folder answers `None`, which is
-            // how [`Self::advance_float`] learns that the peek hanging off it
-            // has nothing left to hang from.
-            float::FloatTrigger::Reference { leaf, cell } => {
-                if self.window.tabs[self.window.active_tab].id != leaf.tab {
-                    return None;
-                }
-                let reference = self.terminal_reference_at(leaf.seat, cell)?;
-                matches!(reference.card, ReferenceCard::Folder(_)).then_some(reference.rect)
-            }
-        }
-    }
-
-    /// The folder a trigger speaks for, read at the instant it is asked.
-    ///
-    /// **Captured, never followed** (A7/R-g): §7.1.2 says the root is taken from
-    /// the cwd of the terminal the trigger belongs to *at summon time*, and the
-    /// float then stays there. A tree that re-roots itself as you `cd` is, in
-    /// this design's own words, 整个生态独立判定最惊吓的行为.
-    fn trigger_root(&self, trigger: float::FloatTrigger) -> FilesRoot {
-        // **A reference names its own folder**, so it does not go through the
-        // cwd below at all: the two buttons speak for a *terminal* and borrow
-        // the place that terminal is standing in, while this one speaks for a
-        // path that is written on the glass. Read back off the frame for
-        // `trigger_rect`'s reason, and the same `None` — a reference that has
-        // gone — falls through to the ordinary answer rather than inventing one,
-        // because by then the rectangle has already refused and no window will
-        // be opened with it.
-        if let float::FloatTrigger::Reference { leaf, cell } = trigger
-            && let Some(TerminalReference {
-                card: ReferenceCard::Folder(path),
-                ..
-            }) = self.terminal_reference_at(leaf.seat, cell)
-        {
-            return FilesRoot::known(path.display().to_string());
-        }
-        let seat = match trigger {
-            float::FloatTrigger::Tab(id) => self
-                .window
-                .tabs
-                .iter()
-                .find(|tab| tab.id == id)
-                .filter(|tab| tab.seats.is_lone_terminal())
-                .map(|tab| (tab, tab.seats.identity())),
-            float::FloatTrigger::Pane(leaf) | float::FloatTrigger::Reference { leaf, .. } => self
-                .window
-                .tabs
-                .iter()
-                .find(|tab| tab.id == leaf.tab)
-                .map(|tab| (tab, leaf.seat)),
-        };
-        files_root_of(
-            seat.and_then(|(tab, seat)| tab.sessions.get(&seat))
-                .map(|leaf| leaf.folder(&pane_folder::SystemProcessFolders)),
-            &bt_pty::SystemShellEnvironment,
-        )
     }
 
     /// Hand one path to the system's default handler, and say so when the window
@@ -53778,31 +53166,6 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     // ── The web preview (slice 1) ──────────────────────────────────────────
-
-    /// **The pictures the panes under a modal draw** — one per page the dialog
-    /// took off the glass, at the rectangle the page itself had (§7.8 ⑩).
-    ///
-    /// Empty on every frame with no dialog up, and empty for a page whose frame
-    /// has not arrived — the first frame or two of a dialog, a page that has
-    /// never been photographed, a capture the engine refused, a pane past the
-    /// ceiling. What those all draw is the pane's own ground with the scrim over
-    /// it, which is what this defect's *first* frame looks like and is the
-    /// honest picture: this window does not invent pixels for a page it has
-    /// never seen.
-    ///
-    /// Floats are left out here and drawn on their own layer — see
-    /// [`PageKeepsake::float`].
-    fn page_keepsake_icons(&self) -> Vec<bt_render::ChromeIcon> {
-        self.window
-            .page_keepsakes
-            .iter()
-            .filter(|keepsake| keepsake.float.is_none())
-            .filter_map(|keepsake| {
-                let picture = self.window.web_thumbs.frame(keepsake.leaf)?;
-                Some(page_keepsake_icon(picture, keepsake.rect))
-            })
-            .collect()
-    }
 
     // ── The page's own chrome (slice ④) ────────────────────────────────────
 
@@ -69134,48 +68497,6 @@ struct PreparedClipboardPaste {
     picture: Vec<bt_platform::PictureBytes>,
 }
 
-/// **What a paste does with what the clipboard answered** — the clipboard lane's `Done` for a
-/// terminal paste. A read that failed never reaches here: it is its request's `Failed`, said once by
-/// the lane's ledger, and its notice is the window's (`Runtime::spend_paste`).
-fn prepare_clipboard_paste(
-    payload: bt_platform::ClipboardPayload,
-    recipient: &shell_literal::Recipient,
-    leading_space: bool,
-) -> PreparedClipboardPaste {
-    use bt_platform::ClipboardPayload;
-    match payload {
-        ClipboardPayload::Files(paths) => {
-            let insertion = shell_literal::paths_text(&paths, recipient, leading_space);
-            PreparedClipboardPaste {
-                text: (!insertion.text.is_empty()).then_some(insertion.text),
-                notice: shell_literal::refusal_notice(&insertion.refused),
-                ..PreparedClipboardPaste::default()
-            }
-        }
-        ClipboardPayload::Text(text) => PreparedClipboardPaste {
-            text: Some(text),
-            clipboard_text: true,
-            ..PreparedClipboardPaste::default()
-        },
-        // **The third rung, and it is third because the clipboard says so**
-        // (§7.61). A source that puts a picture *and* its own text on the board —
-        // every browser does — is a text paste, and a source that puts a file
-        // beside a thumbnail of it is a path paste. This arm is what is left:
-        // a picture and nothing else.
-        ClipboardPayload::Picture(offered) => PreparedClipboardPaste {
-            picture: offered,
-            ..PreparedClipboardPaste::default()
-        },
-        ClipboardPayload::Nothing => PreparedClipboardPaste::default(),
-        ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise) => {
-            PreparedClipboardPaste {
-                notice: Some(i18n::Text::PasteClipboardPromise.text().to_owned()),
-                ..PreparedClipboardPaste::default()
-            }
-        }
-    }
-}
-
 /// **The rule [`Runtime::dropped_files_seat`] applies, with the window's two
 /// questions already answered** (GitHub issue #1 ②).
 ///
@@ -69214,34 +68535,6 @@ fn dropped_files_seat_at(
         // unknown target is a refusal.
         Some(_) | None => None,
     }
-}
-
-/// Deliver one string to a shell the way a paste is delivered.
-///
-/// Shared by terminal clipboard routing and K144 rather than copied because the files
-/// tree's `Insert path into terminal` (K144) is a paste in every respect that
-/// matters to the shell and to the view — the selection goes, the view returns
-/// to the bottom, the bytes are bracketed if the shell asked for bracketing, and
-/// they go down the one door onto the child's input.
-/// The only thing that differs is where the string came from, which is the one
-/// thing this function does not ask.
-///
-/// **One write, whatever the clipboard held.** This used to hand the bytes over in 16 KiB
-/// chunks, and the reason it gave was true at the time: the write was synchronous, so chunking
-/// it was how ConPTY's backpressure reached us a piece at a time instead of as one unbounded
-/// call. The wait now lives on `bt_pty`'s writer thread, which makes chunking here strictly
-/// worse — a paste split into sixty pieces is sixty chances for the child to stop reading
-/// *between* them, and `bt_pty::InputRing` only promises a whole write, never a partial one. As
-/// one write it either reaches the shell entire or is refused entire, which is the only pair of
-/// outcomes a pasted command line can survive.
-fn paste_text<T>(
-    session: &mut DualPlaneSession,
-    projection: &mut ViewportProjection,
-    text: &str,
-    write: impl FnOnce(&[u8]) -> Result<T>,
-) -> Result<T> {
-    let bytes = input::paste_bytes(text, session.bracketed_paste_mode());
-    paste_spelled(session, projection, &bytes, write)
 }
 
 /// **A paste whose bytes are already spelled**, with everything else a paste owes: the
@@ -69854,21 +69147,6 @@ fn tab_surface(focus_column: bool, layout: seats::TabLayoutMode) -> TabSurface {
         seats::TabLayoutMode::Vertical => TabSurface::Rail,
         seats::TabLayoutMode::Horizontal => TabSurface::Strip,
     }
-}
-
-/// **Where the `˅`'s turn is aimed** — `true` for "all the way over".
-///
-/// §7.1.6e's criterion applied to the *clock* rather than to the picture, and
-/// read from the one place that states it
-/// ([`profiles::MenuSide::turns_the_chevron`]). Hiding the angle at paint time
-/// would be enough to stop the lie, and would still leave a tween running for
-/// 140ms, asking for a repaint on each of its frames, on its way to a number no
-/// surface is going to draw.
-///
-/// `None` is not a third rule: a window with no new-tab button on screen has no
-/// arrow to aim.
-fn chevron_turn_target(open: bool, side: Option<profiles::MenuSide>) -> bool {
-    open && side.is_some_and(profiles::MenuSide::turns_the_chevron)
 }
 
 #[cfg(test)]

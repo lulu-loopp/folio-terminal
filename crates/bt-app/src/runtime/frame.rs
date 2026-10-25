@@ -1,6 +1,7 @@
 //! `frame` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::TabId;
 use crate::wake_owner::WakeOwner;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -22,6 +23,7 @@ use bt_render::{
     frame_is_alternate_screen,
 };
 use bt_viewport::{HyperlinkHit, ViewportFrame};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalPosition;
 
@@ -2558,6 +2560,83 @@ impl<B: Backend> Runtime<'_, B> {
         }
         self.reap_exited_tabs(now)?;
         Ok(wake)
+    }
+
+    /// **How solid each card head's hover-revealed run is this frame** — the `×`
+    /// and the offer to pin, in Cards mode (`bt_render::HOVER_CHROME_FADE`).
+    ///
+    /// [`Self::settled_head_ink`] on the card column and [`Self::settled_tab_ink`]
+    /// in shape: keyed by [`TabId`] inside for the register's sake and by index
+    /// outside because that is what the painter walks, translated here because
+    /// this is the one place that can do both on the same frame.
+    ///
+    /// **The list is whatever is hovered plus whatever is still leaving**, which
+    /// is what makes it a list rather than the one card under the pointer: a hand
+    /// crossing from one card to the next leaves two entries for ninety
+    /// milliseconds, one coming up and one going down.
+    ///
+    /// **Nothing is pulled toward `1.0` outside Cards mode.** This register is the
+    /// card's alone, and a hover in another layout must not leave an entry in it
+    /// that the column would then draw with when the mode is turned on. The
+    /// *width* half of a card head's reveal is not in here at all: it is
+    /// `TabTrailer::reveal`, the same tween the strip and the rail open their
+    /// pins with, driven off the very [`Self::hovered_tab`] this function reads
+    /// (owner ruling 2026-09-14 — a card head is a tab head, slide included).
+    pub(crate) fn settled_card_ink(&mut self, now: Instant) -> Vec<(usize, f32)> {
+        let motion = self.app.motion;
+        let showing = self.sampled_rail(now).draws_focus_rail();
+        let hovered = showing.then(|| self.hovered_tab()).flatten();
+        let places: BTreeMap<TabId, usize> = self
+            .window
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| (tab.id, index))
+            .collect();
+        let mut wanted: Vec<TabId> = self
+            .window
+            .settling
+            .held()
+            .into_iter()
+            .filter_map(|key| match key {
+                Fading::CardHead(tab) => Some(tab),
+                _ => None,
+            })
+            .collect();
+        // A card whose tab has been closed mid-fade is forgotten rather than
+        // eased: there is nothing left on the glass for a fade home to be drawn
+        // on — `settled_tab_ink`'s own argument, one surface along.
+        for gone in wanted
+            .iter()
+            .copied()
+            .filter(|tab| !places.contains_key(tab))
+            .collect::<Vec<_>>()
+        {
+            self.window.settling.forget(&Fading::CardHead(gone));
+        }
+        wanted.retain(|tab| places.contains_key(tab));
+        if let Some(index) = hovered
+            && let Some(tab) = self.window.tabs.get(index).map(|tab| tab.id)
+            && !wanted.contains(&tab)
+        {
+            wanted.push(tab);
+        }
+        wanted
+            .into_iter()
+            .map(|tab| {
+                let ink = self.window.settling.settle(
+                    &Fading::CardHead(tab),
+                    0.0,
+                    settling::Toward::eased(
+                        f32::from(u8::from(hovered == Some(places[&tab]))),
+                        bt_render::HOVER_CHROME_FADE,
+                    ),
+                    now,
+                    motion,
+                );
+                (places[&tab], ink)
+            })
+            .collect()
     }
 }
 

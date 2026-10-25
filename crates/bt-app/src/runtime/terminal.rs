@@ -4,6 +4,7 @@
 use crate::PtyTarget;
 use crate::runtime::attention::deliver_osc_attention;
 use crate::runtime::clipboard::input_line_needs_a_space_first;
+use crate::runtime::clipboard::paste_text;
 use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
@@ -11,8 +12,8 @@ use crate::{
     RailJumpLanding, ReferenceCard, RowHost, Runtime, SelectionDrag, SelectionDragMode, Step,
     TerminalReference, UserInputKind, apply_stored_terminal_font, attention_trace, born_in_tab,
     cmdrail, coalesce, create_leaf_session, cubic_bezier, drain_whole_units, files, hang_watch,
-    input, marks, mouse_trace, paste_text, presentation_physical_size, scrollback_quota, seats,
-    shell_literal, termscroll, toast, write_pty_input,
+    input, marks, mouse_trace, presentation_physical_size, scrollback_quota, seats, shell_literal,
+    termscroll, toast, write_pty_input,
 };
 use crate::{
     ClickIntent, DRAIN_SLICES_PER_TURN, DRAIN_TURN_BUDGET, HyperlinkActivation, LeafSeed, TabState,

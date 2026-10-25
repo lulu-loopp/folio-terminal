@@ -11,16 +11,16 @@ use crate::window_seam::prelude::*;
 use crate::{
     ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
     PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
-    TextFieldSeat, UserInputKind, i18n, menubar, offer_pty_input, prepare_clipboard_paste,
-    profile_banner_name, restore, seats, text_field, toast,
+    TextFieldSeat, UserInputKind, i18n, menubar, offer_pty_input, profile_banner_name, restore,
+    seats, text_field, toast,
 };
 use crate::{
-    GlassHere, PasteFacts, PasteRoad, PendingPaste, TabId, TabState, clipboard_focus_of,
-    glass_allows_a_text_write, ime_owner, input, line_continuation_mark, paste_offer_survives,
-    paste_road, paste_spelled, paste_text, powershell_input_line, shell_literal,
+    GlassHere, ImeOwner, PasteFacts, PasteRoad, PendingPaste, TabId, TabState, ime_owner, input,
+    paste_spelled, quit, shell_literal, text_field_holding,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
+use bt_pty::PSREADLINE_PASTE_INPUT;
 use bt_render::{FrameSource, FrameTrigger};
 use bt_term::DualPlaneSession;
 use bt_viewport::{MathBlockAnchor, ViewportProjection};
@@ -1212,6 +1212,225 @@ impl<B: Backend> Runtime<'_, B> {
             self.preview_edit_focus().is_some(),
         )
     }
+
+    /// **Whether a text field of the settings dialog holds the keyboard** — the
+    /// one fact [`text_field_holding`] needs beyond the rung (B-AUDIT-046 RT-1).
+    ///
+    /// The conditions under which the ladder reaches
+    /// [`Self::settings_field_key`] and it answers, asked in the ladder's own
+    /// words: no card stands above the dialog (each of those has its rung above
+    /// the dialog's), no chord is being recorded (the recorder takes every key),
+    /// no picker is open over the field, and the focus is a text field.
+    fn settings_field_holds_the_keyboard(&self) -> bool {
+        let card_above = self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
+            || self.window.dirty_gate.is_open()
+            || self.window.first_run.is_open()
+            || self.paste_card_seat().is_some()
+            || self.update_card_is_up()
+            || self.uninstall_card_is_up();
+        !card_above
+            && self.window.settings.is_open()
+            && self.window.settings.recording_row().is_none()
+            && self.window.settings.menu().is_none()
+            && self.window.settings.row_menu().is_none()
+            && self
+                .window
+                .settings
+                .focus()
+                .is_some_and(|target| self.window.settings.text_field(target).is_some())
+    }
+}
+
+/// **The one rule for whether a paste asks** (owner's rulings 2026-09-22, 0.4.4 ticket 02).
+///
+/// `setting on ∧ payload was text ∧ !bracketed ∧ more than one line`, with ticket 03's PowerShell
+/// road standing in front of the question. The cheap facts are read first, so a bracketed paste
+/// or a path is never scanned, and a single line is scanned once and allocates nothing.
+fn paste_road(text: &str, facts: PasteFacts) -> PasteRoad {
+    if !facts.clipboard_text || facts.bracketed {
+        return PasteRoad::AsTyped;
+    }
+    let lines = input::pasted_line_count(text);
+    if lines <= 1 {
+        return PasteRoad::AsTyped;
+    }
+    if facts.powershell_prompt_open && facts.through_conpty {
+        return PasteRoad::InputLine;
+    }
+    if facts.ask {
+        PasteRoad::Ask { lines }
+    } else {
+        PasteRoad::AsTyped
+    }
+}
+
+/// **What a multi-line paste into a PowerShell prompt writes** (0.4.4 ticket 03) — one write,
+/// whichever of the spike's two proven roads the text needs.
+///
+/// * **C1, the clipboard road** — the one byte [`PSREADLINE_PASTE_INPUT`] (Ctrl+V), and
+///   PSReadLine reads the clipboard itself and inserts the block without accepting it. Taken
+///   when [`input::psreadline_pastes_it_unchanged`]: what lands is then what Folio's cleanup
+///   would have sent. Only [`paste_road`] sends a paste here, and it does so only for the
+///   clipboard's own text, so the shell re-reads the very text Folio read — never a path Folio
+///   spelled or a picture it saved. **A known limit, accepted** (2026-09-23 spike, A4): a third
+///   program that rewrites the clipboard in the ~20 ms between this write and the shell's read
+///   gets its text pasted instead; Folio does not read the clipboard a second time to check.
+/// * **C2, Folio's own bytes** — [`input::input_line_bytes`]: today's sanitized text with every
+///   break as a Shift+Enter record. Taken for text Folio has to change (a control character it
+///   drops, a lone `\r` PSReadLine would delete), because C1 would bypass that cleanup.
+fn powershell_input_line(text: &str) -> std::borrow::Cow<'static, [u8]> {
+    if input::psreadline_pastes_it_unchanged(text) {
+        std::borrow::Cow::Borrowed(PSREADLINE_PASTE_INPUT)
+    } else {
+        std::borrow::Cow::Owned(input::input_line_bytes(text))
+    }
+}
+
+/// **The mark a line of this shell ends with when its command goes on to the next line** (0.4.4
+/// ticket 45): cmd's `^`, PowerShell's backtick, a POSIX shell's and fish's backslash. Nushell
+/// has none (a command spans lines inside brackets, not after a mark), and an agent's prompt is
+/// not a shell.
+fn line_continuation_mark(grammar: shell_literal::ShellGrammar) -> Option<char> {
+    match grammar {
+        shell_literal::ShellGrammar::Cmd => Some('^'),
+        shell_literal::ShellGrammar::PowerShell => Some('`'),
+        shell_literal::ShellGrammar::Posix
+        | shell_literal::ShellGrammar::Fish
+        | shell_literal::ShellGrammar::Csh => Some('\\'),
+        shell_literal::ShellGrammar::Nushell | shell_literal::ShellGrammar::Agent => None,
+    }
+}
+
+/// **What the clipboard verbs read of the keyboard**, for the rung that holds it
+/// (`Runtime::clipboard_focus`): whether a surface above the clipboard rung
+/// swallows every key, the one-line field on the rung, whether the quick edit
+/// has the keyboard, and whether the rung is the shell's.
+#[must_use]
+pub(crate) fn clipboard_focus_of(
+    rung: ImeOwner,
+    swallowing: bool,
+    settings_field: bool,
+    preview_edit: bool,
+) -> menubar::ClipboardFocus {
+    menubar::ClipboardFocus {
+        swallowing,
+        field: text_field_holding(rung, settings_field),
+        preview_edit,
+        shell: rung == ImeOwner::Shell,
+    }
+}
+
+/// **Whether the release may keep the offer the box made** — the whole of the
+/// text write's safety, as one comparison of two readings taken at two moments.
+///
+/// `promised` is what the last survey put on screen; `at_release` is the same
+/// question asked again at the point the platform says the hand is, against the
+/// window as it stands now. Anything other than "these are the same offer" is a
+/// refusal, and a refusal is the dashed outline the drop table already draws —
+/// **never a redirection**. A text write that lands somewhere other than where
+/// the box said is the one failure this gesture cannot afford, so the rule is
+/// equality and not a nearest match.
+///
+/// **Equality over the whole offer is what makes this one rule and not four.**
+/// The landing differing is the hand having moved or the tree having reflowed
+/// under it; the tab or the incarnation differing is the pane having been
+/// replaced under a still hand. `at_release` being `None` is the aim no longer
+/// naming a live shell at all. And a missing `promised` refuses as loudly as a
+/// mismatch: it is a release whose box never promised a paste in the first
+/// place.
+fn paste_offer_survives(promised: Option<PasteOffer>, at_release: Option<PasteOffer>) -> bool {
+    promised.is_some() && promised == at_release
+}
+
+/// **A text write happens only when the glass is certainly ours** (review
+/// 2026-09-17 round 2).
+///
+/// The opposite default to [`glass_allows_a_drop`], and the asymmetry is the
+/// ruling rather than an inconsistency: bytes on a command line are not visible
+/// as a mistake and cannot be undone by repeating the gesture, so the answer
+/// this window does not have is the answer it refuses on.
+///
+/// **What it is defending against.** The pointer is captured for the whole of a
+/// drag, so a release is delivered to the window that started it wherever the
+/// hand actually is — and the survey reads this window's own geometry, which
+/// goes on describing a pane that an always-on-top window is sitting in front
+/// of. Hover a visible part of a terminal's middle, move into the part another
+/// window covers, let go: every identity is unchanged, the plan fits, and
+/// without this the path is typed into a terminal nobody could see. Neither the
+/// broker's aim nor its pointer closes it — both are refreshed by *delivered*
+/// motion, which is the reading the release already distrusts.
+pub(crate) const fn glass_allows_a_text_write(glass: GlassHere) -> bool {
+    matches!(glass, GlassHere::Ours)
+}
+
+/// **What a paste does with what the clipboard answered** — the clipboard lane's `Done` for a
+/// terminal paste. A read that failed never reaches here: it is its request's `Failed`, said once by
+/// the lane's ledger, and its notice is the window's (`Runtime::spend_paste`).
+pub(crate) fn prepare_clipboard_paste(
+    payload: bt_platform::ClipboardPayload,
+    recipient: &shell_literal::Recipient,
+    leading_space: bool,
+) -> PreparedClipboardPaste {
+    use bt_platform::ClipboardPayload;
+    match payload {
+        ClipboardPayload::Files(paths) => {
+            let insertion = shell_literal::paths_text(&paths, recipient, leading_space);
+            PreparedClipboardPaste {
+                text: (!insertion.text.is_empty()).then_some(insertion.text),
+                notice: shell_literal::refusal_notice(&insertion.refused),
+                ..PreparedClipboardPaste::default()
+            }
+        }
+        ClipboardPayload::Text(text) => PreparedClipboardPaste {
+            text: Some(text),
+            clipboard_text: true,
+            ..PreparedClipboardPaste::default()
+        },
+        // **The third rung, and it is third because the clipboard says so**
+        // (§7.61). A source that puts a picture *and* its own text on the board —
+        // every browser does — is a text paste, and a source that puts a file
+        // beside a thumbnail of it is a path paste. This arm is what is left:
+        // a picture and nothing else.
+        ClipboardPayload::Picture(offered) => PreparedClipboardPaste {
+            picture: offered,
+            ..PreparedClipboardPaste::default()
+        },
+        ClipboardPayload::Nothing => PreparedClipboardPaste::default(),
+        ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise) => {
+            PreparedClipboardPaste {
+                notice: Some(i18n::Text::PasteClipboardPromise.text().to_owned()),
+                ..PreparedClipboardPaste::default()
+            }
+        }
+    }
+}
+
+/// Deliver one string to a shell the way a paste is delivered.
+///
+/// Shared by terminal clipboard routing and K144 rather than copied because the files
+/// tree's `Insert path into terminal` (K144) is a paste in every respect that
+/// matters to the shell and to the view — the selection goes, the view returns
+/// to the bottom, the bytes are bracketed if the shell asked for bracketing, and
+/// they go down the one door onto the child's input.
+/// The only thing that differs is where the string came from, which is the one
+/// thing this function does not ask.
+///
+/// **One write, whatever the clipboard held.** This used to hand the bytes over in 16 KiB
+/// chunks, and the reason it gave was true at the time: the write was synchronous, so chunking
+/// it was how ConPTY's backpressure reached us a piece at a time instead of as one unbounded
+/// call. The wait now lives on `bt_pty`'s writer thread, which makes chunking here strictly
+/// worse — a paste split into sixty pieces is sixty chances for the child to stop reading
+/// *between* them, and `bt_pty::InputRing` only promises a whole write, never a partial one. As
+/// one write it either reaches the shell entire or is refused entire, which is the only pair of
+/// outcomes a pasted command line can survive.
+pub(crate) fn paste_text<T>(
+    session: &mut DualPlaneSession,
+    projection: &mut ViewportProjection,
+    text: &str,
+    write: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
+    let bytes = input::paste_bytes(text, session.bracketed_paste_mode());
+    paste_spelled(session, projection, &bytes, write)
 }
 
 /// **The rule [`Runtime::live_paste_target`] turns on**, as a function of the
