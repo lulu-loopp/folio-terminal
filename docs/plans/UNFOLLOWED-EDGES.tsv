@@ -1381,6 +1381,7 @@ crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting:
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	and_then	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	checked_sub	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	get	1	
+crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	is_some	1	2026-10-25: T-IDLE-TURN-COST: Option::is_some on the turn's staleness handed to the census, no door
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::close	Ambiguous	ok	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::offer	Ambiguous	checked_sub	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::Accounts::offer	Ambiguous	len	1	
@@ -1401,6 +1402,37 @@ crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting:
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::said	Ambiguous	collect	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::said	Ambiguous	line	1	
 crates/bt-app/src/hang_watch_accounting.rs	bt-app crate::hang_watch::accounting::said	Ambiguous	map	1	
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Cause::from_byte	Ambiguous	find	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::app_event	Ambiguous	find	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::app_event	Ambiguous	len	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::app_event	Ambiguous	to_owned	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::app_event	Ambiguous	unwrap_or	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	and_then	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	as_str	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	map	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	map_or	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	map_or_else	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	ok	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	unwrap_or	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Ambiguous	unwrap_or_else	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::name	Dynamic	owner	2	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Census::named	Ambiguous	expect	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::OWNERS	Ambiguous	len	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Round::tick	Ambiguous	as_str	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Round::tick	Ambiguous	clone	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Round::tick	Dynamic	perf	2	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::Round::tick	Dynamic	threads	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	chars	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	collect	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	is_whitespace	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	join	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	map	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::threads_line	Ambiguous	then_with	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::turns_line	Ambiguous	collect	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::turns_line	Ambiguous	is_empty	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::turns_line	Ambiguous	join	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::turns_line	Ambiguous	map	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
+crates/bt-app/src/hang_watch_census.rs	bt-app crate::hang_watch::census::turns_line	Ambiguous	then	1	2026-10-25: T-IDLE-TURN-COST: the turn census's own counters, names and lines (iterator, Option and str methods on its own data), no door behind them
 crates/bt-app/src/hang_watch_detail.rs	bt-app crate::hang_watch::detail::Ledger::attempt	Ambiguous	store	1	
 crates/bt-app/src/hang_watch_detail.rs	bt-app crate::hang_watch::detail::Ledger::enter	Ambiguous	all	1	
 crates/bt-app/src/hang_watch_detail.rs	bt-app crate::hang_watch::detail::Ledger::enter	Ambiguous	fold	1	
@@ -2529,7 +2561,10 @@ crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	and_then	1
 crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	ok	2	
 crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	collect	1	
+crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	let_go_of_the_picture	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `Compositor::let_go_of_the_picture` (bt-platform) on a window's compositor, called inside the `CompositorCommit` admission this site takes; it clears the visual's content and commits, and reaches no other door
 crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	map	1	
+crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	map_err	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	to_string	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/main.rs	bt-app crate::rename_key	Ambiguous	eq_ignore_ascii_case	3	
 crates/bt-app/src/main.rs	bt-app crate::rename_key	Ambiguous	then	1	
 crates/bt-app/src/main.rs	bt-app crate::rename_key	Dynamic	take_selection	2	
@@ -8575,11 +8610,11 @@ crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::processor_time	Ambi
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::processor_time	Dynamic	count	4	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::read_the_settlement	Ambiguous	collect	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	as_mut_ptr	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	as_raw_handle	3	
+crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	as_raw_handle	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	assume_init	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	cast	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	expect	2	
-crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	is_ok	3	
+crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	expect	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	is_ok	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	kind	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::suspended	Ambiguous	si_pid	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::ProbeChild::wait_within	Dynamic	rest	2	
@@ -9909,6 +9944,31 @@ crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::answer	Dyn
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::SessionEndWatch::install	Ambiguous	as_bool	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::session_end_subclass	Ambiguous	is_null	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::session_end_subclass	Dynamic	(value)	1	
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Ambiguous	as_raw_handle	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Ambiguous	expect	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Ambiguous	is_break	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Ambiguous	is_ok	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Dynamic	pid	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Dynamic	visit	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	and_then	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	as_mut_ptr	3	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	as_raw_handle	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	assume_init	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	cast	4	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	collect	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	expect	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	into_iter	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	into_owned	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	is_empty	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	iter	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	map	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	map_err	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	ok	3	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	take_while	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	to_ne_bytes	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	to_string	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	truncate	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
+crates/bt-platform/src/threads.rs	bt-platform crate::threads::of_this_process	Ambiguous	unwrap_or	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
 crates/bt-platform/src/touch_pan.rs	bt-platform crate::touch_pan::PanTrack::step	Ambiguous	then_some	1	
 crates/bt-platform/src/trust.rs	bt-platform crate::trust::FileVersion::parse_four	Ambiguous	next	2	
 crates/bt-platform/src/trust.rs	bt-platform crate::trust::FileVersion::parse_four	Ambiguous	ok	1	
@@ -10396,9 +10456,11 @@ crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::shutdown	Dynamic	try_wait	2
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	as_mut	2	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	clone	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	close	1	
+crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	expect	2	2026-10-25: T-IDLE-TURN-COST: the pty reader and writer threads named through thread::Builder
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	is_some	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	map_err	4	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	openpty	1	
+crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	spawn	2	2026-10-25: T-IDLE-TURN-COST: the pty reader and writer threads named through thread::Builder
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	spawn_command	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	take_writer	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::PtySession::spawn	Ambiguous	try_clone_reader	1	
@@ -10524,6 +10586,7 @@ crates/bt-render/src/lib.rs	bt-render crate::CellMetrics::measure_at	Ambiguous	o
 crates/bt-render/src/lib.rs	bt-render crate::ChromeTextAdvances::from_stops	Ambiguous	collect	1	
 crates/bt-render/src/lib.rs	bt-render crate::ComposedRowCache::get	Ambiguous	is_some	1	
 crates/bt-render/src/lib.rs	bt-render crate::DeviceLossPilot::answer	Dynamic	rest	1	
+crates/bt-render/src/lib.rs	bt-render crate::DeviceResources::mint	Dynamic	driver	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; the removal-reason reader `driver_removal_reason` returned, called from the device-loss callback: one `GetDeviceRemovedReason` on a COM reference it holds, which reaches no door
 crates/bt-render/src/lib.rs	bt-render crate::GRID_CJK_FALLBACK_FAMILIES	Ambiguous	collect	1	
 crates/bt-render/src/lib.rs	bt-render crate::GRID_CJK_FALLBACK_FAMILIES	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::assemble	Ambiguous	elapsed	3	
@@ -10537,6 +10600,9 @@ crates/bt-render/src/lib.rs	bt-render crate::GpuContext::bootstrap_for_surface	A
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::device_loss	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::hold_background_texture	Ambiguous	create_view	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::hold_video_texture	Ambiguous	create_view	1	
+crates/bt-render/src/lib.rs	bt-render crate::GpuContext::let_go_of_the_lost_device	Ambiguous	map_err	2	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::GpuContext::let_go_of_the_lost_device	Ambiguous	request_device	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; wgpu `Adapter::request_device` on the noop backend's adapter: an inert device with no driver behind it, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::GpuContext::let_go_of_the_lost_device	Ambiguous	to_string	2	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::open	Ambiguous	clone	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	clone	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	elapsed	2	
@@ -10544,7 +10610,6 @@ crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_lo
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	get_capabilities	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	into_iter	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	kind	2	
-crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	limits	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	map_err	2	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	ok_or_else	1	
@@ -10571,6 +10636,9 @@ crates/bt-render/src/lib.rs	bt-render crate::TextRefusals::names	Ambiguous	map	1
 crates/bt-render/src/lib.rs	bt-render crate::WideShapingCache::get_or_shape	Ambiguous	elapsed	1	
 crates/bt-render/src/lib.rs	bt-render crate::WideShapingCache::get_or_shape	Ambiguous	map_or	1	
 crates/bt-render/src/lib.rs	bt-render crate::WideShapingCache::get_or_shape	Ambiguous	next	1	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::adopt_new_device	Ambiguous	collect	2	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::adopt_new_device	Ambiguous	map	2	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::adopt_new_device	Ambiguous	remove_srgb_suffix	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; wgpu `TextureFormat::remove_srgb_suffix`, a pure function of a format, which reaches no door
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::assemble	Ambiguous	elapsed	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::bytes_view	Ambiguous	create_view	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::bytes_view	Ambiguous	remove_srgb_suffix	1	
@@ -10694,6 +10762,13 @@ crates/bt-render/src/lib.rs	bt-render crate::create_surface	Ambiguous	to_string	
 crates/bt-render/src/lib.rs	bt-render crate::database_has_family	Ambiguous	any	2	
 crates/bt-render/src/lib.rs	bt-render crate::database_has_family	Ambiguous	iter	1	
 crates/bt-render/src/lib.rs	bt-render crate::draw_video_stage	Ambiguous	map_or	1	
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	GetDeviceRemovedReason	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `ID3D12Device::GetDeviceRemovedReason` (windows crate) on a held COM reference: a read of one HRESULT, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	clone	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a COM reference cloned (`AddRef`) out of wgpu's hal device, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	code	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `windows::core::Error` accessors on the answer just read, which reach no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	err	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	map	2	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	message	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `windows::core::Error` accessors on the answer just read, which reach no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	raw_device	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; wgpu hal `Device::raw_device`, the accessor of the D3D12 device it wraps, which reaches no door
 crates/bt-render/src/lib.rs	bt-render crate::drop_faces_with_no_scalable_em	Ambiguous	collect	1	
 crates/bt-render/src/lib.rs	bt-render crate::drop_faces_with_no_scalable_em	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::explicit_presentation_route	Ambiguous	find	1	

@@ -219,6 +219,16 @@ impl Compositor {
         Err(not_here("the web preview's visual tree"))
     }
 
+    /// The Windows arm lets go of the swapchain its GPU visual shows before a device is built
+    /// again. Nothing here shows one.
+    pub fn let_go_of_the_picture(
+        &self,
+        token: crate::admission::WaitToken<'_, crate::admission::doors::CompositorCommit>,
+    ) -> Result<(), String> {
+        let _ = token;
+        Ok(())
+    }
+
     /// Everything said since the last commit becomes visible. Nothing was said.
     ///
     /// **The door** (`doors::CompositorCommit`), the same signature as the Windows arm's.

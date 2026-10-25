@@ -58078,7 +58078,7 @@ mod hold_station_tests {
         );
         // One scope covers the entire dispatch, including early-return gates
         // and the application doors. `during` owns the restoration.
-        let opened = "hang_watch::during(window_event_station(&event), || {";
+        let opened = "hang_watch::during(station, || {";
         assert_eq!(
             event.matches(opened).count(),
             1,
@@ -64910,6 +64910,18 @@ fn rebuild_every_native_surface(
     gpu: &mut GpuContext,
     windows: Vec<&mut WindowRuntime>,
 ) -> std::result::Result<(), RenderError> {
+    // **Every window lets go of the old swapchain first** (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE):
+    // a composition visual keeps the swapchain it shows, and through it the device, and the
+    // new device is asked of the same adapter — see `Compositor::let_go_of_the_picture`.
+    for window in &windows {
+        bt_platform::admission::admitted::<bt_platform::admission::doors::CompositorCommit, _>(
+            |token| window.compositor.let_go_of_the_picture(token),
+        )
+        .unwrap_or_else(|refused| Err(refused.to_string()))
+        .map_err(|error| {
+            RenderError::DeviceLost(format!("a window kept its old picture: {error}"))
+        })?;
+    }
     let rebuilt: Vec<RebuiltWindow<'_>> = windows
         .into_iter()
         .map(|window: &mut WindowRuntime| {
@@ -69518,7 +69530,10 @@ impl<B: Backend> FolioApp<B> {
         }
         present_diagnostics::event();
         hang_watch::at(hang_watch::Station::Event);
-        hang_watch::during(window_event_station(&event), || {
+        let station = window_event_station(&event);
+        // The turn census names a turn woken by an event after its first handler (T-IDLE-TURN-COST).
+        hang_watch::window_event(station);
+        hang_watch::during(station, || {
             // **The one line the whole slice is about.** winit stamps the id of the
             // window the event happened to; before this, the loop compared it against
             // the only window there was and dropped anything else. Now it is a
@@ -70059,7 +70074,7 @@ mod resident_run_tests {
         );
         assert!(
             trait_method_body("FolioApp", "ApplicationHandler", "new_events")
-                .contains("hang_watch::woke()"),
+                .contains("hang_watch::woke("),
             "and the park ends at the wake, not at the next turn — an event \
              that wedges is a thread holding control"
         );
@@ -70304,6 +70319,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             bt_platform::file_reads::input();
         }
         present_diagnostics::event();
+        // The turn census names a turn woken by an event after its first handler (T-IDLE-TURN-COST).
+        hang_watch::app_event(&event);
         // **The lane this wake belongs to, named before it is spent** — see
         // [`AppEvent::station`]. Paired with the `at` below rather than left
         // standing, on [`hang_watch::enter`]'s own rule: the station a handler
@@ -70870,7 +70887,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     /// hang, and would be excused by the deadline it was parked with if the
     /// parking outlived the park.
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
-        hang_watch::woke();
+        // The cause is the turn census's (T-IDLE-TURN-COST): what woke this turn.
+        hang_watch::woke(match cause {
+            StartCause::ResumeTimeReached { .. } => hang_watch::WakeCause::ResumeTimeReached,
+            StartCause::WaitCancelled { .. } => hang_watch::WakeCause::WaitCancelled,
+            StartCause::Poll => hang_watch::WakeCause::Poll,
+            StartCause::Init => hang_watch::WakeCause::Init,
+        });
         // winit's first callback, before `resumed`: the window thread's phase turns to `Running`.
         if matches!(cause, StartCause::Init) {
             bt_platform::admission::loop_running();

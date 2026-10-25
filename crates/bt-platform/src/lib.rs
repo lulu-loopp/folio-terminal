@@ -4025,62 +4025,50 @@ impl ProbeChild {
     /// its immediate child, when it is uncontained) with a suspend count above zero.
     #[cfg(windows)]
     pub fn suspended(&self) -> std::io::Result<bool> {
+        use std::ops::ControlFlow;
         use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
         use windows::Wdk::System::Threading::{NtQueryInformationThread, ThreadSuspendCount};
         use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
-        };
         use windows::Win32::System::Threading::{OpenThread, THREAD_QUERY_LIMITED_INFORMATION};
 
         let processes: Vec<u32> = match &self.guard.job {
             Some(job) => job_process_ids(job)?,
             None => vec![self.leader.id],
         };
-        // SAFETY: a snapshot of the system's threads; its handle moves to `OwnedHandle` at once.
-        let snapshot = unsafe {
-            OwnedHandle::from_raw_handle(CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)?.0)
-        };
-        let mut entry = THREADENTRY32 {
-            dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>())
-                .expect("thread entry size fits u32"),
-            ..THREADENTRY32::default()
-        };
-        // SAFETY: the snapshot handle is live and `entry` carries its own size.
-        let mut more =
-            unsafe { Thread32First(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
-        while more {
-            if processes.contains(&entry.th32OwnerProcessID) {
+        let mut held = false;
+        crate::threads::each_thread_of(
+            |pid| processes.contains(&pid),
+            |thread_id| {
                 // SAFETY: opens a thread of this probe's own processes for a query; the handle
                 // moves to `OwnedHandle` at once. A thread that ended meanwhile is skipped.
-                let opened = unsafe {
-                    OpenThread(THREAD_QUERY_LIMITED_INFORMATION, false, entry.th32ThreadID)
+                let Ok(thread) =
+                    (unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, false, thread_id) })
+                else {
+                    return ControlFlow::Continue(());
                 };
-                if let Ok(thread) = opened {
-                    // SAFETY: as above.
-                    let thread = unsafe { OwnedHandle::from_raw_handle(thread.0) };
-                    let mut count = 0_u32;
-                    // SAFETY: the thread handle is live; `count` is the four bytes the
-                    // `ThreadSuspendCount` class writes.
-                    let status = unsafe {
-                        NtQueryInformationThread(
-                            HANDLE(thread.as_raw_handle()),
-                            ThreadSuspendCount,
-                            std::ptr::from_mut(&mut count).cast(),
-                            u32::try_from(std::mem::size_of::<u32>()).expect("four bytes"),
-                            std::ptr::null_mut(),
-                        )
-                    };
-                    if status.is_ok() && count > 0 {
-                        return Ok(true);
-                    }
+                // SAFETY: as above.
+                let thread = unsafe { OwnedHandle::from_raw_handle(thread.0) };
+                let mut count = 0_u32;
+                // SAFETY: the thread handle is live; `count` is the four bytes the
+                // `ThreadSuspendCount` class writes.
+                let status = unsafe {
+                    NtQueryInformationThread(
+                        HANDLE(thread.as_raw_handle()),
+                        ThreadSuspendCount,
+                        std::ptr::from_mut(&mut count).cast(),
+                        u32::try_from(std::mem::size_of::<u32>()).expect("four bytes"),
+                        std::ptr::null_mut(),
+                    )
+                };
+                if status.is_ok() && count > 0 {
+                    held = true;
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
                 }
-            }
-            // SAFETY: as for `Thread32First`.
-            more =
-                unsafe { Thread32Next(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
-        }
-        Ok(false)
+            },
+        )?;
+        Ok(held)
     }
 
     /// Whether the probe's immediate child is stopped — held by a signal another program sent.
@@ -6560,40 +6548,22 @@ mod probe_child_tests {
     /// Resume every thread of process `pid` — the harness letting go of a suspension it holds.
     fn resume_threads_of(pid: u32) {
         use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-        use windows::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
-        };
         use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
-        // SAFETY: a thread snapshot; its handle moves to `OwnedHandle` at once.
-        let snapshot = unsafe {
-            OwnedHandle::from_raw_handle(
-                CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
-                    .expect("a thread snapshot")
-                    .0,
-            )
-        };
-        let mut entry = THREADENTRY32 {
-            dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>()).expect("fits"),
-            ..THREADENTRY32::default()
-        };
-        // SAFETY: the snapshot is live; `entry` carries its own size.
-        let mut more =
-            unsafe { Thread32First(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
-        while more {
-            if entry.th32OwnerProcessID == pid {
+        crate::threads::each_thread_of(
+            |owner| owner == pid,
+            |thread_id| {
                 // SAFETY: a thread of this test's own suspended helper; the handle is owned and
                 // closed at once.
                 unsafe {
-                    let thread = OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, false, thread_id)
                         .expect("open the helper's thread");
                     let thread = OwnedHandle::from_raw_handle(thread.0);
                     assert_ne!(ResumeThread(HANDLE(thread.as_raw_handle())), u32::MAX);
                 }
-            }
-            // SAFETY: as above.
-            more =
-                unsafe { Thread32Next(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
-        }
+                std::ops::ControlFlow::Continue(())
+            },
+        )
+        .expect("a thread snapshot");
     }
 
     /// RED (mutation: one sample — `held_suspended` answers its first read) — **a probe suspended
@@ -8961,6 +8931,12 @@ pub mod hang;
 /// difference should be readable on one screen.
 pub mod mem;
 
+/// **This process's threads, by the names they were given** (T-IDLE-TURN-COST): the census
+/// `BT_PERF_TRACE threads` prints, and the one walk over the system's thread snapshot the probe's
+/// suspension check shares. Beside [`mem`] for its reason: one question about the calling process,
+/// both arms in one file.
+pub mod threads;
+
 /// **Each message the window thread's pump dispatches, timed** (ticket 64) —
 /// the posted ones through winit's message hook, the sent ones through this
 /// thread's own `WH_CALLWNDPROC` pair, and the names the self-report calls
@@ -10772,12 +10748,38 @@ mod windows_impl {
             self.commit_now()
         }
 
+        /// **Let go of the swapchain the GPU visual shows**, and commit that — the first step
+        /// of building the picture again on a new device (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE).
+        ///
+        /// `SetContent` is the visual taking a reference to wgpu's swapchain, and the swapchain
+        /// holds the command queue it presents on, which holds the D3D12 device. D3D12 keeps
+        /// one device per adapter in a process, so while any of that chain is alive the driver
+        /// answers a request for a new device on the same adapter with the removed one, and
+        /// wgpu's adapter list comes back empty (`dx12 found no adapters`, the clean Win10
+        /// VM's rebuild). wgpu never empties the visual itself: dropping a surface releases
+        /// wgpu's own reference and leaves this one. The visual shows nothing until the next
+        /// surface sets its content again, which is what a window whose device is gone was
+        /// showing anyway.
+        ///
+        /// **The door** is the commit's (`doors::CompositorCommit`, row 9): one `SetContent`
+        /// and one commit, the same two calls a frame's publication makes.
+        pub fn let_go_of_the_picture(
+            &self,
+            token: WaitToken<'_, doors::CompositorCommit>,
+        ) -> Result<(), String> {
+            let _ = token;
+            unsafe { self.gpu.SetContent(None::<&IUnknown>) }.map_err(|error| {
+                compositor_failure("IDCompositionVisual::SetContent(nothing)", &error)
+            })?;
+            self.commit_now()
+        }
+
         /// **The commit with no token**, for the batches that are already admitted as a whole.
-        /// Crate-visible so `webview` can reach it; its callers are exactly seven (design note
+        /// Crate-visible so `webview` can reach it; its callers are exactly eight (design note
         /// 2026-09-26, revision (f)1): the forwarding call in [`Compositor::commit`],
         /// [`Compositor::new`] (`CompositorBirth`), [`Compositor::set_window_size`]
-        /// (`CompositorWindowSize`), and `WebHost::rehost`'s two and `WebHost::compensate`'s two
-        /// (`WebRehost`).
+        /// (`CompositorWindowSize`), `WebHost::rehost`'s two and `WebHost::compensate`'s two
+        /// (`WebRehost`), and [`Compositor::let_go_of_the_picture`] (`CompositorCommit`).
         pub(crate) fn commit_now(&self) -> Result<(), String> {
             unsafe { self.device.Commit() }
                 .map_err(|error| compositor_failure("IDCompositionDevice2::Commit", &error))
@@ -19439,6 +19441,11 @@ mod compositor_arms_tests {
                 "place_web_visual",
                 "hide_web_visual",
                 "commit",
+                // T-WEBVIEW-WARMUP-DROPS-THE-DEVICE. A device rebuilt after a
+                // loss is asked for only once the old one is let go of, and the
+                // visual's swapchain is one of its holders; the macOS arm has
+                // the door and nothing to let go of.
+                "let_go_of_the_picture",
             ],
             "the DirectComposition arm is this ticket's baseline and this ticket does not touch \
              it — a change here is a change to a tree nothing in M4-1 ran"
@@ -19734,11 +19741,13 @@ mod compositor_arms_tests {
     /// `every_macos_window_door_proves_its_thread_before_it_calls_appkit` makes
     /// one file over.
     ///
-    /// **Five named exceptions, and each reaches no AppKit at all**:
+    /// **Six named exceptions, and each reaches no AppKit at all**:
     /// `gpu_visual_ptr` hands back a pointer it was given in the constructor,
     /// `skirt_covers_anything` is arithmetic over two cells, the two size
-    /// setters move those cells and nothing else, and `commit` has an empty
-    /// body because CoreAnimation commits the run loop's own transaction.
+    /// setters move those cells and nothing else, `commit` has an empty
+    /// body because CoreAnimation commits the run loop's own transaction, and
+    /// `let_go_of_the_picture` has an empty body because the old surface's
+    /// layer is taken off where the new surface is made.
     /// `new` gates through `folios_surface_view`, which is `macos_impl`'s door
     /// and asks the same question.
     ///
@@ -19754,6 +19763,7 @@ mod compositor_arms_tests {
                 "gpu_visual_ptr"
                     | "skirt_covers_anything"
                     | "commit"
+                    | "let_go_of_the_picture"
                     | "set_window_size"
                     | "set_covered_size"
             ) {

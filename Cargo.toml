@@ -268,7 +268,11 @@ vte = { version = "=0.15.0", default-features = false, features = ["std"] }
 # names its clock through it (`crates/bt-source/tests/clock_guard.rs` holds the
 # set). Already in the lock file through `winit`, at this version.
 web-time = "=1.1.0"
-wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12", "wgsl"] }
+# `noop`: wgpu's inert backend, compiled in for one use — a device that holds no driver object,
+# onto which `bt-render` moves everything made of a lost device before it asks the driver for a
+# new one (`GpuContext::let_go_of_the_lost_device`). It is never picked by an adapter request: an
+# instance only lists it when it is enabled by name (`NoopBackendOptions::enabled`).
+wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12", "wgsl", "noop"] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 [profile.test]
