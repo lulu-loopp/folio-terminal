@@ -4236,6 +4236,73 @@ fn note_what_the_device_said(
 /// The headline over what the driver said when it took a device away.
 const DEVICE_LOST_HEADLINE: &str = "Folio lost the GPU device";
 
+/// **The driver's own reason for taking a device away, asked of the driver** —
+/// a reader that answers `None` while the device is still here, or on a backend
+/// that keeps no reason.
+///
+/// wgpu's loss callback carries `Unknown: Device is lost` for every removal the
+/// D3D12 backend notices (`wgpu-hal-30.0.0` `auxil/dxgi/result.rs` maps
+/// `DXGI_ERROR_DEVICE_REMOVED` to `DeviceError::Lost` and drops the code), and
+/// that sentence is the same for a driver reset, a hung queue and a command the
+/// driver refused. The clean Win10 VM lost its device on the first-run card and
+/// on the Settings sheet, four runs out of four, and the log could not say which
+/// of those it was. `ID3D12Device::GetDeviceRemovedReason` can: it answers the
+/// `HRESULT` the runtime removed the device with — `0x887A0006` hung,
+/// `0x887A0005` removed, `0x887A0007` reset, `0x887A0020` an internal driver
+/// error, `0x887A0001` an invalid call.
+///
+/// Built before the loss callback is armed and moved into it, because the
+/// callback is handed no device. What it holds is one more reference to the
+/// D3D12 device, inside the callback the wgpu device owns: it goes when that
+/// device goes, so it never keeps a device alive that would otherwise have been
+/// released.
+///
+/// **Two `unsafe` calls, and the only two in this crate outside
+/// [`create_surface`].** `as_hal` because wgpu cannot know what a caller does
+/// with the backend's own object — here, one `AddRef` and nothing else — and
+/// `GetDeviceRemovedReason` because every COM call is `unsafe` in the bindings;
+/// it reads one `HRESULT` off a device this closure holds a reference to.
+#[allow(unsafe_code)]
+fn driver_removal_reason(
+    device: &wgpu::Device,
+) -> impl Fn() -> Option<String> + Send + Sync + 'static {
+    #[cfg(target_os = "windows")]
+    {
+        // SAFETY: the hal device is only read — its raw `ID3D12Device` is
+        // cloned (`AddRef`) and the guard is dropped at the end of this
+        // statement, so no wgpu lock is held past it. A device on any other
+        // backend answers `None` and nothing is kept.
+        let raw =
+            unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }.map(|hal| hal.raw_device().clone());
+        move || {
+            let raw = raw.as_ref()?;
+            // SAFETY: a call on a live COM reference this closure owns;
+            // `ID3D12Device` is free-threaded.
+            unsafe { raw.GetDeviceRemovedReason() }
+                .err()
+                .map(|error| format!("{:#010X} {}", error.code().0, error.message().trim()))
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = device;
+        || None
+    }
+}
+
+/// **The sentence the loss callback latches**: wgpu's reason and message, and
+/// the driver's own reason after them when it gave one.
+fn what_the_lost_device_said(
+    reason: wgpu::DeviceLostReason,
+    message: &str,
+    driver: Option<String>,
+) -> String {
+    match driver {
+        Some(driver) => format!("{reason:?}: {message} (the driver's reason: {driver})"),
+        None => format!("{reason:?}: {message}"),
+    }
+}
+
 /// The headline over an error wgpu could attribute to no call of ours.
 ///
 /// A different sentence from [`DEVICE_LOST_HEADLINE`] because it is a different
@@ -4704,6 +4771,12 @@ pub struct GpuContext {
     instance: wgpu::Instance,
     present_wait: wgpu::Dx12UseFrameLatencyWaitableObject,
     adapter: wgpu::Adapter,
+    /// **Whether the adapter was the software fallback asked for by name** — what the
+    /// rebuild after a device loss asks for again, so that a context is rebuilt on the
+    /// kind of adapter it was opened on. `false` for every window's context: the product
+    /// asks for the best adapter for its surface, which on a machine with no graphics
+    /// driver is the software one without being asked (the clean Win10 VM's).
+    adapter_is_the_fallback: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
     /// The format the atlas and both pipelines were built for. The whole of the
@@ -6893,6 +6966,7 @@ impl DeviceResources {
         let device_loss: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
         {
             let latch = Arc::clone(&device_loss);
+            let driver = driver_removal_reason(device);
             device.set_device_lost_callback(move |reason, message| {
                 // wgpu's choice of thread: the window thread when it notices during a call made
                 // there, a backend thread otherwise (design note 2026-09-26, revision (c)7).
@@ -6900,7 +6974,7 @@ impl DeviceResources {
                 if let Some(line) = note_what_the_device_said(
                     &latch,
                     DEVICE_LOST_HEADLINE,
-                    &format!("{reason:?}: {message}"),
+                    &what_the_lost_device_said(reason, &message, driver()),
                 ) {
                     bt_viewport::trace::line(line.to_string());
                 }
@@ -7069,7 +7143,7 @@ impl GpuContext {
             .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?;
         Self::assemble(
             (instance, present_wait),
-            adapter,
+            (adapter, false),
             device,
             queue,
             format,
@@ -7103,6 +7177,13 @@ impl GpuContext {
     ///    new one.** A composition visual publishes exactly one swapchain
     ///    (`IDCompositionVisual::SetContent`), so a second surface created over
     ///    a live one is two swapchains fighting for one visual.
+    ///
+    ///    **And nothing of the lost device is left before the new one is asked
+    ///    for** ([`Self::let_go_of_the_lost_device`];
+    ///    T-WEBVIEW-WARMUP-DROPS-THE-DEVICE). D3D12 keeps one device per adapter
+    ///    in a process, so a removed device that anything still holds is the
+    ///    answer to the next request on that adapter, and a machine whose only
+    ///    adapter is that one gets none.
     /// 2. **A new [`wgpu::Instance`], not the old one.** On Windows a removed
     ///    device retires the DXGI factory that made it, and a surface may only
     ///    be presented on a device from the same instance that created it. The
@@ -7140,6 +7221,14 @@ impl GpuContext {
                 RebuiltWindow::Offscreen(renderer) => offscreen.push(renderer),
             }
         }
+        {
+            let mut every: Vec<&mut WindowRenderer> = on_screen
+                .iter_mut()
+                .map(|(renderer, _)| &mut **renderer)
+                .chain(offscreen.iter_mut().map(|renderer| &mut **renderer))
+                .collect();
+            self.let_go_of_the_lost_device(&mut every).await?;
+        }
         let descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         let present_wait = descriptor
             .backend_options
@@ -7159,7 +7248,7 @@ impl GpuContext {
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: bootstrap.as_ref().map(|(_, surface, _)| surface),
                 power_preference: gpu_power_request().preference(),
-                force_fallback_adapter: false,
+                force_fallback_adapter: self.adapter_is_the_fallback,
                 ..Default::default()
             })
             .await
@@ -7188,7 +7277,126 @@ impl GpuContext {
                 .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?,
             None => self.format,
         };
+        let resources = DeviceResources::mint(&device, &queue, format);
+        let (device_loss, device_fault) = self.install_device(
+            (instance, present_wait),
+            adapter,
+            (device, queue),
+            format,
+            resources,
+        );
+        self.init_timings.adapter = adapter_time;
+        self.init_timings.device = device_time;
+        if let Some((renderer, surface, kind)) = bootstrap {
+            renderer.adopt_new_device(self, Some((surface, kind)))?;
+        }
+        for (renderer, target) in on_screen {
+            let kind = target.kind();
+            let surface = create_surface(&self.instance, target)?;
+            renderer.adopt_new_device(self, Some((surface, kind)))?;
+        }
+        for renderer in offscreen {
+            renderer.adopt_new_device(self, None)?;
+        }
+        // **Both latches are replaced last, after every window has adopted**
+        // (review row R2-7; the fault latch joined it in §7.1.3m ⑤″, and for the
+        // same reason — a context that kept the old device's faults would refuse
+        // every frame on the new one). Replacing them is what says the device is
+        // back — an
+        // `OnceLock` cannot be un-set, so a context that kept the old one would
+        // refuse every frame it was ever asked for again — and *when* it is
+        // replaced is what says the recovery is over. It used to be installed
+        // before this loop, so a window that failed to adopt left through the
+        // `?` above with the machine already reporting a device: the pilot's
+        // next question was answered "already back", the episode ended, and the
+        // window that had surrendered its swapchain and been given nothing sat
+        // blank for the rest of the run with nothing anywhere saying why. Left
+        // where it now is, that window's failure keeps the old latch set, the
+        // pilot tries the whole rebuild again, and a machine that will not give
+        // a device back reaches the exit that is there for it.
+        self.device_loss = device_loss;
+        self.device_fault = device_fault;
+        Ok(())
+    }
+
+    /// **Let go of every object of the lost device before a new one is asked for**
+    /// (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE).
+    ///
+    /// D3D12 keeps one device per adapter in a process, and a request for a device on an
+    /// adapter whose device is removed but still referenced is answered with nothing: wgpu
+    /// probes each adapter with a device of its own as it lists them, the probe fails, and
+    /// the list comes back empty (`dx12 found no adapters` — the clean Win10 VM, where the
+    /// software adapter is the only one, so a lost device there was never rebuilt).
+    ///
+    /// Every object made out of a device holds it: this context's pipelines, atlas, caches,
+    /// adapter and instance, and every window's target, text renderers and fading surfaces.
+    /// They are released the one way this type already knows how to make all of them again
+    /// — the same exhaustive [`DeviceResources::mint`] and the same
+    /// [`WindowRenderer::adopt_new_device`] the rebuild itself runs — on an **inert
+    /// device**: wgpu's no-op backend, which draws nothing, holds no driver object and is
+    /// never chosen by an ordinary adapter request (it has to be enabled by name). The
+    /// latches are not replaced here, so a rebuild that fails after this step still says
+    /// the device is lost.
+    async fn let_go_of_the_lost_device(
+        &mut self,
+        windows: &mut [&mut WindowRenderer],
+    ) -> Result<(), RenderError> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::NOOP,
+            backend_options: wgpu::BackendOptions {
+                noop: wgpu::NoopBackendOptions::enabled(),
+                ..Default::default()
+            },
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("Folio inert device"),
+                // The real device may allow textures past 8192 (see the helper); a
+                // window that large re-minted here must not trip the default ceiling.
+                required_limits: limits_with_this_adapters_textures(&adapter),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let format = self.format;
+        let resources = DeviceResources::mint(&device, &queue, format);
+        let present_wait = self.present_wait.clone();
+        // The inert device's own latches are dropped: this context is still the lost one's.
+        let _ = self.install_device(
+            (instance, present_wait),
+            adapter,
+            (device, queue),
+            format,
+            resources,
+        );
+        for window in windows.iter_mut() {
+            window.adopt_new_device(self, None)?;
+        }
+        Ok(())
+    }
+
+    /// **Make `device` this context's device**: every shared resource replaced by the set
+    /// minted on it, and every content cache emptied. Answers the new device's two latches,
+    /// which the caller installs when — and only when — the device is in use (see the end
+    /// of [`Self::rebuild_after_device_loss`]).
+    fn install_device(
+        &mut self,
+        instance: (wgpu::Instance, wgpu::Dx12UseFrameLatencyWaitableObject),
+        adapter: wgpu::Adapter,
+        device: (wgpu::Device, wgpu::Queue),
+        format: wgpu::TextureFormat,
+        resources: DeviceResources,
+    ) -> (Arc<OnceLock<String>>, Arc<OnceLock<String>>) {
+        let (instance, present_wait) = instance;
+        let (device, queue) = device;
         let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
+        // Exhaustive on purpose, as in `assemble`: a resource this destructure does not
+        // name will not compile, so nothing of the old device can be left behind.
         let DeviceResources {
             device_loss,
             device_fault,
@@ -7208,7 +7416,7 @@ impl GpuContext {
             video_bind_group_layout,
             video_sampler,
             video_blank,
-        } = DeviceResources::mint(&device, &queue, format);
+        } = resources;
         self.instance = instance;
         self.present_wait = present_wait;
         self.adapter = adapter;
@@ -7242,38 +7450,7 @@ impl GpuContext {
         self.video_textures.clear();
         self.background_texture = None;
         self.math_textures.clear();
-        self.init_timings.adapter = adapter_time;
-        self.init_timings.device = device_time;
-        if let Some((renderer, surface, kind)) = bootstrap {
-            renderer.adopt_new_device(self, Some((surface, kind)))?;
-        }
-        for (renderer, target) in on_screen {
-            let kind = target.kind();
-            let surface = create_surface(&self.instance, target)?;
-            renderer.adopt_new_device(self, Some((surface, kind)))?;
-        }
-        for renderer in offscreen {
-            renderer.adopt_new_device(self, None)?;
-        }
-        // **Both latches are replaced last, after every window has adopted**
-        // (review row R2-7; the fault latch joined it in §7.1.3m ⑤″, and for the
-        // same reason — a context that kept the old device's faults would refuse
-        // every frame on the new one). Replacing them is what says the device is
-        // back — an
-        // `OnceLock` cannot be un-set, so a context that kept the old one would
-        // refuse every frame it was ever asked for again — and *when* it is
-        // replaced is what says the recovery is over. It used to be installed
-        // before this loop, so a window that failed to adopt left through the
-        // `?` above with the machine already reporting a device: the pilot's
-        // next question was answered "already back", the episode ended, and the
-        // window that had surrendered its swapchain and been given nothing sat
-        // blank for the rest of the run with nothing anywhere saying why. Left
-        // where it now is, that window's failure keeps the old latch set, the
-        // pilot tries the whole rebuild again, and a machine that will not give
-        // a device back reaches the exit that is there for it.
-        self.device_loss = device_loss;
-        self.device_fault = device_fault;
-        Ok(())
+        (device_loss, device_fault)
     }
 
     /// The device layer with no window at all: `compatible_surface: None` and
@@ -7354,18 +7531,22 @@ impl GpuContext {
             force_fallback_adapter,
             ..Default::default()
         };
-        let adapter = if demand_fallback {
-            instance
+        let (adapter, adapter_is_the_fallback) = if demand_fallback {
+            let adapter = instance
                 .request_adapter(&options(true))
                 .await
-                .map_err(|error| RenderError::Wgpu(error.to_string()))?
+                .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+            (adapter, true)
         } else {
             match instance.request_adapter(&options(false)).await {
-                Ok(adapter) => adapter,
-                Err(_) => instance
-                    .request_adapter(&options(true))
-                    .await
-                    .map_err(|error| RenderError::Wgpu(error.to_string()))?,
+                Ok(adapter) => (adapter, false),
+                Err(_) => {
+                    let adapter = instance
+                        .request_adapter(&options(true))
+                        .await
+                        .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+                    (adapter, true)
+                }
             }
         };
         let adapter_time = phase_started.elapsed();
@@ -7385,7 +7566,7 @@ impl GpuContext {
         let device_time = phase_started.elapsed();
         Self::assemble(
             (instance, present_wait),
-            adapter,
+            (adapter, adapter_is_the_fallback),
             device,
             queue,
             format,
@@ -7396,7 +7577,7 @@ impl GpuContext {
 
     fn assemble(
         instance: (wgpu::Instance, wgpu::Dx12UseFrameLatencyWaitableObject),
-        adapter: wgpu::Adapter,
+        adapter: (wgpu::Adapter, bool),
         device: wgpu::Device,
         queue: wgpu::Queue,
         format: wgpu::TextureFormat,
@@ -7404,6 +7585,7 @@ impl GpuContext {
         device_time: Duration,
     ) -> Result<Self, RenderError> {
         let (instance, present_wait) = instance;
+        let (adapter, adapter_is_the_fallback) = adapter;
         let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
         let phase_started = Instant::now();
         let mut font_system = terminal_font_system();
@@ -7443,6 +7625,7 @@ impl GpuContext {
             instance,
             present_wait,
             adapter,
+            adapter_is_the_fallback,
             device,
             queue,
             format,
@@ -7704,6 +7887,50 @@ impl GpuContext {
     #[cfg(all(test, target_os = "windows"))]
     fn lose_the_device_on_purpose(&self) {
         self.device.destroy();
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+    }
+
+    /// **Have the D3D12 runtime remove this context's device**, the way a driver
+    /// reset or a hung queue does — and unlike [`Self::lose_the_device_on_purpose`],
+    /// which leaves the D3D12 device itself healthy.
+    ///
+    /// `ID3D12Device5::RemoveDevice` puts the device in the removed state; the
+    /// next call wgpu makes that the runtime answers — a resource's creation —
+    /// returns `DXGI_ERROR_DEVICE_REMOVED`, and
+    /// wgpu raises the same `Unknown: Device is lost` the clean Win10 VM logged.
+    ///
+    /// **Process-wide on one adapter**: D3D12 keeps one device per adapter per
+    /// process, so every context of this test binary on the same adapter is
+    /// removed with it. Only the software adapter is removed this way, and only
+    /// under the GPU test lock, which every headless device is taken through.
+    #[cfg(all(test, target_os = "windows"))]
+    #[allow(unsafe_code)]
+    fn remove_the_device_for_real(&self) {
+        use windows::Win32::Graphics::Direct3D12::ID3D12Device5;
+        use windows::core::Interface;
+        // SAFETY: the hal device is read for one clone of its raw COM pointer.
+        let raw = unsafe { self.device.as_hal::<wgpu::hal::api::Dx12>() }
+            .map(|hal| hal.raw_device().clone())
+            .expect("a D3D12 device");
+        let five: ID3D12Device5 = raw
+            .cast()
+            .expect("ID3D12Device5 (Windows 10 1809 or later)");
+        // SAFETY: a call on a live COM reference; removal is what is asked for.
+        unsafe { five.RemoveDevice() };
+        drop(five);
+        drop(raw);
+        // The runtime says so to the next call that returns an `HRESULT`: a resource's
+        // creation always does, where a poll of a queue with nothing in flight may not ask.
+        let _ = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("the call that hears the removal"),
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.submit(std::iter::empty());
         let _ = self.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,
@@ -31985,6 +32212,144 @@ mod tests {
             assert_eq!(window.overlay_groups_composited(), 1);
         }
 
+        /// PIN (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE) — **a surface fading at one
+        /// half reads as CSS `opacity` on both sides of the sRGB knee.**
+        ///
+        /// `over` keeps one half of the transfer with `select`; the knee is at
+        /// linear 0.0031308, between `#0A` and `#0B`. Every other test here
+        /// draws at `#1B` or above, on the transfer's upper half only. This
+        /// ramp of opaque greys from `#00` to `#10`, over a black ground at one
+        /// half, has to read as the browser's `c / 2` on every step: exact where
+        /// the half is a whole byte, either neighbour where it is not.
+        ///
+        /// MUTATION: swap `select`'s first two operands in `encode` and the
+        /// lower half takes the power curve — `#02` reads `#00`, `#04` reads
+        /// `#01`.
+        #[test]
+        fn a_surface_fading_at_one_half_reads_as_css_opacity_either_side_of_the_srgb_knee() {
+            const RAMP: [u8; 11] = [
+                0x00, 0x02, 0x04, 0x06, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0E, 0x10,
+            ];
+            const STEP: f32 = 28.0;
+            const TOP: f32 = 100.0;
+            const BOTTOM: f32 = 140.0;
+
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let black = OverlayLayer {
+                quads: vec![OverlayQuad {
+                    rect: [0.0, 0.0, WIDTH as f32, HEIGHT as f32],
+                    color: [0, 0, 0],
+                    alpha: 1.0,
+                }],
+                ..OverlayLayer::default()
+            };
+            let ramp = OverlayLayer {
+                quads: RAMP
+                    .iter()
+                    .enumerate()
+                    .map(|(step, &grey)| {
+                        let left = 6.0 + STEP * step as f32;
+                        OverlayQuad {
+                            rect: [left, TOP, left + STEP, BOTTOM],
+                            color: [grey; 3],
+                            alpha: 1.0,
+                        }
+                    })
+                    .collect(),
+                ..OverlayLayer::default()
+            };
+            window.set_modal_overlay(vec![black, ramp], vec![group(1..2, 0.5)]);
+            let pixels = present(&mut window, &mut gpu);
+
+            let mut wrong = Vec::new();
+            for (step, &grey) in RAMP.iter().enumerate() {
+                let centre = ((6.0 + STEP * (step as f32 + 0.5)) as u32, 120);
+                let read = at(&pixels, centre);
+                let (low, high) = (grey / 2, grey.div_ceil(2));
+                if !(low..=high).contains(&read) {
+                    wrong.push(format!(
+                        "#{grey:02X} at one half read #{read:02X}, CSS says #{low:02X}"
+                    ));
+                }
+            }
+            assert!(wrong.is_empty(), "the ramp across the knee: {wrong:#?}");
+        }
+
+        /// RED (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE) — **no fragment stage of this
+        /// renderer branches.**
+        ///
+        /// `group.wgsl`'s `over` was written with `if … return`, in its sRGB
+        /// transfer and for an empty texel. Compiled under FXC's optimiser, as
+        /// every release build compiles it, it removed the device on Windows
+        /// 10's Basic Render Driver the first time a surface was put back — at a
+        /// first start's tooltip, at Settings opening. The same functions with
+        /// the transfer written straight-line ran on that driver, and a debug
+        /// build (FXC told to skip optimising) never showed it. No machine these
+        /// tests run on has that driver, so the property is held where it can
+        /// be: in the shaders, parsed by naga as wgpu parses them, every
+        /// function a fragment entry point reaches walked for an `if`, a
+        /// `switch` or a loop. Every fragment stage here was straight-line
+        /// already except that one.
+        ///
+        /// Only `if` was shown to fail on that driver. `switch` and loops are
+        /// refused out of caution, as the same dynamic flow control FXC
+        /// optimises; a fragment loop that is ever needed takes a release-build
+        /// run on folio-win10 and a reasoned change to this test.
+        ///
+        /// A shader added to this renderer joins the list.
+        ///
+        /// MUTATION: put `if linear.r <= 0.0031308 { return linear * 12.92; }`
+        /// back at the head of `encode` in `group.wgsl` and `over` is named.
+        #[test]
+        fn no_fragment_stage_of_the_renderer_branches() {
+            use wgpu::naga;
+
+            fn control_flow_in(module: &naga::Module, block: &naga::Block) -> Option<&'static str> {
+                block.iter().find_map(|statement| match statement {
+                    naga::Statement::If { .. } => Some("an `if`"),
+                    naga::Statement::Switch { .. } => Some("a `switch`"),
+                    naga::Statement::Loop { .. } => Some("a loop"),
+                    naga::Statement::Block(inner) => control_flow_in(module, inner),
+                    naga::Statement::Call { function, .. } => {
+                        control_flow_in(module, &module.functions[*function].body)
+                    }
+                    _ => None,
+                })
+            }
+
+            let shaders = [
+                ("background.wgsl", include_str!("background.wgsl")),
+                ("group.wgsl", include_str!("group.wgsl")),
+                ("math.wgsl", include_str!("math.wgsl")),
+                ("rect.wgsl", include_str!("rect.wgsl")),
+                ("video.wgsl", include_str!("video.wgsl")),
+            ];
+            let mut fragment_stages = 0;
+            let mut branching = Vec::new();
+            for (file, source) in shaders {
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|error| panic!("{file}: {}", error.emit_to_string(source)));
+                for entry in &module.entry_points {
+                    if entry.stage != naga::ShaderStage::Fragment {
+                        continue;
+                    }
+                    fragment_stages += 1;
+                    if let Some(kind) = control_flow_in(&module, &entry.function.body) {
+                        branching.push(format!("{file} `{}`: {kind}", entry.name));
+                    }
+                }
+            }
+            assert!(fragment_stages > 0, "no fragment stage was read");
+            assert!(
+                branching.is_empty(),
+                "a fragment stage branches, which an optimised FXC build of it may turn into \
+                 a shader a driver cannot run: {branching:#?}"
+            );
+        }
+
         /// PIN (46) — **a surface at rest draws the bytes it drew before groups
         /// existed**, group or no group.
         ///
@@ -33929,6 +34294,91 @@ mod tests {
                     },
                 )
             })
+        }
+
+        /// **A device the driver removes says the driver's reason in its one line**
+        /// (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE).
+        ///
+        /// The clean Win10 VM lost its device four runs out of four and its log said
+        /// `Unknown: Device is lost` each time — wgpu's sentence for every removal the
+        /// D3D12 backend notices, the code dropped on the way. The device here is
+        /// removed by the D3D12 runtime itself (`RemoveDevice`), on the adapter that VM
+        /// had, so the loss arrives through the same callback with the same words, and
+        /// the line has to carry what `GetDeviceRemovedReason` answers:
+        /// `DXGI_ERROR_DEVICE_REMOVED`, `0x887A0005`.
+        ///
+        /// RED (without the driver's reason read in the callback): the latch held
+        /// `Unknown: Device is lost` and nothing after it.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_device_the_driver_removes_says_the_drivers_reason() {
+            let Some(gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            assert!(gpu.device_loss().is_none(), "a device that is still here");
+            gpu.remove_the_device_for_real();
+            let said = gpu
+                .device_loss()
+                .expect("wgpu's own callback says a removed device went away");
+            assert!(
+                said.starts_with("Unknown: Device is lost"),
+                "wgpu's own words come first, as before: {said}"
+            );
+            assert!(
+                said.contains("(the driver's reason: 0x887A0005 "),
+                "the driver's HRESULT is on the line: {said}"
+            );
+        }
+
+        /// **A device the driver removes is rebuilt on the same adapter** — the software
+        /// one, which is the only adapter the clean Win10 VM has
+        /// (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE).
+        ///
+        /// D3D12 keeps one device per adapter in a process. While anything made of the
+        /// removed device is alive, wgpu's probe of that adapter fails and the adapter list
+        /// comes back empty — the VM's `could not open another GPU device: … dx12 found no
+        /// adapters`, after which Folio stopped. The rebuild has to let go of every object
+        /// of the lost device first, the window's included, and then ask.
+        ///
+        /// RED (without `let_go_of_the_lost_device`): the rebuild answered
+        /// `wgpu error: No suitable graphics adapter found; … dx12 had no fallback adapters`.
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn a_device_the_driver_removes_is_rebuilt_on_its_own_adapter() {
+            const WIDTH: u32 = 360;
+            const HEIGHT: u32 = 200;
+
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window =
+                WindowRenderer::offscreen(&mut gpu, WIDTH, HEIGHT, 1.0, FORMAT).expect("a window");
+            window.set_modal_overlay(a_sentence_this_window_keeps(), Vec::new());
+            let frame = single_cell_cursor_frame(window.base_metrics());
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame before the loss");
+            let before = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
+            assert!(before > 0, "the label has to be on the glass to be lost");
+
+            gpu.remove_the_device_for_real();
+            assert!(gpu.device_loss().is_some(), "the driver removed the device");
+
+            pollster::block_on(
+                gpu.rebuild_after_device_loss(vec![RebuiltWindow::Offscreen(&mut window)]),
+            )
+            .expect("the software adapter gives a device again once the lost one is let go of");
+            assert!(
+                gpu.device_loss().is_none(),
+                "the new device carries a new latch"
+            );
+            assert_eq!(
+                gpu.adapter.get_info().device_type,
+                wgpu::DeviceType::Cpu,
+                "rebuilt on the adapter it was opened on"
+            );
+
+            one_frame(&mut window, &mut gpu, &frame).expect("the frame after the rebuild");
+            let after = ink_pixels(&window.read_back(&gpu).expect("it reads back"));
+            assert_eq!(after, before, "the same words on the new device");
         }
 
         /// PIN (user report, 2026-09-01) — **the whole of the fix, against a

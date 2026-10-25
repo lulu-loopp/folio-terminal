@@ -60,9 +60,9 @@ bt-app	-	crate::psreadline::installed_disk::<System as Disk>::entries	std::fs::r
 bt-app	-	crate::raster_peek_page	std::fs::metadata	1
 bt-app	-	crate::rebuild_every_native_surface	pollster::block_on	1
 bt-app	-	crate::release_trial_writer	std::fs::create_dir_all	1
-bt-app	-	crate::revived_page_of	std::fs::canonicalize	1
 bt-app	-	crate::runtime::preview::Runtime::open_preview_web_file_on	std::fs::canonicalize	1
 bt-app	-	crate::runtime::profiles::Runtime::toggle_root_menu	std::fs::metadata	1
+bt-app	-	crate::runtime::web::revived_page_of	std::fs::canonicalize	1
 bt-app	-	crate::schemes::read_scheme_file	std::fs::metadata	1
 bt-app	-	crate::schemes::user_dir	std::fs::create_dir_all	1
 bt-app	-	crate::schemes::user_sources	std::fs::read_dir	1

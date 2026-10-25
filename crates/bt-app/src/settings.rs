@@ -5783,8 +5783,8 @@ pub fn notices_page() -> &'static str {
 /// **Resolved once per process**, which is what makes it safe to ask from a
 /// dialog that redraws on hover: this is one `current_exe` and one or two
 /// `is_file`, and the file beside a running executable does not move under it —
-/// `SettingsValues`' own `explorer_menu::package_file().is_some()` is the same
-/// arithmetic on the same page.
+/// `SettingsValues`' own `explorer_menu::package_file().is_some()` rests on the
+/// same fact, settled by `main` before the loop since 2026-10-25.
 fn notices_destination() -> LinkDestination {
     static WHERE: std::sync::OnceLock<LinkDestination> = std::sync::OnceLock::new();
     *WHERE.get_or_init(|| match notices_beside_the_executable() {

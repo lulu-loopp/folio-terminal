@@ -465,6 +465,85 @@ writes, an `extern crate … as`); either, for a landmark no pin names
 names. When refused, rename what is not a landmark, or
 widen the grammar in its own change with a planted case.
 
+`main`'s settles are pinned the same way (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP,
+2026-10-24): `profiles::settle_registry` as `main`'s first statement, before
+`parse`; `persist::settle_storage_dir` in the `--remove-shell-integration` door,
+before `parse`, and in the claim after the update pass, after `parse`; and
+`explorer_menu::settle_package` (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD,
+2026-10-25) in the loop's process once the running image is resolved, after
+`hand_over`. Every
+pinned writer is spelled only as the call through its pin's module path,
+`module::writer(…)` (`admission::` for the role and phase writers): an import, a
+value or a rename is refused by name and path
+(`a_pinned_settle_is_read_through_its_own_module_path`). Only the one segment
+before `::` is read, so `x::persist::settle_storage_dir(…)` for another module
+named `persist` would pass: a stated limit, the one the `admission::` rule always
+had. A pin is one call: the calls are counted per (writer, owner, landmark), and
+a second call matching a pin already met is reported as a surplus
+(`a_second_call_matching_a_pin_is_a_surplus`).
+
+A wait reached through the generic admission is pinned by its door
+(T-DOOR-PINS-BY-DOOR, 2026-10-25): `DOOR_PINS` places each call of a pinned door
+after its owner's landmark, through the same placement and count as `PINS`
+(`window_waits_tests::placed_and_counted`, one engine for both tables). Row 30's
+settle is admitted twice in `fn main`, after `build` (the build-error return) and
+after `run_app` (the tail); row 17's flush is admitted once, inside its one road
+`trace_sink::Shutdown::flush_through_its_door`, and `main` takes that road as
+`trace_shutdown.flush_through_its_door()` after `build` and after `run_app`. A
+pinned call with none found is red, a second matching one a surplus. "After
+`run_app`" is all a tail pin says: it does not pin the settle before the footer,
+or before the flush, which is the order row 30 exists for — a fixed landmark set
+cannot.
+
+What is read (`pinned_door_failures`'s grammar): every product token `admitted`,
+among the tokens of the smallest function body the index records around it, or —
+outside every recorded body (a signature, a module-level macro such as
+`define_class!`) — among its file's. Not an admission: a declaration, a method, a
+field, a `let`, a macro of the name, a name in a `use` that is not renamed, a
+path that resolves only to items the crate itself declares
+(`OnTheWorker::admitted`), and a bare name, neither called nor turbofished, that
+resolves to nothing (a local, as the `define_class!` methods' in
+`macos_http.rs`). Read first, before any resolution: an `admitted::<…>` inside a
+macro's arguments (other than `IN_PLACE_MACROS`) or inside a nested `fn`'s body —
+which the index does not record, so its calls would be the owner's, placed by
+where they are written — is refused. A path resolving to `admitted` in
+`bt_platform::admission` or `bt_effects::admission` must be the call
+`admitted::<doors::Door, …>(…)`, its first generic argument written as a path
+ending `doors::Door` that resolves to that admission's `doors`. The pair is
+stated because the `use` reader does not follow a `use` across crates; the
+consequence is that a path into any other crate is refused, not read — a third
+crate's re-export of the admission (`bt_term::admission::admitted::<…>`) would
+otherwise pass unseen. Refused by owner, line and what is written: a path that
+resolves to nothing (a name a macro-written `use` or an `extern crate … as`
+brings in), a path into another crate, a path resolving to the admission and
+another item at once, no turbofish (a door inferred from the argument), an
+imported or aliased door, another module's `doors`, the admission as a value
+(so a local named `admitted` where the name is the admission's is refused too),
+inside a macro's arguments or a nested `fn`, and a rename `admitted as …` in a
+`use`. Every token of a pinned road's name but its declaration must be the call
+on the pin's receiver, matched by spelling — a same-name method of another type
+called through a rebound `trace_shutdown` would count as the road — outside any
+macro's arguments and nested `fn`. A pinned door's call that stands under a
+statement's `#[cfg…]` or `#[cfg_attr(…)]` (the statement or block an outer one
+governs, or the block an inner `#![…]` one opens) is refused: the index reads a
+file's, an item's and a module's `cfg` but never a statement's, so a gated call
+would meet its pin on a build it is not in. The writer table (`PINS`) does not
+read statement `cfg`s yet — a stated gap, T-WINDOW-WAITS-STATEMENT-CFG (0.4.9 plan
+row 60). Not read: closures and run-time-dead branches — a call in a closure's
+body, or in a branch that never runs (`if cfg!(…)`, `if false`), is placed where
+it is written, as a landmark is, and is still in the build, so a closure written
+after `run_app` that is never called, or a settle under `if false`, would meet
+the tail's pin. An
+unreadable admission is refused wherever it is (it may be a pinned door's), and
+its owner's pins are not also called "not there" (`deleting_the_tail_settle_is_red`,
+`a_second_settle_in_another_branch_is_a_surplus`,
+`a_door_through_an_alias_or_another_module_is_refused`,
+`a_path_to_admitted_that_names_nothing_or_another_crate_is_refused`,
+`a_door_call_inside_a_nested_fn_is_refused`, `a_use_bound_is_no_use_declaration`,
+`a_pinned_call_under_a_statement_cfg_is_refused`,
+`a_module_level_macro_is_read_among_its_file`,
+`a_road_call_is_pinned_by_its_receiver`, `a_name_that_is_not_the_admission_is_not_read`).
+
 The registry's `# completions` section (S-1, 2026-10-11) is the side-effects
 contract's ledger, one row per request protocol, held by the
 `every_*completions*` tests (among them `every_worker_door_body_is_reached_from_a_completions_door`) and `every_conforming_request_door_holds_no_wait_of_its_own`
@@ -1112,29 +1191,70 @@ Explorer verb and the toast sender's name (`Notifier::new(display_name, wake)`).
 system's own words — a dialog's title and buttons, AppKit's rows — stay the system's.
 
 Where and what to do: `crates/bt-source/tests/native_labels.rs`
-(`bt_platform_native_labels_come_from_the_caller`) reads every string literal in the
-product bytes of `menu.rs`, `macos_menu.rs`, `macos_dialogs.rs` and
-`explorer_command.rs` whole, of the `impl` blocks of `MathContextMenu`,
-`FolderPicker`, `ImagePicker` and `SaveFilePicker` on every arm, and of the dialog
-functions it names. A literal whose text begins with an ASCII capital letter is
-refused, except inside an attribute (a doc comment, a class or link name), right after
-`extern` (an ABI), and inside `Err(…)`, a `.map_err(…)` or an `.ok_or_else(…)` — an
-error text, not a label. A literal that must stay is a row of the guard's `ALLOWED`
-(file, text, reason), which only shrinks; a row no guarded item uses is refused. A
-literal inside a `macro_rules!` definition is refused by its line, because it lands in
-an expansion the reading cannot see. Its fixture (`tests/fixtures/native_labels/`)
-plants each case (`a_capitalised_literal_in_a_guarded_item_is_named`). When red, add
-the words to `i18n.rs` (English in both columns, Chinese pending with its
-`CHINESE_PENDING` rows), pass them in at the call, and take the literal out; a new
-guarded surface adds its item to the guard's lists. An entry of the guard's
-`FILES`, `TYPES` or `FUNCTIONS` that names nothing in the index is refused by name, so
-a renamed item cannot drop out silently, and a literal the index holds no record of is
-refused by its line. `ALLOWED` shrinks by review only: no check holds it to the merge
-base's. Not seen, as limits (widening the grammar is T-NATIVE-LABELS-GUARD-REACH, 0.4.9):
-a `const` or `static` label defined outside the scope and named from a guarded item (the
-shape `NOTIFICATION_DISPLAY_NAME` had), a crate-local `macro_rules!` defined outside the
-scope and invoked inside it, a helper function on none of the lists, and a label whose
-first character is not a capital (an `"&Copy"` mnemonic, a leading space).
+(`bt_platform_native_labels_come_from_the_caller`) reads the product bytes of
+`menu.rs`, `macos_menu.rs`, `macos_dialogs.rs` and `explorer_command.rs` whole, of
+the `impl` blocks of `MathContextMenu`, `FolderPicker`, `ImagePicker` and
+`SaveFilePicker` on every arm, and of the dialog functions it names, **and of every
+item and `const`/`static` initializer the call graph reaches from them** (a helper on
+none of the lists, a label `const` written elsewhere, a method behind a first-party
+trait object; T-NATIVE-LABELS-GUARD-REACH, 2026-10-25). What runs with no call edge
+is taken in too, to a fixed point: every first-party impl of a foreign trait (`Drop`,
+`Display`, an iterator's `next`) whose self type a body of the reach names, and the
+functions, `static`s and `const`s an item-position macro writes (`define_class!`,
+`thread_local!`) — in the scope, by a `sel!` selector, by a type a reached body names,
+or by a path — read by syntax: a free call takes in every package function of its
+name, `Owner::f` the functions of that type or module (refused when the package names
+`Owner` and none is `f`), a method call every package method of its name, and a call
+of a binding is refused, and so is a free call no package function answers whose name
+a package `use` brings in or the package gives to something that is not a type; a
+`const` named there whose initializer calls, names a path or names a package value is
+refused; an item-position macro in the scope whose tokens do not parse
+as items is refused by its line. An ambiguous, other-arm or dynamic call with
+candidates is followed into every candidate but the ones a `BOUNDARY` row drops
+(caller, name called, candidate, reason: a `.push` on a `Vec` never runs a
+first-party `push`); an edge the guard cannot read (a dynamic call with none, an
+unplaced path, a generated item, macro arguments) is refused by its line unless an
+`UNREAD` row reviews it (caller, name called, kind, reason); a cut-off chain and an
+unparsed body are refused with no row. Macro arguments are read where the call graph
+parses them; `msg_send!`'s `part: argument` list is read as a body; any other
+arguments that parse as no expression list are refused by their line when they hold a
+call, a path, a macro or a package name. A call of any `macro_rules!` of `bt-platform`
+is refused unless the macro is a row of `MACROS` (name, reason; empty), and a literal
+inside a `macro_rules!` definition in the scope is refused by its line, because it
+lands in an expansion the reading cannot see. **A string literal that holds a letter
+is a label** — plain, raw, byte or C, each piece of `concat!`, read with its `&`
+mnemonics taken out and its ends trimmed, so `"&Copy"`, `" copy"` and `"Save &"` are
+labels too — and is refused, except by its place, a closed list: inside an attribute
+(a doc comment, a class or link name), right after `extern` (an ABI), inside a call of
+the guard's `ERROR_CALLS` (`Err(…)`, `.map_err(…)`, `.ok_or_else(…)`: an error text),
+and inside a call of its `PROGRAMMER_CALLS` (`.expect(…)`) or a macro of its
+`PROGRAMMER_MACROS` (`panic!`, `unreachable!`, the `assert` macros: a programmer's
+text). Any other diagnostic-looking text is a row. A literal
+that must stay is a row of the guard's `ALLOWED` (file, text as written, reason), one
+row per literal. Every row allows one use and a row nothing uses is refused. The lists
+are held to the merge base's by `scripts/ci/check-native-labels.ps1` (its plants in
+`check-native-labels-tests.ps1`): the four row lists only shrink, the `FILES`,
+`TYPES` and `FUNCTIONS` scope only grows and the exempt lists `ERROR_CALLS`,
+`PROGRAMMER_CALLS` and `PROGRAMMER_MACROS` only shrink; an
+honest move of an `ALLOWED` row to another file passes (`moved-rows.ps1`), and a row
+added, a scope entry taken off or an exempt macro added needs a new dated
+`// widened <date> by <ticket> (+<n> rows): <what>` line, counting them, in a change
+to the guard's grammar. Its fixture (`tests/fixtures/native_labels/`) plants each case
+(`a_literal_with_a_word_in_a_guarded_item_is_named`,
+`what_a_guarded_item_reaches_is_read`, `what_runs_with_no_call_edge_is_read`,
+`an_allowed_row_allows_one_literal`,
+`an_ambiguous_candidate_is_followed_unless_a_row_stops_it`). When red, add the words to
+`i18n.rs` (English in both columns, Chinese pending with its `CHINESE_PENDING` rows),
+pass them in at the call, and take the literal out; a text no person reads gets a row
+with its reason; a new guarded surface adds its item to the guard's lists. An entry of
+the guard's `FILES`, `TYPES` or `FUNCTIONS` that names nothing in the index is refused
+by name, so a renamed item cannot drop out silently, and a literal the index holds no
+record of is refused by its line. Not seen, as limits: a literal `bt-app` passes in
+(the caller's table is `bt-app`'s runtime tests' subject), a character literal, the
+expansion of a macro on `MACROS`, an item a derive or an attribute macro generates, a
+blanket impl (`impl<T: Bound> Trait for T`, whose self type no body names, so an
+implicit call running one is never taken in), and
+what a foreign function or a foreign macro's expansion does with the words.
 
 ## Machine-independent paths
 

@@ -1367,7 +1367,13 @@ derive for `WorkerCtx` and `WaitToken`;
 at `App::finish`'s head, in the build-error arm and after `run_app`;
 `quit_abandoned` in the `Abandon` arm; `loop_running` on `Init`; the three
 standalone entries), each spelled only as the call `admission::writer(…)`, and
-`enter_callback` at its nineteen entries;
+`enter_callback` at its nineteen entries; and `main`'s three settles
+(T-LAZY-INITIALIZERS-BEFORE-THE-LOOP) at theirs, each spelled only through its
+pin's module path: `profiles::settle_registry` as `main`'s first statement, before
+the parse, and `persist::settle_storage_dir` in the removal door, before the parse,
+and in the claim after the parse; and `explorer_menu::settle_package`
+(T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD) after the hand-over, once the running
+image is resolved;
 (5) no `allow` or `expect` of `clippy::disallowed_methods`, `clippy::style`,
 `clippy::all` or `warnings`, at any level, in either path spelling, inside
 `cfg_attr` at any depth — only a door's own `expect`, of which there are none until
@@ -2190,17 +2196,17 @@ A new size reaches a pane's grid at once and its shell at the quiet boundary.
 | hop | crate | entry | carries | lane |
 |---|---|---|---|---|
 | ingress | `bt-app` | `FolioApp::window_event` → `FolioApp::on_window_event` → `Runtime::resized` or `Runtime::scale_factor_changed` → `Runtime::resize`; the other ingresses join at the next two rows: a divider drag (`Runtime::drive_divider_drag` → `Runtime::commit_seat_geometry`), a split (`Runtime::split_seat`), a pane zoom (`Runtime::toggle_pane_zoom`), a tab switch (`Runtime::activate_tab`), a pane's text size (`Runtime::step_pane_text_scale`) | the window's new physical size | window thread |
-| solve | `bt-app` | `resize_worth_solving` (a minimised or empty rectangle solves nothing), `Runtime::resolve_seat_layout` → `size_authority_for_rectangle`, `solve_seats` | `bt_layout::solve::SeatLayout` | window thread |
+| solve | `bt-app` | `runtime::dpi::resize_worth_solving` (a minimised or empty rectangle solves nothing), `Runtime::resolve_seat_layout` → `size_authority_for_rectangle`, `solve_seats` | `bt_layout::solve::SeatLayout` | window thread |
 | per-leaf plan | `bt-app` | `Runtime::resize_leaves_to_layout` (refused while the DPI rectangle may not cut a grid) → `leaf_resize_plan` → `LeafSession::grid_for` | `LeafResizeTarget` | window thread |
 | schedule | `bt-app` | `schedule_leaf_grid_change` (the focused leaf last, through `Runtime::schedule_grid_change`) → `plan_grid_change` → `coalesce_pty_resize_on_grid_change` → `coalesce_pty_resize` | `PendingPtyResize`, the newest grid with the quiet deadline | window thread |
 | reflow | `bt-term` | `DualPlaneSession::resize_at` → `lifecycle::plan_resize` → `TerminalAdapter::resize` | `lifecycle::ResizePlan` | window thread: in the same turn for a shown pane, at the release for a hidden one |
 | release | `bt-app` | `Runtime::turn` → `Runtime::flush_pending_pty_resize` → `release_due_leaf_resize` → `service_pending_pty_resize` (`take_due_pty_resize`, `pty_resize_wake_deadline`) | `PendingPtyResize` | window thread, once per turn, after every other task that can change a session |
 | commit | `bt-app` | `commit_leaf_resize` → `pty_size` → `pty_door::resize`, then `bt_term::DualPlaneSession::mark_pty_resize_requested_at` (or, with nothing to tell, `bt_term::DualPlaneSession::mark_resize_settled_unchanged_at`); `replace_psreadline_resize_reanchor_debt` | `bt_pty::PtySize` | window thread, admitted as the PtyResize door (§5.3 row 12) |
 | pseudoconsole | `bt-pty` | `PtySession::resize` | `PtySize` | window thread, synchronous: the ResizePseudoConsole round trip into conhost |
-| close | `bt-app` | `Runtime::finish_resize_if_quiescent` → `bt_term::DualPlaneSession::finish_resize_if_quiescent`; an owed PSReadLine repair through `take_psreadline_resize_reanchor_input` → `write_pty_input` | the repair's bytes | window thread, a later turn (it runs before the release in `Runtime::turn`) |
+| close | `bt-app` | `Runtime::finish_resize_if_quiescent` → `bt_term::DualPlaneSession::finish_resize_if_quiescent`; an owed PSReadLine repair through `runtime::dpi::take_psreadline_resize_reanchor_input` → `write_pty_input` | the repair's bytes | window thread, a later turn (it runs before the release in `Runtime::turn`) |
 | a birth's missed size | `bt-app` | `Runtime::land_births` → `Runtime::land_own_shell` (or, for a restart's successor, `Runtime::land_restart` → `land_successor`) → `land_shell_birth` → `apply_owed_shell_resize` → `pty_door::resize`; a silent birth death's last-resort shell through `Runtime::land_birth_death_fallback` → `runtime::tabs::land_birth_death_fallback` → `land_birth_death_fallback_shell` → `apply_owed_shell_resize` | `bt_pty::PtySize` | window thread, when the `bt-pty-birth` worker's shell lands |
 
-The free functions in `main.rs` that sequence it, in call order:
+The free functions that sequence it, in call order:
 `resize_worth_solving`, `size_authority_for_rectangle`, `solve_seats`,
 `leaf_resize_plan`, `schedule_leaf_grid_change`, `plan_grid_change`,
 `coalesce_pty_resize_on_grid_change`, `coalesce_pty_resize`,
@@ -2208,7 +2214,9 @@ The free functions in `main.rs` that sequence it, in call order:
 `pty_resize_wake_deadline`, `commit_leaf_resize`, `pty_size`,
 `replace_psreadline_resize_reanchor_debt`,
 `take_psreadline_resize_reanchor_input`, and at a birth's landing `land_shell_birth`,
-`land_birth_death_fallback_shell` and `apply_owed_shell_resize`. The `Runtime` methods around them (`resize`,
+`land_birth_death_fallback_shell` and `apply_owed_shell_resize`. All are in `main.rs`
+except `resize_worth_solving` and `take_psreadline_resize_reanchor_input`, which K2
+batch 3 (T-SPLIT-2B) moved into `runtime/dpi.rs` beside their callers. The `Runtime` methods around them (`resize`,
 `resolve_seat_layout`, `resize_leaves_to_layout`, `flush_pending_pty_resize`,
 `finish_resize_if_quiescent`) are in `runtime/dpi.rs`, `runtime/panes.rs` and
 `runtime/diagnostics.rs`.
@@ -2771,7 +2779,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 | `clipboard.rs` | 19 | copy, copy on select, the paste target and its delivery, the multi-line paste card | session (bytes into `InputRing`) | the clipboard read, on this thread (§7.2) |
 | `configuration.rs` | 10 | Settings ▸ About ▸ Export… and Import…, each imported part through its own door (§9) | — | `file_reads` (the settings lane, through `bt_persist::read_export`); store writes, row 20 |
 | `diagnostics.rs` | 5 | the OS theme change, application-change notes, the trace drain, grid-change scheduling | ingress (trace) | — |
-| `dpi.rs` | 11 | window resize, scale-factor change, DPI settling | session | row 12 (`flush_pending_pty_resize`) |
+| `dpi.rs` | 12 | window resize, scale-factor change, DPI settling | session | row 12 (`flush_pending_pty_resize`) |
 | `files.rs` | 59 | the files column and its float: the tree, rename, new, delete, locate, pins, drops, the palette's roots | observation (`bt-files-worker`, `bt-index-worker`); ingress (`files_watch`); hand-off (reveal) | `bt_platform::rename_without_replacing`, `create_dir`, `File::create_new` here, row 20; `files::read_directory` has no door (§6) |
 | `first_run.rs` | 24 | the first-run card, the Explorer package row, the agent hook installers, the PowerShell integration offer (the PSReadLine invite and install retired 2026-10-17) | observation (the package probe); storage (the package job) | — (rows 3 and 4 done) |
 | `floats.rs` | 61 | floating windows, popups and chevron menus; the file, terminal and page menus | observation (files, git); hand-off (reveal) | — |
@@ -2792,12 +2800,12 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 | `tabs.rs` | 71 | the tab strip: new, close, activate, rename, drag, tear out; the tab menu; tables | — | — |
 | `terminal.rs` | 34 | the terminal pane: `drain_pty`, command marks, scroll and column bars, restart, fonts, selection, the PowerShell intent | session (drain, pane birth) | rows 2 (`spend_powershell_intent`), 5 (`apply_terminal_font`), 19 |
 | `tooltips.rs` | 9 | tooltips | — | — |
-| `web.rs` | 36 | the web pane: open, sync and advance the page, apply its outcomes, dev tools, sheets, the colour scheme, handing a URL to the browser; the engine's warm-up (`warm_web_engine`, ticket 54); the spare controller's making and adoption (`make_spare_web_controller`, `adopt_spare_web_page`, `seat_a_web_page`, ticket 60) | hand-off; `folio-web-thumb` | web view native affinity (§5.2); row 21 |
+| `web.rs` | 39 | the web pane: open, sync and advance the page, apply its outcomes, dev tools, sheets, the colour scheme, handing a URL to the browser; the engine's warm-up (`warm_web_engine`, ticket 54); the spare controller's making and adoption (`make_spare_web_controller`, `adopt_spare_web_page`, `seat_a_web_page`, ticket 60) | hand-off; `folio-web-thumb` | web view native affinity (§5.2); row 21 |
 | `windows.rs` | 38 | windows: open, dress, show, restore, the dirty gate, the quit save, close, retire and vault a window, moves; the window's title (`want_title`, `flush_title`) | storage (`quit_save` through `SessionWriter`) | `let_the_system_translate_touch`; `Window::set_title` (§5.2, `flush_title` only); row 16 |
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 836 (626 free functions, 210 methods) after batch 1. The table
+into their topics batch by batch: 823 (617 free functions, 206 methods) after batch 3. The table
 below is the 2026-09-21 manifest's sort of the 201 methods then left
 (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
 

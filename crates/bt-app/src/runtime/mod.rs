@@ -41,6 +41,10 @@ pub(crate) use windows::recent_term_leaf_seed;
 #[cfg(test)]
 pub(crate) use diagnostics::resolved_theme_change;
 #[cfg(test)]
+pub(crate) use dpi::{
+    apply_tabs_leaf_metrics, resize_worth_solving, take_psreadline_resize_reanchor_input,
+};
+#[cfg(test)]
 pub(crate) use pointer::a_capture_still_holds_its_pointer;
 pub(crate) use pointer::platform_pointer_of;
 #[cfg(test)]
@@ -49,6 +53,11 @@ pub(crate) use profiles::profile_menu_anchor;
 pub(crate) use search::rescan_leaf_for_search;
 #[cfg(test)]
 pub(crate) use tooltips::{tab_surface_tip_boxes, tooltip_anchor_for};
+#[cfg(test)]
+pub(crate) use web::{
+    a_page_is_off_the_glass, a_page_still_has_a_pane, a_page_was_replaced,
+    a_retirement_happens_on_this_turn, hole_for, revived_page_of,
+};
 mod terminal;
 mod tooltips;
 mod update_card;

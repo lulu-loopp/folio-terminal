@@ -185,11 +185,21 @@ pub enum FileScoped {
     /// grammar is the whole test file, not one item in it. It is a PowerShell gate and cannot
     /// ask this crate's index.
     TheTestGlobalsWideningGate,
+    /// `scripts/ci/check-native-labels.ps1`, the native-labels guard's history half, naming
+    /// `crates/bt-source/tests/native_labels.rs` (T-NATIVE-LABELS-GUARD-REACH).
+    ///
+    /// The guard's four lists (`ALLOWED`, `MACROS`, `BOUNDARY`, `UNREAD`) are written in the
+    /// guard's own file, and the gate holds their rows to the merge base's: it reads the lists'
+    /// text from the file and from `git show`, and admits growth only under a `// widened ...
+    /// (+n rows)` line in a change to the rest of that file, the guard's grammar. The rows as
+    /// written and whether the file's grammar changed are facts about that file, with no item to
+    /// ask about. It is a PowerShell gate and cannot ask this crate's index.
+    TheNativeLabelsListsGate,
 }
 
 impl FileScoped {
     /// Every entry. The allowlist is small enough to be an array and only shrinks.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::VendoredAddedFiles,
         Self::TheTripwireItself,
         Self::TheDeadCodeGate,
@@ -202,6 +212,7 @@ impl FileScoped {
         Self::ThePsReadLineArtefactGate,
         Self::TheTimingWideningGate,
         Self::TheTestGlobalsWideningGate,
+        Self::TheNativeLabelsListsGate,
     ];
 
     /// Where the reader lives, from the workspace root, with forward slashes.
@@ -220,6 +231,7 @@ impl FileScoped {
             Self::ThePsReadLineArtefactGate => "scripts/ci/check-psreadline-artefact.ps1",
             Self::TheTimingWideningGate => "scripts/ci/check-timing-bound.ps1",
             Self::TheTestGlobalsWideningGate => "scripts/ci/check-test-globals.ps1",
+            Self::TheNativeLabelsListsGate => "scripts/ci/check-native-labels.ps1",
         }
     }
 
@@ -280,6 +292,11 @@ impl FileScoped {
                 "a widening line admits by-hand rows only in a change to the scan's grammar, and \
                  whether the scan's file differs from the merge base's is a fact about that file; \
                  a PowerShell gate"
+            }
+            Self::TheNativeLabelsListsGate => {
+                "the guard's four lists are written in its own file and the gate holds their rows \
+                 to the merge base's, growth only under a widening line in a change to the rest of \
+                 the file; facts about that file; a PowerShell gate"
             }
         }
     }

@@ -58,25 +58,31 @@ fn texel(input: VertexOutput) -> vec4<f32> {
     return textureLoad(surface_texture, at, 0);
 }
 
+// **Straight-line code, no branch on a pixel's value** (T-WEBVIEW-WARMUP-DROPS-
+// THE-DEVICE). Written with `if … return`, the transfer below and the empty
+// texel's early way out compiled — under FXC's optimiser, which a release build
+// uses — to a shader that removed the device on Windows 10's Basic Render
+// Driver the first time a surface was put back. Both halves of the transfer are
+// computed and `select` keeps one; it is the same function on every input.
+
 // The sRGB transfer, IEC 61966-2-1 — the inverse of the decode the sRGB view
 // performed on the load.
-fn encode(linear: f32) -> f32 {
-    if linear <= 0.0031308 {
-        return linear * 12.92;
-    }
-    return 1.055 * pow(linear, 1.0 / 2.4) - 0.055;
+fn encode(linear: vec3<f32>) -> vec3<f32> {
+    let low = linear * 12.92;
+    let high = 1.055 * pow(linear, vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(high, low, linear <= vec3<f32>(0.0031308));
 }
 
 @fragment
 fn over(input: VertexOutput) -> @location(0) vec4<f32> {
     let premultiplied = texel(input);
-    if premultiplied.a <= 0.0 {
-        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    }
+    let alpha = premultiplied.a;
+    // Un-premultiplied over an alpha kept off zero: every 8-bit alpha but zero
+    // is at least 1/255 and divides as itself, and an empty texel — colour zero
+    // over alpha zero — comes out empty without a NaN to throw away.
     // Clamped: an 8-bit texel's colour over its own 8-bit alpha can round a hair past one.
-    let linear = clamp(premultiplied.rgb / premultiplied.a, vec3<f32>(0.0), vec3<f32>(1.0));
-    let encoded = vec3<f32>(encode(linear.r), encode(linear.g), encode(linear.b));
-    return vec4<f32>(encoded * premultiplied.a, premultiplied.a) * input.opacity;
+    let linear = clamp(premultiplied.rgb / max(alpha, 1.0 / 255.0), vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(encode(linear) * alpha, alpha) * input.opacity;
 }
 
 @fragment

@@ -736,6 +736,17 @@ impl Compositor {
         Ok(())
     }
 
+    /// The Windows arm lets go of the swapchain its GPU visual shows before a device is built
+    /// again. Here the layer the old surface left on Folio's view is taken off where the new
+    /// surface is made (`folios_own_metal_view` in the app), so there is nothing to let go of.
+    pub fn let_go_of_the_picture(
+        &self,
+        token: WaitToken<'_, doors::CompositorCommit>,
+    ) -> Result<(), String> {
+        let _ = token;
+        Ok(())
+    }
+
     /// This page's slot, made if this is the first anyone has asked.
     ///
     /// **One minting door**, exactly as the Windows arm has one: a page's slot

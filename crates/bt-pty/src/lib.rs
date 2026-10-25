@@ -2548,18 +2548,27 @@ impl PtySession {
         let output = Arc::new(OutputRing::new(PTY_RING_BYTES));
         let reader_output = Arc::clone(&output);
         let reader_dump = dump.clone();
-        let reader_thread = std::thread::spawn(move || {
-            read_pty_output(reader.as_mut(), &reader_output, &wake, reader_dump);
-            reader_output.close();
-            wake();
-        });
+        // Named, as every thread this program starts is, so the `BT_PERF_TRACE threads` census
+        // (T-IDLE-TURN-COST) counts a pane's two threads as the pane's. `thread::spawn`'s own
+        // answer to a refused thread — a panic — is kept.
+        let reader_thread = std::thread::Builder::new()
+            .name(String::from("bt-pty-reader"))
+            .spawn(move || {
+                read_pty_output(reader.as_mut(), &reader_output, &wake, reader_dump);
+                reader_output.close();
+                wake();
+            })
+            .expect("failed to spawn thread");
         let input = Arc::new(InputRing::new(PTY_INPUT_RING_BYTES));
         let writer_input = Arc::clone(&input);
         // The thread that is allowed to block on the pipe, because it is not the thread the
         // message pump lives on. See [`InputRing`].
-        let writer_thread = std::thread::spawn(move || {
-            pump_pty_input(writer.as_mut(), &writer_input);
-        });
+        let writer_thread = std::thread::Builder::new()
+            .name(String::from("bt-pty-writer"))
+            .spawn(move || {
+                pump_pty_input(writer.as_mut(), &writer_input);
+            })
+            .expect("failed to spawn thread");
         Ok(Self {
             master: Some(pair.master),
             child: Some(child),

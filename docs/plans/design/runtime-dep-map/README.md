@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **836 items, 626 free functions and 210 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 1's head; 846, 634 and 212 before it).
+- **unclassified.tsv**: **823 items, 617 free functions and 206 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 3's head; 828, 620 and 208 before it,
+  837, 627 and 210 before batch 2, and 846, 634 and 212 before batch 1).
   - The plan's "106 unclassified" was the 2026-09-18 theme-regex count of
     `Runtime` methods whose names no theme matched (112 on 2026-09-21). The name
     sort is retired.
@@ -96,8 +97,8 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    |---:|---|---:|---:|
    | 1 | `runtime/pointer/ending.rs`, `runtime/pointer/mod.rs`, `runtime/diagnostics.rs`, `runtime/profiles.rs`, `runtime/search.rs`, `runtime/tooltips.rs` | moved by batch 1 | — |
    | — | `runtime/profiles.rs` | 1 (1 + 0): `tab_surface`, tied with `runtime/tabs.rs` | 2 |
-   | 2 | `runtime/web.rs` | 9 (7 + 2) | 9 |
-   | 3 | `runtime/dpi.rs` | 6 (5 + 1) | 10 |
+   | 2 | `runtime/web.rs` | moved by batch 2 | — |
+   | 3 | `runtime/dpi.rs` | moved by batch 3 (4 items; `files_float_content_height`, tied with `runtime/floats.rs`, waits for that batch; `release_due_leaf_resize` stays in `main.rs`, the single writer road of `LeafSession.birth` and `.grid`), with `Runtime::page_shrinker` as the web batch's tail | — |
    | 4 | `runtime/attention.rs` | 5 (4 + 1) | 11 |
    | 5 | `runtime/palette.rs` | 7 (1 + 6) | 14 |
    | 6 | `runtime/terminal.rs` | 14 (12 + 2) | 15 |
@@ -114,6 +115,13 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 17 | `runtime/panes.rs` | 33 (24 + 9) | 65 |
    | 18 | `runtime/mouse.rs` | 49 (29 + 20) | 81 |
    | 19 | `runtime/preview.rs` | 91 (72 + 19) | 144 |
+
+   **An item stays in `main.rs`, whatever its `called_from` row proposes, when moving it would make a field it
+   writes a multi-writer fact** (the ownership census refuses a new one without a ruled owner; the standing rule is
+   that such a move goes back through the original single writer). `release_due_leaf_resize` is the first: it writes
+   `LeafSession.birth` and `LeafSession.grid`, whose other writers stay at the root, and batch 3 moved it back. It
+   stays in `main.rs` until an owner is ruled for those two facts; `unclassified.tsv` keeps proposing
+   `runtime/dpi.rs` for it (that column is generated), and no later batch retries the move.
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,

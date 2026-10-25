@@ -302,6 +302,24 @@ impl TestCa {
         }
     }
 
+    /// [`TestCa::new`], **whose every leaf names where its revocation list is
+    /// published**, as a public CA's leaf does: under
+    /// [`TestCa::policy_without_revocation_lists`] its revocation is offline,
+    /// as on a machine with no network (`world::World::naming_its_crls`).
+    ///
+    /// # Errors
+    /// `Unsupported` off Windows.
+    pub fn naming_its_crls() -> io::Result<Self> {
+        #[cfg(windows)]
+        {
+            Ok(Self(world::World::naming_its_crls()))
+        }
+        #[cfg(not(windows))]
+        {
+            Self::new()
+        }
+    }
+
     /// The policy under which this world's root is the only trusted root,
     /// with a revocation list that revokes nothing.
     #[must_use]
@@ -309,6 +327,34 @@ impl TestCa {
         #[cfg(windows)]
         {
             self.0.policy()
+        }
+        #[cfg(not(windows))]
+        {
+            match self.0 {}
+        }
+    }
+
+    /// [`TestCa::policy`] **holding no revocation list**: no leaf's revocation
+    /// can be established — offline for a world [`TestCa::naming_its_crls`],
+    /// unknown otherwise.
+    #[must_use]
+    pub fn policy_without_revocation_lists(&self) -> Policy {
+        #[cfg(windows)]
+        {
+            self.0.policy_without_revocation_lists()
+        }
+        #[cfg(not(windows))]
+        {
+            match self.0 {}
+        }
+    }
+
+    /// [`TestCa::policy`] **revoking every leaf issued so far**.
+    #[must_use]
+    pub fn policy_revoking_every_leaf(&self) -> Policy {
+        #[cfg(windows)]
+        {
+            self.0.policy_revoking_every_leaf()
         }
         #[cfg(not(windows))]
         {

@@ -20,7 +20,9 @@ All notable changes to Folio are recorded here. The format follows
 ### Fixed
 
 - On Windows 11, resting the pointer on the maximize button opens the snap layouts, and Win+Z shows them over the button. <!-- zh: pending T-SNAP-LAYOUTS-MAXBUTTON -->
+- On Windows 10 machines without a graphics driver, Folio no longer closes at its first start or when Settings opens. <!-- zh: 在没有显卡驱动的 Windows 10 电脑上，Folio 不再在首次启动或打开设置时关闭。 -->
 - A PDF opened from a web address that does not end in `.pdf` is no longer drawn stretched on a 125 %, 150 % or 175 % display, and a web page at an address ending in `.pdf` is no longer drawn too large. <!-- zh: pending T-PDF-CONTENT-TYPE -->
+- On Windows, when an update cannot be verified because there is no network, the update card says so instead of only "The update is not verified." <!-- zh: 在 Windows 上，因没有网络而无法验证更新时，更新卡片会说明这一点，而不只是显示“更新未通过验证。” -->
 
 ## 0.4.8-preview — 2026-10-23
 

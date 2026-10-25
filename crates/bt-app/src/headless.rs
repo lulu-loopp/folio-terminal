@@ -1559,10 +1559,19 @@ impl HeadlessApplication {
             scratch,
         } = folio;
         let id = window.window.id;
+        // The loop's witnesses over values of this test's own: a headless application must not
+        // settle the process's data directory (`%APPDATA%`), and its profile table is the one the
+        // test's `App` was built over.
         let mut application = crate::FolioApp::<Headless>::new(
             app.event_proxy.clone(),
             crate::cli::CliRequest::default(),
             None,
+            // Leaked per application rather than shared: one test's witness is no other test's.
+            crate::startup::Settled::planted(Box::leak(Box::new(
+                crate::persist::DataDirectory::planted(PathBuf::new()),
+            ))),
+            crate::profiles::settle_registry(),
+            crate::explorer_menu::settle_package(),
         );
         application.app = Some(app);
         application.windows.insert(id, window);

@@ -493,6 +493,7 @@ dependencies = [
  "unicode-script",
  "web-time",
  "wgpu",
+ "windows",
 ]
 
 [[package]]

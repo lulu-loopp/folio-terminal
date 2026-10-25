@@ -46,6 +46,15 @@ bt-source = { path = "../bt-source" }
 bt-term = { path = "../bt-term" }
 pollster.workspace = true
 
+# **A device the driver really removes, on purpose, in a test** (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE).
+# `ID3D12Device5::RemoveDevice` is the one call that puts a D3D12 device in the state a driver
+# reset or a hung queue leaves it in — `wgpu::Device::destroy` does not, it only marks wgpu's
+# side invalid and the D3D12 device underneath stays healthy. The clean Win10 VM's loss and its
+# failed rebuild are both about the D3D12 device, so the tests that hold them need this one call.
+# Tests only; the crate itself reads the driver through `wgpu::hal` and names no `windows` type.
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.62.2", features = ["Win32_Graphics_Direct3D12"] }
+
 [lints]
 workspace = true
 

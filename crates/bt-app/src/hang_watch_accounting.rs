@@ -451,7 +451,7 @@ fn owner_byte(owner: Option<WakeOwner>) -> u8 {
 }
 
 /// The owner [`owner_byte`] packed.
-fn owner_of(byte: u8) -> Option<WakeOwner> {
+pub(super) fn owner_of(byte: u8) -> Option<WakeOwner> {
     Option::and_then(byte.checked_sub(1), WakeOwner::from_byte)
 }
 
@@ -532,6 +532,8 @@ pub(super) struct Accounts {
     lines: Mutex<Vec<BudgetLine>>,
     /// Pushes that found [`Self::lines`] held or full, for the run.
     lost: AtomicU64,
+    /// What woke each turn, and what those turns cost (T-IDLE-TURN-COST).
+    pub(super) census: super::census::Census,
 }
 
 impl Accounts {
@@ -569,6 +571,7 @@ impl Accounts {
             yielded_turns: AtomicU64::new(0),
             lines: Mutex::new(Vec::with_capacity(BUDGET_LINES_KEPT)),
             lost: AtomicU64::new(0),
+            census: super::census::Census::new(),
         }
     }
 
@@ -603,6 +606,7 @@ impl Accounts {
         let owed = self.owed_ns.swap(0, Ordering::Relaxed);
         let past = self.owed_past.swap(false, Ordering::Relaxed);
         let owner = self.owed_owner.swap(0, Ordering::Relaxed);
+        self.census.begin(owner);
         let (delay, stale) = match owed.checked_sub(1) {
             Some(due) if past => (0, now_ns.saturating_sub(due).saturating_add(1)),
             Some(due) if now_ns >= due => ((now_ns - due).saturating_add(1), 0),
@@ -745,6 +749,7 @@ impl Accounts {
             frame => frame,
         };
         self.wall.record(wall_ns);
+        self.census.close(wall_ns, stale_ns.is_some());
         self.waits.record(waits_ns);
         self.unexplained.record(unexplained_ns);
         if let Some(delay) = delay_ns {
@@ -1422,6 +1427,47 @@ mod tests {
         assert!(
             matches!(line.budget, Budget::Stale { stale_ns, .. } if stale_ns == 1_090 * MS),
             "{line:?}"
+        );
+    }
+
+    /// RED (T-IDLE-TURN-COST; mutation: hand the census `false` for a stale turn in
+    /// `Accounts::close`, or no owner in `Accounts::begin`) — **the accounting hands the turn
+    /// census each turn's staleness and owner**: a wake already due at park is filed as
+    /// `Stale(owner)`, a wake that came at its deadline as `Timed(owner)`, and a turn owed nothing
+    /// as `Untold`.
+    #[test]
+    fn the_turn_census_is_handed_each_turns_staleness_and_owner() {
+        use super::super::WakeCause;
+        use super::super::census::turns_line;
+        let heart = heart();
+        let census = &heart.accounts.census;
+        let before = census.reading();
+        // Owed nothing: untold, 100 µs.
+        heart.woke_at_ns(11_900 * US);
+        let parking = heart.until(
+            heart.origin + Duration::from_millis(10),
+            Some(WakeOwner::ForegroundProgram),
+        );
+        heart.park_at_ns(parking, 12 * MS);
+        // Already due when the loop parked: stale, 100 µs, though winit says the time was reached.
+        heart.woke_at_ns(12_100 * US);
+        census.started(WakeCause::ResumeTimeReached);
+        heart.park_at_ns(Park::Indefinite, 12_200 * US);
+        // Owed nothing again: untold, 1 ms.
+        heart.woke_at_ns(20 * MS);
+        let parking = heart.until(
+            heart.origin + Duration::from_millis(40),
+            Some(WakeOwner::Toast),
+        );
+        heart.park_at_ns(parking, 21 * MS);
+        // Woken at its deadline: timed, 500 µs.
+        heart.woke_at_ns(40 * MS);
+        census.started(WakeCause::ResumeTimeReached);
+        heart.park_at_ns(Park::Indefinite, 40_500 * US);
+        assert_eq!(
+            turns_line(census, &before, &census.reading(), 2_000),
+            "BT_PERF_TRACE turns window_ms=2000 turns=4 us_total=1700 \
+             by_source=Untold:2/1100,Timed(Toast):1/500,Stale(ForegroundProgram):1/100 unkept=0"
         );
     }
 
