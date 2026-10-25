@@ -63,7 +63,10 @@
 //! the reason says what it reads; the follow-up T-ENV-UNJUDGED-ROWS rewrites each). **The list
 //! only shrinks**: a new reader is moved to the entry rather than listed, and
 //! `scripts/ci/check-env-doors.ps1` refuses, against the merge base, a row added or a row that
-//! reads a name or holds a refusal its base row did not.
+//! reads a name or holds a refusal its base row did not. The last column, `module`, is the module
+//! the item is written in (`-` for a read in no item), held equal to the tree like the rest: it is
+//! what lets that check read a row moved to another module as the row moved, not one added
+//! (T-MOVED-NOT-ADDED-RULE).
 //!
 //! # What it does not see
 //!
@@ -85,7 +88,7 @@ use bt_source::{
 const LIST: &str = "docs/plans/ENV-DOORS.tsv";
 
 /// The list's column header.
-const HEADER: &str = "file\titem\tcategory\tnames\trefused\tticket\treason";
+const HEADER: &str = "file\titem\tcategory\tnames\trefused\tticket\treason\tmodule";
 
 /// The four names of `std::env` that read the environment.
 const READERS: [&str; 4] = ["var", "var_os", "vars", "vars_os"];
@@ -160,11 +163,13 @@ enum Finding {
     Refused(&'static str),
 }
 
-/// What one product item reads: its `BT_` names, and its refusals with their sites.
+/// What one product item reads: its `BT_` names, and its refusals with their sites; and the
+/// module it is written in (`-` for a read in no item).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Reads {
     names: BTreeSet<String>,
     refused: Vec<String>,
+    module: String,
 }
 
 /// The scan of one index: `(file, item)` → what it reads, for every product item that reads a
@@ -196,10 +201,15 @@ fn scan(index: &Index, root: &Path) -> BTreeMap<(String, String), Reads> {
             relative(file.path(), root),
             item.map_or_else(|| "-".to_owned(), identity_of),
         );
+        let module = item.map_or_else(|| "-".to_owned(), module_of);
+        let reads = || Reads {
+            module: module.clone(),
+            ..Reads::default()
+        };
         match finding {
             // In any case: Windows reads `bt_card_trace` as the door `BT_CARD_TRACE`.
             Finding::Read(read) if read.to_ascii_uppercase().starts_with("BT_") => {
-                found.entry(key).or_default().names.insert(read);
+                found.entry(key).or_insert_with(reads).names.insert(read);
             }
             Finding::Read(_) => {}
             Finding::Refused(why) => {
@@ -210,7 +220,7 @@ fn scan(index: &Index, root: &Path) -> BTreeMap<(String, String), Reads> {
                     });
                 found
                     .entry(key)
-                    .or_default()
+                    .or_insert_with(reads)
                     .refused
                     .push(format!("{place} {why}"));
             }
@@ -376,14 +386,23 @@ fn innermost_item(index: &Index, span: Span) -> Option<&ItemRecord> {
 
 /// An item's first identity, as `module::Type::name`.
 fn identity_of(item: &ItemRecord) -> String {
-    let identity = item
-        .identities()
-        .min_by(|left, right| left.module_path.cmp(&right.module_path))
-        .expect("an item has an identity");
+    let identity = first_identity(item);
     match identity.type_owner {
         Some(owner) => format!("{}::{owner}::{}", identity.module_path, identity.name),
         None => format!("{}::{}", identity.module_path, identity.name),
     }
+}
+
+/// The module of an item's first identity: the `module` column of its row.
+fn module_of(item: &ItemRecord) -> String {
+    first_identity(item).module_path
+}
+
+/// The identity a row names an item by: the first by module path.
+fn first_identity(item: &ItemRecord) -> bt_source::ItemIdentity {
+    item.identities()
+        .min_by(|left, right| left.module_path.cmp(&right.module_path))
+        .expect("an item has an identity")
 }
 
 /// Whether a module-level `use` of the file holding `file` brings `name` in as `path`.
@@ -485,12 +504,13 @@ fn workspace_scan() -> BTreeMap<(String, String), Reads> {
     found
 }
 
-/// One row of the list: what it says the item reads. Its category, ticket and reason are checked
-/// for shape as the list is read.
+/// One row of the list: what it says the item reads, and the module it says the item is written
+/// in. Its category, ticket and reason are checked for shape as the list is read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Row {
     names: BTreeSet<String>,
     refused: usize,
+    module: String,
 }
 
 /// The committed list, by `(file, item)`.
@@ -504,7 +524,7 @@ fn committed() -> BTreeMap<(String, String), Row> {
     let mut rows = BTreeMap::new();
     for line in lines {
         let columns: Vec<&str> = line.split('\t').collect();
-        assert_eq!(columns.len(), 7, "{LIST}: a row is seven columns: {line}");
+        assert_eq!(columns.len(), 8, "{LIST}: a row is eight columns: {line}");
         assert!(
             CATEGORIES.contains(&columns[2]),
             "{LIST}: `{}` is not one of {CATEGORIES:?}: {line}",
@@ -524,6 +544,7 @@ fn committed() -> BTreeMap<(String, String), Row> {
             refused: columns[4]
                 .parse()
                 .unwrap_or_else(|_| panic!("{LIST}: `refused` is a count: {line}")),
+            module: columns[7].to_owned(),
         };
         assert!(
             columns[2] != "unjudged" || row.names.is_empty(),
@@ -568,6 +589,10 @@ fn differences(
                     reads.refused.join(SITE)
                 ));
             }
+            Some(row) if row.module != reads.module => said.push(format!(
+                "{file} {item} is written in {}; its row says module {}",
+                reads.module, row.module
+            )),
             Some(_) => {}
         }
     }
@@ -635,8 +660,9 @@ fn no_library_reads_a_bt_door_outside_the_entry_list() {
                     reads.names.iter().cloned().collect::<Vec<_>>().join(",")
                 };
                 format!(
-                    "{file}\t{item}\t{names}\t{}\t{}\n",
+                    "{file}\t{item}\t{names}\t{}\t{}\t{}\n",
                     reads.refused.len(),
+                    reads.module,
                     reads.refused.join(" | ")
                 )
             })
@@ -765,10 +791,11 @@ fn the_grammar_reads_each_supported_shape_and_refuses_each_other_one() {
 }
 
 /// RED (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY) — **the list is an equality**: a reader with no row, a
-/// row whose names or count are not the reader's, and a row whose item reads nothing are each
-/// named.
+/// row whose names or count are not the reader's, a row whose module is not the reader's
+/// (T-MOVED-NOT-ADDED-RULE) and a row whose item reads nothing are each named.
 ///
-/// MUTATION: drop the stale-row loop from `differences` — the third sentence is lost.
+/// MUTATION: drop the stale-row loop from `differences` — the last sentence is lost; drop the
+/// module arm — the `crate::elsewhere` sentence is lost.
 #[test]
 fn a_reader_without_its_row_a_wrong_row_and_a_stale_row_are_each_named() {
     let key = |item: &str| ("crates/x/src/lib.rs".to_owned(), item.to_owned());
@@ -777,24 +804,29 @@ fn a_reader_without_its_row_a_wrong_row_and_a_stale_row_are_each_named() {
         refused: (0..refused)
             .map(|line| format!("x:{line} refused"))
             .collect(),
+        module: "crate".to_owned(),
     };
-    let row = |names: &[&str], refused: usize| Row {
+    let row = |names: &[&str], refused: usize, module: &str| Row {
         names: names.iter().map(|name| (*name).to_owned()).collect(),
         refused,
+        module: module.to_owned(),
     };
     let found = BTreeMap::from([
         (key("crate::listed"), reads(&["BT_A"], 0)),
         (key("crate::unlisted"), reads(&["BT_B"], 0)),
         (key("crate::miscounted"), reads(&[], 2)),
+        (key("crate::elsewhere"), reads(&["BT_D"], 0)),
     ]);
     let rows = BTreeMap::from([
-        (key("crate::listed"), row(&["BT_A"], 0)),
-        (key("crate::miscounted"), row(&[], 1)),
-        (key("crate::gone"), row(&["BT_C"], 0)),
+        (key("crate::listed"), row(&["BT_A"], 0, "crate")),
+        (key("crate::miscounted"), row(&[], 1, "crate")),
+        (key("crate::elsewhere"), row(&["BT_D"], 0, "crate::other")),
+        (key("crate::gone"), row(&["BT_C"], 0, "crate")),
     ]);
     let said = differences(&found, &rows);
-    assert_eq!(said.len(), 3, "{said:#?}");
-    assert!(said[0].contains("crate::miscounted") && said[0].contains("its row says"));
-    assert!(said[1].contains("crate::unlisted") && said[1].contains("has no row"));
-    assert!(said[2].contains("crate::gone") && said[2].contains("stale"));
+    assert_eq!(said.len(), 4, "{said:#?}");
+    assert!(said[0].contains("crate::elsewhere") && said[0].contains("its row says module"));
+    assert!(said[1].contains("crate::miscounted") && said[1].contains("its row says"));
+    assert!(said[2].contains("crate::unlisted") && said[2].contains("has no row"));
+    assert!(said[3].contains("crate::gone") && said[3].contains("stale"));
 }

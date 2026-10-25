@@ -25,6 +25,8 @@ pub(crate) use capture::{
     PressVerdict, ReleaseVerdict, cancel_then_route, press_against_the_slot,
     release_against_the_slot,
 };
+#[cfg(test)]
+pub(crate) use ending::a_capture_still_holds_its_pointer;
 pub(crate) use ending::{Ending, Gone, Leaving, OwnerGone};
 
 #[cfg(test)]
@@ -371,6 +373,19 @@ impl<B: Backend> Runtime<'_, B> {
             });
         }
     }
+}
+
+/// **The platform's cursor, in the units a pointer event would have arrived in**
+/// (GitHub issue #1 ②; release review 0.4.2 X-10).
+///
+/// [`bt_platform::pointer_position_in_window`] answers whole physical pixels
+/// because that is what both systems count in; `CursorMoved` carries `f64`
+/// because a trackpad can land between two of them. The widening is the whole of
+/// this function, and it is a free one so the units can be read — and pinned —
+/// without a window, the native call above it being the one thing a test cannot
+/// reach.
+pub(crate) fn platform_pointer_of(queried: Option<(i32, i32)>) -> Option<PhysicalPosition<f64>> {
+    queried.map(|(x, y)| PhysicalPosition::new(f64::from(x), f64::from(y)))
 }
 
 #[cfg(test)]

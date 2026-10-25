@@ -640,6 +640,8 @@ pub mod doors {
         SessionWriterRetire => "16b", 213, [Exiting];
         /// Row 17: the trace writer's bounded flush (`TraceFlush`).
         TraceFlush => "17", 214, [Exiting];
+        /// Row 30: `diagnostics.log`'s writer settled on the way out, bounded (`DiagnosticsSettle`).
+        DiagnosticsSettle => "30", 223, [Exiting];
         /// Row 29: an update's exit guard at the process's end, bounded (`UpdateLeave`).
         UpdateLeave => "29", 112, [Exiting];
         /// Row 27: the media session's way out — the engines let go of, then the readers,

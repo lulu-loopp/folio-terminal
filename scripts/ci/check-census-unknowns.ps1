@@ -12,8 +12,18 @@
 # of sites behind that key, is its measurement. A key the merge base does not
 # carry is an added unknown, and a key whose `sites` is larger than the merge
 # base's is a grown one: both are refused, by key, whatever else shrank or
-# disappeared beside them, so a moved or replaced unknown is refused even when
-# the row count and the summed `sites` stay level. A key that disappeared or
+# disappeared beside them, so a replaced unknown is refused even when the row
+# count and the summed `sites` stay level. A **moved** unknown is not added
+# (T-MOVED-NOT-ADDED-RULE, `moved-rows.ps1`): a key the merge base does not carry
+# whose `site`, `function` and `reason` are a base key's that is gone, with only
+# its `module` changed, is that key moved - when it is the one key of that
+# identity on each side, the old module no longer lists the function and the
+# new one did not at the base - and its `sites` is held to the base key's. (A
+# same-named function in another module that takes over an unknown the old one
+# dropped passes as moved, held to the base key's `sites`, as check-dead-code's
+# U-44 rule does: the check reads the list, not the tree.) There is no rename
+# arm here: a row has no reason of its own to carry the dated reason a rename needs, so a key whose
+# function was renamed is added, as before. A key that disappeared or
 # whose `sites` went down is the list shrinking, which is what regenerating it
 # with `scripts/generate-ownership-census.ps1` after a fix writes. A key is
 # never added or grown by hand to let a new unknown past the test. Keys compare
@@ -42,7 +52,14 @@
 # hand-added unknown row (it must go red), including when an old row is removed
 # in the same change and the number of rows and sites stays level, a row whose
 # `sites` grew by one (red, naming the key), and an added annotation row that
-# says "proposed".
+# says "proposed". `check-census-unknowns-tests.ps1` runs it against scratch
+# repositories (`-Repo`): a moved key passes, and an added key, a moved key whose
+# `sites` grew, a move whose old module still lists the function and an
+# ambiguous move are each refused.
+
+param(
+    [string]$Repo = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -54,7 +71,9 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 # em dash, and a console code page would read it as two characters and a tab.
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
-$repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot "moved-rows.ps1")
+
+$repo = $Repo
 $relative = "docs/plans/design/ownership-census-unknowns.tsv"
 $list = Join-Path $repo $relative
 $annotationsRelative = "docs/plans/design/ownership-census-annotations.tsv"
@@ -188,21 +207,53 @@ try {
     Pop-Location
 }
 
+# A key as the move rule reads it: located by its module, about its function.
+function Get-MoveRow([string]$key) {
+    $columns = $key.Split("`t")
+    return [pscustomobject]@{
+        Identity = "$($columns[0])`t$($columns[2])`t$($columns[3])"
+        Location = $columns[1]
+        Tail     = $columns[2]
+        Row      = $key
+    }
+}
+
 $added = @()
 $grown = @()
 $shrunk = 0
+$unmatched = @()
 foreach ($key in $now.Keys) {
     if (-not $before.ContainsKey($key)) {
-        $added += "    $(Format-UnknownKey $key): $($now[$key]) site(s), not at $from"
+        $unmatched += Get-MoveRow $key
     } elseif ($now[$key] -gt $before[$key]) {
         $grown += "    $(Format-UnknownKey $key): $($now[$key]) site(s), $($before[$key]) at $from"
     } elseif ($now[$key] -lt $before[$key]) {
         $shrunk += 1
     }
 }
-$removed = @($before.Keys | Where-Object { -not $now.ContainsKey($_) }).Count
+$leftover = @($before.Keys | Where-Object { -not $now.ContainsKey($_) } | ForEach-Object { Get-MoveRow $_ })
+$tree = @($now.Keys | ForEach-Object { Get-MoveRow $_ })
+$moves = 0
+foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -Tree $tree -Base @($before.Keys | ForEach-Object { Get-MoveRow $_ }))) {
+    $key = $result.Row
+    if ($result.Verdict -eq "moved") {
+        $was = $before[$result.From]
+        $moves += 1
+        Write-Host "moved     $(Format-UnknownKey $key) (from $($result.Was))"
+        if ($now[$key] -gt $was) {
+            $grown += "    $(Format-UnknownKey $key): $($now[$key]) site(s), moved from $($result.Was), where it had $was at ${from}: a move does not grow"
+        } elseif ($now[$key] -lt $was) {
+            $shrunk += 1
+        }
+    } elseif ($result.Verdict -eq "added") {
+        $added += "    $(Format-UnknownKey $key): $($now[$key]) site(s), not at $from"
+    } else {
+        $added += "    $(Format-UnknownKey $key): $($now[$key]) site(s), not at ${from}: $(Format-MoveRefusal $result)"
+    }
+}
+$removed = $leftover.Count - $moves
 Write-Host ("$relative against ${from}: $($before.Count) unknowns -> $($now.Count), " +
-    "$($added.Count) added, $($grown.Count) grown, $shrunk shrunk, $removed removed.")
+    "$($added.Count) added, $($grown.Count) grown, $shrunk shrunk, $removed removed, $moves moved.")
 
 if ($added.Count + $grown.Count -gt 0) {
     $details = @()

@@ -309,6 +309,14 @@ use bt_viewport::{
     HyperlinkHit, MathBlockAnchor, ViewSelection, ViewportFrame, ViewportProjection,
     horizontal::ContentColumn,
 };
+// K2 (T-SPLIT-2B) moved these free functions into their `runtime/` topics; the root names them
+// again so that its callers, and its test modules through `use super::*`, read them as before.
+use runtime::platform_pointer_of;
+#[cfg(test)]
+use runtime::{
+    a_capture_still_holds_its_pointer, profile_menu_anchor, rescan_leaf_for_search,
+    resolved_theme_change, tab_surface_tip_boxes, tooltip_anchor_for,
+};
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
 // seen" rule under the name this crate has always called it by.
@@ -22664,29 +22672,6 @@ impl PtyInput {
     }
 }
 
-/// **Whether the hand that began a gesture is still on it** (Codex review 2026-09-17, for the
-/// divider; T-POINTER-CAPTURE cut 5, R-9, for every gesture).
-///
-/// Two samples of one platform fact — which window of this thread holds the pointer — taken at the
-/// press and now. Equality is the whole predicate, and it has to be equality rather than "this
-/// window holds it": on macOS the answer is `None` at both ends, because AppKit has no per-thread
-/// capture to report, and a rule phrased as "we hold it" would cancel every gesture on that
-/// platform on its first turn. Two `None`s mean nothing was taken away, which is the truth there.
-///
-/// The gesture this ends is the one no event reports. Windows says capture loss with
-/// `WM_CAPTURECHANGED`; winit 0.30.13 answers it by zeroing its own capture count and emitting
-/// nothing, and a steal need not blur this window, so `Focused(false)` — the path that already
-/// ends a gesture — may never come. What is left is a capture that stays held for the rest of the
-/// window's life: a divider that `flush_pending_pty_resize` reads as a hand still on the geometry,
-/// so that no pane of this window can release a resize to its child, and a thumb, a selection or a
-/// press that goes on following a hand nobody is holding down.
-fn a_capture_still_holds_its_pointer(
-    at_the_press: Option<bt_platform::NativeWindow>,
-    now: Option<bt_platform::NativeWindow>,
-) -> bool {
-    at_the_press == now
-}
-
 /// What one released resize actually moved, so the window can decide what it owes the screen.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct LeafResizeCommit {
@@ -24190,68 +24175,6 @@ struct LeafSearchRescan {
     /// The previous cache answered the same question and its walk was complete — B58's "output
     /// caused this" half, as [`search::SearchState::keeps_current`] reads it.
     carried_complete: bool,
-}
-
-/// **Re-ask one terminal pane's search** — the scan half of `Runtime::refresh_search`, a free
-/// function so the budget each road may spend can be pinned over a real leaf.
-///
-/// `cache` is carried only while it is an answer to **the same question**: the same seat and the
-/// same [`WindowRuntime::search_revision`]. Anything else — a new query, a flipped toggle, another
-/// pane — starts a new walk, and the old cursor is never read again. The history half reads at
-/// most [`SearchRefresh::walk_budget`] owed lines on top of whatever froze since the last scan.
-fn rescan_leaf_for_search(
-    compiled: &bt_transcript::search::CompiledSearch,
-    leaf: &LeafSession,
-    seat: SeatId,
-    revision: u64,
-    cache: Option<&SearchScanCache>,
-    road: SearchRefresh,
-    timed: bool,
-) -> LeafSearchRescan {
-    let transcript = leaf.session.transcript();
-    // **The previous answer, and only while it is an answer to the same question.** Seat and
-    // revision are what "the same question" means here; the plane having moved under it is not a
-    // reason to throw it away, it is the reason it is passed in.
-    let previous = cache.filter(|cache| cache.seat == seat && cache.revision == revision);
-    let started = timed.then(Instant::now);
-    let history = search::scan_history_slice(
-        compiled,
-        transcript,
-        previous.map(|cache| &cache.history),
-        road.walk_budget(),
-    );
-    let history_us = started.map_or(0, |at| at.elapsed().as_micros());
-    // The two volatile planes, every time: fifty rows of grid and whatever has scrolled out but not
-    // frozen. Their cost is a property of the screen, so re-scanning them unconditionally is what
-    // buys "the word you are typing is findable the instant it is echoed".
-    let live: Vec<search::LiveRow> = leaf
-        .session
-        .live_rows()
-        .iter()
-        .enumerate()
-        .map(|(row, captured)| search::live_row(row as u32, &captured.cells))
-        .collect();
-    let volatile_hits =
-        search::scan_volatile(compiled, transcript, &live, leaf.session.grid_generation());
-    // Nothing happened when the question, the lines read and the volatile hits are all the ones the
-    // last scan saw. `reads_as` stands in for the history hits because it is what they are a
-    // function of — and it moves with a walk's cursor, so a slice is never mistaken for nothing.
-    let unchanged = previous.is_some_and(|cache| {
-        cache.history.reads_as(&history.scan) && cache.volatile_hits == volatile_hits
-    });
-    LeafSearchRescan {
-        lines_scanned: history.lines_scanned,
-        history_us,
-        live_rows: live.len(),
-        unchanged,
-        carried_complete: previous.is_some_and(|cache| cache.history.is_complete()),
-        cache: SearchScanCache {
-            seat,
-            revision,
-            history: history.scan,
-            volatile_hits,
-        },
-    }
 }
 
 /// Which way a keyboard walk of the command marks goes.
@@ -40910,26 +40833,6 @@ fn folder_pick_outcome(
     }
 }
 
-/// **What one control of a pane's own run says it does** (user ruling
-/// 2026-08-27 — 「头/轨上每一枚可点的东西都必须有 tooltip,且由注册表守着」).
-///
-/// **It reads the registry**, which is the second half of the ruling: the words
-/// a verb wears live in `icons::ActionIcon::bare_tip` beside the shape it
-/// wears, and this only spends them. None of a pane run's four changes with the
-/// state, so the first entry is the whole of what each has to say — the two
-/// controls on this window that do change (a preview's padlock and a page's
-/// reload) are the head's and the rail's, and their own passes choose between
-/// the two words the registry lists for them.
-///
-/// A free function, so a gate can read the same table without a live window.
-/// The empty string is unreachable: the gate walks every verb a run can answer
-/// with and fails the build if one has no words.
-fn pane_control_tip(verb: icons::ActionIcon) -> &'static str {
-    verb.bare_tip()
-        .and_then(|words| words.first())
-        .map_or("", |text| text.text())
-}
-
 /// **Which verb the system folder chooser was opened for.**
 ///
 /// The chooser is one bridge — `IFileDialog::Show` runs a nested message loop,
@@ -48161,17 +48064,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ────────────────────────── in-pane search (§7.1.5d) ──────────────────────────
 
-    /// What both ways of choosing a match owe the window: the viewport reveals it
-    /// if it is off screen, the projection is handed the new current ground, and
-    /// the counter is rebuilt around it.
-    fn after_current_hit_moved(&mut self) -> Result<()> {
-        self.reveal_current_search_hit()?;
-        if let Some(seat) = self.window.search.seat() {
-            self.install_search_highlights(seat);
-        }
-        self.after_search_change()
-    }
-
     // -- the PowerShell integration notice (7.1.6j) -------------------------
 
     /// Whether the focused pane has a strip up — the Esc ladder's question.
@@ -53368,29 +53260,6 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     // ── P143-P150: the glance card ──────────────────────────────────────────
-
-    /// **The folders the root menu offers as "a terminal is here"**, read once as it opens
-    /// (T-CWD-FROM-PROCESS): every terminal pane of the tab in front of you, each through
-    /// [`LeafSession::folder`] — its report, else its shell process's folder, else where it was
-    /// opened.
-    ///
-    /// The shells' folders are read here rather than in `profiles` because that is where the
-    /// sessions are: red line L1's argument, one layer up. Every pane of the tab in front of you
-    /// gets a say, not only the focused one — "a terminal is here" is true of all of them, and the
-    /// whole point of the list is to name the places you are already standing.
-    fn shell_folders_for_the_root_menu(
-        &self,
-        door: &dyn pane_folder::ProcessFolders,
-    ) -> Vec<String> {
-        let tab = &self.window.tabs[self.window.active_tab];
-        tab.seats
-            .terminals()
-            .iter()
-            .filter_map(|seat| tab.sessions.get(seat))
-            .filter_map(|leaf: &LeafSession| leaf.folder(door).into_folder())
-            .map(|cwd| cwd.display().to_string())
-            .collect()
-    }
 
     /// The places this column could be pointed at (E54): its own root, the home folder, the
     /// shells' folders the menu took as it opened ([`Self::shell_folders_for_the_root_menu`]) and
@@ -65435,10 +65304,15 @@ fn rebuild_every_native_surface(
 }
 
 impl<B: Backend> FolioApp<B> {
+    /// `_storage` and `_profiles` are the witnesses that `main` settled the data directory and the
+    /// profile table (`startup::Settled`, T-LAZY-INITIALIZERS-BEFORE-THE-LOOP): nothing is read
+    /// from them; that they exist is the proof the loop does not start before either.
     fn new(
         proxy: LoopProxy,
         cli: cli::CliRequest,
         delegate: Option<bt_platform::AppDelegate>,
+        _storage: startup::Settled<persist::DataDirectory>,
+        _profiles: startup::Settled<profiles::Registry>,
     ) -> Self {
         Self {
             app: None,
@@ -71696,19 +71570,6 @@ fn dropped_files_seat_at(
     }
 }
 
-/// **The platform's cursor, in the units a pointer event would have arrived in**
-/// (GitHub issue #1 ②; release review 0.4.2 X-10).
-///
-/// [`bt_platform::pointer_position_in_window`] answers whole physical pixels
-/// because that is what both systems count in; `CursorMoved` carries `f64`
-/// because a trackpad can land between two of them. The widening is the whole of
-/// this function, and it is a free one so the units can be read — and pinned —
-/// without a window, the native call above it being the one thing a test cannot
-/// reach.
-fn platform_pointer_of(queried: Option<(i32, i32)>) -> Option<PhysicalPosition<f64>> {
-    queried.map(|(x, y)| PhysicalPosition::new(f64::from(x), f64::from(y)))
-}
-
 /// **A dropped file's path is a copied file's path** (GitHub issue #1 ②).
 ///
 /// One line, and the line is the whole point: a drop hands this process the same
@@ -72329,24 +72190,6 @@ const CWD_AS_WHOLE_PATH: CwdRendering = CwdRendering {
     maximum: CWD_MAX_CHARS,
 };
 
-/// The tooltip anchor a window-chrome target answers to, for the boxes the title
-/// bar owns: the caption run, and the panel toggle when the bar carries one.
-///
-/// A function rather than a `From`, because it is deliberately partial: most of
-/// [`seats::ChromeTarget`] names something a click does that nothing hovers for
-/// (a divider, a pane head), and the two enums are separate precisely so neither
-/// has to grow entries for the other's questions.
-fn tooltip_anchor_for(target: seats::ChromeTarget) -> Option<tooltip::TooltipAnchorId> {
-    match target {
-        seats::ChromeTarget::Settings => Some(tooltip::TooltipAnchorId::Settings),
-        seats::ChromeTarget::Minimize => Some(tooltip::TooltipAnchorId::Minimize),
-        seats::ChromeTarget::Maximize => Some(tooltip::TooltipAnchorId::Maximize),
-        seats::ChromeTarget::CloseWindow => Some(tooltip::TooltipAnchorId::CloseWindow),
-        seats::ChromeTarget::PanelToggle => Some(tooltip::TooltipAnchorId::PanelToggle),
-        _ => None,
-    }
-}
-
 /// A tab's name: 手动 > 程序标题 (OSC 2) > cwd 叶名 > the profile's own name.
 ///
 /// "Each layer is more specific than the one under it, and each is something
@@ -72391,73 +72234,6 @@ fn display_title(
     .0
 }
 
-/// The same walk, keeping the answer to "which layer won?" that
-/// [`display_title`] throws away.
-///
-/// One function with two readers rather than two functions agreeing: the tab's
-/// tooltip states the provenance out loud (M140, mock-up 4197-4199), and a
-/// second walk of the same stack would be a second set of precedence rules to
-/// keep in step — including the sanitiser's fall-through, which is exactly the
-/// subtlety a copy would lose. `None` is the fourth layer, which is nobody's
-/// claim: the profile's own name is what a tab is called when no one has said
-/// anything about it, and it has no provenance to report.
-/// **Which button the profile picker hangs off** — the fifth reader of the one
-/// fact [`tab_surface_tip_boxes`]'s doc lists four readers of, and the first one
-/// that got it wrong in a way nothing could see.
-///
-/// The rule is one sentence: **ask the column first, and if it answered that is
-/// the answer**; only a window with no focus column falls through to the two
-/// ordinary surfaces, where a vertical layout hangs the menu off the rail and a
-/// horizontal one off the strip. `None` means there is no button on screen to
-/// hang it off at all, which is a real state — a vertical layout whose rail is
-/// not being drawn — and not a failure.
-///
-/// **Pure, and that is the fix.** The live version computed the column's answer
-/// and then wrote `self.rail_geometry_now(now)?` on the way to a fallback it was
-/// never going to use: in focus mode `seats::rail_geometry` answers `None` by
-/// design, so the `?` returned out of the whole function and the picker's layout
-/// came back `None` while its state said open. The chevron flipped to `^`,
-/// `refresh_overlay` drew nothing, the press router had no rectangles to hit —
-/// a dead switch you could not even click away, in exactly one configuration
-/// (focus mode over a vertical rail). Precedence expressed as data cannot make
-/// that mistake, because there is no early return between the two answers.
-fn profile_menu_anchor(
-    focus_column: Option<&seats::FocusRailGeometry>,
-    rail: Option<&seats::RailGeometry>,
-    strip_new_tab_menu: [f32; 4],
-    state: seats::RailState,
-) -> Option<([f32; 4], profiles::MenuSide)> {
-    // **The side is not decided here** (§7.1.6e, 2026-08-20). Which way the
-    // picker hangs is a fact about the posture and is answered by
-    // `RailState::profile_menu_side`, because the `˅` itself and the tween that
-    // turns it need that same fact without needing a rectangle — and three
-    // spellings of one precedence is how the chevron came to point at a menu
-    // that was somewhere else. What is left here is the half only this function
-    // wants: *which box*.
-    let side = state.profile_menu_side()?;
-    // **And neither is the precedence** (§7.1.6e″, 2026-08-25). *Which* of the
-    // three surfaces holds the `+` is [`tab_surface`]'s one sentence, for the
-    // reason the side is `profile_menu_side`'s: [`popup_owner`] needs that same
-    // answer without needing a rectangle, and two spellings of one precedence is
-    // how the menu and the panel it belongs to came to disagree about which
-    // button they were talking about. What is left here is the half only this
-    // function wants: *which box*.
-    let anchor = match tab_surface(focus_column.is_some(), state.layout) {
-        // §7.1.6b′: the focus column keeps the panel's `+` and its `˅`, and
-        // `hit_focus_rail` answers `NewTabMenu` for it — so in focus mode the
-        // button that opened this menu is not the one either arm below
-        // describes.
-        TabSurface::FocusColumn => focus_column.map(|column| column.new_tab_menu),
-        // Q181: a parked rail has no chevron — 28px of it would leave the `+`
-        // nothing — so the `+` is what the menu hangs off there. The two share a
-        // right edge and a top, so the menu does not jump when the panel slides
-        // open and the chevron reappears.
-        TabSurface::Rail => rail.map(|rail| rail.new_tab_menu.unwrap_or(rail.new_tab)),
-        TabSurface::Strip => Some(strip_new_tab_menu),
-    }?;
-    Some((anchor, side))
-}
-
 /// **Which surface this window is drawing its tab list on** — §7.1.6e″'s one
 /// author, and the precedence [`profile_menu_anchor`] walks for the `+`'s box.
 ///
@@ -72490,154 +72266,6 @@ fn tab_surface(focus_column: bool, layout: seats::TabLayoutMode) -> TabSurface {
 /// arrow to aim.
 fn chevron_turn_target(open: bool, side: Option<profiles::MenuSide>) -> bool {
     open && side.is_some_and(profiles::MenuSide::turns_the_chevron)
-}
-
-/// Every tippable box of the **tab surface** that is actually on screen, in
-/// innermost-first order.
-///
-/// One function for two surfaces, and the layout picks which. That is the whole
-/// of the bug it exists to close: `tab_strip_geometry` is a pure function of a
-/// width and a trailer list and knows nothing about a rail being on screen, so
-/// asking it unconditionally — which is what the tooltip rebuild used to do —
-/// yields a full run of tab, pin and mark boxes lying across the top bar in
-/// vertical layout, where the only thing actually drawn is the app's name and
-/// the sidebar toggle. [`tooltip::TooltipAnchors`] is first-match-wins and those
-/// phantoms are pushed before the window chrome, so the visible toggle answered
-/// with some tab's name. `layout_peek_layer`, `profile_menu_layout` and
-/// `chrome_target_at` each already carry a comment about meeting this in their
-/// own corner; this is the fourth, and the last of the four to be told.
-///
-/// Pure, and that is deliberate: the *words* need a live window (which tab is
-/// running what), the *boxes* need only two geometries, and separating them is
-/// what makes "vertical registers nothing from the strip" a claim a test can
-/// make without a GPU. [`Runtime::tab_surface_tip_text`] is the other half.
-///
-/// `renaming` is the index of the tab whose name is being edited, if any: the
-/// editor IS the answer (mock-up 4193-4196), and a box telling you what the name
-/// currently is would be covering the box you are typing it into.
-fn tab_surface_tip_boxes(
-    layout: seats::TabLayoutMode,
-    strip: &seats::TabStripGeometry,
-    rail: Option<&seats::RailGeometry>,
-    scale: f32,
-    profile_menu_open: bool,
-    renaming: Option<usize>,
-) -> Vec<(tooltip::TooltipAnchorId, [f32; 4])> {
-    let mut boxes = Vec::new();
-    // Per row: the trailing controls and the mark first, then the body they sit
-    // in — the innermost-first order `TooltipAnchors` reproduces `closest()`
-    // with.
-    //
-    // **The close `×` is here now** (user ruling 2026-08-28, §7.37). It used to
-    // be deliberately absent, on the argument that `tabTrailer` writes no `title`
-    // on it (mock-up 4207) so a pointer there falls through to the tab — the tip
-    // you wanted anyway. The ruling overturns that on the same ground the pane
-    // head's `×` was: an idiom can say "this is a cross", it cannot say the cross
-    // closes *the tab* and not the document or the window. It registers exactly
-    // where the tab draws one — `slot.close` is `Some` — which is exactly where
-    // `hit_tab_chrome` answers `TabClose`, so a pinned tab (pin in the slot, no
-    // `×`) and a squeezed one (no room for one) tip nothing there and fall
-    // through as before.
-    //
-    // Each box is handed in already measured against its surface's own clip,
-    // because "cropped away" is the one thing the two surfaces answer
-    // differently — the strip clips on X, the rail on Y.
-    let mut row = |index: usize, parts: [(tooltip::TooltipAnchorId, Option<[f32; 4]>); 5]| {
-        if renaming == Some(index) {
-            return;
-        }
-        boxes.extend(parts.into_iter().filter_map(|(id, rect)| Some((id, rect?))));
-    };
-    let (new_tab, new_tab_menu) = match layout {
-        seats::TabLayoutMode::Horizontal => {
-            // What is cropped away is not there to be tipped, exactly as it is
-            // not there to be clicked (`hit_tab_chrome`). The strip scrolls on X.
-            let visible =
-                |rect: [f32; 4]| rect[0] >= strip.viewport[0] && rect[2] <= strip.viewport[1];
-            for (index, slot) in strip.tabs.iter().enumerate() {
-                row(
-                    index,
-                    [
-                        (
-                            tooltip::TooltipAnchorId::TabFiles(index),
-                            slot.files.filter(|files| visible(*files)),
-                        ),
-                        (
-                            tooltip::TooltipAnchorId::TabPin(index),
-                            slot.pin.filter(|pin| visible(*pin)),
-                        ),
-                        (
-                            tooltip::TooltipAnchorId::TabClose(index),
-                            slot.close.filter(|close| visible(*close)),
-                        ),
-                        (
-                            tooltip::TooltipAnchorId::TabIcon(index),
-                            Some(seats::tab_mark_box(slot, scale)).filter(|rect| visible(*rect)),
-                        ),
-                        (
-                            tooltip::TooltipAnchorId::Tab(index),
-                            Some(slot.body).filter(|rect| visible(*rect)),
-                        ),
-                    ],
-                );
-            }
-            (
-                Some(strip.new_tab).filter(|rect| visible(*rect)),
-                Some(strip.new_tab_menu).filter(|rect| visible(*rect)),
-            )
-        }
-        // `None` is a real answer here as everywhere else the rail is asked: a
-        // collapsed rail puts no list on screen, so there is nothing to be over.
-        seats::TabLayoutMode::Vertical => match rail {
-            None => (None, None),
-            Some(rail) => {
-                // The rail scrolls on Y, so its clip is a band rather than a pair
-                // of X bounds — the same rule on the other axis.
-                let visible =
-                    |rect: [f32; 4]| rect[1] >= rail.viewport[0] && rect[3] <= rail.viewport[1];
-                for (index, slot) in rail.tabs.iter().enumerate() {
-                    row(
-                        index,
-                        [
-                            (
-                                tooltip::TooltipAnchorId::TabFiles(index),
-                                slot.files.filter(|files| visible(*files)),
-                            ),
-                            (
-                                tooltip::TooltipAnchorId::TabPin(index),
-                                slot.pin.filter(|pin| visible(*pin)),
-                            ),
-                            (
-                                tooltip::TooltipAnchorId::TabClose(index),
-                                slot.close.filter(|close| visible(*close)),
-                            ),
-                            (
-                                tooltip::TooltipAnchorId::TabIcon(index),
-                                Some(slot.mark).filter(|rect| visible(*rect)),
-                            ),
-                            (
-                                tooltip::TooltipAnchorId::Tab(index),
-                                Some(slot.body).filter(|rect| visible(*rect)),
-                            ),
-                        ],
-                    );
-                }
-                // The `+` row is `position: sticky` and never scrolls out from
-                // under the list, so it is not measured against that band.
-                (Some(rail.new_tab), rail.new_tab_menu)
-            }
-        },
-    };
-    if let Some(rect) = new_tab {
-        boxes.push((tooltip::TooltipAnchorId::NewTab, rect));
-    }
-    // I94: the chevron's own tip is silenced while its menu is up. You just
-    // clicked it and the answer is on screen, so the question is closed and the
-    // tip would be noise sitting on top of the answer.
-    if let Some(rect) = new_tab_menu.filter(|_| !profile_menu_open) {
-        boxes.push((tooltip::TooltipAnchorId::NewTabMenu, rect));
-    }
-    boxes
 }
 
 #[cfg(test)]
@@ -76061,13 +75689,6 @@ fn resolve_theme_mode(mode: ThemeModeV1, os_theme: Option<OsTheme>) -> Theme {
     }
 }
 
-fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> {
-    match mode {
-        ThemeModeV1::System => Some(resolve_theme_mode(mode, Some(os_theme))),
-        ThemeModeV1::Light | ThemeModeV1::Dark => None,
-    }
-}
-
 /// **The desktop's canvas reaches this loop on the system-preference event, and
 /// not only on winit's own** (ticket M1-3).
 ///
@@ -77687,9 +77308,24 @@ fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync 
         if the_hook_lets_this_panic_unwind() {
             return;
         }
-        previous(info);
-        fatal(&path);
+        the_fatal_road(
+            diagnostics::settle_in_panic,
+            || previous(info),
+            || fatal(&path),
+        );
     }));
+}
+
+/// **The panic hook's fatal road, in its order**: `diagnostics.log`'s writer settled
+/// first — the writer's fence on the panic hook's road, which no door admits (an
+/// `# emergency` holder) — so every line said before the panic is above the panic
+/// message the previous hook writes to `stderr` (in a Log run, the same file), and above
+/// the footer `fatal` writes after it (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD, review
+/// H1).
+fn the_fatal_road(settle: impl FnOnce(), previous: impl FnOnce(), fatal: impl FnOnce()) {
+    settle();
+    previous();
+    fatal();
 }
 
 /// **Whether the panic hook returns and lets this thread's panic unwind** to the
@@ -78026,6 +77662,12 @@ fn start_video_prewarm(prewarm: fn() -> std::io::Result<()>, say: impl Fn(&str))
 }
 
 fn main() -> Result<()> {
+    // **The profile table, settled before any branch** (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP;
+    // C1): every process this program becomes — the loop's, an argv door's, the rescue's, the
+    // hand-over's sender — has the table made here, off Windows the one `$SHELL` probe its seed
+    // costs, so no read anywhere is its first use. Pinned before `parse` in `window_waits_tests`;
+    // its witness is what `FolioApp::new` takes.
+    let registry = profiles::settle_registry();
     // **Every diagnostic door, read once, here** (`entry_doors`, T-DIAGNOSTIC-DOORS-AT-THE-ENTRY):
     // the recordings and traces this run was asked for, handed to each library that writes one
     // before any station can be reached. Nothing below reads them from the environment again.
@@ -78118,7 +77760,7 @@ fn main() -> Result<()> {
     // **The process's half of the start, in `startup::begin`'s order**: a removal verb, the
     // command line, the hand-over. What the hand-over keeps — the parsed request, the data
     // directory, and the two lines a hand-over that did not happen owes the log — comes back.
-    let (request, storage, gave_up, stood_down) = startup::begin(startup::FrontDoor {
+    let (request, settled, gave_up, stood_down) = startup::begin(startup::FrontDoor {
         removal: || {
             // **And the door that undoes what the other two registered**: somebody
             // taking Folio back out of Explorer's menu, which is the one thing this
@@ -78139,6 +77781,9 @@ fn main() -> Result<()> {
             // stopped to raise a modal nobody is in front of would be worse than an
             // uninstall that said nothing at all.
             if cli::remove_shell_integration(std::env::args_os().skip(1)) {
+                // The folder the removal reads, settled as this door always paid for it: the
+                // process has no window, so no request door can be the first to ask.
+                persist::settle_storage_dir();
                 let report = shell_integration::remove_shell_integration(
                     shell_integration::CheckAsker::Verb,
                     &shell_integration::ProbeEnvironment::Inherited,
@@ -78261,7 +77906,14 @@ fn main() -> Result<()> {
             // the literal `leave_process(code)`, and a second call spelled the same way
             // would answer that search first — turning a pin on where the run's last
             // line is written into a pin on a branch that never writes one.
-            let storage = persist::storage_dir();
+            //
+            // **Settled here, and only here in the loop's process**
+            // (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP; C1): after the update pass, before the
+            // hand-over (its pin in `window_waits_tests`); the witness rides out to
+            // `FolioApp::new`, so the loop cannot start on an unsettled directory and no reader
+            // can be the one that moves it.
+            let settled = persist::settle_storage_dir();
+            let storage = settled.value().data_folder().to_path_buf();
             //
             // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
             // only in `Starting`. A refusal is one more `None`: carry on and open a window.
@@ -78305,7 +77957,7 @@ fn main() -> Result<()> {
             {
                 bt_platform::leave_process(handed);
             }
-            (request, storage, gave_up.take(), stood_down)
+            (request, settled, gave_up.take(), stood_down)
         },
     });
     // **The thread that owns the window says so, before it owns one.** Every
@@ -78322,7 +77974,8 @@ fn main() -> Result<()> {
     // console this process borrowed is very often a pane inside another Folio.
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
-    let channel = diagnostics::enter_resident_run(&storage);
+    let storage = settled.value().data_folder();
+    let channel = diagnostics::enter_resident_run(storage);
     // A start whose hand-over gave up says why where this run's diagnostics go
     // (0.4.8 D3), above the line that says its window saves nothing.
     if let Some(line) = gave_up {
@@ -78494,6 +78147,10 @@ fn main() -> Result<()> {
             // The way out from before the loop: the trace writer is retired through its flush
             // door, which is an exit door (§5.3 row 17), so the phase says so first (D-78).
             bt_platform::admission::exiting();
+            // What the run said is on the disk before the error that ends it (row 30).
+            let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(
+                diagnostics::settle,
+            );
             let _ = trace_shutdown.flush_through_its_door();
             return Err(anyhow::Error::new(error).context("create winit event loop"));
         }
@@ -78549,7 +78206,13 @@ fn main() -> Result<()> {
             }
         }
     };
-    let mut application = FolioApp::new(event_loop.create_proxy().into(), request, delegate);
+    let mut application = FolioApp::new(
+        event_loop.create_proxy().into(),
+        request,
+        delegate,
+        settled,
+        registry,
+    );
     let outcome = event_loop
         .run_app(&mut application)
         .map_err(|error| anyhow!(error));
@@ -78583,6 +78246,12 @@ fn main() -> Result<()> {
     // The footer is written **before** the call and not after, because the whole
     // value of the line is that it is the last thing in the file when something
     // between it and the process's death goes wrong.
+    //
+    // **And everything the run said, on the disk above the footer** (§5.3 row 30,
+    // T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD): `diagnostics.log`'s writer answers a fence
+    // once every line handed over before it is written, within `diagnostics::SETTLE_WITHIN`.
+    // An owner-thread door (`doors::DiagnosticsSettle`), admitted on the way out.
+    let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(diagnostics::settle);
     let code = match &outcome {
         Ok(()) => 0,
         Err(error) => {

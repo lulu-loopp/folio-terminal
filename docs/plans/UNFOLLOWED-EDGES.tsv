@@ -2152,8 +2152,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::settled_card_ink	Ambiguous	coll
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settled_card_ink	Ambiguous	filter_map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settled_card_ink	Ambiguous	flatten	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settled_card_ink	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::shell_folders_for_the_root_menu	Ambiguous	display	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::shell_folders_for_the_root_menu	Ambiguous	to_string	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	filter_map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	unwrap_or_default	1	
@@ -2460,8 +2458,6 @@ crates/bt-app/src/main.rs	bt-app crate::page_foot_flash	Ambiguous	text	1
 crates/bt-app/src/main.rs	bt-app crate::page_foot_flash	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::page_foot_flash	Dynamic	fresh	1	
 crates/bt-app/src/main.rs	bt-app crate::page_foot_flash	Dynamic	latest	3	
-crates/bt-app/src/main.rs	bt-app crate::pane_control_tip	Ambiguous	map_or	1	
-crates/bt-app/src/main.rs	bt-app crate::pane_control_tip	Ambiguous	text	1	
 crates/bt-app/src/main.rs	bt-app crate::pane_into_new_tab	Ambiguous	unwrap_or_default	6	
 crates/bt-app/src/main.rs	bt-app crate::pane_into_new_tab	Dynamic	solve	1	
 crates/bt-app/src/main.rs	bt-app crate::pane_into_tab	Dynamic	solve	2	
@@ -2543,9 +2539,6 @@ crates/bt-app/src/main.rs	bt-app crate::rename_key	Ambiguous	eq_ignore_ascii_cas
 crates/bt-app/src/main.rs	bt-app crate::rename_key	Ambiguous	then	1	
 crates/bt-app/src/main.rs	bt-app crate::rename_key	Dynamic	take_selection	2	
 crates/bt-app/src/main.rs	bt-app crate::report_frame_shape_stop	Dynamic	announce	1	
-crates/bt-app/src/main.rs	bt-app crate::rescan_leaf_for_search	Ambiguous	as_micros	1	
-crates/bt-app/src/main.rs	bt-app crate::rescan_leaf_for_search	Ambiguous	elapsed	1	
-crates/bt-app/src/main.rs	bt-app crate::rescan_leaf_for_search	Ambiguous	map_or	1	
 crates/bt-app/src/main.rs	bt-app crate::resolve_document_pictures	Ambiguous	clone	1	
 crates/bt-app/src/main.rs	bt-app crate::resolve_document_pictures	Dynamic	ask	1	
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	map_or_else	1	
@@ -2594,9 +2587,6 @@ crates/bt-app/src/main.rs	bt-app crate::switcher_rows	Ambiguous	clone	1
 crates/bt-app/src/main.rs	bt-app crate::switcher_rows	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::switcher_rows	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::switcher_rows	Ambiguous	unwrap_or_else	1	
-crates/bt-app/src/main.rs	bt-app crate::tab_surface_tip_boxes	Ambiguous	filter_map	1	
-crates/bt-app/src/main.rs	bt-app crate::tab_surface_tip_boxes	Dynamic	row	2	
-crates/bt-app/src/main.rs	bt-app crate::tab_surface_tip_boxes	Dynamic	visible	12	
 crates/bt-app/src/main.rs	bt-app crate::tabs_a_close_loses	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::tabs_a_close_loses	Ambiguous	count	1	
 crates/bt-app/src/main.rs	bt-app crate::tabs_a_close_loses	Ambiguous	into_iter	1	
@@ -2607,6 +2597,9 @@ crates/bt-app/src/main.rs	bt-app crate::take_psreadline_resize_reanchor_input	Am
 crates/bt-app/src/main.rs	bt-app crate::tear_out_rect	Dynamic	physical	4	
 crates/bt-app/src/main.rs	bt-app crate::terminal_reference_row	Ambiguous	eq_ignore_ascii_case	3	
 crates/bt-app/src/main.rs	bt-app crate::terminal_reference_row	Dynamic	verdict	1	
+crates/bt-app/src/main.rs	bt-app crate::the_fatal_road	Dynamic	fatal	1	2026-10-24: the panic hook's three steps are handed to the_fatal_road so a test drives their order (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD review H1); its one product call names diagnostics::settle_in_panic, the previous hook and fatal
+crates/bt-app/src/main.rs	bt-app crate::the_fatal_road	Dynamic	previous	1	2026-10-24: the panic hook's three steps are handed to the_fatal_road so a test drives their order (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD review H1); its one product call names diagnostics::settle_in_panic, the previous hook and fatal
+crates/bt-app/src/main.rs	bt-app crate::the_fatal_road	Dynamic	settle	1	2026-10-24: the panic hook's three steps are handed to the_fatal_road so a test drives their order (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD review H1); its one product call names diagnostics::settle_in_panic, the previous hook and fatal
 crates/bt-app/src/main.rs	bt-app crate::title_layer	Ambiguous	is_empty	1	
 crates/bt-app/src/main.rs	bt-app crate::trace_unchanged_present	Ambiguous	as_micros	1	
 crates/bt-app/src/main.rs	bt-app crate::trace_unchanged_present	Ambiguous	elapsed	1	
@@ -2814,7 +2807,6 @@ crates/bt-app/src/persist.rs	bt-app crate::persist::read_fault	Ambiguous	unwrap_
 crates/bt-app/src/persist.rs	bt-app crate::persist::read_fault	Dynamic	in_force	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::serve_storage_job	Ambiguous	is_err	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::serve_storage_job	Ambiguous	to_string	1	
-crates/bt-app/src/persist.rs	bt-app crate::persist::storage_dir	Ambiguous	clone	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::storage_location	Ambiguous	join	4	
 crates/bt-app/src/persist.rs	bt-app crate::persist::storage_location	Dynamic	env	4	
 crates/bt-app/src/persist.rs	bt-app crate::persist::wake_documents	Dynamic	wake	1	
@@ -3320,7 +3312,6 @@ crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::reinsert	Ambiguo
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::reinsert	Ambiguous	len	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::rename	Ambiguous	is_empty	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::rename	Ambiguous	to_owned	1	
-crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::restore_defaults	Ambiguous	find	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::restore_defaults	Ambiguous	get	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::table	Ambiguous	clone	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::table	Ambiguous	unwrap_or_else	1	
@@ -3780,16 +3771,16 @@ crates/bt-app/src/quake.rs	bt-app crate::quake::typed_into_a_prompt	Ambiguous	co
 crates/bt-app/src/quake.rs	bt-app crate::quake::typed_into_a_prompt	Ambiguous	is_control	1	
 crates/bt-app/src/quake.rs	bt-app crate::quake::typed_into_a_prompt	Ambiguous	is_empty	1	
 crates/bt-app/src/quake.rs	bt-app crate::quake::typed_into_a_prompt	Ambiguous	push	1	
-crates/bt-app/src/quit.rs	bt-app crate::quit::QUIT_DOCUMENTS_BY	Ambiguous	expect	1	
-crates/bt-app/src/quit.rs	bt-app crate::quit::QUIT_RECOVERY_BY	Ambiguous	checked_div	1	
-crates/bt-app/src/quit.rs	bt-app crate::quit::QUIT_RECOVERY_BY	Ambiguous	expect	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Quit::recovery	Ambiguous	collect	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Quit::recovery	Ambiguous	into_iter	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Quit::recovery	Ambiguous	map	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Quit::settle_held_release	Ambiguous	collect	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Quit::settle_held_release	Ambiguous	into_iter	1	
 crates/bt-app/src/quit.rs	bt-app crate::quit::Raised::press	Ambiguous	chosen	1	
+crates/bt-app/src/quit.rs	bt-app crate::quit::documents_by_of	Ambiguous	expect	1	2026-10-24: T-QUIT-FLUSH-BUDGET-PER-QUIT; the phase-bound derivation moved from the `QUIT_DOCUMENTS_BY`/`QUIT_RECOVERY_BY` consts (now test-only) into this const fn; `Option::expect` on what `Duration::checked_div` answers, a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/quit.rs	bt-app crate::quit::dropped_on_begin	Ambiguous	unwrap_or_default	1	
+crates/bt-app/src/quit.rs	bt-app crate::quit::recovery_by_of	Ambiguous	checked_div	1	2026-10-24: T-QUIT-FLUSH-BUDGET-PER-QUIT; the phase-bound derivation moved from the `QUIT_DOCUMENTS_BY`/`QUIT_RECOVERY_BY` consts (now test-only) into this const fn; `Duration::checked_div` on what `Duration::saturating_mul` answers, a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/quit.rs	bt-app crate::quit::recovery_by_of	Ambiguous	expect	1	2026-10-24: T-QUIT-FLUSH-BUDGET-PER-QUIT; the phase-bound derivation moved from the `QUIT_DOCUMENTS_BY`/`QUIT_RECOVERY_BY` consts (now test-only) into this const fn; `Option::expect` on what `Duration::checked_div` answers, a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders::from_persisted	Ambiguous	is_empty	1	
 crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders::record	Ambiguous	is_empty	1	
 crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders::record	Ambiguous	is_none_or	1	
@@ -4655,6 +4646,8 @@ crates/bt-app/src/runtime/profiles.rs	bt-app crate::runtime::profiles::Runtime::
 crates/bt-app/src/runtime/profiles.rs	bt-app crate::runtime::profiles::Runtime::open_profile_editor	Ambiguous	map	1	
 crates/bt-app/src/runtime/profiles.rs	bt-app crate::runtime::profiles::Runtime::profile_menu_layout	Ambiguous	flatten	1	
 crates/bt-app/src/runtime/profiles.rs	bt-app crate::runtime::profiles::Runtime::root_menu_stand	Ambiguous	then_some	1	
+crates/bt-app/src/runtime/profiles.rs	bt-app crate::runtime::profiles::Runtime::shell_folders_for_the_root_menu	Ambiguous	display	1	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `Runtime::shell_folders_for_the_root_menu` from main.rs into runtime/profiles.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/profiles.rs	bt-app crate::runtime::profiles::Runtime::shell_folders_for_the_root_menu	Ambiguous	to_string	1	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `Runtime::shell_folders_for_the_root_menu` from main.rs into runtime/profiles.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/profiles.rs	bt-app crate::runtime::profiles::Runtime::shown_program_rows	Ambiguous	unwrap_or_default	2	
 crates/bt-app/src/runtime/profiles.rs	bt-app crate::runtime::profiles::Runtime::toggle_root_menu	Ambiguous	is_ok_and	1	
 crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::Runtime::drive_search_hover	Ambiguous	is_some	1	
@@ -4664,6 +4657,9 @@ crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::Runtime::reve
 crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::Runtime::search_field_key	Ambiguous	eq_ignore_ascii_case	1	
 crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::Runtime::search_field_look	Ambiguous	is_empty	1	
 crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::Runtime::search_walk_deadline	Ambiguous	then	1	
+crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::rescan_leaf_for_search	Ambiguous	as_micros	1	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `rescan_leaf_for_search` from main.rs into runtime/search.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::rescan_leaf_for_search	Ambiguous	elapsed	1	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `rescan_leaf_for_search` from main.rs into runtime/search.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::rescan_leaf_for_search	Ambiguous	map_or	1	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `rescan_leaf_for_search` from main.rs into runtime/search.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::browse_for_new_tab_root	Ambiguous	as_deref	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::browse_for_new_tab_root	Ambiguous	or_else	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::commit_row_into_new_tab	Ambiguous	to_string	1	
@@ -4735,6 +4731,11 @@ crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::Runtime::
 crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::Runtime::tooltip_layer	Ambiguous	map	2	
 crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::Runtime::tooltip_layer	Ambiguous	split	2	
 crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::Runtime::tooltip_layer	Ambiguous	wraps	1	
+crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::pane_control_tip	Ambiguous	map_or	1	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `pane_control_tip` from main.rs into runtime/tooltips.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::pane_control_tip	Ambiguous	text	1	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `pane_control_tip` from main.rs into runtime/tooltips.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::tab_surface_tip_boxes	Ambiguous	filter_map	1	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `tab_surface_tip_boxes` from main.rs into runtime/tooltips.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::tab_surface_tip_boxes	Dynamic	row	2	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `tab_surface_tip_boxes` from main.rs into runtime/tooltips.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::tab_surface_tip_boxes	Dynamic	visible	12	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `tab_surface_tip_boxes` from main.rs into runtime/tooltips.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/update_card.rs	bt-app crate::runtime::update_card::Runtime::update_card_verbs	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::adopt_spare_web_page	Ambiguous	as_micros	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::adopt_spare_web_page	Ambiguous	elapsed	1	
@@ -11541,6 +11542,7 @@ crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	
 crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	Ambiguous	ends_with	1	
 crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	Ambiguous	is_some_and	1	
 crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	Ambiguous	to_str	1	
+crates/bt-testpath/src/lib.rs	bt-testpath crate::temp_path	Ambiguous	join	1	2026-10-24: reached only from persist.rs cfg(test) DIRECTORY static (a test process scratch data directory, T-LAZY-INITIALIZERS-BEFORE-THE-LOOP); the walk does not read cfg, the product build has no such static
 crates/bt-transcript/src/lib.rs	bt-transcript crate::<CellText as From<&str>>::from	Ambiguous	len	3	
 crates/bt-transcript/src/lib.rs	bt-transcript crate::CapturedCell::carries_unclaimed_text	Ambiguous	all	1	
 crates/bt-transcript/src/lib.rs	bt-transcript crate::CapturedCell::plain	Dynamic	into	1	
