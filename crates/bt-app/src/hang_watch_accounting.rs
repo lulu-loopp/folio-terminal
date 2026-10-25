@@ -451,7 +451,7 @@ fn owner_byte(owner: Option<WakeOwner>) -> u8 {
 }
 
 /// The owner [`owner_byte`] packed.
-fn owner_of(byte: u8) -> Option<WakeOwner> {
+pub(super) fn owner_of(byte: u8) -> Option<WakeOwner> {
     Option::and_then(byte.checked_sub(1), WakeOwner::from_byte)
 }
 
@@ -532,6 +532,8 @@ pub(super) struct Accounts {
     lines: Mutex<Vec<BudgetLine>>,
     /// Pushes that found [`Self::lines`] held or full, for the run.
     lost: AtomicU64,
+    /// What woke each turn, and what those turns cost (T-IDLE-TURN-COST).
+    pub(super) census: super::census::Census,
 }
 
 impl Accounts {
@@ -569,6 +571,7 @@ impl Accounts {
             yielded_turns: AtomicU64::new(0),
             lines: Mutex::new(Vec::with_capacity(BUDGET_LINES_KEPT)),
             lost: AtomicU64::new(0),
+            census: super::census::Census::new(),
         }
     }
 
@@ -603,6 +606,7 @@ impl Accounts {
         let owed = self.owed_ns.swap(0, Ordering::Relaxed);
         let past = self.owed_past.swap(false, Ordering::Relaxed);
         let owner = self.owed_owner.swap(0, Ordering::Relaxed);
+        self.census.begin(owner);
         let (delay, stale) = match owed.checked_sub(1) {
             Some(due) if past => (0, now_ns.saturating_sub(due).saturating_add(1)),
             Some(due) if now_ns >= due => ((now_ns - due).saturating_add(1), 0),
@@ -745,6 +749,7 @@ impl Accounts {
             frame => frame,
         };
         self.wall.record(wall_ns);
+        self.census.close(wall_ns, stale_ns.is_some());
         self.waits.record(waits_ns);
         self.unexplained.record(unexplained_ns);
         if let Some(delay) = delay_ns {
