@@ -21,11 +21,13 @@
 //!    [`Refusal::TimestampInvalid`]; a time outside the leaf's validity:
 //!    [`Refusal::TimestampOutsideValidity`].
 //! 3. **Revocation** — read from the signer's chain as Windows built it:
-//!    revoked is [`Refusal::Revoked`], and **"unknown" is
-//!    [`Refusal::RevocationUnknown`]** (F-5: at download time the machine is
-//!    online by construction; the next press asks again). Windows' own
-//!    default policy passes an offline revocation check, which is why this is
-//!    read from the chain rather than left to `WinVerifyTrust`'s answer.
+//!    revoked is [`Refusal::Revoked`], and **"unknown" is a refusal** (F-5:
+//!    the next press asks again) — [`Refusal::RevocationOffline`] when the
+//!    place the revocation answer is published could not be reached (no
+//!    network, or its server down), [`Refusal::RevocationUnknown`] for every
+//!    other unknown; each carries Windows' code. Windows' own default policy
+//!    passes an offline revocation check, which is why this is read from the
+//!    chain rather than left to `WinVerifyTrust`'s answer.
 //! 4. **The identity-validation OID** — the leaf's one extended key usage
 //!    under `1.3.6.1.4.1.311.97.` that is not Artifact Signing's Public Trust
 //!    marker ([`identity_oid`]), equal to the running build's:
@@ -305,8 +307,23 @@ pub enum Refusal {
     TimestampOutsideValidity,
     /// Step 3: the signer's chain is revoked.
     Revoked,
-    /// Step 3: revocation could not be established.
-    RevocationUnknown,
+    /// Step 3: revocation could not be established because where its answer
+    /// is published could not be reached — `CERT_TRUST_IS_OFFLINE_REVOCATION`
+    /// in the chain, or `CRYPT_E_REVOCATION_OFFLINE`: no network, or the
+    /// server down. Nothing here tells those two apart.
+    RevocationOffline {
+        /// Windows' answer: the chain's `dwErrorStatus` flags, or the
+        /// `HRESULT`'s bits when `WinVerifyTrust` named it.
+        code: u32,
+    },
+    /// Step 3: revocation could not be established otherwise — no
+    /// distribution point, a list that does not parse or verify, a server
+    /// error (`CERT_TRUST_REVOCATION_STATUS_UNKNOWN` alone,
+    /// `CRYPT_E_NO_REVOCATION_CHECK`, `CERT_E_REVOCATION_FAILURE`).
+    RevocationUnknown {
+        /// Windows' answer, as [`Self::RevocationOffline`]'s.
+        code: u32,
+    },
     /// Step 4: the leaf carries no identity-validation OID, or more than one.
     NoIdentity {
         /// The Artifact Signing OIDs it does carry.
@@ -366,7 +383,8 @@ impl Refusal {
             Self::TimestampInvalid { .. } => "timestamp-invalid",
             Self::TimestampOutsideValidity => "timestamp-outside-validity",
             Self::Revoked => "revoked",
-            Self::RevocationUnknown => "revocation-unknown",
+            Self::RevocationOffline { .. } => "revocation-offline",
+            Self::RevocationUnknown { .. } => "revocation-unknown",
             Self::NoIdentity { .. } => "no-identity",
             Self::IdentityDiffers { .. } => "identity-differs",
             Self::SubjectDiffers { .. } => "subject-differs",
@@ -386,6 +404,9 @@ impl fmt::Display for Refusal {
             Self::Unreadable(why) | Self::ManifestUnreadable(why) => write!(f, "{name}: {why}"),
             Self::Untrusted { code } | Self::TimestampInvalid { code } => {
                 write!(f, "{name}: 0x{:08X}", code.cast_unsigned())
+            }
+            Self::RevocationOffline { code } | Self::RevocationUnknown { code } => {
+                write!(f, "{name}: 0x{code:08X}")
             }
             Self::NoIdentity { found } => write!(f, "{name}: [{}]", found.join(", ")),
             Self::IdentityDiffers { expected, found }
@@ -447,13 +468,17 @@ pub fn identity_oid(key_usages: &[String]) -> Result<String, Refusal> {
 ///
 /// # Errors
 ///
-/// [`Refusal::Revoked`] when any element is revoked; [`Refusal::RevocationUnknown`]
-/// when revocation could not be established (unknown or offline).
+/// [`Refusal::Revoked`] when any element is revoked; otherwise
+/// [`Refusal::RevocationOffline`] when the chain says revocation was offline,
+/// and [`Refusal::RevocationUnknown`] when it says only unknown — each with the
+/// flags.
 pub const fn revocation_verdict(error_status: u32) -> Result<(), Refusal> {
     if error_status & CHAIN_IS_REVOKED != 0 {
         Err(Refusal::Revoked)
-    } else if error_status & (CHAIN_REVOCATION_UNKNOWN | CHAIN_OFFLINE_REVOCATION) != 0 {
-        Err(Refusal::RevocationUnknown)
+    } else if error_status & CHAIN_OFFLINE_REVOCATION != 0 {
+        Err(Refusal::RevocationOffline { code: error_status })
+    } else if error_status & CHAIN_REVOCATION_UNKNOWN != 0 {
+        Err(Refusal::RevocationUnknown { code: error_status })
     } else {
         Ok(())
     }
@@ -471,8 +496,13 @@ pub const fn trust_verdict(code: i32) -> Result<(), Refusal> {
         0 => Ok(()),
         TRUST_E_NOSIGNATURE => Err(Refusal::Unsigned),
         CERT_E_REVOKED | CRYPT_E_REVOKED => Err(Refusal::Revoked),
-        CERT_E_REVOCATION_FAILURE | CRYPT_E_NO_REVOCATION_CHECK | CRYPT_E_REVOCATION_OFFLINE => {
-            Err(Refusal::RevocationUnknown)
+        CRYPT_E_REVOCATION_OFFLINE => Err(Refusal::RevocationOffline {
+            code: code.cast_unsigned(),
+        }),
+        CERT_E_REVOCATION_FAILURE | CRYPT_E_NO_REVOCATION_CHECK => {
+            Err(Refusal::RevocationUnknown {
+                code: code.cast_unsigned(),
+            })
         }
         code => Err(Refusal::Untrusted { code }),
     }

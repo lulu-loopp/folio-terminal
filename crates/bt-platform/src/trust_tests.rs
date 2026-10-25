@@ -60,27 +60,29 @@ fn the_identity_oid_is_the_one_that_is_not_the_public_trust_marker() {
 /// press. On Windows the same refusal is produced by the real chain engine in
 /// `a_test_signed_file_without_a_revocation_list_is_revocation_unknown`.
 ///
-/// MUTATION: drop `CHAIN_REVOCATION_UNKNOWN | CHAIN_OFFLINE_REVOCATION` from
-/// `revocation_verdict` and the unknown cases pass.
+/// MUTATION: drop `CHAIN_REVOCATION_UNKNOWN` or `CHAIN_OFFLINE_REVOCATION`
+/// from `revocation_verdict` and the unknown cases pass.
 #[test]
 fn revocation_unknown_is_a_refusal() {
     assert_eq!(revocation_verdict(0), Ok(()));
     assert_eq!(
         revocation_verdict(CHAIN_REVOCATION_UNKNOWN),
-        Err(Refusal::RevocationUnknown)
+        Err(Refusal::RevocationUnknown {
+            code: CHAIN_REVOCATION_UNKNOWN
+        })
     );
-    assert_eq!(
+    assert!(matches!(
         revocation_verdict(CHAIN_REVOCATION_UNKNOWN | CHAIN_OFFLINE_REVOCATION),
-        Err(Refusal::RevocationUnknown)
-    );
+        Err(Refusal::RevocationOffline { .. })
+    ));
     assert_eq!(
         revocation_verdict(CHAIN_IS_REVOKED | CHAIN_REVOCATION_UNKNOWN),
         Err(Refusal::Revoked)
     );
-    assert_eq!(
+    assert!(matches!(
         trust_verdict(super::CRYPT_E_REVOCATION_OFFLINE),
-        Err(Refusal::RevocationUnknown)
-    );
+        Err(Refusal::RevocationOffline { .. })
+    ));
     assert_eq!(trust_verdict(super::CERT_E_REVOKED), Err(Refusal::Revoked));
     assert_eq!(
         trust_verdict(super::TRUST_E_NOSIGNATURE),
@@ -88,6 +90,61 @@ fn revocation_unknown_is_a_refusal() {
     );
     #[cfg(windows)]
     windows_world::a_test_signed_file_without_a_revocation_list_is_revocation_unknown();
+}
+
+/// RED (0.4.9 T-UPDATE-OFFLINE-IDENTITY-CARD) — **revocation that could not
+/// be reached is named apart from revocation otherwise unknown**, each with
+/// Windows' code, and revoked wins over both.
+///
+/// On a machine with no network the chain says `REVOCATION_STATUS_UNKNOWN |
+/// IS_OFFLINE_REVOCATION` and the card must be able to say the network was the
+/// reason; a list that is missing or does not verify says unknown alone and
+/// keeps "not verified". On Windows the real chain engine gives the offline
+/// answer for a leaf naming a list it cannot reach
+/// (`a_test_signed_file_naming_an_unreachable_list_is_revocation_offline`).
+///
+/// MUTATION: test `CHAIN_REVOCATION_UNKNOWN` before `CHAIN_OFFLINE_REVOCATION`
+/// in `revocation_verdict`, or fold `CRYPT_E_REVOCATION_OFFLINE` back into the
+/// unknown arm of `trust_verdict`, and the offline cases fail.
+#[test]
+fn offline_revocation_is_named_apart_from_unknown() {
+    let offline = CHAIN_REVOCATION_UNKNOWN | CHAIN_OFFLINE_REVOCATION;
+    assert_eq!(
+        revocation_verdict(offline),
+        Err(Refusal::RevocationOffline { code: offline })
+    );
+    assert_eq!(
+        revocation_verdict(CHAIN_IS_REVOKED | offline),
+        Err(Refusal::Revoked)
+    );
+    assert_eq!(
+        trust_verdict(super::CRYPT_E_REVOCATION_OFFLINE),
+        Err(Refusal::RevocationOffline { code: 0x8009_2013 })
+    );
+    for unknown in [
+        super::CRYPT_E_NO_REVOCATION_CHECK,
+        super::CERT_E_REVOCATION_FAILURE,
+    ] {
+        assert_eq!(
+            trust_verdict(unknown),
+            Err(Refusal::RevocationUnknown {
+                code: unknown.cast_unsigned()
+            })
+        );
+    }
+    assert_eq!(
+        Refusal::RevocationOffline { code: offline }.to_string(),
+        "revocation-offline: 0x01000040"
+    );
+    assert_eq!(
+        Refusal::RevocationUnknown {
+            code: CHAIN_REVOCATION_UNKNOWN
+        }
+        .to_string(),
+        "revocation-unknown: 0x00000040"
+    );
+    #[cfg(windows)]
+    windows_world::a_test_signed_file_naming_an_unreachable_list_is_revocation_offline();
 }
 
 /// PIN (U-15) — **the stamped time must fall inside the signer's validity,
@@ -159,8 +216,8 @@ fn the_capability_needs_the_flag_and_the_signature() {
         Capability::Unsigned
     );
     assert_eq!(
-        capability(true, || Err(Refusal::RevocationUnknown)),
-        Capability::Unidentified(Refusal::RevocationUnknown)
+        capability(true, || Err(Refusal::RevocationUnknown { code: 0x40 })),
+        Capability::Unidentified(Refusal::RevocationUnknown { code: 0x40 })
     );
 }
 
