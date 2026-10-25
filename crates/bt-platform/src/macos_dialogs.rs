@@ -900,8 +900,11 @@ fn an_alert_would_be_seen(mtm: MainThreadMarker) -> bool {
 /// (T-TRACE-SINK-OFF-THE-CALLING-THREAD keeps it off the `stderr` road for that reason).
 #[expect(
     clippy::print_stderr,
-    reason = "the last-resort fault report: written where it is said, because a panic's box comes "
-              "after the panic road's fence and a queued line would leave with the process"
+    reason = "the last-resort fault report, written where it is said: a panic's box comes after the \
+              panic road's fence, where a queued line would leave with the process; for the other \
+              caller that reaches it in a resident run, bt-app's SystemBox::say (the stop's lost \
+              configuration change), the synchronous write is a known limit, to be routed through \
+              stderr_line by plan row 66 (T-STOP-NOTICE-BOX-QUERY-MACOS)"
 )]
 fn say_to_stderr(title: &str, text: &str) {
     eprintln!("{title}");

@@ -1841,8 +1841,11 @@ pub fn leave_process(code: i32) -> ! {
 #[cfg(not(any(windows, target_os = "macos")))]
 #[expect(
     clippy::print_stderr,
-    reason = "the last-resort fault report: written where it is said, because a panic's box comes "
-              "after the panic road's fence and a queued line would leave with the process"
+    reason = "the last-resort fault report, written where it is said: a panic's box comes after the \
+              panic road's fence, where a queued line would leave with the process; for the other \
+              caller that reaches it in a resident run, bt-app's SystemBox::say (the stop's lost \
+              configuration change), the synchronous write is a known limit, to be routed through \
+              stderr_line by plan row 66 (T-STOP-NOTICE-BOX-QUERY-MACOS)"
 )]
 pub fn message_box(title: &str, text: &str) {
     eprintln!("{title}");
