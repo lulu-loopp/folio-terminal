@@ -2553,8 +2553,6 @@ crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Dynamic	row_r
 crates/bt-app/src/main.rs	bt-app crate::push_markdown_table	Ambiguous	as_deref_mut	1	
 crates/bt-app/src/main.rs	bt-app crate::rail_overlay_layer	Ambiguous	collect	2	
 crates/bt-app/src/main.rs	bt-app crate::rail_overlay_layer	Ambiguous	map	2	
-crates/bt-app/src/main.rs	bt-app crate::raise_cancelled_quit_card_on	Ambiguous	text	1	
-crates/bt-app/src/main.rs	bt-app crate::raise_cancelled_quit_card_on	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::raster_peek_page	Ambiguous	and_then	1	
 crates/bt-app/src/main.rs	bt-app crate::raster_peek_page	Ambiguous	ok	1	
 crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	and_then	1	
@@ -3919,6 +3917,8 @@ crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::raise_notification_refusal	Ambiguous	to_owned	1	
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::replace_contradicted_flash	Ambiguous	then_some	1	
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::toast_anchor_rect	Ambiguous	flatten	1	
+crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::raise_cancelled_quit_card_on	Ambiguous	text	1	2026-10-25: T-SPLIT-2B batch 4; the same site, moved with `raise_cancelled_quit_card_on` from main.rs into runtime/attention.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::raise_cancelled_quit_card_on	Ambiguous	to_owned	1	2026-10-25: T-SPLIT-2B batch 4; the same site, moved with `raise_cancelled_quit_card_on` from main.rs into runtime/attention.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::apply_clipboard_payload	Ambiguous	is_empty	1	
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::ask_for_a_paste	Ambiguous	id	1	
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::ask_for_a_paste	Ambiguous	reason	1	
