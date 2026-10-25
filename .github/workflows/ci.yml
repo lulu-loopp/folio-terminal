@@ -504,6 +504,14 @@ jobs:
           BT_SOURCE_MEASURE_BUDGETS: "1"
         run: cargo test -p bt-source --locked --test measure -- --nocapture
 
+      # T-TEST-PROCESS-GLOBALS (ruling 1): the globals the tests reach only through product
+      # functions, the guard's stated blind spot, printed as `TEST_GLOBALS_PRODUCT_REACH` for the
+      # ticket that would gate them. A measure, never a gate.
+      - name: the tests' product reach of process-globals, measured
+        shell: pwsh
+        continue-on-error: true
+        run: cargo test -p bt-source --locked --test test_globals -- --exact the_product_reach_of_the_tests_is_measured --nocapture
+
       # T-REQUEST-DOOR-GUARD (C1, a request door returns at once), over the real tree: bt-source's
       # `request_doors::every_request_door_returns_at_once` walks each request door of
       # window_waits.tsv to its boundary and holds what it meets to
@@ -643,6 +651,13 @@ jobs:
       - name: the timing-bound gate can actually fail
         shell: pwsh
         run: ./scripts/ci/check-timing-bound-tests.ps1
+
+      # The test process-globals register (T-TEST-PROCESS-GLOBALS) admits an added row of a class
+      # the guard checks, and a by-hand row only under a widening line. Its scratch-repository
+      # suite plants each verdict, admitted and refused.
+      - name: the test-globals gate can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-test-globals-tests.ps1
 
       # The PSReadLine artefact gate holds the vendored package, its README, the build script's
       # pinned table and Folio's manifest to one another (T-INTEGRATION-INJECT-2-BUILD). Its
@@ -1232,6 +1247,10 @@ jobs:
       - name: the timing-bound test list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-timing-bound.ps1
+
+      - name: the test-globals register grows only by rows the guard checks
+        shell: pwsh
+        run: ./scripts/ci/check-test-globals.ps1
 
       # The lane contract's declared failures (`lane::EXPECTED_FAILURES`): no
       # lane gains one against the merge base; a claim new to the suite brings

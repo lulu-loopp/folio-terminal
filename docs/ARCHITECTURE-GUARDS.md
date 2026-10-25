@@ -422,6 +422,40 @@ wait from the window path or route it through an admitted worker; update the
 registry through `scripts/dev/generate-window-waits-table.ps1`, never by
 hand-editing the generated architecture region.
 
+The role and phase writers (`enter_window_thread`, `loop_running`, `exiting`,
+`quit_abandoned`, `enter_standalone_main`) are called only where `PINS` places
+them, each after the landmark of its owner's body that its pin names. A landmark
+is placed by the call it names (T-LANDMARK-GUARD-BY-CALL, 2026-10-24): the call
+of a path or a name that resolves to the landmark's item, however it is spelled
+(`cli::parse(…)`, `launch_wire::hand_over(…)`, an alias such as `wire::hand_over(…)`
+after `use crate::launch_wire as wire;` or a glob that brings `wire` in, a
+re-export, a glob re-export), followed through the crate's `use` declarations,
+explicit and glob; a method call on the receiver written in `LANDMARKS`
+(`builder.build()`, `event_loop.run_app(…)`, `self.session_store.close()`); or a
+variant's path (`StartCause::Init`, each declared variant `QuitStep::V`). Never a
+bare identifier: a field, a statement `let` or a parameter of the owner and the
+local it binds, a path that resolves to another item (one of the crate's, or one
+led by a first-party crate, a dependency, `std`/`core`/`alloc` or a primitive
+type), another enum's variant
+and an enum's associated item are not landmarks. Any other position of a
+landmark's name is refused with the name, the shape and the line: a path that
+resolves to nothing (no item of the crate, a first segment that is none of those
+crates) or to the landmark and another item at once
+(globs), a pattern, a parameter (a closure's too), an import, a value, a method
+call on another receiver, a path naming a method, a landmark's path not called
+directly, a path with generic arguments or a leading `::`, `Enum::*` /
+`Enum::{…}`, a rename, a macro or a nested `fn` of the name, and the landmark
+itself written inside a nested `fn`'s body or the arguments of a macro other than
+the standard ones that run them in place (`IN_PLACE_MACROS`: `matches!`,
+`assert!`, `format!`, …) (`window_waits_tests::landmarks_in`; the planted cases are the `a_*landmark*`
+tests, and `a_refused_landmark_fails_the_pinned_writers_guard` runs the whole
+guard). Not followed: a landmark called inside a helper the owner calls, and a
+name brought in by what the guard's `use` reader does not record (a `use` a macro
+writes, an `extern crate … as`); either, for a landmark no pin names
+(`hand_over`), can leave a moved writer reading the earlier landmark its pin
+names. When refused, rename what is not a landmark, or
+widen the grammar in its own change with a planted case.
+
 The registry's `# completions` section (S-1, 2026-10-11) is the side-effects
 contract's ledger, one row per request protocol, held by the
 `every_*completions*` tests (among them `every_worker_door_body_is_reached_from_a_completions_door`) and `every_conforming_request_door_holds_no_wait_of_its_own`
@@ -760,9 +794,45 @@ not be told from a test's own helper). A row listed twice is refused. When red,
 name the path with `bt_testpath::unique_name`/`temp_path`, locate a bin through
 `CARGO_BIN_EXE_<name>` in an integration test (cargo builds it for that target),
 or, when the fixed name is the subject, add a row saying why. A process-global that
-two tests touch is not in its grammar: review owns it. An `#[ignore]`d test that
+two tests touch is not in its grammar; the next paragraph's guard holds it. An `#[ignore]`d test that
 must run alone or serially says so on its line of `scripts/ci/ignored-tests.txt`
 (`run=alone`, `run=serial`).
+
+**Process-globals tests share** (T-TEST-PROCESS-GLOBALS, 2026-10-24).
+`crates/bt-source/tests/test_globals.rs` is the gate and `docs/plans/TEST-GLOBALS.tsv`
+its register. A process-global is a `static` of an `Atomic*`, a non-unit `Mutex`/`RwLock`,
+a `OnceLock`/`OnceCell`, a `LazyLock`, or a `static mut`. It may be written in a module or
+in a body. Not one: a `thread_local!` (each test has its own thread), a unit lock (the
+remedy), a static inside a `#[test]` body. A test's reach is its body and the test-only
+callables of its target that it reaches through resolved call-graph edges. It also takes
+in, to a fixed point, what runs without an edge: a test-only impl of a foreign trait (a
+`Drop`, winit's `resumed`) whose self type a body of the reach names, a test-only
+`GlobalAlloc` (in every test of its target), and a function written in an item-position
+macro's tokens (`define_class!`) whose type the reach names. A global that two tests of one
+binary reach (G1), or that one test's reach writes (G2), is a row. An array of cells is
+the cell, and a field or index of a `static mut` under `=`, `op=` or `&mut` writes it.
+`store`, `fetch_*`, `lock`, `get_or_init` and the like are writes, and any use the table
+in the module doc does not read is undecided and taken as a write. G3 is the reach itself.
+Refused by file and line: an unresolved edge with a test-only candidate that reaches a
+global, an unresolved path whose last segment is a global's name, an unparsed body on the
+walk, a global named where the call graph places no value (a glob `use` makes a name
+nameable too), and an implicitly run impl that reaches a global and whose type no test's
+reach names. A row is file, global, binary, class and a dated reason, and the rows equal the
+hits both ways. The guard checks `lock:<NAME>` (every test that reaches the global, each
+`cfg` arm on its own, reaches the one unit lock of the binary that NAME names; two locks of
+one name are spelled by their module path's tail), `single writer`, `one main` (a
+`harness = false` target, from its manifest) and `run=alone`/`run=serial` (each test
+carries `#[ignore]` and that condition on the ignored list). It also checks that a `write-once` row's writes
+are once-writes. `per-test key`, `monotone`, `write-once`, `not on a test thread` and
+`serial helpers` are by hand. `scripts/ci/check-test-globals.ps1` admits an added row of
+a checked class with its dated reason. It refuses an added by-hand row unless a new
+`# widened <date> by <ticket> (+n rows)` line admits exactly those rows in a change to the
+scan. `check-test-globals-tests.ps1` plants each verdict. When red, make the state the
+test's own (a value handed in, a key per test), or take one unit lock in every test that
+reaches it, or add the row. **Not seen:** a global a test reaches only through product
+functions; the walk ends there, as `timing.rs`'s does. The CJK probe's `i18n` switch is
+one. `the_product_reach_of_the_tests_is_measured` prints `TEST_GLOBALS_PRODUCT_REACH` as
+a measure, not a gate.
 
 ## Raw-effect and thread-door exceptions
 

@@ -49,8 +49,7 @@
 use crate::window_seam::prelude::*;
 use crate::{
     FloatDragKind, LeafId, MouseRoute, PasteTarget, PreviewSurface, RowHost, RowMiddlePress,
-    RowPress, Runtime, TabId, UserInputKind, VideoPicturePress, a_capture_still_holds_its_pointer,
-    float, input,
+    RowPress, Runtime, TabId, UserInputKind, VideoPicturePress, float, input,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -608,6 +607,29 @@ impl<B: Backend> Runtime<'_, B> {
         self.answer_attention(owner.seat, UserInputKind::MouseButton);
         self.send_mouse_input_to(owner.seat, &bytes, "forward mouse button release to PTY")
     }
+}
+
+/// **Whether the hand that began a gesture is still on it** (Codex review 2026-09-17, for the
+/// divider; T-POINTER-CAPTURE cut 5, R-9, for every gesture).
+///
+/// Two samples of one platform fact — which window of this thread holds the pointer — taken at the
+/// press and now. Equality is the whole predicate, and it has to be equality rather than "this
+/// window holds it": on macOS the answer is `None` at both ends, because AppKit has no per-thread
+/// capture to report, and a rule phrased as "we hold it" would cancel every gesture on that
+/// platform on its first turn. Two `None`s mean nothing was taken away, which is the truth there.
+///
+/// The gesture this ends is the one no event reports. Windows says capture loss with
+/// `WM_CAPTURECHANGED`; winit 0.30.13 answers it by zeroing its own capture count and emitting
+/// nothing, and a steal need not blur this window, so `Focused(false)` — the path that already
+/// ends a gesture — may never come. What is left is a capture that stays held for the rest of the
+/// window's life: a divider that `flush_pending_pty_resize` reads as a hand still on the geometry,
+/// so that no pane of this window can release a resize to its child, and a thumb, a selection or a
+/// press that goes on following a hand nobody is holding down.
+pub(crate) fn a_capture_still_holds_its_pointer(
+    at_the_press: Option<bt_platform::NativeWindow>,
+    now: Option<bt_platform::NativeWindow>,
+) -> bool {
+    at_the_press == now
 }
 
 #[cfg(test)]
