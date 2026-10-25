@@ -1130,7 +1130,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::head_that_raised_a_layer	Ambigu
 crates/bt-app/src/main.rs	bt-app crate::Runtime::head_that_raised_a_layer	Ambiguous	into_iter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::open_crumb_draft	Ambiguous	then	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::page_carried_by	Ambiguous	then_some	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::page_shrinker	Ambiguous	send_event	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::push_action_candidates	Ambiguous	then_some	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::push_action_candidates	Ambiguous	to_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::push_action_candidates	Path	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1172,7 +1171,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::settled_card_ink	Ambiguous	map	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	filter_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::trace_card_scale	Ambiguous	line_px	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::write_editor_field	Path	ProfilesNameBlank	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::write_editor_field	Path	ProfilesNameTaken	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::write_editor_field	Path	ProfilesProgramHasArguments	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1228,7 +1226,6 @@ crates/bt-app/src/main.rs	bt-app crate::animation_refusal_notice	Path	PreviewAni
 crates/bt-app/src/main.rs	bt-app crate::animation_refusal_notice	Path	PreviewAnimationFileTooLong	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::animation_refusal_notice	Path	PreviewAnimationTooLarge	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::answer_one_picture	Ambiguous	clone	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::apply_tabs_leaf_metrics	Dynamic	derive	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	checked_sub	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	enumerate	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -2688,6 +2685,8 @@ crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime
 crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::Runtime::apply_scale_factor	Macro	eprintln	1	violation	2026-10-24: (b) the trace sink and stderr: a sink-less run writes stderr, and a trace run opens and appends the trace file, under its lock, on the calling thread; (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
 crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::Runtime::flush_resize_trace	Ambiguous	unwrap_or_else	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::Runtime::flush_resize_trace	Path	to_string	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::Runtime::trace_card_scale	Ambiguous	line_px	1	unreviewed	2026-10-25: T-SPLIT-2B batch 3; the same site, moved by K2 batch 3 with `Runtime::trace_card_scale` from main.rs into runtime/dpi.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::apply_tabs_leaf_metrics	Dynamic	derive	1	unreviewed	2026-10-25: T-SPLIT-2B batch 3; the same site, moved by K2 batch 3 with `apply_tabs_leaf_metrics` from main.rs into runtime/dpi.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/files.rs	Runtime::close_pane	Inherits	Runtime::rename_files_row (row 20)	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::close_pane
 crates/bt-app/src/runtime/files.rs	Runtime::reap_exited_tabs	Inherits	Runtime::rename_files_row (row 20)	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::reap_exited_tabs
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::Runtime::ask_files_dir	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -3217,6 +3216,7 @@ crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::open_web_p
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::open_web_page_on	Macro	anyhow	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::open_web_page_on	Macro	eprintln	1	violation	2026-10-24: (b) the trace sink and stderr: a sink-less run writes stderr, and a trace run opens and appends the trace file, under its lock, on the calling thread; (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::close_pane, Runtime::reap_exited_tabs
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::open_web_page_with	Macro	eprintln	1	violation	2026-10-24: (b) the trace sink and stderr: a sink-less run writes stderr, and a trace run opens and appends the trace file, under its lock, on the calling thread; (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::close_pane, Runtime::reap_exited_tabs
+crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::page_shrinker	Ambiguous	send_event	1	unreviewed	2026-10-25: T-SPLIT-2B batch 3; the same site, moved by K2 batch 3 with `Runtime::page_shrinker` from main.rs into runtime/web.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::settle_the_web_keyboard	Macro	eprintln	1	violation	2026-10-24: (b) the trace sink and stderr: a sink-less run writes stderr, and a trace run opens and appends the trace file, under its lock, on the calling thread; (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::sync_web_page	Ambiguous	is_some_and	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::sync_web_page	Ambiguous	map_or_else	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))

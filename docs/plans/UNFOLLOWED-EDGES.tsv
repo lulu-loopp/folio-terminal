@@ -2103,7 +2103,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::open_scheme_for_editing	Ambiguo
 crates/bt-app/src/main.rs	bt-app crate::Runtime::open_scheme_for_editing	Ambiguous	map_or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::open_scheme_for_editing	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::page_carried_by	Ambiguous	then_some	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::page_shrinker	Ambiguous	send_event	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::push_action_candidates	Ambiguous	then_some	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::push_action_candidates	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::push_command_candidates	Ambiguous	map	1	
@@ -2232,7 +2231,6 @@ crates/bt-app/src/main.rs	bt-app crate::apply_stored_terminal_font	Ambiguous	as_
 crates/bt-app/src/main.rs	bt-app crate::apply_stored_terminal_font	Ambiguous	elapsed	1	
 crates/bt-app/src/main.rs	bt-app crate::apply_stored_terminal_font	Ambiguous	is_empty	1	
 crates/bt-app/src/main.rs	bt-app crate::apply_stored_terminal_font	Ambiguous	len	1	
-crates/bt-app/src/main.rs	bt-app crate::apply_tabs_leaf_metrics	Dynamic	derive	1	
 crates/bt-app/src/main.rs	bt-app crate::attention_ledger_deadline	Ambiguous	deadline	1	
 crates/bt-app/src/main.rs	bt-app crate::birth_due	Ambiguous	then_some	1	
 crates/bt-app/src/main.rs	bt-app crate::birth_due	Dynamic	rows_decide	1	
@@ -2588,8 +2586,6 @@ crates/bt-app/src/main.rs	bt-app crate::tabs_a_close_loses	Ambiguous	count	1
 crates/bt-app/src/main.rs	bt-app crate::tabs_a_close_loses	Ambiguous	into_iter	1	
 crates/bt-app/src/main.rs	bt-app crate::tabs_a_close_loses	Ambiguous	is_some_and	1	
 crates/bt-app/src/main.rs	bt-app crate::take_due_pty_resize	Ambiguous	then	1	
-crates/bt-app/src/main.rs	bt-app crate::take_psreadline_resize_reanchor_input	Ambiguous	flatten	1	
-crates/bt-app/src/main.rs	bt-app crate::take_psreadline_resize_reanchor_input	Ambiguous	then	1	
 crates/bt-app/src/main.rs	bt-app crate::tear_out_rect	Dynamic	physical	4	
 crates/bt-app/src/main.rs	bt-app crate::terminal_reference_row	Ambiguous	eq_ignore_ascii_case	3	
 crates/bt-app/src/main.rs	bt-app crate::terminal_reference_row	Dynamic	verdict	1	
@@ -3928,6 +3924,9 @@ crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::Runtime::flush_resi
 crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::Runtime::resize	Ambiguous	context	1	
 crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::Runtime::resize	Ambiguous	map_err	1	
 crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::Runtime::resize	Ambiguous	to_string	1	
+crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::apply_tabs_leaf_metrics	Dynamic	derive	1	2026-10-25: T-SPLIT-2B batch 3; the same site, moved with `apply_tabs_leaf_metrics` from main.rs into runtime/dpi.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::take_psreadline_resize_reanchor_input	Ambiguous	flatten	1	2026-10-25: T-SPLIT-2B batch 3; the same site, moved with `take_psreadline_resize_reanchor_input` from main.rs into runtime/dpi.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::take_psreadline_resize_reanchor_input	Ambiguous	then	1	2026-10-25: T-SPLIT-2B batch 3; the same site, moved with `take_psreadline_resize_reanchor_input` from main.rs into runtime/dpi.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::Runtime::apply_files_results	Ambiguous	accept	1	
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::Runtime::apply_folder_pick_result	Ambiguous	into_owned	1	
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::Runtime::ask_files_dir	Ambiguous	clone	1	
@@ -4747,6 +4746,7 @@ crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::make_spare
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::make_spare_web_controller	Ambiguous	to_string	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::open_web_page_on	Ambiguous	send_event	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::open_web_page_on	Ambiguous	unwrap_or_default	1	
+crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::page_shrinker	Ambiguous	send_event	1	2026-10-25: T-SPLIT-2B batch 3; the same site, moved with `Runtime::page_shrinker` from main.rs into runtime/web.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::run_web_fault_verb	Ambiguous	and_then	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::run_web_fault_verb	Ambiguous	unwrap_or_default	2	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::scroll_web_page	Dynamic	notch	2	

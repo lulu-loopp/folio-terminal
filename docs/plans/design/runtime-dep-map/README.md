@@ -64,9 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **828 items, 620 free functions and 208 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 2's head; 837, 627 and 210 before it,
-  and 846, 634 and 212 before batch 1).
+- **unclassified.tsv**: **822 items, 616 free functions and 206 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 3's head; 828, 620 and 208 before it,
+  837, 627 and 210 before batch 2, and 846, 634 and 212 before batch 1).
   - The plan's "106 unclassified" was the 2026-09-18 theme-regex count of
     `Runtime` methods whose names no theme matched (112 on 2026-09-21). The name
     sort is retired.
@@ -98,7 +98,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 1 | `runtime/pointer/ending.rs`, `runtime/pointer/mod.rs`, `runtime/diagnostics.rs`, `runtime/profiles.rs`, `runtime/search.rs`, `runtime/tooltips.rs` | moved by batch 1 | — |
    | — | `runtime/profiles.rs` | 1 (1 + 0): `tab_surface`, tied with `runtime/tabs.rs` | 2 |
    | 2 | `runtime/web.rs` | moved by batch 2 | — |
-   | 3 | `runtime/dpi.rs` | 6 (5 + 1) | 10 |
+   | 3 | `runtime/dpi.rs` | moved by batch 3 (5 items; `files_float_content_height`, tied with `runtime/floats.rs`, waits for that batch), with `Runtime::page_shrinker` as the web batch's tail | — |
    | 4 | `runtime/attention.rs` | 5 (4 + 1) | 11 |
    | 5 | `runtime/palette.rs` | 7 (1 + 6) | 14 |
    | 6 | `runtime/terminal.rs` | 14 (12 + 2) | 15 |

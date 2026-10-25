@@ -2776,7 +2776,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 | `clipboard.rs` | 19 | copy, copy on select, the paste target and its delivery, the multi-line paste card | session (bytes into `InputRing`) | the clipboard read, on this thread (§7.2) |
 | `configuration.rs` | 10 | Settings ▸ About ▸ Export… and Import…, each imported part through its own door (§9) | — | `file_reads` (the settings lane, through `bt_persist::read_export`); store writes, row 20 |
 | `diagnostics.rs` | 5 | the OS theme change, application-change notes, the trace drain, grid-change scheduling | ingress (trace) | — |
-| `dpi.rs` | 11 | window resize, scale-factor change, DPI settling | session | row 12 (`flush_pending_pty_resize`) |
+| `dpi.rs` | 12 | window resize, scale-factor change, DPI settling | session | row 12 (`flush_pending_pty_resize`) |
 | `files.rs` | 59 | the files column and its float: the tree, rename, new, delete, locate, pins, drops, the palette's roots | observation (`bt-files-worker`, `bt-index-worker`); ingress (`files_watch`); hand-off (reveal) | `bt_platform::rename_without_replacing`, `create_dir`, `File::create_new` here, row 20; `files::read_directory` has no door (§6) |
 | `first_run.rs` | 24 | the first-run card, the Explorer package row, the agent hook installers, the PowerShell integration offer (the PSReadLine invite and install retired 2026-10-17) | observation (the package probe); storage (the package job) | — (rows 3 and 4 done) |
 | `floats.rs` | 61 | floating windows, popups and chevron menus; the file, terminal and page menus | observation (files, git); hand-off (reveal) | — |
@@ -2797,12 +2797,12 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 | `tabs.rs` | 71 | the tab strip: new, close, activate, rename, drag, tear out; the tab menu; tables | — | — |
 | `terminal.rs` | 34 | the terminal pane: `drain_pty`, command marks, scroll and column bars, restart, fonts, selection, the PowerShell intent | session (drain, pane birth) | rows 2 (`spend_powershell_intent`), 5 (`apply_terminal_font`), 19 |
 | `tooltips.rs` | 9 | tooltips | — | — |
-| `web.rs` | 38 | the web pane: open, sync and advance the page, apply its outcomes, dev tools, sheets, the colour scheme, handing a URL to the browser; the engine's warm-up (`warm_web_engine`, ticket 54); the spare controller's making and adoption (`make_spare_web_controller`, `adopt_spare_web_page`, `seat_a_web_page`, ticket 60) | hand-off; `folio-web-thumb` | web view native affinity (§5.2); row 21 |
+| `web.rs` | 39 | the web pane: open, sync and advance the page, apply its outcomes, dev tools, sheets, the colour scheme, handing a URL to the browser; the engine's warm-up (`warm_web_engine`, ticket 54); the spare controller's making and adoption (`make_spare_web_controller`, `adopt_spare_web_page`, `seat_a_web_page`, ticket 60) | hand-off; `folio-web-thumb` | web view native affinity (§5.2); row 21 |
 | `windows.rs` | 38 | windows: open, dress, show, restore, the dirty gate, the quit save, close, retire and vault a window, moves; the window's title (`want_title`, `flush_title`) | storage (`quit_save` through `SessionWriter`) | `let_the_system_translate_touch`; `Window::set_title` (§5.2, `flush_title` only); row 16 |
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 828 (620 free functions, 208 methods) after batch 2. The table
+into their topics batch by batch: 822 (616 free functions, 206 methods) after batch 3. The table
 below is the 2026-09-21 manifest's sort of the 201 methods then left
 (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
 
