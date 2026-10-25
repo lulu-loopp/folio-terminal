@@ -2535,7 +2535,7 @@ crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	and_then	1
 crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	ok	2	
 crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	collect	1	
-crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	let_go_of_the_picture	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `Compositor::let_go_of_the_picture` (bt-platform) on a window's compositor, called inside the `CompositorCommit` admission this site already takes; it clears the visual's content and commits, and reaches no other door
+crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	let_go_of_the_picture	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `Compositor::let_go_of_the_picture` (bt-platform) on a window's compositor, called inside the `CompositorCommit` admission this site takes; it clears the visual's content and commits, and reaches no other door
 crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	map_err	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	to_string	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door

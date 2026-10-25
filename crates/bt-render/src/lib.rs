@@ -7349,6 +7349,9 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("Folio inert device"),
+                // The real device may allow textures past 8192 (see the helper); a
+                // window that large re-minted here must not trip the default ceiling.
+                required_limits: limits_with_this_adapters_textures(&adapter),
                 ..Default::default()
             })
             .await
@@ -32202,6 +32205,72 @@ mod tests {
             assert_eq!(window.overlay_groups_composited(), 1);
         }
 
+        /// PIN (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE) — **a surface fading at one
+        /// half reads as CSS `opacity` on both sides of the sRGB knee.**
+        ///
+        /// `over` keeps one half of the transfer with `select`; the knee is at
+        /// linear 0.0031308, between `#0A` and `#0B`. Every other test here
+        /// draws at `#1B` or above, on the transfer's upper half only. This
+        /// ramp of opaque greys from `#00` to `#10`, over a black ground at one
+        /// half, has to read as the browser's `c / 2` on every step: exact where
+        /// the half is a whole byte, either neighbour where it is not.
+        ///
+        /// MUTATION: swap `select`'s first two operands in `encode` and the
+        /// lower half takes the power curve — `#02` reads `#00`, `#04` reads
+        /// `#01`.
+        #[test]
+        fn a_surface_fading_at_one_half_reads_as_css_opacity_either_side_of_the_srgb_knee() {
+            const RAMP: [u8; 11] = [
+                0x00, 0x02, 0x04, 0x06, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0E, 0x10,
+            ];
+            const STEP: f32 = 28.0;
+            const TOP: f32 = 100.0;
+            const BOTTOM: f32 = 140.0;
+
+            let Some(mut gpu) = on_the_software_adapter(FORMAT) else {
+                return;
+            };
+            let mut window = window(&mut gpu);
+            let black = OverlayLayer {
+                quads: vec![OverlayQuad {
+                    rect: [0.0, 0.0, WIDTH as f32, HEIGHT as f32],
+                    color: [0, 0, 0],
+                    alpha: 1.0,
+                }],
+                ..OverlayLayer::default()
+            };
+            let ramp = OverlayLayer {
+                quads: RAMP
+                    .iter()
+                    .enumerate()
+                    .map(|(step, &grey)| {
+                        let left = 6.0 + STEP * step as f32;
+                        OverlayQuad {
+                            rect: [left, TOP, left + STEP, BOTTOM],
+                            color: [grey; 3],
+                            alpha: 1.0,
+                        }
+                    })
+                    .collect(),
+                ..OverlayLayer::default()
+            };
+            window.set_modal_overlay(vec![black, ramp], vec![group(1..2, 0.5)]);
+            let pixels = present(&mut window, &mut gpu);
+
+            let mut wrong = Vec::new();
+            for (step, &grey) in RAMP.iter().enumerate() {
+                let centre = ((6.0 + STEP * (step as f32 + 0.5)) as u32, 120);
+                let read = at(&pixels, centre);
+                let (low, high) = (grey / 2, grey.div_ceil(2));
+                if !(low..=high).contains(&read) {
+                    wrong.push(format!(
+                        "#{grey:02X} at one half read #{read:02X}, CSS says #{low:02X}"
+                    ));
+                }
+            }
+            assert!(wrong.is_empty(), "the ramp across the knee: {wrong:#?}");
+        }
+
         /// RED (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE) — **no fragment stage of this
         /// renderer branches.**
         ///
@@ -32217,6 +32286,11 @@ mod tests {
         /// function a fragment entry point reaches walked for an `if`, a
         /// `switch` or a loop. Every fragment stage here was straight-line
         /// already except that one.
+        ///
+        /// Only `if` was shown to fail on that driver. `switch` and loops are
+        /// refused out of caution, as the same dynamic flow control FXC
+        /// optimises; a fragment loop that is ever needed takes a release-build
+        /// run on folio-win10 and a reasoned change to this test.
         ///
         /// A shader added to this renderer joins the list.
         ///
@@ -34215,30 +34289,6 @@ mod tests {
             })
         }
 
-        /// PIN (user report, 2026-09-01) — **the whole of the fix, against a
-        /// device that is really gone.**
-        ///
-        /// `wgpu::Device::destroy` is not a simulation: it marks the device
-        /// invalid, releases its GPU resources and posts the loss through the
-        /// same callback and into the same latch a `DXGI_ERROR_DEVICE_REMOVED`
-        /// arrives through (`wgpu-core-30.0.0` `device/resource.rs`). So every
-        /// step below is the real one — the gate refusing a frame, the chain
-        /// rebuilt from a new instance, the atlas starting again at 256², the
-        /// window taking a target it did not have a moment ago.
-        ///
-        /// And the claim being made is the strong one. The label is set **once**,
-        /// before the device dies, and is never set again: what draws it after
-        /// the rebuild is the window's own retained state over a device that has
-        /// nothing in common with the one it was first drawn on.
-        ///
-        /// MUTATIONS, both run: ① have the rebuild keep the old `device_loss`
-        /// latch and the frame after it is refused by name — an `OnceLock`
-        /// cannot be un-set, so the latch has to be *replaced*; ② return from
-        /// `adopt_new_device` before it re-mints the window's device side, and
-        /// this panics inside `wgpu-core`'s own storage — `Cannot get
-        /// non-existent resource BufferId(1,1)` — which is exactly the shape
-        /// §7.1.3m named: a resource handed out quietly and the *use* of it
-        /// blamed, several calls away from what actually went wrong.
         /// **A device the driver removes says the driver's reason in its one line**
         /// (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE).
         ///
@@ -34324,6 +34374,30 @@ mod tests {
             assert_eq!(after, before, "the same words on the new device");
         }
 
+        /// PIN (user report, 2026-09-01) — **the whole of the fix, against a
+        /// device that is really gone.**
+        ///
+        /// `wgpu::Device::destroy` is not a simulation: it marks the device
+        /// invalid, releases its GPU resources and posts the loss through the
+        /// same callback and into the same latch a `DXGI_ERROR_DEVICE_REMOVED`
+        /// arrives through (`wgpu-core-30.0.0` `device/resource.rs`). So every
+        /// step below is the real one — the gate refusing a frame, the chain
+        /// rebuilt from a new instance, the atlas starting again at 256², the
+        /// window taking a target it did not have a moment ago.
+        ///
+        /// And the claim being made is the strong one. The label is set **once**,
+        /// before the device dies, and is never set again: what draws it after
+        /// the rebuild is the window's own retained state over a device that has
+        /// nothing in common with the one it was first drawn on.
+        ///
+        /// MUTATIONS, both run: ① have the rebuild keep the old `device_loss`
+        /// latch and the frame after it is refused by name — an `OnceLock`
+        /// cannot be un-set, so the latch has to be *replaced*; ② return from
+        /// `adopt_new_device` before it re-mints the window's device side, and
+        /// this panics inside `wgpu-core`'s own storage — `Cannot get
+        /// non-existent resource BufferId(1,1)` — which is exactly the shape
+        /// §7.1.3m named: a resource handed out quietly and the *use* of it
+        /// blamed, several calls away from what actually went wrong.
         #[cfg(target_os = "windows")]
         #[test]
         fn a_device_that_is_really_taken_away_is_rebuilt_and_the_window_says_it_again() {
