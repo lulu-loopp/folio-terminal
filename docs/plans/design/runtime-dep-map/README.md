@@ -159,7 +159,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    - `drain_leaf_pty` — its `called_from` home is `runtime/terminal.rs`, but it writes `LeafSession.pending_typing`,
      whose other writer, `Runtime::queue_typing_in_the_focused_pane`, stays at the root (the census rule above).
      Its doc comment is not above it: it stands above `synchronized_update_committed`, the function before it, and
-     runs into that function's own doc (`main.rs`, "It was invisible while `window_title` was the layer…" to
+     runs into that function's own doc (`main.rs`, from "Drain one shell's pipe into its own screen." to
      "…a leaf can supply none of them about itself."). `move.py` takes only the comment directly above an item, so
      the batch that moves it carries that block by hand.
    - `hyperlink_activation` — its `called_from` home is `runtime/terminal.rs`, but `ControlClickHint::of` at the root
