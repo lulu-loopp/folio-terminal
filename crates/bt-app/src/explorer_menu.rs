@@ -628,14 +628,14 @@ pub(crate) fn settle_package() -> Settled<Option<PathBuf>> {
 
 /// The look [`settle_package`] makes: `folio.msix` in this executable's folder.
 fn look_beside_this_image() -> Option<PathBuf> {
-    package_in(this_folder().as_deref(), &|path| path.is_file())
+    package_in(this_folder().as_deref(), &|path: &Path| path.is_file())
 }
 
 /// **`folio.msix` in `folder`, when `is_file` finds it there** — the one look, made by
 /// [`settle_package`] before the loop and by a probe's or a deployment's worker for itself.
 fn package_in(folder: Option<&Path>, is_file: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
     let beside = folder?.join(PACKAGE_FILE_NAME);
-    is_file(&beside).then_some(beside)
+    if is_file(&beside) { Some(beside) } else { None }
 }
 
 /// What the row is drawn from.
@@ -1523,7 +1523,7 @@ impl Start<'static> {
                 .is_some_and(|exe| is_this_executable(&exe)),
             // The probe's own look, on its worker: an update's commit runs it again later in
             // the run, and it asks the folder as it is then ([`package_file`] is the start's).
-            package: package_in(here.as_deref(), &|path| path.is_file()),
+            package: package_in(here.as_deref(), &|path: &Path| path.is_file()),
             here,
             this_build: this_package_version(),
             ours: &is_this_executable,
