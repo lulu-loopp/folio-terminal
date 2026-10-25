@@ -336,22 +336,27 @@ pub(super) fn threads_line(threads: &[Option<String>]) -> String {
     )
 }
 
-/// **The watchdog's side**: the reading the last line was taken from, and whether the thread
-/// census has been said. Owned by the watchdog thread; its time is the heartbeat's.
+/// **The watchdog's side**: the reading the last `turns` line was taken from, and the last
+/// `threads` line said. Owned by the watchdog thread; its time is the heartbeat's.
 #[derive(Debug)]
 pub(super) struct Round {
     last: Option<(u64, Reading)>,
+    threads_said: Option<String>,
 }
 
 impl Round {
     pub(super) const fn new() -> Self {
-        Self { last: None }
+        Self {
+            last: None,
+            threads_said: None,
+        }
     }
 
     /// **One watchdog round at `now_ms`.** Untraced, nothing is read or written. Traced, the
-    /// `turns` line for the window since the last round (since the heartbeat's origin, the first
-    /// time) goes to `perf`, and the first round's is preceded by the `threads` line, from
-    /// `threads` — asked once per run.
+    /// process's threads are counted (`threads`) and their line goes to `perf` when it differs
+    /// from the last one said — the first round's always, and after that a pane opened or closed,
+    /// a worker started or ended — and then the `turns` line for the window since the last round
+    /// (since the heartbeat's origin, the first time).
     pub(super) fn tick(
         &mut self,
         now_ms: u64,
@@ -363,17 +368,16 @@ impl Round {
         if !trace {
             return;
         }
-        let after = census.read();
-        let (since_ms, before) = match self.last.take() {
-            Some(last) => last,
-            None => {
-                perf(match threads() {
-                    Ok(threads) => threads_line(&threads),
-                    Err(error) => format!("BT_PERF_TRACE threads unavailable error={error}"),
-                });
-                (0, Reading::zero())
-            }
+        let counted = match threads() {
+            Ok(threads) => threads_line(&threads),
+            Err(error) => format!("BT_PERF_TRACE threads unavailable error={error}"),
         };
+        if self.threads_said.as_deref() != Some(counted.as_str()) {
+            perf(counted.clone());
+            self.threads_said = Some(counted);
+        }
+        let after = census.read();
+        let (since_ms, before) = self.last.take().unwrap_or_else(|| (0, Reading::zero()));
         perf(turns_line(
             census,
             &before,
@@ -499,14 +503,15 @@ mod tests {
         );
     }
 
-    /// RED (mutation: print the run's totals instead of the window's) — **a round prints only
-    /// what happened since the last one, and the threads once.**
+    /// RED (mutation: print the run's totals instead of the window's, or say the threads only
+    /// once) — **a round prints only what happened since the last one, and the threads whenever
+    /// they changed.**
     #[test]
     fn a_round_prints_the_window_since_the_last() {
         let census = Census::new();
         let mut round = Round::new();
         let mut said = Vec::new();
-        let mut asked = 0;
+        let one = || Ok(vec![Some(String::from("main"))]);
         turn(
             &census,
             None,
@@ -515,16 +520,7 @@ mod tests {
             MS,
             false,
         );
-        round.tick(
-            2_000,
-            true,
-            &census,
-            || {
-                asked += 1;
-                Ok(Vec::new())
-            },
-            |line| said.push(line),
-        );
+        round.tick(2_000, true, &census, one, |line| said.push(line));
         turn(
             &census,
             None,
@@ -533,31 +529,21 @@ mod tests {
             2 * MS,
             false,
         );
-        round.tick(
-            4_100,
-            true,
-            &census,
-            || {
-                asked += 1;
-                Ok(Vec::new())
-            },
-            |line| said.push(line),
-        );
+        round.tick(4_100, true, &census, one, |line| said.push(line));
         round.tick(
             6_100,
             true,
             &census,
-            || Ok(Vec::new()),
+            || Ok(vec![Some(String::from("main")), None]),
             |line| said.push(line),
         );
-        assert_eq!(asked, 1);
         assert_eq!(
-            said[1..],
+            said,
             [
-                "BT_PERF_TRACE turns window_ms=2000 turns=1 us_total=1000 \
-                 by_source=Event(GitChanged):1/1000 unkept=0",
-                "BT_PERF_TRACE turns window_ms=2100 turns=1 us_total=2000 \
-                 by_source=Event(LayoutTablesReady):1/2000 unkept=0",
+                "BT_PERF_TRACE threads total=1 named=[main:1] unnamed=0",
+                "BT_PERF_TRACE turns window_ms=2000 turns=1 us_total=1000 by_source=Event(GitChanged):1/1000 unkept=0",
+                "BT_PERF_TRACE turns window_ms=2100 turns=1 us_total=2000 by_source=Event(LayoutTablesReady):1/2000 unkept=0",
+                "BT_PERF_TRACE threads total=2 named=[main:1] unnamed=1",
                 "BT_PERF_TRACE turns window_ms=2000 turns=0 us_total=0 by_source=- unkept=0",
             ]
         );
