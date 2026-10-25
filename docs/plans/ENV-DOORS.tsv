@@ -31,7 +31,7 @@ crates/bt-app/src/entry_doors.rs	crate::entry_doors::EntryDoors::at_the_entry	en
 crates/bt-app/src/hang_watch.rs	-	door	BT_HANG_SELFTEST	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_HANG_SELFTEST (debug builds), read in the initializer of the static SELFTEST_HOLD, which bt-source indexes as no item
 crates/bt-app/src/main.rs	-	door	BT_PANIC_SELFTEST,BT_SURFACE_SELFTEST	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_PANIC_SELFTEST and BT_SURFACE_SELFTEST (debug builds), read in the initializers of the statics PANIC_SELFTEST_AFTER and SURFACE_SELFTEST_AFTER, which bt-source indexes as no item
 crates/bt-app/src/main.rs	crate::load_probe_input	door	BT_PROBE_INPUT	0	T-PRODUCT-DOORS-AT-THE-ENTRY	BT_PROBE_INPUT, read once at startup outside main
-crates/bt-app/src/persist.rs	crate::persist::relocated_storage_dir	unjudged	-	1	T-ENV-UNJUDGED-ROWS	APPDATA, HOME and XDG_DATA_HOME, the data directory's place
+crates/bt-app/src/persist.rs	crate::persist::relocated_storage_dir	unjudged	-	1	T-ENV-UNJUDGED-ROWS	2026-10-24: renamed from crate::persist::storage_dir by T-LAZY-INITIALIZERS-BEFORE-THE-LOOP (the same read, moved with the relocation body); APPDATA, HOME and XDG_DATA_HOME, the data directory's place
 crates/bt-app/src/persist.rs	crate::persist::storage_dir_as_it_stands	unjudged	-	1	T-ENV-UNJUDGED-ROWS	APPDATA, HOME and XDG_DATA_HOME, the data directory's place
 crates/bt-app/src/persist.rs	crate::persist::storage_dir_unmoved	unjudged	-	1	T-ENV-UNJUDGED-ROWS	APPDATA, HOME and XDG_DATA_HOME, the data directory's place
 crates/bt-app/src/psreadline.rs	crate::psreadline::documents_directory	door	BT_PSREADLINE_DOCUMENTS	0	T-TEST-DOORS-AT-THE-ENTRY	BT_PSREADLINE_DOCUMENTS, the PSReadLine installer's Documents redirect, read at use
