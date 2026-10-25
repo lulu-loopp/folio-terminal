@@ -2135,16 +2135,8 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::open_scheme_for_editing	Ambiguo
 crates/bt-app/src/main.rs	bt-app crate::Runtime::open_scheme_for_editing	Ambiguous	map_or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::open_scheme_for_editing	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::page_carried_by	Ambiguous	then_some	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::push_action_candidates	Ambiguous	then_some	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::push_action_candidates	Ambiguous	to_owned	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::push_command_candidates	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::push_float_refusal_card	Ambiguous	then_some	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::push_float_refusal_card	Ambiguous	unwrap_or_default	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::push_place_candidates	Ambiguous	into_owned	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::push_place_candidates	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::push_place_candidates	Ambiguous	or_else	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::push_place_candidates	Ambiguous	to_string	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::push_place_candidates	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::record_settings_key	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::reference_cell_index	Ambiguous	checked_add	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::refresh_focus_thumbnails	Ambiguous	collect	1	
@@ -4290,6 +4282,14 @@ crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::wheel_
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::arrange_palette	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_field_look	Ambiguous	text	1	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::palette_field_look	Ambiguous	to_owned	1	
+crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_action_candidates	Ambiguous	then_some	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_action_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_action_candidates	Ambiguous	to_owned	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_action_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_command_candidates	Ambiguous	map	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_command_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_place_candidates	Ambiguous	into_owned	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_place_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_place_candidates	Ambiguous	map	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_place_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_place_candidates	Ambiguous	or_else	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_place_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_place_candidates	Ambiguous	to_string	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_place_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_place_candidates	Ambiguous	to_string_lossy	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_place_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::run_palette_row	Ambiguous	clone	2	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::run_palette_row	Ambiguous	map	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::aimed_seat_kind	Ambiguous	map	1	
