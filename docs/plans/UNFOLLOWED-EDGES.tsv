@@ -2604,6 +2604,9 @@ crates/bt-app/src/main.rs	bt-app crate::take_psreadline_resize_reanchor_input	Am
 crates/bt-app/src/main.rs	bt-app crate::tear_out_rect	Dynamic	physical	4	
 crates/bt-app/src/main.rs	bt-app crate::terminal_reference_row	Ambiguous	eq_ignore_ascii_case	3	
 crates/bt-app/src/main.rs	bt-app crate::terminal_reference_row	Dynamic	verdict	1	
+crates/bt-app/src/main.rs	bt-app crate::the_fatal_road	Dynamic	fatal	1	2026-10-24: the panic hook's three steps are handed to the_fatal_road so a test drives their order (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD review H1); its one product call names diagnostics::settle_in_panic, the previous hook and fatal
+crates/bt-app/src/main.rs	bt-app crate::the_fatal_road	Dynamic	previous	1	2026-10-24: the panic hook's three steps are handed to the_fatal_road so a test drives their order (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD review H1); its one product call names diagnostics::settle_in_panic, the previous hook and fatal
+crates/bt-app/src/main.rs	bt-app crate::the_fatal_road	Dynamic	settle	1	2026-10-24: the panic hook's three steps are handed to the_fatal_road so a test drives their order (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD review H1); its one product call names diagnostics::settle_in_panic, the previous hook and fatal
 crates/bt-app/src/main.rs	bt-app crate::title_layer	Ambiguous	is_empty	1	
 crates/bt-app/src/main.rs	bt-app crate::trace_unchanged_present	Ambiguous	as_micros	1	
 crates/bt-app/src/main.rs	bt-app crate::trace_unchanged_present	Ambiguous	elapsed	1	
