@@ -456,6 +456,20 @@ writes, an `extern crate … as`); either, for a landmark no pin names
 names. When refused, rename what is not a landmark, or
 widen the grammar in its own change with a planted case.
 
+`main`'s two settles are pinned the same way (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP,
+2026-10-24): `profiles::settle_registry` as `main`'s first statement, before
+`parse`; `persist::settle_storage_dir` in the `--remove-shell-integration` door,
+before `parse`, and in the claim after the update pass, after `parse`. Every
+pinned writer is spelled only as the call through its pin's module path,
+`module::writer(…)` (`admission::` for the role and phase writers): an import, a
+value or a rename is refused by name and path
+(`a_pinned_settle_is_read_through_its_own_module_path`). Only the one segment
+before `::` is read, so `x::persist::settle_storage_dir(…)` for another module
+named `persist` would pass: a stated limit, the one the `admission::` rule always
+had. A pin is one call: the calls are counted per (writer, owner, landmark), and
+a second call matching a pin already met is reported as a surplus
+(`a_second_call_matching_a_pin_is_a_surplus`).
+
 The registry's `# completions` section (S-1, 2026-10-11) is the side-effects
 contract's ledger, one row per request protocol, held by the
 `every_*completions*` tests (among them `every_worker_door_body_is_reached_from_a_completions_door`) and `every_conforming_request_door_holds_no_wait_of_its_own`

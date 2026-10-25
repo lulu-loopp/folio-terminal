@@ -4264,20 +4264,39 @@ fn storage_location(
 ///
 /// Before [`settle_storage_dir`] ran in this process.
 pub fn storage_dir() -> PathBuf {
-    DIRECTORY.get().clone()
+    DIRECTORY.get().0.clone()
+}
+
+/// **The data directory as [`settle_storage_dir`] settled it** — a value only this module makes,
+/// so the witness `FolioApp::new` takes (`Settled<DataDirectory>`) can only come from this cell's
+/// settle, as `Settled<profiles::Registry>` can only come from the profile table's (review N1).
+pub(crate) struct DataDirectory(PathBuf);
+
+impl DataDirectory {
+    /// The folder.
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// A test's own folder, for a witness over a value of the test's (`Settled::planted`).
+    #[cfg(test)]
+    pub(crate) fn planted(path: PathBuf) -> Self {
+        Self(path)
+    }
 }
 
 /// The data directory, once [`settle_storage_dir`] has made it.
 #[cfg(not(test))]
-static DIRECTORY: SettledOnce<PathBuf> = SettledOnce::new(DIRECTORY_IS);
+static DIRECTORY: SettledOnce<DataDirectory> = SettledOnce::new(DIRECTORY_IS);
 
 /// A test process's data directory is a scratch folder of its own, never `%APPDATA%`: a test
 /// that reads [`storage_dir`] without settling it (it has no `main`) is settled there. A test
 /// that drives a start in a process of its own calls [`settle_storage_dir`] as `main` does.
 #[cfg(test)]
-static DIRECTORY: SettledOnce<PathBuf> = SettledOnce::settled_in_a_test_by(DIRECTORY_IS, || {
-    bt_testpath::temp_path("bt-app-test-process-data-directory")
-});
+static DIRECTORY: SettledOnce<DataDirectory> =
+    SettledOnce::settled_in_a_test_by(DIRECTORY_IS, || {
+        DataDirectory(bt_testpath::temp_path("bt-app-test-process-data-directory"))
+    });
 
 /// What [`DIRECTORY`] holds, for the panic of a read before it is settled.
 const DIRECTORY_IS: &str = "the data directory (persist::storage_dir)";
@@ -4289,8 +4308,8 @@ const DIRECTORY_IS: &str = "the data directory (persist::storage_dir)";
 /// a process that must leave the folder as it found it reads
 /// [`storage_dir_as_it_stands`] or [`storage_dir_unmoved`] instead and never
 /// settles.
-pub fn settle_storage_dir() -> Settled<PathBuf> {
-    DIRECTORY.settle(relocated_storage_dir)
+pub(crate) fn settle_storage_dir() -> Settled<DataDirectory> {
+    DIRECTORY.settle(|| DataDirectory(relocated_storage_dir()))
 }
 
 /// [`settle_storage_dir`]'s body: the directory, moved from its previous name

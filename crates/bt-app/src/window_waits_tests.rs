@@ -3886,7 +3886,7 @@ const LANDMARKS: [(&str, &[Landmark]); 4] = [
 /// Windows transaction since U-23. B-ENDSESSION adds the system's end's write step, `exiting`
 /// then `quit_abandoned` around the one admitted wait in `session_end::settle` (the quit's `Write`
 /// on the held document; nothing is torn down).
-const PINS: [Pin; 21] = [
+const PINS: [Pin; 22] = [
     Pin {
         module: "admission",
         writer: "enter_standalone_main",
@@ -3932,6 +3932,15 @@ const PINS: [Pin; 21] = [
         writer: "exiting",
         owner: "bt-app crate::App::finish",
         after: None,
+    },
+    // Twice in the `Write` arm, once per branch: an update's write by receipt (the verdict that
+    // leaves) and the ordinary judged flush (counted since review N2 of
+    // T-LAZY-INITIALIZERS-BEFORE-THE-LOOP; the set comparison before it took them for one).
+    Pin {
+        module: "admission",
+        writer: "exiting",
+        owner: "bt-app crate::FolioApp::settle_quit",
+        after: Some("Write"),
     },
     Pin {
         module: "admission",
@@ -5082,12 +5091,18 @@ fn pinned_writer_failures(
             }
         }
     }
-    let mut wanted: Vec<(String, String, Option<&str>)> = pins
-        .iter()
-        .map(|pin| (pin.writer.to_owned(), pin.owner.to_owned(), pin.after))
-        .collect();
-    wanted.sort();
-    found.sort();
+    // Counted, not collected (review N2): a second call that matches a pin already met — the same
+    // writer, owner and landmark — is a surplus call, not the pin seen twice.
+    let mut wanted: BTreeMap<(String, String, Option<&str>), usize> = BTreeMap::new();
+    for pin in pins {
+        *wanted
+            .entry((pin.writer.to_owned(), pin.owner.to_owned(), pin.after))
+            .or_insert(0) += 1;
+    }
+    let mut met: BTreeMap<(String, String, Option<&str>), usize> = BTreeMap::new();
+    for site in found {
+        *met.entry(site).or_insert(0) += 1;
+    }
     let said = |(writer, owner, after): &(String, String, Option<&str>)| {
         format!(
             "`{}::{writer}` in `{owner}`{}",
@@ -5096,13 +5111,18 @@ fn pinned_writer_failures(
         )
     };
     failures.extend(refusals);
-    for missing in wanted
-        .iter()
-        .filter(|pin| !found.contains(pin) && !refused.contains(&(pin.0.clone(), pin.1.clone())))
-    {
-        failures.push(format!("the pinned call {} is not there", said(missing)));
+    for (pin, &pinned) in &wanted {
+        let calls = met.get(pin).copied().unwrap_or(0);
+        if calls == 0 && !refused.contains(&(pin.0.clone(), pin.1.clone())) {
+            failures.push(format!("the pinned call {} is not there", said(pin)));
+        } else if calls != 0 && calls != pinned {
+            failures.push(format!(
+                "{} is called {calls}× where its pins say {pinned}×",
+                said(pin)
+            ));
+        }
     }
-    for extra in found.iter().filter(|site| !wanted.contains(site)) {
+    for extra in met.keys().filter(|site| !wanted.contains_key(*site)) {
         failures.push(format!("{} is not a pinned call site", said(extra)));
     }
     let wanted: BTreeMap<(String, String, String), usize> = pinned_callbacks
@@ -12618,6 +12638,46 @@ pub fn main() {
                  crate::main` at "
             ),
         "the guard fails with the refusal, once: {failures:?}"
+    );
+}
+
+/// RED (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP review, N2) — **a pin is one call**: a second settle
+/// in another branch before `cli::parse(…)` matches the pinned (writer, owner, landmark) and is
+/// reported as a surplus call, not taken for the pin seen twice.
+///
+/// MUTATION: compare the pins and the calls as sets again (`found.contains(pin)`) — the second
+/// call passes unseen.
+#[test]
+fn a_second_call_matching_a_pin_is_a_surplus() {
+    let pins = [Pin {
+        module: "persist",
+        writer: "settle_storage_dir",
+        owner: "planted crate::main",
+        after: None,
+    }];
+    let owners = [("planted crate::main", product_main_landmarks())];
+    let main = r#"
+pub mod persist { pub fn settle_storage_dir() {} }
+pub fn main(windowless: bool) {
+    if windowless {
+        persist::settle_storage_dir();
+        return;
+    }
+    persist::settle_storage_dir();
+    cli::parse();
+}
+"#;
+    let world = planted_world(
+        "ww-settle-twice",
+        &format!("{PLANTED_LANDMARK_ITEMS}{main}"),
+    );
+    assert_eq!(
+        pinned_writer_failures(&world, &pins, &owners, &[], &BTreeMap::new()),
+        vec![
+            "`persist::settle_storage_dir` in `planted crate::main` is called 2× where its pins \
+             say 1×"
+                .to_owned()
+        ],
     );
 }
 

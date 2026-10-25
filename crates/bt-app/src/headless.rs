@@ -1562,12 +1562,15 @@ impl HeadlessApplication {
         // The loop's witnesses over values of this test's own: a headless application must not
         // settle the process's data directory (`%APPDATA%`), and its profile table is the one the
         // test's `App` was built over.
-        static NO_STORAGE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        static NO_STORAGE: std::sync::OnceLock<crate::persist::DataDirectory> =
+            std::sync::OnceLock::new();
         let mut application = crate::FolioApp::<Headless>::new(
             app.event_proxy.clone(),
             crate::cli::CliRequest::default(),
             None,
-            crate::startup::Settled::planted(NO_STORAGE.get_or_init(std::path::PathBuf::new)),
+            crate::startup::Settled::planted(
+                NO_STORAGE.get_or_init(|| crate::persist::DataDirectory::planted(PathBuf::new())),
+            ),
             crate::profiles::settle_registry(),
         );
         application.app = Some(app);
