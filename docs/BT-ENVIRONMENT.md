@@ -59,7 +59,7 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 | `BT_HOTKEY_TRACE` | file path, used verbatim | Appends one line per station on the road a summon press travels, on both platforms: `reconcile wanted=<chord>` when the claim moves to a new chord (not once per frame), `install handler -> Ok/Err(<OSStatus>)` and `register keycode=<n> modifiers=<hex> -> Ok/Err(<OSStatus>)` where the claim is made, `handler fired id=<n> signature=<four characters> live=yes/no` for **every** hot key event this process is offered, and `summons_wake called` then `QuakeSummoned handled` as the press crosses into the event loop. A file that stops part way names the station the press did not reach. | The summon chord as `keybindings.json` spells it, key codes, modifier masks, `OSStatus` values and four-character signatures. No screen text and nothing else the reader typed. | off |
 | `BT_GLYPH_CENSUS` | file path, used verbatim | Appends one line each time a frame's demand on the shared glyph atlas changes: glyph instances, distinct rasters, distinct faces-and-sizes, rasters two surfaces share, the area they cover and the device's texture limit. **Slows every frame**: a raster's size is learned by rasterizing it a second time. | Counters and font identifiers. No screen text. | off |
 | `BT_FOCUS_THUMB_DUMP` | file path, used verbatim | Appends one counter line per frame that spent the thumbnail budget. | Integer counters only. | off |
-| `BT_PERF_TRACE` | switch | Per-frame and per-task timings and counters to `stderr`; includes one `BT_PERF_TRACE attempt` record per redraw/retained attempt, including empty and failed outcomes (identity, actual configuration, separate native/attention readings and phase timings; [format and freshness diagnostics](PRESENT-DIAGNOSTICS.md)); also turns on shaping-cache counting. Its `projection` line carries, since 2026-09-17, the three scroll numbers the frame it is written after decided: `scroll_offset_subpixels` (how far into the history the view stands), `scroll_extent_subpixels` (how far it could stand) and `bottom_relief_subpixels` (how much of that the blank rows under the prompt are spending). Among them, `live_math_result_dropped row=… candidate_row=… reason=…` for a rendered live formula the session refused to install — the one outcome that leaves a formula at source with nothing else to show for it. The reason is `screen`, `grid-generation`, `detection-revision`, `layout`, `source-changed`, `no-longer-detected` or `unproven`; the first four say the grid moved on while the raster was being made, and the last three say the rows no longer prove what was scanned. | Counters. One line carries the error text of a formula that failed to render. | off |
+| `BT_PERF_TRACE` | switch | Per-frame and per-task timings and counters to `stderr`; every two seconds a `BT_PERF_TRACE turns` census of the window thread's turns by what woke them, and a `BT_PERF_TRACE threads` census of the process's threads by name whenever it changed ([formats](#turn-and-thread-census-bt_perf_trace)); includes one `BT_PERF_TRACE attempt` record per redraw/retained attempt, including empty and failed outcomes (identity, actual configuration, separate native/attention readings and phase timings; [format and freshness diagnostics](PRESENT-DIAGNOSTICS.md)); also turns on shaping-cache counting. Its `projection` line carries, since 2026-09-17, the three scroll numbers the frame it is written after decided: `scroll_offset_subpixels` (how far into the history the view stands), `scroll_extent_subpixels` (how far it could stand) and `bottom_relief_subpixels` (how much of that the blank rows under the prompt are spending). Among them, `live_math_result_dropped row=… candidate_row=… reason=…` for a rendered live formula the session refused to install — the one outcome that leaves a formula at source with nothing else to show for it. The reason is `screen`, `grid-generation`, `detection-revision`, `layout`, `source-changed`, `no-longer-detected` or `unproven`; the first four say the grid moved on while the raster was being made, and the last three say the rows no longer prove what was scanned. | Counters. One line carries the error text of a formula that failed to render. | off |
 | `BT_STARTUP_TRACE` | switch | Startup phase timings, DPI snapshots, surface-size clamps and the diagnostics channel, to `stderr`. | Timings and geometry. | off |
 | `BT_RESIZE_TRACE` | switch | Surface-size clamp lines during resize, to `stderr`. | Geometry. | off |
 | `BT_LAYOUT_EVENTS` | switch | Seat geometry changes to `stderr`. Note the name does not contain `TRACE`, so with nothing else set these lines go to `diagnostics.log`. | Geometry. | off |
@@ -452,6 +452,48 @@ names are limited to 96 bytes and control characters are replaced. A full
 table leaves byte/read totals intact and marks `top tracked` and the number
 of reads with untracked paths. It does not claim an exhaustive ranking in that
 case. The table is cleared at collection. No path string is allocated per read.
+
+### Turn and thread census (`BT_PERF_TRACE`)
+
+With `BT_PERF_TRACE` set, the hang-watch worker writes, on its existing
+two-second round and through the stderr trace sink (no clock of its own; the
+window thread only adds each turn to two counters):
+
+```
+BT_PERF_TRACE threads total=14 named=[bt-pty-reader:3,bt-pty-writer:3,bt-hang-watch:1,main:1] unnamed=6
+BT_PERF_TRACE turns window_ms=2000 turns=10 us_total=6131 by_source=Timed(ShellCaret):3/800,Timed(RefusedFrame):3/740,Window(EventRedraw):3/4302,Event(TaskbarAnswered):1/288 unkept=0
+```
+
+`threads` comes before the first `turns` line and again whenever it differs
+from the last one said (a pane opened or closed, a worker started or ended): every thread of the
+process, grouped by the name it was given (Windows `GetThreadDescription`, macOS
+`proc_pidinfo`'s `pth_name`), most threads first; a name's spaces, commas, colons
+and brackets print as `_`. `unnamed` are the threads nobody named — the graphics
+driver's, the text services', the system's thread pools. A web page's browser
+runs in processes of its own and is not counted. Where no census can be taken
+the line is `BT_PERF_TRACE threads unavailable error=...`.
+
+`turns` covers the `window_ms` since the last line (the first covers the run so
+far): `turns` is how many times the window thread woke and went round,
+`us_total` their wall time in microseconds, and `by_source` splits both by what
+woke each turn, most turns first (`-` when none). The sources are the names the
+program already uses for wakes:
+
+- `Timed(<WakeOwner>)`: the loop parked until the clock that owner asked for and
+  the time came (`ResumeTimeReached` with no owner);
+- `Stale(<WakeOwner>)`: the loop parked until an instant that was already due,
+  so it went straight round again; steady counts here are a loop spinning;
+- `Event(<AppEvent>)`: a worker, a shell or a watch posted the event that ended
+  the wait;
+- `Window(<station>)`: the platform delivered a window event first, named by the
+  hang-watch station it runs under (`EventRedraw`, `EventKey`, `EventPointer`, …);
+- `WaitCancelled`: the wait ended and no handler of the turn named itself;
+- `Poll`, `Init`: winit's causes of those names; `Untold`: the platform gave no
+  cause and no handler named the turn.
+
+`unkept` counts turns whose event could not be named (more event kinds than the
+census keeps names for). The numbers come from the turn accounting, so a turn
+counted here is a turn in the exit summary's `wall` line.
 
 ### Picture freshness (always on)
 

@@ -353,6 +353,13 @@ mod detail;
 #[path = "hang_watch_accounting.rs"]
 mod accounting;
 
+/// What woke each turn, and what those turns cost: the `BT_PERF_TRACE turns` census
+/// (T-IDLE-TURN-COST).
+#[path = "hang_watch_census.rs"]
+mod census;
+
+pub use census::Cause as WakeCause;
+
 /// The window thread's waits as one registry, held equal to `bt_platform::admission::doors` and
 /// to `docs/ARCHITECTURE.md` §5.3 (A1a). Here because the stations are this module's.
 #[cfg(test)]
@@ -2967,9 +2974,22 @@ pub fn park(park: Park) {
     HEARTBEAT.park(park);
 }
 
-/// The platform woke the window thread. See [`Heartbeat::woke`].
-pub fn woke() {
+/// The platform woke the window thread, for `cause`. See [`Heartbeat::woke`]; the cause is the
+/// turn census's (T-IDLE-TURN-COST).
+pub fn woke(cause: WakeCause) {
     HEARTBEAT.woke();
+    HEARTBEAT.accounts.census.started(cause);
+}
+
+/// `user_event` was handed `event`: the turn census names a turn by its first handler.
+pub(crate) fn app_event(event: &crate::AppEvent) {
+    HEARTBEAT.accounts.census.app_event(event);
+}
+
+/// `window_event` was handed an event `window_event_station` names `station`: the turn census
+/// names a turn by its first handler.
+pub fn window_event(station: Station) {
+    HEARTBEAT.accounts.census.window_event(station);
 }
 
 /// A visible window's frame is `interval` long this turn. See [`Heartbeat::frame_interval`].
@@ -3542,6 +3562,8 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace
     let mut ask = move || bt_platform::hang::ask_thread_to_answer(ui_thread_id, ANSWER_WITHIN);
     // The budget lines lost as of the last one printed; the next line printed says how many more.
     let mut lost_printed = 0;
+    // The turn census's last reading (T-IDLE-TURN-COST), read only on a traced run.
+    let mut census = census::Round::new();
     loop {
         std::thread::sleep(WATCH_INTERVAL);
         let heart = heartbeat();
@@ -3634,6 +3656,13 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace
             &bt_platform::file_reads::LEDGER,
             bt_platform::file_reads::take_input,
             |line| crate::diagnostics::note(&line),
+            crate::trace_sink::stderr_line,
+        );
+        census.tick(
+            now_ms,
+            trace_perf,
+            &heart.accounts.census,
+            bt_platform::threads::of_this_process,
             crate::trace_sink::stderr_line,
         );
     }

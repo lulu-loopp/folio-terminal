@@ -4025,62 +4025,50 @@ impl ProbeChild {
     /// its immediate child, when it is uncontained) with a suspend count above zero.
     #[cfg(windows)]
     pub fn suspended(&self) -> std::io::Result<bool> {
+        use std::ops::ControlFlow;
         use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
         use windows::Wdk::System::Threading::{NtQueryInformationThread, ThreadSuspendCount};
         use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
-        };
         use windows::Win32::System::Threading::{OpenThread, THREAD_QUERY_LIMITED_INFORMATION};
 
         let processes: Vec<u32> = match &self.guard.job {
             Some(job) => job_process_ids(job)?,
             None => vec![self.leader.id],
         };
-        // SAFETY: a snapshot of the system's threads; its handle moves to `OwnedHandle` at once.
-        let snapshot = unsafe {
-            OwnedHandle::from_raw_handle(CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)?.0)
-        };
-        let mut entry = THREADENTRY32 {
-            dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>())
-                .expect("thread entry size fits u32"),
-            ..THREADENTRY32::default()
-        };
-        // SAFETY: the snapshot handle is live and `entry` carries its own size.
-        let mut more =
-            unsafe { Thread32First(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
-        while more {
-            if processes.contains(&entry.th32OwnerProcessID) {
+        let mut held = false;
+        crate::threads::each_thread_of(
+            |pid| processes.contains(&pid),
+            |thread_id| {
                 // SAFETY: opens a thread of this probe's own processes for a query; the handle
                 // moves to `OwnedHandle` at once. A thread that ended meanwhile is skipped.
-                let opened = unsafe {
-                    OpenThread(THREAD_QUERY_LIMITED_INFORMATION, false, entry.th32ThreadID)
+                let Ok(thread) =
+                    (unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, false, thread_id) })
+                else {
+                    return ControlFlow::Continue(());
                 };
-                if let Ok(thread) = opened {
-                    // SAFETY: as above.
-                    let thread = unsafe { OwnedHandle::from_raw_handle(thread.0) };
-                    let mut count = 0_u32;
-                    // SAFETY: the thread handle is live; `count` is the four bytes the
-                    // `ThreadSuspendCount` class writes.
-                    let status = unsafe {
-                        NtQueryInformationThread(
-                            HANDLE(thread.as_raw_handle()),
-                            ThreadSuspendCount,
-                            std::ptr::from_mut(&mut count).cast(),
-                            u32::try_from(std::mem::size_of::<u32>()).expect("four bytes"),
-                            std::ptr::null_mut(),
-                        )
-                    };
-                    if status.is_ok() && count > 0 {
-                        return Ok(true);
-                    }
+                // SAFETY: as above.
+                let thread = unsafe { OwnedHandle::from_raw_handle(thread.0) };
+                let mut count = 0_u32;
+                // SAFETY: the thread handle is live; `count` is the four bytes the
+                // `ThreadSuspendCount` class writes.
+                let status = unsafe {
+                    NtQueryInformationThread(
+                        HANDLE(thread.as_raw_handle()),
+                        ThreadSuspendCount,
+                        std::ptr::from_mut(&mut count).cast(),
+                        u32::try_from(std::mem::size_of::<u32>()).expect("four bytes"),
+                        std::ptr::null_mut(),
+                    )
+                };
+                if status.is_ok() && count > 0 {
+                    held = true;
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
                 }
-            }
-            // SAFETY: as for `Thread32First`.
-            more =
-                unsafe { Thread32Next(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
-        }
-        Ok(false)
+            },
+        )?;
+        Ok(held)
     }
 
     /// Whether the probe's immediate child is stopped — held by a signal another program sent.
@@ -6560,40 +6548,22 @@ mod probe_child_tests {
     /// Resume every thread of process `pid` — the harness letting go of a suspension it holds.
     fn resume_threads_of(pid: u32) {
         use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-        use windows::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
-        };
         use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
-        // SAFETY: a thread snapshot; its handle moves to `OwnedHandle` at once.
-        let snapshot = unsafe {
-            OwnedHandle::from_raw_handle(
-                CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
-                    .expect("a thread snapshot")
-                    .0,
-            )
-        };
-        let mut entry = THREADENTRY32 {
-            dwSize: u32::try_from(std::mem::size_of::<THREADENTRY32>()).expect("fits"),
-            ..THREADENTRY32::default()
-        };
-        // SAFETY: the snapshot is live; `entry` carries its own size.
-        let mut more =
-            unsafe { Thread32First(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
-        while more {
-            if entry.th32OwnerProcessID == pid {
+        crate::threads::each_thread_of(
+            |owner| owner == pid,
+            |thread_id| {
                 // SAFETY: a thread of this test's own suspended helper; the handle is owned and
                 // closed at once.
                 unsafe {
-                    let thread = OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, false, thread_id)
                         .expect("open the helper's thread");
                     let thread = OwnedHandle::from_raw_handle(thread.0);
                     assert_ne!(ResumeThread(HANDLE(thread.as_raw_handle())), u32::MAX);
                 }
-            }
-            // SAFETY: as above.
-            more =
-                unsafe { Thread32Next(HANDLE(snapshot.as_raw_handle()), &raw mut entry) }.is_ok();
-        }
+                std::ops::ControlFlow::Continue(())
+            },
+        )
+        .expect("a thread snapshot");
     }
 
     /// RED (mutation: one sample — `held_suspended` answers its first read) — **a probe suspended
@@ -8960,6 +8930,12 @@ pub mod hang;
 /// [`instance`]'s reason: the two platforms count faults differently, and that
 /// difference should be readable on one screen.
 pub mod mem;
+
+/// **This process's threads, by the names they were given** (T-IDLE-TURN-COST): the census
+/// `BT_PERF_TRACE threads` prints, and the one walk over the system's thread snapshot the probe's
+/// suspension check shares. Beside [`mem`] for its reason: one question about the calling process,
+/// both arms in one file.
+pub mod threads;
 
 /// **Each message the window thread's pump dispatches, timed** (ticket 64) —
 /// the posted ones through winit's message hook, the sent ones through this
