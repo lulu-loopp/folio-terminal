@@ -2791,12 +2791,12 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 | `tabs.rs` | 71 | the tab strip: new, close, activate, rename, drag, tear out; the tab menu; tables | — | — |
 | `terminal.rs` | 34 | the terminal pane: `drain_pty`, command marks, scroll and column bars, restart, fonts, selection, the PowerShell intent | session (drain, pane birth) | rows 2 (`spend_powershell_intent`), 5 (`apply_terminal_font`), 19 |
 | `tooltips.rs` | 9 | tooltips | — | — |
-| `web.rs` | 36 | the web pane: open, sync and advance the page, apply its outcomes, dev tools, sheets, the colour scheme, handing a URL to the browser; the engine's warm-up (`warm_web_engine`, ticket 54); the spare controller's making and adoption (`make_spare_web_controller`, `adopt_spare_web_page`, `seat_a_web_page`, ticket 60) | hand-off; `folio-web-thumb` | web view native affinity (§5.2); row 21 |
+| `web.rs` | 38 | the web pane: open, sync and advance the page, apply its outcomes, dev tools, sheets, the colour scheme, handing a URL to the browser; the engine's warm-up (`warm_web_engine`, ticket 54); the spare controller's making and adoption (`make_spare_web_controller`, `adopt_spare_web_page`, `seat_a_web_page`, ticket 60) | hand-off; `folio-web-thumb` | web view native affinity (§5.2); row 21 |
 | `windows.rs` | 38 | windows: open, dress, show, restore, the dirty gate, the quit save, close, retire and vault a window, moves; the window's title (`want_title`, `flush_title`) | storage (`quit_save` through `SessionWriter`) | `let_the_system_translate_touch`; `Window::set_title` (§5.2, `flush_title` only); row 16 |
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 836 (626 free functions, 210 methods) after batch 1. The table
+into their topics batch by batch: 828 (620 free functions, 208 methods) after batch 2. The table
 below is the 2026-09-21 manifest's sort of the 201 methods then left
 (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
 
