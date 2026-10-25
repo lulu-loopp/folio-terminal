@@ -205,6 +205,16 @@ fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
         !says_not_written(&mut own),
         "and it landed: nothing is said"
     );
+    assert!(
+        own.folio
+            .app
+            .as_ref()
+            .unwrap()
+            .quit
+            .as_ref()
+            .is_some_and(|quit| quit.document_is_written()),
+        "and the quit goes on its way out"
+    );
 
     // Out of budget: the turn comes longer after the documents phase began than the quit's one
     // budget — on the turn's own clock, which is the one the write is judged on.
