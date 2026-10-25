@@ -448,6 +448,7 @@ fn reason(failure: &Failure) -> String {
         Failure::Stopped(Stop::Sums) => Text::UpdateFailedSums,
         Failure::Stopped(Stop::Mount) => Text::UpdateFailedMount,
         Failure::Stopped(Stop::Identity) => Text::UpdateFailedIdentity,
+        Failure::Stopped(Stop::Offline) => Text::UpdateFailedOffline,
         Failure::Stopped(Stop::Copy) => Text::UpdateFailedCopy,
         Failure::Stopped(Stop::Clone) => Text::UpdateFailedClone,
         Failure::Stopped(Stop::TooOld) => Text::UpdateFailedTooOld,
@@ -1118,7 +1119,7 @@ mod tests {
     use crate::install_channel::{Channel, Manager};
     use crate::update_job::{
         Bytes, Driver, Effect, Failure, Gathered, Job, NoDownloadDoor, Offer, Poster, Presenters,
-        Refused, SharedTransport, State, Step, Unsupported, Verb,
+        Refused, SharedTransport, State, Step, Stop, Unsupported, Verb,
     };
 
     /// The transport the verbs below never ask for a file.
@@ -2111,6 +2112,33 @@ mod tests {
             Asks::Releases,
             "a page moves nothing"
         );
+    }
+
+    /// RED (0.4.9 T-UPDATE-OFFLINE-IDENTITY-CARD) — **an identity check that
+    /// could not reach revocation says the network was the reason; every
+    /// other identity refusal still says the update is not verified; both
+    /// then say nothing changed.**
+    ///
+    /// MUTATION: map `Stop::Offline` to `Text::UpdateFailedIdentity` in
+    /// `reason` and the card cannot tell a missing network from a bad
+    /// signature.
+    #[test]
+    fn an_offline_identity_check_says_the_network_was_the_reason() {
+        for (stop, says) in [
+            (
+                Stop::Offline,
+                "The update could not be verified without a network.",
+            ),
+            (Stop::Identity, "The update is not verified."),
+        ] {
+            let drawn = paint(&State::Failed(None, Failure::Stopped(stop))).expect("a failed card");
+            assert_eq!(drawn.heading.as_deref(), Some(says), "{stop:?}");
+            assert_eq!(
+                drawn.detail.as_deref(),
+                Some("Nothing changed."),
+                "{stop:?}"
+            );
+        }
     }
 
     /// RED (U-19) — **a rolled-back failure gives its reason, then `Previous

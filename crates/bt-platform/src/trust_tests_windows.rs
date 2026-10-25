@@ -47,14 +47,37 @@ pub fn a_test_signed_file_without_a_revocation_list_is_revocation_unknown() {
     let leaf = world.leaf(SUBJECT, IDENTITY);
     let path = world.signed(&folder, "folio.exe", &leaf, VERSION);
     assert!(signature(&path, &world.policy()).is_ok(), "known good");
-    let silent = Policy::ExclusiveRoot {
-        root: world.root.der.clone(),
-        revocation_lists: Vec::new(),
-    };
-    assert_eq!(signature(&path, &silent), Err(Refusal::RevocationUnknown));
+    let silent = world.policy_without_revocation_lists();
+    assert!(
+        matches!(
+            signature(&path, &silent),
+            Err(Refusal::RevocationUnknown { .. })
+        ),
+        "{:?}",
+        signature(&path, &silent)
+    );
     assert_eq!(
         signature(&path, &world.policy_revoking(&[world.last_serial()])),
         Err(Refusal::Revoked)
+    );
+}
+
+/// A leaf naming where its revocation list is published, verified under a
+/// policy that holds no list and an engine that retrieves nothing: the chain
+/// says revocation is offline — what a machine without a network sees.
+pub fn a_test_signed_file_naming_an_unreachable_list_is_revocation_offline() {
+    let world = World::naming_its_crls();
+    let folder = Folder::new("offline");
+    let named = world.leaf(SUBJECT, IDENTITY);
+    let path = world.signed(&folder, "folio.exe", &named, VERSION);
+    assert!(signature(&path, &world.policy()).is_ok(), "known good");
+    assert!(
+        matches!(
+            signature(&path, &world.policy_without_revocation_lists()),
+            Err(Refusal::RevocationOffline { .. })
+        ),
+        "{:?}",
+        signature(&path, &world.policy_without_revocation_lists())
     );
 }
 

@@ -219,6 +219,15 @@ fn key_usage_extension(usages: &[&str]) -> Vec<u8> {
     encode(X509_ENHANCED_KEY_USAGE, (&raw const usage).cast())
 }
 
+/// `CRLDistributionPoints` (RFC 5280 4.2.1.13) with one distribution point
+/// whose full name is the URI `url`.
+fn crl_distribution_points(url: &str) -> Vec<u8> {
+    let uri = der(0x86, url.as_bytes());
+    let full_name = der(0xA0, &uri);
+    let point_name = der(0xA0, &full_name);
+    der(0x30, &der(0x30, &point_name))
+}
+
 fn basic_constraints(ca: bool) -> Vec<u8> {
     let info = CERT_BASIC_CONSTRAINTS2_INFO {
         fCA: ca.into(),
@@ -239,6 +248,9 @@ pub struct Spec<'a> {
     pub usages: &'a [&'a str],
     /// Mark the key-usage extension critical (a time-stamp authority's must be).
     pub critical_usages: bool,
+    /// A CRL distribution point naming this URL, the way a public CA's leaf
+    /// names where its revocation list is published; none when `None`.
+    pub crl_url: Option<&'a str>,
 }
 
 /// A certificate made here, with the key it certifies.
@@ -327,6 +339,18 @@ pub fn issue(spec: &Spec<'_>, issuer: Option<&Made>) -> Made {
             Value: CRYPT_INTEGER_BLOB {
                 cbData: usages.len() as u32,
                 pbData: usages.as_mut_ptr(),
+            },
+        });
+    }
+    let mut points_oid = cstr("2.5.29.31");
+    let mut points = spec.crl_url.map(crl_distribution_points);
+    if let Some(points) = points.as_mut() {
+        extensions.push(CERT_EXTENSION {
+            pszObjId: PSTR(points_oid.as_mut_ptr()),
+            fCritical: false.into(),
+            Value: CRYPT_INTEGER_BLOB {
+                cbData: points.len() as u32,
+                pbData: points.as_mut_ptr(),
             },
         });
     }
@@ -1161,14 +1185,23 @@ pub fn sign(path: &Path, leaf: &Made, chain: &[&Made], authority: Option<&Author
 // ── the world ───────────────────────────────────────────────────────────────
 
 pub use super::{IDENTITY, OTHER_IDENTITY, SUBJECT};
+/// The revocation list URL [`World::leaf_naming_its_crl`] names: the
+/// loopback interface's discard port, so even a retrieval would leave
+/// nothing of this machine.
+pub const CRL_URL: &str = "http://127.0.0.1:9/folio-test-root.crl";
 /// The version every test file carries unless it says otherwise.
 pub const VERSION: FileVersion = FileVersion([0, 4, 6, 0]);
+
+/// The serial of a world's first leaf.
+const FIRST_LEAF: u64 = 101;
 
 /// A root, and a time-stamp authority under it.
 pub struct World {
     pub root: Made,
     pub authority: Arc<Made>,
     serial: std::cell::Cell<u64>,
+    /// The revocation list URL every leaf names, if any.
+    crl_url: Option<&'static str>,
 }
 
 impl World {
@@ -1186,6 +1219,7 @@ impl World {
                 ca: true,
                 usages: &[],
                 critical_usages: false,
+                crl_url: None,
             },
             None,
         );
@@ -1198,13 +1232,29 @@ impl World {
                 ca: false,
                 usages: &[TIME_STAMPING],
                 critical_usages: true,
+                crl_url: None,
             },
             Some(&root),
         );
         Self {
             root,
             authority: Arc::new(authority),
-            serial: std::cell::Cell::new(100),
+            serial: std::cell::Cell::new(FIRST_LEAF - 1),
+            crl_url: None,
+        }
+    }
+
+    /// [`Self::new`], **whose every leaf names where its revocation list is
+    /// published** ([`CRL_URL`]), as a public CA's leaf does. Under this
+    /// world's engine, which retrieves nothing
+    /// (`CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL`), a policy that holds no
+    /// revocation list cannot reach it: the chain says revocation is offline
+    /// (`CERT_TRUST_IS_OFFLINE_REVOCATION`), as on a machine with no network.
+    /// A leaf naming none says revocation is unknown alone.
+    pub fn naming_its_crls() -> Self {
+        Self {
+            crl_url: Some(CRL_URL),
+            ..Self::new()
         }
     }
 
@@ -1228,6 +1278,7 @@ impl World {
                 ca: false,
                 usages: &[PUBLIC_TRUST_MARKER, CODE_SIGNING, identity],
                 critical_usages: false,
+                crl_url: self.crl_url,
             },
             Some(&self.root),
         )
@@ -1236,6 +1287,15 @@ impl World {
     /// A leaf valid for three days around now, like Artifact Signing's.
     pub fn leaf(&self, subject: &str, identity: &str) -> Made {
         self.leaf_between(subject, identity, now() - DAY, now() + 2 * DAY)
+    }
+
+    /// This world's exclusive-root policy **holding no revocation list**:
+    /// revocation cannot be established for any leaf.
+    pub fn policy_without_revocation_lists(&self) -> Policy {
+        Policy::ExclusiveRoot {
+            root: self.root.der.clone(),
+            revocation_lists: Vec::new(),
+        }
     }
 
     /// The exclusive-root policy of this world, publishing `revoked` as its
@@ -1250,6 +1310,13 @@ impl World {
     /// The exclusive-root policy, with a revocation list revoking nothing.
     pub fn policy(&self) -> Policy {
         self.policy_revoking(&[])
+    }
+
+    /// The exclusive-root policy, **revoking every leaf this world has
+    /// issued so far**.
+    pub fn policy_revoking_every_leaf(&self) -> Policy {
+        let leaves: Vec<u64> = (FIRST_LEAF..=self.last_serial()).collect();
+        self.policy_revoking(&leaves)
     }
 
     /// The last serial this world issued.
