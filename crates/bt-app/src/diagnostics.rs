@@ -525,7 +525,7 @@ impl Queue {
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| drain.serve(ctx),
         ) {
-            queue.unstarted = Some(error.to_string());
+            queue.unstarted = Some(format!("{error}"));
         }
         queue
     }
