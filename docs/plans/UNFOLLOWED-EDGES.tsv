@@ -6010,10 +6010,7 @@ crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::place	Dynamic	px	8
 crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::tab_tip	Ambiguous	text	1	
 crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::wrap	Dynamic	measure	2	
 crates/bt-app/src/trace.rs	bt-app crate::trace::Dump::line	Dynamic	message	1	
-crates/bt-app/src/trace.rs	bt-app crate::trace::Trace::create	Ambiguous	open	1	
 crates/bt-app/src/trace.rs	bt-app crate::trace::Trace::write	Ambiguous	as_secs_f64	1	
-crates/bt-app/src/trace.rs	bt-app crate::trace::TraceFile::append	Ambiguous	flush	1	
-crates/bt-app/src/trace.rs	bt-app crate::trace::TraceFile::append	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/trace.rs	bt-app crate::trace::TraceFile::open	Ambiguous	append	1	
 crates/bt-app/src/trace.rs	bt-app crate::trace::TraceFile::open	Ambiguous	open	1	
 crates/bt-app/src/trace.rs	bt-app crate::trace::emit	Dynamic	message	1	
@@ -6024,11 +6021,6 @@ crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::Queue::offer	Ambiguous
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::Queue::offer	Ambiguous	is_ok	2	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::Queue::offer	Ambiguous	is_some_and	2	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::Queue::offer	Ambiguous	try_send	2	
-crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::a_trace_was_asked_for	Ambiguous	any	1	
-crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::a_trace_was_asked_for	Ambiguous	contains	1	
-crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::a_trace_was_asked_for	Ambiguous	starts_with	1	
-crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::a_trace_was_asked_for	Ambiguous	to_ascii_uppercase	1	
-crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::a_trace_was_asked_for	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::flush	Ambiguous	and_then	1	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::flush_sink	Ambiguous	is_finished	2	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::flush_sink	Ambiguous	join	1	
@@ -6036,10 +6028,8 @@ crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::flush_sink	Ambiguous	r
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::flush_sink	Ambiguous	saturating_duration_since	1	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::flush_sink	Ambiguous	take	1	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::put	Dynamic	write_all	1	
-crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::run_to	Ambiguous	append	1	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::run_to	Dynamic	flush	1	
 crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::sink	Ambiguous	and_then	1	
-crates/bt-app/src/trace_sink.rs	bt-app crate::trace_sink::started	Ambiguous	is_some	1	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::Entry::line	Ambiguous	in_lang	7	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::Entry::line	Ambiguous	join	1	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::Entry::line	Ambiguous	to_owned	4	
@@ -9911,6 +9901,7 @@ crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::answer	Dyn
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::SessionEndWatch::install	Ambiguous	as_bool	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::session_end_subclass	Ambiguous	is_null	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::session_end_subclass	Dynamic	(value)	1	
+crates/bt-platform/src/stderr_road.rs	bt-platform crate::stderr_road::say	Dynamic	road	1	2026-10-25: the road fn main installs, diagnostics::stderr_line (a request door of its own row): this crate's stderr lines handed to the writer that owns the run's stderr; the crate cannot name bt-app, so the call is a function value (T-TRACE-SINK-OFF-THE-CALLING-THREAD)
 crates/bt-platform/src/touch_pan.rs	bt-platform crate::touch_pan::PanTrack::step	Ambiguous	then_some	1	
 crates/bt-platform/src/trust.rs	bt-platform crate::trust::FileVersion::parse_four	Ambiguous	next	2	
 crates/bt-platform/src/trust.rs	bt-platform crate::trust::FileVersion::parse_four	Ambiguous	ok	1	
@@ -10455,6 +10446,7 @@ crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Ambiguous	elapsed	1
 crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Ambiguous	is_err	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Ambiguous	spawn	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::retire_within	Dynamic	teardown	1	
+crates/bt-pty/src/lib.rs	bt-pty crate::say	Dynamic	road	1	2026-10-25: the road fn main installs, diagnostics::stderr_line (a request door of its own row): this crate's stderr lines handed to the writer that owns the run's stderr; the crate cannot name bt-app, so the call is a function value (T-TRACE-SINK-OFF-THE-CALLING-THREAD)
 crates/bt-pty/src/lib.rs	bt-pty crate::spawn_dump_publisher	Ambiguous	is_err	2	
 crates/bt-pty/src/lib.rs	bt-pty crate::spawn_dump_publisher	Ambiguous	load	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::spawn_dump_publisher	Ambiguous	sync_data	2	
