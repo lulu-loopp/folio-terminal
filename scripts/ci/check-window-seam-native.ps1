@@ -20,7 +20,13 @@
 # that row moved - when it is the one row of that kind and name on each side and
 # the old owner no longer holds it. A `method` or `trait` row's owner is its
 # type, which a move between files does not change: a changed owner there is
-# another type, an added row.
+# another type, an added row. **A renamed row is accepted only with a dated
+# reason** (the rename arm of `moved-rows.ps1`): a row the base does not carry
+# whose kind and owner are exactly one gone base row's - the item renamed in
+# place, and no other row of that kind and owner left or arrived - is that row
+# renamed when its reason is `YYYY-MM-DD: <TICKET-ID> <why>` (a real day, new
+# against the base row's). Without it, or with two candidates on a side, it is
+# added and refused.
 #
 # The baseline is the list committed at `git merge-base HEAD origin/main`. When
 # the merge base has no list (the branch that introduces it), the baseline is
@@ -63,7 +69,9 @@ $seed = @(
 )
 
 # The rows of one copy of the list, by identity (`kind`, `owner`, `name`).
-function Read-NativeRows([string[]] $lines, [string] $what) {
+# The reason of each row read, by identity, for the rename arm.
+$reasons = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+function Read-NativeRows([string[]] $lines, [string] $what, [string] $side) {
     $rows = [System.Collections.Generic.List[string]]::new()
     $header = $false
     foreach ($line in $lines) {
@@ -80,6 +88,7 @@ function Read-NativeRows([string[]] $lines, [string] $what) {
             throw "$what has a row that is not four columns: $line"
         }
         $rows.Add("$($columns[0])`t$($columns[1])`t$($columns[2])")
+        $reasons["$side`t$($columns[0])`t$($columns[1])`t$($columns[2])"] = $columns[3]
     }
     return , $rows
 }
@@ -90,7 +99,7 @@ if (-not (Test-Path -LiteralPath $list)) {
 
 Push-Location $repo
 try {
-    $now = Read-NativeRows ([IO.File]::ReadAllLines($list)) "$relative (working tree)"
+    $now = Read-NativeRows ([IO.File]::ReadAllLines($list)) "$relative (working tree)" "now"
 
     $base = $null
     & git rev-parse --verify --quiet refs/remotes/origin/main *> $null
@@ -107,7 +116,7 @@ try {
     $text = (& git show "${base}:${relative}" 2>$null) | Out-String
     if ($LASTEXITCODE -eq 0) {
         $from = "the merge base $($base.Substring(0, 12))"
-        $before = Read-NativeRows ($text -split "`r?`n") "$relative at $from"
+        $before = Read-NativeRows ($text -split "`r?`n") "$relative at $from" "base"
     } else {
         $from = "the list's seed (the merge base $($base.Substring(0, 12)) has none)"
         $before = [System.Collections.Generic.List[string]]::new()
@@ -122,7 +131,7 @@ try {
 function Get-MoveRow([string]$row) {
     $kind, $owner, $name = $row.Split("`t")
     $located = (($kind -ceq "function" -or $kind -ceq "type") -and $owner -cmatch '^crate($|::|, )') -or
-        ($kind -ceq "const" -and $owner.EndsWith(".rs", [StringComparison]::Ordinal))
+        $kind -ceq "const"
     return [pscustomobject]@{
         Identity = "$kind`t$name"
         Location = if ($located) { $owner } else { $null }
@@ -136,20 +145,48 @@ $leftover = @($before | Where-Object { -not $now.Contains($_) } | ForEach-Object
 $tree = @($now | ForEach-Object { Get-MoveRow $_ })
 $added = @()
 $moves = 0
+$paired = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+$unpaired = @()
 foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -Tree $tree)) {
     $spelled = $result.Row -replace "`t", " "
     if ($result.Verdict -eq "moved") {
         $moves += 1
+        [void]$paired.Add($result.From)
         Write-Host "moved     $spelled (from $($result.Was))"
     } elseif ($result.Verdict -eq "added") {
-        $added += "    $spelled"
+        $unpaired += $result.Row
     } else {
         $added += "    ${spelled}: $(Format-MoveRefusal $result)"
+    }
+}
+# The rename arm (moved-rows.ps1): an added row whose kind and owner are one gone base row's, and
+# no other added row's, is that row renamed - with a dated reason naming its ticket.
+function Get-RenameRow([string]$row, [string]$side) {
+    $kind, $owner, $name = $row.Split("`t")
+    $reason = if ($reasons.ContainsKey("$side`t$row")) { $reasons["$side`t$row"] } else { $null }
+    return [pscustomobject]@{ Group = "$kind`t$owner"; Row = $row; Reason = $reason }
+}
+$renames = 0
+$gone = @($leftover | Where-Object { -not $paired.Contains($_.Row) } | ForEach-Object { Get-RenameRow $_.Row "base" })
+foreach ($result in (Find-RenamedRows -Added @($unpaired | ForEach-Object { Get-RenameRow $_ "now" }) -Leftover $gone)) {
+    $spelled = $result.Row -replace "`t", " "
+    if ($result.Verdict -eq "renamed") {
+        $wrong = Test-RenameReason $result.Reason $result.WasReason
+        if ($wrong) {
+            $added += "    ${spelled}: it would be $($result.From -replace "`t", " ") renamed, and $wrong"
+        } else {
+            $renames += 1
+            Write-Host "renamed   $spelled (from $($result.From -replace "`t", " "))"
+        }
+    } elseif ($result.Verdict -eq "ambiguous") {
+        $added += "    ${spelled}: more than one row of its kind and owner left or arrived, so no rename can be paired"
+    } else {
+        $added += "    $spelled"
     }
 }
 if ($added.Count -gt 0) {
     $named = $added -join [Environment]::NewLine
     throw "$relative only shrinks: $($added.Count) row(s) not at ${from}:$([Environment]::NewLine)$named$([Environment]::NewLine)Write the code for the backend parameter, through a door of the seam, rather than listing it."
 }
-Write-Host "$relative against ${from}: $($before.Count) rows -> $($now.Count), 0 added, $moves moved."
+Write-Host "$relative against ${from}: $($before.Count) rows -> $($now.Count), 0 added, $moves moved, $renames renamed."
 exit 0

@@ -74,6 +74,8 @@ try {
             "a moved unknown whose sites grew" "3 site(s), moved from crate, where it had 2"
         Refused ($header + $moved.Replace("`tsettle`t", "`tsettled`t") + $rail) `
             "a moved unknown with its function renamed" "?.attention in crate::runtime::attention::settled (a closure parameter without a type): 2 site(s), not at the merge base"
+        Refused ($header + $settle.Replace("`tsettle`t", "`tsettled`t") + $rail) `
+            "an unknown whose function was renamed in place (no rename arm here)" "?.attention in crate::settled (a closure parameter without a type): 2 site(s), not at the merge base"
         Refused ($header + $moved + $moved.Replace("::attention`t", "::panes`t") + $rail) `
             "one unknown arriving at two modules" "and arrived at more than one place"
 

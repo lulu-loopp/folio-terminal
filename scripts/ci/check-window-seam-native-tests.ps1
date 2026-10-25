@@ -58,13 +58,13 @@ try {
         & git commit -q -m base
         & git update-ref refs/remotes/origin/main (& git rev-parse HEAD).Trim()
 
-        Passes ($header + $create + $rebuild + $check) "unchanged" "3 rows -> 3, 0 added, 0 moved."
+        Passes ($header + $create + $rebuild + $check) "unchanged" "3 rows -> 3, 0 added, 0 moved, 0 renamed."
         $movedFunction = $rebuild.Replace("`tcrate`t", "`tcrate::runtime::frame`t")
-        Passes ($header + $create + $movedFunction + $check) "a function moved to another module" "3 rows -> 3, 0 added, 1 moved."
+        Passes ($header + $create + $movedFunction + $check) "a function moved to another module" "3 rows -> 3, 0 added, 1 moved, 0 renamed."
         Passes ($header + $create + $movedFunction + $check.Replace("`tmain.rs`t", "`truntime/frame.rs`t")) `
-            "a function and a const moved" "3 rows -> 3, 0 added, 2 moved."
+            "a function and a const moved" "3 rows -> 3, 0 added, 2 moved, 0 renamed."
         Passes ($header + $create + $movedFunction.Replace("rebuild`n", "rebuild, reworded`n") + $check) `
-            "a moved function whose reason is reworded" "1 moved."
+            "a moved function whose reason is reworded" "1 moved, 0 renamed."
 
         Refused ($header + $create + $rebuild + $check + "method`tRuntime`tplanted_probe`ta planted row`n") `
             "an added row" "only shrinks: 1 row(s) not at the merge base"
@@ -76,6 +76,15 @@ try {
             "one function arriving at two modules" "and arrived at more than one place"
         Refused ($header + $create + $movedFunction.Replace("rebuild_every", "rebuild_each") + $check) `
             "a moved function renamed" "function crate::runtime::frame rebuild_each_native_surface"
+
+        # The rename arm: a row renamed in place is accepted only with a dated reason naming its
+        # ticket; without one, or two at once, it is refused. (No row has a count to grow.)
+        $renamed = "method`tRuntime`tcreate_native`t2026-10-24: T-X the builder renamed`n"
+        Passes ($header + $renamed + $rebuild + $check) "a method renamed with a dated reason" "0 added, 0 moved, 1 renamed."
+        Refused ($header + $create.Replace("`tcreate`t", "`tcreate_native`t") + $rebuild + $check) "a method renamed without a dated reason" `
+            "method Runtime create_native: it would be method Runtime create renamed, and a rename carries a dated reason naming its ticket"
+        Refused ($header + $renamed + $renamed.Replace("create_native", "create_headless") + $rebuild + $check) "two renames with one identity" `
+            "more than one row of its kind and owner left or arrived, so no rename can be paired"
     } finally {
         Pop-Location
     }
@@ -83,5 +92,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-window-seam-native: unchanged, moved function, moved const, reworded reason, added, method owner, onto an impl, ambiguous and renamed cases pass"
+Write-Host "check-window-seam-native: unchanged, moved function, moved const, reworded reason, added, method owner, onto an impl, ambiguous and renamed cases pass; and the rename arm's dated, undated and two-at-once cases pass"
 exit 0

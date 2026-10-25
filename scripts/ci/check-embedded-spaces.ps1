@@ -78,7 +78,9 @@
 # `moved-rows.ps1`): a row the base does not have whose literal's text and
 # reason are a gone base row's, in another file, is that row moved - when that
 # text and reason left one file for one other, and no more rows arrived than
-# left (a literal names no item, so the count is the whole of "it left"). It
+# left (a literal names no item, so the count is the whole of "it left"). There
+# is no rename arm here: a row names no item, so renaming the code around a
+# listed literal already changes no row. It
 # passes, loudly, when the base has no list - that is how the commit that
 # introduces the list passes. It refuses (exit 2) when there is no base at
 # all: no `origin/main` in the clone, or no merge base, means the comparison

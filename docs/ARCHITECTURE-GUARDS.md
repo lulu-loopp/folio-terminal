@@ -276,7 +276,13 @@ does not carry, or a key whose `sites` count is larger, is refused by key; a key
 that disappears or whose `sites` count drops is the list shrinking. Keys compare
 case-sensitively, as `FieldCensus` keys them. It is a shrink-only tripwire over
 aggregated counts; a same-key swap (one site resolved and another added under
-the same site, module, function and reason) is invisible to it, by design. When red,
+the same site, module, function and reason) is invisible to it, by design. A
+key moved to another module is not added (T-MOVED-NOT-ADDED-RULE, the rule of
+`scripts/ci/moved-rows.ps1`): a new key whose site, function and reason are a
+gone base key's, with only its `module` changed, is that key moved when it is
+the one key of that identity on each side and the old module no longer holds
+the function, and its `sites` is held to the base key's; anything else is added,
+as before. When red,
 fix the routing or regenerate with `scripts/generate-ownership-census.ps1` and
 justify each real multi-writer or unknown row; do not edit generated census rows
 as a substitute for changing the code.
@@ -951,7 +957,14 @@ identity — every bound resolved through `use` items, globs and renames by
 and its fixture (`tests/fixtures/window_seam/`) plants each refusal
 (`every_road_around_the_window_seam_is_named`). The native list only shrinks:
 `scripts/ci/check-window-seam-native.ps1` refuses a row the merge base does not
-have (`gates-can-fail` plants one). When red, write the new code for the backend
+have (`gates-can-fail` plants one), except a row moved (T-MOVED-NOT-ADDED-RULE):
+a `function` or `type` row whose owner is a module, or a `const` row whose owner
+is a file, that left one module or file for one other with its kind and name.
+A `method` or `trait` row's owner is its type, which a move between files does
+not change. A row renamed in place - its kind and owner exactly one gone base
+row's, and no other row of that kind and owner left or arrived - is accepted
+only with a reason `YYYY-MM-DD: <TICKET-ID> <why>`, new against the base row's:
+a move needs no reason, a rename does, because the item changed. When red, write the new code for the backend
 parameter and add the door it needs to the seam's trait (with its `Native` impl
 beside the others and its headless impl in `headless.rs`); never add a native
 row for code that only reads or tells the window. A row nothing writes any more
@@ -998,7 +1011,17 @@ that moves it) and `unjudged` (a refused shape that reads no `BT_` door; the
 reason says what it reads, and T-ENV-UNJUDGED-ROWS rewrites each). A name is a
 `BT_` name in any case, as Windows reads it. **The list only shrinks**:
 `scripts/ci/check-env-doors.ps1` refuses, against the merge base, a row added
-and a row that reads a name or holds a refusal its base row did not. When red,
+and a row that reads a name or holds a refusal its base row did not. The list's
+last column, `module`, is the module the item is written in, so a row moved to
+another file and module in the same package, with its path inside the module
+unchanged, is that row moved and held to its base row, not added
+(T-MOVED-NOT-ADDED-RULE). A row renamed in place - its file, module and names
+exactly one gone base row's, and no other row of those left or arrived - is
+accepted, held to its base row the same way, only with a reason
+`YYYY-MM-DD: <TICKET-ID> <why>`, new against the base row's: a move needs no
+reason, a rename does, because the item changed. The census unknowns and the
+pointer debt have no rename arm (their rows carry no reason of their own), nor
+does the embedded-spaces list (its rows name no item). When red,
 move the read to the entry and hand the answer down as a parameter or an
 installed answer; the grammar is not widened to quiet a refusal.
 
@@ -1116,7 +1139,10 @@ literal on that line, trimmed — not the code around it; read for the base from
 the base's own copy of the file, through the same lexer, where a file that does
 not lex fails the check as `base <sha>:<path>:<line>`) and its reason, with
 multiplicity. A literal that moves, or whose surrounding code is renamed or
-rewrapped, keeps its row with the line corrected; a row pointed at another
+rewrapped, keeps its row with the line corrected; a literal moved to another
+file with its item keeps its row with the path and line corrected, and is that
+row moved, not added, when its text and reason left one file for one other and
+no more rows arrived than left (T-MOVED-NOT-ADDED-RULE); a row pointed at another
 literal is an added row and refused; and an edit to a listed literal's pinned
 text is refused too — there is no override and no replacement path. Columns
 that must evolve do not belong in a string literal: take them out (cells in a

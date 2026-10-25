@@ -102,3 +102,64 @@ function Format-MoveRefusal([object]$Result) {
         default { return "" }
     }
 }
+
+# THE RENAME ARM, stricter than a move, for the lists whose rows carry a reason of their own
+# (check-env-doors.ps1, check-window-seam-native.ps1). A tree row still ADDED after the move
+# pairing is RENAMED when, ordinally:
+#
+#   (i)   its Group (the row without its item and its measurement: what it is and where it stands)
+#         is the Group of exactly one base row left over, and of no other added tree row - so the
+#         base row's item is gone from the list at that same place and this is the one row that
+#         arrived there;
+#   (ii)  the check finds its measurement not grown against that base row;
+#   (iii) its reason is dated and names the ticket: `YYYY-MM-DD: <TICKET-ID> <why>`, a real day,
+#         and not the base row's reason. A move needs no reason; a rename does, because the item
+#         changed.
+#
+# (i) failing with more than one row on a side is AMBIGUOUS and refused; (iii) failing is refused
+# with the form it needs. The lists with no reason column of their own (the census unknowns, the
+# pointer debt) and the one whose rows name no item (embedded spaces) have no rename arm: a
+# renamed item there is an added row, as before.
+function Find-RenamedRows {
+    param(
+        [object[]]$Added,
+        [object[]]$Leftover
+    )
+    $ordinal = [StringComparer]::Ordinal
+    $count = { param($rows) $by = [Collections.Generic.Dictionary[string, Collections.Generic.List[object]]]::new($ordinal)
+        foreach ($row in $rows) {
+            if (-not $by.ContainsKey($row.Group)) { $by[$row.Group] = [Collections.Generic.List[object]]::new() }
+            $by[$row.Group].Add($row)
+        }
+        , $by }
+    $bases = & $count $Leftover
+    $news = & $count $Added
+    $results = [Collections.Generic.List[object]]::new()
+    foreach ($row in $Added) {
+        $from = if ($bases.ContainsKey($row.Group)) { $bases[$row.Group] } else { $null }
+        $verdict = if (-not $from) { "added" }
+            elseif ($from.Count -ne 1 -or $news[$row.Group].Count -ne 1) { "ambiguous" }
+            else { "renamed" }
+        $results.Add([pscustomobject]@{
+                Row = $row.Row; Verdict = $verdict
+                From = if ($verdict -eq "renamed") { $from[0].Row } else { $null }
+                Reason = $row.Reason; WasReason = if ($from) { $from[0].Reason } else { $null }
+            })
+    }
+    return , $results
+}
+
+# $null when `reason` is a dated reason naming a ticket and new against `was`; otherwise what is
+# wrong with it.
+function Test-RenameReason([string]$Reason, [string]$Was) {
+    if ($Reason -cnotmatch '^(?<date>\d{4}-\d{2}-\d{2}): (?<ticket>[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)\s+\S') {
+        return "a rename carries a dated reason naming its ticket ('YYYY-MM-DD: <TICKET-ID> <why>'), and this one says '$Reason'"
+    }
+    $day = [DateTime]::MinValue
+    if (-not [DateTime]::TryParseExact($Matches['date'], 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::None, [ref]$day)) {
+        return "a rename's reason is dated with a real day, and '$($Matches['date'])' is not one"
+    }
+    if ($Reason -ceq $Was) { return "a rename carries a new dated reason, and this one is the base row's" }
+    return $null
+}

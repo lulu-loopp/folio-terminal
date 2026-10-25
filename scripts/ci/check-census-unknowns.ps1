@@ -18,7 +18,9 @@
 # whose `site`, `function` and `reason` are a base key's that is gone, with only
 # its `module` changed, is that key moved - when it is the one key of that
 # identity on each side and the old module no longer holds the function - and
-# its `sites` is held to the base key's. A key that disappeared or
+# its `sites` is held to the base key's. There is no rename arm here: a row has
+# no reason of its own to carry the dated reason a rename needs, so a key whose
+# function was renamed is added, as before. A key that disappeared or
 # whose `sites` went down is the list shrinking, which is what regenerating it
 # with `scripts/generate-ownership-census.ps1` after a fix writes. A key is
 # never added or grown by hand to let a new unknown past the test. Keys compare
