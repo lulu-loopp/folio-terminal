@@ -4411,7 +4411,12 @@ mod tests {
     ///
     /// Answers whether the marks' migration started (its worker's wake came).
     fn run_the_start_writers(root: &Path) -> bool {
-        let storage = persist::storage_dir();
+        // Settled as `main`'s claim settles it: this is a start's process of its own, under the
+        // private `APPDATA` the harness handed it.
+        let storage = persist::settle_storage_dir()
+            .value()
+            .data_folder()
+            .to_path_buf();
         let now = std::time::Instant::now();
 
         let mut session = persist::SessionStore::open();

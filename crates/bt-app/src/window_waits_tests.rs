@@ -3811,8 +3811,11 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
 
 // ── assertion 3: the pinned writers (§3.2, §4.2, (c)5, (c)6, (c)7) ──────────────────────────
 
-/// One pinned call of a role or phase writer: who makes it, and the landmark it follows.
+/// One pinned call of a role or phase writer, or of a settle `main` makes before the loop: the
+/// module path it is spelled through (`module::writer(…)`, the only spelling the guard reads),
+/// who makes it, and the landmark it follows.
 struct Pin {
+    module: &'static str,
     writer: &'static str,
     owner: &'static str,
     after: Option<&'static str>,
@@ -3883,93 +3886,142 @@ const LANDMARKS: [(&str, &[Landmark]); 4] = [
 /// Windows transaction since U-23. B-ENDSESSION adds the system's end's write step, `exiting`
 /// then `quit_abandoned` around the one admitted wait in `session_end::settle` (the quit's `Write`
 /// on the held document; nothing is torn down).
-const PINS: [Pin; 18] = [
+const PINS: [Pin; 22] = [
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::main",
         after: None,
     },
+    // T-LAZY-INITIALIZERS-BEFORE-THE-LOOP (C1): the profile table, settled as `main`'s first
+    // statement — before `parse`, so before every branch; the data directory, settled by the
+    // removal door (before `parse`; its process has no window) and in the claim after the
+    // update pass (after `parse`, before `hand_over`).
     Pin {
+        module: "profiles",
+        writer: "settle_registry",
+        owner: "bt-app crate::main",
+        after: None,
+    },
+    Pin {
+        module: "persist",
+        writer: "settle_storage_dir",
+        owner: "bt-app crate::main",
+        after: None,
+    },
+    Pin {
+        module: "persist",
+        writer: "settle_storage_dir",
+        owner: "bt-app crate::main",
+        after: Some("parse"),
+    },
+    Pin {
+        module: "admission",
         writer: "enter_window_thread",
         owner: "bt-app crate::main",
         after: Some("parse"),
     },
     Pin {
+        module: "admission",
         writer: "loop_running",
         owner: "bt-app crate::FolioApp::new_events",
         after: Some("Init"),
     },
     Pin {
+        module: "admission",
         writer: "exiting",
         owner: "bt-app crate::App::finish",
         after: None,
     },
+    // Twice in the `Write` arm, once per branch: an update's write by receipt (the verdict that
+    // leaves) and the ordinary judged flush (counted since review N2 of
+    // T-LAZY-INITIALIZERS-BEFORE-THE-LOOP; the set comparison before it took them for one).
     Pin {
+        module: "admission",
         writer: "exiting",
         owner: "bt-app crate::FolioApp::settle_quit",
         after: Some("Write"),
     },
     Pin {
+        module: "admission",
+        writer: "exiting",
+        owner: "bt-app crate::FolioApp::settle_quit",
+        after: Some("Write"),
+    },
+    Pin {
+        module: "admission",
         writer: "exiting",
         owner: "bt-app crate::main",
         after: Some("build"),
     },
     Pin {
+        module: "admission",
         writer: "exiting",
         owner: "bt-app crate::main",
         after: Some("run_app"),
     },
     Pin {
+        module: "admission",
         writer: "quit_abandoned",
         owner: "bt-app crate::FolioApp::settle_quit",
         after: Some("Abandon"),
     },
     Pin {
+        module: "admission",
         writer: "exiting",
         owner: "bt-app crate::session_end::settle",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "quit_abandoned",
         owner: "bt-app crate::session_end::settle",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::elevated_host::serve",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::attention_wire::payload_on_stdin",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::explorer_menu::removal_waited_on",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::uninstall::standalone",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::uninstall::remover_standalone",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::update_apply_macos::run_here",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::update_apply_windows::run_here",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::update_recover::run_here",
         after: None,
@@ -4924,8 +4976,9 @@ fn landmarks_in(
     Ok(found)
 }
 
-/// **The role and phase writers are called only where they are pinned**, each spelled as the
-/// call `admission::writer(…)` — an import or a value would let one be called where no pin can
+/// **The role and phase writers, and `main`'s settles, are called only where they are pinned**,
+/// each spelled as the call through its pin's module path, `module::writer(…)` (`admission::` for
+/// the role and phase writers) — an import or a value would let one be called where no pin can
 /// see.
 fn the_role_and_phase_writers_are_called_only_where_they_are_pinned(world: &World) -> Vec<String> {
     let dependencies: BTreeMap<String, BTreeSet<String>> = LANDMARKS
@@ -4951,7 +5004,17 @@ fn pinned_writer_failures(
     dependencies: &BTreeMap<String, BTreeSet<String>>,
 ) -> Vec<String> {
     let mut failures = Vec::new();
-    let writers: BTreeSet<&str> = pins.iter().map(|pin| pin.writer).collect();
+    let mut writers: BTreeMap<&str, &str> = BTreeMap::from([("enter_callback", "admission")]);
+    for pin in pins {
+        if let Some(module) = writers.insert(pin.writer, pin.module)
+            && module != pin.module
+        {
+            failures.push(format!(
+                "the pins name `{}` through two module paths, `{module}::` and `{}::`",
+                pin.writer, pin.module
+            ));
+        }
+    }
     let first_party: BTreeSet<String> = world
         .srcs
         .iter()
@@ -4966,7 +5029,7 @@ fn pinned_writer_failures(
     let mut refused: BTreeSet<(String, String)> = BTreeSet::new();
     let mut callbacks: BTreeMap<(String, String, String), usize> = BTreeMap::new();
     for src in &world.srcs {
-        for writer in writers.iter().copied().chain(["enter_callback"]) {
+        for (&writer, &module) in &writers {
             for at in src.named(writer) {
                 if !src.in_product(at) {
                     continue;
@@ -4979,12 +5042,12 @@ fn pinned_writer_failures(
                 }
                 let spelled = before.len() >= 2
                     && src.is(before.last(), "::")
-                    && src.is(before.get(before.len() - 2), "admission")
+                    && src.is(before.get(before.len() - 2), module)
                     && src.is(after.get(1), "(");
                 if !spelled {
                     failures.push(format!(
                         "`{writer}` is named at {} ({}) other than as the call \
-                         `admission::{writer}(…)`",
+                         `{module}::{writer}(…)`",
                         src.location(at),
                         src.owner_of(at)
                     ));
@@ -5028,26 +5091,38 @@ fn pinned_writer_failures(
             }
         }
     }
-    let mut wanted: Vec<(String, String, Option<&str>)> = pins
-        .iter()
-        .map(|pin| (pin.writer.to_owned(), pin.owner.to_owned(), pin.after))
-        .collect();
-    wanted.sort();
-    found.sort();
+    // Counted, not collected (review N2): a second call that matches a pin already met — the same
+    // writer, owner and landmark — is a surplus call, not the pin seen twice.
+    let mut wanted: BTreeMap<(String, String, Option<&str>), usize> = BTreeMap::new();
+    for pin in pins {
+        *wanted
+            .entry((pin.writer.to_owned(), pin.owner.to_owned(), pin.after))
+            .or_insert(0) += 1;
+    }
+    let mut met: BTreeMap<(String, String, Option<&str>), usize> = BTreeMap::new();
+    for site in found {
+        *met.entry(site).or_insert(0) += 1;
+    }
     let said = |(writer, owner, after): &(String, String, Option<&str>)| {
         format!(
-            "`admission::{writer}` in `{owner}`{}",
+            "`{}::{writer}` in `{owner}`{}",
+            writers.get(writer.as_str()).copied().unwrap_or_default(),
             after.map(|l| format!(" after `{l}`")).unwrap_or_default()
         )
     };
     failures.extend(refusals);
-    for missing in wanted
-        .iter()
-        .filter(|pin| !found.contains(pin) && !refused.contains(&(pin.0.clone(), pin.1.clone())))
-    {
-        failures.push(format!("the pinned call {} is not there", said(missing)));
+    for (pin, &pinned) in &wanted {
+        let calls = met.get(pin).copied().unwrap_or(0);
+        if calls == 0 && !refused.contains(&(pin.0.clone(), pin.1.clone())) {
+            failures.push(format!("the pinned call {} is not there", said(pin)));
+        } else if calls != 0 && calls != pinned {
+            failures.push(format!(
+                "{} is called {calls}× where its pins say {pinned}×",
+                said(pin)
+            ));
+        }
     }
-    for extra in found.iter().filter(|site| !wanted.contains(site)) {
+    for extra in met.keys().filter(|site| !wanted.contains_key(*site)) {
         failures.push(format!("{} is not a pinned call site", said(extra)));
     }
     let wanted: BTreeMap<(String, String, String), usize> = pinned_callbacks
@@ -12525,6 +12600,7 @@ pub fn main(hand_over: fn()) {
 #[test]
 fn a_refused_landmark_fails_the_pinned_writers_guard() {
     let pins = [Pin {
+        module: "admission",
         writer: "enter_window_thread",
         owner: "planted crate::main",
         after: Some("parse"),
@@ -12564,6 +12640,93 @@ pub fn main() {
                  crate::main` at "
             ),
         "the guard fails with the refusal, once: {failures:?}"
+    );
+}
+
+/// RED (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP review, N2) — **a pin is one call**: a second settle
+/// in another branch before `cli::parse(…)` matches the pinned (writer, owner, landmark) and is
+/// reported as a surplus call, not taken for the pin seen twice.
+///
+/// MUTATION: compare the pins and the calls as sets again (`found.contains(pin)`) — the second
+/// call passes unseen.
+#[test]
+fn a_second_call_matching_a_pin_is_a_surplus() {
+    let pins = [Pin {
+        module: "persist",
+        writer: "settle_storage_dir",
+        owner: "planted crate::main",
+        after: None,
+    }];
+    let owners = [("planted crate::main", product_main_landmarks())];
+    let main = r#"
+pub mod persist { pub fn settle_storage_dir() {} }
+pub fn main(windowless: bool) {
+    if windowless {
+        persist::settle_storage_dir();
+        return;
+    }
+    persist::settle_storage_dir();
+    cli::parse();
+}
+"#;
+    let world = planted_world(
+        "ww-settle-twice",
+        &format!("{PLANTED_LANDMARK_ITEMS}{main}"),
+    );
+    assert_eq!(
+        pinned_writer_failures(&world, &pins, &owners, &[], &BTreeMap::new()),
+        vec![
+            "`persist::settle_storage_dir` in `planted crate::main` is called 2× where its pins \
+             say 1×"
+                .to_owned()
+        ],
+    );
+}
+
+/// RED (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP) — **a pinned writer is read through its own pin's
+/// module path**: `main`'s settle spelled `persist::settle_storage_dir(…)` before `cli::parse(…)` is
+/// its pin, and the same settle called through an import is refused by name and path.
+///
+/// MUTATION: check every writer's spelling against `admission` again (the guard before this
+/// ticket) — the settle spelled through `persist::` is refused and its pin is "not there".
+#[test]
+fn a_pinned_settle_is_read_through_its_own_module_path() {
+    let pins = [Pin {
+        module: "persist",
+        writer: "settle_storage_dir",
+        owner: "planted crate::main",
+        after: None,
+    }];
+    let owners = [("planted crate::main", product_main_landmarks())];
+    let items =
+        format!("{PLANTED_LANDMARK_ITEMS}pub mod persist {{ pub fn settle_storage_dir() {{}} }}\n");
+    let through = r#"
+pub fn main() {
+    persist::settle_storage_dir();
+    cli::parse();
+}
+"#;
+    let world = planted_world("ww-settle-through-its-path", &format!("{items}{through}"));
+    assert_eq!(
+        pinned_writer_failures(&world, &pins, &owners, &[], &BTreeMap::new()),
+        Vec::<String>::new(),
+        "the settle is where its pin says"
+    );
+    let imported = r#"
+use persist::settle_storage_dir;
+pub fn main() {
+    settle_storage_dir();
+    cli::parse();
+}
+"#;
+    let world = planted_world("ww-settle-imported", &format!("{items}{imported}"));
+    let failures = pinned_writer_failures(&world, &pins, &owners, &[], &BTreeMap::new());
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure
+                .contains("other than as the call `persist::settle_storage_dir(…)`")),
+        "the import is refused by its path: {failures:?}"
     );
 }
 
