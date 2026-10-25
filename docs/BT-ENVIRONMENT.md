@@ -460,14 +460,14 @@ two-second round and through the stderr trace sink (no clock of its own; the
 window thread only adds each turn to two counters):
 
 ```
-BT_PERF_TRACE threads total=32 named=[bt-pty-reader:3,bt-pty-writer:3,bt-hang-watch:1,main:1] unnamed=6
+BT_PERF_TRACE threads total=14 named=[bt-pty-reader:3,bt-pty-writer:3,bt-hang-watch:1,main:1] unnamed=6
 BT_PERF_TRACE turns window_ms=2000 turns=10 us_total=6131 by_source=Timed(ShellCaret):3/800,Timed(RefusedFrame):3/740,Window(EventRedraw):3/4302,Event(TaskbarAnswered):1/288 unkept=0
 ```
 
 `threads` comes before the first `turns` line and again whenever it differs
 from the last one said (a pane opened or closed, a worker started or ended): every thread of the
 process, grouped by the name it was given (Windows `GetThreadDescription`, macOS
-`pthread_getname_np`'s name), most threads first; a name's spaces, commas, colons
+`proc_pidinfo`'s `pth_name`), most threads first; a name's spaces, commas, colons
 and brackets print as `_`. `unnamed` are the threads nobody named — the graphics
 driver's, the text services', the system's thread pools. A web page's browser
 runs in processes of its own and is not counted. Where no census can be taken

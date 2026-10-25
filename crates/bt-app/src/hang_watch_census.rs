@@ -549,8 +549,8 @@ mod tests {
         );
     }
 
-    /// RED (mutation: read the counters on an untraced run) — **untraced, a round asks nothing
-    /// and says nothing.**
+    /// RED (mutation: take the thread census before the trace check) — **untraced, a round
+    /// walks no threads and says nothing.**
     #[test]
     fn an_untraced_round_is_silent() {
         let census = Census::new();

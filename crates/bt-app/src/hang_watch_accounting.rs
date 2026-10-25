@@ -1430,6 +1430,47 @@ mod tests {
         );
     }
 
+    /// RED (T-IDLE-TURN-COST; mutation: hand the census `false` for a stale turn in
+    /// `Accounts::close`, or no owner in `Accounts::begin`) — **the accounting hands the turn
+    /// census each turn's staleness and owner**: a wake already due at park is filed as
+    /// `Stale(owner)`, a wake that came at its deadline as `Timed(owner)`, and a turn owed nothing
+    /// as `Untold`.
+    #[test]
+    fn the_turn_census_is_handed_each_turns_staleness_and_owner() {
+        use super::super::WakeCause;
+        use super::super::census::turns_line;
+        let heart = heart();
+        let census = &heart.accounts.census;
+        let before = census.reading();
+        // Owed nothing: untold, 100 µs.
+        heart.woke_at_ns(11_900 * US);
+        let parking = heart.until(
+            heart.origin + Duration::from_millis(10),
+            Some(WakeOwner::ForegroundProgram),
+        );
+        heart.park_at_ns(parking, 12 * MS);
+        // Already due when the loop parked: stale, 100 µs, though winit says the time was reached.
+        heart.woke_at_ns(12_100 * US);
+        census.started(WakeCause::ResumeTimeReached);
+        heart.park_at_ns(Park::Indefinite, 12_200 * US);
+        // Owed nothing again: untold, 1 ms.
+        heart.woke_at_ns(20 * MS);
+        let parking = heart.until(
+            heart.origin + Duration::from_millis(40),
+            Some(WakeOwner::Toast),
+        );
+        heart.park_at_ns(parking, 21 * MS);
+        // Woken at its deadline: timed, 500 µs.
+        heart.woke_at_ns(40 * MS);
+        census.started(WakeCause::ResumeTimeReached);
+        heart.park_at_ns(Park::Indefinite, 40_500 * US);
+        assert_eq!(
+            turns_line(census, &before, &census.reading(), 2_000),
+            "BT_PERF_TRACE turns window_ms=2000 turns=4 us_total=1700 \
+             by_source=Untold:2/1100,Timed(Toast):1/500,Stale(ForegroundProgram):1/100 unkept=0"
+        );
+    }
+
     /// RED (T-WINDOW-THREAD-UNDER-LOAD) — **a wake that was a wait and came late names its owner
     /// beside the delay, and reads no staleness.**
     ///

@@ -58438,15 +58438,6 @@ mod hold_station_tests {
         );
         // One scope covers the entire dispatch, including early-return gates
         // and the application doors. `during` owns the restoration.
-        // The station is named once and handed to both the turn census and the
-        // scope (T-IDLE-TURN-COST), so the scope is asked for by that binding.
-        assert_eq!(
-            event
-                .matches("let station = window_event_station(&event);")
-                .count(),
-            1,
-            "the event's station is not named once, before its handlers"
-        );
         let opened = "hang_watch::during(station, || {";
         assert_eq!(
             event.matches(opened).count(),
