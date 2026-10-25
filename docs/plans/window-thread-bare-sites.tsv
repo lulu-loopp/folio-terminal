@@ -33,7 +33,6 @@ bt-app	-	crate::diagnostics::rotate_if_oversized	std::fs::metadata	1
 bt-app	-	crate::diagnostics::rotate_if_oversized	std::fs::rename	1
 bt-app	-	crate::explorer_menu::removal_waited_on	std::sync::mpsc::Receiver::recv_timeout	1
 bt-app	-	crate::explorer_menu::same_path	std::fs::canonicalize	1
-bt-app	-	crate::facts_of_a_file_the_user_chose	std::fs::metadata	1
 bt-app	-	crate::files::canonical_path	std::fs::canonicalize	1
 bt-app	-	crate::files::read_directory	std::fs::metadata	1
 bt-app	-	crate::files::read_directory	std::fs::read_dir	1
@@ -60,6 +59,7 @@ bt-app	-	crate::psreadline::installed_disk::<System as Disk>::entries	std::fs::r
 bt-app	-	crate::raster_peek_page	std::fs::metadata	1
 bt-app	-	crate::rebuild_every_native_surface	pollster::block_on	1
 bt-app	-	crate::release_trial_writer	std::fs::create_dir_all	1
+bt-app	-	crate::runtime::peek::facts_of_a_file_the_user_chose	std::fs::metadata	1
 bt-app	-	crate::runtime::preview::Runtime::open_preview_web_file_on	std::fs::canonicalize	1
 bt-app	-	crate::runtime::profiles::Runtime::toggle_root_menu	std::fs::metadata	1
 bt-app	-	crate::runtime::web::revived_page_of	std::fs::canonicalize	1

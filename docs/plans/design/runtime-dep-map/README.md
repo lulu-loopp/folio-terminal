@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **783 items, 587 free functions and 196 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 7's head; 799, 600 and 199 before it,
+- **unclassified.tsv**: **769 items, 573 free functions and 196 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 8's head; 783, 587 and 196 before it,
+  799, 600 and 199 before batch 7,
   813, 612 and 201 before batch 6,
   819, 613 and 206 before batch 5,
   823, 617 and 206 before batch 4,
@@ -107,7 +108,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 5 | `runtime/palette.rs` | moved by batch 5 (6 items; `Runtime::focus_seat` held, below) | — |
    | 6 | `runtime/terminal.rs` | moved by batch 6 (13 items; `deliver_osc_attention` went to `runtime/attention.rs` instead, below) | — |
    | 7 | `runtime/git.rs` | moved by batch 7 (14 items, `Runtime::expand_commit` by a ruled exception, below), with `seat_holds_the_keyboard` and `apply_leaf_metrics` as the terminal batch's tail | — |
-   | 8 | `runtime/peek.rs` | 14 (14 + 0) | 21 |
+   | 8 | `runtime/peek.rs` | moved by batch 8 (14 items; five callers inside `runtime/peek.rs` dropped their `crate::` prefix, below) | — |
    | 9 | `runtime/clipboard.rs` | 16 (13 + 3) | 27 |
    | 10 | `runtime/floats.rs` | 15 (7 + 8) | 34 |
    | 11 | `runtime/files.rs` | 19 (17 + 2) | 38 |
@@ -141,7 +142,9 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    **A product caller in another `runtime/` file imports the moved item from its new path** (`use
    crate::runtime::<topic>::<item>;`, an import line and no body text; ruled at batch 7). What stays forbidden is a
    non-test `use runtime::…` at the crate root to keep a root caller compiling: an item with a product caller at the
-   root waits until that caller moves.
+   root waits until that caller moves. A caller inside the target module that named the item by its root path drops
+   the `crate::` prefix (`crate::x(` becomes `x(`; ruled at batch 8, where five calls in `runtime/peek.rs` did); no
+   root re-export.
 
    **Held items** (each row's generated `called_from` home is not where it goes):
    - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).
