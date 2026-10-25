@@ -2588,7 +2588,6 @@ crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	is_empty	2
 crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	iter	1	
 crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	map	2	
 crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	zip	2	
-crates/bt-app/src/main.rs	bt-app crate::revived_page_of	Ambiguous	ok	1	
 crates/bt-app/src/main.rs	bt-app crate::run_decoration_worker	Ambiguous	and_then	1	
 crates/bt-app/src/main.rs	bt-app crate::scale_door	Ambiguous	as_micros	1	
 crates/bt-app/src/main.rs	bt-app crate::scale_door	Ambiguous	elapsed	1	
@@ -4792,6 +4791,7 @@ crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::warm_web_e
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Ambiguous	collect	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Ambiguous	filter_map	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Ambiguous	to_owned	1	
+crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::revived_page_of	Ambiguous	ok	1	2026-10-25: T-SPLIT-2B batch 2; the same site, moved with `revived_page_of` from main.rs into runtime/web.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::abandon_a_window_nothing_arrived_in	Ambiguous	enumerate	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::answer_restore	Ambiguous	is_empty	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::answer_restore	Ambiguous	saturating_sub	1	

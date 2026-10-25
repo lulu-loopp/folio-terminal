@@ -1479,8 +1479,6 @@ crates/bt-app/src/main.rs	bt-app crate::resolve_document_pictures	Ambiguous	clon
 crates/bt-app/src/main.rs	bt-app crate::resolve_document_pictures	Dynamic	ask	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	map_or_else	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	or_else	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::revived_page_of	Ambiguous	ok	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::revived_page_of	Effect	std::fs::canonicalize	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::close_pane, Runtime::reap_exited_tabs
 crates/bt-app/src/main.rs	bt-app crate::run_decoration_worker	Ambiguous	and_then	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::scale_door	Ambiguous	as_micros	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::scale_door	Ambiguous	elapsed	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -3229,6 +3227,8 @@ crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Ambiguous	filter_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Ambiguous	to_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Path	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::revived_page_of	Ambiguous	ok	1	unreviewed	2026-10-25: T-SPLIT-2B batch 2; the same site, moved by K2 batch 2 with `revived_page_of` from main.rs into runtime/web.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::revived_page_of	Effect	std::fs::canonicalize	1	violation	2026-10-25: T-SPLIT-2B batch 2; the same site, moved by K2 batch 2 with `revived_page_of` from main.rs into runtime/web.rs: K2 moves the item, not the call; the finding stands: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::close_pane, Runtime::reap_exited_tabs
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::apply_window_min_inner_size	Ambiguous	context	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::apply_window_min_inner_size	Macro	anyhow	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::follow_the_window_band	Ambiguous	context	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
