@@ -2629,8 +2629,11 @@ fn merge(shipped: Vec<Profile>, file: &ProfilesV1) -> (Vec<Profile>, Vec<Profile
 /// first one it can is its id's row in force, and every later row of that id
 /// is a duplicate. The profiles merge and a press's delta read a document by
 /// this (review rounds 4 and 5).
+///
+/// The seed is the process's settled one ([`settle_registry`]), so a press's delta does not ask
+/// the machine for the seed again (off Windows, the `$SHELL` probe) on the thread that pressed.
 pub(crate) fn installable() -> impl Fn(&ProfileEntryV1) -> bool {
-    let shipped = shipped();
+    let shipped: &'static [Profile] = &registry().seed;
     let platform = SeedPlatform::of_this_build();
     move |entry: &ProfileEntryV1| {
         let seed = shipped.iter().find(|profile| profile.id == entry.id);
