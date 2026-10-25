@@ -2163,7 +2163,7 @@ then a mark.
 | take and deliver | `bt-app` | `FolioApp::user_event` → `attention_wire::take` → `attention_wire::Message::decode` → `deliver_attention`, which finds the pane by `attention_wire::names_this_pane` | `attention_wire::Message` | window thread |
 | ledger | `bt-workbench` | `attention::AttentionLedger::apply` | `attention::Event`, `attention::Reach`, `attention::Outcome` | window thread |
 | reach and interruption | `bt-app` | `notify::desktop_reach` → `Runtime::raise_attention` → `notify::interruption` (a taskbar flash, or a desktop message through the notifications) | `notify::Interruption` | window thread |
-| answer | `bt-app` | `Runtime::answer_attention` → `answer_attention_in` (from typing, the IME, a paste, a click, the wheel); the look through `Runtime::mark_attention_seen` (from `Runtime::activate_tab`) | `UserInputKind`, `bt_workbench::attention::AnswerKind` | window thread |
+| answer | `bt-app` | `Runtime::answer_attention` → `runtime::attention::answer_attention_in` (from typing, the IME, a paste, a click, the wheel); the look through `Runtime::mark_attention_seen` (from `Runtime::activate_tab`) | `UserInputKind`, `bt_workbench::attention::AnswerKind` | window thread |
 | tab mark | `bt-app` | `TabState::mark_state` (from `Runtime::refresh_chrome_with_overlay`) → `seats::window_tab_strip`, `seats::rail_chrome` or `seats::focus_rail_chrome` (the tab strip, the rail, the focus rail) → `marks::status_dot_sprite` | `seats::TabMarkState` | window thread, at frame build |
 | the pane that asks | `bt-app` | `Runtime::layout_peek_layer` (`LeafSession::session_facts` → `SessionFacts::claim`) → `peek_strip::push_mark_slot` → `marks::status_dot_sprite`; the palette's places row through `palette::place_row` | `peek_strip::PeekLeaf` | window thread, at the peek layer's and the palette's frame build |
 
@@ -2805,7 +2805,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 823 (617 free functions, 206 methods) after batch 3. The table
+into their topics batch by batch: 819 (613 free functions, 206 methods) after batch 4. The table
 below is the 2026-09-21 manifest's sort of the 201 methods then left
 (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
 
