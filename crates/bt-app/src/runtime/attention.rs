@@ -8,6 +8,7 @@ use crate::{
     attention, attention_trace, document_request, emit_attention_lines, float, i18n, marks, notice,
     notify, profiles, quit, seats, taskbar_lane, toast,
 };
+use crate::{attention_delivery, attention_map, hang_watch};
 use anyhow::Result;
 use bt_layout::SeatId;
 use std::time::Instant;
@@ -1181,6 +1182,125 @@ impl<B: Backend> Runtime<'_, B> {
         }
         Ok(())
     }
+}
+
+/// **The other lane: what a program wrote down its own tty** (`attention` plan §11.6, slice A1).
+///
+/// Two arrivals and two levels, and the levels are declared in `attention_map`'s own table rather
+/// than decided here — a sequence's worth is data, so a family whose level is argued over is a row
+/// somebody edits.
+///
+/// * the **weak** level, `OSC 1337;RequestAttention=`. `bt-term` keeps it as a *level* on the
+///   status snapshot, because that is what the bytes are; the ledger takes *edges*, because a
+///   request is a thing that begins. [`attention::AttentionLedger::weak_edge`] is the one
+///   translation between the two, and it lives beside the mirror it compares against so that no
+///   call site has to keep a second copy of "what was it last time".
+/// * the **event** level, `OSC 9`, `OSC 777;notify` and kitty's `OSC 99`. It mints nothing and
+///   holds nothing (red line 14). What it may do is two things, and which of them happens is
+///   decided by whether this pane already has a request standing: on a pane that is asking, it
+///   **lends its words** to that request's one interruption; on a pane that is asking nothing, it
+///   is an **event of its own** and goes through the event door — where §11.7's three tiers decide
+///   how far it gets and the trace records which sequence carried it.
+///
+/// **One arrival, one interruption**, which is §11.6's pin ② said as an invariant rather than as a
+/// test: the words go to exactly one place, and the place is the request when there is one,
+/// because a standing request is the stronger claim and the one the reader can still act on.
+///
+/// **The transport is `osc` and never `bel`** (§13.2.2). codex reaches us as a bare bell only
+/// because it does not recognise this terminal; recording an `OSC 9` from a codex that *does*
+/// recognise it as a bell would make the one fact the survey is asking about — did the adapter
+/// install — unanswerable from the file that exists to answer it.
+///
+/// **Here and not in the per-frame pass**, and the order inside is the reason: a program that
+/// writes `RequestAttention=yes` and then `OSC 9;Allow this?` in one burst has said both things
+/// before this function is called, so the request is minted and *then* the words are offered to it.
+/// Run from the animation tick instead, the announcement would arrive at a pane with no live
+/// request and its sentence would be dropped — the program's own words lost to a scheduling
+/// detail.
+// Nine, and `settle_attention`'s allowance for its reason: every one is a different question about
+// one turn of one tab's OSC lane, and a struct would move the list rather than shorten it. The
+// ninth is when now is, which this lane needs because a `RequestAttention=yes` arriving on it is a
+// program speaking in that pane (`attention` plan §11.10.4).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn deliver_osc_attention(
+    tab: &mut TabState,
+    index: usize,
+    tab_is_active: bool,
+    place: notify::WindowPlace,
+    switches: attention::NotificationSwitches,
+    next_place: &mut attention::Places,
+    announcements: &[(SeatId, bt_term::TerminalNotification)],
+    now: Instant,
+    trace: Option<&attention_trace::Trace>,
+    raised: &mut Vec<AttentionDelivery>,
+) {
+    hang_watch::during(hang_watch::Station::DrainAttention, || {
+        let reach = notify::desktop_reach(tab_is_active, place);
+        let tab_id = tab.id;
+        // Carried out of the mutable walk for `settle_attention`'s reason: the title's three-layer
+        // chain reads facts of the tab that its leaves' borrow is holding. The carried title travels
+        // with each one because it is the announcement's own field and no two arrivals share it.
+        let mut allowed: Vec<(SeatId, Option<String>, attention::Raised)> = Vec::new();
+        for (seat, leaf) in tab.leaves_mut() {
+            let Some(event) = leaf
+                .attention
+                .weak_edge(leaf.session.status().attention_request)
+            else {
+                continue;
+            };
+            let at = attention::Site {
+                tab: index,
+                seat: *seat,
+            };
+            let outcome = leaf.attention.apply(at, reach, event, next_place, now);
+            emit_attention_lines(trace, outcome.lines);
+            allowed.extend(outcome.raised.map(|one| (*seat, None, one)));
+        }
+        for (seat, notification) in announcements {
+            // The row decides, and its pin is that no sequence on this lane is ever the strong level:
+            // "a program is blocked on your input" is a sentence no OSC in existence can say, and
+            // reading one as if it could is the substitution this whole block was opened to undo.
+            if attention_map::osc_credential(attention_map::OscArrival::Notification(
+                notification.source,
+            )) != Some(attention::Credential::Announced)
+            {
+                continue;
+            }
+            let Some(leaf) = tab.sessions.get_mut(seat) else {
+                continue;
+            };
+            let words = attention_map::announced_words(notification);
+            if leaf.attention.announce(words) {
+                continue;
+            }
+            let outcome = leaf.attention.announce_turn_end(
+                attention::Site {
+                    tab: index,
+                    seat: *seat,
+                },
+                reach,
+                switches,
+                attention_map::OSC_TRANSPORT,
+                attention_map::osc_via(notification.source),
+                words,
+            );
+            emit_attention_lines(trace, outcome.lines);
+            allowed.extend(
+                outcome
+                    .raised
+                    .map(|one| (*seat, notification.title.clone(), one)),
+            );
+        }
+        for (seat, carried, one) in allowed {
+            raised.push(attention_delivery(
+                tab,
+                tab_id,
+                seat,
+                carried.as_deref(),
+                one,
+            ));
+        }
+    })
 }
 
 /// **The cancelled quit's card, raised on `toasts`** (T-QUIT-DOCUMENTS; design note

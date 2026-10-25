@@ -2155,7 +2155,7 @@ then a mark.
 | hop | crate | entry | carries | lane |
 |---|---|---|---|---|
 | escape sequence (weak tier) | `bt-term` | `inline_image::parse_request_attention` → `AdapterEvent::AttentionRequest` → `lifecycle::classify` → `DualPlaneSession::apply_attention_request` | `session::AttentionRequest`; the level `SessionStatus::attention_request` | window thread, inside the feed (`bt_app::Runtime::drain_pty`) |
-| level to edge | `bt-app` | `deliver_osc_attention` (from `Runtime::drain_pty`) and `settle_attention` (from `Runtime::advance_strip_animation`), each through `bt_workbench::attention::AttentionLedger::weak_edge` | `AttentionDelivery` | window thread |
+| level to edge | `bt-app` | `runtime::attention::deliver_osc_attention` (from `Runtime::drain_pty`) and `settle_attention` (from `Runtime::advance_strip_animation`), each through `bt_workbench::attention::AttentionLedger::weak_edge` | `AttentionDelivery` | window thread |
 | the verb (folio attention, family and event) | `bt-app` | `cli::attention` → `attention_wire::run_verb` → `bt_platform::attention_pipe::send_line` | `cli::AttentionCall`, one line of JSON (`attention_wire::Message`) | the verb's own process, which builds no window |
 | endpoint (strong tier) | `bt-platform` | `attention_pipe::AttentionPipe::start`; its listener hands each line to the closure it was given | one line of text | `folio-attention-endpoint` |
 | park and wake | `bt-app` | `attention_wire::open` → `attention_wire::park` (a bounded inbox, the oldest line dropped) → `AppEvent::AttentionSpoke` | one line of text | parked on `folio-attention-endpoint`; the event wakes the window thread |

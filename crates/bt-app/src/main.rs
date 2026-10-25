@@ -316,10 +316,13 @@ use runtime::platform_pointer_of;
 use runtime::{
     a_capture_still_holds_its_pointer, a_page_is_off_the_glass, a_page_still_has_a_pane,
     a_page_was_replaced, a_retirement_happens_on_this_turn, answer_attention_in,
-    apply_tabs_leaf_metrics, hole_for, merge_notice_card, next_attention_stop, profile_menu_anchor,
-    raise_cancelled_quit_card_on, recall_flash, rescan_leaf_for_search, resize_worth_solving,
-    resolved_theme_change, revived_page_of, tab_surface_tip_boxes,
-    take_psreadline_resize_reanchor_input, tooltip_anchor_for,
+    apply_tabs_leaf_metrics, drain_may_take_another_slice, hole_for, in_drain_feed_turn,
+    local_image_activation, merge_notice_card, next_attention_stop, profile_menu_anchor,
+    raise_cancelled_quit_card_on, recall_flash, reference_card, reference_run_rect,
+    rescan_leaf_for_search, resize_worth_solving, resolved_theme_change, restart_seed,
+    revived_page_of, should_copy_on_select_release, step_leaf_text_scale, stepped_command_mark,
+    tab_surface_tip_boxes, take_psreadline_resize_reanchor_input, terminal_link_answers_a_press,
+    tooltip_anchor_for,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
@@ -10220,54 +10223,6 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
         // `--with-environment` (owner ruling 2026-10-05): the launcher's environment, when the
         // command line asked for it, and the account's otherwise.
         carried_environment: plan.carried_environment.clone(),
-    }
-}
-
-/// **What a `Restart shell…` spawns** — `docs/M2-restart-shell-contract.md`
-/// §1.1, as a function of the leaf that is leaving.
-///
-/// A free function so the contract can be pinned without a window: the three
-/// things §1.1 says are kept are kept *here*, and every one of them is kept by
-/// being read off the dying leaf rather than looked up somewhere newer.
-///
-/// * **The profile is the seat's own**, not the current default. A seat
-///   restarted twice runs the same program both times, which is the whole of
-///   what "同一 seat 反复重启永远用同一个可执行文件" asks for; reading
-///   `settings.default_profile` here would turn a Git Bash pane into a
-///   PowerShell the first time somebody changed that setting.
-/// * **The directory is where the pane stands**, read by the caller through
-///   [`LeafSession::seed_place_for_a_new_shell`]: the last trusted OSC 7 report,
-///   else the shell process's current folder, else the seat's initial cwd.
-///   Since T-CWD-FROM-PROCESS (2026-10-17) a `cd` the old shell performed
-///   without announcing it *is* seen when its process can be read — that
-///   supersedes §1.1's 「最后已知」 and not 「当前」 for this verb; a process
-///   that cannot be read leaves the old ladder. Until 2026-10-04 only the first
-///   rung was read, so a pane opened in a chosen folder whose shell never
-///   reported restarted at its profile's default instead of where it was born.
-/// * **No folder at all is an absence, not a fallback.** `None` (a pane whose
-///   spawn could name no place, or one put down at its shell's own `~`) reaches
-///   `profiles::spawn_place`, which answers it with the profile's own starting
-///   directory — the same answer a brand-new pane on that profile gets.
-///
-/// The manual name is not here because it is not a fact about a shell: it is the
-/// tab's (`TabSeed::manual_name`), and a restart that never touches a tab keeps
-/// it by construction rather than by copying it.
-fn restart_seed(profile: &str, standing_in: Option<profiles::SeedPlace>) -> LeafSeed {
-    LeafSeed {
-        profile: profile.to_owned(),
-        // Named or carried as the leaf says (`LeafSession::seed_place_for_a_new_shell`):
-        // `profiles::place_for` weighs it.
-        cwd: standing_in,
-        // A running pane's profile is one this build has, by construction — it
-        // started a process from it.
-        unknown_profile_id: None,
-        // A new shell starts its card at the tail.
-        card_skip: 0,
-        // A restart is a new shell in the same place; nothing is owed to its prompt.
-        prefill: None,
-        // Not the seed's to say: a Restart shell is born in its tab, and `born_in_tab` gives it
-        // the tab's carried environment (coordinator's ruling 2026-10-09).
-        carried_environment: None,
     }
 }
 
@@ -23242,25 +23197,6 @@ enum SelectionDragMode {
     Line,
 }
 
-/// Whether letting go of a drag-selection writes it to the clipboard.
-///
-/// `copy_on_select` is the reader's own answer, and it is a parameter rather
-/// than a guard at the call site so that the whole policy is one function a
-/// test can ask (gesture audit 2026-08-26, 丙4). The audit's finding about this
-/// gesture is unlike the other six: the reader **can** perform it — they do,
-/// constantly — they simply are not told that they did, and what they were not
-/// told is that their clipboard is gone. Windows Terminal's `copyOnSelect`
-/// ships **off**, so it is not muscle memory arriving with the reader either.
-/// The switch is what gives the behaviour a name; it stays on by default
-/// because that is what every build of this window has done.
-fn should_copy_on_select_release(
-    route: Option<&MouseRoute>,
-    single_click: bool,
-    copy_on_select: bool,
-) -> bool {
-    copy_on_select && !single_click && matches!(route, Some(MouseRoute::Local(_)))
-}
-
 /// Whether a press that hit no chrome target reaches no terminal grid, and so is
 /// the seat's to keep rather than the selection machinery's to act on.
 ///
@@ -24046,26 +23982,6 @@ struct LeafSearchRescan {
 enum Step {
     Back,
     Forward,
-}
-
-/// Which command a walk lands on, given how many there are and which one the
-/// viewport is showing.
-///
-/// A function rather than four lines inside [`Runtime::step_command_mark`], for
-/// [`stepped_tab`]'s reason one file over: the ends are the whole of the rule and
-/// the ends are what a window, a session and a solve make expensive to reach.
-///
-/// **`at` is `None` when the viewport is above every command** — scrolled into
-/// output that predates the oldest mark, or into a transcript whose oldest marks
-/// have been evicted. Forwards, the first command is the next one; backwards there
-/// is nothing before it, and there is no wrap to throw the walk to the newest.
-fn stepped_command_mark(count: usize, at: Option<usize>, step: Step) -> Option<usize> {
-    match (step, at) {
-        (Step::Forward, None) => (count > 0).then_some(0),
-        (Step::Back, None) => None,
-        (Step::Forward, Some(index)) => (index + 1 < count).then_some(index + 1),
-        (Step::Back, Some(index)) => index.checked_sub(1),
-    }
 }
 
 /// `.cmdrail.srch-mode` — whether one pane's rail is carrying search results
@@ -28792,108 +28708,6 @@ fn facts_of_a_file_the_user_chose(path: &Path) -> (bool, Option<u64>) {
     )
 }
 
-/// [`ReferenceCard`] for the target `uri`, or `None` for a reference this window
-/// has no card for.
-///
-/// **It is [`hyperlink_activation`] read for a hand instead of for a click**,
-/// and that is the whole of the implementation on purpose. §7.1.5j ① already
-/// folded every shape the terminal can print a local file in — a bare path, a
-/// `file:` URI, an OSC 8 target — into one `file:` link fed to one routing
-/// table, and a *second* table here would be the thing that clause exists to
-/// forbid: a hover that decided for itself which references are files would
-/// drift from the click that opens them, and the first symptom would be a card
-/// over something a press does nothing to.
-///
-/// So the mapping is the plain half of that table, arm for arm:
-///
-/// * [`HyperlinkActivation::Preview`] — this window's own answer for a file, so
-///   the card is the one that shows a file. A share arrives down this arm too
-///   and is *meant* to: §7.1.3's network refusal is what the card then prints,
-///   the preview's judgement borrowed exactly as the files column borrows it.
-/// * [`HyperlinkActivation::FilesColumn`] — this window's own answer for a
-///   folder, so the card is the one that shows a folder.
-/// * everything else — **no card**, and each for the reason its own arm gives.
-///   `Browser`, `Share`, `Scheme` and `Blocked` are `Ctrl`'s answers and can never be reached with
-///   `control: false`; they are listed so that a future arm cannot be added
-///   without someone deciding what a hand resting on it should see. `None` is
-///   the plain half of a row with no destination inside this window at all — a
-///   `mailto:`, a scheme with no arm — and a card over one would be this window
-///   offering to show something it cannot fetch. **`Page` is the one arm that
-///   acts and still raises nothing**, and that is a fact about the cards this
-///   window has rather than about the address: both of them — the glance and
-///   the folder flyout — are made of a thing on this disk, and a remote page is
-///   not one. Reading it to fill a card would mean fetching it, which is the
-///   press's business and not a resting hand's; the hover line already prints
-///   the address, which is everything this window knows about it before it goes.
-///
-/// `control` is deliberately not a parameter. A modifier held during a hover is
-/// not a request; the card is what this window has to say about the reference,
-/// and `Ctrl` changes where a *press* goes rather than what the thing is.
-fn reference_card(
-    uri: &str,
-    namer: bt_transcript::paths::PathNamer<'_>,
-    verdict: &dyn Fn(&Path) -> Option<bt_term::PathVerdict>,
-) -> Option<ReferenceCard> {
-    match hyperlink_activation(false, true, uri, namer, verdict) {
-        HyperlinkActivation::Preview(path, _) => Some(ReferenceCard::File(path)),
-        HyperlinkActivation::FilesColumn(path) => Some(ReferenceCard::Folder(path)),
-        HyperlinkActivation::None
-        | HyperlinkActivation::Browser(_)
-        | HyperlinkActivation::Share(_)
-        | HyperlinkActivation::Scheme(_)
-        | HyperlinkActivation::Page(_)
-        | HyperlinkActivation::External(_)
-        | HyperlinkActivation::Reveal(_)
-        | HyperlinkActivation::Blocked(_) => None,
-    }
-}
-
-/// **The box a reference's run occupies on one row of a pane's grid** — the
-/// rectangle a card raised over it is placed against.
-///
-/// `cells` is the segment's flat cell indices in reading order, exactly as
-/// [`bt_viewport::ViewportFrame::hyperlink_cells`] hands them over and exactly
-/// the set the underline is painted on, so the card stands beside what is lit
-/// rather than beside a second opinion about where the reference is.
-///
-/// **One row's worth, and the row is the pointer's.** A segment may cover the
-/// tail of one row and the head of the next — `hyperlink_cells`' own note says
-/// so — and a rectangle unioned across both would be a box with a hole in it
-/// spanning the whole pane's width. The row the hand is on is the row the hand
-/// is asking about, which is the same choice a wrapped file row in the tree
-/// makes by having only one.
-///
-/// `top` and `bottom` are that row's own drawn interval rather than a multiple
-/// of the cell height, because a pane with a math block in it has rows of
-/// unequal height and the frame is the only thing that knows theirs.
-fn reference_run_rect(
-    cells: &[u32],
-    columns: u32,
-    row: u32,
-    origin: [f32; 2],
-    cell_width: f32,
-    top: f32,
-    bottom: f32,
-) -> Option<[f32; 4]> {
-    let (mut first, mut last) = (u32::MAX, 0u32);
-    for &cell in cells {
-        if columns == 0 || cell / columns != row {
-            continue;
-        }
-        let column = cell % columns;
-        first = first.min(column);
-        last = last.max(column);
-    }
-    (first <= last).then(|| {
-        [
-            origin[0] + first as f32 * cell_width,
-            origin[1] + top,
-            origin[0] + (last + 1) as f32 * cell_width,
-            origin[1] + bottom,
-        ]
-    })
-}
-
 // `names_an_html_page` stood here from §7.1.5g (user ruling 2026-08-20) until
 // 2026-08-25. It answered "is this HTML", and while `html` and `htm` were the
 // only spellings on the engine's lane that was the same question as "is this a
@@ -29085,26 +28899,6 @@ impl LocalImageActivation {
             Self::None => None,
             Self::Preview(path) | Self::External(path) => Some(path),
         }
-    }
-}
-
-/// Which door a click on a verified inline image reference goes through.
-///
-/// The modifier is read through [`ClickIntent`] rather than by an `if control`
-/// of its own, because this arm and [`hyperlink_activation`]'s are the same rule
-/// stated about two kinds of reference (§7.1.5g, user ruling 2026-08-20) — and a
-/// rule written down twice is a rule that can come to be two.
-fn local_image_activation(
-    control: bool,
-    click_no_drag: bool,
-    worker_verified_path: Option<&std::path::Path>,
-) -> LocalImageActivation {
-    let Some(path) = worker_verified_path.filter(|_| click_no_drag) else {
-        return LocalImageActivation::None;
-    };
-    match ClickIntent::of(control) {
-        ClickIntent::Here => LocalImageActivation::Preview(path.to_path_buf()),
-        ClickIntent::System => LocalImageActivation::External(path.to_path_buf()),
     }
 }
 
@@ -30078,125 +29872,6 @@ fn attention_delivery(
         ),
         body: raised.body,
     }
-}
-
-/// **The other lane: what a program wrote down its own tty** (`attention` plan §11.6, slice A1).
-///
-/// Two arrivals and two levels, and the levels are declared in `attention_map`'s own table rather
-/// than decided here — a sequence's worth is data, so a family whose level is argued over is a row
-/// somebody edits.
-///
-/// * the **weak** level, `OSC 1337;RequestAttention=`. `bt-term` keeps it as a *level* on the
-///   status snapshot, because that is what the bytes are; the ledger takes *edges*, because a
-///   request is a thing that begins. [`attention::AttentionLedger::weak_edge`] is the one
-///   translation between the two, and it lives beside the mirror it compares against so that no
-///   call site has to keep a second copy of "what was it last time".
-/// * the **event** level, `OSC 9`, `OSC 777;notify` and kitty's `OSC 99`. It mints nothing and
-///   holds nothing (red line 14). What it may do is two things, and which of them happens is
-///   decided by whether this pane already has a request standing: on a pane that is asking, it
-///   **lends its words** to that request's one interruption; on a pane that is asking nothing, it
-///   is an **event of its own** and goes through the event door — where §11.7's three tiers decide
-///   how far it gets and the trace records which sequence carried it.
-///
-/// **One arrival, one interruption**, which is §11.6's pin ② said as an invariant rather than as a
-/// test: the words go to exactly one place, and the place is the request when there is one,
-/// because a standing request is the stronger claim and the one the reader can still act on.
-///
-/// **The transport is `osc` and never `bel`** (§13.2.2). codex reaches us as a bare bell only
-/// because it does not recognise this terminal; recording an `OSC 9` from a codex that *does*
-/// recognise it as a bell would make the one fact the survey is asking about — did the adapter
-/// install — unanswerable from the file that exists to answer it.
-///
-/// **Here and not in the per-frame pass**, and the order inside is the reason: a program that
-/// writes `RequestAttention=yes` and then `OSC 9;Allow this?` in one burst has said both things
-/// before this function is called, so the request is minted and *then* the words are offered to it.
-/// Run from the animation tick instead, the announcement would arrive at a pane with no live
-/// request and its sentence would be dropped — the program's own words lost to a scheduling
-/// detail.
-// Nine, and `settle_attention`'s allowance for its reason: every one is a different question about
-// one turn of one tab's OSC lane, and a struct would move the list rather than shorten it. The
-// ninth is when now is, which this lane needs because a `RequestAttention=yes` arriving on it is a
-// program speaking in that pane (`attention` plan §11.10.4).
-#[allow(clippy::too_many_arguments)]
-fn deliver_osc_attention(
-    tab: &mut TabState,
-    index: usize,
-    tab_is_active: bool,
-    place: notify::WindowPlace,
-    switches: attention::NotificationSwitches,
-    next_place: &mut attention::Places,
-    announcements: &[(SeatId, bt_term::TerminalNotification)],
-    now: Instant,
-    trace: Option<&attention_trace::Trace>,
-    raised: &mut Vec<AttentionDelivery>,
-) {
-    hang_watch::during(hang_watch::Station::DrainAttention, || {
-        let reach = notify::desktop_reach(tab_is_active, place);
-        let tab_id = tab.id;
-        // Carried out of the mutable walk for `settle_attention`'s reason: the title's three-layer
-        // chain reads facts of the tab that its leaves' borrow is holding. The carried title travels
-        // with each one because it is the announcement's own field and no two arrivals share it.
-        let mut allowed: Vec<(SeatId, Option<String>, attention::Raised)> = Vec::new();
-        for (seat, leaf) in tab.leaves_mut() {
-            let Some(event) = leaf
-                .attention
-                .weak_edge(leaf.session.status().attention_request)
-            else {
-                continue;
-            };
-            let at = attention::Site {
-                tab: index,
-                seat: *seat,
-            };
-            let outcome = leaf.attention.apply(at, reach, event, next_place, now);
-            emit_attention_lines(trace, outcome.lines);
-            allowed.extend(outcome.raised.map(|one| (*seat, None, one)));
-        }
-        for (seat, notification) in announcements {
-            // The row decides, and its pin is that no sequence on this lane is ever the strong level:
-            // "a program is blocked on your input" is a sentence no OSC in existence can say, and
-            // reading one as if it could is the substitution this whole block was opened to undo.
-            if attention_map::osc_credential(attention_map::OscArrival::Notification(
-                notification.source,
-            )) != Some(attention::Credential::Announced)
-            {
-                continue;
-            }
-            let Some(leaf) = tab.sessions.get_mut(seat) else {
-                continue;
-            };
-            let words = attention_map::announced_words(notification);
-            if leaf.attention.announce(words) {
-                continue;
-            }
-            let outcome = leaf.attention.announce_turn_end(
-                attention::Site {
-                    tab: index,
-                    seat: *seat,
-                },
-                reach,
-                switches,
-                attention_map::OSC_TRANSPORT,
-                attention_map::osc_via(notification.source),
-                words,
-            );
-            emit_attention_lines(trace, outcome.lines);
-            allowed.extend(
-                outcome
-                    .raised
-                    .map(|one| (*seat, notification.title.clone(), one)),
-            );
-        }
-        for (seat, carried, one) in allowed {
-            raised.push(attention_delivery(
-                tab,
-                tab_id,
-                seat,
-                carried.as_deref(),
-                one,
-            ));
-        }
-    })
 }
 
 /// **Hand every arrived message to the one pane that can have sent it.**
@@ -34794,42 +34469,6 @@ fn pointer_cursor(
         Some(bt_layout::Axis::Col) => CursorIcon::NsResize,
         None => CursorIcon::Default,
     }
-}
-
-/// Whether the terminal hyperlink under the pointer would answer a press right
-/// now — and therefore whether the pointer wears the hand (§7.1.5g).
-///
-/// **The underline and the hand are two different sentences.** The dotted rest
-/// and its solid hover already say "there is a link here", and they say it to a
-/// hand that is not holding anything down, because that is a fact about the
-/// output and not about the gesture. The pointing finger is the narrower one:
-/// "and *this* press, with the keys held the way they are held right now, is one
-/// that goes somewhere".
-///
-/// **So it is not a fact about `Ctrl`; it is the routing table asked** (user
-/// ruling 2026-08-20). A plain hover over a link to a readable file wears the
-/// hand, because a plain press opens it — and, since the folder ruling of
-/// 2026-08-21, so does a plain hover over a folder, because a plain press points
-/// the files column at it; since 2026-08-23 so does a page, and since
-/// 2026-08-29 so does a **web address**, because a plain press on one now draws
-/// it on the seat. The one shape left without the hand plainly is the row with
-/// nothing inside this window at all — a `mailto:`, a scheme with no arm — and
-/// that is the whole of what the modifier still lights up on its own.
-///
-/// One expression rather than two agreeing ones, for the reason 7.1.5f wrote
-/// down: a pointer that promises a press the release then declines is this window
-/// lying about what it can do. `verdict` travels for the same reason it travels
-/// into the table, and reaches no disk at all (audit 3 C-2) — so a name nobody
-/// has answered for wears no finger, exactly as it is no link.
-fn terminal_link_answers_a_press(
-    control: bool,
-    uri: Option<&str>,
-    namer: bt_transcript::paths::PathNamer<'_>,
-    verdict: &dyn Fn(&Path) -> Option<bt_term::PathVerdict>,
-) -> bool {
-    uri.is_some_and(|uri| {
-        hyperlink_activation(control, true, uri, namer, verdict) != HyperlinkActivation::None
-    })
 }
 
 /// What is in the hand (J111).
@@ -43225,27 +42864,6 @@ fn pane_cell_metrics<G: Glass>(
         .context("measure a terminal pane at its text size")
 }
 
-/// **The one mutation door's core** (ticket 37): move one leaf's rung and apply what it now
-/// derives to.
-///
-/// `derive` is [`pane_cell_metrics`] bound to the leaf's window, so the derivation stays the one
-/// derivation; a test hands it the same measuring service at a chosen base and scale. Answers
-/// whether the pane's metrics moved — `false` both when the step went nowhere (the end of the
-/// ladder) and when it went to a rung the clamp draws at the same size, and in both cases nothing
-/// else has been touched. The rung itself moves even then: the indicator shows the requested
-/// rung, and a pane at the floor of a base-10 face still says it is at 50 %.
-fn step_leaf_text_scale(
-    leaf: &mut LeafSession,
-    step: TextStep,
-    count: u32,
-    derive: impl FnOnce(TextScale) -> Result<bt_render::CellMetrics>,
-) -> Result<bool> {
-    let requested = (0..count).fold(leaf.text_scale, |scale, _| scale.stepped(step));
-    let metrics = derive(requested)?;
-    leaf.text_scale = requested;
-    Ok(apply_leaf_metrics(leaf, metrics))
-}
-
 /// **The one apply operation** (ticket 37): put freshly derived metrics on one leaf.
 ///
 /// Every road that changes what a pane is drawn at comes through here — a size step, a Settings
@@ -44570,41 +44188,6 @@ const DRAIN_TURN_BUDGET: Duration = Duration::from_millis(8);
 const DRAIN_SLICES_PER_TURN: usize =
     bt_pty::TERM_READ_QUANTUM.get() / bt_pty::TERM_READ_SLICE.get();
 
-/// **May the drain go round again?** — the whole of T-DRAIN-BURST's decision, in
-/// one function so that it can be put to a test without a window.
-///
-/// `slices_taken` counts passes over every pane, not reads of one pane: the
-/// panes are drained round-robin so that a quiet pane's few hundred bytes are
-/// not stuck behind a noisy sibling's quarter megabyte, and a pass is therefore
-/// the unit both halves of this budget are spent in.
-///
-/// Both bounds are "whichever comes first", and each is there for a case the
-/// other does not cover. The clock is the one that matters while a pane prints;
-/// the slice count is what keeps a turn from carrying more than §1.3 says it
-/// may when the output is cheap enough that the clock never runs out —
-/// megabytes of blank lines would otherwise be drained in a single turn, and a
-/// turn that long is the defect however fast it parsed.
-fn drain_may_take_another_slice(slices_taken: usize, elapsed: Duration) -> bool {
-    slices_taken < DRAIN_SLICES_PER_TURN && elapsed < DRAIN_TURN_BUDGET
-}
-
-/// Bracket the complete slice loop, including its error return, once for every tab.
-fn in_drain_feed_turn<T, R>(
-    tabs: &mut [T],
-    begin: impl Fn(&mut T),
-    end: impl Fn(&mut T),
-    drain: impl FnOnce(&mut [T]) -> R,
-) -> R {
-    for tab in &mut *tabs {
-        begin(tab);
-    }
-    let result = drain(tabs);
-    for tab in tabs {
-        end(tab);
-    }
-    result
-}
-
 /// What one drain turned up, beyond the bytes.
 ///
 /// Separate answers rather than a `bool` tuple because they drive different
@@ -45295,52 +44878,6 @@ fn git_document_question(
         | preview::PreviewSource::GitGraph { .. }
         | preview::PreviewSource::Web(_) => None,
     }
-}
-
-/// Drain every shell this tab holds.
-///
-/// Written as a loop rather than left to the tab's deref because "drain this
-/// tab" has always meant *all of it*: a background pane that stops being read
-/// fills its pipe and blocks the shell writing into it. The tab's answer is the
-/// union of its leaves' — anything arrived anywhere, any title moved anywhere.
-///
-/// The three bools are the bits of [`seat_holds_the_keyboard`] a leaf cannot
-/// answer about itself; this loop supplies the fourth from the seat it is on,
-/// and that predicate — not this signature — is where the four are joined.
-fn drain_tab_pty(
-    tab: &mut TabState,
-    window_focused: bool,
-    tab_is_active: bool,
-    owner_is_a_shell: bool,
-) -> Result<DrainOutcome> {
-    hang_watch::during_pane(hang_watch::Station::DrainTab, tab.id.0, || {
-        // Copied before the loop, which then holds the tab mutably. It is the one
-        // fact this loop needs that a leaf cannot supply about itself: whether the
-        // pane it just heard is the pane the frame path is going to compose.
-        let focused = tab.focused_leaf;
-        let mut outcome = DrainOutcome::default();
-        for (seat, leaf) in tab.leaves_mut() {
-            let holds_the_keyboard = seat_holds_the_keyboard(
-                window_focused,
-                tab_is_active,
-                *seat == focused,
-                owner_is_a_shell,
-            );
-            let pane_parent = hang_watch::enter_pane(hang_watch::Station::DrainPane, seat.0);
-            let result = drain_leaf_pty(leaf, holds_the_keyboard);
-            hang_watch::counters(0, 0, 1);
-            hang_watch::at(pane_parent);
-            let mut leaf_outcome = result?;
-            outcome.arrived_off_focus |= leaf_outcome.arrived && *seat != focused;
-            // The address a leaf cannot write on its own request, stamped by the
-            // level that holds the key it is filed under.
-            for (address, _) in &mut leaf_outcome.notifications {
-                *address = *seat;
-            }
-            outcome.merge(leaf_outcome);
-        }
-        Ok(outcome)
-    })
 }
 
 /// **Everything a window is born with that is not the same in every window.**
@@ -51604,34 +51141,6 @@ impl<B: Backend> Runtime<'_, B> {
     // backwards live there, where they can be asked the questions a hand asks
     // without a window, a shell or a GPU.
 
-    /// What the foot bar of `seat` is owed on the glass right now.
-    ///
-    /// **One derivation, three consumers** — the painter, the hover, and the
-    /// press. A press that could take a mark the painter had not drawn is the
-    /// same defect [`preview::ScrollBar`] exists to prevent, read in time rather
-    /// than in space: you cannot grab what is not there. So the visibility rule
-    /// is asked once and everything that cares reads the answer.
-    fn terminal_column_thumb(&self, seat: SeatId, now: Instant) -> termscroll::Thumb {
-        let Some(leaf) = self.sessions.get(&seat) else {
-            return termscroll::Thumb::Hidden;
-        };
-        let situation = termscroll::ThumbSituation {
-            // "Has a horizontal axis" is what `has_history` means down here: a
-            // pane whose widest line fits across it has nothing to be a picture
-            // of, exactly as a pane with no scrollback has nothing above it.
-            has_history: leaf.projection.horizontal().max_x_origin().0 > 0,
-            alternate_screen: leaf.session.terminal_modes().alternate_screen,
-            scrolled: leaf.projection.horizontal().is_scrolled(),
-            near: self.terminal_column_hover == Some(seat),
-            held: self
-                .held_terminal_column_drag()
-                .copied()
-                .is_some_and(|drag| drag.seat == seat),
-            since_rest: now.saturating_duration_since(leaf.column_awake),
-        };
-        termscroll::column_visibility(situation, self.app.motion, |x| cubic_bezier(x, EASE))
-    }
-
     /// A press on a terminal pane's foot mark.
     ///
     /// Returns whether the press was the bar's. **One gesture and not two**: the
@@ -54112,25 +53621,6 @@ impl<B: Backend> Runtime<'_, B> {
         };
         if let Some(leaf) = self.sessions.get_mut(&seat) {
             leaf.session.ask_about_link_target(path);
-        }
-    }
-
-    /// **The same question, put again although the pane already holds an answer** (closure
-    /// re-review B-1') — the press's door, and the press's alone.
-    ///
-    /// Everything [`Self::ask_the_worker_about_a_link_target`] refuses, this refuses too: the
-    /// lexical gate, and a question already queued or already out with a worker. What it does not
-    /// skip is a verdict, because a held "yes" is exactly the thing a press has to re-check now
-    /// that no reveal stats its target.
-    fn re_ask_the_worker_about_a_link_target(&mut self, seat: SeatId, uri: &str) {
-        let namespace = self.seat_path_namespace(seat);
-        let Some(path) =
-            link_target_to_ask_about(uri, bt_transcript::paths::PathNamer::Pane(&namespace))
-        else {
-            return;
-        };
-        if let Some(leaf) = self.sessions.get_mut(&seat) {
-            leaf.session.re_ask_about_link_target(path);
         }
     }
 

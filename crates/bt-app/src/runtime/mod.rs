@@ -58,6 +58,12 @@ pub(crate) use profiles::profile_menu_anchor;
 #[cfg(test)]
 pub(crate) use search::rescan_leaf_for_search;
 #[cfg(test)]
+pub(crate) use terminal::{
+    drain_may_take_another_slice, in_drain_feed_turn, local_image_activation, reference_card,
+    reference_run_rect, restart_seed, should_copy_on_select_release, step_leaf_text_scale,
+    stepped_command_mark, terminal_link_answers_a_press,
+};
+#[cfg(test)]
 pub(crate) use tooltips::{tab_surface_tip_boxes, tooltip_anchor_for};
 #[cfg(test)]
 pub(crate) use web::{
