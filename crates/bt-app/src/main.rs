@@ -322,15 +322,18 @@ use runtime::platform_pointer_of;
 use runtime::{
     a_capture_still_holds_its_pointer, a_page_is_off_the_glass, a_page_still_has_a_pane,
     a_page_was_replaced, a_retirement_happens_on_this_turn, answer_attention_in,
-    apply_leaf_metrics, apply_tabs_leaf_metrics, drain_may_take_another_slice,
-    float_git_page_shown, git_answer_notice, git_full_path, git_roots_on_glass,
-    git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, graph_key_of, hole_for,
-    in_drain_feed_turn, local_image_activation, merge_notice_card, next_attention_stop,
+    apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels, drain_may_take_another_slice,
+    file_peek_promotion, float_git_page_shown, git_answer_notice, git_full_path,
+    git_roots_on_glass, git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, graph_key_of,
+    hole_for, in_drain_feed_turn, let_go_unnamed_peek_records, local_image_activation,
+    merge_notice_card, next_attention_stop, peek_body_kind, peek_card_opened, peek_files_named,
+    peek_foot_press, peek_page_texture_key, peek_reads_the_file, peek_scale_task, preview_body_bar,
     profile_menu_anchor, raise_cancelled_quit_card_on, recall_flash, reference_card,
-    reference_run_rect, rescan_leaf_for_search, resize_worth_solving, resolved_theme_change,
-    restart_seed, revived_page_of, seat_holds_the_keyboard, should_copy_on_select_release,
-    step_leaf_text_scale, stepped_command_mark, tab_surface_tip_boxes,
-    take_psreadline_resize_reanchor_input, terminal_link_answers_a_press, tooltip_anchor_for,
+    reference_run_rect, remember_decode, rescan_leaf_for_search, resize_worth_solving,
+    resolved_theme_change, restart_seed, revived_page_of, seat_holds_the_keyboard,
+    should_copy_on_select_release, step_leaf_text_scale, stepped_command_mark,
+    tab_surface_tip_boxes, take_psreadline_resize_reanchor_input, terminal_link_answers_a_press,
+    tooltip_anchor_for,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
@@ -9393,107 +9396,6 @@ impl ScrollThumbState {
     }
 }
 
-/// **A scroll bar on a layer of its own** — the overlay's answer to
-/// [`push_block_scroll_indicator`], which is the same bar drawn into a block.
-///
-/// A layer rather than more quads on the surface's own, and that is a z-order
-/// fact rather than tidiness: within one layer the order is the layer's own
-/// fills, then the *document's* fills, then marks, then text — so a thumb pushed
-/// onto a card's or a window's quads would be painted under a diff's line band
-/// and under the very text it is meant to ride over. [`marks::OverlayLayer`]
-/// states the rule this obeys: anything that must cover something else goes on a
-/// later layer.
-///
-/// It is an overlay bar in the sense every modern editor's is — it lies *over*
-/// the last few pixels of the document rather than taking a gutter out of it.
-/// Taking a gutter would change the width the document is laid out at, which
-/// changes its height, which decides whether the bar exists: the reflow loop
-/// that scrollbar-gutter rules exist to break.
-fn scroll_bar_layer(
-    bar: &preview::ScrollBar,
-    state: ScrollThumbState,
-    palette: &bt_render::ChromePalette,
-) -> marks::OverlayLayer {
-    // The divider's three inks — this app's only existing family for a bar a
-    // hand can hold, and the same three the block's bar wears, because they are
-    // the same control.
-    let ink = match state {
-        ScrollThumbState::Held => palette.divider_active,
-        ScrollThumbState::Hovered => palette.files_row_text,
-        ScrollThumbState::Rest => palette.files_row_muted,
-    };
-    marks::OverlayLayer {
-        quads: vec![
-            bt_render::OverlayQuad {
-                rect: bar.track,
-                color: palette.preview_grid_line,
-                alpha: 1.0,
-            },
-            bt_render::OverlayQuad {
-                rect: bar.thumb,
-                color: ink,
-                alpha: 1.0,
-            },
-        ],
-        ..marks::OverlayLayer::default()
-    }
-}
-
-/// **The bar a preview surface wears down its right edge** when its document is
-/// taller than the box it is shown in (user ruling, 2026-08-14).
-///
-/// # Why this exists at all
-///
-/// The glance card got one first, because it was the surface people were
-/// visibly trying to read further into. That left the window upside down: the
-/// 300-pixel hover card said how much of its file it was showing and the docked
-/// pane it opens into — the *real* one, holding the same document at four times
-/// the size — said nothing at all. A page you can scroll and cannot see the
-/// extent of is a page you have to scroll to find the end of.
-///
-/// So the seat, the float and the card wear one bar, and this is the arithmetic
-/// all three go through. It is [`preview::scroll_bar`] with the axis nailed
-/// down, and the axis is nailed down *here* rather than at the three call sites
-/// for the reason the block's bar learned the hard way: a surface that guessed
-/// would move its document sideways when the thumb went down.
-///
-/// `content` is the document's own extent **along `axis`** — the same number
-/// [`preview_document_max_scroll`] takes the page out of — so the bar's
-/// `overflow` and the clamp on the stored offset are one quantity by
-/// construction, and a thumb dragged to the far end of its track lands exactly
-/// where the wheel stops. The whole `scroll` is taken and the axis picks out of
-/// it, so a caller cannot hand one axis's bar the other axis's offset.
-///
-/// **The axis was nailed down to `Vertical` here and is now a parameter** (user
-/// report, 2026-08-17). A diff does not reflow — `white-space: pre` is the whole
-/// of what a patch is — so a line longer than the pane runs off its right edge,
-/// and the extent for it was already computed and already reachable by
-/// `Shift`+wheel. What was missing was the *picture*: a page you can scroll and
-/// cannot see the extent of is a page you have to scroll to find the end of,
-/// which is the sentence this bar was written under in the first place. It was
-/// only ever true of one of the two axes.
-fn preview_body_bar(
-    body: [f32; 4],
-    axis: preview::ScrollAxis,
-    scroll: [f32; 2],
-    content: f32,
-    scale: f32,
-) -> Option<preview::ScrollBar> {
-    let offset = match axis {
-        preview::ScrollAxis::Horizontal => scroll[0],
-        preview::ScrollAxis::Vertical => scroll[1],
-    };
-    Some(
-        preview::scroll_bar(body, axis, offset, content, scale)?
-            // **The target reaches inward, and stops at the surface's edge.** What
-            // is past that edge is a divider's band or the window's own resize
-            // border, and both of them are asked before this window's code is —
-            // see [`preview::BODY_SCROLL_INWARD_HIT_LOGICAL_PX`] for the real-machine
-            // finding that this closes.
-            .grown_inward(preview::BODY_SCROLL_INWARD_HIT_LOGICAL_PX * scale),
-    )
-}
-
 /// Every wide block that is on screen this frame, with the rectangle it owns
 /// and the width it wants.
 ///
@@ -11462,96 +11364,6 @@ enum PeekBodyKind {
     Frame,
     /// The preview pane's own body, laid out at the card's width.
     Document,
-}
-
-/// [`PeekBodyKind`] for one glance.
-///
-/// **The page arm asks [`preview_open_lane`] and not the name alone**, which is
-/// the whole of "the card says what the double click does": the row and the card
-/// are two readings of one gesture, so they read it through one function. A page
-/// on a share is not a page — the mint refuses it — and the card that appears
-/// there is the refusal the seat would have shown, which is the answer it gave
-/// before this ruling and still gives.
-///
-/// A composed document has no path, so it is never a page however its name is
-/// spelled: a git diff of `docs/design/ui-mockup.html` is a reading of a repository,
-/// exactly as [`preview_page_hand_off`] has always said.
-///
-/// # What a page's row earns (user ruling 2026-08-25)
-///
-/// The 2026-08-23 ruling gave the whole page class one line — `Opens as a page.`
-/// — and it was the true sentence available that day: the card has no engine, so
-/// it cannot show a page. What it left out is that the *file* under a page is
-/// still a file, and a reader resting the pointer on one is asking about the
-/// file. So the class is asked one more question here, and it is a question
-/// about bytes rather than about the card: [`preview::path_page_glance`].
-///
-/// * `.html` / `.htm` — **the source**, down [`PeekBodyKind::Document`]'s own
-///   lane, with no branch of its own anywhere below this line. It is text; the
-///   glance reads text; there is nothing else to arrange.
-/// * `.pdf` — **the facts**, because nothing in it is text and a card that said
-///   only "opens as a page" was spending two lines to say what the `web` chip in
-///   its own corner already says.
-///
-/// Both keep the chip and both keep the foot: the row still opens as a page, and
-/// the card still says how.
-fn peek_body_kind(
-    ftype: preview::PreviewFtype,
-    path: Option<&Path>,
-    refused: bool,
-    gone: bool,
-) -> PeekBodyKind {
-    // **A file that has gone outranks everything below** (§7.37). The reference
-    // was validated when it was printed and the file was deleted after; there is
-    // no type to name, nothing to refuse and no page to open, so the card says
-    // the one true thing rather than calling the absence "binary". A composed
-    // document has no path and cannot be gone — `gone` is only ever true for a
-    // real file the caller stat-ed and did not find.
-    if gone && path.is_some() {
-        return PeekBodyKind::Gone;
-    }
-    match (ftype, path) {
-        // **A refusal outranks a picture, and used to be read after one** (route A of the
-        // untrusted-path audit, 2026-09-08). This arm and the video arm below it match on the
-        // *name's* judgement and on there being a file, and both are true of
-        // `\\attacker\share\probe.png`: the buffer had already filed `Refused(NetworkPath)`, and
-        // this ladder walked past it into a body whose whole job is to ask the decoration worker
-        // for that file's pixels. The refusal was drawn one layer above a read that had already
-        // gone out to the share. Every other arm consults `refused` — the page arm below, the
-        // fall-through at the end — so the guard is this ladder's own rule reaching the two rungs
-        // that were written before there was anything for them to refuse.
-        (preview::PreviewFtype::Image, Some(_)) if !refused => PeekBodyKind::Picture,
-        // **A video, and the same two-part shape the picture arm has**: a body
-        // that needs a file has one, and a composed document that merely spells
-        // a video's name — a git diff of `clip.mp4` is a reading of a repository
-        // — has nothing to decode and falls to the refusal, exactly as a
-        // composed `.png` does one line up.
-        (preview::PreviewFtype::Video, Some(_)) if !refused => PeekBodyKind::Frame,
-        (
-            preview::PreviewFtype::Image
-            | preview::PreviewFtype::Video
-            | preview::PreviewFtype::Unknown,
-            _,
-        ) => PeekBodyKind::Refused,
-        (preview::PreviewFtype::Web, Some(path))
-            if preview_open_lane(path) == PreviewOpenLane::Page =>
-        {
-            match preview::path_page_glance(path) {
-                // A page whose own bytes are text is read as text — and if that
-                // read came back refused (a `.html` full of NULs, a file that
-                // vanished under the pointer), the refusal is what the card
-                // owes, exactly as it does for any other document.
-                Some(preview::PageGlance::Source) if refused => PeekBodyKind::Refused,
-                Some(preview::PageGlance::Source) => PeekBodyKind::Document,
-                Some(preview::PageGlance::Facts) => PeekBodyKind::Facts,
-                // A member of the page class with no second column is one this
-                // arm has nothing to say about beyond what the row does.
-                None => PeekBodyKind::Page,
-            }
-        }
-        _ if refused => PeekBodyKind::Refused,
-        _ => PeekBodyKind::Document,
-    }
 }
 
 #[cfg(test)]
@@ -25370,21 +25182,6 @@ enum PeekCacheEntry {
     },
 }
 
-/// **Whether a peek reads its file now** (T-FRESH-FACTS): when nothing is cached for it, and —
-/// on a new peek only — when the last read failed. A file that was missing or half-written when a
-/// hover first settled on it used to stay silent for the window's life, while its link was
-/// verified again at the next command's end; a hover that settles on it again reads it again. The
-/// re-entries of one peek (its decode or its resample landing) never re-read, and one read is out
-/// at a time (`Pending`). A subject with no file behind it (`readable` false) is never read.
-fn peek_reads_the_file(entry: Option<&PeekCacheEntry>, readable: bool, settled: bool) -> bool {
-    readable
-        && match entry {
-            None => true,
-            Some(PeekCacheEntry::Failed(_)) => settled,
-            Some(PeekCacheEntry::Pending { .. } | PeekCacheEntry::Ready { .. }) => false,
-        }
-}
-
 /// **What an entry weighs, and which entries weight pressure may take** (T-PEEK-CACHE-QUESTION-RECORDS).
 ///
 /// A `Ready` weighs its native decode's pixels and is the one thing eviction chooses: the cost of
@@ -25408,63 +25205,6 @@ impl bt_term::Weighed for PeekCacheEntry {
 
     fn evictable(&self) -> bool {
         matches!(self, Self::Ready { .. })
-    }
-}
-
-/// **Every file a surface of this window names to the peek cache** (T-PEEK-CACHE-QUESTION-RECORDS),
-/// by the key the cache files it under.
-///
-/// The surfaces whose resolve files a record of a question are four, and each names its file in
-/// the state it already keeps: a picture pane — a seat or a float of any tab, in the background as
-/// much as on the glass — by the picture it holds ([`PreviewPane::image`]); a markdown page, on
-/// any of those panes or on the card, by every picture in reach it asked about
-/// ([`DocumentPictures::files`]); the glance card by its file (`card_file`); and the hover flyout
-/// by its subject while it is up (`flyout`). A free function over the tabs for
-/// [`animation_surface_exists`]' reason: the set is derived from what the window holds, rather
-/// than kept beside it as a second record that could disagree, and tabs are what a test can build.
-fn peek_files_named(
-    tabs: &[TabState],
-    peek_pane: &PreviewPane,
-    card_file: Option<&Path>,
-    flyout: Option<&str>,
-) -> BTreeSet<String> {
-    let mut named = BTreeSet::new();
-    for pane in documents_held_in(tabs, peek_pane) {
-        if let Some(picture) = pane.image() {
-            named.insert(bt_term::normalized_local_image_path_key(&picture.path));
-        }
-        if let PreviewDocument::Markdown { pictures, .. } = pane.doc() {
-            named.extend(
-                pictures
-                    .files
-                    .iter()
-                    .map(|file| bt_term::normalized_local_image_path_key(file)),
-            );
-        }
-    }
-    named.extend(card_file.map(bt_term::normalized_local_image_path_key));
-    named.extend(flyout.map(str::to_owned));
-    named
-}
-
-/// **A failed peek no surface names any more is let go of** (T-PEEK-CACHE-QUESTION-RECORDS) —
-/// [`AnimationCache::let_go_unnamed`]'s rule, for the peek cache.
-///
-/// A `Failed` record is kept exactly as long as some surface names its file (`named`, from
-/// [`peek_files_named`]): while one does, its redraws read the failure and ask nothing; when the
-/// last one has gone, the file's next showing is new input and asks. A decode in flight is kept
-/// until its answer, which [`file_peek_answer`] files nowhere if the file is unnamed by then. A
-/// decode is weight, which the budget governs.
-fn let_go_unnamed_peek_records(peek_cache: &mut PeekCache, named: &BTreeSet<String>) {
-    let unnamed: Vec<String> = peek_cache
-        .iter()
-        .filter(|(key, entry)| {
-            matches!(entry, PeekCacheEntry::Failed(_)) && !named.contains(key.as_str())
-        })
-        .map(|(key, _)| key.clone())
-        .collect();
-    for key in &unnamed {
-        peek_cache.remove(key);
     }
 }
 
@@ -25514,36 +25254,6 @@ fn file_peek_answer(
     true
 }
 
-/// **A decode the session's own worker made, remembered for the peek** — a pasted picture under
-/// its content key, a printed path's picture under its normalized path
-/// ([`peek_cache_key_for_decode`]; `Runtime::remember_decode_for_peek` says why).
-///
-/// **Never over a read in flight** (T-PEEK-ANSWER-IDENTITY round 2): a `Pending` is the record of
-/// a surface's question, and its answer is the one road that tells the surfaces waiting on it — the
-/// flyout's re-entry, a page's sharpening and re-flow, the panes' and card's redraw. Pixels filed
-/// over it would leave that answer awaited by no record and set aside ([`peek_awaits`]), and the
-/// surfaces waiting would hear nothing. The read's own answer files the same file's pixels.
-fn remember_decode(
-    peek_cache: &mut PeekCache,
-    source: &bt_term::InlineImageSource,
-    decoded: &bt_term::DecodedInlineImage,
-) {
-    let key = peek_cache_key_for_decode(source, decoded);
-    if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Pending { .. })) {
-        return;
-    }
-    peek_cache.insert(
-        key,
-        PeekCacheEntry::Ready {
-            key: decoded.key.clone(),
-            rgba: Arc::clone(&decoded.rgba),
-            width_px: decoded.width_px,
-            height_px: decoded.height_px,
-            native_size: decoded.native_size,
-        },
-    );
-}
-
 /// **What became of a request for a file's pixels** ([`ask_for_peek_pixels`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PeekAsk {
@@ -25569,70 +25279,6 @@ fn unstarted_pixels() -> PeekCacheEntry {
     PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
         DECODE_UNSTARTED.to_owned(),
     ))
-}
-
-/// **Ask the computation lane for one file's native pixels for the window at `leaf`, and file
-/// the record of the question** (user ruling 2026-08-27, §7.23; T-PEEK-ANSWER-IDENTITY) — the one
-/// door every surface that shows a file's pixels asks through: the picture pane's refit, a
-/// markdown page's pictures, the glance card and the hover flyout, by way of
-/// `Runtime::request_peek_pixels`.
-///
-/// **The door itself asks whether this is a file to read** (routes A and E of the untrusted-path
-/// audit, 2026-09-08): what goes out of here is a request to open a file, and a request nobody
-/// may make is one this window does not send. **It is the one place the fork between the picture
-/// decoder and the video decoder is written**, read with [`preview::path_names_a_video`] — the
-/// predicate the preview's open forks on, so a file that opened as a video is decoded as one —
-/// because both fill the same record under the same key and a second reading of the name at the
-/// delivery end is how a `.png` and a `.mp4` would come to disagree about who owns it.
-///
-/// **And it files what it asked**: a read admitted is `Pending` under the identity the lane
-/// minted, which its answer is filed by ([`file_peek_answer`]); a thread that could not be
-/// started is the unstarted record. A full lane or a refusal files nothing.
-fn ask_for_peek_pixels(
-    peek_cache: &mut PeekCache,
-    computation: &computation_lane::ComputationLane,
-    leaf: ShellAddress,
-    path: &Path,
-) -> PeekAsk {
-    if !preview::is_readable_unasked(path) {
-        return PeekAsk::Refused;
-    }
-    let request = if preview::path_names_a_video(path) {
-        MathWorkerRequest::PeekVideoFrame {
-            leaf,
-            path: path.to_owned(),
-        }
-    } else {
-        MathWorkerRequest::PeekImage {
-            leaf,
-            path: path.to_owned(),
-        }
-    };
-    let asked = match computation.decorate(request) {
-        Ok(asked) => PeekAsk::Asked(asked),
-        Err((lane::Refused::Full { .. }, _)) => PeekAsk::NotNow,
-        Err((lane::Refused::NotStarted(_), _)) => PeekAsk::Unstarted,
-        Err(_) => PeekAsk::Refused,
-    };
-    let key = bt_term::normalized_local_image_path_key(path);
-    match asked {
-        PeekAsk::Asked(asked) => peek_cache.insert(key, PeekCacheEntry::Pending { asked }),
-        PeekAsk::Unstarted => peek_cache.insert(key, unstarted_pixels()),
-        PeekAsk::NotNow | PeekAsk::Refused => {}
-    }
-    asked
-}
-
-/// **A glance card opening over a file** (T-PEEK-CACHE-QUESTION-RECORDS round 2): a new card is
-/// the card's own new input, so a failure filed for its file is let go of and the card's body
-/// asks again — [`peek_reads_the_file`]'s rule for a hover that settles, said for the card. The
-/// moment is the opening and not the teardown: a card coming down is a surface leaving, which
-/// lets a failure go only when no other surface names the file ([`let_go_unnamed_peek_records`]).
-fn peek_card_opened(peek_cache: &mut PeekCache, card_file: &Path) {
-    let key = bt_term::normalized_local_image_path_key(card_file);
-    if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Failed(_))) {
-        peek_cache.remove(&key);
-    }
 }
 
 /// **What this window's decoded pictures live in** — see [`MAX_PEEK_CACHE_BYTES`].
@@ -25800,36 +25446,6 @@ impl PeekPageSlot {
             self.pages.remove(0);
         }
     }
-}
-
-/// **What the shared GPU cache calls one drawn page**: the file, when it was last written, **which
-/// page it is**, and the size it was drawn at.
-///
-/// All four, because all four can change while the string is still a valid name for something. Two
-/// files at one size are two pictures; one file rewritten is two pictures; one file at two DPIs is
-/// two rasters of the same picture; and two pages of one document are two pictures with everything
-/// else about them identical — which is the one the column added, and the one that would have put
-/// page 1 in every slot of the card (user ruling 2026-08-26).
-fn peek_page_texture_key(
-    path: &Path,
-    mtime: Option<SystemTime>,
-    page: u32,
-    width: u32,
-    height: u32,
-) -> String {
-    let stamp = mtime
-        .and_then(|mtime| mtime.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map_or_else(
-            // A filesystem that will not say is never treated as saying "the same as last time":
-            // such a file is re-rastered on every question anyway (`raster_peek_page`), so what
-            // this needs is a name that does not collide with a real timestamp.
-            || "?".to_owned(),
-            |since| since.as_nanos().to_string(),
-        );
-    format!(
-        "peek-page:{}:{stamp}:{page}:{width}x{height}",
-        path.display()
-    )
 }
 
 /// One drawn page, in the shape the renderer takes it.
@@ -27771,26 +27387,6 @@ impl PeekThumbnail {
     }
 }
 
-/// The one resample that stands between a native decode and the flyout, addressed to the worker.
-fn peek_scale_task(
-    target: &PeekThumbnailTarget,
-    rgba: Arc<[u8]>,
-    native_width_px: u32,
-    native_height_px: u32,
-) -> bt_term::InlineImageScaleTask {
-    let (content_key, display_width_px, display_height_px) = target;
-    bt_term::InlineImageScaleTask {
-        // The peek is not an occurrence in the document; its identity is the content key.
-        occurrence_id: 0,
-        content_key: content_key.clone(),
-        rgba,
-        width_px: native_width_px,
-        height_px: native_height_px,
-        display_width_px: *display_width_px,
-        display_height_px: *display_height_px,
-    }
-}
-
 /// The `peek_cache` identity a decoration-worker decode must be remembered under, so that the
 /// hover which later asks for the same picture finds it instead of asking the disk again.
 ///
@@ -28538,28 +28134,6 @@ fn verified_target_of(verdict: Option<&bt_term::PathVerdict>) -> bt_platform::Ve
         executable: verdict.executable,
         resolved: verdict.door_ready.clone(),
     }
-}
-
-/// **Is it still there, and how large** — for a file the *user* pointed at (§7.37, §7.29 ⑬).
-///
-/// One stat, on the window thread, once per frame of one hover. It is the budget §7.29 settled and
-/// `docs/DESIGN.md:189` is the ruling that admits it: the user chose this path, so this window may
-/// be as slow as the place they chose it in.
-///
-/// **A path a program printed does not come here** (audit 3 C-2). That is the whole of why this is
-/// a function with a name rather than four lines inside the card: the card takes a terminal
-/// reference's facts off its pane's ledger and everything else's from here, so the source guard
-/// over the hover path can say "no filesystem call in those bodies" with no exception in it.
-fn facts_of_a_file_the_user_chose(path: &Path) -> (bool, Option<u64>) {
-    let stat = bt_transcript::paths::may_read_unasked_through_links(
-        path,
-        bt_transcript::paths::PathNamer::ThisWindow,
-    )
-    .then(|| std::fs::metadata(path));
-    (
-        matches!(stat, Some(Err(_))),
-        stat.and_then(Result::ok).map(|file| file.len()),
-    )
 }
 
 // `names_an_html_page` stood here from §7.1.5g (user ruling 2026-08-20) until
@@ -34187,49 +33761,6 @@ fn risen_frame(frame: [f32; 4], fade: float::FloatFade) -> [f32; 4] {
     ]
 }
 
-/// What the float asks of the pointer.
-///
-/// The gesture already in flight before the part under the pointer, so a grip
-/// pulled past its own floor — or a header carried until the pointer is over the
-/// body — keeps the shape it was grabbed by (K113).
-///
-/// **Where the window a glance card becomes opens, and where the hand is holding
-/// it** (user ruling 2026-08-27, §7.29).
-///
-/// Two answers because they are one decision: the frame is chosen so that the
-/// *head* does not move, and the grab is then measured against the frame that
-/// was actually chosen — derived apart, they are a window that jumps on the
-/// first move after the one that opened it.
-///
-/// **The card's own top-left, and the window grows down and right from it.** A
-/// peek float promotes to a window of its own size and therefore does not move
-/// at all ([`FloatHeadPress`]); a card promotes to something larger, so some
-/// edge has to travel. The top-left is the edge that must not, because the head
-/// is at the top-left and the head is where the hand is: keeping it still is
-/// keeping the hand still, and every other choice slides the thing being carried
-/// out from under the finger carrying it.
-///
-/// **Then the viewport, which may overrule it.** A card standing near the bottom
-/// of the window promotes to something taller than the room under it, and
-/// [`float::clamp_pinned`] pulls that back inside — so the frame moves after all,
-/// once, on the frame it opens. The grab is measured **after** the clamp for
-/// exactly that reason: the one thing worse than a window that grows under the
-/// hand is a window that then drifts away from it on every subsequent move.
-fn file_peek_promotion(
-    card: [f32; 4],
-    size: [f32; 2],
-    pointer: [f32; 2],
-    viewport: [f32; 4],
-    scale: f32,
-) -> ([f32; 4], [f32; 2]) {
-    let placed = float::clamp_pinned(
-        [card[0], card[1], card[0] + size[0], card[1] + size[1]],
-        viewport,
-        scale,
-    );
-    (placed, [pointer[0] - placed[0], pointer[1] - placed[1]])
-}
-
 /// `pinned` gates **the grip and nothing else**, and it is a fact about the
 /// window under the pointer rather than about the window at large — with several
 /// floats on screen (2026-08-12) a peek standing over a pinned one would
@@ -36733,33 +36264,6 @@ enum PeekFootPress {
     /// own `Ctrl`+click takes ([`Runtime::reveal_verified`]) — carrying the
     /// pane's ledger, never asking a disk.
     RevealVerified(SeatId, PathBuf),
-}
-
-/// [`PeekFootPress`] for a press on the foot of a card about `file`, raised over
-/// `host`, with the hand-over modifier held or not.
-///
-/// **The plain click stays in the window and the modifier hands it over** — the
-/// standing gesture rule ([`ClickIntent`]), and the ruling's own two halves: 「点击
-/// = 在 Folio 文件列里定位…并选中文件，Ctrl+点击 = 在系统资源管理器/访达里打开并选中」.
-/// The reveal goes through the door the *surface* already uses for its own
-/// `Ctrl`+click, so a terminal reference is handed over off its ledger exactly
-/// as it is when the reference itself is clicked.
-///
-/// `None` for a path with no folder above it or no name, which no card over a
-/// file on a disk has.
-fn peek_foot_press(host: RowHost, file: &Path, hand_over: bool) -> Option<PeekFootPress> {
-    match ClickIntent::of(hand_over) {
-        ClickIntent::Here => Some(PeekFootPress::Locate {
-            folder: file.parent()?.to_path_buf(),
-            file: file.file_name()?.to_string_lossy().into_owned(),
-        }),
-        ClickIntent::System => Some(match host {
-            RowHost::Terminal(seat) => PeekFootPress::RevealVerified(seat, file.to_path_buf()),
-            RowHost::Column(_) | RowHost::Float(_) | RowHost::Git(_) => {
-                PeekFootPress::Reveal(file.to_path_buf())
-            }
-        }),
-    }
 }
 
 impl TabState {

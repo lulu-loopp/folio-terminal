@@ -56,6 +56,12 @@ pub(crate) use git::{
 #[cfg(test)]
 pub(crate) use palette::recall_flash;
 #[cfg(test)]
+pub(crate) use peek::{
+    ask_for_peek_pixels, file_peek_promotion, let_go_unnamed_peek_records, peek_body_kind,
+    peek_card_opened, peek_files_named, peek_foot_press, peek_page_texture_key,
+    peek_reads_the_file, peek_scale_task, preview_body_bar, remember_decode,
+};
+#[cfg(test)]
 pub(crate) use pointer::a_capture_still_holds_its_pointer;
 pub(crate) use pointer::platform_pointer_of;
 #[cfg(test)]

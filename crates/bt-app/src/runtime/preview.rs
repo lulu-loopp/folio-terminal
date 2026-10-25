@@ -5,6 +5,7 @@ use super::pointer::{Gone, OwnerGone};
 use crate::computation_lane::{Asking, ComputationId};
 use crate::input::Keystroke;
 use crate::runtime::git::graph_key_of;
+use crate::runtime::peek::{peek_scale_task, preview_body_bar, scroll_bar_layer};
 use crate::window_seam::prelude::*;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
@@ -38,25 +39,24 @@ use crate::{
     image_zoom_toggled, ime_owner, input, markdown_empty_page_offset, markdown_prose_composition,
     markdown_prose_paragraphs, markdown_runs, markdown_source_cell, markdown_source_offset_at,
     marks, measure_preview_links, notice, owe_sharpened_rasters, page_address_hand_off,
-    page_destination, page_foot_flash, page_foot_lead, page_source_file, peek_scale_task,
-    picture_channel_owner, picture_errand, picture_files_of, pictures_awaited_by,
-    pictures_need_handing_over, place_preview_math, preedit_caret_byte, present_diagnostics,
-    preview, preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_prose,
-    preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
-    preview_document_max_scroll, preview_edit, preview_edit_bands, preview_image_placement,
-    preview_link_activation, preview_link_answers_a_press, preview_live,
-    preview_open_externally_label, preview_open_lane, preview_opened_label,
-    preview_page_browser_hand_off, preview_press, preview_press_opens_its_link, preview_provenance,
-    preview_rail_tip_text, preview_select, preview_selection_bands, preview_tab_index_among,
-    preview_text, preview_text_box_at, preview_text_boxes, preview_text_grain, preview_trace,
-    preview_viewport, preview_watch, preview_wide_blocks, preview_wrap, preview_wrap_columns,
-    profiles, resolve_document_pictures, revealable_preview_file, scroll_bar_layer,
-    scrollback_quota, seats, settings, settle_attention, shown_address, source_opens_as_a_page,
-    step_preview_caret_by_row, strip_animation_tick_is_due, surface_pixels, surface_subject_of,
-    surface_takes_image_zoom, switcher_rows, tab_owes_frame, tab_trailing_targets, table_block,
-    text_field, tick_owes_a_present, toast, tooltip, video_frame_texture_key, video_seat,
-    video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
-    wheel_points_sideways, window_taskbar_progress,
+    page_destination, page_foot_flash, page_foot_lead, page_source_file, picture_channel_owner,
+    picture_errand, picture_files_of, pictures_awaited_by, pictures_need_handing_over,
+    place_preview_math, preedit_caret_byte, present_diagnostics, preview, preview_block_bar_at,
+    preview_block_wheel, preview_caret_prose, preview_caret_row, preview_copies_on_select,
+    preview_document_height, preview_document_key, preview_document_max_scroll, preview_edit,
+    preview_edit_bands, preview_image_placement, preview_link_activation,
+    preview_link_answers_a_press, preview_live, preview_open_externally_label, preview_open_lane,
+    preview_opened_label, preview_page_browser_hand_off, preview_press,
+    preview_press_opens_its_link, preview_provenance, preview_rail_tip_text, preview_select,
+    preview_selection_bands, preview_tab_index_among, preview_text, preview_text_box_at,
+    preview_text_boxes, preview_text_grain, preview_trace, preview_viewport, preview_watch,
+    preview_wide_blocks, preview_wrap, preview_wrap_columns, profiles, resolve_document_pictures,
+    revealable_preview_file, scrollback_quota, seats, settings, settle_attention, shown_address,
+    source_opens_as_a_page, step_preview_caret_by_row, strip_animation_tick_is_due, surface_pixels,
+    surface_subject_of, surface_takes_image_zoom, switcher_rows, tab_owes_frame,
+    tab_trailing_targets, table_block, text_field, tick_owes_a_present, toast, tooltip,
+    video_frame_texture_key, video_seat, video_still_destination, viewport_of_rect, visible_range,
+    webhost, webnav, wheel_points_sideways, window_taskbar_progress,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
