@@ -32202,6 +32202,73 @@ mod tests {
             assert_eq!(window.overlay_groups_composited(), 1);
         }
 
+        /// RED (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE) — **no fragment stage of this
+        /// renderer branches.**
+        ///
+        /// `group.wgsl`'s `over` was written with `if … return`, in its sRGB
+        /// transfer and for an empty texel. Compiled under FXC's optimiser, as
+        /// every release build compiles it, it removed the device on Windows
+        /// 10's Basic Render Driver the first time a surface was put back — at a
+        /// first start's tooltip, at Settings opening. The same functions with
+        /// the transfer written straight-line ran on that driver, and a debug
+        /// build (FXC told to skip optimising) never showed it. No machine these
+        /// tests run on has that driver, so the property is held where it can
+        /// be: in the shaders, parsed by naga as wgpu parses them, every
+        /// function a fragment entry point reaches walked for an `if`, a
+        /// `switch` or a loop. Every fragment stage here was straight-line
+        /// already except that one.
+        ///
+        /// A shader added to this renderer joins the list.
+        ///
+        /// MUTATION: put `if linear.r <= 0.0031308 { return linear * 12.92; }`
+        /// back at the head of `encode` in `group.wgsl` and `over` is named.
+        #[test]
+        fn no_fragment_stage_of_the_renderer_branches() {
+            use wgpu::naga;
+
+            fn control_flow_in(module: &naga::Module, block: &naga::Block) -> Option<&'static str> {
+                block.iter().find_map(|statement| match statement {
+                    naga::Statement::If { .. } => Some("an `if`"),
+                    naga::Statement::Switch { .. } => Some("a `switch`"),
+                    naga::Statement::Loop { .. } => Some("a loop"),
+                    naga::Statement::Block(inner) => control_flow_in(module, inner),
+                    naga::Statement::Call { function, .. } => {
+                        control_flow_in(module, &module.functions[*function].body)
+                    }
+                    _ => None,
+                })
+            }
+
+            let shaders = [
+                ("background.wgsl", include_str!("background.wgsl")),
+                ("group.wgsl", include_str!("group.wgsl")),
+                ("math.wgsl", include_str!("math.wgsl")),
+                ("rect.wgsl", include_str!("rect.wgsl")),
+                ("video.wgsl", include_str!("video.wgsl")),
+            ];
+            let mut fragment_stages = 0;
+            let mut branching = Vec::new();
+            for (file, source) in shaders {
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|error| panic!("{file}: {}", error.emit_to_string(source)));
+                for entry in &module.entry_points {
+                    if entry.stage != naga::ShaderStage::Fragment {
+                        continue;
+                    }
+                    fragment_stages += 1;
+                    if let Some(kind) = control_flow_in(&module, &entry.function.body) {
+                        branching.push(format!("{file} `{}`: {kind}", entry.name));
+                    }
+                }
+            }
+            assert!(fragment_stages > 0, "no fragment stage was read");
+            assert!(
+                branching.is_empty(),
+                "a fragment stage branches, which an optimised FXC build of it may turn into \
+                 a shader a driver cannot run: {branching:#?}"
+            );
+        }
+
         /// PIN (46) — **a surface at rest draws the bytes it drew before groups
         /// existed**, group or no group.
         ///
