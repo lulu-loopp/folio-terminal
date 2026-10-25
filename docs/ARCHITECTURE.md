@@ -2770,7 +2770,9 @@ Every method below runs on the **window thread** and holds `&mut App` and
 ownership. "Asks" names the lanes of §5.1 whose requests the file sends or
 whose answers it applies; "doors and rows" names the §6 doors and the §5.3
 rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the methods K2
-(T-SPLIT-2B) has moved in since: one each into `profiles.rs` and `search.rs` (batch 1).
+(T-SPLIT-2B) has moved in since, updated with each batch (through batch 5: `profiles.rs` and
+`search.rs` +1 each in batch 1, `web.rs` +2 in batch 2 and +1 in batch 3, `dpi.rs` +1 in batch 3,
+`palette.rs` +5 in batch 5).
 
 | file | methods | owns | asks | doors and rows |
 |---|---|---|---|---|

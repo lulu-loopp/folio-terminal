@@ -101,7 +101,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | — | `runtime/profiles.rs` | 1 (1 + 0): `tab_surface`, tied with `runtime/tabs.rs` | 2 |
    | 2 | `runtime/web.rs` | moved by batch 2 | — |
    | 3 | `runtime/dpi.rs` | moved by batch 3 (4 items; `files_float_content_height`, tied with `runtime/floats.rs`, waits for that batch; `release_due_leaf_resize` stays in `main.rs`, the single writer road of `LeafSession.birth` and `.grid`), with `Runtime::page_shrinker` as the web batch's tail | — |
-   | 4 | `runtime/attention.rs` | moved by batch 4 (4 items; `Runtime::reveal_in_explorer`, tied with `runtime/configuration.rs` and `runtime/floats.rs`, waits for the floats batch) | — |
+   | 4 | `runtime/attention.rs` | moved by batch 4 (4 items; `Runtime::reveal_in_explorer`, tied with `runtime/configuration.rs` and `runtime/floats.rs`, held for a ruling, below) | — |
    | 5 | `runtime/palette.rs` | moved by batch 5 (6 items; `Runtime::focus_seat` held, below) | — |
    | 6 | `runtime/terminal.rs` | 14 (12 + 2) | 15 |
    | 7 | `runtime/git.rs` | 14 (11 + 3) | 19 |
@@ -127,10 +127,13 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
 
    **Held items** (each row's generated `called_from` home is not where it goes):
    - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).
-   - `files_float_content_height` (tied `runtime/dpi.rs` / `runtime/floats.rs`) and
-     `Runtime::reveal_in_explorer` (tied `runtime/attention.rs` / `runtime/configuration.rs` /
-     `runtime/floats.rs`) — the owner column (`docs/ARCHITECTURE.md` §13) gives both to `runtime/floats.rs`;
-     they move with the floats batch.
+   - `files_float_content_height` (tied `runtime/dpi.rs` / `runtime/floats.rs`) — the owner column
+     (`docs/ARCHITECTURE.md` §13) gives it to `runtime/floats.rs` ("floating windows"); it moves with the floats
+     batch.
+   - `Runtime::reveal_in_explorer` — a three-way tie (`runtime/attention.rs` / `runtime/configuration.rs` /
+     `runtime/floats.rs`) that the owner column does not settle: §13's "Still in `main.rs`" table lists it
+     unassigned, and its asks column names "hand-off (reveal)" for both `files.rs` and `floats.rs`. It waits for
+     a ruling at the floats batch, not for `runtime/floats.rs` by right.
    - `Runtime::focus_seat` — its first `called_from` place is `runtime/palette.rs`, but that is three of eight
      callers (the others are `runtime/web.rs`, `runtime/attention.rs`, `runtime/preview.rs` and `main.rs`) and it
      is a general focus door, not the command palette's; batch 5 held it, and it waits for the topic that owns
