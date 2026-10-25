@@ -803,9 +803,45 @@ not be told from a test's own helper). A row listed twice is refused. When red,
 name the path with `bt_testpath::unique_name`/`temp_path`, locate a bin through
 `CARGO_BIN_EXE_<name>` in an integration test (cargo builds it for that target),
 or, when the fixed name is the subject, add a row saying why. A process-global that
-two tests touch is not in its grammar: review owns it. An `#[ignore]`d test that
+two tests touch is not in its grammar; the next paragraph's guard holds it. An `#[ignore]`d test that
 must run alone or serially says so on its line of `scripts/ci/ignored-tests.txt`
 (`run=alone`, `run=serial`).
+
+**Process-globals tests share** (T-TEST-PROCESS-GLOBALS, 2026-10-24).
+`crates/bt-source/tests/test_globals.rs` is the gate and `docs/plans/TEST-GLOBALS.tsv`
+its register. A process-global is a `static` of an `Atomic*`, a non-unit `Mutex`/`RwLock`,
+a `OnceLock`/`OnceCell`, a `LazyLock`, or a `static mut`. It may be written in a module or
+in a body. Not one: a `thread_local!` (each test has its own thread), a unit lock (the
+remedy), a static inside a `#[test]` body. A test's reach is its body and the test-only
+callables of its target that it reaches through resolved call-graph edges. It also takes
+in, to a fixed point, what runs without an edge: a test-only impl of a foreign trait (a
+`Drop`, winit's `resumed`) whose self type a body of the reach names, a test-only
+`GlobalAlloc` (in every test of its target), and a function written in an item-position
+macro's tokens (`define_class!`) whose type the reach names. A global that two tests of one
+binary reach (G1), or that one test's reach writes (G2), is a row. An array of cells is
+the cell, and a field or index of a `static mut` under `=`, `op=` or `&mut` writes it.
+`store`, `fetch_*`, `lock`, `get_or_init` and the like are writes, and any use the table
+in the module doc does not read is undecided and taken as a write. G3 is the reach itself.
+Refused by file and line: an unresolved edge with a test-only candidate that reaches a
+global, an unresolved path whose last segment is a global's name, an unparsed body on the
+walk, a global named where the call graph places no value (a glob `use` makes a name
+nameable too), and an implicitly run impl that reaches a global and whose type no test's
+reach names. A row is file, global, binary, class and a dated reason, and the rows equal the
+hits both ways. The guard checks `lock:<NAME>` (every test that reaches the global, each
+`cfg` arm on its own, reaches the one unit lock of the binary that NAME names; two locks of
+one name are spelled by their module path's tail), `single writer`, `one main` (a
+`harness = false` target, from its manifest) and `run=alone`/`run=serial` (each test
+carries `#[ignore]` and that condition on the ignored list). It also checks that a `write-once` row's writes
+are once-writes. `per-test key`, `monotone`, `write-once`, `not on a test thread` and
+`serial helpers` are by hand. `scripts/ci/check-test-globals.ps1` admits an added row of
+a checked class with its dated reason. It refuses an added by-hand row unless a new
+`# widened <date> by <ticket> (+n rows)` line admits exactly those rows in a change to the
+scan. `check-test-globals-tests.ps1` plants each verdict. When red, make the state the
+test's own (a value handed in, a key per test), or take one unit lock in every test that
+reaches it, or add the row. **Not seen:** a global a test reaches only through product
+functions; the walk ends there, as `timing.rs`'s does. The CJK probe's `i18n` switch is
+one. `the_product_reach_of_the_tests_is_measured` prints `TEST_GLOBALS_PRODUCT_REACH` as
+a measure, not a gate.
 
 ## Raw-effect and thread-door exceptions
 

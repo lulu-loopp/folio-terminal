@@ -183,6 +183,50 @@ fn the_targets_come_out_of_the_manifests() {
     );
 }
 
+/// RED (T-TEST-PROCESS-GLOBALS) — **a target whose table says `harness = false` is known as
+/// one, by its manifest**, and a target that says nothing runs under libtest.
+///
+/// The process-globals guard admits a static that a `harness = false` target's own `main`
+/// shares with nothing; it asks the manifest which targets those are, never a list of names.
+///
+/// MUTATION: drop the `harness` read for `[[test]]` tables in `manifest.rs` and
+/// `macos_services` is not known.
+#[test]
+fn a_target_without_the_harness_is_known_by_its_manifest() {
+    let workspace = workspace();
+    let without: Vec<String> = workspace
+        .packages()
+        .iter()
+        .flat_map(|package| {
+            package
+                .targets()
+                .iter()
+                .filter(|target| package.runs_without_harness(&target.id))
+                .map(|target| target.id.to_string())
+        })
+        .collect();
+    for named in [
+        "bt-platform:test:macos_services",
+        "bt-platform:test:video_playback",
+        "bt-app:test:macos_glyph_surface",
+    ] {
+        assert!(
+            without.iter().any(|id| id == named),
+            "{named} in {without:#?}"
+        );
+    }
+    for runs_under_libtest in [
+        "bt-platform:lib:bt-platform",
+        "bt-app:bin:folio",
+        "bt-app:test:built_folio_manifest",
+    ] {
+        assert!(
+            !without.iter().any(|id| id == runs_under_libtest),
+            "{runs_under_libtest} in {without:#?}"
+        );
+    }
+}
+
 /// RED (A2a, thread-door note revision (j)11.7) — **the manifest reader knows
 /// examples, benchmarks and build scripts as targets**, each by cargo's own
 /// discovery and its switches, and none of them is a product compilation.
