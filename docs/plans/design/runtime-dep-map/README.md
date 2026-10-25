@@ -131,7 +131,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    `runtime/terminal.rs`, so `unclassified.tsv` proposed that file; it writes `LeafSession.attention`, whose census
    owner is "attention (→ bt-workbench)", and `docs/ARCHITECTURE.md` §12.1 lists it with the attention routing. It
    went to `runtime/attention.rs`, which keeps that fact at two writer modules (the root and `runtime/attention.rs`)
-   instead of three.
+   instead of three. An item that writes facts of two different census owners is held for a ruling instead.
 
    **Held items** (each row's generated `called_from` home is not where it goes):
    - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).
