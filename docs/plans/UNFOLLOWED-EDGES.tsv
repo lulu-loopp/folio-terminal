@@ -2535,7 +2535,10 @@ crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	and_then	1
 crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	ok	2	
 crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	collect	1	
+crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	let_go_of_the_picture	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `Compositor::let_go_of_the_picture` (bt-platform) on a window's compositor, called inside the `CompositorCommit` admission this site already takes; it clears the visual's content and commits, and reaches no other door
 crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	map	1	
+crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	map_err	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	to_string	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/main.rs	bt-app crate::rename_key	Ambiguous	eq_ignore_ascii_case	3	
 crates/bt-app/src/main.rs	bt-app crate::rename_key	Ambiguous	then	1	
 crates/bt-app/src/main.rs	bt-app crate::rename_key	Dynamic	take_selection	2	
@@ -10523,6 +10526,7 @@ crates/bt-render/src/lib.rs	bt-render crate::CellMetrics::measure_at	Ambiguous	o
 crates/bt-render/src/lib.rs	bt-render crate::ChromeTextAdvances::from_stops	Ambiguous	collect	1	
 crates/bt-render/src/lib.rs	bt-render crate::ComposedRowCache::get	Ambiguous	is_some	1	
 crates/bt-render/src/lib.rs	bt-render crate::DeviceLossPilot::answer	Dynamic	rest	1	
+crates/bt-render/src/lib.rs	bt-render crate::DeviceResources::mint	Dynamic	driver	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; the removal-reason reader `driver_removal_reason` returned, called from the device-loss callback: one `GetDeviceRemovedReason` on a COM reference it holds, which reaches no door
 crates/bt-render/src/lib.rs	bt-render crate::GRID_CJK_FALLBACK_FAMILIES	Ambiguous	collect	1	
 crates/bt-render/src/lib.rs	bt-render crate::GRID_CJK_FALLBACK_FAMILIES	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::assemble	Ambiguous	elapsed	3	
@@ -10536,6 +10540,9 @@ crates/bt-render/src/lib.rs	bt-render crate::GpuContext::bootstrap_for_surface	A
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::device_loss	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::hold_background_texture	Ambiguous	create_view	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::hold_video_texture	Ambiguous	create_view	1	
+crates/bt-render/src/lib.rs	bt-render crate::GpuContext::let_go_of_the_lost_device	Ambiguous	map_err	2	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::GpuContext::let_go_of_the_lost_device	Ambiguous	request_device	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; wgpu `Adapter::request_device` on the noop backend's adapter: an inert device with no driver behind it, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::GpuContext::let_go_of_the_lost_device	Ambiguous	to_string	2	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::open	Ambiguous	clone	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	clone	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	elapsed	2	
@@ -10543,7 +10550,6 @@ crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_lo
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	get_capabilities	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	into_iter	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	kind	2	
-crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	limits	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	map_err	2	
 crates/bt-render/src/lib.rs	bt-render crate::GpuContext::rebuild_after_device_loss	Ambiguous	ok_or_else	1	
@@ -10570,6 +10576,9 @@ crates/bt-render/src/lib.rs	bt-render crate::TextRefusals::names	Ambiguous	map	1
 crates/bt-render/src/lib.rs	bt-render crate::WideShapingCache::get_or_shape	Ambiguous	elapsed	1	
 crates/bt-render/src/lib.rs	bt-render crate::WideShapingCache::get_or_shape	Ambiguous	map_or	1	
 crates/bt-render/src/lib.rs	bt-render crate::WideShapingCache::get_or_shape	Ambiguous	next	1	
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::adopt_new_device	Ambiguous	collect	2	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::adopt_new_device	Ambiguous	map	2	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::adopt_new_device	Ambiguous	remove_srgb_suffix	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; wgpu `TextureFormat::remove_srgb_suffix`, a pure function of a format, which reaches no door
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::assemble	Ambiguous	elapsed	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::bytes_view	Ambiguous	create_view	1	
 crates/bt-render/src/lib.rs	bt-render crate::WindowRenderer::bytes_view	Ambiguous	remove_srgb_suffix	1	
@@ -10693,6 +10702,13 @@ crates/bt-render/src/lib.rs	bt-render crate::create_surface	Ambiguous	to_string	
 crates/bt-render/src/lib.rs	bt-render crate::database_has_family	Ambiguous	any	2	
 crates/bt-render/src/lib.rs	bt-render crate::database_has_family	Ambiguous	iter	1	
 crates/bt-render/src/lib.rs	bt-render crate::draw_video_stage	Ambiguous	map_or	1	
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	GetDeviceRemovedReason	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `ID3D12Device::GetDeviceRemovedReason` (windows crate) on a held COM reference: a read of one HRESULT, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	clone	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a COM reference cloned (`AddRef`) out of wgpu's hal device, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	code	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `windows::core::Error` accessors on the answer just read, which reach no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	err	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	map	2	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	message	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `windows::core::Error` accessors on the answer just read, which reach no door
+crates/bt-render/src/lib.rs	bt-render crate::driver_removal_reason	Ambiguous	raw_device	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; wgpu hal `Device::raw_device`, the accessor of the D3D12 device it wraps, which reaches no door
 crates/bt-render/src/lib.rs	bt-render crate::drop_faces_with_no_scalable_em	Ambiguous	collect	1	
 crates/bt-render/src/lib.rs	bt-render crate::drop_faces_with_no_scalable_em	Ambiguous	map	1	
 crates/bt-render/src/lib.rs	bt-render crate::explicit_presentation_route	Ambiguous	find	1	
