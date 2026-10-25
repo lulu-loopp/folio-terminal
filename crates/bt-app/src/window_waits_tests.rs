@@ -4474,8 +4474,9 @@ fn one_of(readings: impl IntoIterator<Item = Resolved>) -> Resolved {
     }
 }
 
-/// What the path `written`, ending at `at` in `module`, names for the landmark item `landmark`
-/// (absolute, led by the crate's identifier). Every reading ([`LandmarkScope::readings`]) is
+/// What the path `written`, ending at `at` in `module`, names for the landmark item, one of
+/// `targets` (each absolute, led by its crate's identifier; more than one when the item is
+/// re-exported by a crate the reader does not follow into, as `admitted` is). Every reading ([`LandmarkScope::readings`]) is
 /// followed ([`through_uses`]) and each path it ends at is the landmark, another item — one the
 /// crate declares, or one led by a [root](LandmarkScope) outside it — or nothing; the globs one
 /// reading passes are [`one_of`] it, and so are the readings of one precedence group. The first
@@ -4485,7 +4486,7 @@ fn call_resolution(
     written: &[&str],
     at: usize,
     module: &str,
-    landmark: &[String],
+    targets: &[Vec<String>],
 ) -> Resolved {
     let names = &scope.names;
     let reading = |path: Vec<String>| {
@@ -4493,7 +4494,7 @@ fn call_resolution(
             through_uses(scope, absolute_in(names, path, module), USE_HOPS)
                 .into_iter()
                 .map(|path| match path {
-                    Some(path) if path == landmark => Resolved::Landmark,
+                    Some(path) if targets.contains(&path) => Resolved::Landmark,
                     Some(path) if path[0] == names.crate_ident => {
                         if scope.declares(&path) {
                             Resolved::Other
@@ -4903,7 +4904,7 @@ fn landmarks_in(
                 for landmark in landmarks.iter().copied() {
                     let resolution = |written: &[&'static str]| match landmark {
                         Landmark::Call(path) => {
-                            call_resolution(scope, written, tok.start, module, &item_path(path))
+                            call_resolution(scope, written, tok.start, module, &[item_path(path)])
                         }
                         _ => Resolved::Other,
                     };
@@ -5015,18 +5016,13 @@ fn pinned_writer_failures(
             ));
         }
     }
-    let first_party: BTreeSet<String> = world
-        .srcs
-        .iter()
-        .map(|src| src.package.replace('-', "_"))
-        .collect();
-    // Each package's scope, made when one of its owners has landmarks to read.
-    let mut scopes: HashMap<&str, LandmarkScope> = HashMap::new();
-    let no_dependencies = BTreeSet::new();
-    let mut found: Vec<(String, String, Option<&str>)> = Vec::new();
-    // A pinned call whose owner's landmarks are refused is not placed: the refusal says why, once.
-    let mut refusals: BTreeSet<String> = BTreeSet::new();
-    let mut refused: BTreeSet<(String, String)> = BTreeSet::new();
+    let called = |writer: &str| {
+        format!(
+            "`{}::{writer}`",
+            writers.get(writer).copied().unwrap_or_default()
+        )
+    };
+    let mut calls: Vec<PinnedCall<'_>> = Vec::new();
     let mut callbacks: BTreeMap<(String, String, String), usize> = BTreeMap::new();
     for src in &world.srcs {
         for (&writer, &module) in &writers {
@@ -5063,68 +5059,26 @@ fn pinned_writer_failures(
                         .or_insert(0) += 1;
                     continue;
                 }
-                let owner = src.owner_of(at);
-                let landmarks = owner_landmarks
-                    .iter()
-                    .find(|(named, _)| *named == owner)
-                    .map_or(&[][..], |(_, landmarks)| *landmarks);
-                let landmark = match src.callable_at(at) {
-                    Some(record) if !landmarks.is_empty() => {
-                        let scope = scopes.entry(src.package).or_insert_with(|| {
-                            LandmarkScope::new(
-                                src,
-                                Names::new(src, &first_party),
-                                dependencies.get(src.package).unwrap_or(&no_dependencies),
-                            )
-                        });
-                        landmark_before(src, scope, record, at, landmarks)
-                    }
-                    _ => Ok(None),
-                };
-                match landmark {
-                    Ok(landmark) => found.push((writer.to_owned(), owner, landmark)),
-                    Err(refusal) => {
-                        refusals.insert(refusal);
-                        refused.insert((writer.to_owned(), owner));
-                    }
-                }
+                calls.push(PinnedCall {
+                    src,
+                    at,
+                    called: called(writer),
+                });
             }
         }
     }
-    // Counted, not collected (review N2): a second call that matches a pin already met — the same
-    // writer, owner and landmark — is a surplus call, not the pin seen twice.
-    let mut wanted: BTreeMap<(String, String, Option<&str>), usize> = BTreeMap::new();
-    for pin in pins {
-        *wanted
-            .entry((pin.writer.to_owned(), pin.owner.to_owned(), pin.after))
-            .or_insert(0) += 1;
-    }
-    let mut met: BTreeMap<(String, String, Option<&str>), usize> = BTreeMap::new();
-    for site in found {
-        *met.entry(site).or_insert(0) += 1;
-    }
-    let said = |(writer, owner, after): &(String, String, Option<&str>)| {
-        format!(
-            "`{}::{writer}` in `{owner}`{}",
-            writers.get(writer.as_str()).copied().unwrap_or_default(),
-            after.map(|l| format!(" after `{l}`")).unwrap_or_default()
-        )
-    };
-    failures.extend(refusals);
-    for (pin, &pinned) in &wanted {
-        let calls = met.get(pin).copied().unwrap_or(0);
-        if calls == 0 && !refused.contains(&(pin.0.clone(), pin.1.clone())) {
-            failures.push(format!("the pinned call {} is not there", said(pin)));
-        } else if calls != 0 && calls != pinned {
-            failures.push(format!(
-                "{} is called {calls}× where its pins say {pinned}×",
-                said(pin)
-            ));
-        }
-    }
-    for extra in met.keys().filter(|site| !wanted.contains_key(*site)) {
-        failures.push(format!("{} is not a pinned call site", said(extra)));
-    }
+    let wanted: Vec<(String, &str, Option<&str>)> = pins
+        .iter()
+        .map(|pin| (called(pin.writer), pin.owner, pin.after))
+        .collect();
+    let mut scopes = Scopes::new(world, dependencies);
+    failures.extend(placed_and_counted(
+        calls,
+        &wanted,
+        owner_landmarks,
+        &BTreeSet::new(),
+        &mut scopes,
+    ));
     let wanted: BTreeMap<(String, String, String), usize> = pinned_callbacks
         .iter()
         .map(|(package, module, name, count)| {
@@ -5159,6 +5113,551 @@ fn pinned_writer_failures(
         ));
     }
     failures
+}
+
+/// One call a pin table's reader found in the product: where it is written, and the call as the
+/// table's messages spell it (`` `admission::exiting` ``, `` `admitted::<doors::TraceFlush, _>` ``).
+struct PinnedCall<'w> {
+    src: &'w Src,
+    at: usize,
+    called: String,
+}
+
+/// Each package's [`LandmarkScope`], made the first time one of its calls is read.
+struct Scopes<'d> {
+    first_party: BTreeSet<String>,
+    dependencies: &'d BTreeMap<String, BTreeSet<String>>,
+    made: HashMap<&'static str, LandmarkScope>,
+}
+
+impl<'d> Scopes<'d> {
+    fn new(world: &World, dependencies: &'d BTreeMap<String, BTreeSet<String>>) -> Self {
+        Self {
+            first_party: world
+                .srcs
+                .iter()
+                .map(|src| src.package.replace('-', "_"))
+                .collect(),
+            dependencies,
+            made: HashMap::new(),
+        }
+    }
+
+    fn of(&mut self, src: &Src) -> &LandmarkScope {
+        let (first_party, dependencies) = (&self.first_party, self.dependencies);
+        self.made.entry(src.package).or_insert_with(|| {
+            LandmarkScope::new(
+                src,
+                Names::new(src, first_party),
+                dependencies.get(src.package).unwrap_or(&BTreeSet::new()),
+            )
+        })
+    }
+}
+
+/// **The one placement engine both pin tables share** (the writers' [`PINS`], the doors'
+/// [`DOOR_PINS`]): each call is placed after the nearest landmark of its owner's body
+/// ([`landmark_before`]; an owner without landmarks places nothing), and the placed calls are
+/// counted per (call, owner, landmark) against `wanted`, one entry per pinned call. A pin is not
+/// "not there" when its owner's landmarks were refused — the refusal says why, once — or when its
+/// owner is in `unread_owners`, where a call was refused before the reader could say which it was.
+fn placed_and_counted(
+    calls: Vec<PinnedCall<'_>>,
+    wanted: &[(String, &str, Option<&str>)],
+    owner_landmarks: &[(&str, &[Landmark])],
+    unread_owners: &BTreeSet<String>,
+    scopes: &mut Scopes<'_>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut found: Vec<(String, String, Option<&str>)> = Vec::new();
+    // A pinned call whose owner's landmarks are refused is not placed: the refusal says why, once.
+    let mut refusals: BTreeSet<String> = BTreeSet::new();
+    let mut refused: BTreeSet<(String, String)> = BTreeSet::new();
+    for PinnedCall { src, at, called } in calls {
+        let owner = src.owner_of(at);
+        let landmarks = owner_landmarks
+            .iter()
+            .find(|(named, _)| *named == owner)
+            .map_or(&[][..], |(_, landmarks)| *landmarks);
+        let landmark = match src.callable_at(at) {
+            Some(record) if !landmarks.is_empty() => {
+                landmark_before(src, scopes.of(src), record, at, landmarks)
+            }
+            _ => Ok(None),
+        };
+        match landmark {
+            Ok(landmark) => found.push((called, owner, landmark)),
+            Err(refusal) => {
+                refusals.insert(refusal);
+                refused.insert((called, owner));
+            }
+        }
+    }
+    // Counted, not collected (review N2): a second call that matches a pin already met — the same
+    // call, owner and landmark — is a surplus call, not the pin seen twice.
+    let mut pinned: BTreeMap<(String, String, Option<&str>), usize> = BTreeMap::new();
+    for (called, owner, after) in wanted {
+        *pinned
+            .entry((called.clone(), (*owner).to_owned(), *after))
+            .or_insert(0) += 1;
+    }
+    let mut met: BTreeMap<(String, String, Option<&str>), usize> = BTreeMap::new();
+    for site in found {
+        *met.entry(site).or_insert(0) += 1;
+    }
+    let said = |(called, owner, after): &(String, String, Option<&str>)| {
+        format!(
+            "{called} in `{owner}`{}",
+            after.map(|l| format!(" after `{l}`")).unwrap_or_default()
+        )
+    };
+    failures.extend(refusals);
+    for (pin, &count) in &pinned {
+        let calls = met.get(pin).copied().unwrap_or(0);
+        if calls == 0
+            && !refused.contains(&(pin.0.clone(), pin.1.clone()))
+            && !unread_owners.contains(&pin.1)
+        {
+            failures.push(format!("the pinned call {} is not there", said(pin)));
+        } else if calls != 0 && calls != count {
+            failures.push(format!(
+                "{} is called {calls}× where its pins say {count}×",
+                said(pin)
+            ));
+        }
+    }
+    for extra in met.keys().filter(|site| !pinned.contains_key(*site)) {
+        failures.push(format!("{} is not a pinned call site", said(extra)));
+    }
+    failures
+}
+
+// ── assertion 3b: the pinned doors (§5.3 rows 17 and 30) ────────────────────────────────────
+
+/// How a pinned door's call is written: the admission itself, `admitted::<doors::Door, _>(…)`, or
+/// the door's one road — a method that admits it, called as `receiver.name(…)` on the receiver
+/// written as these segments joined by `.`.
+#[derive(Clone, Copy)]
+enum Road {
+    Admitted,
+    Method(&'static [&'static str], &'static str),
+}
+
+/// One pinned call of a door (T-DOOR-PINS-BY-DOOR): the door, the road it is called by, who makes
+/// the call, and the landmark it follows.
+struct DoorPin {
+    door: &'static str,
+    road: Road,
+    owner: &'static str,
+    after: Option<&'static str>,
+}
+
+/// The admission's modules, as a path to `admitted` and to its `doors` module begins: the crate
+/// that declares it, and the one that re-exports it by a glob (`pub use bt_effects::admission::*`)
+/// — the reader does not follow `use` declarations into another crate, so the pair is stated.
+const ADMISSIONS: [&[&str]; 2] = [&["bt_platform", "admission"], &["bt_effects", "admission"]];
+
+/// **The doors whose every call is pinned**, row for row: `diagnostics.log`'s settle (row 30) is
+/// admitted twice in `fn main`, in the build-error arm (after `build`) and at the tail (after
+/// `run_app`); the trace's flush (row 17) is admitted once, inside its one road
+/// `Shutdown::flush_through_its_door`, and `main` takes that road on the same two ways out.
+const DOOR_PINS: [DoorPin; 5] = [
+    DoorPin {
+        door: "DiagnosticsSettle",
+        road: Road::Admitted,
+        owner: "bt-app crate::main",
+        after: Some("build"),
+    },
+    DoorPin {
+        door: "DiagnosticsSettle",
+        road: Road::Admitted,
+        owner: "bt-app crate::main",
+        after: Some("run_app"),
+    },
+    DoorPin {
+        door: "TraceFlush",
+        road: Road::Admitted,
+        owner: "bt-app crate::trace_sink::Shutdown::flush_through_its_door",
+        after: None,
+    },
+    DoorPin {
+        door: "TraceFlush",
+        road: Road::Method(&["trace_shutdown"], "flush_through_its_door"),
+        owner: "bt-app crate::main",
+        after: Some("build"),
+    },
+    DoorPin {
+        door: "TraceFlush",
+        road: Road::Method(&["trace_shutdown"], "flush_through_its_door"),
+        owner: "bt-app crate::main",
+        after: Some("run_app"),
+    },
+];
+
+/// **The pinned doors are called only where [`DOOR_PINS`] places them**: every admission in the
+/// product is read for its door, and a pinned door's admissions and road calls are placed and
+/// counted as the writers' are.
+fn the_pinned_doors_are_called_only_where_they_are_pinned(world: &World) -> Vec<String> {
+    let dependencies: BTreeMap<String, BTreeSet<String>> = world
+        .srcs
+        .iter()
+        .map(|src| (src.package.to_owned(), dependency_crates(src.package)))
+        .collect();
+    pinned_door_failures(world, &DOOR_PINS, &ADMISSIONS, &LANDMARKS, &dependencies)
+}
+
+/// How a pinned door's call is said in the guard's messages.
+fn door_call(pin: &DoorPin) -> String {
+    match pin.road {
+        Road::Admitted => format!("`admitted::<doors::{}, _>`", pin.door),
+        Road::Method(receiver, name) => format!("`{}.{name}(…)`", receiver.join(".")),
+    }
+}
+
+/// [`the_pinned_doors_are_called_only_where_they_are_pinned`] over `world`, with its pins, the
+/// admission's modules, its owners' landmarks and each package's dependency crates as arguments —
+/// the product's, or a planted crate's.
+///
+/// **The grammar.** Every product token `admitted` is read where it is written. Not an admission:
+/// a declaration `fn admitted`, a method `.admitted(…)`, a field, a statement `let`, a macro of the
+/// name, and a path that resolves ([`call_resolution`]) to another item or to nothing
+/// (`OnTheWorker::admitted(…)`). A path that resolves to `admitted` in one of `admissions` is an
+/// admission and must be the call `admitted::<P, …>(…)` whose first generic argument `P` is
+/// written as a path ending `doors::Door` and resolves to `doors::Door` in one of `admissions`; the
+/// door is `Door`. Refused, by owner, line and what is written: no turbofish (a door inferred
+/// from the argument), `P` a single name (an imported door, an alias), `P` resolving elsewhere
+/// (another module's `doors`), `admitted` handed over as a value, an admission inside a macro's
+/// arguments (a module-level macro's too, such as `define_class!`: outside every body the index
+/// records, a token is read among its file's), a rename `admitted as …` in a `use`, and a path that
+/// resolves to the admission and another item at once. A bare `admitted` not called where the name
+/// is the admission's is a value, so a local of the name there is refused too: rename it.
+/// Every token spelling a pinned road's method name, but its declaration, must be the call on the
+/// pin's receiver; any other position is refused. Every admission is read, so an unreadable one —
+/// which might be a pinned door's — is refused wherever it is; pins are compared for the doors of
+/// `pins` only.
+fn pinned_door_failures(
+    world: &World,
+    pins: &[DoorPin],
+    admissions: &[&[&str]],
+    owner_landmarks: &[(&str, &[Landmark])],
+    dependencies: &BTreeMap<String, BTreeSet<String>>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    let doors: BTreeSet<&str> = pins.iter().map(|pin| pin.door).collect();
+    let mut roads: BTreeMap<&str, &[&str]> = BTreeMap::new();
+    for pin in pins {
+        if let Road::Method(receiver, name) = pin.road
+            && let Some(other) = roads.insert(name, receiver)
+            && other != receiver
+        {
+            failures.push(format!(
+                "the door pins call `{name}` on two receivers, `{}` and `{}`",
+                other.join("."),
+                receiver.join(".")
+            ));
+        }
+    }
+    let admitted: Vec<Vec<String>> = admissions
+        .iter()
+        .map(|module| segments(module, &["admitted"]))
+        .collect();
+    let mut scopes = Scopes::new(world, dependencies);
+    let mut calls: Vec<PinnedCall<'_>> = Vec::new();
+    let mut unread_owners: BTreeSet<String> = BTreeSet::new();
+    for src in &world.srcs {
+        let uses = use_declarations(src);
+        for at in src.named("admitted") {
+            if !src.in_product(at) {
+                continue;
+            }
+            match admission_door(src, scopes.of(src), at, admissions, &admitted, &uses) {
+                Ok(Some(door)) if doors.contains(door) => calls.push(PinnedCall {
+                    src,
+                    at,
+                    called: format!("`admitted::<doors::{door}, _>`"),
+                }),
+                Ok(_) => {}
+                Err(refusal) => {
+                    failures.push(refusal);
+                    unread_owners.insert(src.owner_of(at));
+                }
+            }
+        }
+        for (&name, &receiver) in &roads {
+            for at in src.named(name) {
+                if !src.in_product(at) {
+                    continue;
+                }
+                match road_call(src, at, receiver) {
+                    Ok(true) => calls.push(PinnedCall {
+                        src,
+                        at,
+                        called: format!("`{}.{name}(…)`", receiver.join(".")),
+                    }),
+                    Ok(false) => {}
+                    Err(refusal) => {
+                        failures.push(refusal);
+                        unread_owners.insert(src.owner_of(at));
+                    }
+                }
+            }
+        }
+    }
+    let wanted: Vec<(String, &str, Option<&str>)> = pins
+        .iter()
+        .map(|pin| (door_call(pin), pin.owner, pin.after))
+        .collect();
+    failures.extend(placed_and_counted(
+        calls,
+        &wanted,
+        owner_landmarks,
+        &unread_owners,
+        &mut scopes,
+    ));
+    failures
+}
+
+/// `module`'s segments followed by `rest`'s, as owned strings.
+fn segments(module: &[&str], rest: &[&str]) -> Vec<String> {
+    module
+        .iter()
+        .chain(rest)
+        .map(|segment| (*segment).to_owned())
+        .collect()
+}
+
+/// Every product `use` declaration of `src`, as the byte range from its `use` to its `;`.
+fn use_declarations(src: &Src) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for at in src.named("use") {
+        if !src.in_product(at) {
+            continue;
+        }
+        let file_start = src.index.file_at(at).map_or(0, |f| f.span().start());
+        let before = src.lex(at.saturating_sub(16).max(file_start), at);
+        if before
+            .last()
+            .is_some_and(|t| src.is(Some(t), "::") || src.is(Some(t), "."))
+        {
+            continue;
+        }
+        if let Some(end) = semicolon_after(src, at) {
+            out.push((at, end));
+        }
+    }
+    out
+}
+
+/// Where the first `;` after `at` in its file stands, read through a widening window.
+fn semicolon_after(src: &Src, at: usize) -> Option<usize> {
+    let file_end = src.file_end(at);
+    let mut window = 4096;
+    loop {
+        let toks = src.lex(at, (at + window).min(file_end));
+        if let Some(end) = toks.iter().find(|t| src.is(Some(t), ";")) {
+            return Some(end.start);
+        }
+        if at + window >= file_end {
+            return None;
+        }
+        window *= 4;
+    }
+}
+
+/// The tokens the token at `at` is read among, with its index: the smallest function body holding
+/// it, or — outside every body the index records (a signature, a type, a module-level macro such as
+/// `define_class!`) — its whole file.
+fn tokens_around(src: &Src, at: usize) -> (Vec<Tok>, usize) {
+    let (start, end) = src
+        .callable_at(at)
+        .and_then(ItemRecord::body)
+        .filter(|body| body.start() <= at && at < body.end())
+        .map_or_else(
+            || {
+                let file = src.index.file_at(at).expect("a token is in a file");
+                (file.span().start(), src.file_end(at))
+            },
+            |body| (body.start(), body.end()),
+        );
+    let toks = src.lex(start, end);
+    let index = toks
+        .iter()
+        .position(|tok| tok.start == at)
+        .expect("the token is among its own");
+    (toks, index)
+}
+
+/// Whether the innermost group open before `toks[index]` is a `{`.
+fn in_braces(src: &Src, toks: &[Tok], index: usize) -> bool {
+    let mut open: Vec<&str> = Vec::new();
+    for tok in &toks[..index] {
+        match src.text(*tok) {
+            spelled @ ("{" | "(" | "[") if tok.kind == Kind::Punct => open.push(spelled),
+            "}" | ")" | "]" if tok.kind == Kind::Punct => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    open.last() == Some(&"{")
+}
+
+/// **The door of the token `admitted` at `at`**, by [`pinned_door_failures`]' grammar: `None` when
+/// the token is not an admission, the door when it is one, or the refusal.
+fn admission_door(
+    src: &Src,
+    scope: &LandmarkScope,
+    at: usize,
+    admissions: &[&[&str]],
+    admitted: &[Vec<String>],
+    uses: &[(usize, usize)],
+) -> Result<Option<&'static str>, String> {
+    let refusal = |why: &str, toks: &[Tok], index: usize| {
+        let excerpt: Vec<&str> = toks[index.saturating_sub(3)..(index + 8).min(toks.len())]
+            .iter()
+            .map(|tok| src.text(*tok))
+            .collect();
+        format!(
+            "an admission is written where the guard cannot read its door: `admitted` in `{}` at \
+             {}, {why} (`{}`); a door is read only from the call `admitted::<doors::Door, …>(…)`",
+            src.owner_of(at),
+            src.location(at),
+            excerpt.join(" ")
+        )
+    };
+    if let Some(&(start, end)) = uses.iter().find(|(start, end)| *start < at && at < *end) {
+        let toks = src.lex(start, end);
+        let index = toks
+            .iter()
+            .position(|tok| tok.start == at)
+            .expect("the token is in its `use`");
+        return if src.is(toks.get(index + 1), "as") {
+            Err(refusal(
+                "a rename, which calls the admission by another name",
+                &toks,
+                index,
+            ))
+        } else {
+            Ok(None)
+        };
+    }
+    let (toks, index) = tokens_around(src, at);
+    let module = src.module_at(at);
+    let written = match shape_of(src, &toks, index, in_braces(src, &toks, index)) {
+        Shape::NestedFn | Shape::Method(_) | Shape::Field | Shape::Binding | Shape::Macro => {
+            return Ok(None);
+        }
+        Shape::Rename => return Err(refusal("a rename", &toks, index)),
+        Shape::Path(None, _) => {
+            return Err(refusal(
+                "a path the guard cannot read (generic arguments or a leading `::`)",
+                &toks,
+                index,
+            ));
+        }
+        Shape::Path(Some(written), _) => written,
+        Shape::Bare(_) => vec!["admitted"],
+    };
+    match call_resolution(scope, &written, at, module, admitted) {
+        Resolved::Landmark => {}
+        Resolved::Ambiguous => {
+            return Err(refusal(
+                "a path that resolves to the admission and another item at once",
+                &toks,
+                index,
+            ));
+        }
+        Resolved::Other | Resolved::Nothing => return Ok(None),
+    }
+    if Apart::holds(&Apart::of(src, &toks).macros, index) {
+        return Err(refusal(
+            "inside a macro's arguments, which runs where the macro puts it",
+            &toks,
+            index,
+        ));
+    }
+    if !(src.is(toks.get(index + 1), "::") && src.is(toks.get(index + 2), "<")) {
+        return Err(refusal(
+            if src.is(toks.get(index + 1), "(") {
+                "no turbofish, so the door is inferred from the argument"
+            } else {
+                "handed over as a value"
+            },
+            &toks,
+            index,
+        ));
+    }
+    let close = angle_close(src, &toks, index + 2)
+        .ok_or_else(|| refusal("a turbofish that does not close", &toks, index))?;
+    if !src.is(toks.get(close + 1), "(") {
+        return Err(refusal("handed over as a value", &toks, index));
+    }
+    let arguments = split_commas(src, &toks[index + 3..close]);
+    let door: Vec<&'static str> = arguments.first().map_or_else(Vec::new, |argument| {
+        argument
+            .iter()
+            .enumerate()
+            .map(|(at, tok)| match (at % 2, tok.kind) {
+                (0, Kind::Ident) => Some(src.text(*tok)),
+                (1, _) if src.text(*tok) == "::" => Some("::"),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|written| written.len() % 2 == 1)
+            .map(|written| written.into_iter().step_by(2).collect())
+            .unwrap_or_default()
+    });
+    let Some((&name, rest)) = door.split_last() else {
+        return Err(refusal(
+            "a first generic argument that is not a plain path",
+            &toks,
+            index,
+        ));
+    };
+    if rest.last() != Some(&"doors") {
+        return Err(refusal(
+            "a door not written as `doors::Door` (an imported door or an alias)",
+            &toks,
+            index,
+        ));
+    }
+    let targets: Vec<Vec<String>> = admissions
+        .iter()
+        .map(|module| segments(module, &["doors", name]))
+        .collect();
+    let door_at = arguments[0][door.len() * 2 - 2].start;
+    if call_resolution(scope, &door, door_at, module, &targets) != Resolved::Landmark {
+        return Err(refusal(
+            "a `doors` path that resolves to no door of the admission",
+            &toks,
+            index,
+        ));
+    }
+    Ok(Some(name))
+}
+
+/// Whether the token at `at`, spelling a pinned road's method name, is the call on `receiver`:
+/// `false` for its declaration, the refusal for any other position.
+fn road_call(src: &Src, at: usize, receiver: &[&str]) -> Result<bool, String> {
+    let name = src.text(
+        src.lex(at, (at + 128).min(src.file_end(at)))
+            .first()
+            .copied()
+            .expect("the named token"),
+    );
+    let (toks, index) = tokens_around(src, at);
+    match shape_of(src, &toks, index, in_braces(src, &toks, index)) {
+        Shape::NestedFn => Ok(false),
+        Shape::Method(Some(written)) if written == receiver && src.is(toks.get(index + 1), "(") => {
+            Ok(true)
+        }
+        _ => Err(format!(
+            "the door road `{name}` is named at {} ({}) other than as the call `{}.{name}(…)`",
+            src.location(at),
+            src.owner_of(at),
+            receiver.join(".")
+        )),
+    }
 }
 
 // ── assertion 4: §C-2, suppression ──────────────────────────────────────────────────────────
@@ -6306,7 +6805,7 @@ fn every_entrance_left_the_vocabulary_takes_its_capability(world: &World) -> Vec
 fn every_door_is_where_the_registry_says() {
     let world = World::new();
     let words = vocabulary();
-    let assertions: [(&str, Vec<String>); 17] = [
+    let assertions: [(&str, Vec<String>); 18] = [
         (
             "the_universe_is_the_product_and_its_tools_are_declared",
             the_universe_is_the_product_and_its_tools_are_declared(&world),
@@ -6322,6 +6821,10 @@ fn every_door_is_where_the_registry_says() {
         (
             "the_role_and_phase_writers_are_called_only_where_they_are_pinned",
             the_role_and_phase_writers_are_called_only_where_they_are_pinned(&world),
+        ),
+        (
+            "the_pinned_doors_are_called_only_where_they_are_pinned",
+            the_pinned_doors_are_called_only_where_they_are_pinned(&world),
         ),
         (
             "the_remover_effect_doors_are_called_only_from_their_worker_roads",
@@ -12727,6 +13230,305 @@ pub fn main() {
             .any(|failure| failure
                 .contains("other than as the call `persist::settle_storage_dir(…)`")),
         "the import is refused by its path: {failures:?}"
+    );
+}
+
+/// The items a planted `main` admits its doors through, beside [`PLANTED_LANDMARK_ITEMS`]: the
+/// admission `gate::admitted` with its `gate::doors`, the loop `run_app` is called on, the trace's
+/// `Shutdown` whose one road admits `TraceFlush`, and an unrelated `OnTheWorker::admitted`.
+const PLANTED_DOOR_ITEMS: &str = r#"
+pub mod gate {
+    pub mod doors { pub struct DiagnosticsSettle; pub struct TraceFlush; }
+    pub fn admitted<D, R>(work: impl FnOnce() -> R) -> R { work() }
+}
+pub mod other { pub mod doors { pub struct DiagnosticsSettle; } }
+pub struct EventLoop;
+impl EventLoop { pub fn run_app(&self) {} }
+pub struct Shutdown;
+impl Shutdown {
+    pub fn flush_through_its_door(self) {
+        gate::admitted::<gate::doors::TraceFlush, _>(|| ());
+    }
+}
+pub struct OnTheWorker;
+impl OnTheWorker { pub fn admitted(_: u8) {} }
+"#;
+
+/// The planted counterpart of [`DOOR_PINS`]: the same five rows, owned by the planted `main` and
+/// the planted `Shutdown::flush_through_its_door`.
+const PLANTED_DOOR_PINS: [DoorPin; 5] = [
+    DoorPin {
+        door: "DiagnosticsSettle",
+        road: Road::Admitted,
+        owner: "planted crate::main",
+        after: Some("build"),
+    },
+    DoorPin {
+        door: "DiagnosticsSettle",
+        road: Road::Admitted,
+        owner: "planted crate::main",
+        after: Some("run_app"),
+    },
+    DoorPin {
+        door: "TraceFlush",
+        road: Road::Admitted,
+        owner: "planted crate::Shutdown::flush_through_its_door",
+        after: None,
+    },
+    DoorPin {
+        door: "TraceFlush",
+        road: Road::Method(&["trace_shutdown"], "flush_through_its_door"),
+        owner: "planted crate::main",
+        after: Some("build"),
+    },
+    DoorPin {
+        door: "TraceFlush",
+        road: Road::Method(&["trace_shutdown"], "flush_through_its_door"),
+        owner: "planted crate::main",
+        after: Some("run_app"),
+    },
+];
+
+/// A planted `main` with both ways out, as the product's has them: the build-error return after
+/// `builder.build()` and the tail after `event_loop.run_app()`, each settling the log through its
+/// admission and retiring the trace through its road. `{tail}` is the tail's settle, `{more}` what
+/// a case adds after `run_app`.
+const PLANTED_DOOR_MAIN: &str = r#"
+pub fn main(fail: bool, again: bool) {
+    let trace_shutdown = Shutdown;
+    let builder = loop_builder();
+    builder.build();
+    if fail {
+        gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());
+        trace_shutdown.flush_through_its_door();
+        return;
+    }
+    let event_loop = EventLoop;
+    event_loop.run_app();
+    {tail}
+    {more}
+    trace_shutdown.flush_through_its_door();
+}
+"#;
+
+/// The tail's settle as the product writes it.
+const PLANTED_TAIL_SETTLE: &str = "gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());";
+
+/// [`pinned_door_failures`] over a planted crate: [`PLANTED_LANDMARK_ITEMS`],
+/// [`PLANTED_DOOR_ITEMS`], `uses` at the crate root and [`PLANTED_DOOR_MAIN`] with its tail's
+/// settle and its addition, read with the product `main`'s landmarks.
+fn planted_door_failures(tag: &str, uses: &str, tail: &str, more: &str) -> Vec<String> {
+    let main = PLANTED_DOOR_MAIN
+        .replace("{tail}", tail)
+        .replace("{more}", more);
+    let world = planted_world(
+        tag,
+        &format!("{PLANTED_LANDMARK_ITEMS}{PLANTED_DOOR_ITEMS}{uses}{main}"),
+    );
+    let owners = [("planted crate::main", product_main_landmarks())];
+    pinned_door_failures(
+        &world,
+        &PLANTED_DOOR_PINS,
+        &[&["planted", "gate"]],
+        &owners,
+        &BTreeMap::new(),
+    )
+}
+
+/// RED (T-DOOR-PINS-BY-DOOR) — **the tail's settle is pinned by its door**: the planted `main` with
+/// both ways out is green; without the tail's `admitted::<doors::DiagnosticsSettle, _>(…)` the
+/// guard names the door and the place it is missing from — the gap the settle fence's builder left
+/// (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD §3).
+///
+/// MUTATION: drop the "is not there" loop of [`placed_and_counted`] — the deleted settle passes.
+#[test]
+fn deleting_the_tail_settle_is_red() {
+    assert_eq!(
+        planted_door_failures("ww-doors-both", "", PLANTED_TAIL_SETTLE, ""),
+        Vec::<String>::new(),
+        "both ways out settle and flush where the pins say"
+    );
+    assert_eq!(
+        planted_door_failures("ww-doors-no-tail", "", "", ""),
+        vec![
+            "the pinned call `admitted::<doors::DiagnosticsSettle, _>` in `planted crate::main` \
+             after `run_app` is not there"
+                .to_owned()
+        ],
+    );
+}
+
+/// RED (T-DOOR-PINS-BY-DOOR) — **a door pin is one call**: a second settle in another branch after
+/// `run_app` matches the tail's pin and is a surplus.
+///
+/// MUTATION: compare the door pins as a set (`calls != 0` passes any count) — the second settle
+/// passes unseen.
+#[test]
+fn a_second_settle_in_another_branch_is_a_surplus() {
+    assert_eq!(
+        planted_door_failures(
+            "ww-doors-twice",
+            "",
+            PLANTED_TAIL_SETTLE,
+            "if again { gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
+        ),
+        vec![
+            "`admitted::<doors::DiagnosticsSettle, _>` in `planted crate::main` after `run_app` \
+             is called 2× where its pins say 1×"
+                .to_owned()
+        ],
+    );
+}
+
+/// RED (T-DOOR-PINS-BY-DOOR) — **a door is read only as written through its own path**: an
+/// aliased door, an imported one, another module's `doors`, an admission with no turbofish (the
+/// door inferred from the argument), an admission handed over as a value and the admission
+/// renamed in a `use` are each refused by owner, line and what is written — and a refusal in
+/// `main` keeps its pins from being called "not there".
+///
+/// MUTATION: read the door by its last segment alone (skip the `doors::` and resolution checks in
+/// [`admission_door`]) — the alias, the import and the other module's door are read as doors and
+/// the cases are green or "not there".
+#[test]
+fn a_door_through_an_alias_or_another_module_is_refused() {
+    let cases = [
+        (
+            "ww-doors-alias",
+            "use gate::doors::DiagnosticsSettle as Settle;\n",
+            "gate::admitted::<Settle, _>(|| ());",
+            "a door not written as `doors::Door`",
+        ),
+        (
+            "ww-doors-imported",
+            "use gate::doors::DiagnosticsSettle;\n",
+            "gate::admitted::<DiagnosticsSettle, _>(|| ());",
+            "a door not written as `doors::Door`",
+        ),
+        (
+            "ww-doors-other-module",
+            "",
+            "gate::admitted::<other::doors::DiagnosticsSettle, _>(|| ());",
+            "a `doors` path that resolves to no door of the admission",
+        ),
+        (
+            "ww-doors-inferred",
+            "",
+            "gate::admitted(|| ());",
+            "no turbofish, so the door is inferred from the argument",
+        ),
+        (
+            "ww-doors-value",
+            "",
+            "let settle = gate::admitted::<gate::doors::DiagnosticsSettle, _>; settle(|| ());",
+            "handed over as a value",
+        ),
+    ];
+    for (tag, uses, tail, why) in cases {
+        let failures = planted_door_failures(tag, uses, tail, "");
+        assert!(
+            failures.len() == 1
+                && failures[0].starts_with(
+                    "an admission is written where the guard cannot read its door: `admitted` \
+                     in `planted crate::main` at "
+                )
+                && failures[0].contains(why),
+            "{tag}: refused, once, {why:?}: {failures:?}"
+        );
+    }
+    let failures = planted_door_failures(
+        "ww-doors-renamed",
+        "use gate::admitted as admit;\n",
+        "admit::<gate::doors::DiagnosticsSettle, _>(|| ());",
+        "",
+    );
+    assert!(
+        failures.iter().any(|failure| failure.starts_with(
+            "an admission is written where the guard cannot read its door: `admitted` in \
+             `planted crate` at "
+        ) && failure.contains("a rename")),
+        "the renamed admission is refused at its `use`: {failures:?}"
+    );
+}
+
+/// RED (T-DOOR-PINS-BY-DOOR) — **a door's road is pinned by its call on the pinned receiver**: the
+/// trace's flush is admitted inside `Shutdown::flush_through_its_door`, so `main`'s two ways out
+/// are pinned as that road's calls; deleting the tail's is red, and the road named as a value or
+/// called on another receiver is refused.
+///
+/// MUTATION: skip the roads in [`pinned_door_failures`] — the deleted flush passes.
+#[test]
+fn a_road_call_is_pinned_by_its_receiver() {
+    let main = |tag: &str, tail: &str| {
+        let world = planted_world(
+            tag,
+            &format!(
+                "{PLANTED_LANDMARK_ITEMS}{PLANTED_DOOR_ITEMS}{}",
+                PLANTED_DOOR_MAIN
+                    .replace("{tail}", PLANTED_TAIL_SETTLE)
+                    .replace("{more}", "")
+                    .replace(
+                        "    trace_shutdown.flush_through_its_door();\n}",
+                        &format!("    {tail}\n}}")
+                    )
+            ),
+        );
+        let owners = [("planted crate::main", product_main_landmarks())];
+        pinned_door_failures(
+            &world,
+            &PLANTED_DOOR_PINS,
+            &[&["planted", "gate"]],
+            &owners,
+            &BTreeMap::new(),
+        )
+    };
+    assert_eq!(
+        main("ww-road-gone", ""),
+        vec![
+            "the pinned call `trace_shutdown.flush_through_its_door(…)` in `planted crate::main` \
+             after `run_app` is not there"
+                .to_owned()
+        ],
+    );
+    for (tag, tail) in [
+        (
+            "ww-road-value",
+            "let retire = Shutdown::flush_through_its_door; retire(trace_shutdown);",
+        ),
+        (
+            "ww-road-receiver",
+            "let shutdown = trace_shutdown; shutdown.flush_through_its_door();",
+        ),
+    ] {
+        let failures = main(tag, tail);
+        assert!(
+            failures.len() == 1
+                && failures[0].starts_with("the door road `flush_through_its_door` is named at ")
+                && failures[0].ends_with(
+                    "(planted crate::main) other than as the call \
+                     `trace_shutdown.flush_through_its_door(…)`"
+                ),
+            "{tag}: refused, once: {failures:?}"
+        );
+    }
+}
+
+/// RED (T-DOOR-PINS-BY-DOOR) — **what only spells `admitted` is no admission**: another type's
+/// `admitted`, a method of the name, and a local of the name where it names nothing else are not
+/// read as doors.
+///
+/// MUTATION: take every token `admitted` for an admission (drop the resolution in
+/// [`admission_door`]) — `OnTheWorker::admitted(0)` is refused for its missing turbofish.
+#[test]
+fn a_name_that_is_not_the_admission_is_not_read() {
+    assert_eq!(
+        planted_door_failures(
+            "ww-doors-not-admissions",
+            "",
+            PLANTED_TAIL_SETTLE,
+            "OnTheWorker::admitted(0); let admitted = 1; if admitted == 1 {} \
+             let worker = OnTheWorker; worker.admitted();",
+        ),
+        Vec::<String>::new(),
     );
 }
 

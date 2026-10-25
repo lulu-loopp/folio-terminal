@@ -479,6 +479,35 @@ had. A pin is one call: the calls are counted per (writer, owner, landmark), and
 a second call matching a pin already met is reported as a surplus
 (`a_second_call_matching_a_pin_is_a_surplus`).
 
+A wait reached through the generic admission is pinned by its door
+(T-DOOR-PINS-BY-DOOR, 2026-10-25): `DOOR_PINS` places each call of a pinned door
+after its owner's landmark, through the same placement and count as `PINS`
+(`window_waits_tests::placed_and_counted`, one engine for both tables). Row 30's
+settle is admitted twice in `fn main`, after `build` (the build-error return) and
+after `run_app` (the tail); row 17's flush is admitted once, inside its one road
+`trace_sink::Shutdown::flush_through_its_door`, and `main` takes that road as
+`trace_shutdown.flush_through_its_door()` after `build` and after `run_app`.
+Every product token `admitted` is read (`pinned_door_failures`'s grammar): a
+declaration, a method, a field, a `let`, a macro of the name and a path resolving
+to another item (`OnTheWorker::admitted`) are not admissions; a path resolving to
+`admitted` in `bt_platform::admission` or `bt_effects::admission` (the pair is
+stated: the `use` reader does not follow the glob re-export across crates) must be
+the call `admitted::<doors::Door, …>(…)`, its first generic argument written as a
+path ending `doors::Door` that resolves to that admission's `doors`. Refused by
+owner, line and what is written: no turbofish (a door inferred from the
+argument), an imported or aliased door, another module's `doors`, the admission as
+a value, inside a macro's arguments (a module-level one's too), a rename
+`admitted as …` in a `use`, and a path resolving to the admission and another item
+at once; a bare `admitted` not called where the name is the admission's is a
+value, so a local of that name there is refused too. Every token of a pinned
+road's name but its declaration must be the call on the pin's receiver. An
+unreadable admission is refused wherever it is (it may be a pinned door's), and
+its owner's pins are not also called "not there"; a pinned call with none found
+is red, a second matching one a surplus (`deleting_the_tail_settle_is_red`,
+`a_second_settle_in_another_branch_is_a_surplus`,
+`a_door_through_an_alias_or_another_module_is_refused`,
+`a_road_call_is_pinned_by_its_receiver`, `a_name_that_is_not_the_admission_is_not_read`).
+
 The registry's `# completions` section (S-1, 2026-10-11) is the side-effects
 contract's ledger, one row per request protocol, held by the
 `every_*completions*` tests (among them `every_worker_door_body_is_reached_from_a_completions_door`) and `every_conforming_request_door_holds_no_wait_of_its_own`
