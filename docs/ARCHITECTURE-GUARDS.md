@@ -486,26 +486,56 @@ after its owner's landmark, through the same placement and count as `PINS`
 settle is admitted twice in `fn main`, after `build` (the build-error return) and
 after `run_app` (the tail); row 17's flush is admitted once, inside its one road
 `trace_sink::Shutdown::flush_through_its_door`, and `main` takes that road as
-`trace_shutdown.flush_through_its_door()` after `build` and after `run_app`.
-Every product token `admitted` is read (`pinned_door_failures`'s grammar): a
-declaration, a method, a field, a `let`, a macro of the name and a path resolving
-to another item (`OnTheWorker::admitted`) are not admissions; a path resolving to
-`admitted` in `bt_platform::admission` or `bt_effects::admission` (the pair is
-stated: the `use` reader does not follow the glob re-export across crates) must be
-the call `admitted::<doors::Door, …>(…)`, its first generic argument written as a
-path ending `doors::Door` that resolves to that admission's `doors`. Refused by
-owner, line and what is written: no turbofish (a door inferred from the
-argument), an imported or aliased door, another module's `doors`, the admission as
-a value, inside a macro's arguments (a module-level one's too), a rename
-`admitted as …` in a `use`, and a path resolving to the admission and another item
-at once; a bare `admitted` not called where the name is the admission's is a
-value, so a local of that name there is refused too. Every token of a pinned
-road's name but its declaration must be the call on the pin's receiver. An
+`trace_shutdown.flush_through_its_door()` after `build` and after `run_app`. A
+pinned call with none found is red, a second matching one a surplus. "After
+`run_app`" is all a tail pin says: it does not pin the settle before the footer,
+or before the flush, which is the order row 30 exists for — a fixed landmark set
+cannot.
+
+What is read (`pinned_door_failures`'s grammar): every product token `admitted`,
+among the tokens of the smallest function body the index records around it, or —
+outside every recorded body (a signature, a module-level macro such as
+`define_class!`) — among its file's. Not an admission: a declaration, a method, a
+field, a `let`, a macro of the name, a name in a `use` that is not renamed, a
+path that resolves only to items the crate itself declares
+(`OnTheWorker::admitted`), and a bare name, neither called nor turbofished, that
+resolves to nothing (a local, as the `define_class!` methods' in
+`macos_http.rs`). Read first, before any resolution: an `admitted::<…>` inside a
+macro's arguments (other than `IN_PLACE_MACROS`) or inside a nested `fn`'s body —
+which the index does not record, so its calls would be the owner's, placed by
+where they are written — is refused. A path resolving to `admitted` in
+`bt_platform::admission` or `bt_effects::admission` must be the call
+`admitted::<doors::Door, …>(…)`, its first generic argument written as a path
+ending `doors::Door` that resolves to that admission's `doors`. The pair is
+stated because the `use` reader does not follow a `use` across crates; the
+consequence is that a path into any other crate is refused, not read — a third
+crate's re-export of the admission (`bt_term::admission::admitted::<…>`) would
+otherwise pass unseen. Refused by owner, line and what is written: a path that
+resolves to nothing (a name a macro-written `use` or an `extern crate … as`
+brings in), a path into another crate, a path resolving to the admission and
+another item at once, no turbofish (a door inferred from the argument), an
+imported or aliased door, another module's `doors`, the admission as a value
+(so a local named `admitted` where the name is the admission's is refused too),
+inside a macro's arguments or a nested `fn`, and a rename `admitted as …` in a
+`use`. Every token of a pinned road's name but its declaration must be the call
+on the pin's receiver, matched by spelling — a same-name method of another type
+called through a rebound `trace_shutdown` would count as the road — outside any
+macro's arguments and nested `fn`. A pinned door's call that stands under a
+statement's `#[cfg…]` (the statement or block an outer `#[cfg…]` governs, or the
+block an inner `#![cfg…]` opens) is refused: the index reads a file's, an item's
+and a module's `cfg` but never a statement's, so a gated call would meet its pin
+on a build it is not in. The writer table (`PINS`) does not read statement
+`cfg`s yet — a stated gap with its own plan row. Not read: closures — a call in a
+closure's body is placed where it is written, as a landmark is, so a closure
+written after `run_app` that is never called would meet the tail's pin. An
 unreadable admission is refused wherever it is (it may be a pinned door's), and
-its owner's pins are not also called "not there"; a pinned call with none found
-is red, a second matching one a surplus (`deleting_the_tail_settle_is_red`,
+its owner's pins are not also called "not there" (`deleting_the_tail_settle_is_red`,
 `a_second_settle_in_another_branch_is_a_surplus`,
 `a_door_through_an_alias_or_another_module_is_refused`,
+`a_path_to_admitted_that_names_nothing_or_another_crate_is_refused`,
+`a_door_call_inside_a_nested_fn_is_refused`, `a_use_bound_is_no_use_declaration`,
+`a_pinned_call_under_a_statement_cfg_is_refused`,
+`a_module_level_macro_is_read_among_its_file`,
 `a_road_call_is_pinned_by_its_receiver`, `a_name_that_is_not_the_admission_is_not_read`).
 
 The registry's `# completions` section (S-1, 2026-10-11) is the side-effects
