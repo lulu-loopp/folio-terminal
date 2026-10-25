@@ -9,7 +9,8 @@
 //! # What a process-global is
 //!
 //! A `static` written in a module or inside a function body, whose written type is, through
-//! `Arc`/`Box`/`Rc`:
+//! `Arc`/`Box`/`Rc` and through an array or a slice (`[AtomicU64; 5]` is its cell, element by
+//! element):
 //!
 //! * an `Atomic*`;
 //! * a `Mutex<T>` or `RwLock<T>` with a `T` other than `()`;
@@ -34,6 +35,22 @@
 //! Test-only means no product build compiles it. This is `timing.rs`'s helper walk; a product
 //! function ends the walk.
 //!
+//! **What runs without a call edge is taken in too**, to a fixed point:
+//!
+//! * a test-only first-party impl of a foreign trait of the target ([`Resolver::implicit`]: a
+//!   `Drop` at a scope's end, winit's `ApplicationHandler::resumed`, a `Display` a `format!`
+//!   runs), when a body of the reach names its self type: a path, a type, a struct literal or
+//!   an unparsed macro argument that, placed from the body's module (its own module, its named
+//!   and glob `use`s, `crate`/`self`/`super`), may be the type as placed from the impl's module,
+//!   or a method of that type in the reach. Two types of one name in two modules are two types;
+//! * a test-only `GlobalAlloc` impl of the target, in every test of the target: every
+//!   allocation runs it;
+//! * a function written in the tokens of an item-position macro of test code
+//!   (`objc2::define_class!`), which the index holds no record of: the tokens are read as
+//!   items, and a function in an `impl` block is taken in when a body of the reach names that
+//!   block's type, a free one when a body names the function. Its paths are placed without a
+//!   call graph, by its module, its named and glob `use`s, and `crate`/`self`/`super`.
+//!
 //! A test **reaches** a global when a body in its reach names it: a use of a module's `static`
 //! is a [`Target::Value`] edge, and a body-declared static is named by its own name inside the
 //! body that declares it. Each use is read by its syntax:
@@ -47,26 +64,36 @@
 //! | `LazyLock` of a cell | a method, read as that cell's | a method, as that cell's |
 //! | `static mut` | a value, a field, an index, a deref, `&` | `=`, `op=`, `&mut`, `addr_of_mut!` |
 //!
+//! A field, an index or a parenthesis of the global under `=`, `op=`, `&mut`, `addr_of_mut!` or
+//! a method call is the global in that place: `X.f = 1`, `X[i] += 1` and `&mut X.f` write a
+//! `static mut`, `X.f.push(1)` is its method, and `X[i].fetch_add(1, …)` is the cell's.
+//!
 //! **Any other use is undecided, and is read as a write** (fail closed): the global handed by
-//! reference to a call, used bare as a value, or a cell's method not in the table. So it is a
-//! G2 hit, its message says `undecided use`, and no class this guard checks passes over it.
+//! reference to a call, used bare as a value, or a method not in the table (a `static mut`'s
+//! included). So it is a G2 hit, its message says `undecided use`, and no class this guard
+//! checks passes over it.
 //!
 //! # The grammar
 //!
 //! * **G1 — shared.** A global reached by two or more tests of one binary must be a row:
 //!   `<file>:<line>\t<binary>\t<GLOBAL>\tG1\treached by <n> tests of <binary> (…) and on no row
-//!   of docs/plans/TEST-GLOBALS.tsv`.
+//!   of docs/plans/TEST-GLOBALS.tsv`. Two `cfg` arms of one test are one test.
 //! * **G2 — written.** A global that a body in one test's reach writes must be a row, even when
 //!   no other test names it, because product code the other tests call may read it:
 //!   `<file>:<line>\t<binary>\t<GLOBAL>\tG2\twritten (<op>) by <test> and on no row …`.
 //! * **G3 — through the call graph.** The reach is G3. On the walk, an edge the call graph
 //!   leaves unresolved is refused by file and line when a candidate is a test-only callable of
 //!   the target that the caller may call and that reaches a global, or of which that cannot be
-//!   told. Unresolved edges are `Dynamic`, `Ambiguous` and `OtherArm`; a `Path` is read as every
-//!   test-only callable of its last segment's name. Also refused: a body on the walk that does
-//!   not parse, a cut-off chain, a `macro_rules!` of the package whose definition names a
-//!   global, macro arguments that do not parse and name a global, and a use the call graph sees
-//!   that this reading does not.
+//!   told. Unresolved edges are `Dynamic`, `Ambiguous` and `OtherArm`; a `Path` whose last
+//!   segment is a global's name is refused outright, and any other is read as every test-only
+//!   callable of its last segment's name. A call in an item-macro function is read the same
+//!   way. Also refused: a body on the walk that does not parse, a cut-off chain, a
+//!   `macro_rules!` of the package whose definition names a global, macro arguments that do not
+//!   parse and name a global, a use the call graph sees that this reading does not, an
+//!   implicitly run impl or item-macro function that reaches a global and whose type no test's
+//!   reach names, and an item-position macro of test code whose tokens do not parse as items
+//!   (or hold an item other than a function) and name a global or a test-only callable that
+//!   reaches one.
 //!
 //! # The register
 //!
@@ -75,18 +102,23 @@
 //! the hits both ways: an unlisted hit is red, and so is a row that is no longer a hit. These
 //! classes **are checked here**:
 //!
-//! * `lock:<NAME>`: every test that reaches the global also reaches a unit lock named `<NAME>`;
+//! * `lock:<NAME>`: every test that reaches the global, each `cfg` arm on its own, also
+//!   reaches the unit lock `<NAME>` names. `<NAME>` is the lock's name, or its module path's
+//!   tail (`windows_impl::ONE_WATCHER_AT_A_TIME`), and must name exactly one unit lock of the
+//!   binary;
 //! * `single writer`: exactly one test's reach writes it;
 //! * `one main`: the binary runs without the harness;
-//! * `run=alone`, `run=serial`: every test that reaches it is on `scripts/ci/ignored-tests.txt`
-//!   with that run condition;
-//! * `write-once`: every write is a once-write (`get_or_init`, `get_or_try_init`, `set`), or the
-//!   global is a `LazyLock` of a plain value.
+//! * `run=alone`, `run=serial`: every test that reaches it carries `#[ignore]` and is on
+//!   `scripts/ci/ignored-tests.txt` with that run condition (the list names a test by its bare
+//!   name, so the attribute is what ties the line to this package's test).
 //!
-//! These classes are **by hand**: `per-test key`, `monotone`, `not on a test thread` and
-//! `serial helpers`. `scripts/ci/check-test-globals.ps1` admits an added row of a checked class
-//! with its dated reason. It admits an added row of a by-hand class only under a new
-//! `# widened` line, as the timing list does.
+//! These classes are **by hand**: `per-test key`, `monotone`, `write-once`, `not on a test
+//! thread` and `serial helpers`. Of `write-once`, the guard holds the writes: every write is a
+//! once-write (`get_or_init`, `get_or_try_init`, `set`), or the global is a `LazyLock` of a
+//! plain value. That the once-written value is the same for every test is a person's reading.
+//! `scripts/ci/check-test-globals.ps1` admits an added row of a checked class with its dated
+//! reason. It admits an added row of a by-hand class only under a new `# widened` line, as the
+//! timing list does.
 //!
 //! # What it does not see
 //!
@@ -95,11 +127,17 @@
 //!   thousand unresolved edges in bt-app's product graph alone, so following product code
 //!   decides nothing. The `i18n` language switch the CJK timing probe makes is one; it was found
 //!   by reading. [`the_product_reach_of_the_tests_is_measured`] prints how many such globals
-//!   there are, as a measure, not a gate.
+//!   there are, as a measure, not a gate; CI prints it on every run.
 //! * An unresolved edge whose candidates are all product code.
 //! * A global of a first-party type with interior mutability, a `Sync` wrapper around an
 //!   `UnsafeCell`, and a cell reached through a `static` holding a reference.
 //! * A body-declared static named by another body that a `use` brought it into.
+//! * An implicitly run impl whose type one test's reach names while another test builds a
+//!   value of it without naming it (by inference alone, or through a path the module-local
+//!   placing above does not follow, as `super::super::T` through a re-export): the second test
+//!   is not given it. An impl no test's reach names at all is refused.
+//! * A `#[cfg]` written on an item-position macro invocation itself: the macro is read as test
+//!   code only when its file or its module is.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -121,7 +159,7 @@ const HEADER: &str = "file\tglobal\tbinary\tclass\treason";
 /// The run conditions of the ignored tests, from the workspace root.
 const IGNORED: &str = "scripts/ci/ignored-tests.txt";
 
-/// The classes this guard checks itself.
+/// The classes this guard checks itself, beside `lock:<NAME>`.
 const CHECKED: [&str; 4] = ["single writer", "one main", "run=alone", "run=serial"];
 
 /// The classes reviewed by hand. The guard holds `write-once`'s writes to once-writes, but
@@ -184,6 +222,17 @@ fn is_test(attributes: &[Span], item: &ItemRecord) -> bool {
             .take_while(|span| span.start() < outer.end())
             .any(|span| span.within(outer))
     }
+}
+
+/// Whether callable `item` carries one of `attributes` among those written before its body.
+fn carries(attributes: &[Span], item: &ItemRecord) -> bool {
+    let outer = item.declaration();
+    let body = item.body().map_or(outer.end(), Span::start);
+    let first = attributes.partition_point(|span| span.start() < outer.start());
+    attributes[first..]
+        .iter()
+        .take_while(|span| span.start() < body)
+        .any(|span| span.within(outer))
 }
 
 /// Whether no product build compiles `record`: its file, or every arm it stands on, is
@@ -269,8 +318,15 @@ fn shape_of(ty: &syn::Type, mutable: bool) -> Shape {
     if mutable {
         return Shape::Global(Kind::StaticMut);
     }
-    let syn::Type::Path(path) = ty else {
-        return Shape::NotMutable;
+    let path = match ty {
+        syn::Type::Path(path) => path,
+        // An array or a slice of cells is the cell, element by element: `X[i].fetch_add(…)`
+        // reads as the cell's method.
+        syn::Type::Array(array) => return shape_of(&array.elem, false),
+        syn::Type::Slice(slice) => return shape_of(&slice.elem, false),
+        syn::Type::Paren(inner) => return shape_of(&inner.elem, false),
+        syn::Type::Group(inner) => return shape_of(&inner.elem, false),
+        _ => return Shape::NotMutable,
     };
     let Some(last) = path.path.segments.last() else {
         return Shape::NotMutable;
@@ -393,6 +449,8 @@ struct Global {
     /// Its module path and name; for a body-declared one, its body's path and name.
     key: String,
     name: String,
+    /// Its package's position.
+    package: usize,
     /// The file it is written in, relative to the root.
     file: String,
     /// Where it is written, `file:line`.
@@ -420,14 +478,49 @@ struct Globals {
     scoped: Vec<(usize, Span, String)>,
     /// The names of each package's globals, for what a macro's tokens name.
     names: HashMap<String, BTreeSet<String>>,
-    /// Each package's names a module-level `use` binds, by module: what makes a module's global
-    /// nameable by its bare name outside its own module.
-    imported: HashMap<(usize, String), BTreeSet<String>>,
+    /// Each package's names a module-level `use` binds, by module, with the absolute path each
+    /// names: what makes a module's global nameable by its bare name outside its own module.
+    imported: HashMap<(usize, String), BTreeMap<String, String>>,
+    /// The modules each module's glob `use`s open (`use super::*;`), absolute.
+    globbed: HashMap<(usize, String), BTreeSet<String>>,
+    /// The packages' names, by position.
+    packages: Vec<String>,
+    /// Every `thread_local!` static, by package position and module path and name: not a
+    /// global, and the index holds no record of it.
+    thread_locals: BTreeSet<(usize, String)>,
+}
+
+/// `segments`, written in module `module`, as an absolute `crate::…` path: `crate`, `self` and
+/// `super` are read; any other first segment is read as a child of `module`, which is what
+/// it is unless it names another crate (whose globals are not this package's, so no key
+/// matches it).
+fn absolute(module: &str, segments: &[String]) -> String {
+    let mut at: Vec<&str> = module.split("::").collect();
+    let mut rest = segments;
+    match rest.first().map(String::as_str) {
+        Some("crate") => {
+            at = vec!["crate"];
+            rest = &rest[1..];
+        }
+        Some("self") => rest = &rest[1..],
+        _ => {}
+    }
+    while rest.first().map(String::as_str) == Some("super") {
+        if at.len() > 1 {
+            at.pop();
+        }
+        rest = &rest[1..];
+    }
+    at.extend(rest.iter().map(String::as_str));
+    at.join("::")
 }
 
 impl Globals {
     fn read(indices: &[(String, Index)], root: &Path) -> Self {
-        let mut globals = Self::default();
+        let mut globals = Self {
+            packages: indices.iter().map(|(name, _)| name.clone()).collect(),
+            ..Self::default()
+        };
         for (position, (package, index)) in indices.iter().enumerate() {
             let attributes = test_attributes(index);
             for (value_position, value) in index.values().iter().enumerate() {
@@ -465,6 +558,7 @@ impl Globals {
                     Global {
                         key: format!("{module}::{}", value.name()),
                         name: value.name().to_owned(),
+                        package: position,
                         file: relative(file.path(), root),
                         at: place(index, value.whole().start(), root),
                         shape,
@@ -483,7 +577,34 @@ impl Globals {
                         .imported
                         .entry((position, module.to_owned()))
                         .or_default()
-                        .extend(import.names().iter().map(|(bound, _)| bound.clone()));
+                        .extend(
+                            import
+                                .names()
+                                .iter()
+                                .map(|(bound, path)| (bound.clone(), absolute(module, path))),
+                        );
+                    globals
+                        .globbed
+                        .entry((position, module.to_owned()))
+                        .or_default()
+                        .extend(import.globs().iter().map(|path| absolute(module, path)));
+                }
+            }
+            // `thread_local!` statics written in a module, read from the macro's tokens.
+            for record in index.macros() {
+                if record.kind() != MacroKind::Invocation || record.name() != "thread_local" {
+                    continue;
+                }
+                let Ok(file) = syn::parse_str::<syn::File>(index.text(record.tokens())) else {
+                    continue;
+                };
+                let module = innermost_module(index, record.span());
+                for item in &file.items {
+                    if let syn::Item::Static(declared) = item {
+                        globals
+                            .thread_locals
+                            .insert((position, format!("{module}::{}", declared.ident)));
+                    }
                 }
             }
             // Statics declared in a body: read from the body's own syntax.
@@ -522,6 +643,7 @@ impl Globals {
                     let global = Global {
                         key: format!("{owner_path}::{}", declared.name),
                         name: declared.name.clone(),
+                        package: position,
                         file: relative(index.file_of(record).path(), root),
                         at: place(index, at, root),
                         shape,
@@ -569,14 +691,97 @@ impl Globals {
         self.names
             .get(package)
             .is_some_and(|names| names.contains(name))
-            && (self
-                .all
-                .iter()
-                .any(|global| global.name == name && global.module.as_deref() == Some(module))
-                || self
-                    .imported
-                    .get(&(position, module.to_owned()))
-                    .is_some_and(|bound| bound.contains(name)))
+            && (self.all.iter().any(|global| {
+                global.package == position
+                    && global.name == name
+                    && global.module.as_deref() == Some(module)
+            }) || self
+                .imported
+                .get(&(position, module.to_owned()))
+                .is_some_and(|bound| bound.contains_key(name))
+                || self.globbed_global(position, module, name).is_some())
+    }
+
+    /// The module-level global named `name` that a glob `use` of `module` brings in.
+    fn globbed_global(&self, position: usize, module: &str, name: &str) -> Option<usize> {
+        let opened = self.globbed.get(&(position, module.to_owned()))?;
+        self.all.iter().position(|global| {
+            global.package == position
+                && global.name == name
+                && global
+                    .module
+                    .as_ref()
+                    .is_some_and(|declared| opened.contains(declared))
+        })
+    }
+
+    /// The absolute paths a path written in `module` of the package at `position` may name,
+    /// read without a call graph: for a bare name, its own module's, a named `use`'s and each
+    /// glob `use`'s; for a longer path, through a `use` of its first segment, or as an absolute
+    /// or relative path.
+    fn places(&self, position: usize, module: &str, segments: &[String]) -> Vec<String> {
+        let imported = self.imported.get(&(position, module.to_owned()));
+        match segments {
+            [] => Vec::new(),
+            [name] => {
+                let mut found = vec![format!("{module}::{name}")];
+                found.extend(imported.and_then(|bound| bound.get(name)).cloned());
+                found.extend(
+                    self.globbed
+                        .get(&(position, module.to_owned()))
+                        .into_iter()
+                        .flatten()
+                        .map(|opened| format!("{opened}::{name}")),
+                );
+                found
+            }
+            [first, rest @ ..] => {
+                let mut found = vec![imported.and_then(|bound| bound.get(first)).map_or_else(
+                    || absolute(module, segments),
+                    |path| format!("{path}::{}", rest.join("::")),
+                )];
+                // The call graph writes a path it cannot place without its leading `crate`, so a
+                // path of plain segments is also read from the crate root.
+                if !matches!(first.as_str(), "crate" | "self" | "super") {
+                    found.push(format!("crate::{}", segments.join("::")));
+                }
+                found
+            }
+        }
+    }
+
+    /// The module-level global or unit lock a path written in `module` of the package at
+    /// `position` names ([`Self::places`]).
+    fn resolve(&self, position: usize, module: &str, segments: &[String]) -> Option<usize> {
+        self.places(position, module, segments)
+            .iter()
+            .find_map(|key| {
+                self.all.iter().position(|global| {
+                    global.package == position && global.module.is_some() && global.key == *key
+                })
+            })
+    }
+
+    /// What the paths `written` in `module` of the package at `position` may name, as
+    /// `<position>:<absolute path>` keys ([`Self::places`]): how a body names a type.
+    fn named_keys<'p>(
+        &self,
+        position: usize,
+        module: &str,
+        written: impl IntoIterator<Item = &'p Vec<String>>,
+    ) -> BTreeSet<String> {
+        written
+            .into_iter()
+            .flat_map(|segments| self.places(position, module, segments))
+            .map(|place| format!("{position}:{place}"))
+            .collect()
+    }
+
+    /// Whether a path written in `module` names a `thread_local!` static of the package.
+    fn names_a_thread_local(&self, position: usize, module: &str, segments: &[String]) -> bool {
+        self.places(position, module, segments)
+            .into_iter()
+            .any(|key| self.thread_locals.contains(&(position, key)))
     }
 
     fn add(&mut self, package: &str, global: Global) {
@@ -604,9 +809,12 @@ struct Touch {
 #[derive(Clone, Debug, Default)]
 struct Facts {
     touches: Vec<Touch>,
-    /// The unit locks it names.
+    /// The unit locks it names, by key.
     locks: BTreeSet<String>,
     refusals: Vec<String>,
+    /// What the paths it writes may name, and its own type for a method, as
+    /// [`Globals::named_keys`].
+    named: BTreeSet<String>,
 }
 
 /// The call graph, the globals, and every body's facts, read once.
@@ -620,6 +828,16 @@ struct Reader<'r, 'i> {
     asking: RefCell<Vec<ItemId>>,
     leaned_on_open: Cell<bool>,
     test_callables: RefCell<HashMap<String, Vec<ItemId>>>,
+    /// The test-only first-party impls of a foreign trait (`Drop`, winit's `ApplicationHandler`,
+    /// `Display`), by every key their self type's name may be placed at from their module
+    /// ([`Globals::named_keys`]): what an implicit call or a foreign callback runs
+    /// ([`Resolver::implicit`]).
+    implicit: HashMap<String, Vec<ItemId>>,
+    /// The test-only `GlobalAlloc` impls: every allocation of every test of their target runs
+    /// them.
+    allocators: Vec<ItemId>,
+    /// The functions of item-position macros of test code.
+    macro_bodies: Vec<MacroBody>,
 }
 
 /// Whether a test-only callable reaches a global, through test-only callables of the target.
@@ -634,12 +852,43 @@ enum Reach {
 #[derive(Default)]
 struct Walk {
     touches: Vec<Touch>,
+    /// The unit locks its reach names, by key.
     locks: BTreeSet<String>,
     refusals: Vec<String>,
+    /// The implicitly run impls it took in.
+    ran: BTreeSet<ItemId>,
+    /// The item-macro functions it took in, by position.
+    ran_macros: BTreeSet<usize>,
+    /// The unresolved calls met: their candidates, the caller (for visibility) and what to say.
+    /// Judged once the reach is whole, so a candidate already in the reach adds nothing.
+    pending: Vec<(Vec<ItemId>, Option<ItemId>, String)>,
 }
 
 impl<'r, 'i> Reader<'r, 'i> {
-    fn new(resolver: &'r Resolver<'i>, globals: &'r Globals, root: &'r Path) -> Self {
+    fn new(
+        resolver: &'r Resolver<'i>,
+        globals: &'r Globals,
+        root: &'r Path,
+        macro_bodies: Vec<MacroBody>,
+    ) -> Self {
+        let mut implicit: HashMap<String, Vec<ItemId>> = HashMap::new();
+        let mut allocators = Vec::new();
+        for (path, ids) in resolver.implicit() {
+            for id in ids {
+                let record = resolver.record(id);
+                if !test_only(resolver.index_of(id), record) {
+                    continue;
+                }
+                if path.rsplit("::").next() == Some("GlobalAlloc") {
+                    allocators.push(id);
+                } else if let Some(owner) = record.type_owner() {
+                    let module = record.module_paths().into_iter().next().unwrap_or("crate");
+                    for key in globals.named_keys(id.package(), module, &[vec![owner.to_owned()]]) {
+                        implicit.entry(key).or_default().push(id);
+                    }
+                }
+            }
+        }
         Self {
             resolver,
             graph: CallGraph::new(resolver),
@@ -650,6 +899,9 @@ impl<'r, 'i> Reader<'r, 'i> {
             asking: RefCell::default(),
             leaned_on_open: Cell::new(false),
             test_callables: RefCell::default(),
+            implicit,
+            allocators,
+            macro_bodies,
         }
     }
 
@@ -689,6 +941,15 @@ impl<'r, 'i> Reader<'r, 'i> {
                 return facts;
             }
         };
+        let module = record.module_paths().into_iter().next().unwrap_or("crate");
+        facts.named = self.globals.named_keys(id.package(), module, &read.named);
+        if let Some(owner) = record.type_owner() {
+            facts.named.extend(self.globals.named_keys(
+                id.package(),
+                module,
+                &[vec![owner.to_owned()]],
+            ));
+        }
         let uses: HashMap<usize, &reading::Use> =
             read.uses.iter().map(|used| (used.at, used)).collect();
         let mut seen = BTreeSet::new();
@@ -728,7 +989,7 @@ impl<'r, 'i> Reader<'r, 'i> {
                     site,
                 }),
                 Shape::UnitLock => {
-                    facts.locks.insert(global_record.name.clone());
+                    facts.locks.insert(global_record.key.clone());
                 }
                 Shape::NotMutable => {}
             }
@@ -758,7 +1019,7 @@ impl<'r, 'i> Reader<'r, 'i> {
                         site: self.place(id, base + used.at),
                     }),
                     Shape::UnitLock => {
-                        facts.locks.insert(global_record.name.clone());
+                        facts.locks.insert(global_record.key.clone());
                     }
                     Shape::NotMutable => {}
                 }
@@ -872,7 +1133,7 @@ impl<'r, 'i> Reader<'r, 'i> {
         }
         let outer = self.leaned_on_open.replace(false);
         self.asking.borrow_mut().push(id);
-        let walk = self.walk(id, within);
+        let walk = self.walk(id, within, false);
         let answer = if walk
             .touches
             .iter()
@@ -898,7 +1159,7 @@ impl<'r, 'i> Reader<'r, 'i> {
     fn refuse_candidates(
         &self,
         candidates: impl IntoIterator<Item = ItemId>,
-        from: ItemId,
+        from: Option<ItemId>,
         within: &BTreeSet<String>,
         what: &str,
     ) -> Option<String> {
@@ -907,7 +1168,7 @@ impl<'r, 'i> Reader<'r, 'i> {
         for candidate in candidates {
             if !self.test_only(candidate)
                 || !self.of_target(candidate, within)
-                || !self.visible_from(candidate, from)
+                || from.is_some_and(|from| !self.visible_from(candidate, from))
             {
                 continue;
             }
@@ -935,88 +1196,190 @@ impl<'r, 'i> Reader<'r, 'i> {
     }
 
     /// From `root`, every global and lock its reach names, and what the walk cannot decide.
-    fn walk(&self, root: ItemId, within: &BTreeSet<String>) -> Walk {
+    ///
+    /// The reach grows to a fixed point: once the call edges are walked, every test-only impl
+    /// of a foreign trait of the target whose self type a body of the reach names (an implicit
+    /// call or a foreign callback runs it: a `Drop` at a scope's end, winit's `resumed`), every
+    /// `GlobalAlloc` impl of the target, and every item-macro function whose type a body of the
+    /// reach names are taken in, and walked in turn. The allocators are a test's alone
+    /// (`from_a_test`): every test of the target runs them, so a callable asked whether it
+    /// reaches a global does not answer for them. An unresolved call's candidates are judged
+    /// when the reach is whole, and a candidate already in the reach adds nothing to it.
+    fn walk(&self, root: ItemId, within: &BTreeSet<String>, from_a_test: bool) -> Walk {
         let mut stack = vec![root];
         let mut seen = BTreeSet::from([root]);
         let mut walk = Walk::default();
-        while let Some(at) = stack.pop() {
-            let facts = self.facts(at);
-            walk.touches.extend(facts.touches.iter().cloned());
-            walk.locks.extend(facts.locks.iter().cloned());
-            walk.refusals.extend(facts.refusals.iter().cloned());
-            let index = self.resolver.index_of(at);
-            let package = self.resolver.package(at);
-            for edge in self.graph.edges(Node::Item(at)).iter() {
-                let site = || place(index, edge.site.span.start(), self.root);
-                match &edge.to {
-                    Target::Item(to) => {
-                        if !self.test_only(*to) || !self.of_target(*to, within) {
-                            continue;
-                        }
-                        if seen.insert(*to) {
-                            stack.push(*to);
-                        }
-                    }
-                    Target::Unresolved(
-                        Unresolved::Dynamic { candidates, .. }
-                        | Unresolved::Ambiguous { candidates, .. }
-                        | Unresolved::OtherArm { candidates },
-                    ) => {
-                        let what = format!(
-                            "{}: a call to `{}` the call graph does not resolve",
-                            site(),
-                            edge.site.name
-                        );
-                        walk.refusals.extend(self.refuse_candidates(
-                            candidates.iter().copied(),
-                            at,
-                            within,
-                            &what,
-                        ));
-                    }
-                    Target::Unresolved(Unresolved::Path { written, .. }) => {
-                        let last = written.rsplit("::").next().unwrap_or(written);
-                        let named = self
-                            .test_callables(package)
-                            .into_iter()
-                            .filter(|id| self.resolver.record(*id).name() == last);
-                        let what = format!(
-                            "{}: the path `{written}` names nothing the call graph places, and is \
-                             read as any test-only callable of that name",
-                            site()
-                        );
-                        walk.refusals
-                            .extend(self.refuse_candidates(named, at, within, &what));
-                    }
-                    Target::Unresolved(Unresolved::Unparsed { why }) => walk.refusals.push(
-                        format!("{}: a body on the walk does not parse ({why})", site()),
-                    ),
-                    Target::Unresolved(Unresolved::Cutoff { what }) => walk
-                        .refusals
-                        .push(format!("{}: the walk was cut off at {what}", site())),
-                    Target::Unresolved(Unresolved::Macro { name }) => {
-                        let names = self.globals.names.get(package);
-                        let defined = index.macros().iter().any(|record| {
-                            record.kind() == MacroKind::Definition
-                                && defined_macro(index, record) == name.rsplit("::").next()
-                                && {
-                                    let tokens = index.text(record.tokens());
-                                    reading::words(tokens)
-                                        .any(|word| names.is_some_and(|names| names.contains(word)))
-                                }
-                        });
-                        if defined {
-                            walk.refusals.push(format!(
-                                "{}: the macro `{name}!`'s expansion is not followed, and its definition here names a process-global",
-                                site()
-                            ));
-                        }
-                    }
-                    _ => {}
+        let mut named: BTreeSet<String> = BTreeSet::new();
+        let mut implicit: Vec<ItemId> = if from_a_test {
+            self.allocators.clone()
+        } else {
+            Vec::new()
+        };
+        loop {
+            while let Some(at) = stack.pop() {
+                self.walk_one(at, within, &mut walk, &mut named, &mut stack, &mut seen);
+            }
+            for name in &named {
+                if let Some(ids) = self.implicit.get(name) {
+                    implicit.extend(ids.iter().copied());
                 }
             }
+            for id in implicit.drain(..) {
+                if self.of_target(id, within) && seen.insert(id) {
+                    walk.ran.insert(id);
+                    stack.push(id);
+                }
+            }
+            let mut grew = false;
+            for (position, body) in self.macro_bodies.iter().enumerate() {
+                if walk.ran_macros.contains(&position)
+                    || body.named_by_keys.is_disjoint(&named)
+                    || body.targets.is_disjoint(within)
+                {
+                    continue;
+                }
+                walk.ran_macros.insert(position);
+                grew = true;
+                walk.touches.extend(body.facts.touches.iter().cloned());
+                walk.locks.extend(body.facts.locks.iter().cloned());
+                walk.refusals.extend(body.facts.refusals.iter().cloned());
+                named.extend(body.facts.named.iter().cloned());
+                let package = &self.globals.packages[body.package];
+                for (site, callee) in &body.calls {
+                    let candidates = self
+                        .test_callables(package)
+                        .into_iter()
+                        .filter(|id| self.resolver.record(*id).name() == callee)
+                        .collect();
+                    let what = format!(
+                        "{site}: a call to `{callee}` in {}, which no call graph follows, read as \
+                         any test-only callable of that name",
+                        body.what
+                    );
+                    walk.pending.push((candidates, None, what));
+                }
+            }
+            if stack.is_empty() && !grew {
+                for (candidates, from, what) in std::mem::take(&mut walk.pending) {
+                    let outside = candidates.into_iter().filter(|id| !seen.contains(id));
+                    walk.refusals
+                        .extend(self.refuse_candidates(outside, from, within, &what));
+                }
+                return walk;
+            }
         }
-        walk
+    }
+
+    /// One body of the walk: its facts, and its call edges followed or judged.
+    fn walk_one(
+        &self,
+        at: ItemId,
+        within: &BTreeSet<String>,
+        walk: &mut Walk,
+        named: &mut BTreeSet<String>,
+        stack: &mut Vec<ItemId>,
+        seen: &mut BTreeSet<ItemId>,
+    ) {
+        let facts = self.facts(at);
+        walk.touches.extend(facts.touches.iter().cloned());
+        walk.locks.extend(facts.locks.iter().cloned());
+        walk.refusals.extend(facts.refusals.iter().cloned());
+        named.extend(facts.named.iter().cloned());
+        let index = self.resolver.index_of(at);
+        let package = self.resolver.package(at);
+        for edge in self.graph.edges(Node::Item(at)).iter() {
+            let site = || place(index, edge.site.span.start(), self.root);
+            match &edge.to {
+                Target::Item(to) => {
+                    if !self.test_only(*to) || !self.of_target(*to, within) {
+                        continue;
+                    }
+                    if seen.insert(*to) {
+                        stack.push(*to);
+                    }
+                }
+                Target::Unresolved(
+                    Unresolved::Dynamic { candidates, .. }
+                    | Unresolved::Ambiguous { candidates, .. }
+                    | Unresolved::OtherArm { candidates },
+                ) => {
+                    let what = format!(
+                        "{}: a call to `{}` the call graph does not resolve",
+                        site(),
+                        edge.site.name
+                    );
+                    walk.pending.push((candidates.clone(), Some(at), what));
+                }
+                Target::Unresolved(Unresolved::Path { written, .. }) => {
+                    let last = written.rsplit("::").next().unwrap_or(written);
+                    let segments: Vec<String> = written.split("::").map(str::to_owned).collect();
+                    let module = self
+                        .resolver
+                        .record(at)
+                        .module_paths()
+                        .into_iter()
+                        .next()
+                        .unwrap_or("crate");
+                    if self
+                        .globals
+                        .names
+                        .get(package)
+                        .is_some_and(|names| names.contains(last))
+                        && (self
+                            .globals
+                            .resolve(at.package(), module, &segments)
+                            .is_some()
+                            || !self
+                                .globals
+                                .names_a_thread_local(at.package(), module, &segments))
+                    {
+                        walk.refusals.push(format!(
+                            "{}: the path `{written}` names a process-global's name, and the call \
+                             graph places no value here",
+                            site()
+                        ));
+                        continue;
+                    }
+                    let candidates = self
+                        .test_callables(package)
+                        .into_iter()
+                        .filter(|id| self.resolver.record(*id).name() == last)
+                        .collect();
+                    let what = format!(
+                        "{}: the path `{written}` names nothing the call graph places, and is \
+                         read as any test-only callable of that name",
+                        site()
+                    );
+                    walk.pending.push((candidates, Some(at), what));
+                }
+                Target::Unresolved(Unresolved::Unparsed { why }) => walk.refusals.push(format!(
+                    "{}: a body on the walk does not parse ({why})",
+                    site()
+                )),
+                Target::Unresolved(Unresolved::Cutoff { what }) => walk
+                    .refusals
+                    .push(format!("{}: the walk was cut off at {what}", site())),
+                Target::Unresolved(Unresolved::Macro { name }) => {
+                    let names = self.globals.names.get(package);
+                    let defined = index.macros().iter().any(|record| {
+                        record.kind() == MacroKind::Definition
+                            && defined_macro(index, record) == name.rsplit("::").next()
+                            && {
+                                let tokens = index.text(record.tokens());
+                                reading::words(tokens)
+                                    .any(|word| names.is_some_and(|names| names.contains(word)))
+                            }
+                    });
+                    if defined {
+                        walk.refusals.push(format!(
+                            "{}: the macro `{name}!`'s expansion is not followed, and its definition here names a process-global",
+                            site()
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -1030,27 +1393,252 @@ fn defined_macro<'i>(index: &'i Index, record: &bt_source::MacroRecord) -> Optio
     (end > 0).then(|| &rest[..end])
 }
 
+// ── item-position macros ──────────────────────────────────────────────────────
+
+/// One function written in the tokens of an item-position macro of test code
+/// (`objc2::define_class!`): the index holds no record of it and the call graph no edge, so it
+/// is read here, its paths placed by [`Globals::resolve`].
+struct MacroBody {
+    package: usize,
+    targets: BTreeSet<String>,
+    /// The type of its `impl` block, or its own name: a reach that names it runs it.
+    named_by: String,
+    /// `named_by` as its module places it ([`Globals::named_keys`]).
+    named_by_keys: BTreeSet<String>,
+    /// `file:line` and name, for a refusal.
+    what: String,
+    facts: Facts,
+    /// Its calls, `file:line` and callee name: no call graph follows them.
+    calls: Vec<(String, String)>,
+}
+
+/// An item-position macro of test code whose tokens do not parse as items.
+struct UnreadMacro {
+    package: usize,
+    targets: BTreeSet<String>,
+    at: String,
+    name: String,
+    words: BTreeSet<String>,
+}
+
+/// The module path of the innermost module `span` is written in.
+fn innermost_module(index: &Index, span: Span) -> &str {
+    index
+        .modules()
+        .iter()
+        .filter(|module| span.within(module.span()))
+        .min_by_key(|module| module.span().len())
+        .and_then(|module| module.module_paths().first())
+        .map_or("crate", String::as_str)
+}
+
+/// Every span of `spans` merged into disjoint runs, sorted.
+fn merged(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    spans.sort_unstable();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        match runs.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => runs.push((start, end)),
+        }
+    }
+    runs
+}
+
+/// Whether `span` lies inside one of the disjoint sorted `runs`.
+fn inside(runs: &[(usize, usize)], span: Span) -> bool {
+    let after = runs.partition_point(|run| run.0 <= span.start());
+    after > 0 && span.end() <= runs[after - 1].1
+}
+
+/// Every item-position macro invocation of test code — written outside every body, every
+/// `const`/`static` initializer and every other macro — read as items: its functions, and the
+/// macros whose tokens do not parse as items, and the refusals of items in them that are not
+/// functions and name a global.
+fn item_macros(
+    indices: &[(String, Index)],
+    globals: &Globals,
+    root: &Path,
+) -> (Vec<MacroBody>, Vec<UnreadMacro>, Vec<String>) {
+    let mut bodies = Vec::new();
+    let mut unread = Vec::new();
+    let mut refusals = Vec::new();
+    for (position, (package, index)) in indices.iter().enumerate() {
+        let mut covered: Vec<(usize, usize)> = index
+            .items()
+            .iter()
+            .filter_map(|record| record.body().map(|body| (body.start(), body.end())))
+            .collect();
+        covered.extend(
+            index
+                .values()
+                .iter()
+                .map(|value| (value.whole().start(), value.whole().end())),
+        );
+        covered.extend(
+            index
+                .macros()
+                .iter()
+                .map(|record| (record.tokens().start(), record.tokens().end())),
+        );
+        let covered = merged(covered);
+        let names = globals.names.get(package.as_str());
+        for record in index.macros() {
+            if record.kind() != MacroKind::Invocation || inside(&covered, record.span()) {
+                continue;
+            }
+            let Some(file) = index.file_at(record.span().start()) else {
+                continue;
+            };
+            let module = index
+                .modules()
+                .iter()
+                .filter(|module| record.span().within(module.span()))
+                .min_by_key(|module| module.span().len());
+            let module_path = innermost_module(index, record.span());
+            let in_product =
+                file.permits_product() && module.is_none_or(|module| module.permits_product());
+            if in_product {
+                continue;
+            }
+            let targets: BTreeSet<String> = file
+                .owners()
+                .iter()
+                .map(|owner| owner.target.to_string())
+                .collect();
+            let tokens = record.tokens();
+            let text = index.text(tokens);
+            let at = |offset: usize| place(index, tokens.start() + offset, root);
+            let Ok((fns, others)) = reading::items(text) else {
+                unread.push(UnreadMacro {
+                    package: position,
+                    targets,
+                    at: at(0),
+                    name: record.name().to_owned(),
+                    words: reading::words(text).map(str::to_owned).collect(),
+                });
+                continue;
+            };
+            let global_name = |word: &str| names.is_some_and(|names| names.contains(word));
+            for range in others {
+                if let Some(word) =
+                    reading::words(&text[range.clone()]).find(|word| global_name(word))
+                {
+                    refusals.push(format!(
+                        "{}: an item in `{}!` that is not a function names `{word}`, a process-global's name, and is not read",
+                        at(range.start),
+                        record.name()
+                    ));
+                }
+            }
+            for function in fns {
+                let mut facts = Facts::default();
+                let read = &function.reading;
+                for used in &read.uses {
+                    if used.segments == 1 && read.local_names.contains(&used.last) {
+                        continue;
+                    }
+                    let site = at(used.at);
+                    match globals.resolve(position, module_path, &used.path) {
+                        Some(global) => match globals.all[global].shape {
+                            Shape::Global(kind) => facts.touches.push(Touch {
+                                global,
+                                access: access(kind, &used.context, &globals.all[global].name),
+                                site,
+                            }),
+                            Shape::UnitLock => {
+                                facts.locks.insert(globals.all[global].key.clone());
+                            }
+                            Shape::NotMutable => {}
+                        },
+                        None if global_name(&used.last) => facts.refusals.push(format!(
+                            "{site}: `{}` in `{}!` is a process-global's name, and this reading cannot place it",
+                            used.path.join("::"),
+                            record.name()
+                        )),
+                        None => {}
+                    }
+                }
+                for unparsed in &read.unparsed {
+                    for (offset, ident) in &unparsed.idents {
+                        if global_name(ident) {
+                            facts.refusals.push(format!(
+                                "{}: the arguments of `{}!` do not parse as expressions, and they name `{ident}`, a process-global's name",
+                                at(*offset),
+                                unparsed.name
+                            ));
+                        }
+                    }
+                }
+                facts.named = globals.named_keys(position, module_path, &read.named);
+                let named_by_keys =
+                    globals.named_keys(position, module_path, &[vec![function.named_by.clone()]]);
+                bodies.push(MacroBody {
+                    named_by_keys,
+                    package: position,
+                    targets: targets.clone(),
+                    what: format!(
+                        "{}: `{}::{}` in `{}!`",
+                        at(function.at),
+                        function.named_by,
+                        function.name,
+                        record.name()
+                    ),
+                    named_by: function.named_by,
+                    calls: read
+                        .calls
+                        .iter()
+                        .map(|(offset, name)| (at(*offset), name.clone()))
+                        .collect(),
+                    facts,
+                });
+            }
+        }
+    }
+    (bodies, unread, refusals)
+}
+
 // ── the scan ──────────────────────────────────────────────────────────────────
+
+/// One test's reach of one global.
+#[derive(Debug)]
+struct Reached {
+    /// The accesses of its reach.
+    touches: Vec<Touch>,
+    /// The unit locks its reach names, by key.
+    locks: BTreeSet<String>,
+    /// Whether the test carries `#[ignore]`.
+    ignored: bool,
+}
 
 /// One global of one binary that a test reaches: who reaches it, who writes it, and how.
 #[derive(Default, Debug)]
 struct Shared {
-    /// Each test that reaches it, with the accesses of its reach and the locks it names.
-    tests: BTreeMap<String, (Vec<Touch>, BTreeSet<String>)>,
+    /// Each test that reaches it, by its name and where it is written: two `cfg` arms of one
+    /// test are one test of a build, each held to a row on its own.
+    tests: BTreeMap<(String, String), Reached>,
 }
 
 impl Shared {
+    /// The tests that reach it, by name.
+    fn names(&self) -> BTreeSet<&str> {
+        self.tests.keys().map(|(name, _)| name.as_str()).collect()
+    }
+
+    /// The tests whose reach writes it, by name, with the writes.
     fn writers(&self) -> BTreeMap<&str, Vec<&Touch>> {
-        self.tests
-            .iter()
-            .filter_map(|(test, (touches, _))| {
-                let writes: Vec<&Touch> = touches
-                    .iter()
-                    .filter(|touch| touch.access.writes())
-                    .collect();
-                (!writes.is_empty()).then_some((test.as_str(), writes))
-            })
-            .collect()
+        let mut writers: BTreeMap<&str, Vec<&Touch>> = BTreeMap::new();
+        for ((test, _), reached) in &self.tests {
+            let writes: Vec<&Touch> = reached
+                .touches
+                .iter()
+                .filter(|touch| touch.access.writes())
+                .collect();
+            if !writes.is_empty() {
+                writers.entry(test.as_str()).or_default().extend(writes);
+            }
+        }
+        writers
     }
 }
 
@@ -1073,7 +1661,7 @@ impl Scan {
         self.reached
             .iter()
             .filter_map(|(key, shared)| {
-                if shared.tests.len() >= 2 {
+                if shared.names().len() >= 2 {
                     Some((key, "G1"))
                 } else if !shared.writers().is_empty() {
                     Some((key, "G2"))
@@ -1093,7 +1681,7 @@ impl Scan {
             .iter()
             .find(|global| global.key == key.1 && global.file == key.0)
             .map_or_else(|| key.0.clone(), |global| global.at.clone());
-        let tests: Vec<&str> = shared.tests.keys().map(String::as_str).collect();
+        let tests: Vec<&str> = shared.names().into_iter().collect();
         if shape == "G1" {
             format!(
                 "{at}\t{}\t{}\tG1\treached by {} tests of {} ({}) and on no row of {LIST}",
@@ -1186,9 +1774,12 @@ fn scan(indices: &[(String, Index)], without_harness: &BTreeSet<String>, root: &
     let resolver = Resolver::new(&packages, Arms::filtered(|_| true))
         .unwrap_or_else(|refused| panic!("{refused:?}"));
     let globals = Globals::read(indices, root);
-    let reader = Reader::new(&resolver, &globals, root);
+    let (bodies, unread, mut refusals) = item_macros(indices, &globals, root);
+    let reader = Reader::new(&resolver, &globals, root, bodies);
+    let mut refusals: BTreeSet<String> = refusals.drain(..).collect();
     let mut reached: BTreeMap<Key, Shared> = BTreeMap::new();
-    let mut refusals = BTreeSet::new();
+    let mut ran: BTreeSet<ItemId> = BTreeSet::new();
+    let mut ran_macros: BTreeSet<usize> = BTreeSet::new();
     let mut tests = 0;
     for (package, index) in indices {
         tests += index
@@ -1196,14 +1787,25 @@ fn scan(indices: &[(String, Index)], without_harness: &BTreeSet<String>, root: &
             .iter()
             .filter(|item| item.body().is_some() && item.kind().is_callable() && is_test_code(item))
             .count();
+        let ignores = spans(
+            index,
+            &Search::new(
+                needle!(Pattern::text("#[ignore")),
+                View::CodeKeepingLiterals,
+            ),
+        );
         for record in test_roots(index, without_harness) {
-            let Some(id) = resolver.id_of(package, record) else {
-                continue;
-            };
+            let id = resolver
+                .id_of(package, record)
+                .expect("a record of this index is the resolver's");
             let within = targets(index, record);
-            let walk = reader.walk(id, &within);
+            let walk = reader.walk(id, &within, true);
             refusals.extend(walk.refusals);
+            ran.extend(walk.ran);
+            ran_macros.extend(walk.ran_macros);
             let name = test_name(record);
+            let written_at = place(index, record.whole().start(), root);
+            let ignored = carries(&ignores, record);
             let mut by_global: BTreeMap<usize, Vec<Touch>> = BTreeMap::new();
             for touch in walk.touches {
                 if matches!(globals.all[touch.global].shape, Shape::Global(_)) {
@@ -1221,10 +1823,84 @@ fn scan(indices: &[(String, Index)], without_harness: &BTreeSet<String>, root: &
                         ))
                         .or_default()
                         .tests
-                        .insert(name.clone(), (touches.clone(), walk.locks.clone()));
+                        .insert(
+                            (name.clone(), written_at.clone()),
+                            Reached {
+                                touches: touches.clone(),
+                                locks: walk.locks.clone(),
+                                ignored,
+                            },
+                        );
                 }
             }
         }
+    }
+    // An impl an implicit call or a foreign callback runs, reaching a global, that no test's
+    // reach names: what runs it cannot be told.
+    let mut implicit: Vec<ItemId> = reader.allocators.clone();
+    implicit.extend(reader.implicit.values().flatten().copied());
+    for id in implicit {
+        if ran.contains(&id) {
+            continue;
+        }
+        let record = resolver.record(id);
+        let within = targets(resolver.index_of(id), record);
+        let why = match reader.reach(id, &within) {
+            Reach::No => continue,
+            Reach::Yes => "reaches a process-global".to_owned(),
+            Reach::CannotTell(why) => format!(
+                "and whether it reaches a process-global cannot be told ({})",
+                why.join("; ")
+            ),
+        };
+        refusals.insert(format!(
+            "{}: `{}` runs by an implicit call or a foreign callback, {why}, and no test's reach \
+             names `{}`",
+            reader.place(id, record.whole().start()),
+            reader.name(id),
+            record.type_owner().unwrap_or("its type")
+        ));
+    }
+    for (position, body) in reader.macro_bodies.iter().enumerate() {
+        let touches = body
+            .facts
+            .touches
+            .iter()
+            .any(|touch| matches!(globals.all[touch.global].shape, Shape::Global(_)));
+        if ran_macros.contains(&position) || (!touches && body.facts.refusals.is_empty()) {
+            continue;
+        }
+        refusals.insert(format!(
+            "{}, run by a foreign callback, names a process-global, and no test's reach names `{}`",
+            body.what, body.named_by
+        ));
+    }
+    // An item-position macro of test code whose tokens do not parse as items: refused when they
+    // name a global, or a test-only callable of its target that reaches one.
+    for macro_record in &unread {
+        let package = &globals.packages[macro_record.package];
+        let names = globals.names.get(package);
+        if let Some(word) = macro_record
+            .words
+            .iter()
+            .find(|word| names.is_some_and(|names| names.contains(*word)))
+        {
+            refusals.insert(format!(
+                "{}: the tokens of `{}!` do not parse as items, and they name `{word}`, a \
+                 process-global's name",
+                macro_record.at, macro_record.name
+            ));
+            continue;
+        }
+        let candidates = reader
+            .test_callables(package)
+            .into_iter()
+            .filter(|id| macro_record.words.contains(resolver.record(*id).name()));
+        let what = format!(
+            "{}: the tokens of `{}!` do not parse as items and name a test-only callable",
+            macro_record.at, macro_record.name
+        );
+        refusals.extend(reader.refuse_candidates(candidates, None, &macro_record.targets, &what));
     }
     drop(reader);
     Scan {
@@ -1327,14 +2003,44 @@ fn class_broken(
     let shared = &scan.reached[key];
     let writers = shared.writers();
     if let Some(lock) = row.class.strip_prefix("lock:") {
-        let without: Vec<&str> = shared
+        // The unit locks of this binary the row's name or path ends: exactly one, or the row
+        // spells the lock by more of its module path.
+        let suffix = format!("::{lock}");
+        let named: Vec<&str> = scan
+            .globals
+            .all
+            .iter()
+            .filter(|global| {
+                global.shape == Shape::UnitLock
+                    && global.targets.contains(&key.2)
+                    && (global.key == lock || global.key.ends_with(&suffix))
+            })
+            .map(|global| global.key.as_str())
+            .collect();
+        let [held] = named[..] else {
+            return Some(if named.is_empty() {
+                format!("no unit lock of {} is named `{lock}`", key.2)
+            } else {
+                format!(
+                    "`{lock}` names {} unit locks of {}: {}; spell the one by its module path",
+                    named.len(),
+                    key.2,
+                    named.join(", ")
+                )
+            });
+        };
+        let without: BTreeSet<&str> = shared
             .tests
             .iter()
-            .filter(|(_, (_, locks))| !locks.contains(lock))
-            .map(|(test, _)| test.as_str())
+            .filter(|(_, reached)| !reached.locks.contains(held))
+            .map(|((test, _), _)| test.as_str())
             .collect();
-        return (!without.is_empty())
-            .then(|| format!("{} reach it without `{lock}`", without.join(", ")));
+        return (!without.is_empty()).then(|| {
+            format!(
+                "{} reach it without `{held}`",
+                without.into_iter().collect::<Vec<_>>().join(", ")
+            )
+        });
     }
     match row.class.as_str() {
         "single writer" => (writers.len() != 1).then(|| {
@@ -1348,13 +2054,23 @@ fn class_broken(
             (!without_harness.contains(&key.2)).then(|| format!("{} runs under the harness", key.2))
         }
         "run=alone" | "run=serial" => {
-            let off: Vec<&str> = shared
+            // The list names a test by its bare name, so the test itself must carry `#[ignore]`:
+            // another package's ignored test of the same name says nothing of this one.
+            let off: BTreeSet<&str> = shared
                 .tests
-                .keys()
-                .filter(|test| runs.get(*test) != Some(&row.class))
-                .map(String::as_str)
+                .iter()
+                .filter(|((test, _), reached)| {
+                    !reached.ignored || runs.get(test) != Some(&row.class)
+                })
+                .map(|((test, _), _)| test.as_str())
                 .collect();
-            (!off.is_empty()).then(|| format!("not {} on {IGNORED}: {}", row.class, off.join(", ")))
+            (!off.is_empty()).then(|| {
+                format!(
+                    "not an ignored test {} on {IGNORED}: {}",
+                    row.class,
+                    off.into_iter().collect::<Vec<_>>().join(", ")
+                )
+            })
         }
         "write-once" => {
             let other: Vec<String> = writers
@@ -1534,56 +2250,91 @@ fn a_row_needs_a_dated_reason_and_a_known_class() {
 
 // ── the fixture ───────────────────────────────────────────────────────────────
 
-/// The `test_globals` fixture, as the library `globals`.
-fn fixture() -> (Vec<(String, Index)>, PathBuf) {
+/// The `test_globals` fixture: the library `globals`, and its test target `main_probe`, which
+/// runs without the harness.
+fn fixture() -> (Vec<(String, Index)>, BTreeSet<String>, PathBuf) {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
         .join("test_globals");
+    let probe = TargetId {
+        package: "globals".to_owned(),
+        kind: TargetKind::IntegrationTest,
+        name: "main_probe".to_owned(),
+    };
+    let without_harness = BTreeSet::from([probe.to_string()]);
     let universe = Universe::declare(
         "the test_globals fixture",
-        vec![TargetRoot {
-            id: TargetId {
-                package: "globals".to_owned(),
-                kind: TargetKind::Library,
-                name: "globals".to_owned(),
+        vec![
+            TargetRoot {
+                id: TargetId {
+                    package: "globals".to_owned(),
+                    kind: TargetKind::Library,
+                    name: "globals".to_owned(),
+                },
+                file: directory.join("lib.rs"),
             },
-            file: directory.join("lib.rs"),
-        }],
+            TargetRoot {
+                id: probe,
+                file: directory.join("main_probe.rs"),
+            },
+        ],
         vec![DiskScope::under(&directory)],
         Vendor::Excluded,
     )
     .expect("the fixture is there");
     let index =
         Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
-    (vec![("globals".to_owned(), index)], directory)
+    (
+        vec![("globals".to_owned(), index)],
+        without_harness,
+        directory,
+    )
 }
 
-/// The fixture's own register: each checked class once, held and broken, and a stale row.
+/// The fixture's own register: each checked class held and broken, and a stale row.
 const FIXTURE_ROWS: &str = "file\tglobal\tbinary\tclass\treason
 lib.rs\tcrate::tests::LOCKED\tglobals:lib:globals\tlock:TURN\t2026-10-24: every test takes TURN
 lib.rs\tcrate::tests::HALF_LOCKED\tglobals:lib:globals\tlock:TURN\t2026-10-24: one test forgets TURN
+lib.rs\tcrate::tests::ARMED_TWICE\tglobals:lib:globals\tlock:TURN\t2026-10-24: one arm of a test forgets TURN
+lib.rs\tcrate::tests::GATED\tglobals:lib:globals\tlock:GATE_TURN\t2026-10-24: two locks answer to GATE_TURN
+lib.rs\tcrate::tests::GATED_TOO\tglobals:lib:globals\tlock:gated::GATE_TURN\t2026-10-24: spelled by its module path
 lib.rs\tcrate::tests::ONE_WRITER\tglobals:lib:globals\tsingle writer\t2026-10-24: one test writes it
 lib.rs\tcrate::tests::TWO_WRITERS\tglobals:lib:globals\tsingle writer\t2026-10-24: two tests write it
+lib.rs\tcrate::tests::GUARDED\tglobals:lib:globals\tsingle writer\t2026-10-24: a drop guard is a second writer
 lib.rs\tcrate::tests::FAMILIES\tglobals:lib:globals\twrite-once\t2026-10-24: a LazyLock of a fixed list
 lib.rs\tcrate::tests::RESET\tglobals:lib:globals\twrite-once\t2026-10-24: stored, so not write-once
-lib.rs\tcrate::tests::ALONE\tglobals:lib:globals\trun=alone\t2026-10-24: its tests are not on the ignored list
+lib.rs\tcrate::tests::ALONE\tglobals:lib:globals\trun=alone\t2026-10-24: listed, but its tests carry no #[ignore]
+lib.rs\tcrate::tests::ALONE_HELD\tglobals:lib:globals\trun=alone\t2026-10-24: ignored and listed run=alone
+lib.rs\tcrate::tests::WRITTEN\tglobals:lib:globals\tone main\t2026-10-24: the library runs under the harness
+main_probe.rs\tcrate::PROBED\tglobals:test:main_probe\tone main\t2026-10-24: written by its main
+main_probe.rs\tcrate::RESUMED\tglobals:test:main_probe\tone main\t2026-10-24: written by a callback for a type main names
+main_probe.rs\tcrate::COUNTED\tglobals:test:main_probe\tone main\t2026-10-24: written by its global allocator
 lib.rs\tcrate::tests::GROWS\tglobals:lib:globals\tmonotone\t2026-10-24: by hand
 lib.rs\tcrate::tests::READ_ONCE\tglobals:lib:globals\tmonotone\t2026-10-24: one test reads it, so stale
 ";
 
 /// RED (T-TEST-PROCESS-GLOBALS) — **each shape of the grammar is found, its accepted twin is
-/// not, a resolved helper carries a global to the tests that call it, an unresolved call whose
-/// candidate reaches one is refused by file and line, each checked class is held and broken,
-/// and a global reached only through a product function is not seen (the blind spot, pinned).**
+/// not, a resolved helper, an implicit call (a drop guard, a global allocator) and a foreign
+/// callback (winit's `resumed`, a function in `define_class!`'s tokens) carry a global to the
+/// tests whose reach runs them, what the walk cannot decide is refused by file and line, each
+/// checked class is held and broken, and a global reached only through a product function is
+/// not seen (the blind spot, pinned).**
 ///
 /// MUTATIONS: in `Reader::walk`, follow no test-only callable — `HELPED` and the helper's
-/// `CACHE` are not found; read `lock` as a read in `method_of` — `WRITTEN_BY_LOCK` is not
-/// found; skip the `Ambiguous` arm — the `poke` refusal is gone.
+/// `CACHE` are not found; take in no implicit impl — `GUARDED`'s `single writer` row holds
+/// and `RESUMED`/`COUNTED` are stale; take in no item-macro function — `PRESSED` is not found;
+/// read `lock` as a read in `method_of` — `WRITTEN_BY_LOCK` is not found; skip the `Ambiguous`
+/// arm — the `poke` refusal is gone; `place` for `place_written` — `SPOT` and `TALLIES` are
+/// not found; drop the `Path` arm's global-name refusal — `LOST`'s refusal is gone; drop
+/// `globbed` from `nameable` — `GLOBBED`'s refusal is gone; key `Shared::tests` by name alone
+/// — `ARMED_TWICE`'s row holds; match a lock row by bare name — `GATED`'s row holds; drop the
+/// `#[ignore]` requirement — `ALONE`'s row holds; read arrays as not cells — `SLOTS` is not
+/// found.
 #[test]
 fn the_grammar_refuses_each_shape_and_accepts_its_twin() {
-    let (indices, directory) = fixture();
-    let scan = scan(&indices, &BTreeSet::new(), &directory);
+    let (indices, without_harness, directory) = fixture();
+    let scan = scan(&indices, &without_harness, &directory);
     let found: Vec<String> = scan
         .hits()
         .iter()
@@ -1593,28 +2344,58 @@ fn the_grammar_refuses_each_shape_and_accepts_its_twin() {
         found,
         [
             "crate::tests::ALONE G1",
+            "crate::tests::ALONE_HELD G1",
+            "crate::tests::ARMED_TWICE G1",
             "crate::tests::FAMILIES G1",
+            "crate::tests::GATED G1",
+            "crate::tests::GATED_TOO G1",
             "crate::tests::GROWS G2",
+            "crate::tests::GUARDED G1",
             "crate::tests::HALF_LOCKED G1",
             "crate::tests::HELPED G1",
             "crate::tests::LOCKED G1",
             "crate::tests::ONE_WRITER G1",
+            "crate::tests::PRESSED G2",
             "crate::tests::RESET G2",
             "crate::tests::SHARED G1",
+            "crate::tests::SLOTS G2",
+            "crate::tests::SPOT G2",
+            "crate::tests::TALLIES G2",
             "crate::tests::TWO_WRITERS G1",
             "crate::tests::UNDECIDED G2",
             "crate::tests::WRITTEN G2",
             "crate::tests::WRITTEN_BY_LOCK G2",
             "crate::tests::cached::CACHE G1",
+            "crate::COUNTED G2",
+            "crate::PROBED G2",
+            "crate::RESUMED G2",
         ],
         "{found:#?}"
     );
     let refusals: Vec<&String> = scan.refusals.iter().collect();
-    assert_eq!(refusals.len(), 1, "{refusals:#?}");
+    let refused = |needle: &str| {
+        refusals
+            .iter()
+            .any(|refusal| refusal.starts_with("lib.rs:") && refusal.contains(needle))
+    };
+    assert_eq!(refusals.len(), 4, "{refusals:#?}");
     assert!(
-        refusals[0].starts_with("lib.rs:")
-            && refusals[0].contains("`poke`")
-            && refusals[0].contains("a candidate reaches a process-global: Poker::poke"),
+        refused("`poke`") && refused("a candidate reaches a process-global: Poker::poke"),
+        "{refusals:#?}"
+    );
+    assert!(
+        refused("`Orphan::drop` runs by an implicit call or a foreign callback")
+            && refused("no test's reach names `Orphan`"),
+        "{refusals:#?}"
+    );
+    assert!(
+        refused("the path `missing::LOST` names a process-global's name"),
+        "{refusals:#?}"
+    );
+    assert!(
+        refused(
+            "the arguments of `odd_macro!` do not parse as expressions, and they name `GLOBBED`"
+        ),
         "{refusals:#?}"
     );
     let undecided = scan.said(
@@ -1631,7 +2412,16 @@ fn the_grammar_refuses_each_shape_and_accepts_its_twin() {
     );
 
     let rows = rows_of(FIXTURE_ROWS);
-    let (unlisted, stale, broken) = judge(&scan, &rows, &BTreeSet::new(), &BTreeMap::new());
+    let runs: BTreeMap<String, String> = [
+        "tests::alone_once",
+        "tests::alone_twice",
+        "tests::alone_held_once",
+        "tests::alone_held_twice",
+    ]
+    .into_iter()
+    .map(|test| (test.to_owned(), "run=alone".to_owned()))
+    .collect();
+    let (unlisted, stale, broken) = judge(&scan, &rows, &without_harness, &runs);
     let unlisted: Vec<&str> = unlisted
         .iter()
         .map(|line| line.split('\t').nth(2).unwrap_or(line))
@@ -1640,9 +2430,12 @@ fn the_grammar_refuses_each_shape_and_accepts_its_twin() {
         unlisted,
         [
             "crate::tests::HELPED",
+            "crate::tests::PRESSED",
             "crate::tests::SHARED",
+            "crate::tests::SLOTS",
+            "crate::tests::SPOT",
+            "crate::tests::TALLIES",
             "crate::tests::UNDECIDED",
-            "crate::tests::WRITTEN",
             "crate::tests::WRITTEN_BY_LOCK",
             "crate::tests::cached::CACHE",
         ]
@@ -1653,18 +2446,54 @@ fn the_grammar_refuses_each_shape_and_accepts_its_twin() {
             "lib.rs\tcrate::tests::READ_ONCE\tglobals:lib:globals: no longer reached by two tests or written by one"
         ]
     );
-    let broken: Vec<&str> = broken
+    let broken_globals: Vec<&str> = broken
         .iter()
         .map(|line| line.split('\t').nth(1).unwrap_or(line))
         .collect();
     assert_eq!(
-        broken,
+        broken_globals,
         [
             "crate::tests::ALONE",
+            "crate::tests::ARMED_TWICE",
+            "crate::tests::GATED",
+            "crate::tests::GUARDED",
             "crate::tests::HALF_LOCKED",
             "crate::tests::RESET",
             "crate::tests::TWO_WRITERS",
-        ]
+            "crate::tests::WRITTEN",
+        ],
+        "{broken:#?}"
+    );
+    let says = |global: &str, needle: &str| {
+        broken
+            .iter()
+            .any(|line| line.contains(&format!("\t{global}\t")) && line.contains(needle))
+    };
+    assert!(
+        says("crate::tests::ALONE", "not an ignored test run=alone"),
+        "{broken:#?}"
+    );
+    assert!(
+        says("crate::tests::ARMED_TWICE", "on_each_arm reach it without"),
+        "{broken:#?}"
+    );
+    assert!(
+        says("crate::tests::GATED", "spell the one by its module path"),
+        "{broken:#?}"
+    );
+    assert!(
+        says(
+            "crate::tests::GUARDED",
+            "written by 2 tests: tests::guarded_is_reset_by_a_drop, tests::guarded_writes"
+        ),
+        "{broken:#?}"
+    );
+    assert!(
+        says(
+            "crate::tests::WRITTEN",
+            "globals:lib:globals runs under the harness"
+        ),
+        "{broken:#?}"
     );
 }
 
@@ -1673,8 +2502,11 @@ fn the_grammar_refuses_each_shape_and_accepts_its_twin() {
 /// **What the blind spot holds, as a number** (T-TEST-PROCESS-GLOBALS ruling 1): the product
 /// functions' writes of process-globals that two tests of one binary reach through resolved
 /// edges, product code included, and the unresolved edges met on the way. A measure, printed as
-/// `TEST_GLOBALS_PRODUCT_REACH`, for a ticket that would gate product reach; never a gate, and
-/// never compared.
+/// `TEST_GLOBALS_PRODUCT_REACH` (CI's step "the tests' product reach of process-globals,
+/// measured" runs it with `--nocapture`), for a ticket that would gate product reach; never a
+/// gate, and never compared. It reads the workspace on its own: run beside the gate in one test
+/// binary, the second index costs no wall time (2026-10-24, this machine: 22.6 s for the binary,
+/// 24.0 s for the gate alone, 18.9 s for this alone).
 #[test]
 fn the_product_reach_of_the_tests_is_measured() {
     let (indices, without_harness) = workspace();
@@ -1686,7 +2518,7 @@ fn the_product_reach_of_the_tests_is_measured() {
     let resolver = Resolver::new(&packages, Arms::filtered(|_| true))
         .unwrap_or_else(|refused| panic!("{refused:?}"));
     let globals = Globals::read(&indices, &root);
-    let reader = Reader::new(&resolver, &globals, &root);
+    let reader = Reader::new(&resolver, &globals, &root, Vec::new());
 
     // Every callable's resolved callees, reversed.
     let mut callers: HashMap<ItemId, Vec<ItemId>> = HashMap::new();
@@ -1723,9 +2555,10 @@ fn the_product_reach_of_the_tests_is_measured() {
     let mut tests: HashMap<ItemId, BTreeSet<String>> = HashMap::new();
     for (package, index) in &indices {
         for record in test_roots(index, &without_harness) {
-            if let Some(id) = resolver.id_of(package, record) {
-                tests.insert(id, targets(index, record));
-            }
+            let id = resolver
+                .id_of(package, record)
+                .expect("a record of this index is the resolver's");
+            tests.insert(id, targets(index, record));
         }
     }
     let mut written = 0;
@@ -1812,6 +2645,8 @@ mod reading {
         /// The offset of its last segment, in the text handed to [`callable`].
         pub at: usize,
         pub last: String,
+        /// Its segments as written, `super::X` as `["super", "X"]`.
+        pub path: Vec<String>,
         pub segments: usize,
         pub context: Context,
     }
@@ -1838,6 +2673,13 @@ mod reading {
         /// The `const`s and `static`s written in the body, by name: a bare path of one of
         /// those names is the body's own.
         pub local_names: std::collections::BTreeSet<String>,
+        /// Every prefix of every path the body writes (a type, a value, a struct literal, a
+        /// pattern), as segments, and every identifier of a macro argument it cannot parse:
+        /// what names a type whose impl an implicit call or a foreign callback runs.
+        pub named: std::collections::BTreeSet<Vec<String>>,
+        /// Every call the body writes, by its offset and the callee's last name: a path call's
+        /// last segment, a method call's method. Read only for a body no call graph walks.
+        pub calls: Vec<(usize, String)>,
     }
 
     /// Read a callable's whole text.
@@ -1845,17 +2687,94 @@ mod reading {
         let mut reader = Reader::default();
         if function {
             let parsed = syn::parse_str::<syn::ItemFn>(text)?;
+            reader.visit_signature(&parsed.sig);
             reader.visit_block(&parsed.block);
         } else if owned {
             let parsed = syn::parse_str::<syn::ImplItemFn>(text)?;
+            reader.visit_signature(&parsed.sig);
             reader.visit_block(&parsed.block);
         } else {
             let parsed = syn::parse_str::<syn::TraitItemFn>(text)?;
+            reader.visit_signature(&parsed.sig);
             if let Some(block) = &parsed.default {
                 reader.visit_block(block);
             }
         }
         Ok(reader.reading)
+    }
+
+    /// One function written inside an item-position macro's tokens.
+    pub struct MacroFn {
+        /// What runs it when written: the type of its `impl` block, or its own name for a free
+        /// function.
+        pub named_by: String,
+        pub name: String,
+        /// Its offset in the tokens.
+        pub at: usize,
+        pub reading: Reading,
+    }
+
+    /// The tokens of an item-position macro, read as items: every function in them, through
+    /// `impl` blocks and inline modules, and the byte ranges of every other item.
+    pub fn items(text: &str) -> Result<(Vec<MacroFn>, Vec<std::ops::Range<usize>>), syn::Error> {
+        fn read_items(
+            items: &[syn::Item],
+            fns: &mut Vec<MacroFn>,
+            others: &mut Vec<std::ops::Range<usize>>,
+        ) {
+            use syn::spanned::Spanned;
+            for item in items {
+                match item {
+                    syn::Item::Fn(function) => {
+                        let mut reader = Reader::default();
+                        reader.visit_signature(&function.sig);
+                        reader.visit_block(&function.block);
+                        fns.push(MacroFn {
+                            named_by: function.sig.ident.to_string(),
+                            name: function.sig.ident.to_string(),
+                            at: function.sig.ident.span().byte_range().start,
+                            reading: reader.reading,
+                        });
+                    }
+                    syn::Item::Impl(block) => {
+                        let named_by = match &*block.self_ty {
+                            syn::Type::Path(path) => path
+                                .path
+                                .segments
+                                .last()
+                                .map(|segment| segment.ident.to_string()),
+                            _ => None,
+                        };
+                        for member in &block.items {
+                            match (member, &named_by) {
+                                (syn::ImplItem::Fn(function), Some(named_by)) => {
+                                    let mut reader = Reader::default();
+                                    reader.visit_signature(&function.sig);
+                                    reader.visit_block(&function.block);
+                                    fns.push(MacroFn {
+                                        named_by: named_by.clone(),
+                                        name: function.sig.ident.to_string(),
+                                        at: function.sig.ident.span().byte_range().start,
+                                        reading: reader.reading,
+                                    });
+                                }
+                                _ => others.push(member.span().byte_range()),
+                            }
+                        }
+                    }
+                    syn::Item::Mod(module) => match &module.content {
+                        Some((_, inner)) => read_items(inner, fns, others),
+                        None => others.push(item.span().byte_range()),
+                    },
+                    _ => others.push(item.span().byte_range()),
+                }
+            }
+        }
+        let file = syn::parse_str::<syn::File>(text)?;
+        let mut fns = Vec::new();
+        let mut others = Vec::new();
+        read_items(&file.items, &mut fns, &mut others);
+        Ok((fns, others))
     }
 
     /// Whether a callable is written without `pub`.
@@ -1897,9 +2816,16 @@ mod reading {
             let Some(last) = path.path.segments.last() else {
                 return;
             };
+            self.visit_path(&path.path);
             self.reading.uses.push(Use {
                 at: last.ident.span().byte_range().start,
                 last: last.ident.to_string(),
+                path: path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect(),
                 segments: path.path.segments.len(),
                 context,
             });
@@ -1911,6 +2837,23 @@ mod reading {
                 self.record(path, context);
             } else {
                 self.visit_expr(expr);
+            }
+        }
+
+        /// `expr` in a writing context (`=`, `op=`, `&mut`, a method's receiver): a field, an
+        /// index or a parenthesis of a path writes that path, so `X.f = 1`, `X[i] += 1`,
+        /// `&mut X.f` and `X.f.push(1)` are read as `X` in `context`. An index's own
+        /// expression is read as any expression.
+        fn place_written(&mut self, expr: &Expr, context: Context) {
+            match expr {
+                Expr::Field(field) => self.place_written(&field.base, context),
+                Expr::Index(index) => {
+                    self.visit_expr(&index.index);
+                    self.place_written(&index.expr, context);
+                }
+                Expr::Paren(inner) => self.place_written(&inner.expr, context),
+                Expr::Group(inner) => self.place_written(&inner.expr, context),
+                _ => self.place(expr, context),
             }
         }
     }
@@ -1956,13 +2899,30 @@ mod reading {
         fn visit_expr(&mut self, expr: &'ast Expr) {
             match expr {
                 Expr::MethodCall(call) => {
-                    self.place(&call.receiver, Context::Method(call.method.to_string()));
+                    self.reading.calls.push((
+                        call.method.span().byte_range().start,
+                        call.method.to_string(),
+                    ));
+                    if let Some(turbofish) = &call.turbofish {
+                        self.visit_angle_bracketed_generic_arguments(turbofish);
+                    }
+                    self.place_written(&call.receiver, Context::Method(call.method.to_string()));
                     for argument in &call.args {
                         self.visit_expr(argument);
                     }
                 }
+                Expr::Call(call) => {
+                    if let Some(path) = path_of(&call.func)
+                        && let Some(last) = path.path.segments.last()
+                    {
+                        self.reading
+                            .calls
+                            .push((last.ident.span().byte_range().start, last.ident.to_string()));
+                    }
+                    visit::visit_expr_call(self, call);
+                }
                 Expr::Assign(assign) => {
-                    self.place(&assign.left, Context::Assign);
+                    self.place_written(&assign.left, Context::Assign);
                     self.visit_expr(&assign.right);
                 }
                 Expr::Binary(binary)
@@ -1980,24 +2940,22 @@ mod reading {
                             | syn::BinOp::ShrAssign(_)
                     ) =>
                 {
-                    self.place(&binary.left, Context::Assign);
+                    self.place_written(&binary.left, Context::Assign);
                     self.visit_expr(&binary.right);
                 }
                 Expr::Reference(reference) => {
-                    let context = if reference.mutability.is_some() {
-                        Context::MutRef
+                    if reference.mutability.is_some() {
+                        self.place_written(&reference.expr, Context::MutRef);
                     } else {
-                        Context::Ref
-                    };
-                    self.place(&reference.expr, context);
+                        self.place(&reference.expr, Context::Ref);
+                    }
                 }
                 Expr::RawAddr(raw) => {
-                    let context = if matches!(raw.mutability, syn::PointerMutability::Mut(_)) {
-                        Context::MutRef
+                    if matches!(raw.mutability, syn::PointerMutability::Mut(_)) {
+                        self.place_written(&raw.expr, Context::MutRef);
                     } else {
-                        Context::Ref
-                    };
-                    self.place(&raw.expr, context);
+                        self.place(&raw.expr, Context::Ref);
+                    }
                 }
                 Expr::Field(field) => self.place(&field.base, Context::Field),
                 Expr::Index(index) => {
@@ -2010,6 +2968,18 @@ mod reading {
                 Expr::Path(path) if path.qself.is_none() => self.record(path, Context::Bare),
                 _ => visit::visit_expr(self, expr),
             }
+        }
+
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            let segments: Vec<String> = path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect();
+            for end in 1..=segments.len() {
+                self.reading.named.insert(segments[..end].to_vec());
+            }
+            visit::visit_path(self, path);
         }
 
         fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
@@ -2038,12 +3008,11 @@ mod reading {
             if matches!(name.as_str(), "addr_of_mut" | "addr_of")
                 && let Ok(expr) = mac.parse_body::<Expr>()
             {
-                let context = if name == "addr_of_mut" {
-                    Context::MutRef
+                if name == "addr_of_mut" {
+                    self.place_written(&expr, Context::MutRef);
                 } else {
-                    Context::Ref
-                };
-                self.place(&expr, context);
+                    self.place(&expr, Context::Ref);
+                }
                 return;
             }
             let parsed = mac
@@ -2060,6 +3029,9 @@ mod reading {
                 Err(_) => {
                     let mut idents = Vec::new();
                     identifiers(mac.tokens.clone(), &mut idents);
+                    self.reading
+                        .named
+                        .extend(idents.iter().map(|(_, ident)| vec![ident.clone()]));
                     if !idents.is_empty() {
                         self.reading.unparsed.push(Unparsed {
                             name: name.clone(),

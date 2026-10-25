@@ -770,16 +770,25 @@ its register. A process-global is a `static` of an `Atomic*`, a non-unit `Mutex`
 a `OnceLock`/`OnceCell`, a `LazyLock`, or a `static mut`. It may be written in a module or
 in a body. Not one: a `thread_local!` (each test has its own thread), a unit lock (the
 remedy), a static inside a `#[test]` body. A test's reach is its body and the test-only
-callables of its target that it reaches through resolved call-graph edges. A global that
-two tests of one binary reach (G1), or that one test's reach writes (G2), is a row.
+callables of its target that it reaches through resolved call-graph edges. It also takes
+in, to a fixed point, what runs without an edge: a test-only impl of a foreign trait (a
+`Drop`, winit's `resumed`) whose self type a body of the reach names, a test-only
+`GlobalAlloc` (in every test of its target), and a function written in an item-position
+macro's tokens (`define_class!`) whose type the reach names. A global that two tests of one
+binary reach (G1), or that one test's reach writes (G2), is a row. An array of cells is
+the cell, and a field or index of a `static mut` under `=`, `op=` or `&mut` writes it.
 `store`, `fetch_*`, `lock`, `get_or_init` and the like are writes, and any use the table
 in the module doc does not read is undecided and taken as a write. G3 is the reach itself.
 Refused by file and line: an unresolved edge with a test-only candidate that reaches a
-global, an unparsed body on the walk, and a global named where the call graph places no
-value. A row is file, global, binary, class and a dated reason, and the rows equal the
-hits both ways. The guard checks `lock:<NAME>` (every test that reaches the global also
-names that unit lock), `single writer`, `one main` (a `harness = false` target, from its
-manifest) and `run=alone`/`run=serial`. It also checks that a `write-once` row's writes
+global, an unresolved path whose last segment is a global's name, an unparsed body on the
+walk, a global named where the call graph places no value (a glob `use` makes a name
+nameable too), and an implicitly run impl that reaches a global and whose type no test's
+reach names. A row is file, global, binary, class and a dated reason, and the rows equal the
+hits both ways. The guard checks `lock:<NAME>` (every test that reaches the global, each
+`cfg` arm on its own, reaches the one unit lock of the binary that NAME names; two locks of
+one name are spelled by their module path's tail), `single writer`, `one main` (a
+`harness = false` target, from its manifest) and `run=alone`/`run=serial` (each test
+carries `#[ignore]` and that condition on the ignored list). It also checks that a `write-once` row's writes
 are once-writes. `per-test key`, `monotone`, `write-once`, `not on a test thread` and
 `serial helpers` are by hand. `scripts/ci/check-test-globals.ps1` admits an added row of
 a checked class with its dated reason. It refuses an added by-hand row unless a new

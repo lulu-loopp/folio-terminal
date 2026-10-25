@@ -6,11 +6,15 @@
 # file, global (its module path and name; a body-declared one by its body's path) and binary (the
 # target whose tests share it: each target has a copy of its own).
 #
-# Classes the guard checks itself: lock:<NAME> (every test that reaches the global also reaches
-# the unit lock NAME), single writer (exactly one test's reach writes it), one main (the binary
-# runs without the harness), run=alone / run=serial (every test that reaches it carries that run
-# condition on scripts/ci/ignored-tests.txt). Classes by hand: per-test key, monotone, write-once
-# (its writes are held to once-writes by the guard), not on a test thread, serial helpers.
+# Classes the guard checks itself: lock:<NAME> (every test that reaches the global, each cfg arm
+# on its own, also reaches the unit lock NAME names: its name, or its module path's tail when
+# two locks of the binary share the name), single writer (exactly one test's reach writes it),
+# one main (the binary runs without the harness), run=alone / run=serial (every test that
+# reaches it carries #[ignore] and that run condition on scripts/ci/ignored-tests.txt). A test's
+# reach takes in the impls an implicit call or a foreign callback runs (a Drop, winit's resumed,
+# a global allocator, a function in define_class!'s tokens). Classes by hand: per-test key,
+# monotone, write-once (its writes are held to once-writes by the guard), not on a test thread,
+# serial helpers.
 #
 # scripts/ci/check-test-globals.ps1 admits an added row of a checked class with its dated reason,
 # and an added row of a by-hand class only under a new "# widened <date> by <ticket> (+n rows)"
@@ -25,24 +29,27 @@ crates/bt-app/src/shell_integration/profile_marks.rs	crate::shell_integration::p
 crates/bt-app/src/shell_integration_psreadline_tests.rs	crate::shell_integration::psreadline_tests::composed_5_1::SCRIPT	bt-app:bin:folio	single writer	2026-10-24: the composed script, made once by get_or_init in the one test that reaches it (census row 25)
 crates/bt-app/src/test_support.rs	crate::test_support::a_read_out::NEXT	bt-app:bin:folio	monotone	2026-10-24: a counter that hands each read-out its own number; it only grows and no test asserts its value
 crates/bt-app/src/test_support.rs	crate::test_support::admitted::NEXT	bt-app:bin:folio	monotone	2026-10-24: a counter that hands each admitted fixture its own number; it only grows and no test asserts its value
-crates/bt-app/src/update_handoff.rs	crate::update_handoff::ARMED	bt-app:bin:folio	single writer	2026-10-24: the panic road's test is the only one that arms the slot, and it does so by try_lock (census row 17)
+crates/bt-app/src/update_handoff.rs	crate::update_handoff::ARMED	bt-app:bin:folio	single writer	2026-10-24: the one test that reaches it holds the slot (lock) on a worker to prove the panic road's try_lock does not wait; it stores nothing; product writers (arm, disarm, record_the_applier) are the stated blind spot (census row 17)
 crates/bt-app/src/update_startup.rs	crate::update_startup::FAILED	bt-app:bin:folio	single writer	2026-10-24: set only in the child arm of its test, a process of its own (alone_in_a_process); the parent never writes it
 crates/bt-app/src/update_startup.rs	crate::update_startup::HELD	bt-app:bin:folio	single writer	2026-10-24: set only in the child arm of its test, a process of its own (alone_in_a_process); the parent never writes it
 crates/bt-app/src/update_startup.rs	crate::update_startup::LAST_TRIAL	bt-app:bin:folio	single writer	2026-10-24: set only in the child arm of its test, a process of its own (alone_in_a_process); the parent never writes it
 crates/bt-app/src/update_startup.rs	crate::update_startup::STAND_IN	bt-app:bin:folio	single writer	2026-10-24: set only in the child arm of its test, a process of its own (alone_in_a_process); the parent never writes it
-crates/bt-app/src/update_startup.rs	crate::update_startup::TRIAL	bt-app:bin:folio	not on a test thread	2026-10-24: set only in the child arm of its three tests, each a process of its own (child_root); no thread of the shared test process writes it
+crates/bt-app/src/update_startup.rs	crate::update_startup::TRIAL	bt-app:bin:folio	not on a test thread	2026-10-24: a stand-in class until 0.4.9 row 58's checked own-process class: written only in the child arm of its three tests (child_root), on the test thread of a child process that runs that one test alone; no thread of the shared test process writes it
 crates/bt-effects/src/admission.rs	crate::admission::ENTER_WINDOW_REFUSED	bt-effects:lib:bt-effects	lock:WRITERS	2026-10-24: every refusal test takes WRITERS first (census row 1)
 crates/bt-effects/src/admission.rs	crate::admission::EXITING_REFUSED	bt-effects:lib:bt-effects	lock:WRITERS	2026-10-24: every refusal test takes WRITERS first (census row 2)
 crates/bt-effects/src/admission.rs	crate::admission::LOOP_RUNNING_REFUSED	bt-effects:lib:bt-effects	lock:WRITERS	2026-10-24: every refusal test takes WRITERS first (census row 3)
 crates/bt-effects/src/admission.rs	crate::admission::QUIT_ABANDONED_REFUSED	bt-effects:lib:bt-effects	lock:WRITERS	2026-10-24: every refusal test takes WRITERS first (census row 4)
 crates/bt-effects/src/admission_tests.rs	crate::admission::tests::POINTER_RAN	bt-effects:lib:bt-effects	single writer	2026-10-24: one test runs the pointer and reads the flag (census row 16)
-crates/bt-platform/src/lib.rs	crate::windows_impl::first_read_gate::GATE	bt-platform:lib:bt-platform	lock:ONE_WATCHER_AT_A_TIME	2026-10-24: every test that holds the watcher's read takes the watchers' turn first (census row 8)
-crates/bt-platform/src/macos_watch.rs	crate::macos_watch::stream_gate::GATE	bt-platform:lib:bt-platform	lock:ONE_WATCHER_AT_A_TIME	2026-10-24: every test that holds the stream's start takes the watchers' turn first
+crates/bt-platform/src/lib.rs	crate::windows_impl::first_read_gate::GATE	bt-platform:lib:bt-platform	lock:first_read_gate::ONE_WATCHER_AT_A_TIME	2026-10-24: every test that holds the watcher's read takes the watchers' turn first (census row 8)
+crates/bt-platform/src/macos_watch.rs	crate::macos_watch::stream_gate::GATE	bt-platform:lib:bt-platform	lock:stream_gate::ONE_WATCHER_AT_A_TIME	2026-10-24: every test that holds the stream's start takes the watchers' turn first
 crates/bt-platform/tests/macos_app_delegate.rs	crate::mac::INBOX	bt-platform:test:macos_app_delegate	one main	2026-10-24: harness = false; the target's main is its only case (census row 28)
+crates/bt-platform/tests/macos_dock_menu.rs	crate::mac::SENT	bt-platform:test:macos_dock_menu	one main	2026-10-24: harness = false; written by taken() under run_every_claim, which winit's ApplicationHandler::resumed runs for the Probe main hands the event loop
 crates/bt-platform/tests/macos_hotkey.rs	crate::mac::FIRED	bt-platform:test:macos_hotkey	one main	2026-10-24: harness = false; the target's main is its only case (census row 32)
 crates/bt-platform/tests/macos_menu_bar.rs	crate::mac::SENT	bt-platform:test:macos_menu_bar	one main	2026-10-24: harness = false; the target's main is its only case (census row 31)
+crates/bt-platform/tests/macos_pointer_route.rs	crate::mac::PRESSES	bt-platform:test:macos_pointer_route	one main	2026-10-24: harness = false; written by ProbeView's mouseDown: in define_class!'s tokens, which AppKit runs for the view main builds
 crates/bt-platform/tests/macos_services.rs	crate::mac::BEFORE_READY	bt-platform:test:macos_services	one main	2026-10-24: harness = false; the target's main is its only case (census row 34)
 crates/bt-platform/tests/macos_services.rs	crate::mac::INBOX	bt-platform:test:macos_services	one main	2026-10-24: harness = false; the target's main is its only case (census row 29)
+crates/bt-platform/tests/macos_services.rs	crate::mac::READY	bt-platform:test:macos_services	one main	2026-10-24: harness = false; stored in winit's ApplicationHandler::resumed for the handler main hands the event loop
 crates/bt-pty/src/lib.rs	crate::PTY_DUMP_RECORDINGS	bt-pty:lib:bt-pty	monotone	2026-10-24: the recordings' ordinal; it only grows, so each recording's name is its own, and the tests compare names, never the count
 crates/bt-pty/src/test_shell.rs	crate::test_shell::WARM_UP	bt-pty:lib:bt-pty	per-test key	2026-10-24: a record of every warm-up, read filtered by each test's own program name (census row 12)
 crates/bt-render/src/lib.rs	crate::CJK_FALLBACK_FAMILIES	bt-render:lib:bt-render	write-once	2026-10-24: a LazyLock of a fixed list (census row 19)
