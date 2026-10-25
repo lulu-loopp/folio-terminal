@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **813 items, 612 free functions and 201 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 5's head; 819, 613 and 206 before it,
+- **unclassified.tsv**: **799 items, 600 free functions and 199 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 6's head; 813, 612 and 201 before it,
+  819, 613 and 206 before batch 5,
   823, 617 and 206 before batch 4,
   828, 620 and 208 before batch 3,
   837, 627 and 210 before batch 2, and 846, 634 and 212 before batch 1).
@@ -103,7 +104,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 3 | `runtime/dpi.rs` | moved by batch 3 (4 items; `files_float_content_height`, tied with `runtime/floats.rs`, waits for that batch; `release_due_leaf_resize` stays in `main.rs`, the single writer road of `LeafSession.birth` and `.grid`), with `Runtime::page_shrinker` as the web batch's tail | — |
    | 4 | `runtime/attention.rs` | moved by batch 4 (4 items; `Runtime::reveal_in_explorer`, tied with `runtime/configuration.rs` and `runtime/floats.rs`, held for a ruling, below) | — |
    | 5 | `runtime/palette.rs` | moved by batch 5 (6 items; `Runtime::focus_seat` held, below) | — |
-   | 6 | `runtime/terminal.rs` | 14 (12 + 2) | 15 |
+   | 6 | `runtime/terminal.rs` | moved by batch 6 (13 items; `deliver_osc_attention` went to `runtime/attention.rs` instead, below) | — |
    | 7 | `runtime/git.rs` | 14 (11 + 3) | 19 |
    | 8 | `runtime/peek.rs` | 14 (14 + 0) | 21 |
    | 9 | `runtime/clipboard.rs` | 16 (13 + 3) | 27 |
@@ -124,6 +125,13 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    `LeafSession.birth` and `LeafSession.grid`, whose other writers stay at the root, and batch 3 moved it back. It
    stays in `main.rs` until an owner is ruled for those two facts; `unclassified.tsv` keeps proposing
    `runtime/dpi.rs` for it (that column is generated), and no later batch retries the move.
+
+   **When the ownership census names an owner for a field an item writes, the owner column wins over the first
+   caller** (a judged exception, batch 6). `deliver_osc_attention` is called only from `Runtime::drain_pty` in
+   `runtime/terminal.rs`, so `unclassified.tsv` proposed that file; it writes `LeafSession.attention`, whose census
+   owner is "attention (→ bt-workbench)", and `docs/ARCHITECTURE.md` §12.1 lists it with the attention routing. It
+   went to `runtime/attention.rs`, which keeps that fact at two writer modules (the root and `runtime/attention.rs`)
+   instead of three.
 
    **Held items** (each row's generated `called_from` home is not where it goes):
    - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).

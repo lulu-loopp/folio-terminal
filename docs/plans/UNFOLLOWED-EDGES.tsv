@@ -2396,9 +2396,6 @@ crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	len	1
 crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	map_or	1	
 crates/bt-app/src/main.rs	bt-app crate::image_zoom_key	Ambiguous	as_str	1	
 crates/bt-app/src/main.rs	bt-app crate::ime_commit_bytes	Ambiguous	to_vec	1	
-crates/bt-app/src/main.rs	bt-app crate::in_drain_feed_turn	Dynamic	begin	1	
-crates/bt-app/src/main.rs	bt-app crate::in_drain_feed_turn	Dynamic	drain	1	
-crates/bt-app/src/main.rs	bt-app crate::in_drain_feed_turn	Dynamic	end	1	
 crates/bt-app/src/main.rs	bt-app crate::input_line_needs_a_space_first	Ambiguous	all	1	
 crates/bt-app/src/main.rs	bt-app crate::input_line_needs_a_space_first	Ambiguous	chars	1	
 crates/bt-app/src/main.rs	bt-app crate::input_line_needs_a_space_first	Ambiguous	is_empty	1	
@@ -2597,9 +2594,6 @@ crates/bt-app/src/main.rs	bt-app crate::startup_window_rect	Ambiguous	map	1
 crates/bt-app/src/main.rs	bt-app crate::startup_window_rect	Ambiguous	saturating_add	2	
 crates/bt-app/src/main.rs	bt-app crate::startup_window_rect	Ambiguous	unwrap_or	2	
 crates/bt-app/src/main.rs	bt-app crate::stem_end	Ambiguous	unwrap_or	1	
-crates/bt-app/src/main.rs	bt-app crate::step_leaf_text_scale	Ambiguous	fold	1	
-crates/bt-app/src/main.rs	bt-app crate::step_leaf_text_scale	Ambiguous	stepped	1	
-crates/bt-app/src/main.rs	bt-app crate::step_leaf_text_scale	Dynamic	derive	1	
 crates/bt-app/src/main.rs	bt-app crate::surface_pixels	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::surface_pixels	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::switcher_rows	Ambiguous	clone	1	
@@ -4751,6 +4745,12 @@ crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::terminal_reference_at	Dynamic	subpixels	2	
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::terminal_reference_cell	Ambiguous	ok	1	
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::terminal_reference_cell	Ambiguous	then_some	1	
+crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::in_drain_feed_turn	Dynamic	begin	1	2026-10-25: T-SPLIT-2B batch 6; the same site, moved by K2 batch 6 with `in_drain_feed_turn` from main.rs into runtime/terminal.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::in_drain_feed_turn	Dynamic	drain	1	2026-10-25: T-SPLIT-2B batch 6; the same site, moved by K2 batch 6 with `in_drain_feed_turn` from main.rs into runtime/terminal.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::in_drain_feed_turn	Dynamic	end	1	2026-10-25: T-SPLIT-2B batch 6; the same site, moved by K2 batch 6 with `in_drain_feed_turn` from main.rs into runtime/terminal.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::step_leaf_text_scale	Ambiguous	fold	1	2026-10-25: T-SPLIT-2B batch 6; the same site, moved by K2 batch 6 with `step_leaf_text_scale` from main.rs into runtime/terminal.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::step_leaf_text_scale	Ambiguous	stepped	1	2026-10-25: T-SPLIT-2B batch 6; the same site, moved by K2 batch 6 with `step_leaf_text_scale` from main.rs into runtime/terminal.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::step_leaf_text_scale	Dynamic	derive	1	2026-10-25: T-SPLIT-2B batch 6; the same site, moved by K2 batch 6 with `step_leaf_text_scale` from main.rs into runtime/terminal.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::Runtime::rebuild_tooltip_anchors	Ambiguous	collect	1	
 crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::Runtime::rebuild_tooltip_anchors	Ambiguous	map	1	
 crates/bt-app/src/runtime/tooltips.rs	bt-app crate::runtime::tooltips::Runtime::rebuild_tooltip_anchors	Ambiguous	text	7	
