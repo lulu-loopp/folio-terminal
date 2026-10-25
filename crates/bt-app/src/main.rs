@@ -48540,8 +48540,8 @@ impl<B: Backend> Runtime<'_, B> {
             // **What the machine could do, beside what it has done.** Both halves
             // are cheap here — one remembered kernel answer and one cell the start
             // settled (`explorer_menu::package_file`), nothing asked of the disk —
-            // and neither can be answered
-            // by the row itself, which is why the answer is handed in.
+            // and neither can be answered by the row itself, which is why the
+            // answer is handed in.
             explorer_first_page_offered: explorer_menu::first_page_offered(
                 explorer_menu::supported(),
                 explorer_menu::package_file().is_some(),

@@ -615,6 +615,14 @@ static PACKAGE: SettledOnce<Option<PathBuf>> = SettledOnce::new(PACKAGE_IS);
 static PACKAGE: SettledOnce<Option<PathBuf>> =
     SettledOnce::settled_in_a_test_by(PACKAGE_IS, look_beside_this_image);
 
+#[cfg(test)]
+thread_local! {
+    /// **How many looks [`package_in`] made on this thread**, for a suite that holds a reader to
+    /// making none (`the_settings_values_read_the_start_s_package_answer_and_ask_the_disk_nothing`).
+    /// Per thread, so a test counts its own looks and no other test's.
+    static LOOKS_ON_THIS_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// What [`PACKAGE`] holds, for the panic of a read before it is settled.
 const PACKAGE_IS: &str = "the package file beside the executable (explorer_menu::package_file)";
 
@@ -634,6 +642,8 @@ fn look_beside_this_image() -> Option<PathBuf> {
 /// **`folio.msix` in `folder`, when `is_file` finds it there** — the one look, made by
 /// [`settle_package`] before the loop and by a probe's or a deployment's worker for itself.
 fn package_in(folder: Option<&Path>, is_file: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
+    #[cfg(test)]
+    LOOKS_ON_THIS_THREAD.with(|looks| looks.set(looks.get() + 1));
     let beside = folder?.join(PACKAGE_FILE_NAME);
     if is_file(&beside) { Some(beside) } else { None }
 }
@@ -1361,6 +1371,8 @@ pub(crate) trait Deployment {
     fn registered(&self) -> Result<Option<msix::PackageRegistration>, String>;
     /// [`bt_platform::msix::register`].
     fn register(&self, package: &Path, external: &Path) -> Result<(), String>;
+    /// [`bt_platform::msix::remove`].
+    fn remove(&self, full_name: &str) -> Result<(), String>;
     /// Whether `path` is a file — a press's job looking for the `folio.msix` it registers
     /// ([`start_request`]), on its worker.
     fn holds_file(&self, path: &Path) -> bool;
@@ -1376,6 +1388,10 @@ impl Deployment for ThisMachine {
 
     fn register(&self, package: &Path, external: &Path) -> Result<(), String> {
         msix::register(package, external)
+    }
+
+    fn remove(&self, full_name: &str) -> Result<(), String> {
+        msix::remove(full_name)
     }
 
     fn holds_file(&self, path: &Path) -> bool {
@@ -1953,7 +1969,8 @@ fn start_request_with(
                         Removal::Unanswerable => Err(PressFailure::Folio(
                             Text::ExplorerFirstPageUnreadable.text().to_owned(),
                         )),
-                        Removal::Remove(full_name) => msix::remove(full_name)
+                        Removal::Remove(full_name) => deployment
+                            .remove(full_name)
                             .map_err(|message| PressFailure::Windows {
                                 install: false,
                                 message,
@@ -3096,6 +3113,11 @@ mod tests {
             Ok(())
         }
 
+        fn remove(&self, _: &str) -> Result<(), String> {
+            *self.registration.lock().unwrap() = None;
+            Ok(())
+        }
+
         fn holds_file(&self, path: &Path) -> bool {
             path.is_file()
         }
@@ -3578,18 +3600,31 @@ mod tests {
             Ok(())
         }
 
+        fn remove(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+
         fn holds_file(&self, _: &Path) -> bool {
             self.looked.send(std::thread::current().id()).unwrap();
             self.finds
         }
     }
 
-    /// The row's cells as a test found them, put back after a job that wrote them: they are the
-    /// process's, and other tests draw the row.
-    fn forget_the_job() {
-        *KNOWN.lock().unwrap() = None;
-        REGISTERED_HERE.store(false, Ordering::Release);
-        remember_renewal_refusal(None);
+    /// **The row's cells put back as a test found them, however the test ends** — on its return
+    /// or as a failed assertion unwinds: they are the process's, and other tests draw the row.
+    /// Made after the DEPLOYMENT turn is taken, so it is dropped before the turn is let go.
+    struct ForgetTheJob;
+
+    impl Drop for ForgetTheJob {
+        fn drop(&mut self) {
+            *KNOWN
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            REGISTERED_HERE.store(false, Ordering::Release);
+            remember_renewal_refusal(None);
+            let _ = take_outcome();
+            BUSY.store(false, Ordering::Release);
+        }
     }
 
     /// RED (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD; C1) — **a press asks nothing of the
@@ -3607,6 +3642,7 @@ mod tests {
         let _turn = DEPLOYMENT
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _forget = ForgetTheJob;
         let asking = std::thread::current().id();
 
         let (executor, say, said) = refusing();
@@ -3659,7 +3695,6 @@ mod tests {
             "and nothing was registered"
         );
         assert!(!job_in_flight(), "and the latch is let go");
-        forget_the_job();
     }
 
     /// RED (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD) — **a press registers the file its job
@@ -3674,6 +3709,7 @@ mod tests {
         let _turn = DEPLOYMENT
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _forget = ForgetTheJob;
         let here = this_folder().expect("the suite's binary is in a folder");
         assert_eq!(
             package_file(),
@@ -3696,14 +3732,12 @@ mod tests {
             "the file the job found, against its folder"
         );
         assert!(!job_in_flight());
-        forget_the_job();
     }
 
     /// RED (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD) — **the row is drawn from the folder as
     /// the start found it**: `folio.msix` there offers the first page and says so on the row's
-    /// line; gone, or no folder at all, greys it with the missing-package line. The window's
-    /// readers ([`package_file`]) answer the start's look, which a test process makes on its
-    /// first read as `main` makes it before the loop.
+    /// line; gone, or no folder at all, greys it with the missing-package line. That the window's
+    /// readers ask no disk is the next test's.
     ///
     /// MUTATION: drop the `is_file` from `package_in` — the folder without the file still offers
     /// the first page.
@@ -3727,13 +3761,40 @@ mod tests {
             Text::DescExplorerMenu
         );
         assert_eq!(package_in(None, &|_| true), None, "no folder, no package");
-
-        assert_eq!(
-            package_file().map(Path::to_path_buf),
-            look_beside_this_image(),
-            "the window reads the start's look"
-        );
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// RED (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD; C1) — **the Settings dialog's values and
+    /// the row's line read the start's answer and ask the disk nothing**: once the package fact
+    /// is settled, as `fn main` settles it before the loop, building the values a frame of the
+    /// dialog draws from — the switch's greyed half among them — and the row's sentence makes no
+    /// look on the window thread, and the switch is offered by the settled answer. Before, both
+    /// asked `is_file` on every frame.
+    ///
+    /// MUTATION: make `package_file` look each time it is read
+    /// (`look_beside_this_image()`, the shape before) — the values and the line make looks.
+    #[test]
+    fn the_settings_values_read_the_start_s_package_answer_and_ask_the_disk_nothing() {
+        let mut folio = crate::headless::HeadlessFolio::with_tabs(
+            "explorer-settled-values",
+            vec![crate::test_support::ringing_tab(1, 1)],
+            0,
+        );
+        let settled = settle_package();
+        let looks = || LOOKS_ON_THIS_THREAD.with(std::cell::Cell::get);
+        let before = looks();
+        let values = folio.runtime().settings_values();
+        let _ = row_description();
+        assert_eq!(
+            looks(),
+            before,
+            "the Settings values and the row's line asked the disk nothing"
+        );
+        assert_eq!(
+            values.explorer_first_page_offered,
+            first_page_offered(supported(), settled.value().is_some()),
+            "the switch is offered by the start's answer"
+        );
     }
 
     /// RED (T-PROFILE-INSTALL-REFUSED-START) — **a probe that panicked while it held the
