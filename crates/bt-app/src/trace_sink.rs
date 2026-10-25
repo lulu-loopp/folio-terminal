@@ -405,7 +405,9 @@ impl std::io::Write for LineByLine {
         self.pending.extend_from_slice(bytes);
         while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = self.pending.drain(..=end).collect();
-            (self.say)(String::from_utf8_lossy(&line[..end]).into_owned());
+            (self.say)(std::borrow::Cow::into_owned(String::from_utf8_lossy(
+                &line[..end],
+            )));
         }
         Ok(bytes.len())
     }

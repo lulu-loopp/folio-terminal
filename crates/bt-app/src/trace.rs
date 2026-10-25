@@ -287,15 +287,16 @@ impl Gate {
     /// decides the whole run by coming before `trace_sink::start`.
     pub fn get(&'static self) -> Option<&'static Trace> {
         if let Some(answer) = self.trace.get() {
-            return answer.as_ref();
+            return Option::as_ref(answer);
         }
         let Some(path) = installed(self.door) else {
-            return self.trace.get_or_init(|| None).as_ref();
+            return Option::as_ref(self.trace.get_or_init(|| None));
         };
         let queue = trace_sink::queue()?;
-        self.trace
-            .get_or_init(|| Some(Trace::create(path, self.header, queue)))
-            .as_ref()
+        Option::as_ref(
+            self.trace
+                .get_or_init(|| Some(Trace::create(path, self.header, queue))),
+        )
     }
 }
 

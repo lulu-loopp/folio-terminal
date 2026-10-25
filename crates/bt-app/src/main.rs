@@ -77781,12 +77781,12 @@ fn main() -> Result<()> {
             // way out's order (`diagnostics::way_out`): the trace retired before the settle
             // unless the trace is the console. The error itself is std's to write, once `main`
             // has returned it: `Error: …` on `stderr`, after the fence and with no footer.
-            let mut trace = Some(trace_shutdown);
+            let mut unretired = Some(trace_shutdown);
             for step in diagnostics::way_out(channel) {
                 match step {
                     diagnostics::WayOut::TraceFlush => {
-                        if let Some(trace) = trace.take() {
-                            let _ = trace.flush_through_its_door();
+                        if let Some(trace_shutdown) = unretired.take() {
+                            let _ = trace_shutdown.flush_through_its_door();
                         }
                     }
                     diagnostics::WayOut::Settle => {
@@ -77918,12 +77918,12 @@ fn main() -> Result<()> {
         Ok(()) => 0,
         Err(_) => 1,
     };
-    let mut trace = Some(trace_shutdown);
+    let mut unretired = Some(trace_shutdown);
     for step in diagnostics::way_out(channel) {
         match step {
             diagnostics::WayOut::TraceFlush => {
-                if let Some(trace) = trace.take() {
-                    let _ = trace.flush_through_its_door();
+                if let Some(trace_shutdown) = unretired.take() {
+                    let _ = trace_shutdown.flush_through_its_door();
                 }
             }
             diagnostics::WayOut::Settle => {

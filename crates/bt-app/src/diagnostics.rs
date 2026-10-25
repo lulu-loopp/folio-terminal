@@ -466,7 +466,7 @@ fn at_the_front_door(text: &str) {
 /// [`stderr_line`] writes there.
 pub fn way_out_line(text: String) {
     way_out_line_on(
-        RESIDENT_LOG.get().map(PathBuf::as_path),
+        Option::map(RESIDENT_LOG.get(), PathBuf::as_path),
         crate::trace_sink::queue(),
         resident_channel(),
         text,
