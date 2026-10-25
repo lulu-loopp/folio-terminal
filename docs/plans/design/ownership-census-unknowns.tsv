@@ -28,9 +28,9 @@ site	module	function	reason	sites
 ?.seats	crate::runtime::panes	Runtime::seats_wearing_a_play_button	call `preview_seats` through a receiver that does not resolve: the value of a block, a branch or a loop	1
 ?.session	crate::runtime::frame	Runtime::turn	call `resize_finish_deadline` through a receiver that does not resolve: what `flat_map` returns	1
 ?.session	crate::runtime::preview	Runtime::advance_strip_animation	call `status` through a receiver that does not resolve: what `flat_map` returns	1
-?.sessions	crate	Runtime::trigger_root	call `get` through a receiver that does not resolve: a closure parameter without a type	1
+?.sessions	crate::runtime::floats	Runtime::trigger_root	call `get` through a receiver that does not resolve: a closure parameter without a type	1
 ?.tabs	crate	FolioApp::settle_restore_answer	call `iter` through a receiver that does not resolve: iterating _	1
-?.tabs	crate	Runtime::trigger_rect	call `get` through a receiver that does not resolve: `seats::tab_strip_geometry`	1
+?.tabs	crate::runtime::floats	Runtime::trigger_rect	call `get` through a receiver that does not resolve: `seats::tab_strip_geometry`	1
 ?.tabs	crate::runtime::peek	Runtime::layout_peek_layer	call `get` through a receiver that does not resolve: `seats::tab_strip_geometry`	1
 ?.tabs	crate::runtime::tabs	Runtime::measure_open_rename	call `get` through a receiver that does not resolve: `seats::tab_strip_geometry`	1
 ?.tabs	crate::runtime::tabs	Runtime::measure_open_rename	call `get` through a receiver that does not resolve: a closure parameter without a type	1
