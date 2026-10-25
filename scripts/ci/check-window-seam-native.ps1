@@ -10,7 +10,17 @@
 # unknowns: **the list only shrinks against the merge base.** A row's identity
 # is its first three columns — `kind`, `owner`, `name`; its reason may be
 # reworded. A row the merge base does not carry is refused, by identity,
-# whatever else disappeared beside it.
+# whatever else disappeared beside it - unless it is a base row **moved**
+# (T-MOVED-NOT-ADDED-RULE, `moved-rows.ps1`). The guard's `owner` is a location
+# for exactly two shapes: a `function` or `type` row whose owner is a module
+# (`crate`, `crate::...`, or the guard's `crate, crate::...` for a file reached
+# twice; no type is spelled so, `crate` being a keyword), and a `const` row,
+# whose owner is its file (`....rs`). A row of one of those shapes whose kind and
+# name are a gone base row's of the same shape, at another module or file, is
+# that row moved - when it is the one row of that kind and name on each side and
+# the old owner no longer holds it. A `method` or `trait` row's owner is its
+# type, which a move between files does not change: a changed owner there is
+# another type, an added row.
 #
 # The baseline is the list committed at `git merge-base HEAD origin/main`. When
 # the merge base has no list (the branch that introduces it), the baseline is
@@ -19,7 +29,12 @@
 #
 # It reads only the committed TSV, through git and the working tree.
 # `.github/workflows/ci.yml` runs it in `logic`, and `gates-can-fail` plants a
-# row (it must go red, naming it).
+# row (it must go red, naming it). `check-window-seam-native-tests.ps1` runs it
+# against scratch repositories (`-Repo`), one case per rule of the move.
+
+param(
+    [string]$Repo = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -29,7 +44,9 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
-$repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+. (Join-Path $PSScriptRoot "moved-rows.ps1")
+
+$repo = $Repo
 $relative = "docs/plans/window-seam-native.tsv"
 $list = Join-Path $repo $relative
 
@@ -100,10 +117,39 @@ try {
     Pop-Location
 }
 
-$added = @($now | Where-Object { -not $before.Contains($_) })
+# A row as the move rule reads it: its owner is its location when the guard writes a module or
+# a file there, and the row is about its kind and name.
+function Get-MoveRow([string]$row) {
+    $kind, $owner, $name = $row.Split("`t")
+    $located = (($kind -ceq "function" -or $kind -ceq "type") -and $owner -cmatch '^crate($|::|, )') -or
+        ($kind -ceq "const" -and $owner.EndsWith(".rs", [StringComparison]::Ordinal))
+    return [pscustomobject]@{
+        Identity = "$kind`t$name"
+        Location = if ($located) { $owner } else { $null }
+        Tail     = "$kind $name"
+        Row      = $row
+    }
+}
+
+$unmatched = @($now | Where-Object { -not $before.Contains($_) } | ForEach-Object { Get-MoveRow $_ })
+$leftover = @($before | Where-Object { -not $now.Contains($_) } | ForEach-Object { Get-MoveRow $_ })
+$tree = @($now | ForEach-Object { Get-MoveRow $_ })
+$added = @()
+$moves = 0
+foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -Tree $tree)) {
+    $spelled = $result.Row -replace "`t", " "
+    if ($result.Verdict -eq "moved") {
+        $moves += 1
+        Write-Host "moved     $spelled (from $($result.Was))"
+    } elseif ($result.Verdict -eq "added") {
+        $added += "    $spelled"
+    } else {
+        $added += "    ${spelled}: $(Format-MoveRefusal $result)"
+    }
+}
 if ($added.Count -gt 0) {
-    $named = ($added | ForEach-Object { "    " + ($_ -replace "`t", " ") }) -join [Environment]::NewLine
+    $named = $added -join [Environment]::NewLine
     throw "$relative only shrinks: $($added.Count) row(s) not at ${from}:$([Environment]::NewLine)$named$([Environment]::NewLine)Write the code for the backend parameter, through a door of the seam, rather than listing it."
 }
-Write-Host "$relative against ${from}: $($before.Count) rows -> $($now.Count), 0 added."
+Write-Host "$relative against ${from}: $($before.Count) rows -> $($now.Count), 0 added, $moves moved."
 exit 0

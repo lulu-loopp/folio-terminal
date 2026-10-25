@@ -73,7 +73,12 @@
 # `base <sha>:<path>:<line>: <shape>` and fails the check (the base is main,
 # and main must lex). A row
 # whose identity the merge base does not have is refused: a literal is
-# repaired, never listed - except by the commit that introduces the list. It
+# repaired, never listed - except by the commit that introduces the list, and
+# except a listed literal **moved** to another file (T-MOVED-NOT-ADDED-RULE,
+# `moved-rows.ps1`): a row the base does not have whose literal's text and
+# reason are a gone base row's, in another file, is that row moved - when that
+# text and reason left one file for one other, and no more rows arrived than
+# left (a literal names no item, so the count is the whole of "it left"). It
 # passes, loudly, when the base has no list - that is how the commit that
 # introduces the list passes. It refuses (exit 2) when there is no base at
 # all: no `origin/main` in the clone, or no merge base, means the comparison
@@ -102,6 +107,8 @@ $ErrorActionPreference = "Stop"
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
+
+. (Join-Path $PSScriptRoot "moved-rows.ps1")
 
 $repo = $Repo
 $relative = "docs/plans/embedded-spaces-allowed.txt"
@@ -531,23 +538,48 @@ if ($baseProblems.Count -gt 0) {
 $allowed = @{}
 foreach ($pair in (Get-Identities $before $baseLiterals)) {
     if (-not $pair.Identity) { continue }
-    if ($allowed.ContainsKey($pair.Identity)) { $allowed[$pair.Identity] += 1 } else { $allowed[$pair.Identity] = 1 }
+    if (-not $allowed.ContainsKey($pair.Identity)) { $allowed[$pair.Identity] = [System.Collections.Generic.List[object]]::new() }
+    $allowed[$pair.Identity].Add($pair)
 }
-$added = @()
+$unmatched = @()
 foreach ($pair in $paired) {
-    if ($allowed.ContainsKey($pair.Identity) -and $allowed[$pair.Identity] -gt 0) {
-        $allowed[$pair.Identity] -= 1
+    if ($allowed.ContainsKey($pair.Identity) -and $allowed[$pair.Identity].Count -gt 0) {
+        $allowed[$pair.Identity].RemoveAt(0)
     } else {
-        $added += $pair
+        $unmatched += $pair
     }
 }
 
-$removed = $before.Count - ($now.Count - $added.Count)
-Write-Host "$relative against $($base.Substring(0, 12)): $($before.Count) rows -> $($now.Count), $($added.Count) added, $removed removed."
+# A pair as the move rule reads it: located by its file, the same literal when its text and reason
+# are.
+function Get-MoveRow($pair) {
+    return [pscustomobject]@{
+        Identity = "$($pair.Literal.Text)`t$($pair.Row.Reason)"
+        Location = $pair.Row.Path
+        Tail     = $null
+        Row      = $pair
+    }
+}
+$leftover = @(foreach ($pairs in $allowed.Values) { foreach ($pair in $pairs) { Get-MoveRow $pair } })
+$added = @()
+$moves = 0
+foreach ($result in (Find-MovedRows -Unmatched @($unmatched | ForEach-Object { Get-MoveRow $_ }) -Leftover $leftover -Tree @() -NoItem)) {
+    if ($result.Verdict -eq "moved") {
+        $moves += 1
+        Write-Host "moved     $($result.Row.Row.Key) ($($result.Row.Row.Reason)) from $($result.Was)"
+    } else {
+        $added += [pscustomobject]@{ Pair = $result.Row; Why = (Format-MoveRefusal $result) }
+    }
+}
+
+$removed = $leftover.Count - $moves
+Write-Host "$relative against $($base.Substring(0, 12)): $($before.Count) rows -> $($now.Count), $($added.Count) added, $removed removed, $moves moved."
 
 if ($added.Count -gt 0) {
-    foreach ($pair in $added) {
-        Write-Host "    added: $($pair.Row.Key) ($($pair.Row.Reason)) for the literal text: $($pair.Literal.Text)"
+    foreach ($one in $added) {
+        $pair = $one.Pair
+        $why = if ($one.Why) { " - $($one.Why)" } else { "" }
+        Write-Host "    added: $($pair.Row.Key) ($($pair.Row.Reason)) for the literal text: $($pair.Literal.Text)$why"
     }
     throw (
         "$($added.Count) row(s) were added to $relative, and this list only shrinks (listed above): a row is its path, " +
