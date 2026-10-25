@@ -504,6 +504,14 @@ jobs:
           BT_SOURCE_MEASURE_BUDGETS: "1"
         run: cargo test -p bt-source --locked --test measure -- --nocapture
 
+      # T-TEST-PROCESS-GLOBALS (ruling 1): the globals the tests reach only through product
+      # functions, the guard's stated blind spot, printed as `TEST_GLOBALS_PRODUCT_REACH` for the
+      # ticket that would gate them. A measure, never a gate.
+      - name: the tests' product reach of process-globals, measured
+        shell: pwsh
+        continue-on-error: true
+        run: cargo test -p bt-source --locked --test test_globals -- --exact the_product_reach_of_the_tests_is_measured --nocapture
+
       # T-REQUEST-DOOR-GUARD (C1, a request door returns at once), over the real tree: bt-source's
       # `request_doors::every_request_door_returns_at_once` walks each request door of
       # window_waits.tsv to its boundary and holds what it meets to
@@ -643,6 +651,13 @@ jobs:
       - name: the timing-bound gate can actually fail
         shell: pwsh
         run: ./scripts/ci/check-timing-bound-tests.ps1
+
+      # The test process-globals register (T-TEST-PROCESS-GLOBALS) admits an added row of a class
+      # the guard checks, and a by-hand row only under a widening line. Its scratch-repository
+      # suite plants each verdict, admitted and refused.
+      - name: the test-globals gate can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-test-globals-tests.ps1
 
       # The PSReadLine artefact gate holds the vendored package, its README, the build script's
       # pinned table and Folio's manifest to one another (T-INTEGRATION-INJECT-2-BUILD). Its
@@ -1203,9 +1218,13 @@ jobs:
       # `every_pointer_read_is_the_routers_or_a_captures` requires the file to be
       # exactly what the index finds; this refuses a row added to it to let a new
       # reader past that test. Same whole-row, merge-base rule as the list above.
+      # A row moved to another module is that row moved (T-MOVED-NOT-ADDED-RULE); its
+      # scratch-repository suite runs first, one case per rule of the move.
       - name: the pointer-debt list only shrinks
         shell: pwsh
-        run: ./scripts/ci/check-pointer-debt.ps1
+        run: |
+          ./scripts/ci/check-pointer-debt-tests.ps1
+          ./scripts/ci/check-pointer-debt.ps1
 
       # `docs/plans/ENV-DOORS.tsv` (T-DIAGNOSTIC-DOORS-AT-THE-ENTRY): the product items that read
       # the environment outside the program's entry. The bt-source test `env_doors` holds it to
@@ -1232,6 +1251,10 @@ jobs:
       - name: the timing-bound test list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-timing-bound.ps1
+
+      - name: the test-globals register grows only by rows the guard checks
+        shell: pwsh
+        run: ./scripts/ci/check-test-globals.ps1
 
       # The lane contract's declared failures (`lane::EXPECTED_FAILURES`): no
       # lane gains one against the merge base; a claim new to the suite brings
@@ -1271,9 +1294,13 @@ jobs:
       # bt-source's `census` test holds the code to the committed list, and
       # this holds the list, key by key, to the merge base's (or census-1's
       # seed): no key added, no key's `sites` grown.
+      # A key moved to another module is that key moved (T-MOVED-NOT-ADDED-RULE); its
+      # scratch-repository suite runs first, one case per rule of the move.
       - name: the census's unknown sites only shrink
         shell: pwsh
-        run: ./scripts/ci/check-census-unknowns.ps1
+        run: |
+          ./scripts/ci/check-census-unknowns-tests.ps1
+          ./scripts/ci/check-census-unknowns.ps1
 
       # T-BT-SOURCE-CALL-GRAPH round 3: the calls the door reach cannot see through, by site:
       # bt-source's `call_graph` test holds the code to docs/plans/UNFOLLOWED-EDGES.tsv, and this
@@ -1298,9 +1325,13 @@ jobs:
       # T-HEADLESS-RUNTIME-SEAM: the places bt-app names a backend holder for the
       # native backend are listed, and the list is held to the merge base's (or
       # its seed): no row added.
+      # A row moved to another module or file is that row moved (T-MOVED-NOT-ADDED-RULE); its
+      # scratch-repository suite runs first, one case per rule of the move.
       - name: the window seam's native list only shrinks
         shell: pwsh
-        run: ./scripts/ci/check-window-seam-native.ps1
+        run: |
+          ./scripts/ci/check-window-seam-native-tests.ps1
+          ./scripts/ci/check-window-seam-native.ps1
 
       # T-DIAGNOSTICS-TEST-SINK: the runtime roads that still say their diagnostics line
       # directly, not through the window's door, are listed, and the list is held to the merge

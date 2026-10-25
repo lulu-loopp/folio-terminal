@@ -9522,7 +9522,7 @@ const OWNER_THREADS: [&str; 2] = ["window", "main"];
 /// only when its door is an item a `# doors` line of one of these names (its `call` or its
 /// `minted at`); a new member needs an owner ruling and a line here. The desktop notification is
 /// not one ((c)1), and neither are `PlaceHidden` and `PlaceExposure`, which (b)6 does not list.
-const C7_DOORS: [&str; 22] = [
+const C7_DOORS: [&str; 23] = [
     "TitleFlush",
     "ImeCaretArea",
     "SetCursor",
@@ -9543,6 +9543,7 @@ const C7_DOORS: [&str; 22] = [
     "SessionWriteWait",
     "SessionWriterRetire",
     "TraceFlush",
+    "DiagnosticsSettle",
     "UpdateLeave",
     "LaunchHandOver",
 ];
@@ -9927,7 +9928,7 @@ fn request_door_failures(completions: &[Completion], lines: &[Vec<&str>]) -> Vec
 /// line is a request door's** (the C1 guard's rows; the registry is the one ledger).
 ///
 /// MUTATION: delete the hand-off's line — `Runtime::hand_off` is named as a request door with no
-/// line; a planted line for `diagnostics::note` (a window door) is refused; and the hand-off's line
+/// line; a planted line for `Runtime::rename_preview_file` (a window door) is refused; and the hand-off's line
 /// moved to `door process` (out of the walk) is refused, as is `prewarm`'s moved to `window`.
 #[test]
 fn every_request_door_has_its_line() {
@@ -9952,7 +9953,7 @@ fn every_request_door_has_its_line() {
     );
     let mut planted = lines.clone();
     planted.push(vec![
-        "diagnostics::note",
+        "Runtime::rename_preview_file",
         "window",
         "std::sync::mpsc::Sender::send",
         "—",
@@ -9961,7 +9962,8 @@ fn every_request_door_has_its_line() {
     assert!(
         request_door_failures(&completions, &planted)
             .iter()
-            .any(|failure| failure.contains("`diagnostics::note` is on `# request-doors`")),
+            .any(|failure| failure
+                .contains("`Runtime::rename_preview_file` is on `# request-doors`")),
         "a window door's line is refused"
     );
     let moved = |door: &str, asked: &'static str| -> Vec<Vec<&str>> {

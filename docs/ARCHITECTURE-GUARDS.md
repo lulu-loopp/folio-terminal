@@ -276,7 +276,16 @@ does not carry, or a key whose `sites` count is larger, is refused by key; a key
 that disappears or whose `sites` count drops is the list shrinking. Keys compare
 case-sensitively, as `FieldCensus` keys them. It is a shrink-only tripwire over
 aggregated counts; a same-key swap (one site resolved and another added under
-the same site, module, function and reason) is invisible to it, by design. When red,
+the same site, module, function and reason) is invisible to it, by design. A
+key moved to another module is not added (T-MOVED-NOT-ADDED-RULE, the rule of
+`scripts/ci/moved-rows.ps1`): a new key whose site, function and reason are a
+gone base key's, with only its `module` changed, is that key moved when it is
+the one key of that identity on each side, the old module no longer lists the
+function and the new one did not at the base, and its `sites` is held to the
+base key's (the check reads the list, not the tree, so a same-named function
+elsewhere taking over an unknown the old one dropped passes as moved, held to the
+base count, as check-dead-code's U-44 rule does); anything else is added,
+as before. When red,
 fix the routing or regenerate with `scripts/generate-ownership-census.ps1` and
 justify each real multi-writer or unknown row; do not edit generated census rows
 as a substitute for changing the code.
@@ -808,9 +817,45 @@ not be told from a test's own helper). A row listed twice is refused. When red,
 name the path with `bt_testpath::unique_name`/`temp_path`, locate a bin through
 `CARGO_BIN_EXE_<name>` in an integration test (cargo builds it for that target),
 or, when the fixed name is the subject, add a row saying why. A process-global that
-two tests touch is not in its grammar: review owns it. An `#[ignore]`d test that
+two tests touch is not in its grammar; the next paragraph's guard holds it. An `#[ignore]`d test that
 must run alone or serially says so on its line of `scripts/ci/ignored-tests.txt`
 (`run=alone`, `run=serial`).
+
+**Process-globals tests share** (T-TEST-PROCESS-GLOBALS, 2026-10-24).
+`crates/bt-source/tests/test_globals.rs` is the gate and `docs/plans/TEST-GLOBALS.tsv`
+its register. A process-global is a `static` of an `Atomic*`, a non-unit `Mutex`/`RwLock`,
+a `OnceLock`/`OnceCell`, a `LazyLock`, or a `static mut`. It may be written in a module or
+in a body. Not one: a `thread_local!` (each test has its own thread), a unit lock (the
+remedy), a static inside a `#[test]` body. A test's reach is its body and the test-only
+callables of its target that it reaches through resolved call-graph edges. It also takes
+in, to a fixed point, what runs without an edge: a test-only impl of a foreign trait (a
+`Drop`, winit's `resumed`) whose self type a body of the reach names, a test-only
+`GlobalAlloc` (in every test of its target), and a function written in an item-position
+macro's tokens (`define_class!`) whose type the reach names. A global that two tests of one
+binary reach (G1), or that one test's reach writes (G2), is a row. An array of cells is
+the cell, and a field or index of a `static mut` under `=`, `op=` or `&mut` writes it.
+`store`, `fetch_*`, `lock`, `get_or_init` and the like are writes, and any use the table
+in the module doc does not read is undecided and taken as a write. G3 is the reach itself.
+Refused by file and line: an unresolved edge with a test-only candidate that reaches a
+global, an unresolved path whose last segment is a global's name, an unparsed body on the
+walk, a global named where the call graph places no value (a glob `use` makes a name
+nameable too), and an implicitly run impl that reaches a global and whose type no test's
+reach names. A row is file, global, binary, class and a dated reason, and the rows equal the
+hits both ways. The guard checks `lock:<NAME>` (every test that reaches the global, each
+`cfg` arm on its own, reaches the one unit lock of the binary that NAME names; two locks of
+one name are spelled by their module path's tail), `single writer`, `one main` (a
+`harness = false` target, from its manifest) and `run=alone`/`run=serial` (each test
+carries `#[ignore]` and that condition on the ignored list). It also checks that a `write-once` row's writes
+are once-writes. `per-test key`, `monotone`, `write-once`, `not on a test thread` and
+`serial helpers` are by hand. `scripts/ci/check-test-globals.ps1` admits an added row of
+a checked class with its dated reason. It refuses an added by-hand row unless a new
+`# widened <date> by <ticket> (+n rows)` line admits exactly those rows in a change to the
+scan. `check-test-globals-tests.ps1` plants each verdict. When red, make the state the
+test's own (a value handed in, a key per test), or take one unit lock in every test that
+reaches it, or add the row. **Not seen:** a global a test reaches only through product
+functions; the walk ends there, as `timing.rs`'s does. The CJK probe's `i18n` switch is
+one. `the_product_reach_of_the_tests_is_measured` prints `TEST_GLOBALS_PRODUCT_REACH` as
+a measure, not a gate.
 
 ## Raw-effect and thread-door exceptions
 
@@ -965,7 +1010,14 @@ identity — every bound resolved through `use` items, globs and renames by
 and its fixture (`tests/fixtures/window_seam/`) plants each refusal
 (`every_road_around_the_window_seam_is_named`). The native list only shrinks:
 `scripts/ci/check-window-seam-native.ps1` refuses a row the merge base does not
-have (`gates-can-fail` plants one). When red, write the new code for the backend
+have (`gates-can-fail` plants one), except a row moved (T-MOVED-NOT-ADDED-RULE):
+a `function` or `type` row whose owner is a module, or a `const` row whose owner
+is a file, that left one module or file for one other with its kind and name.
+A `method` or `trait` row's owner is its type, which a move between files does
+not change. A row renamed in place - its kind and owner exactly one gone base
+row's, and no other row of that kind and owner left or arrived - is accepted
+only with a reason `YYYY-MM-DD: <TICKET-ID> <why>`, new against the base row's:
+a move needs no reason, a rename does, because the item changed. When red, write the new code for the backend
 parameter and add the door it needs to the seam's trait (with its `Native` impl
 beside the others and its headless impl in `headless.rs`); never add a native
 row for code that only reads or tells the window. A row nothing writes any more
@@ -1012,7 +1064,17 @@ that moves it) and `unjudged` (a refused shape that reads no `BT_` door; the
 reason says what it reads, and T-ENV-UNJUDGED-ROWS rewrites each). A name is a
 `BT_` name in any case, as Windows reads it. **The list only shrinks**:
 `scripts/ci/check-env-doors.ps1` refuses, against the merge base, a row added
-and a row that reads a name or holds a refusal its base row did not. When red,
+and a row that reads a name or holds a refusal its base row did not. The list's
+last column, `module`, is the module the item is written in, so a row moved to
+another file and module in the same package, with its path inside the module
+unchanged, is that row moved and held to its base row, not added
+(T-MOVED-NOT-ADDED-RULE). A row renamed in place - its file, module and names
+exactly one gone base row's, and no other row of those left or arrived - is
+accepted, held to its base row the same way, only with a reason
+`YYYY-MM-DD: <TICKET-ID> <why>`, new against the base row's: a move needs no
+reason, a rename does, because the item changed. The census unknowns and the
+pointer debt have no rename arm (their rows carry no reason of their own), nor
+does the embedded-spaces list (its rows name no item). When red,
 move the read to the entry and hand the answer down as a parameter or an
 installed answer; the grammar is not widened to quiet a refusal.
 
@@ -1130,7 +1192,10 @@ literal on that line, trimmed — not the code around it; read for the base from
 the base's own copy of the file, through the same lexer, where a file that does
 not lex fails the check as `base <sha>:<path>:<line>`) and its reason, with
 multiplicity. A literal that moves, or whose surrounding code is renamed or
-rewrapped, keeps its row with the line corrected; a row pointed at another
+rewrapped, keeps its row with the line corrected; a literal moved to another
+file with its item keeps its row with the path and line corrected, and is that
+row moved, not added, when its text and reason left one file for one other and
+no more rows arrived than left (T-MOVED-NOT-ADDED-RULE); a row pointed at another
 literal is an added row and refused; and an edit to a listed literal's pinned
 text is refused too — there is no override and no replacement path. Columns
 that must evolve do not belong in a string literal: take them out (cells in a

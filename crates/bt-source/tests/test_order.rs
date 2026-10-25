@@ -69,10 +69,10 @@
 //!   at the helper), but a root made in one helper and created in another is two bodies with
 //!   half the shape each.
 //! * **A body that makes one path unique and another not.** One owner call accepts the body.
-//! * **A process-global another test mutates** (shape (b) of the census): a static reached
-//!   through product calls is not named in the test's body. The census of 2026-10-24 judged
-//!   the 39 named ones one by one (report §1, T-TEST-ORDER-STRAYS); a register and guard for
-//!   them is a ticket of its own.
+//! * **A process-global another test mutates** (shape (b) of the census): not this grammar's.
+//!   `test_globals.rs` holds the globals tests share or write to `docs/plans/TEST-GLOBALS.tsv`
+//!   (T-TEST-PROCESS-GLOBALS), and states its own blind spot: a static reached only through
+//!   product calls.
 //! * A re-export of `std::env::set_var` under another name.
 
 use std::collections::BTreeSet;

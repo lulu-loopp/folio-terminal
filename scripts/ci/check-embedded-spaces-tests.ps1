@@ -3,8 +3,10 @@
 # break, is refused by its file:line unless the allow-list has its row; the list is exact (a stale
 # row is refused, a second literal on a listed line needs its own row); it only shrinks against the
 # merge base (a row is its path, its literal's text and its reason, so a row whose line moved is the
-# same row and a row pointed at another literal is not); and a shape the lexer cannot finish is
-# refused by its file:line rather than read to the end of the file.
+# same row and a row pointed at another literal is not); a listed literal moved to another file
+# keeps its row, re-keyed, while a move that brings more rows than left, a move whose reason was
+# reworded and a literal arriving in two files are refused (T-MOVED-NOT-ADDED-RULE); and a shape
+# the lexer cannot finish is refused by its file:line rather than read to the end of the file.
 
 $ErrorActionPreference = "Stop"
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
@@ -179,6 +181,34 @@ try {
         $output = Run-Gate 0 "a moved literal"
         if ($output -notmatch "1 rows -> 1, 0 added, 0 removed") { throw "the moved row was counted as added: $output" }
 
+        # The literal moved to another file with its item: the row is re-keyed to the new file and
+        # line, and it is that row moved (T-MOVED-NOT-ADDED-RULE).
+        $other = [IO.Path]::ChangeExtension('crates/bt-a/src/table', 'rs')
+        $otherPath = Join-Path $root $other
+        [IO.File]::WriteAllText($otherPath, $fixture.Replace("`r`n", "`n"))
+        & git add -- $other
+        Write-Tree $clean ($header + "${other}:3 a table fixture`n")
+        $output = Run-Gate 0 "a literal moved to another file"
+        if ($output -notmatch "1 rows -> 1, 0 added, 0 removed, 1 moved") { throw "the literal moved to another file was not counted as moved: $output" }
+        # More rows arrived than left: the second is added.
+        [IO.File]::WriteAllText($otherPath, ($fixture + "`npub const AGAIN: &str = r`"name   value`";`n").Replace("`r`n", "`n"))
+        Write-Tree $clean ($header + "${other}:3 a table fixture`n" + "${other}:4 a table fixture`n")
+        $output = Run-Gate 1 "a move that brings more rows than left"
+        if ($output -notmatch "with more rows than it had there") { throw "the grown move was refused for the wrong reason: $output" }
+        # A move whose reason was reworded is a new row.
+        [IO.File]::WriteAllText($otherPath, $fixture.Replace("`r`n", "`n"))
+        Write-Tree $clean ($header + "${other}:3 a reworded table fixture`n")
+        $output = Run-Gate 1 "a moved literal whose reason was reworded"
+        if ($output -notmatch "only shrinks" -or $output -notmatch "1 added") { throw "the reworded move was refused for the wrong reason: $output" }
+        # One literal arriving in two files cannot be paired.
+        $third = [IO.Path]::ChangeExtension('crates/bt-a/src/columns', 'rs')
+        [IO.File]::WriteAllText((Join-Path $root $third), $fixture.Replace("`r`n", "`n"))
+        & git add -- $third
+        Write-Tree $clean ($header + "${other}:3 a table fixture`n" + "${third}:3 a table fixture`n")
+        $output = Run-Gate 1 "one literal arriving in two files"
+        if ($output -notmatch "and arrived at more than one place") { throw "the ambiguous move was refused for the wrong reason: $output" }
+        & git rm -q -f -- $other $third
+
         # A row whose line opens no literal with a run is stale.
         Write-Tree ($clean + "`n" + $fixture) ($header + $row + "${source}:1 a row for nothing`n")
         $output = Run-Gate 1 "a stale row"
@@ -318,5 +348,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-embedded-spaces: no-base, clean, planted, escaped break, continuation, byte string, removed row, moved row, stale row, added row, reworded row, shrink, shared line, extra row, repointed row, lost continuation at a line break, escaped backslash, C string, raw byte string, hash count, CRLF, four unfinished shapes, rename beside a literal, tab boundary, split escape, Chinese identity, base fault and malformed-row cases pass"
+Write-Host "check-embedded-spaces: no-base, clean, planted, escaped break, continuation, byte string, removed row, moved row, moved to another file, moved and grown, moved and reworded, moved to two files, stale row, added row, reworded row, shrink, shared line, extra row, repointed row, lost continuation at a line break, escaped backslash, C string, raw byte string, hash count, CRLF, four unfinished shapes, rename beside a literal, tab boundary, split escape, Chinese identity, base fault and malformed-row cases pass"
 exit 0

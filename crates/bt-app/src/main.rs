@@ -77296,9 +77296,24 @@ fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync 
         if the_hook_lets_this_panic_unwind() {
             return;
         }
-        previous(info);
-        fatal(&path);
+        the_fatal_road(
+            diagnostics::settle_in_panic,
+            || previous(info),
+            || fatal(&path),
+        );
     }));
+}
+
+/// **The panic hook's fatal road, in its order**: `diagnostics.log`'s writer settled
+/// first — the writer's fence on the panic hook's road, which no door admits (an
+/// `# emergency` holder) — so every line said before the panic is above the panic
+/// message the previous hook writes to `stderr` (in a Log run, the same file), and above
+/// the footer `fatal` writes after it (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD, review
+/// H1).
+fn the_fatal_road(settle: impl FnOnce(), previous: impl FnOnce(), fatal: impl FnOnce()) {
+    settle();
+    previous();
+    fatal();
 }
 
 /// **Whether the panic hook returns and lets this thread's panic unwind** to the
@@ -78120,6 +78135,10 @@ fn main() -> Result<()> {
             // The way out from before the loop: the trace writer is retired through its flush
             // door, which is an exit door (§5.3 row 17), so the phase says so first (D-78).
             bt_platform::admission::exiting();
+            // What the run said is on the disk before the error that ends it (row 30).
+            let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(
+                diagnostics::settle,
+            );
             let _ = trace_shutdown.flush_through_its_door();
             return Err(anyhow::Error::new(error).context("create winit event loop"));
         }
@@ -78215,6 +78234,12 @@ fn main() -> Result<()> {
     // The footer is written **before** the call and not after, because the whole
     // value of the line is that it is the last thing in the file when something
     // between it and the process's death goes wrong.
+    //
+    // **And everything the run said, on the disk above the footer** (§5.3 row 30,
+    // T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD): `diagnostics.log`'s writer answers a fence
+    // once every line handed over before it is written, within `diagnostics::SETTLE_WITHIN`.
+    // An owner-thread door (`doors::DiagnosticsSettle`), admitted on the way out.
+    let _ = bt_platform::admission::admitted::<doors::DiagnosticsSettle, _>(diagnostics::settle);
     let code = match &outcome {
         Ok(()) => 0,
         Err(error) => {

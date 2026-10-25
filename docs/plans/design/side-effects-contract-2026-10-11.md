@@ -506,6 +506,8 @@ A `WaitToken` admits and meters a call. It supplies **no elapsed-time bound**. E
 
 The list is closed. A new member needs an owner ruling and a row here, and the guard of (b)2 refuses an unlisted owner-door call reached from a request door.
 
+*Addition, 2026-10-24 (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD, coordinator ruling (a) of that day):* `DiagnosticsSettle` joins the exit waits: `diagnostics.log`'s writer settled on the way out, bound **deadline** (`SETTLE_WITHIN`, = `FLUSH_TIMEOUT`), permanent, outside the running phase; §5.3 row 30.
+
 **Q1, replaced: should these members (the permanent rows above) be a closed class whose completion is their return value, with present, PTY resize and the first GPU open admitted only until their lanes land?** **Recommend yes.** "Present stays on the owner thread" in revision (a) is withdrawn. It stays there only until row 9's 0.5 lane.
 
 ### (b)7 · The harness: a ledger in the product, and a seam each lane adopts (N2-7)
