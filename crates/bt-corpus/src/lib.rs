@@ -19,6 +19,21 @@ pub fn install_host_answers() {
     bt_term::install_svg_rasterizer(bt_math::rasterize_svg_document);
 }
 
+/// **This tool's lines from the crates below `bt-app`, on its own standard error**
+/// (T-TRACE-SINK-OFF-THE-CALLING-THREAD): those crates hand every `stderr` line to a road the
+/// program installs and write nothing without one. Folio's road is its diagnostics writer; a tool
+/// run from a shell, with no window thread to keep free, says them where it stands, as these lines
+/// were always said here. Each tool calls it first.
+pub fn say_lines_on_stderr() {
+    bt_viewport::trace::set_writer(say_on_stderr);
+    bt_platform::stderr_road::install(say_on_stderr);
+    bt_pty::say_lines_through(say_on_stderr);
+}
+
+fn say_on_stderr(line: String) {
+    eprintln!("{line}");
+}
+
 fn enter_the_band_below_normal() {
     bt_platform::set_current_thread_priority(bt_platform::ThreadPriority::BelowNormal);
 }

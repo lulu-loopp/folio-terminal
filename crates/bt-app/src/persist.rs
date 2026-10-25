@@ -119,7 +119,7 @@ impl DocumentWrites {
             && let Err(error) = &result
         {
             // §5.3: one line per failure streak, not one per attempt.
-            eprintln!("BT_PERSIST could not write {file}: {error}");
+            crate::diagnostics::stderr_line(format!("BT_PERSIST could not write {file}: {error}"));
         }
         if landed {
             self.streak = 0;
@@ -4276,11 +4276,11 @@ pub fn storage_dir() -> PathBuf {
             match relocate(&previous, &current) {
                 Relocation::Nothing | Relocation::AlreadyHere => current,
                 Relocation::Moved => {
-                    eprintln!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_PERSIST moved {} to {}",
                         previous.display(),
                         current.display()
-                    );
+                    ));
                     current
                 }
                 Relocation::Failed(error) => {
@@ -4289,12 +4289,12 @@ pub fn storage_dir() -> PathBuf {
                     // keeps reading and writing the files they already have.
                     // Starting fresh beside them would present as "the terminal
                     // forgot everything" while the data sat one directory away.
-                    eprintln!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_PERSIST could not move {} to {}: {error} — continuing in the old \
                          directory",
                         previous.display(),
                         current.display()
-                    );
+                    ));
                     previous
                 }
             }

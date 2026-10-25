@@ -352,7 +352,12 @@ mod tests {
     fn a_reflow_line_names_the_flip_and_what_it_cost() {
         let path = bt_testpath::temp_path("bt-preview-trace-reflow").with_extension("log");
         let _ = std::fs::remove_file(&path);
-        let trace = Trace::create(&path, "# BT_PREVIEW_TRACE_V1 elapsed_ms event field=value…");
+        let capture = crate::trace_sink::Capture::new();
+        let trace = Trace::create(
+            &path,
+            "# BT_PREVIEW_TRACE_V1 elapsed_ms event field=value…",
+            capture.queue(),
+        );
         let micros = std::time::Duration::from_micros;
         reflow(
             Some(&trace),
@@ -411,6 +416,7 @@ mod tests {
                 realize: micros(0),
             },
         );
+        capture.write_out();
         let written = std::fs::read_to_string(&path).expect("the trace file was created");
         let lines: Vec<&str> = written.lines().collect();
         assert_eq!(

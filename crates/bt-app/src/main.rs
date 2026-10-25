@@ -2636,7 +2636,7 @@ fn scale_door(
             let (width, height) = request.size();
             let (leaf, completion) = request.completion();
             if let Some(started) = started {
-                trace_sink::stderr_line(format!(
+                crate::diagnostics::stderr_line(format!(
                     "BT_PERF_TRACE image_scale purpose={purpose:?} size={width}x{height} lanczos_us={}",
                     started.elapsed().as_micros(),
                 ));
@@ -12013,7 +12013,9 @@ fn disable_math_worker_state(running: &mut bool, notice_pending: &mut bool) -> b
     }
     *running = false;
     *notice_pending = true;
-    eprintln!("formula rendering worker stopped; terminal input and output remain available");
+    crate::diagnostics::stderr_line(
+        "formula rendering worker stopped; terminal input and output remain available".to_owned(),
+    );
     true
 }
 
@@ -41070,7 +41072,7 @@ fn apply_stored_terminal_font<G: Glass>(
         settings::monospace_family_files(family)
     });
     if !family.is_empty() && entry_doors::installed().perf {
-        trace_sink::stderr_line(format!(
+        crate::diagnostics::stderr_line(format!(
             "BT_PERF_TRACE monospace_family_files_us={} files={}",
             started.elapsed().as_micros(),
             files.len()
@@ -47152,15 +47154,15 @@ impl Runtime<'_, Native> {
                         // The spike printed exactly these two lines, and they are what a
                         // machine that goes wrong here will be asked for: the chosen mode
                         // alone leaves "why not the other one" unanswerable.
-                        trace_sink::stderr_line(format!(
+                        crate::diagnostics::stderr_line(format!(
                             "BT_STARTUP alpha target={:?}",
                             alpha.target
                         ));
-                        trace_sink::stderr_line(format!(
+                        crate::diagnostics::stderr_line(format!(
                             "BT_STARTUP alpha offered={:?}",
                             alpha.offered
                         ));
-                        trace_sink::stderr_line(format!(
+                        crate::diagnostics::stderr_line(format!(
                             "BT_STARTUP alpha chosen={:?}",
                             alpha.chosen
                         ));
@@ -47489,7 +47491,7 @@ impl Runtime<'_, Native> {
             phase_started,
         });
         if (trace_startup || trace_resize) && startup_shells.is_none() {
-            trace_sink::stderr_line(format!("BT_CONPTY_SOURCE sources={conpty_sources:?}"));
+            crate::diagnostics::stderr_line(format!("BT_CONPTY_SOURCE sources={conpty_sources:?}"));
         }
         let pty_time = phase_started.elapsed();
         let math_worker = Arc::new(computation_lane::ComputationLane::new({
@@ -47716,7 +47718,7 @@ impl Runtime<'_, Native> {
             match runtime.app.startup_shells.as_mut() {
                 // Said when the last launch shell is born, with `pty_spawn` running to it.
                 Some(shells) => shells.startup = Some(line),
-                None => trace_sink::stderr_line(line.said(pty_time, &conpty_sources)),
+                None => crate::diagnostics::stderr_line(line.said(pty_time, &conpty_sources)),
             }
         }
         runtime.show_new_window(restored.is_some_and(|placement| placement.maximized))?;
@@ -47756,7 +47758,7 @@ impl Runtime<'_, Native> {
         let background_visible = startup_started.elapsed();
         runtime.window.background_visible = Some(background_visible);
         if trace_startup {
-            trace_sink::stderr_line(format!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_STARTUP background_visible={}ms",
                 background_visible.as_millis()
             ));
@@ -48202,7 +48204,7 @@ impl<B: Backend> Runtime<'_, B> {
             let laid = inputs.layout(&mut measure);
             if let Some(start) = trace_start {
                 let total_us = start.elapsed().as_micros();
-                trace_sink::stderr_line(format!(
+                crate::diagnostics::stderr_line(format!(
                     "BT_PERF_TRACE settings_layout content_us={content_us} probes_us={probes_us} measure_calls={measure_calls} measure_us={measure_us} geometry_us={} total_us={total_us}",
                     total_us.saturating_sub(content_us + probes_us + measure_us)
                 ));
@@ -51824,7 +51826,9 @@ impl<B: Backend> Runtime<'_, B> {
             // gate is the thing being relied on, and a gate that can only be
             // observed by a panic is a gate nobody would dare move.
             _ => {
-                eprintln!("BT_WEB refused a target it minted itself: {asked}");
+                crate::diagnostics::stderr_line(format!(
+                    "BT_WEB refused a target it minted itself: {asked}"
+                ));
                 None
             }
         }
@@ -54218,7 +54222,7 @@ impl<B: Backend> Runtime<'_, B> {
             return;
         }
         if self.app.trace_perf {
-            trace_sink::stderr_line(format!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERF_TRACE pace interval_us={} millihertz={}",
                 self.window.frame_clock.interval().as_micros(),
                 millihertz.unwrap_or_default(),
@@ -55226,10 +55230,10 @@ impl<B: Backend> Runtime<'_, B> {
         // they are solved into begins the column's own width further in (or stops
         // doing so). There is no branch anywhere below this for what is being
         // drawn — only a different number for where it starts.
-        eprintln!(
+        crate::diagnostics::stderr_line(format!(
             "BT_FOCUS on={on} inset={}px",
             self.rail_posture().terminal_inset_logical_px()
-        );
+        ));
         self.commit_seat_geometry()?;
         self.apply_window_min_inner_size()?;
         if let Some(position) = self.window.pointer_position {
@@ -73080,7 +73084,7 @@ fn log_dpi_snapshot(
     inner_size: PhysicalSize<u32>,
 ) {
     let metrics_scale = metrics_scale.map_or_else(|| "n/a".to_owned(), display_scale_factor);
-    eprintln!(
+    crate::diagnostics::stderr_line(format!(
         "BT_DPI stage={stage} winit_scale={} win32_dpi={} authoritative_scale={} metrics_scale={} rect={},{},{},{} swapchain_size={}x{} inner_size={}x{}",
         display_scale_factor(snapshot.winit_scale),
         snapshot.win32_dpi,
@@ -73094,7 +73098,7 @@ fn log_dpi_snapshot(
         presentation.swapchain_size.1,
         inner_size.width,
         inner_size.height,
-    );
+    ));
     // **The same four numbers, into the mouse trace** (`BT_MOUSE_TRACE`).
     //
     // The `eprintln!` above is untouched and stays the permanent record; this is
@@ -73167,7 +73171,7 @@ fn trace_surface_size_clamp(
     {
         return;
     }
-    trace_sink::stderr_line(format!(
+    crate::diagnostics::stderr_line(format!(
         "{prefix} surface_size_clamped requested={}x{} configured={}x{} max_texture_dimension_2d={}",
         requested.width,
         requested.height,
@@ -77649,6 +77653,13 @@ fn main() -> Result<()> {
     // the recordings and traces this run was asked for, handed to each library that writes one
     // before any station can be reached. Nothing below reads them from the environment again.
     let doors = entry_doors::EntryDoors::at_the_entry().install();
+    // **Every `stderr` line of the crates below this one goes where this program's go**
+    // (T-TRACE-SINK-OFF-THE-CALLING-THREAD): to `diagnostics::stderr_line`, which writes it on the
+    // console while the front door is open and, from `enter_resident_run` on, hands it to the
+    // writer that owns the run's `stderr`. Before any of them can say anything.
+    bt_render::set_trace_writer(diagnostics::stderr_line);
+    bt_platform::stderr_road::install(diagnostics::stderr_line);
+    bt_pty::say_lines_through(diagnostics::stderr_line);
     // **What this process was handed is passed on only by name**, before any door can start a
     // child: the uninstaller removes the data folder, and a `diagnostics.log` handle inherited
     // down a chain of Folio processes is a holder there its probe refuses on.
@@ -77972,15 +77983,14 @@ fn main() -> Result<()> {
     // The door is `bt_viewport`'s because `bt-app` depends on the three crates
     // that write these lines and none of them can name this module; see
     // `bt_viewport::trace`.
-    let trace_shutdown = trace_sink::start();
+    let trace_shutdown = trace_sink::start(channel == diagnostics::Channel::Console);
     // **A value dropped without its retire door says so here, once** (T-DROP-DOORS): from now on
     // the platform's line about a skipped door is a diagnostics note, never a wait.
     bt_platform::door_skipped::install(diagnostics::note);
     bt_pty::say_skipped_doors_through(diagnostics::note);
     ime_outbound::install();
-    bt_render::set_trace_writer(trace_sink::stderr_line);
     if doors.startup {
-        trace_sink::stderr_line(format!(
+        crate::diagnostics::stderr_line(format!(
             "BT_STARTUP_TRACE: from here Folio talks to {}",
             channel.label()
         ));
@@ -78215,7 +78225,7 @@ fn main() -> Result<()> {
     let code = match &outcome {
         Ok(()) => 0,
         Err(error) => {
-            trace_sink::stderr_line(format!("{APP_NAME} stopped: {error:#}"));
+            diagnostics::way_out_line(format!("{APP_NAME} stopped: {error:#}"));
             1
         }
     };
@@ -78223,9 +78233,9 @@ fn main() -> Result<()> {
     // unexplained time and scheduling delay, every door's calls, and the detail lines lost —
     // whole however many of those lines the watchdog never got to write.
     for line in hang_watch::budget_summary() {
-        trace_sink::stderr_line(line);
+        diagnostics::way_out_line(line);
     }
-    trace_sink::stderr_line(diagnostics::run_footer(
+    diagnostics::way_out_line(diagnostics::run_footer(
         &hang_watch::utc_timestamp(std::time::SystemTime::now()),
         code,
         bt_platform::admission::refusals(),

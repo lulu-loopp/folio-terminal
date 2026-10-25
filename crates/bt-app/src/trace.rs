@@ -23,7 +23,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use crate::trace_sink;
@@ -73,6 +73,36 @@ pub struct TraceFiles {
     pub focus_thumb: Option<PathBuf>,
 }
 
+impl TraceFiles {
+    /// Whether any door names a file — whether this run has a trace file for the
+    /// sink to write (`trace_sink::start`).
+    #[must_use]
+    pub fn names_any(&self) -> bool {
+        let Self {
+            mouse,
+            card,
+            attention,
+            preview,
+            web,
+            glyph_census,
+            ime,
+            focus_thumb,
+        } = self;
+        [
+            mouse,
+            card,
+            attention,
+            preview,
+            web,
+            glyph_census,
+            ime,
+            focus_thumb,
+        ]
+        .iter()
+        .any(|door| door.is_some())
+    }
+}
+
 /// Which of [`TraceFiles`]' doors a [`Gate`] or a [`Dump`] writes.
 pub type Door = fn(&TraceFiles) -> Option<&Path>;
 
@@ -92,13 +122,24 @@ fn installed(door: Door) -> Option<&'static Path> {
     INSTALLED.get().and_then(door)
 }
 
+/// What the entry installed, or `None` in a process whose entry installed nothing.
+pub fn installed_files() -> Option<&'static TraceFiles> {
+    INSTALLED.get()
+}
+
 /// A destination resolved by the producer, opened and written only by the sink.
 /// The header is written with the first accepted line, so dropping a queued
 /// line can never leave the file without its header.
+///
+/// **One writer, so no lock** (T-TRACE-SINK-OFF-THE-CALLING-THREAD): the sink's
+/// thread is the only thread that writes a trace file, so the handle is written
+/// through `&File`, one `write_all` per line, with nothing held between lines —
+/// where a `Mutex<File>` used to be held across the `writeln` and the `flush`
+/// by whichever thread had made the line.
 pub struct TraceFile {
     path: PathBuf,
     header: Option<String>,
-    file: OnceLock<Option<Mutex<File>>>,
+    file: OnceLock<Option<File>>,
 }
 
 impl TraceFile {
@@ -120,21 +161,21 @@ impl TraceFile {
     /// for another thread's `eprintln!` nor holds that lock while the write is
     /// stalled. Written straight to `report` and not queued, so the report can
     /// never come back round to the destination that just failed.
-    fn open(&self, report: &mut impl Write) -> Option<&Mutex<File>> {
+    fn open(&self, report: &mut impl Write) -> Option<&File> {
         self.file
             .get_or_init(|| {
                 let opened = (|| -> std::io::Result<File> {
-                    let mut file = OpenOptions::new()
+                    let file = OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(&self.path)?;
                     if let Some(header) = &self.header {
-                        writeln!(file, "{header}")?;
+                        write_line(&file, header)?;
                     }
                     Ok(file)
                 })();
                 match opened {
-                    Ok(file) => Some(Mutex::new(file)),
+                    Ok(file) => Some(file),
                     Err(error) => {
                         // Ignore stderr failures too: a trace must not panic.
                         let _ = writeln!(
@@ -153,13 +194,18 @@ impl TraceFile {
     /// own writer, so the report lands where its batches land and in order.
     pub fn append(&self, line: &str, report: &mut impl Write) {
         if let Some(file) = self.open(report) {
-            let mut file = file
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _ = writeln!(file, "{line}");
-            let _ = file.flush();
+            let _ = write_line(file, line);
         }
     }
+}
+
+/// `line` and its newline, in one write: the file is unbuffered, so there is
+/// nothing to flush after it.
+fn write_line(mut file: &File, line: &str) -> std::io::Result<()> {
+    let mut bytes = String::with_capacity(line.len() + 1);
+    bytes.push_str(line);
+    bytes.push('\n');
+    file.write_all(bytes.as_bytes())
 }
 
 /// One trace destination, and the clock its timestamps are measured from.
@@ -171,6 +217,9 @@ impl TraceFile {
 pub struct Trace {
     file: Arc<TraceFile>,
     started: Instant,
+    /// The sink's queue this trace's lines are offered to: a trace exists only
+    /// where there is a writer to write it.
+    queue: &'static trace_sink::Queue,
 }
 
 impl Trace {
@@ -182,16 +231,14 @@ impl Trace {
     /// the first would take the comparison away. The header line is what keeps
     /// the runs separable, and naming the format in it is what keeps a file
     /// from two different traces readable by whoever opens it.
-    pub fn create(path: &Path, header: &str) -> Self {
-        let file = Arc::new(TraceFile::new(path, Some(header)));
-        // Standalone users keep the immediate header, even when no events
-        // follow. In a resident run, all file I/O belongs to the sink instead.
-        if !trace_sink::started() {
-            let _ = file.open(&mut trace_sink::ProcessStderr);
-        }
+    ///
+    /// On `queue`, whose writer opens the file and writes the header with the
+    /// first line: no thread but that writer touches the file.
+    pub(crate) fn create(path: &Path, header: &str, queue: &'static trace_sink::Queue) -> Self {
         Self {
-            file,
+            file: Arc::new(TraceFile::new(path, Some(header))),
             started: origin(),
+            queue,
         }
     }
 
@@ -204,7 +251,8 @@ impl Trace {
     /// a fact about a different thread at a different moment.
     fn write(&self, message: &str) {
         let elapsed = self.started.elapsed().as_secs_f64() * 1000.0;
-        trace_sink::file_line(Arc::clone(&self.file), format!("{elapsed:9.3} {message}"));
+        self.queue
+            .offer_file_line(Arc::clone(&self.file), format!("{elapsed:9.3} {message}"));
     }
 }
 
@@ -230,10 +278,15 @@ impl Gate {
         }
     }
 
-    /// This process's trace for this door, resolving its path on first ask.
+    /// This process's trace for this door, resolving its path on first ask —
+    /// on the sink's queue, so a door with no sink to write it is closed.
     pub fn get(&'static self) -> Option<&'static Trace> {
         self.trace
-            .get_or_init(|| installed(self.door).map(|path| Trace::create(path, self.header)))
+            .get_or_init(|| {
+                let path = installed(self.door)?;
+                let queue = trace_sink::queue()?;
+                Some(Trace::create(path, self.header, queue))
+            })
             .as_ref()
     }
 }
@@ -309,6 +362,14 @@ mod tests {
         std::fs::read_to_string(path).expect("the trace file was created")
     }
 
+    /// What `path` holds once the writer's body has taken every line offered on
+    /// `capture` so far — the reading a trace file has now that only its writer
+    /// writes it.
+    fn written_out(capture: &trace_sink::Capture, path: &Path) -> String {
+        capture.write_out();
+        body(path)
+    }
+
     /// RED (mutation: a trace file that cannot be opened stops the process — `TraceFile::open`
     /// panicking where it reports) — **a debugging switch naming a folder that is not there says
     /// so once and the run goes on** (G-SWEEP-048): `BT_IME_TRACE` and its siblings name a file;
@@ -378,13 +439,14 @@ mod tests {
     /// One call, one line — and the timestamp and the fields on the same one.
     #[test]
     fn an_open_gate_writes_one_line_per_call() {
+        let capture = trace_sink::Capture::new();
         let path = scratch("one-line");
-        let trace = Trace::create(&path, HEADER);
+        let trace = Trace::create(&path, HEADER, capture.queue());
         emit(Some(&trace), || String::from("mouse_input state=Pressed"));
         emit(Some(&trace), || {
             String::from("finish_local_selection single_click=1")
         });
-        let written = body(&path);
+        let written = written_out(&capture, &path);
         let lines: Vec<&str> = written.lines().collect();
         assert_eq!(
             lines.len(),
@@ -416,16 +478,17 @@ mod tests {
     /// than one launch of the program.
     #[test]
     fn a_second_run_appends_rather_than_erasing_the_first() {
+        let capture = trace_sink::Capture::new();
         let path = scratch("append");
         {
-            let first = Trace::create(&path, HEADER);
+            let first = Trace::create(&path, HEADER, capture.queue());
             emit(Some(&first), || String::from("run=1"));
         }
         {
-            let second = Trace::create(&path, HEADER);
+            let second = Trace::create(&path, HEADER, capture.queue());
             emit(Some(&second), || String::from("run=2"));
         }
-        let written = body(&path);
+        let written = written_out(&capture, &path);
         let lines: Vec<&str> = written.lines().collect();
         assert_eq!(lines.len(), 4, "two headers and two lines, got {written:?}");
         assert!(lines[1].ends_with("run=1"));
@@ -448,9 +511,10 @@ mod tests {
     /// lines against the other file's.
     #[test]
     fn two_gates_share_one_clock_so_their_files_merge() {
+        let capture = trace_sink::Capture::new();
         let first = scratch("clock-first");
         let second = scratch("clock-second");
-        let early = Trace::create(&first, HEADER);
+        let early = Trace::create(&first, HEADER, capture.queue());
         emit(Some(&early), || String::from("first"));
         let stamp_of = |line: &str| -> f64 {
             line.split_whitespace()
@@ -459,11 +523,16 @@ mod tests {
                 .parse()
                 .expect("and it is a number of milliseconds")
         };
-        let opened_at = stamp_of(body(&first).lines().nth(1).expect("the first line"));
-        let late = Trace::create(&second, HEADER);
+        let opened_at = stamp_of(
+            written_out(&capture, &first)
+                .lines()
+                .nth(1)
+                .expect("the first line"),
+        );
+        let late = Trace::create(&second, HEADER, capture.queue());
         emit(Some(&late), || String::from("second"));
         let later = stamp_of(
-            body(&second)
+            written_out(&capture, &second)
                 .lines()
                 .nth(1)
                 .expect("the second file's line"),
@@ -480,16 +549,17 @@ mod tests {
     /// second trace a binding rather than a fork of the machinery.
     #[test]
     fn two_gates_write_to_two_files() {
+        let capture = trace_sink::Capture::new();
         let mouse = scratch("two-mouse");
         let attention = scratch("two-attention");
-        let first = Trace::create(&mouse, HEADER);
-        let second = Trace::create(&attention, HEADER);
+        let first = Trace::create(&mouse, HEADER, capture.queue());
+        let second = Trace::create(&attention, HEADER, capture.queue());
         emit(Some(&first), || String::from("pane_press"));
         emit(Some(&second), || String::from("bell"));
-        assert!(body(&mouse).contains("pane_press"));
-        assert!(!body(&mouse).contains("bell"));
-        assert!(body(&attention).contains("bell"));
-        assert!(!body(&attention).contains("pane_press"));
+        assert!(written_out(&capture, &mouse).contains("pane_press"));
+        assert!(!written_out(&capture, &mouse).contains("bell"));
+        assert!(written_out(&capture, &attention).contains("bell"));
+        assert!(!written_out(&capture, &attention).contains("pane_press"));
         let _ = std::fs::remove_file(&mouse);
         let _ = std::fs::remove_file(&attention);
     }

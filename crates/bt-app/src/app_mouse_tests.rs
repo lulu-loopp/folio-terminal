@@ -576,7 +576,8 @@ fn one_alt_wheel_over_a_card_writes_its_entry_its_rail_its_aim_and_its_route() {
         bt_testpath::unique_name("bt-wheel-trace-alt-wheel")
     ));
     let _ = std::fs::remove_file(&path);
-    let trace = trace::Trace::create(&path, HEADER);
+    let capture = crate::trace_sink::Capture::new();
+    let trace = trace::Trace::create(&path, HEADER, capture.queue());
     let write = |message: String| mouse_trace::emit(Some(&trace), || message);
 
     // A driver that speaks half a detent at a time — the shape a
@@ -699,6 +700,7 @@ fn one_alt_wheel_over_a_card_writes_its_entry_its_rail_its_aim_and_its_route() {
     // ④ And the one word that says which surface took it home.
     write("wheel_route taken=rail-aim".to_owned());
 
+    capture.write_out();
     let written = std::fs::read_to_string(&path).expect("the trace was written");
     let lines: Vec<&str> = written.lines().collect();
     assert_eq!(lines[0], HEADER, "the run names its own format first");

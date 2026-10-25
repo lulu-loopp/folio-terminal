@@ -3634,7 +3634,7 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace
             &bt_platform::file_reads::LEDGER,
             bt_platform::file_reads::take_input,
             |line| crate::diagnostics::note(&line),
-            crate::trace_sink::stderr_line,
+            crate::diagnostics::stderr_line,
         );
     }
 }

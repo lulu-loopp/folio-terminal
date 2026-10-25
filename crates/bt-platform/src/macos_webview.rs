@@ -301,7 +301,9 @@ impl Shared {
     fn load(&self, web_view: &WKWebView, url: &str) {
         let text = NSString::from_str(url);
         let Some(address) = NSURL::URLWithString(&text) else {
-            eprintln!("BT_MAC_WEB an address Foundation would not parse: {url}");
+            crate::stderr_road::say(format!(
+                "BT_MAC_WEB an address Foundation would not parse: {url}"
+            ));
             return;
         };
         if address.isFileURL() {
@@ -310,12 +312,12 @@ impl Shared {
             // file URL built back from that path, which is the form
             // `loadFileURL:` wants.
             let Some(path) = address.path() else {
-                eprintln!("BT_MAC_WEB a file URL with no path: {url}");
+                crate::stderr_road::say(format!("BT_MAC_WEB a file URL with no path: {url}"));
                 return;
             };
             let file = NSURL::fileURLWithPath(&path);
             let Some(folder) = file.URLByDeletingLastPathComponent() else {
-                eprintln!("BT_MAC_WEB a file URL with no folder: {url}");
+                crate::stderr_road::say(format!("BT_MAC_WEB a file URL with no folder: {url}"));
                 return;
             };
             // SAFETY: a live view and two live file URLs, on the main thread.
@@ -729,16 +731,16 @@ fn compile_is_stale(door: &Rc<ThirdDoor>, mint: u64, compiled_from: &str) -> boo
         return false;
     }
     if page_moved {
-        eprintln!(
+        crate::stderr_road::say(format!(
             "BT_MAC_WEB a rule list compiled for page {mint} arrived after page {} took over; \
              it is dropped and the current page is compiled for",
             door.mint.get()
-        );
+        ));
     } else {
-        eprintln!(
+        crate::stderr_road::say(format!(
             "BT_MAC_WEB a rule list compiled for a resource rule the seat has moved off arrived \
              for page {mint}; it is dropped and the rule the seat states now is compiled for"
-        );
+        ));
     }
     compile(door);
     true
@@ -780,7 +782,9 @@ fn rules_compiled(door: &Rc<ThirdDoor>, outcome: Result<String, String>) {
             // one.
             *door.attached.borrow_mut() = None;
             door.stands.set(false);
-            eprintln!("BT_MAC_WEB the page's resource rules would not compile: {reason}");
+            crate::stderr_road::say(format!(
+                "BT_MAC_WEB the page's resource rules would not compile: {reason}"
+            ));
             *door.refused.borrow_mut() = Some(reason);
             door.answer_what_waited();
         }

@@ -5,7 +5,7 @@ use crate::input::Keystroke;
 use crate::window_seam::prelude::*;
 use crate::{
     LeafSearchRescan, LeafSession, PointerTarget, Runtime, SearchRefresh, SearchScanCache,
-    frame_row_of_anchor, hang_watch, input, marks, search, seats, tooltip, trace_sink,
+    frame_row_of_anchor, hang_watch, input, marks, search, seats, tooltip,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -177,7 +177,7 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some(web) = self.web_on_mut(seat)
             && let Err(error) = web.find_stop()
         {
-            eprintln!("BT_WEB {error}");
+            crate::diagnostics::stderr_line(format!("BT_WEB {error}"));
         }
         self.window.search.close();
         self.window.search_layout = None;
@@ -290,7 +290,7 @@ impl<B: Backend> Runtime<'_, B> {
                 && let Some(web) = self.web_on_mut(seat)
                 && let Err(error) = web.find_stop()
             {
-                eprintln!("BT_WEB {error}");
+                crate::diagnostics::stderr_line(format!("BT_WEB {error}"));
             }
             self.window.search_scan = None;
             return self.settle_search_change(road);
@@ -363,7 +363,7 @@ impl<B: Backend> Runtime<'_, B> {
         // `frozen_lines` while a shell prints is the incremental step having been lost; one where
         // it passes `SEARCH_HISTORY_SLICE` on a keystroke is the bound having been lost.
         if self.app.trace_perf {
-            trace_sink::stderr_line(format!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERF_TRACE search_scan lines_scanned={} frozen_lines={} history_us={} history_hits={} history_complete={} live_rows={} volatile_hits={}",
                 rescan.lines_scanned,
                 rescan.cache.history.window().len,
@@ -465,7 +465,7 @@ impl<B: Backend> Runtime<'_, B> {
             if let Some(web) = self.web_on_mut(seat)
                 && let Err(error) = web.find_or_step(&query, case_sensitive, forwards)
             {
-                eprintln!("BT_WEB {error}");
+                crate::diagnostics::stderr_line(format!("BT_WEB {error}"));
             }
             return Ok(());
         }

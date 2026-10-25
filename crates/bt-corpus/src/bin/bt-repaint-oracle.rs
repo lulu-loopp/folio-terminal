@@ -1098,6 +1098,7 @@ impl HeadlessOracle {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    bt_corpus::say_lines_on_stderr();
     bt_corpus::install_host_answers();
     // Set-but-empty names nothing, here as everywhere else in this program: a
     // cleared `BT_PROBE_INPUT=` is a probe that was not asked for, and it says

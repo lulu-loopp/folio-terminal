@@ -4625,7 +4625,7 @@ impl<B: Backend> Runtime<'_, B> {
             if let Some(web) = self.window.web.get_mut(&leaf)
                 && let Err(error) = web.capture_page()
             {
-                eprintln!("BT_WEB capture failed: {error}");
+                crate::diagnostics::stderr_line(format!("BT_WEB capture failed: {error}"));
             }
         }
     }

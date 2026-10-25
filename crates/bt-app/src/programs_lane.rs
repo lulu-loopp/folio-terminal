@@ -753,7 +753,7 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
         let terminal = match walked {
             Ok((path_entries, file_questions)) => {
                 if crate::entry_doors::installed().perf {
-                    crate::trace_sink::stderr_line(format!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_PERF_TRACE program_walk_us={} generation={generation} trigger={:?} \
                          rows={} path_entries={path_entries} file_questions={file_questions} \
                          waiting={waiting} superseded={superseded} band={:?}",

@@ -3404,17 +3404,17 @@ impl ThemeState {
         };
         let Some(rgb) = value.to_str().and_then(parse_background_rgb) else {
             if report {
-                eprintln!(
+                bt_viewport::trace::line(format!(
                     "BT_THEME invalid_BT_BG={value:?} ignored default=#1B1B1B expected=#RRGGBB runtime_theme_locked=false"
-                );
+                ));
             }
             return Self::new(Theme::Dark, DEFAULT_BACKGROUND_RGB, false);
         };
         if report {
-            eprintln!(
+            bt_viewport::trace::line(format!(
                 "BT_THEME BT_BG_override=#{:02X}{:02X}{:02X} runtime_theme_locked=true",
                 rgb[0], rgb[1], rgb[2]
-            );
+            ));
         }
         Self::new(Theme::Dark, rgb, true)
     }

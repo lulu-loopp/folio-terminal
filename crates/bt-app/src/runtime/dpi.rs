@@ -8,7 +8,7 @@ use crate::{
     ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner,
     files_float_content_height, float, hang_watch, log_dpi_snapshot, presentation_physical_size,
     release_due_leaf_resize, resize_worth_solving, scale_factors_match, seats,
-    take_psreadline_resize_reanchor_input, trace_sink, trace_surface_size_clamp, write_pty_input,
+    take_psreadline_resize_reanchor_input, trace_surface_size_clamp, write_pty_input,
 };
 use crate::{apply_tabs_leaf_metrics, pane_cell_metrics};
 use anyhow::Context;
@@ -106,7 +106,7 @@ impl<B: Backend> Runtime<'_, B> {
             .map(|pty| pty.conpty_source().to_string())
             .unwrap_or_else(|| "direct-input".to_string());
         for event in &trace[self.window.resize_trace_logged_events.min(trace.len())..] {
-            trace_sink::stderr_line(format!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_RESIZE_TRACE conpty_source={conpty_source:?} {event:?}"
             ));
         }
@@ -266,7 +266,7 @@ impl<B: Backend> Runtime<'_, B> {
                     .line()
                 });
                 if trace {
-                    trace_sink::stderr_line(format!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_RESIZE_TRACE conpty tab={index} seat={} cols={} rows={}",
                         seat.0,
                         leaf.conpty_grid.columns.get(),
@@ -657,7 +657,9 @@ impl<B: Backend> Runtime<'_, B> {
         // down, exactly as a refused placement is.
         for web in self.window.web.values_mut() {
             if let Err(error) = web.set_device_scale(scale_factor) {
-                eprintln!("BT_WEB rasterization scale failed: {error}");
+                crate::diagnostics::stderr_line(format!(
+                    "BT_WEB rasterization scale failed: {error}"
+                ));
             }
         }
         self.trace_card_scale(

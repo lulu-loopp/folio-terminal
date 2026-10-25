@@ -28,6 +28,8 @@ pub mod process_folder;
 /// has always found it.
 pub use admission::{spawn_at_priority, spawn_at_priority_with_stack};
 pub mod ime_trace;
+/// Where this crate's `stderr` lines go: the road the application installs (row 51).
+pub mod stderr_road;
 
 /// A Windows keyboard layout as the input thread names it: its `HKL`, used as
 /// the cache key, and its eight-character `KLID`, used to find the layout's
@@ -4717,7 +4719,9 @@ pub fn spawn_probe(
 /// PSReadLine probes) keeps no reason of its own.
 fn uncontainable(error: &std::io::Error) -> std::io::Error {
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    say_containment_refusal_once(&SAID, error, &mut |line| eprintln!("{line}"));
+    say_containment_refusal_once(&SAID, error, &mut |line| {
+        crate::stderr_road::say(str::to_owned(line))
+    });
     std::io::Error::new(
         error.kind(),
         format!("the probe could not be contained, so it was not run: {error}"),

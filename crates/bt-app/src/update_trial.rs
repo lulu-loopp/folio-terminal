@@ -674,10 +674,10 @@ pub(crate) fn begin_watch(wake: impl Fn() + Send + 'static) {
     if let Err(error) = started {
         // No watch, so nothing will ever be released: the run writes nothing,
         // which is what a trial that is never committed does anyway.
-        eprintln!(
+        crate::diagnostics::stderr_line(format!(
             "BT_UPDATE_TRIAL no watch on {}: {error}",
             home.journal().display()
-        );
+        ));
     }
 }
 

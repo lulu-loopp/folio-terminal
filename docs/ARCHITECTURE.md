@@ -2523,7 +2523,7 @@ crossed by every turn that began from such a park however short, so a loop
 spinning on an instant nobody consumes writes one `stale` line a second naming
 the clock, and its `suppressed=` is how many turns spun in that second. The
 exit summary, written by
-`fn main` through `trace_sink::stderr_line` just before the run's footer, is read
+`fn main` through `diagnostics::way_out_line` just before the run's footer, is read
 from the run's atomics, so it is whole however many lines were lost:
 
 ```text

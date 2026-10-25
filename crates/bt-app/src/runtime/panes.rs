@@ -24,7 +24,7 @@ use crate::{
     presentation_physical_size, preview, preview_image_placement, preview_trace, profiles,
     rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer, rail_zone_wants_open,
     restated_scroll, restore, restore_row_seed, risen_frame, row_verb, schedule_leaf_grid_change,
-    scrollback_quota, seats, size_authority_for_rectangle, solve_seats, solve_tree, trace_sink,
+    scrollback_quota, seats, size_authority_for_rectangle, solve_seats, solve_tree,
     trace_unchanged_present, video_seat, webhost,
 };
 use anyhow::Context;
@@ -143,7 +143,7 @@ impl<B: Backend> Runtime<'_, B> {
             shells.born(tab_id, seat, source);
             if let Some(lines) = shells.lines_if_born() {
                 for line in lines {
-                    trace_sink::stderr_line(line);
+                    crate::diagnostics::stderr_line(line);
                 }
                 self.app.startup_shells = None;
             }
@@ -294,7 +294,7 @@ impl<B: Backend> Runtime<'_, B> {
                     shells.born(tab_id, seat, source);
                     if let Some(lines) = shells.lines_if_born() {
                         for line in lines {
-                            trace_sink::stderr_line(line);
+                            crate::diagnostics::stderr_line(line);
                         }
                         self.app.startup_shells = None;
                     }
@@ -460,7 +460,10 @@ impl<B: Backend> Runtime<'_, B> {
     fn publish_layout_events(&mut self, events: Vec<seats::LayoutEvent>) {
         self.window.last_layout_events = events;
         if self.app.trace_layout_events && !self.window.last_layout_events.is_empty() {
-            eprintln!("BT_LAYOUT_EVENTS {:?}", self.window.last_layout_events);
+            crate::diagnostics::stderr_line(format!(
+                "BT_LAYOUT_EVENTS {:?}",
+                self.window.last_layout_events
+            ));
         }
     }
 
@@ -1984,7 +1987,7 @@ impl<B: Backend> Runtime<'_, B> {
             published_at,
             next_grid,
         ) {
-            trace_sink::stderr_line(format!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERF_TRACE resize_frame solve_us={} actor_us={} publish_us={} redraw_us={} total_us={} queued={} columns={} rows={}",
                 solved.saturating_duration_since(started).as_micros(),
                 resized.saturating_duration_since(solved).as_micros(),

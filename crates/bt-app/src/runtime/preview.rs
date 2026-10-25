@@ -53,8 +53,8 @@ use crate::{
     scrollback_quota, seats, settings, settle_attention, shown_address, source_opens_as_a_page,
     step_preview_caret_by_row, strip_animation_tick_is_due, surface_pixels, surface_subject_of,
     surface_takes_image_zoom, switcher_rows, tab_owes_frame, tab_trailing_targets, table_block,
-    text_field, tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key,
-    video_seat, video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
+    text_field, tick_owes_a_present, toast, tooltip, video_frame_texture_key, video_seat,
+    video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
     wheel_points_sideways, window_taskbar_progress,
 };
 use crate::{LeafView, TextScale};
@@ -10254,7 +10254,7 @@ impl<B: Backend> Runtime<'_, B> {
                 .map_or(f32::NAN, |(body, image_px)| {
                     image_zoom_scale(body, image_px, zoom)
                 });
-            trace_sink::stderr_line(format!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERF_TRACE image_zoom scale={scale:.4} layout_us={} chrome_us={} present_us={} total_us={}",
                 (laid_out - started).as_micros(),
                 (chromed - laid_out).as_micros(),
@@ -11301,7 +11301,7 @@ impl<B: Backend> Runtime<'_, B> {
                     || "none".to_owned(),
                     |raster| format!("{}x{}", raster.width_px, raster.height_px),
                 );
-            trace_sink::stderr_line(format!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERF_TRACE image_resample want={}x{} held={held_at} display={display_width}x{display_height}",
                 raster_width, raster_height,
             ));
@@ -14053,7 +14053,9 @@ impl<B: Backend> Runtime<'_, B> {
         // The guard is what makes the ceiling on one job a ceiling on the
         // process; it is given up when the worker ends, however it ends.
         let Some(place) = ClipboardPictureJob::take() else {
-            eprintln!("clipboard picture workers are all busy; paste ignored");
+            crate::diagnostics::stderr_line(
+                "clipboard picture workers are all busy; paste ignored".to_owned(),
+            );
             return self.toast(
                 toast::ToastKind::Error,
                 toast::ToastAnchor::Window,
@@ -14092,7 +14094,9 @@ impl<B: Backend> Runtime<'_, B> {
             // A machine that will not start a thread is a machine that cannot do
             // this paste, and saying nothing would look like a key that did not
             // register. The place goes back with the closure that was never run.
-            eprintln!("clipboard picture worker could not be started; paste ignored");
+            crate::diagnostics::stderr_line(
+                "clipboard picture worker could not be started; paste ignored".to_owned(),
+            );
             return self.toast(
                 toast::ToastKind::Error,
                 toast::ToastAnchor::Window,

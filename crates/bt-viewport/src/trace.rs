@@ -1,13 +1,16 @@
-//! **Where a trace line goes, for the crates that cannot see the program's
-//! trace sink.**
+//! **Where a trace or `stderr` line goes, for the crates that cannot see the
+//! program's writers.**
 //!
-//! `bt_app::trace_sink` owns the one writer thread this process has, and the
-//! crates below `bt-app` — the renderer above all, which writes a line on every
-//! composed frame — cannot name it: `bt-app` depends on them. So the sink is
-//! *installed* rather than imported. `bt-app` hands [`set_writer`] a closure at
-//! startup and every [`line`] below it goes through the queue; a run that
-//! installs nothing prints on the spot, which is what a test binary and
-//! `bt-replay` do and is exactly what these call sites did before.
+//! `bt-app` owns the writers this process has — `diagnostics.log`'s and the
+//! trace sink's — and the crates below it, the renderer above all, which writes a
+//! line on every composed frame, cannot name them: `bt-app` depends on them. So
+//! the road is *installed* rather than imported. `bt-app`'s `main` hands
+//! [`set_writer`] `diagnostics::stderr_line` before anything else it does, and
+//! every [`line`] below it goes to whichever writer owns this run's `stderr`.
+//! **A process that installs nothing writes nothing**
+//! (T-TRACE-SINK-OFF-THE-CALLING-THREAD): no line is ever written on the thread
+//! that made it, so a test binary is silent, and a tool that wants its lines
+//! (`bt-replay`) installs a road of its own.
 //!
 //! **Nothing here knows what a viewport is**, and this module is in this crate
 //! for one reason: `bt-render`, `bt-term` and `bt-viewport` are the three crates
@@ -50,7 +53,8 @@ type Writer = Box<dyn Fn(String) + Send + Sync>;
 /// the frame path acquires nothing it could be made to wait on.
 static WRITER: OnceLock<Writer> = OnceLock::new();
 
-/// **Say where this process's trace lines go.** Called once, from `bt-app`.
+/// **Say where this process's trace lines go.** Called once, from `bt-app`'s
+/// `main` (or a tool's).
 ///
 /// A second call is ignored rather than refused: there is one sink per process
 /// by construction, and a program that tried to install two would be saying the
@@ -59,18 +63,15 @@ pub fn set_writer(writer: impl Fn(String) + Send + Sync + 'static) {
     let _ = WRITER.set(Box::new(writer));
 }
 
-/// One trace line, handed to the installed writer or printed here.
+/// One trace or `stderr` line, handed to the installed writer — or, in a process
+/// that installed none, to nobody.
 ///
 /// The `String` is already built by the time this is called, which is deliberate
 /// and is the same discipline every gate in this workspace keeps: the *caller*
 /// decides whether the variable is on, so an off trace formats nothing at all.
 pub fn line(line: String) {
-    match WRITER.get() {
-        Some(writer) => writer(line),
-        // No sink: this is a test, or `bt-replay`, or a build of a crate
-        // somebody is running on its own. Straight to `stderr`, the way every
-        // one of these lines was written before there was a queue.
-        None => eprintln!("{line}"),
+    if let Some(writer) = WRITER.get() {
+        writer(line);
     }
 }
 
@@ -88,7 +89,8 @@ mod tests {
     /// can have.
     ///
     /// Mutation: have [`line`] print unconditionally and the collector stays
-    /// empty.
+    /// empty. (That no line is written before a writer is installed is the
+    /// shape of [`line`] itself: it has no other arm.)
     #[test]
     fn an_installed_writer_takes_the_line() {
         static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());

@@ -4568,7 +4568,9 @@ pub fn disable_git_worker_state(running: &mut bool, notice_pending: &mut bool) -
     }
     *running = false;
     *notice_pending = true;
-    eprintln!("git worker stopped; terminal input and output remain available");
+    crate::diagnostics::stderr_line(
+        "git worker stopped; terminal input and output remain available".to_owned(),
+    );
     true
 }
 

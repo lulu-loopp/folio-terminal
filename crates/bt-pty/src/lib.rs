@@ -802,7 +802,9 @@ pub fn retire_session(session: PtySession) {
     retire_within(RETIREMENT_BUDGET, move || {
         let mut session = session;
         if let Err(error) = session.take_apart() {
-            eprintln!("a closing pane's child did not go quietly: {error}");
+            crate::say(format!(
+                "a closing pane's child did not go quietly: {error}"
+            ));
         }
     });
 }
@@ -826,10 +828,10 @@ fn retire_within(budget: Duration, teardown: impl FnOnce() + Send + 'static) {
             teardown();
             let spent = started.elapsed();
             if spent > budget {
-                eprintln!(
+                crate::say(format!(
                     "a pane took {} ms to close, on a thread of its own rather than the window's",
                     spent.as_millis()
-                );
+                ));
             }
             retirements().end();
         });
@@ -2761,7 +2763,7 @@ impl PtySession {
                 .into_inner()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Err(error) = dump.finish() {
-                eprintln!("BT_PTY_INPUT_DUMP finish failed: {error}");
+                crate::say(format!("BT_PTY_INPUT_DUMP finish failed: {error}"));
             }
         }
         self.shutdown()
@@ -2871,9 +2873,10 @@ impl PtySession {
             match join_within(READER_EXIT_BUDGET, reader) {
                 ReaderExit::Ended => {}
                 ReaderExit::StillReading => {
-                    eprintln!(
+                    crate::say(
                         "a pane closed while its reader was still inside a read on the \
                          pseudoconsole, and it was left to end with the pipe"
+                            .to_owned(),
                     );
                 }
             }
@@ -2918,6 +2921,28 @@ static SKIPPED_DOOR_ROAD: OnceLock<fn(&str)> = OnceLock::new();
 /// is ignored.
 pub fn say_skipped_doors_through(say: fn(&str)) {
     let _ = SKIPPED_DOOR_ROAD.set(say);
+}
+
+/// Where this crate's `stderr` lines go: the application's, once it installs its road
+/// ([`say_lines_through`]).
+static LINE_ROAD: OnceLock<fn(String)> = OnceLock::new();
+
+/// **Where this crate's `stderr` lines go from here on** (T-TRACE-SINK-OFF-THE-CALLING-THREAD,
+/// 0.4.9 plan row 51) — the shape of [`say_skipped_doors_through`] and of `bt-platform`'s
+/// `stderr_road`, which this crate cannot name. `bt-app`'s `main` installs
+/// `diagnostics::stderr_line`, which hands the line to whichever writer owns the run's `stderr`, so
+/// a session retired on the window thread writes nothing there. Installed once; a second install
+/// is ignored.
+pub fn say_lines_through(say: fn(String)) {
+    let _ = LINE_ROAD.set(say);
+}
+
+/// One line for this run's `stderr`, handed to the installed road ([`say_lines_through`]) — or,
+/// in a process that installed none (a test, a tool), to nobody. Never a write on this thread.
+pub(crate) fn say(line: String) {
+    if let Some(road) = LINE_ROAD.get() {
+        road(line);
+    }
 }
 
 /// **Say once that `what` was dropped without `door`, and what that leaves behind**, through the

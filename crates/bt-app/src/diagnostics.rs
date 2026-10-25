@@ -367,13 +367,93 @@ pub fn open_run_log(storage: &Path, now: &str, process_id: u32) -> Option<System
 /// Before [`enter_resident_run`] there is no resident log and this says nothing:
 /// the front door's output is [`eprintln!`]'s business and always was.
 pub fn note(text: &str) {
-    if let Some(log) = RESIDENT_LOG.get()
-        && let Some(queue) = writer(log)
-    {
+    note_on(log_queue(), resident_channel(), text);
+}
+
+/// [`note`], on the log's queue and the run's channel as given — so a test can hand it a queue
+/// of its own and a channel.
+fn note_on(queue: Option<&Queue>, channel: Option<Channel>, text: &str) {
+    if let Some(queue) = queue {
         Queue::offer(queue, text.to_owned());
     }
-    if resident_channel() == Some(Channel::Console) {
+    if channel == Some(Channel::Console) {
         crate::trace_sink::offer_stderr_line(text.to_owned());
+    }
+}
+
+/// This run's log writer's queue, started by the run's first line; `None` before the front door
+/// has closed.
+fn log_queue() -> Option<&'static Queue> {
+    writer(RESIDENT_LOG.get()?)
+}
+
+/// **One line for this run's `stderr`, handed to the writer that owns where `stderr` goes, and
+/// written by nobody who asked** (T-TRACE-SINK-OFF-THE-CALLING-THREAD, 0.4.9 plan row 51).
+///
+/// Every line this program writes to standard error comes here — `bt-app`'s own, and the crates
+/// below it through the roads `fn main` installs (`bt_viewport::trace::set_writer`,
+/// `bt_platform::stderr_road::install`, `bt_pty::say_lines_through`). Where it goes is the
+/// channel the run took, decided once by [`enter_resident_run`]:
+///
+/// - **[`Channel::Log`]**: `stderr` *is* `diagnostics.log`, so the line goes on [`Queue`], the
+///   file's one writer — the same queue [`note`] hands its lines to, so a note and a `stderr`
+///   line keep the order they were said in, and [`settle`]'s fence covers both. Never waits: a
+///   full queue drops the line and counts it.
+/// - **[`Channel::Console`]**: the console a trace run kept, through the trace sink's bounded
+///   queue ([`crate::trace_sink::offer_stderr_line`]), which drops rather than waits for a
+///   reader that stopped reading. Not into the file: a console run writes the file only its
+///   notes, as before.
+/// - **[`Channel::Nowhere`]**: nothing; `stderr` is silenced.
+/// - **Before the front door has closed** (no channel yet): written here, synchronously, on the
+///   console somebody typed at — the answer to the command line, as it always was. No request
+///   door exists yet: they are built with the event loop, after [`enter_resident_run`].
+pub fn stderr_line(text: String) {
+    stderr_line_on(log_queue(), resident_channel(), text);
+}
+
+/// [`stderr_line`], on the log's queue and the run's channel as given — so a test can hand it a
+/// queue of its own and a channel.
+fn stderr_line_on(queue: Option<&Queue>, channel: Option<Channel>, text: String) {
+    match channel {
+        Some(Channel::Log) => {
+            if let Some(queue) = queue {
+                Queue::offer(queue, text);
+            }
+        }
+        Some(Channel::Console) => {
+            crate::trace_sink::offer_stderr_line(text);
+        }
+        Some(Channel::Nowhere) => {}
+        None => at_the_front_door(&text),
+    }
+}
+
+/// [`stderr_line`] before the front door has closed: the console somebody typed at, written here.
+fn at_the_front_door(text: &str) {
+    eprintln!("{text}");
+}
+
+/// **One of the way out's own lines** — the error that ended the run, the run's budget, the
+/// footer — written after [`settle`] has put everything said before them on the disk, by `fn
+/// main` itself on its way out (no request door is left to wait).
+///
+/// In a Log run the line is appended here, synchronously, below every line the fence settled:
+/// the footer is then the file's last line, and a writer that never started does not take the
+/// footer with it. In a console run it goes to the trace sink's queue, which `fn main`'s trace
+/// flush (row 17) puts out after it; in a run whose streams are silenced, nowhere. Before the
+/// front door has closed, on the console, as [`stderr_line`] writes there.
+pub fn way_out_line(text: String) {
+    match resident_channel() {
+        Some(Channel::Log) => {
+            if let Some(log) = RESIDENT_LOG.get() {
+                append_note(log, &text);
+            }
+        }
+        Some(Channel::Console) => {
+            crate::trace_sink::offer_stderr_line(text);
+        }
+        Some(Channel::Nowhere) => {}
+        None => stderr_line(text),
     }
 }
 
@@ -405,7 +485,7 @@ fn writer(log: &Path) -> Option<&'static Queue> {
 pub fn settle(token: WaitToken<'_, doors::DiagnosticsSettle>) {
     if let Some(queue) = WRITER.get() {
         if let Some(why) = &queue.unstarted {
-            crate::trace_sink::stderr_line(unstarted_line(why));
+            way_out_line(unstarted_line(why));
         }
         Queue::settle(queue, token, SETTLE_WITHIN);
     }
@@ -1093,6 +1173,96 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    /// RED (T-TRACE-SINK-OFF-THE-CALLING-THREAD, row 51; mutation: `stderr_line_on`'s Log arm
+    /// writing the line where it is said, `append_note` in place of the offer) — **in a run whose
+    /// `stderr` is `diagnostics.log`, a `stderr` line is the log writer's: queued, not written,
+    /// and in the file once the writer has taken it.** It was a synchronous write to the same
+    /// file, on the thread that said it — a request door's, among them.
+    #[test]
+    fn a_stderr_line_in_a_log_run_is_queued_not_written() {
+        let directory = a_reports_directory("stderr-queued");
+        let log = directory.join(super::LOG_FILENAME);
+        let (queue, drain) = Queue::new(log.clone());
+        let (go, writer) = a_held_writer(drain);
+        super::stderr_line_on(
+            Some(&queue),
+            Some(Channel::Log),
+            "BT_WEB refused about:blank".to_owned(),
+        );
+        assert!(
+            lines_of(&log).is_empty(),
+            "the caller wrote the line itself: {:?}",
+            lines_of(&log)
+        );
+        go.send(()).expect("the writer is waiting");
+        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        assert_eq!(lines_of(&log), ["BT_WEB refused about:blank"]);
+        drop(queue);
+        writer.join().expect("the writer ends with its queue");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED (row 51; mutation: the Log arm writing beside the queue, as above) — **a note and a
+    /// `stderr` line said one after the other keep that order in the file, and the way out's fence
+    /// covers both**: one queue, one writer, for every line bound for `diagnostics.log`. Beside
+    /// the queue, the `stderr` line overtook the note still waiting for the writer.
+    #[test]
+    fn a_note_and_a_stderr_line_keep_their_order_under_one_fence() {
+        let directory = a_reports_directory("note-then-stderr");
+        let log = directory.join(super::LOG_FILENAME);
+        let (queue, drain) = Queue::new(log.clone());
+        let (go, writer) = a_held_writer(drain);
+        super::note_on(Some(&queue), Some(Channel::Log), "the note first");
+        super::stderr_line_on(
+            Some(&queue),
+            Some(Channel::Log),
+            "the stderr line".to_owned(),
+        );
+        super::note_on(Some(&queue), Some(Channel::Log), "the note last");
+        go.send(()).expect("the writer is waiting");
+        assert_eq!(
+            settled(&queue, Duration::from_secs(5)),
+            Settled::Written,
+            "the fence was answered only once every earlier line was written"
+        );
+        assert_eq!(
+            lines_of(&log),
+            ["the note first", "the stderr line", "the note last"]
+        );
+        drop(queue);
+        writer.join().expect("the writer ends with its queue");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED (row 51; mutation: the Console or the Nowhere arm offering to the log's queue) — **a
+    /// run that kept its console, or one whose streams are silenced, puts no `stderr` line into
+    /// `diagnostics.log`**: a console run's lines are the console's (the trace queue's), and its
+    /// file keeps only its notes, as before.
+    #[test]
+    fn a_console_or_silenced_runs_stderr_line_is_not_the_logs() {
+        let directory = a_reports_directory("stderr-not-the-logs");
+        let log = directory.join(super::LOG_FILENAME);
+        let (queue, drain) = Queue::new(log.clone());
+        let (go, writer) = a_held_writer(drain);
+        super::stderr_line_on(
+            Some(&queue),
+            Some(Channel::Console),
+            "for the console".to_owned(),
+        );
+        super::stderr_line_on(
+            Some(&queue),
+            Some(Channel::Nowhere),
+            "for nobody".to_owned(),
+        );
+        super::note_on(Some(&queue), Some(Channel::Console), "a note, for the file");
+        go.send(()).expect("the writer is waiting");
+        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        assert_eq!(lines_of(&log), ["a note, for the file"]);
+        drop(queue);
+        writer.join().expect("the writer ends with its queue");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// RED (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD) — **a line handed to the log is

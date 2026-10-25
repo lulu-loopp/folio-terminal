@@ -539,7 +539,9 @@ impl<B: Backend> Runtime<'_, B> {
                     ) {
                         Ok(floored) => floored,
                         Err(error) => {
-                            eprintln!("BT_WEB place failed: {error}");
+                            crate::diagnostics::stderr_line(format!(
+                                "BT_WEB place failed: {error}"
+                            ));
                             false
                         }
                     }
@@ -570,7 +572,7 @@ impl<B: Backend> Runtime<'_, B> {
         }
         self.window.web_keyboard = None;
         if let Err(error) = self.window.window.take_keyboard_focus() {
-            eprintln!("BT_WEB focus return failed: {error}");
+            crate::diagnostics::stderr_line(format!("BT_WEB focus return failed: {error}"));
         }
     }
 
@@ -634,7 +636,9 @@ impl<B: Backend> Runtime<'_, B> {
                 // before there is a pane order to hand it into.
                 webhost::WebOutcome::FocusLeftThePage { .. } => {
                     if let Err(error) = self.window.window.take_keyboard_focus() {
-                        eprintln!("BT_WEB focus return failed: {error}");
+                        crate::diagnostics::stderr_line(format!(
+                            "BT_WEB focus return failed: {error}"
+                        ));
                     }
                 }
                 webhost::WebOutcome::Cursor(id) => {
@@ -741,14 +745,18 @@ impl<B: Backend> Runtime<'_, B> {
                 // because the difference between "the policy stopped it" and "it
                 // went and came back" is not otherwise visible from outside the
                 // process.
-                webhost::WebOutcome::Refused(uri) => eprintln!("BT_WEB refused {uri}"),
+                webhost::WebOutcome::Refused(uri) => {
+                    crate::diagnostics::stderr_line(format!("BT_WEB refused {uri}"))
+                }
                 // **A window the page asked for** (F-SWEEP-048, #27): a new web pane, or the
                 // refusal said where the page is — the line a refused link in a document gets.
                 webhost::WebOutcome::NewWindow(webhost::NewWindow::Open(url)) => {
                     self.open_web_page_beside(leaf, &url)?;
                 }
                 webhost::WebOutcome::NewWindow(webhost::NewWindow::Refused(uri)) => {
-                    eprintln!("BT_WEB refused a new window for {uri}");
+                    crate::diagnostics::stderr_line(format!(
+                        "BT_WEB refused a new window for {uri}"
+                    ));
                     let surface = self.surface_of_page(leaf);
                     let refusal = crate::LinkRefusal::of_address(&uri);
                     self.say_address_refused(surface, &uri, refusal)?;
@@ -757,10 +765,14 @@ impl<B: Backend> Runtime<'_, B> {
                 // seat itself; this is the residue, and it goes where `BT_DPI`
                 // goes for its reason — a fact with nowhere to be drawn is still
                 // a fact.
-                webhost::WebOutcome::Fault(text) => eprintln!("BT_WEB {text}"),
+                webhost::WebOutcome::Fault(text) => {
+                    crate::diagnostics::stderr_line(format!("BT_WEB {text}"))
+                }
                 // Only a parked spare says this, and a pane's seat is never parked: its owner
                 // (`web_spare`) reads it, and a window has nothing to add.
-                webhost::WebOutcome::Retired(why) => eprintln!("BT_WEB {why}"),
+                webhost::WebOutcome::Retired(why) => {
+                    crate::diagnostics::stderr_line(format!("BT_WEB {why}"))
+                }
                 webhost::WebOutcome::FindMatches { count, active } => {
                     self.web_find_reported(count, active)?;
                 }
@@ -990,7 +1002,9 @@ impl<B: Backend> Runtime<'_, B> {
         // none. The arm that used to stand here — "whichever pane of this tab
         // already holds a page" — is what made a second page unreachable.
         let Some(PreviewSurface::Seat(leaf)) = self.preview_landing_surface() else {
-            eprintln!("BT_WEB no preview seat could be opened for {url}");
+            crate::diagnostics::stderr_line(format!(
+                "BT_WEB no preview seat could be opened for {url}"
+            ));
             return Ok(());
         };
         let seat = leaf.seat;
@@ -1079,7 +1093,7 @@ impl<B: Backend> Runtime<'_, B> {
             // What is left here is the one failure that is not the engine's: no
             // `%LOCALAPPDATA%`, so there is no profile for any engine to use and
             // no seat to hang a card on.
-            Err(error) => eprintln!("BT_WEB {error}"),
+            Err(error) => crate::diagnostics::stderr_line(format!("BT_WEB {error}")),
         }
         Ok(())
     }
@@ -1416,7 +1430,7 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some(web) = self.window.web.get(&leaf)
             && let Err(error) = web.open_dev_tools()
         {
-            eprintln!("BT_WEB {error}");
+            crate::diagnostics::stderr_line(format!("BT_WEB {error}"));
         }
         Ok(())
     }

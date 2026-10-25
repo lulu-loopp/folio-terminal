@@ -9146,7 +9146,7 @@ pub(crate) fn save_notice(outcome: SaveOutcome) -> String {
         SaveOutcome::SavedOrdinarily => preview_saved_ordinarily_notice().to_owned(),
         SaveOutcome::Conflict => preview_conflict_notice().to_owned(),
         SaveOutcome::Failed(error) => {
-            eprintln!("recoverable preview save failure: {error}");
+            crate::diagnostics::stderr_line(format!("recoverable preview save failure: {error}"));
             crate::i18n::not_saved(&error)
         }
     }
@@ -9562,7 +9562,10 @@ pub fn disable_preview_worker_state(running: &mut bool, notice_pending: &mut boo
     }
     *running = false;
     *notice_pending = true;
-    eprintln!("file preview reading worker stopped; terminal input and output remain available");
+    crate::diagnostics::stderr_line(
+        "file preview reading worker stopped; terminal input and output remain available"
+            .to_owned(),
+    );
     true
 }
 

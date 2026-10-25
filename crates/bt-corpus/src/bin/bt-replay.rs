@@ -23,6 +23,7 @@ const HEADLESS_WIDTH: u32 = 1_200;
 const HEADLESS_HEIGHT: u32 = 1_200;
 
 fn main() -> Result<()> {
+    bt_corpus::say_lines_on_stderr();
     bt_corpus::install_host_answers();
     // `BT_PERF_TRACE`, read here once and handed to the crates that time their own work
     // (`bt_viewport::trace::perf`, T-DIAGNOSTIC-DOORS-AT-THE-ENTRY): they read no environment.

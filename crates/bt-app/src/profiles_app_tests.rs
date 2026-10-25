@@ -791,10 +791,14 @@ fn the_attention_trace_writes_one_line_per_decision_and_none_otherwise() {
         bt_testpath::unique_name("bt-attention-trace-stations")
     ));
     let _ = std::fs::remove_file(&path);
-    let trace = crate::trace::Trace::create(&path, "# pin");
+    let capture = crate::trace_sink::Capture::new();
+    let trace = crate::trace::Trace::create(&path, "# pin", capture.queue());
     let read = |from: usize| -> Vec<String> {
+        capture.write_out();
+        // The writer creates the file with its first line: a trace nothing has been said to
+        // yet has no file.
         std::fs::read_to_string(&path)
-            .expect("the trace file was created")
+            .unwrap_or_default()
             .lines()
             .skip(1 + from)
             .map(|line| {
