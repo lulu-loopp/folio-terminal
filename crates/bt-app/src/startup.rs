@@ -100,9 +100,155 @@ pub(crate) fn resume<Answers, Window, Tabs, Error>(
     Ok((window, tabs))
 }
 
+/// **A process-wide value `fn main` settles before anything reads it**
+/// (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP; the side-effects contract C1).
+///
+/// A lazily initialised cell pays its initializer on whichever read comes first, and when that
+/// initializer touches the disk the first read may be a request door on the window thread. This
+/// cell has no initializer a read can run: [`settle`](Self::settle) is the one call that makes the
+/// value, and `main` makes it before its first branch or before the loop (each cell's own doc
+/// says which, and `window_waits_tests`' pinned writers hold the place). A read before it is a
+/// start in the wrong order and panics with the cell's name: there is no answer it could give
+/// that is not the effect it exists to keep off the read.
+///
+/// **A test process has no `main`**, and about six hundred of this crate's tests read the profile
+/// table through a window they build. So a cell may name, for test builds only, what a test
+/// process settles it with on its first read ([`settled_in_a_test_by`](Self::settled_in_a_test_by)):
+/// the same seed `main` settles the profile table with, and a scratch folder of the test
+/// process's own for the data directory — never the person's `%APPDATA%`. The product build has
+/// no such arm; the order there is proven by the pins and the witnesses.
+pub(crate) struct SettledOnce<T: 'static> {
+    cell: std::sync::OnceLock<T>,
+    /// What the value is, for the panic of a read that came first.
+    what: &'static str,
+    /// What a test process settles the cell with on its first read, when the cell names one.
+    #[cfg(test)]
+    in_a_test: Option<fn() -> T>,
+}
+
+impl<T: 'static> SettledOnce<T> {
+    pub(crate) const fn new(what: &'static str) -> Self {
+        Self {
+            cell: std::sync::OnceLock::new(),
+            what,
+            #[cfg(test)]
+            in_a_test: None,
+        }
+    }
+
+    /// [`new`](Self::new), whose first read in a test process settles it by `make`.
+    #[cfg(test)]
+    pub(crate) const fn settled_in_a_test_by(what: &'static str, make: fn() -> T) -> Self {
+        Self {
+            cell: std::sync::OnceLock::new(),
+            what,
+            in_a_test: Some(make),
+        }
+    }
+
+    /// Makes the value by `make` on the first call and answers its witness; a later call runs
+    /// nothing and answers the first value's witness.
+    pub(crate) fn settle(&'static self, make: impl FnOnce() -> T) -> Settled<T> {
+        Settled {
+            value: self.cell.get_or_init(make),
+        }
+    }
+
+    /// The settled value.
+    ///
+    /// # Panics
+    ///
+    /// Before [`settle`](Self::settle): the start's order is `main`'s, so a read that comes first
+    /// is a defect of the code, not of the machine.
+    pub(crate) fn get(&self) -> &T {
+        match self.cell.get() {
+            Some(value) => value,
+            None => self.unsettled(),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn unsettled(&self) -> &T {
+        panic!(
+            "{} is read before `main` settled it (startup::SettledOnce)",
+            self.what
+        )
+    }
+
+    /// A test build's read of an unsettled cell: settled by the cell's test value when it names
+    /// one, the product's panic when it does not.
+    #[cfg(test)]
+    fn unsettled(&self) -> &T {
+        match self.in_a_test {
+            Some(make) => self.cell.get_or_init(make),
+            None => panic!(
+                "{} is read before `main` settled it (startup::SettledOnce)",
+                self.what
+            ),
+        }
+    }
+}
+
+/// **The witness that a [`SettledOnce`] was settled**: only [`SettledOnce::settle`] makes one,
+/// so a function that takes it cannot be called before the settle ran. `FolioApp::new` takes the
+/// two the loop's process settles, which makes "settled before `run_app`" a fact of the types.
+pub(crate) struct Settled<T: 'static> {
+    value: &'static T,
+}
+
+impl<T: 'static> Settled<T> {
+    /// The value the settle made.
+    pub(crate) fn value(&self) -> &'static T {
+        self.value
+    }
+
+    /// A witness over a value of a test's own, for a test that builds the loop's application
+    /// without settling the process's cells (a headless `FolioApp` must not resolve `%APPDATA%`).
+    #[cfg(test)]
+    pub(crate) fn planted(value: &'static T) -> Self {
+        Self { value }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::SettledOnce;
     use crate::headless::{self, StartupStep};
+
+    /// RED (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP) — **a settled cell has no initializer a read can
+    /// run**: a read before the settle panics with the cell's name instead of making the value.
+    ///
+    /// MUTATION: drop the cell's name from the test arm's panic (`panic!("read before settled")`)
+    /// — the panic no longer says which cell was read first.
+    #[test]
+    fn a_settled_cell_read_before_its_settle_panics() {
+        static UNSETTLED: SettledOnce<u32> = SettledOnce::new("the planted value");
+        let read = std::panic::catch_unwind(|| *UNSETTLED.get());
+        let said = read.expect_err("a read before the settle panics");
+        let said = said
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or_default();
+        assert!(said.contains("the planted value"), "{said}");
+    }
+
+    /// RED (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP) — **a cell is settled once**: the second settle
+    /// runs nothing and answers the first value, and a read after it answers that value too.
+    ///
+    /// MUTATION: make `SettledOnce::settle` make the value on every call
+    /// (`Box::leak(Box::new(make()))`) — the counter reads 2 and the second witness holds 2.
+    #[test]
+    fn a_settled_cell_makes_its_value_once() {
+        static CELL: SettledOnce<usize> = SettledOnce::new("the counted value");
+        static MADE: AtomicUsize = AtomicUsize::new(0);
+        let make = || MADE.fetch_add(1, Ordering::Relaxed) + 1;
+        let first = CELL.settle(make);
+        let second = CELL.settle(make);
+        assert_eq!(MADE.load(Ordering::Relaxed), 1);
+        assert_eq!((*first.value(), *second.value(), *CELL.get()), (1, 1, 1));
+    }
 
     /// The walk's answers as two looks land them: a PowerShell 7 row first, a Windows PowerShell
     /// row (its name in Chinese) once the window is up.

@@ -25,6 +25,7 @@ use bt_persist::{
 };
 
 use crate::document_request::{DocumentState, QuitDocument, ReadNews};
+use crate::startup::{Settled, SettledOnce};
 
 /// The name the session document wears on disk, which is also what a notice
 /// about it has to say out loud — [`KEYBINDINGS_FILE_NAME`]'s rule, one file
@@ -4242,64 +4243,101 @@ fn storage_location(
 }
 
 /// `%APPDATA%\Folio\` on Windows, `~/Library/Application Support/Folio` on
-/// macOS — [`storage_location`] holds the rule and the reasons.
+/// macOS — [`storage_location`] holds the rule and the reasons — as
+/// [`settle_storage_dir`] settled it.
 ///
-/// **Resolved once per process, and the move a rename owes the user happens on
-/// that first call.** Three callers ask for this directory — the session store,
-/// the settings store and the bash script's install path — and whichever asks
-/// first is the one that pays for the relocation; the other two find it done.
-/// The alternative, a relocation stapled to `main`, would leave the answer
-/// depending on whether that line ran, which is exactly the kind of ordering a
-/// `OnceLock` exists to remove. On a platform with no previous name there is
-/// nothing to pay for and the directory is the answer straight away.
+/// **Resolved once per process, and the move a rename owes the user is paid by
+/// one named call.** Until 2026-10-24 this was a lazily initialised cell, and
+/// the first caller — whichever it was — paid for the relocation; the doc here
+/// argued that a relocation stapled to `main` would leave the answer depending
+/// on whether that line ran. **Reversed on purpose**
+/// (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP): a cell any caller may initialise is a
+/// cell a request door on the window thread may initialise, and the side-effects contract C1 needs that
+/// proven impossible, not merely unlikely. So the move is
+/// [`settle_storage_dir`]'s, `main` calls it after the update pass and before
+/// the hand-over (its pin in `window_waits_tests`), its witness is what
+/// `FolioApp::new` takes, and a read before it panics rather than moving
+/// anything — the order no longer depends silently on a line, it is held by the
+/// types and by the pinned place.
+///
+/// # Panics
+///
+/// Before [`settle_storage_dir`] ran in this process.
 pub fn storage_dir() -> PathBuf {
-    static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
-    DIRECTORY
-        .get_or_init(|| {
-            // A closure rather than `std::env::var_os` itself: the function item
-            // is generic over the key's type, and handing it over directly binds
-            // one lifetime where the parameter asks for any.
-            let location = storage_location(bt_platform::host_platform(), |name: &str| {
-                std::env::var_os(name)
-            });
-            let current = location.directory;
-            let Some(previous) = location.previous else {
-                return current;
-            };
-            // **An update's trial moves nothing** (`update_trial`, F-7): it runs
-            // in the folder the old build left, as a start whose move failed
-            // does below. The move is the next start's; this one's folder is in
-            // use by then.
-            if crate::update_trial::defer(crate::update_trial::Writer::DataFolderMove) {
-                return as_it_stands(current, previous);
-            }
-            match relocate(&previous, &current) {
-                Relocation::Nothing | Relocation::AlreadyHere => current,
-                Relocation::Moved => {
-                    eprintln!(
-                        "BT_PERSIST moved {} to {}",
-                        previous.display(),
-                        current.display()
-                    );
-                    current
-                }
-                Relocation::Failed(error) => {
-                    // Fail-soft, and deliberately the *old* directory rather than
-                    // an empty new one: a user whose files could not be moved
-                    // keeps reading and writing the files they already have.
-                    // Starting fresh beside them would present as "the terminal
-                    // forgot everything" while the data sat one directory away.
-                    eprintln!(
-                        "BT_PERSIST could not move {} to {}: {error} — continuing in the old \
-                         directory",
-                        previous.display(),
-                        current.display()
-                    );
-                    previous
-                }
-            }
-        })
-        .clone()
+    DIRECTORY.get().clone()
+}
+
+/// The data directory, once [`settle_storage_dir`] has made it.
+#[cfg(not(test))]
+static DIRECTORY: SettledOnce<PathBuf> = SettledOnce::new(DIRECTORY_IS);
+
+/// A test process's data directory is a scratch folder of its own, never `%APPDATA%`: a test
+/// that reads [`storage_dir`] without settling it (it has no `main`) is settled there. A test
+/// that drives a start in a process of its own calls [`settle_storage_dir`] as `main` does.
+#[cfg(test)]
+static DIRECTORY: SettledOnce<PathBuf> = SettledOnce::settled_in_a_test_by(DIRECTORY_IS, || {
+    bt_testpath::temp_path("bt-app-test-process-data-directory")
+});
+
+/// What [`DIRECTORY`] holds, for the panic of a read before it is settled.
+const DIRECTORY_IS: &str = "the data directory (persist::storage_dir)";
+
+/// **Settle the data directory: resolve it, and pay the move a rename owes**,
+/// once per process (later calls answer the first). Called by `fn main` in the
+/// claim, after `update_startup::pass` and before the hand-over, and by the
+/// `--remove-shell-integration` door, which reads the folder it removes from;
+/// a process that must leave the folder as it found it reads
+/// [`storage_dir_as_it_stands`] or [`storage_dir_unmoved`] instead and never
+/// settles.
+pub fn settle_storage_dir() -> Settled<PathBuf> {
+    DIRECTORY.settle(relocated_storage_dir)
+}
+
+/// [`settle_storage_dir`]'s body: the directory, moved from its previous name
+/// when one is owed.
+fn relocated_storage_dir() -> PathBuf {
+    // A closure rather than `std::env::var_os` itself: the function item
+    // is generic over the key's type, and handing it over directly binds
+    // one lifetime where the parameter asks for any.
+    let location = storage_location(bt_platform::host_platform(), |name: &str| {
+        std::env::var_os(name)
+    });
+    let current = location.directory;
+    let Some(previous) = location.previous else {
+        return current;
+    };
+    // **An update's trial moves nothing** (`update_trial`, F-7): it runs
+    // in the folder the old build left, as a start whose move failed
+    // does below. The move is the next start's; this one's folder is in
+    // use by then.
+    if crate::update_trial::defer(crate::update_trial::Writer::DataFolderMove) {
+        return as_it_stands(current, previous);
+    }
+    match relocate(&previous, &current) {
+        Relocation::Nothing | Relocation::AlreadyHere => current,
+        Relocation::Moved => {
+            eprintln!(
+                "BT_PERSIST moved {} to {}",
+                previous.display(),
+                current.display()
+            );
+            current
+        }
+        Relocation::Failed(error) => {
+            // Fail-soft, and deliberately the *old* directory rather than
+            // an empty new one: a user whose files could not be moved
+            // keeps reading and writing the files they already have.
+            // Starting fresh beside them would present as "the terminal
+            // forgot everything" while the data sat one directory away.
+            eprintln!(
+                "BT_PERSIST could not move {} to {}: {error} — continuing in the old \
+                 directory",
+                previous.display(),
+                current.display()
+            );
+            previous
+        }
+    }
 }
 
 /// **The data directory as the disk has it now, with nothing moved and nothing

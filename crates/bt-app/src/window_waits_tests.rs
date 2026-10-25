@@ -3811,8 +3811,11 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
 
 // ── assertion 3: the pinned writers (§3.2, §4.2, (c)5, (c)6, (c)7) ──────────────────────────
 
-/// One pinned call of a role or phase writer: who makes it, and the landmark it follows.
+/// One pinned call of a role or phase writer, or of a settle `main` makes before the loop: the
+/// module path it is spelled through (`module::writer(…)`, the only spelling the guard reads),
+/// who makes it, and the landmark it follows.
 struct Pin {
+    module: &'static str,
     writer: &'static str,
     owner: &'static str,
     after: Option<&'static str>,
@@ -3842,93 +3845,133 @@ const LANDMARKS: [(&str, &[&str]); 4] = [
 /// Windows transaction since U-23. B-ENDSESSION adds the system's end's write step, `exiting`
 /// then `quit_abandoned` around the one admitted wait in `session_end::settle` (the quit's `Write`
 /// on the held document; nothing is torn down).
-const PINS: [Pin; 18] = [
+const PINS: [Pin; 21] = [
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::main",
         after: None,
     },
+    // T-LAZY-INITIALIZERS-BEFORE-THE-LOOP (C1): the profile table, settled as `main`'s first
+    // statement — before `parse`, so before every branch; the data directory, settled by the
+    // removal door (before `parse`; its process has no window) and in the claim after the
+    // update pass (after `parse`, before `hand_over`).
     Pin {
+        module: "profiles",
+        writer: "settle_registry",
+        owner: "bt-app crate::main",
+        after: None,
+    },
+    Pin {
+        module: "persist",
+        writer: "settle_storage_dir",
+        owner: "bt-app crate::main",
+        after: None,
+    },
+    Pin {
+        module: "persist",
+        writer: "settle_storage_dir",
+        owner: "bt-app crate::main",
+        after: Some("parse"),
+    },
+    Pin {
+        module: "admission",
         writer: "enter_window_thread",
         owner: "bt-app crate::main",
         after: Some("parse"),
     },
     Pin {
+        module: "admission",
         writer: "loop_running",
         owner: "bt-app crate::FolioApp::new_events",
         after: Some("Init"),
     },
     Pin {
+        module: "admission",
         writer: "exiting",
         owner: "bt-app crate::App::finish",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "exiting",
         owner: "bt-app crate::FolioApp::settle_quit",
         after: Some("Write"),
     },
     Pin {
+        module: "admission",
         writer: "exiting",
         owner: "bt-app crate::main",
         after: Some("build"),
     },
     Pin {
+        module: "admission",
         writer: "exiting",
         owner: "bt-app crate::main",
         after: Some("run_app"),
     },
     Pin {
+        module: "admission",
         writer: "quit_abandoned",
         owner: "bt-app crate::FolioApp::settle_quit",
         after: Some("Abandon"),
     },
     Pin {
+        module: "admission",
         writer: "exiting",
         owner: "bt-app crate::session_end::settle",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "quit_abandoned",
         owner: "bt-app crate::session_end::settle",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::elevated_host::serve",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::attention_wire::payload_on_stdin",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::explorer_menu::removal_waited_on",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::uninstall::standalone",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::uninstall::remover_standalone",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::update_apply_macos::run_here",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::update_apply_windows::run_here",
         after: None,
     },
     Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::update_recover::run_here",
         after: None,
@@ -4032,16 +4075,27 @@ fn landmark_before(
     found
 }
 
-/// **The role and phase writers are called only where they are pinned**, each spelled as the
-/// call `admission::writer(…)` — an import or a value would let one be called where no pin can
+/// **The role and phase writers, and `main`'s settles, are called only where they are pinned**,
+/// each spelled as the call through its pin's module path, `module::writer(…)` (`admission::` for
+/// the role and phase writers) — an import or a value would let one be called where no pin can
 /// see.
 fn the_role_and_phase_writers_are_called_only_where_they_are_pinned(world: &World) -> Vec<String> {
     let mut failures = Vec::new();
-    let writers: BTreeSet<&str> = PINS.iter().map(|pin| pin.writer).collect();
+    let mut writers: BTreeMap<&str, &str> = BTreeMap::from([("enter_callback", "admission")]);
+    for pin in &PINS {
+        if let Some(module) = writers.insert(pin.writer, pin.module)
+            && module != pin.module
+        {
+            failures.push(format!(
+                "the pins name `{}` through two module paths, `{module}::` and `{}::`",
+                pin.writer, pin.module
+            ));
+        }
+    }
     let mut found: Vec<(String, String, Option<&str>)> = Vec::new();
     let mut callbacks: BTreeMap<(String, String, String), usize> = BTreeMap::new();
     for src in &world.srcs {
-        for writer in writers.iter().copied().chain(["enter_callback"]) {
+        for (&writer, &module) in &writers {
             for at in src.named(writer) {
                 if !src.in_product(at) {
                     continue;
@@ -4054,12 +4108,12 @@ fn the_role_and_phase_writers_are_called_only_where_they_are_pinned(world: &Worl
                 }
                 let spelled = before.len() >= 2
                     && src.is(before.last(), "::")
-                    && src.is(before.get(before.len() - 2), "admission")
+                    && src.is(before.get(before.len() - 2), module)
                     && src.is(after.get(1), "(");
                 if !spelled {
                     failures.push(format!(
                         "`{writer}` is named at {} ({}) other than as the call \
-                         `admission::{writer}(…)`",
+                         `{module}::{writer}(…)`",
                         src.location(at),
                         src.owner_of(at)
                     ));
@@ -4095,7 +4149,8 @@ fn the_role_and_phase_writers_are_called_only_where_they_are_pinned(world: &Worl
     found.sort();
     let said = |(writer, owner, after): &(String, String, Option<&str>)| {
         format!(
-            "`admission::{writer}` in `{owner}`{}",
+            "`{}::{writer}` in `{owner}`{}",
+            writers.get(writer.as_str()).copied().unwrap_or_default(),
             after.map(|l| format!(" after `{l}`")).unwrap_or_default()
         )
     };
