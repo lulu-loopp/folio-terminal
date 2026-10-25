@@ -945,7 +945,9 @@ impl<B: Backend> Runtime<'_, B> {
         });
         if let Err(error) = system_caret {
             hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
-                eprintln!("Chinese IME system-caret update ignored: {error}");
+                crate::diagnostics::stderr_line(format!(
+                    "Chinese IME system-caret update ignored: {error}"
+                ));
             });
         }
     }

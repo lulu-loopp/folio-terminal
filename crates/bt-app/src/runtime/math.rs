@@ -2567,11 +2567,15 @@ impl<B: Backend> Runtime<'_, B> {
         match (result, anchor) {
             (Ok(true), Some((target, anchor))) => self.copy_math_latex(target, &anchor)?,
             (Ok(true), None) => {
-                eprintln!("recoverable formula context-menu result had no pending anchor");
+                crate::diagnostics::stderr_line(
+                    "recoverable formula context-menu result had no pending anchor".to_owned(),
+                );
             }
             (Ok(false), _) => {}
             (Err(error), _) => {
-                eprintln!("recoverable formula context-menu failure: {error}");
+                crate::diagnostics::stderr_line(format!(
+                    "recoverable formula context-menu failure: {error}"
+                ));
             }
         }
         Ok(())

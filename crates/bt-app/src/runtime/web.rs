@@ -1277,7 +1277,7 @@ impl<B: Backend> Runtime<'_, B> {
         let (_, failure) =
             webhost::tell_all_seat_its_color_scheme(self.window.web.values_mut(), scheme);
         if let Some(error) = failure {
-            eprintln!("BT_WEB {error}");
+            crate::diagnostics::stderr_line(format!("BT_WEB {error}"));
         }
     }
 
@@ -1457,7 +1457,7 @@ impl<B: Backend> Runtime<'_, B> {
             WebHeadVerb::DevTools => Ok(()),
         };
         if let Err(error) = outcome {
-            eprintln!("BT_WEB {error}");
+            crate::diagnostics::stderr_line(format!("BT_WEB {error}"));
         }
         self.refresh_chrome();
         self.present_chrome_change()
@@ -1779,7 +1779,7 @@ impl<B: Backend> Runtime<'_, B> {
             return;
         };
         if let Err(error) = web.send_mouse(event, (position.x as i32, position.y as i32), now) {
-            eprintln!("BT_WEB {error}");
+            crate::diagnostics::stderr_line(format!("BT_WEB {error}"));
         }
     }
 
@@ -1906,7 +1906,7 @@ impl<B: Backend> Runtime<'_, B> {
             });
             if let Some(web) = self.window.web.get(&leaf) {
                 if let Err(error) = web.focus_page() {
-                    eprintln!("BT_WEB focus failed: {error}");
+                    crate::diagnostics::stderr_line(format!("BT_WEB focus failed: {error}"));
                 }
                 // **The receipt is written where the keyboard is handed over**,
                 // and this is the only place this window ever hands it over.
@@ -1975,7 +1975,7 @@ impl<B: Backend> Runtime<'_, B> {
                         }
                     }
                     Ok(None) => {}
-                    Err(error) => eprintln!("BT_WEB {error}"),
+                    Err(error) => crate::diagnostics::stderr_line(format!("BT_WEB {error}")),
                 }
             }
             return;

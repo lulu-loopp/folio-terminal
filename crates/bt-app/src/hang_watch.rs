@@ -3788,10 +3788,10 @@ pub fn run_selftest_if_due() {
     if SELFTEST_FIRED.swap(true, Ordering::Relaxed) {
         return;
     }
-    eprintln!(
+    crate::diagnostics::stderr_line(format!(
         "BT_HANG_SELFTEST: holding the window thread for {}s on purpose",
         hold.as_secs()
-    );
+    ));
     at(Station::SelfTest);
     std::thread::sleep(hold);
 }

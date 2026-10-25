@@ -195,7 +195,11 @@ impl Runtime<'_, Native> {
         // the export's dialog is not a reason for a window not to open. A window
         // without one says so when `Export…` is pressed.
         let save_picker = bt_platform::SaveFilePicker::new(native)
-            .inspect_err(|error| eprintln!("recoverable save dialog install failure: {error}"))
+            .inspect_err(|error| {
+                crate::diagnostics::stderr_line(format!(
+                    "recoverable save dialog install failure: {error}"
+                ))
+            })
             .ok();
         // **Spike Q5 item 3, paid at last.** `WM_NCCALCSIZE` has just made this
         // window's client area its whole outer rectangle, so what winit built is
@@ -247,8 +251,7 @@ impl Runtime<'_, Native> {
                 // and a photograph of a window in the wrong place cannot say
                 // which of them was wrong. Printed only when a window is actually
                 // being placed, which is once per tear-out.
-                eprintln!(
-                    "BT_TEAR_OUT pointer={},{} grab={:?} size={:?} dpi={dpi} work={},{} {}x{} rect={},{} {}x{}",
+                crate::diagnostics::stderr_line(format!("BT_TEAR_OUT pointer={},{} grab={:?} size={:?} dpi={dpi} work={},{} {}x{} rect={},{} {}x{}",
                     pointer.0,
                     pointer.1,
                     grip.grab_logical,
@@ -260,8 +263,7 @@ impl Runtime<'_, Native> {
                     rect.left,
                     rect.top,
                     rect.right - rect.left,
-                    rect.bottom - rect.top,
-                );
+                    rect.bottom - rect.top,));
                 rect
             });
         // Kept, because this rectangle is also the one this window goes into the vault holding —
@@ -622,7 +624,7 @@ impl<B: Backend> Runtime<'_, B> {
         if (self.is_quake_window() || self.app.settings_store.loaded().always_on_top)
             && let Err(error) = self.window.window.set_topmost(true)
         {
-            eprintln!("recoverable always-on-top failure: {error}");
+            crate::diagnostics::stderr_line(format!("recoverable always-on-top failure: {error}"));
         }
         // Before the backdrop and not after it, though the measurement says
         // either would do: this is also the border's colour, and a window that
@@ -632,7 +634,9 @@ impl<B: Backend> Runtime<'_, B> {
             && self.app.settings_store.loaded().acrylic
             && let Err(error) = self.window.window.set_backdrop(true)
         {
-            eprintln!("recoverable system backdrop failure: {error}");
+            crate::diagnostics::stderr_line(format!(
+                "recoverable system backdrop failure: {error}"
+            ));
         }
         // **The pinned tabs' preview panes ask for their files here**, and this
         // is the earliest they can: the worker is a field of the runtime, so
@@ -1371,7 +1375,7 @@ impl<B: Backend> Runtime<'_, B> {
         };
         self.window.dwm_dark_mode = Some(dark);
         if let Err(error) = self.window.window.set_dark_mode(dark) {
-            eprintln!("recoverable dark-mode failure: {error}");
+            crate::diagnostics::stderr_line(format!("recoverable dark-mode failure: {error}"));
         }
         Ok(())
     }
@@ -1428,7 +1432,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// on the command line either way.
     pub(in crate::runtime) fn bring_this_window_forward(&mut self) {
         if let Err(error) = crate::bring_owned_window_forward(&self.window.window) {
-            eprintln!("BT_DROP {error}");
+            crate::diagnostics::stderr_line(format!("BT_DROP {error}"));
         }
     }
 
@@ -2104,7 +2108,7 @@ impl<B: Backend> Runtime<'_, B> {
         self.reoffer_ime_cursor_area();
         for web in self.window.web.values() {
             if let Err(error) = web.parent_window_moved() {
-                eprintln!("BT_WEB {error}");
+                crate::diagnostics::stderr_line(format!("BT_WEB {error}"));
             }
         }
         Ok(())

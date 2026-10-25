@@ -154,7 +154,9 @@ fn guarded<T>(what: &str, refusal: T, body: impl FnOnce() -> T) -> T {
                 .map(|text| (*text).to_owned())
                 .or_else(|| panic.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| String::from("a panic with no message"));
-            eprintln!("BT_MAC_WEB a panic inside {what} became a refusal: {said}");
+            crate::stderr_road::say(format!(
+                "BT_MAC_WEB a panic inside {what} became a refusal: {said}"
+            ));
             refusal
         }
     }
@@ -280,7 +282,7 @@ impl Shared {
             .map(|text| text.to_string())
             .unwrap_or_default();
         let described = error.localizedDescription().to_string();
-        eprintln!("BT_MAC_WEB a navigation failed: {described}");
+        crate::stderr_road::say(format!("BT_MAC_WEB a navigation failed: {described}"));
         self.push(WebEvent::NavigationCompleted {
             uri,
             success: false,
@@ -2184,7 +2186,9 @@ fn release_the_view(view: &WKWebView) {
         // Nothing here is safe off the window's thread, and a close that refused
         // would be a close nobody could perform on the way out of a process. The
         // view is dropped by the caller either way.
-        eprintln!("BT_MAC_WEB a page was let go of off the window's thread");
+        crate::stderr_road::say(
+            "BT_MAC_WEB a page was let go of off the window's thread".to_owned(),
+        );
         return;
     }
     // SAFETY: a live view on the main thread.

@@ -1,6 +1,10 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+// Every `stderr` line goes to the writer that owns where `stderr` points, never written by the
+// thread that said it (T-TRACE-SINK-OFF-THE-CALLING-THREAD): `bt-app`'s `diagnostics::stderr_line`, or
+// the road `fn main` installs in a crate below it. Tests: `clippy.toml`'s `allow-print-in-tests`.
+#![deny(clippy::print_stderr)]
 
 mod cjk_fonts;
 use cjk_fonts::{CjkFace, FontSystem, match_cjk_attrs, match_grid_attrs, proportional_cjk_family};
@@ -4131,10 +4135,10 @@ fn text_upload_refused(
             // Once per **lane**, not once per run: see [`GlyphRefusalLog`].
             if !log.reported.contains(lane) {
                 log.reported.insert(lane);
-                eprintln!(
+                bt_viewport::trace::line(format!(
                     "Folio glyph atlas reached the device limit on the {} lane; presenting without text and retrying",
                     lane.name()
-                );
+                ));
             }
             log.frames += 1;
             *text_complete = false;
@@ -4407,7 +4411,7 @@ impl DeviceLossPilot {
             self.spent += 1;
             match machine.rebuild() {
                 Ok(()) => {
-                    eprintln!("{}", note_a_rebuilt_device(&mut self.rebuilds));
+                    bt_viewport::trace::line(note_a_rebuilt_device(&mut self.rebuilds));
                     return Flight::Rebuilt(self.rebuilds);
                 }
                 Err(error) => last = Some(error),
@@ -4587,10 +4591,10 @@ fn count_surface_failure(failure: SurfaceFailure) {
         SurfaceFailure::Outdated | SurfaceFailure::Lost | SurfaceFailure::Validation => return,
     };
     if a_decade_was_reached(reached) {
-        eprintln!(
+        bt_viewport::trace::line(format!(
             "Folio skipped {reached} frames because {why} — surface acquires: {}",
             surface_failure_tally()
-        );
+        ));
     }
 }
 
@@ -6895,7 +6899,7 @@ impl DeviceResources {
                     DEVICE_LOST_HEADLINE,
                     &format!("{reason:?}: {message}"),
                 ) {
-                    eprintln!("{line}");
+                    bt_viewport::trace::line(line.to_string());
                 }
             });
         }
@@ -6916,7 +6920,7 @@ impl DeviceResources {
                 if let Some(line) =
                     note_what_the_device_said(&latch, DEVICE_FAULT_HEADLINE, &error.to_string())
                 {
-                    eprintln!("{line}");
+                    bt_viewport::trace::line(line.to_string());
                 }
             }));
         }
@@ -7903,7 +7907,7 @@ impl GpuContext {
                 // the numbering — see [`note_a_repack`]. A re-pack the log does
                 // not carry is a re-pack nobody on the machine it happened on
                 // can count, and the count is the whole diagnosis.
-                eprintln!("{}", note_a_repack(&mut self.glyph_atlas_refits));
+                bt_viewport::trace::line(note_a_repack(&mut self.glyph_atlas_refits));
             }
             // A refused frame on a packing that is already fresh, and the four
             // ends that say nothing about text at all (a swapchain skipped
@@ -25935,7 +25939,7 @@ mod tests {
             "a refusal names its lane for the trace"
         );
         assert!(
-            exit.contains("eprintln!("),
+            exit.contains("bt_viewport::trace::line(format!("),
             "a refusal is said out loud once"
         );
     }

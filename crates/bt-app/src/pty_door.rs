@@ -261,7 +261,7 @@ fn bear(
     if let Some(line) =
         carried_environment_refusal(carried_environment.as_ref(), bt_platform::host_platform())
     {
-        eprintln!("{line}");
+        crate::diagnostics::stderr_line(line.to_string());
         return Born {
             session: Err(PtyError::Backend(line)),
             folder_gone,
@@ -274,7 +274,7 @@ fn bear(
                 .map_err(|error| error.to_string())
         },
         launch_overrides.clone(),
-        |line| eprintln!("{line}"),
+        |line| crate::diagnostics::stderr_line(line.to_string()),
     );
     let before_folio = before_folio(refresh.as_ref(), &inherited, &launch_overrides);
     shell_integration::derive_environment_for_birth(

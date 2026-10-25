@@ -322,10 +322,10 @@ impl StorageWatch {
                 }
                 MemberReport::Failed(cause) => {
                     if self.heard != Some(false) {
-                        eprintln!(
+                        crate::diagnostics::stderr_line(format!(
                             "recoverable storage watch failure on {}: {cause}",
                             directory.display()
-                        );
+                        ));
                     }
                     self.heard = Some(false);
                 }

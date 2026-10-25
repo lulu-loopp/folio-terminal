@@ -19,6 +19,10 @@ fn store_pwsh() -> Option<(PathBuf, PathBuf)> {
     Some((alias, PathBuf::from(strings.get(2)?)))
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "a test's own output, captured by the harness"
+)]
 fn skipped(test: &str) {
     eprintln!(
         "packaged program test skipped={test} reason=no-store-appexeclink \

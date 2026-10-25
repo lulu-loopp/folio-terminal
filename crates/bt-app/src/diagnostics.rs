@@ -328,8 +328,10 @@ pub fn open_run_log(storage: &Path, now: &str, process_id: u32) -> Option<System
 /// # Why there is a second road to the same file
 ///
 /// The channel this module installs is `SetStdHandle` and `dup2` precisely so
-/// that no call site has to know where diagnostics go, and for the two hundred
-/// and forty `eprintln!` in this workspace that is still the answer. But a run
+/// that no call site has to know where diagnostics go, and for what this
+/// workspace does not write itself — std's panic message and the dependencies'
+/// own `stderr` — that is still the answer; this workspace's own lines all come
+/// here or to [`stderr_line`] (T-TRACE-SINK-OFF-THE-CALLING-THREAD). But a run
 /// that kept its console (a trace run — [`console_was_asked_for`]) writes those
 /// lines into a pipe **somebody else is supposed to be reading**, and a reader
 /// that stops reading stops the writer inside the kernel. Every thread that
@@ -429,6 +431,10 @@ fn stderr_line_on(queue: Option<&Queue>, channel: Option<Channel>, text: String)
 }
 
 /// [`stderr_line`] before the front door has closed: the console somebody typed at, written here.
+#[expect(
+    clippy::print_stderr,
+    reason = "the front door's answer, on the caller's console, before any request door exists"
+)]
 fn at_the_front_door(text: &str) {
     eprintln!("{text}");
 }
@@ -503,10 +509,22 @@ pub fn settle(token: WaitToken<'_, doors::DiagnosticsSettle>) {
 pub fn settle_in_panic() {
     if let Some(queue) = WRITER.get() {
         if let Some(why) = &queue.unstarted {
-            eprintln!("{}", unstarted_line(why));
+            on_the_panic_road(&unstarted_line(why));
         }
         Queue::settle_in_panic(queue, SETTLE_WITHIN);
     }
+}
+
+/// **One of the panic road's own lines, written here, synchronously**: the road leaves the
+/// process from inside the hook, after its fence ([`settle_in_panic`]) and without flushing any
+/// queue, so what it says after the fence — the writer that never started, a panic report that
+/// could not be written, the footer — is written where it is said, as std's own panic message is.
+#[expect(
+    clippy::print_stderr,
+    reason = "the panic road leaves the process from inside the hook: its lines cannot wait for a writer"
+)]
+pub fn on_the_panic_road(text: &str) {
+    eprintln!("{text}");
 }
 
 /// **How long a way out waits for `diagnostics.log`'s writer**: the trace flush's
@@ -839,10 +857,10 @@ fn report_the_previous_runs_crash(since: Option<SystemTime>) {
     let Some(report) = newest_crash_report(&directory, &program, since) else {
         return;
     };
-    eprintln!(
+    crate::diagnostics::stderr_line(format!(
         "Folio: the previous run ended in a crash the system recorded — {}",
         report.display()
-    );
+    ));
 }
 
 /// **The name the system files this process's crash reports under**: the

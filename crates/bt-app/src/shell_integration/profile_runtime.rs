@@ -196,11 +196,11 @@ pub(super) fn spawn_profile_observation(
             let report = observe_profile_lines(worker, observation, &data, &programs, &environment);
             ask_failed_parse_questions_again(worker, questions, &environment);
             for refusal in report.refusals() {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "BT_SHELL_PROFILE {}: {}",
                     refusal.path.display(),
                     refusal.reason
-                );
+                ));
             }
             if let Some(wake) = WAKE.get() {
                 wake();

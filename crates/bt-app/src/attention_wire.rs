@@ -516,7 +516,7 @@ fn payload_of(source: Option<&crate::cli::AttentionPayload>) -> Option<String> {
         crate::cli::AttentionPayload::Inline(text) => Some(text.clone()),
         crate::cli::AttentionPayload::Stdin => payload_on_stdin(
             &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
-            |line| eprintln!("folio attention: {line}"),
+            |line| crate::diagnostics::stderr_line(format!("folio attention: {line}")),
         ),
     }
 }

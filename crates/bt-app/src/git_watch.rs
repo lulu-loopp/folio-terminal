@@ -482,7 +482,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// on `BT_PERF_TRACE`'s own rule.
 fn trace(message: &str) {
     if crate::entry_doors::installed().git {
-        eprintln!("git watch: {message}");
+        crate::diagnostics::stderr_line(format!("git watch: {message}"));
     }
 }
 

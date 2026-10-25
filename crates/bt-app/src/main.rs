@@ -1,3 +1,7 @@
+// Every `stderr` line goes to the writer that owns where `stderr` points, never written by the
+// thread that said it (T-TRACE-SINK-OFF-THE-CALLING-THREAD): `bt-app`'s `diagnostics::stderr_line`, or
+// the road `fn main` installs in a crate below it. Tests: `clippy.toml`'s `allow-print-in-tests`.
+#![deny(clippy::print_stderr)]
 // **A window, not a console** (user report 2026-08-18: double-clicking
 // `folio.exe` first raised a Windows Terminal window, because a
 // console-subsystem binary is handed a console host before its own `main`
@@ -16705,7 +16709,7 @@ fn host_screen_after(answer: Result<bool, bt_pty::PtyError>) -> bt_term::HostScr
         Err(error) => {
             // Said rather than swallowed: this window's screen is still going to be right, and
             // the only thing lost is the host's agreement about the rows above.
-            eprintln!("BT_CLEAR host buffer not cleared: {error}");
+            crate::diagnostics::stderr_line(format!("BT_CLEAR host buffer not cleared: {error}"));
             bt_term::HostScreen::Untold
         }
     }
@@ -19749,7 +19753,9 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         Writer::ExplorerRepair => explorer_menu::begin_probe(),
         Writer::ToastIdentity => {
             if let Err(error) = bt_platform::Notifier::register_identity(APP_NAME) {
-                eprintln!("BT_UPDATE_TRIAL the toast identity was not written: {error}");
+                crate::diagnostics::stderr_line(format!(
+                    "BT_UPDATE_TRIAL the toast identity was not written: {error}"
+                ));
             }
         }
         // On its worker, as at any start's first frame.
@@ -22615,7 +22621,7 @@ fn offer_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Resu
                 Ok(()) => Ok(PtyInput::HeldForBirth),
                 // Said as the shell's own refusal is said, and for its reason.
                 Err(refused) => {
-                    eprintln!("{what}: {refused}");
+                    crate::diagnostics::stderr_line(format!("{what}: {refused}"));
                     Ok(PtyInput::Refused)
                 }
             };
@@ -22634,7 +22640,7 @@ fn offer_pty_input(pty: PtyTarget<'_>, bytes: &[u8], what: &'static str) -> Resu
         Ok(()) => Ok(PtyInput::Queued),
         Err(refused @ PtyError::InputRefused { .. }) => {
             hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
-                eprintln!("{what}: {refused}");
+                crate::diagnostics::stderr_line(format!("{what}: {refused}"));
             });
             Ok(PtyInput::Refused)
         }
@@ -31416,7 +31422,9 @@ impl<T: TaskbarDoor> TaskbarMirror<T> {
             match window.taskbar() {
                 Ok(button) => self.button = Some(button),
                 Err(error) => {
-                    eprintln!("taskbar progress unavailable: {error}");
+                    crate::diagnostics::stderr_line(format!(
+                        "taskbar progress unavailable: {error}"
+                    ));
                     self.refused = true;
                     return;
                 }
@@ -31425,7 +31433,7 @@ impl<T: TaskbarDoor> TaskbarMirror<T> {
         if let Some(button) = self.button.as_ref()
             && let Err(error) = button.set_progress(sending)
         {
-            eprintln!("taskbar progress refused: {error}");
+            crate::diagnostics::stderr_line(format!("taskbar progress refused: {error}"));
             self.refused = true;
         }
     }
@@ -31497,7 +31505,9 @@ impl NotificationDesk {
             match opened {
                 Ok(voice) => self.voice = Some(voice),
                 Err(error) => {
-                    eprintln!("desktop notifications unavailable: {error}");
+                    crate::diagnostics::stderr_line(format!(
+                        "desktop notifications unavailable: {error}"
+                    ));
                     self.refused = true;
                     return Err(error);
                 }
@@ -31506,7 +31516,7 @@ impl NotificationDesk {
         if let Some(voice) = self.voice.as_mut()
             && let Err(error) = voice.show(title, body, launch)
         {
-            eprintln!("desktop notification refused: {error}");
+            crate::diagnostics::stderr_line(format!("desktop notification refused: {error}"));
             self.refused = true;
             return Err(error);
         }
@@ -40829,7 +40839,7 @@ fn folder_pick_outcome(
         // says so to the log rather than in a banner about COM apartments. The
         // caller logs it; this only reports that nothing is owed.
         Err(error) => {
-            eprintln!("recoverable folder chooser failure: {error}");
+            crate::diagnostics::stderr_line(format!("recoverable folder chooser failure: {error}"));
             None
         }
     }
@@ -46619,7 +46629,10 @@ impl Runtime<'_, Native> {
         // likely to change in the window that will not keep it; the sentence
         // itself names no file, for the reason in `i18n::second_instance_notice`.
         if !persist::is_storage_writer() {
-            eprintln!("BT_PERSIST another Folio holds this data directory; nothing here is saved");
+            crate::diagnostics::stderr_line(
+                "BT_PERSIST another Folio holds this data directory; nothing here is saved"
+                    .to_owned(),
+            );
             settings_fault.get_or_insert_with(crate::i18n::second_instance_notice);
         }
         // The `$PROFILE` probe's wake (§7.1.6j), installed here, once, because the wake belongs to
@@ -46812,7 +46825,10 @@ impl Runtime<'_, Native> {
         let mut profiles_fault = profiles_store.take_fault();
         for fault in profiles::install(profiles_store.loaded()) {
             let sentence = i18n::profile_entry_fault(&fault);
-            eprintln!("BT_PERSIST {}: {sentence}", persist::PROFILES_FILE_NAME);
+            crate::diagnostics::stderr_line(format!(
+                "BT_PERSIST {}: {sentence}",
+                persist::PROFILES_FILE_NAME
+            ));
             profiles_fault.get_or_insert(sentence);
         }
         // What a press is measured against is the table the installer put in force: a row it
@@ -46854,12 +46870,12 @@ impl Runtime<'_, Native> {
             bt_platform::host_platform(),
         );
         for fault in refused {
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERSIST {} refused {}: {}",
                 persist::KEYBINDINGS_FILE_NAME,
                 fault.id,
                 fault.reason
-            );
+            ));
             keybindings_fault.get_or_insert_with(|| {
                 format!(
                     "{}: {} - {}",
@@ -46956,9 +46972,9 @@ impl Runtime<'_, Native> {
                     install_minimum_contrast(settings_store.loaded().minimum_contrast);
                     let resolved_theme = resolve_theme_mode(theme_mode, system_os_theme());
                     if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
-                        eprintln!(
+                        crate::diagnostics::stderr_line(format!(
                             "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
-                        );
+                        ));
                     }
                     let restored = restore_window_placement(event_loop, &opening);
                     // Titled from whatever the walk has answered so far; the active tab's own title replaces
@@ -47068,7 +47084,9 @@ impl Runtime<'_, Native> {
                     // without one says so when `Export…` is pressed.
                     let save_picker = bt_platform::SaveFilePicker::new(native)
                         .inspect_err(|error| {
-                            eprintln!("recoverable save dialog install failure: {error}")
+                            crate::diagnostics::stderr_line(format!(
+                                "recoverable save dialog install failure: {error}"
+                            ))
                         })
                         .ok();
                     // Asked of DWM once, before anything reads the Acrylic row, by writing
@@ -50160,7 +50178,9 @@ impl<B: Backend> Runtime<'_, B> {
             // Already queued or already open: a second press while one is up is
             // one dialog, not two, and whoever asked first keeps the answer.
             Ok(false) => {}
-            Err(error) => eprintln!("recoverable program chooser failure: {error}"),
+            Err(error) => crate::diagnostics::stderr_line(format!(
+                "recoverable program chooser failure: {error}"
+            )),
         }
     }
 
@@ -50524,9 +50544,9 @@ impl<B: Backend> Runtime<'_, B> {
     fn apply_theme(&mut self, theme: Theme) -> Result<bool> {
         match set_theme(theme) {
             ThemeChange::LockedByEnvironment => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "BT_THEME switch_ignored={theme:?} reason=BT_BG runtime_theme_locked=true"
-                );
+                ));
                 Ok(false)
             }
             ThemeChange::Unchanged => Ok(false),
@@ -50732,7 +50752,9 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(false);
         }
         if let Err(error) = self.window.window.set_backdrop(enabled) {
-            eprintln!("recoverable system backdrop failure: {error}");
+            crate::diagnostics::stderr_line(format!(
+                "recoverable system backdrop failure: {error}"
+            ));
             return Ok(false);
         }
         let mut settings = self.app.settings_store.loaded().clone();
@@ -50760,7 +50782,7 @@ impl<B: Backend> Runtime<'_, B> {
         if !self.is_quake_window()
             && let Err(error) = self.window.window.set_topmost(enabled)
         {
-            eprintln!("recoverable always-on-top failure: {error}");
+            crate::diagnostics::stderr_line(format!("recoverable always-on-top failure: {error}"));
             return Ok(false);
         }
         let mut settings = self.app.settings_store.loaded().clone();
@@ -53321,7 +53343,9 @@ impl<B: Backend> Runtime<'_, B> {
             // Already queued or already open: a second `Browse…` while one is up
             // is one dialog, not two, and whoever asked first keeps the answer.
             Ok(false) => {}
-            Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
+            Err(error) => crate::diagnostics::stderr_line(format!(
+                "recoverable folder chooser failure: {error}"
+            )),
         }
     }
 
@@ -66483,7 +66507,9 @@ impl<B: Backend> FolioApp<B> {
                 // `quit::Quit::pages`'s own rule: a browser that outlived the
                 // bound is a fact about this machine, and everything this window
                 // was holding is already safe either way.
-                eprintln!("BT_WEB a closed window left with a page still holding its browser");
+                crate::diagnostics::stderr_line(
+                    "BT_WEB a closed window left with a page still holding its browser".to_owned(),
+                );
                 done.push(id);
             } else {
                 waking = earliest_deadline([waking, deadline, Some(until)]);
@@ -66852,11 +66878,11 @@ impl<B: Backend> FolioApp<B> {
                 // window door or the tab's journey was what stopped the loop, and
                 // the answer moved once already (`retire=2922.2ms` before the
                 // stand-in stopped opening a shell it would immediately kill).
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "BT_TEAR_OUT_MS door={:.1} settle={:.1}",
                     door.as_secs_f64() * 1000.0,
                     settle.elapsed().as_secs_f64() * 1000.0,
-                );
+                ));
                 continue;
             }
             // **Into the document the moment it exists**, measured rather than
@@ -67373,10 +67399,10 @@ impl<B: Backend> FolioApp<B> {
             // and the window the reader is looking at is not made to carry a
             // card about a file they may not have chosen.
             cli::PathKind::Absent => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "{APP_NAME} was handed {} to open and there is nothing there",
                     path.display()
-                );
+                ));
                 Ok(())
             }
         }
@@ -67407,10 +67433,10 @@ impl<B: Backend> FolioApp<B> {
     /// not somebody starting Folio, it is somebody handing Folio a place.
     fn open_one_place_for_a_service(&mut self, event_loop: &B::Loop, path: &Path) -> Result<()> {
         let Some(folder) = explorer_menu::folder_for(path, cli::machine_path_kind(path)) else {
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "{APP_NAME} was asked to open {} and there is nothing there",
                 path.display()
-            );
+            ));
             return Ok(());
         };
         let request = launch_wire::LaunchRequest {
@@ -67438,7 +67464,9 @@ impl<B: Backend> FolioApp<B> {
     fn begin_the_systems_quit(&mut self, answer: bt_platform::TerminationAnswer) {
         if self.termination.is_some() {
             if let Err(reason) = answer.answer(bt_platform::TerminationDecision::Cancel) {
-                eprintln!("{APP_NAME} could not refuse a second quit request: {reason}");
+                crate::diagnostics::stderr_line(format!(
+                    "{APP_NAME} could not refuse a second quit request: {reason}"
+                ));
             }
             return;
         }
@@ -67467,7 +67495,9 @@ impl<B: Backend> FolioApp<B> {
             return;
         };
         if let Err(reason) = answer.answer(decision) {
-            eprintln!("{APP_NAME} could not answer the quit the system asked for: {reason}");
+            crate::diagnostics::stderr_line(format!(
+                "{APP_NAME} could not answer the quit the system asked for: {reason}"
+            ));
         }
     }
 
@@ -67738,7 +67768,7 @@ impl<B: Backend> FolioApp<B> {
             return;
         };
         if let Err(error) = bring_owned_window_forward(&runtime.window.window) {
-            eprintln!("BT_LAUNCH {error}");
+            crate::diagnostics::stderr_line(format!("BT_LAUNCH {error}"));
         }
     }
 
@@ -67976,7 +68006,7 @@ impl<B: Backend> FolioApp<B> {
         }
         let plan = menubar::plan(&app.shortcuts, focus);
         if let Err(error) = bt_platform::menu::refresh(&plan) {
-            eprintln!("recoverable menu bar failure: {error}");
+            crate::diagnostics::stderr_line(format!("recoverable menu bar failure: {error}"));
         } else {
             self.main_menu_inputs = Some(MainMenuInputs::new(&app.shortcuts, focus));
         }
@@ -68033,7 +68063,7 @@ impl<B: Backend> FolioApp<B> {
             });
         });
         if let Err(error) = bt_platform::menu::install(&plan, send) {
-            eprintln!("recoverable menu bar failure: {error}");
+            crate::diagnostics::stderr_line(format!("recoverable menu bar failure: {error}"));
         } else {
             self.main_menu_inputs = Some(MainMenuInputs::new(&app.shortcuts, focus));
         }
@@ -68151,7 +68181,9 @@ impl<B: Backend> FolioApp<B> {
             // Said to the log and never to the reader: there is nothing a person
             // can do about a foreground lock, and a card over their editor
             // reporting one would be a worse interruption than the one it reports.
-            eprintln!("BT_QUAKE the summoned window could not take the keyboard: {error}");
+            crate::diagnostics::stderr_line(format!(
+                "BT_QUAKE the summoned window could not take the keyboard: {error}"
+            ));
         }
         // **And the one command the reader asked to have run, on the first summon
         // of this launch** (§7.54e ⑤). Taken here rather than at the door that
@@ -68192,7 +68224,9 @@ impl<B: Backend> FolioApp<B> {
         if let Some(holder) = owed
             && !bt_platform::hotkey::hand_back_to(holder)
         {
-            eprintln!("BT_QUAKE the keyboard could not be handed back");
+            crate::diagnostics::stderr_line(
+                "BT_QUAKE the keyboard could not be handed back".to_owned(),
+            );
         }
         Ok(())
     }
@@ -68899,7 +68933,9 @@ impl<B: Backend> FolioApp<B> {
                         if let Some(mut runtime) = self.runtime_at(index)
                             && let Err(error) = runtime.retire_window()
                         {
-                            eprintln!("{APP_NAME} quit, and a child did not go: {error:#}");
+                            crate::diagnostics::stderr_line(format!(
+                                "{APP_NAME} quit, and a child did not go: {error:#}"
+                            ));
                         }
                     }
                     // **And the process does not walk out in front of them**
@@ -68924,13 +68960,13 @@ impl<B: Backend> FolioApp<B> {
                         |token| pty_door::wait_for_retirements(token, deadline),
                     ) {
                         Ok(0) => {}
-                        Ok(still_going) => eprintln!(
+                        Ok(still_going) => crate::diagnostics::stderr_line(format!(
                             "{APP_NAME} quit with {still_going} pane(s) still being taken apart"
-                        ),
-                        Err(refused) => eprintln!(
+                        )),
+                        Err(refused) => crate::diagnostics::stderr_line(format!(
                             "{APP_NAME} quit without knowing how many panes are still being taken \
                              apart: {refused}"
-                        ),
+                        )),
                     }
                     // **After a real wait, so the clock is read again** (T-TIMING-BOUND-STRAYS): the
                     // wait for the panes above can take up to `pane_retirement_deadline`, and the
@@ -69447,17 +69483,19 @@ impl<B: Backend> FolioApp<B> {
                 true
             }
             Flight::GaveUp(Some(error)) => {
-                eprintln!("{APP_NAME} could not open another GPU device: {error}");
+                crate::diagnostics::stderr_line(format!(
+                    "{APP_NAME} could not open another GPU device: {error}"
+                ));
                 false
             }
             // Every attempt in the episode was granted and not one of the
             // devices survived long enough to draw. There is no refusal to
             // quote, and the pattern is the finding.
             Flight::GaveUp(None) => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "{APP_NAME} opened {DEVICE_REBUILD_ATTEMPTS} GPU devices and lost \
                      every one of them before a frame reached the screen"
-                );
+                ));
                 false
             }
         }
@@ -69494,13 +69532,15 @@ impl<B: Backend> FolioApp<B> {
         };
         match machine.rebuild() {
             Ok(()) => {
-                eprintln!("BT_SURFACE selftest: every swapchain was built again");
+                crate::diagnostics::stderr_line(
+                    "BT_SURFACE selftest: every swapchain was built again".to_owned(),
+                );
                 for window in self.windows.in_order_mut() {
                     window.chrome_present_pending = true;
                     window.window.request_redraw();
                 }
             }
-            Err(error) => eprintln!("BT_SURFACE selftest: {error}"),
+            Err(error) => crate::diagnostics::stderr_line(format!("BT_SURFACE selftest: {error}")),
         }
     }
 
@@ -69512,7 +69552,7 @@ impl<B: Backend> FolioApp<B> {
         if self.recovered_from_a_lost_device() {
             return;
         }
-        eprintln!("{APP_NAME} stopped: {error:#}");
+        crate::diagnostics::stderr_line(format!("{APP_NAME} stopped: {error:#}"));
         report_frame_shape_stop(&error, &panic_log_path(), |path| {
             announce_panic(path);
         });
@@ -69526,7 +69566,9 @@ impl<B: Backend> FolioApp<B> {
             );
         }
         if let Err(shutdown_error) = stopped {
-            eprintln!("child shutdown also failed: {shutdown_error:#}");
+            crate::diagnostics::stderr_line(format!(
+                "child shutdown also failed: {shutdown_error:#}"
+            ));
         }
         // **The spare is abandoned, not waited for** (ticket 60, SW-2): its controller closed now,
         // its parent left to process exit — as this path already treats the pages.
@@ -71256,7 +71298,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             diagnostics::note,
         );
         if let Err(error) = stopped {
-            eprintln!("child shutdown failed: {error:#}");
+            crate::diagnostics::stderr_line(format!("child shutdown failed: {error:#}"));
         }
         self.windows.clear();
         if let Some(app) = self.app.as_mut() {
@@ -71901,9 +71943,9 @@ fn recoverable_wheel_scroll_amount(
         Ok(amount) => amount,
         Err(error) => {
             const FALLBACK_WHEEL_LINES: u32 = 3;
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "system wheel scroll setting unavailable; using {FALLBACK_WHEEL_LINES} lines: {error}"
-            );
+            ));
             bt_platform::WheelScrollAmount::Lines(FALLBACK_WHEEL_LINES)
         }
     }
@@ -75456,7 +75498,7 @@ fn install_page_ground_color(compositor: &impl CompositorDoor) {
     if let Err(error) =
         compositor.set_page_ground_color(bt_render::window_ground_premultiplied_srgb())
     {
-        eprintln!("BT_WEB page ground colour: {error}");
+        crate::diagnostics::stderr_line(format!("BT_WEB page ground colour: {error}"));
     }
 }
 
@@ -75537,7 +75579,7 @@ fn window_surface_target(
         match folios_own_metal_view(window) {
             Ok(view) => bt_render::WindowTarget::MetalLayerOnOwnedView(view),
             Err(error) => {
-                eprintln!("BT_SURFACE Folio's own view: {error:#}");
+                crate::diagnostics::stderr_line(format!("BT_SURFACE Folio's own view: {error:#}"));
                 bt_render::WindowTarget::Hwnd(Arc::clone(window).into())
             }
         }
@@ -75572,7 +75614,7 @@ fn folios_own_metal_view(window: &Window) -> Result<*mut std::ffi::c_void> {
     let view = bt_platform::surface_view(native).map_err(|error| anyhow!(error))?;
     let cleared = bt_platform::clear_surface_layers(native).map_err(|error| anyhow!(error))?;
     if cleared > 0 {
-        eprintln!("BT_SURFACE cleared={cleared}");
+        crate::diagnostics::stderr_line(format!("BT_SURFACE cleared={cleared}"));
     }
     Ok(view)
 }
@@ -75599,14 +75641,14 @@ fn stand_the_window_at(
     what: &str,
 ) {
     if let Err(error) = bt_platform::set_window_outer_rect(native, rect) {
-        eprintln!("BT_WINDOW {what}: {error}");
+        crate::diagnostics::stderr_line(format!("BT_WINDOW {what}: {error}"));
     }
 }
 
 fn install_theme_class_background(window: &impl WindowHost) {
     let opaque = bt_render::window_ground().alpha >= 1.0;
     if let Err(error) = window.set_class_background(opaque.then(background_rgb)) {
-        eprintln!("BT_WINDOW backing colour: {error}");
+        crate::diagnostics::stderr_line(format!("BT_WINDOW backing colour: {error}"));
     }
 }
 
@@ -75952,7 +75994,7 @@ fn trace_unchanged_present(
     let started = Instant::now();
     let content_fnv = frame.map_or(0, |frame| frame_content_digest(frame).content_fnv);
     let alternate = frame.is_some_and(frame_is_alternate_screen);
-    eprintln!(
+    crate::diagnostics::stderr_line(format!(
         "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={} present_unchanged={} slot_overwrites={}",
         source,
         content_fnv,
@@ -75960,7 +76002,7 @@ fn trace_unchanged_present(
         started.elapsed().as_micros(),
         gate.unchanged,
         slot_overwrites,
-    );
+    ));
 }
 
 fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bool {
@@ -77245,14 +77287,11 @@ fn install_panic_log_hook() {
         // the hand-over leaves the applier or starts Folio again, as the
         // process's ordinary end does.
         let _ = update_handoff::leave_in_panic();
-        eprintln!(
-            "{}",
-            diagnostics::run_footer(
-                &hang_watch::utc_timestamp(std::time::SystemTime::now()),
-                PANIC_EXIT_CODE,
-                bt_platform::admission::refusals(),
-            )
-        );
+        diagnostics::on_the_panic_road(&diagnostics::run_footer(
+            &hang_watch::utc_timestamp(std::time::SystemTime::now()),
+            PANIC_EXIT_CODE,
+            bt_platform::admission::refusals(),
+        ));
         bt_platform::leave_process(PANIC_EXIT_CODE)
     });
 }
@@ -77286,7 +77325,10 @@ fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync 
             &Backtrace::force_capture().to_string(),
         );
         if let Err(error) = append_panic_report(&path, &report) {
-            eprintln!("failed to write panic report {}: {error}", path.display());
+            diagnostics::on_the_panic_road(&format!(
+                "failed to write panic report {}: {error}",
+                path.display()
+            ));
         }
         // One formula's render has its own unwind boundary, from the MiTeX
         // conversion through the Typst compile and the rasterizer. Its
@@ -77603,10 +77645,10 @@ fn report_frame_shape_stop(error: &anyhow::Error, path: &Path, announce: impl Fn
         Backtrace::force_capture()
     );
     if let Err(write_error) = append_panic_report(path, &report) {
-        eprintln!(
+        crate::diagnostics::stderr_line(format!(
             "failed to write frame-shape report {}: {write_error}",
             path.display()
-        );
+        ));
     }
     announce(path);
 }
@@ -78172,12 +78214,16 @@ fn main() -> Result<()> {
                 // as such**: one row missing from one Finder menu, with the
                 // delegate, the command line and every other way in untouched.
                 if let Err(reason) = door.offer_open_in_folio() {
-                    eprintln!("{APP_NAME} is not in Finder's Services menu: {reason}");
+                    crate::diagnostics::stderr_line(format!(
+                        "{APP_NAME} is not in Finder's Services menu: {reason}"
+                    ));
                 }
                 Some(door)
             }
             Err(reason) => {
-                eprintln!("{APP_NAME} has no application delegate: {reason}");
+                crate::diagnostics::stderr_line(format!(
+                    "{APP_NAME} has no application delegate: {reason}"
+                ));
                 None
             }
         }

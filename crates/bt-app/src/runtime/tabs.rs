@@ -1656,7 +1656,9 @@ impl<B: Backend> Runtime<'_, B> {
             // Already queued or already open: a second request while one is up is
             // one dialog, not two, and whoever asked first keeps the answer.
             Ok(false) => {}
-            Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
+            Err(error) => crate::diagnostics::stderr_line(format!(
+                "recoverable folder chooser failure: {error}"
+            )),
         }
     }
 

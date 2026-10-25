@@ -860,7 +860,9 @@ impl<B: Backend> Runtime<'_, B> {
         ) {
             Ok(true) => self.window.image_pick_pending = Some(FilePick::BackgroundImage),
             Ok(false) => {}
-            Err(error) => eprintln!("recoverable picture chooser failure: {error}"),
+            Err(error) => crate::diagnostics::stderr_line(format!(
+                "recoverable picture chooser failure: {error}"
+            )),
         }
     }
 
@@ -878,7 +880,9 @@ impl<B: Backend> Runtime<'_, B> {
             Ok(None) => return Ok(()),
             Ok(Some(path)) => path,
             Err(error) => {
-                eprintln!("recoverable file chooser failure: {error}");
+                crate::diagnostics::stderr_line(format!(
+                    "recoverable file chooser failure: {error}"
+                ));
                 return Ok(());
             }
         };
@@ -11638,7 +11642,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// (`webnav` ①). This one is about the string; that one is about the load.
     fn navigate_preview_page(&mut self, target: &str) -> Result<()> {
         let Some((url, minted)) = page_destination(target) else {
-            eprintln!("BT_WEB refused {target}");
+            crate::diagnostics::stderr_line(format!("BT_WEB refused {target}"));
             return Ok(());
         };
         self.open_web_page_with(&url, minted)

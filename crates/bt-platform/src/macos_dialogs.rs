@@ -897,8 +897,8 @@ fn an_alert_would_be_seen(mtm: MainThreadMarker) -> bool {
 
 /// The two lines, when there is no alert to raise them in.
 fn say_to_stderr(title: &str, text: &str) {
-    eprintln!("{title}");
-    eprintln!("{text}");
+    crate::stderr_road::say(title.to_string());
+    crate::stderr_road::say(text.to_string());
 }
 
 /// **Say one thing in a box from a process that has no application** — the

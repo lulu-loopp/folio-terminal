@@ -8461,10 +8461,10 @@ impl OnDisk {
             self.kept.retain(|kept| kept.path != *retired);
         }
         if let Some((path, why)) = &answer.left {
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERSIST {name}: {} is left beside it: {why}",
                 path.display()
-            );
+            ));
         }
         match answer.outcome {
             Outcome::Landed {
@@ -8478,9 +8478,9 @@ impl OnDisk {
                 self.unanswered = false;
                 self.unlanded = None;
                 if let Some(error) = &answer.not_durable {
-                    eprintln!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_PERSIST {name} was written and is not known to be durable: {error}"
-                    );
+                    ));
                 }
                 if let Some(path) = kept {
                     // The copy of what the file held stays until a later save
@@ -8491,9 +8491,9 @@ impl OnDisk {
                     });
                 }
                 if ordinary_on.is_some() {
-                    eprintln!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_PERSIST {name} was written by an ordinary write: its drive cannot exchange two files in one step"
-                    );
+                    ));
                 }
                 Heard::Landed {
                     body: answer.asker,
@@ -8501,9 +8501,9 @@ impl OnDisk {
                 }
             }
             Outcome::Moved { bytes } => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "BT_PERSIST {name} changed on disk; the edits are kept and not written over it"
-                );
+                ));
                 let named = bytes.is_some();
                 self.bytes = bytes;
                 self.unanswered = !reloaded;
@@ -8514,7 +8514,9 @@ impl OnDisk {
             // conflict waits for an answer — the next save's precondition meets
             // whatever the file then holds (round 6, N1).
             Outcome::MovedDuringRead => {
-                eprintln!("BT_PERSIST {name} was being written by another program; not written");
+                crate::diagnostics::stderr_line(format!(
+                    "BT_PERSIST {name} was being written by another program; not written"
+                ));
                 Heard::Conflict { named: false }
             }
             // **A landing over a file that had moved** — the `Merge` policy's
@@ -8524,14 +8526,14 @@ impl OnDisk {
             // `kept`, named here and never removed. Heard as the landing it is
             // (round 7).
             Outcome::Displaced { kept, .. } => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "BT_PERSIST {name} was edited while it was written; the file holds Folio's save, and the edit is kept as {}",
                     kept.display()
-                );
+                ));
                 if let Some(error) = &answer.not_durable {
-                    eprintln!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_PERSIST {name} was written and is not known to be durable: {error}"
-                    );
+                    ));
                 }
                 self.bytes = sent.map(|sent| sent.bytes);
                 self.unanswered = false;
@@ -8542,23 +8544,26 @@ impl OnDisk {
                 }
             }
             Outcome::Conflict { theirs, kept } => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "BT_PERSIST {name} changed on disk while it was written; the other writer's bytes are back under its name"
-                );
+                ));
                 self.bytes = Some(theirs);
                 self.unanswered = !reloaded;
                 match (kept, &answer.not_durable) {
                     (Some(path), Some(error)) => {
-                        eprintln!(
+                        crate::diagnostics::stderr_line(format!(
                             "BT_PERSIST {name} was put back and is not known to be durable: {error}"
-                        );
+                        ));
                         self.kept.push(KeptFile {
                             path,
                             version: answer.version + 1,
                         });
                     }
                     (Some(path), None) => {
-                        eprintln!("BT_PERSIST {name}: {} is left beside it", path.display());
+                        crate::diagnostics::stderr_line(format!(
+                            "BT_PERSIST {name}: {} is left beside it",
+                            path.display()
+                        ));
                     }
                     (None, _) => {}
                 }
@@ -8575,10 +8580,10 @@ impl OnDisk {
 /// account ([`Refusal::described`]) goes to `stderr` beside it.
 fn refusal_said(cause: &Refusal) -> String {
     use crate::i18n::Text;
-    eprintln!(
+    crate::diagnostics::stderr_line(format!(
         "BT_PERSIST a preview save was refused: {}",
         cause.described()
-    );
+    ));
     match cause {
         Refusal::NoWorker(_) => Text::PreviewSaveNotStarted.text().to_owned(),
         Refusal::Link => Text::PreviewSaveLink.text().to_owned(),
@@ -8823,10 +8828,10 @@ impl PreviewSaves {
             .map_or_else(String::new, |path| {
                 format!("; {} is left beside it", path.display())
             });
-        eprintln!(
+        crate::diagnostics::stderr_line(format!(
             "BT_PERSIST a preview save was answered after its buffer closed ({:?}){beside}",
             answer.answer.outcome
-        );
+        ));
     }
 
     /// **Every answer one of `pools` holds the buffer for, heard by it**

@@ -416,7 +416,7 @@ pub fn serve() -> i32 {
     match bt_platform::explorer_command::serve(verb) {
         Ok(()) => 0,
         Err(error) => {
-            eprintln!("BT_EXPLORER_COMMAND {error}");
+            crate::diagnostics::stderr_line(format!("BT_EXPLORER_COMMAND {error}"));
             1
         }
     }
@@ -1019,10 +1019,10 @@ impl MenuFate {
         match outcome {
             Ok(()) => Self::left(format!("{what} was removed")),
             Err(reason) => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "folio {}: {what} could not be removed — {reason}",
                     crate::cli::REMOVE_EXPLORER_MENU_FLAG
-                );
+                ));
                 Self {
                     said: format!("{what} could not be removed"),
                     refused: true,
@@ -1065,7 +1065,12 @@ pub struct MenuRemovalReport {
 pub fn remove_from_explorer_menu() -> MenuRemovalReport {
     removal_waited_on(
         &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
-        |line| eprintln!("folio {}: {line}", crate::cli::REMOVE_EXPLORER_MENU_FLAG),
+        |line| {
+            crate::diagnostics::stderr_line(format!(
+                "folio {}: {line}",
+                crate::cli::REMOVE_EXPLORER_MENU_FLAG
+            ))
+        },
         both_registrations_removed,
     )
 }
@@ -1205,7 +1210,7 @@ pub(crate) fn cleanup_registrations(worker: &WorkerCtx) -> Vec<(Text, CleanupReg
     cleanup_waited_on(
         worker,
         &crate::lane::Executor::thread_door(bt_platform::ThreadPriority::Normal),
-        |line| eprintln!("folio: {line}"),
+        |line| crate::diagnostics::stderr_line(format!("folio: {line}")),
         both_registrations_cleaned,
     )
 }
@@ -1582,7 +1587,9 @@ fn probe(deployment: &impl Deployment, start: &Start<'_>, latch: &AtomicBool) ->
                 // Silent to the user, on `reassert`'s footing: the entry that
                 // is there goes on being whatever it was, the next launch
                 // tries again, and there is no window yet to put a card on.
-                Err(error) => eprintln!("BT_EXPLORER_PACKAGE repair refused — {error}"),
+                Err(error) => crate::diagnostics::stderr_line(format!(
+                    "BT_EXPLORER_PACKAGE repair refused — {error}"
+                )),
             }
         }
         return probed;
@@ -1650,7 +1657,7 @@ fn start_probe(
         // Once per start, whatever it came to: the renewal is re-evaluated
         // at every start, so the log is where a reader sees which way this
         // one went.
-        eprintln!("{}", probed.renewal.log_line(start.this_build));
+        crate::diagnostics::stderr_line(probed.renewal.log_line(start.this_build));
         remember_renewal_refusal(probed.renewal.refusal().map(str::to_owned));
         remember(probed.state.clone());
         // Let go before `finish_job`, which may hand the latch to a press written down

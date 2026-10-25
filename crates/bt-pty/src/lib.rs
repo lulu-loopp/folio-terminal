@@ -1,6 +1,10 @@
 //! ConPTY ownership and the bounded PTY-to-Term transport from DESIGN.md §1.3.
 
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
+// Every `stderr` line goes to the writer that owns where `stderr` points, never written by the
+// thread that said it (T-TRACE-SINK-OFF-THE-CALLING-THREAD): `bt-app`'s `diagnostics::stderr_line`, or
+// the road `fn main` installs in a crate below it. Tests: `clippy.toml`'s `allow-print-in-tests`.
+#![deny(clippy::print_stderr)]
 
 use std::{
     collections::VecDeque,
@@ -400,7 +404,7 @@ impl PtyDump {
             recording.output.clone(),
             recording.input.clone(),
             || (Instant::now(), unix_millis()),
-            &mut |line| eprintln!("{line}"),
+            &mut |line| crate::say(str::to_owned(line)),
         )
     }
 
@@ -491,7 +495,10 @@ impl PtyDump {
         };
         dump.publish()?;
         spawn_dump_publisher(&dump)?;
-        eprintln!("BT_PTY_DUMP recording {ordinal} to {}", dump.path.display());
+        crate::say(format!(
+            "BT_PTY_DUMP recording {ordinal} to {}",
+            dump.path.display()
+        ));
         Ok(dump)
     }
 
@@ -950,7 +957,7 @@ fn read_pty_output_with_dump(
             .map_err(|_| std::io::Error::other("dump mutex poisoned"))
             .and_then(|mut dump| dump.write_chunk(&buffer[..count]));
         if let Err(error) = write_result {
-            eprintln!("BT_PTY_DUMP disabled after write failure: {error}");
+            crate::say(format!("BT_PTY_DUMP disabled after write failure: {error}"));
             if output.push_read(buffer[..count].to_vec(), capped).is_ok() {
                 wake();
                 read_pty_output_without_dump(reader, output, wake);
@@ -968,7 +975,7 @@ fn read_pty_output_with_dump(
         .map_err(|_| std::io::Error::other("dump mutex poisoned"))
         .and_then(|mut dump| dump.finish());
     if let Err(error) = closed {
-        eprintln!("BT_PTY_DUMP could not close its manifest: {error}");
+        crate::say(format!("BT_PTY_DUMP could not close its manifest: {error}"));
     }
 }
 
@@ -2596,7 +2603,7 @@ impl PtySession {
             let mut dump = dump.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             let elapsed_us = u64::try_from(dump.started.elapsed().as_micros()).unwrap_or(u64::MAX);
             if let Err(error) = dump.write_input_at(bytes, reason, elapsed_us) {
-                eprintln!("BT_PTY_INPUT_DUMP write failed: {error}");
+                crate::say(format!("BT_PTY_INPUT_DUMP write failed: {error}"));
             }
         }
         Ok(())
@@ -2612,7 +2619,7 @@ impl PtySession {
             && let Ok(mut dump) = dump.lock()
             && let Err(error) = dump.write_resize(size.columns.get(), size.rows.get())
         {
-            eprintln!("BT_PTY_DUMP resize marker failed: {error}");
+            crate::say(format!("BT_PTY_DUMP resize marker failed: {error}"));
         }
         self.master
             .as_ref()
@@ -2953,7 +2960,7 @@ fn door_skipped(what: &str, door: &str, left: &str) {
     let line = format!("{what} was dropped without {door}, and did not wait: {left}");
     match SKIPPED_DOOR_ROAD.get() {
         Some(say) => say(&line),
-        None => eprintln!("{line}"),
+        None => crate::say(line),
     }
 }
 

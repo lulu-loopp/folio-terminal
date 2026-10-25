@@ -3513,7 +3513,7 @@ impl<B: Backend> Runtime<'_, B> {
             ) {
                 if let Err(reason) = crate::press_owned_title_bar(&self.window.custom_window_frame)
                 {
-                    eprintln!("{reason}");
+                    crate::diagnostics::stderr_line(reason);
                 }
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-title-bar state={state:?} button={button:?} target={traced_target:?}"));
                 return Ok(true);
@@ -5144,7 +5144,9 @@ impl<B: Backend> Runtime<'_, B> {
                     }
                     Ok(false) => {}
                     Err(error) => {
-                        eprintln!("recoverable formula context-menu queue failure: {error}");
+                        crate::diagnostics::stderr_line(format!(
+                            "recoverable formula context-menu queue failure: {error}"
+                        ));
                     }
                 },
                 (MouseButton::Left, MathHitTarget::Block) => {

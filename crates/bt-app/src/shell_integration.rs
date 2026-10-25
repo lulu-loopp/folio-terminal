@@ -3316,7 +3316,7 @@ fn publish_profile_observation(program: &Path, observation: u64, observed: Profi
             .get_or_init(Default::default)
             .first(program, observed.location)
     {
-        eprintln!("{line}");
+        crate::diagnostics::stderr_line(line);
     }
     file_observation(
         &mut PROFILE_OBSERVATIONS

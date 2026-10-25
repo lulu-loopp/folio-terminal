@@ -86,10 +86,10 @@ impl SchemeWatch {
         if let Some(error) = self.news.take_failure()
             && worth_a_line(&error)
         {
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "recoverable scheme watch failure on {}: {error}",
                 directory.display()
-            );
+            ));
         }
         self.news.arm(&directory, proxy, AppEvent::SchemesChanged);
     }
@@ -102,10 +102,10 @@ impl SchemeWatch {
             && worth_a_line(&error)
         {
             let directory = crate::persist::storage_dir().join(crate::schemes::USER_SCHEME_DIR);
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "recoverable scheme watch failure on {}: {error}",
                 directory.display()
-            );
+            ));
         }
         due
     }

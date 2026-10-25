@@ -873,7 +873,7 @@ impl<'a> Told<'a> {
 
 /// One line of the watch to standard error, which a run's diagnostics keep.
 fn say_to_the_log(line: &str) {
-    eprintln!("{line}");
+    crate::diagnostics::stderr_line(line.to_string());
 }
 
 /// **A repetition's refusals in a row** (C3): the asks refused since the
@@ -1751,9 +1751,9 @@ pub(crate) fn hand_back(
     match rescue_version(worker, home, &header.rescue) {
         Some(version) if version >= since => {}
         other => {
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_UPDATE_TRIAL transaction {txn} is undecided; its rescue build ({other:?}) does not take a hand-back"
-            );
+            ));
             return None;
         }
     }
@@ -1770,18 +1770,18 @@ pub(crate) fn hand_back(
     ));
     match starter.start(&program, &line) {
         Ok(pid) => {
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_UPDATE_TRIAL transaction {txn} is undecided; it is handed back to {} ({})",
                 program.display(),
                 if ready { "ready" } else { "not ready" }
-            );
+            ));
             bt_platform::install_flip::started_of(pid).map(|started| Running { pid, started })
         }
         Err(error) => {
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_UPDATE_TRIAL transaction {txn} is undecided and {} could not be started: {error}",
                 program.display()
-            );
+            ));
             None
         }
     }

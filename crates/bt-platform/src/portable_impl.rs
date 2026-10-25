@@ -440,7 +440,9 @@ fn adopt_platform_chrome(
     match crate::macos_impl::adopt_window_chrome(window, bar_logical_px, wake) {
         Ok(adopted) => adopted,
         Err(reason) => {
-            eprintln!("bt-platform: {reason}; the window keeps the title bar the system gave it");
+            crate::stderr_road::say(format!(
+                "bt-platform: {reason}; the window keeps the title bar the system gave it"
+            ));
             (crate::PlatformChrome::FOLIO_DRAWS_THE_WHOLE_BAR, None)
         }
     }
@@ -1828,8 +1830,8 @@ pub fn leave_process(code: i32) -> ! {
 /// stop's lost configuration change (T-QUIT-DOCUMENTS) is said here too.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn message_box(title: &str, text: &str) {
-    eprintln!("{title}");
-    eprintln!("{text}");
+    crate::stderr_road::say(title.to_string());
+    crate::stderr_road::say(text.to_string());
 }
 
 /// **A box from a process that has no application** (U-32) — the two lines,

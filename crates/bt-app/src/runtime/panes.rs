@@ -3041,7 +3041,9 @@ impl<B: Backend> Runtime<'_, B> {
             // Already queued or already open: a second request while one is up
             // is one dialog, not two, and whoever asked first keeps the answer.
             Ok(false) => {}
-            Err(error) => eprintln!("recoverable folder chooser failure: {error}"),
+            Err(error) => crate::diagnostics::stderr_line(format!(
+                "recoverable folder chooser failure: {error}"
+            )),
         }
     }
 
@@ -3229,7 +3231,7 @@ impl<B: Backend> Runtime<'_, B> {
         }) {
             Ok(address) => address,
             Err(error) => {
-                eprintln!("BT_WEB {error}");
+                crate::diagnostics::stderr_line(format!("BT_WEB {error}"));
                 return;
             }
         };
@@ -3241,9 +3243,9 @@ impl<B: Backend> Runtime<'_, B> {
         // it the ordinary way — it has neither a float nor a seat any more —
         // which is one page lost and not two.
         if self.window.web.contains_key(&landed) {
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_WEB the docked page had nowhere to land: {landed:?} is already showing one"
-            );
+            ));
             return;
         }
         let mut outcomes = Vec::new();
@@ -3267,10 +3269,12 @@ impl<B: Backend> Runtime<'_, B> {
             )
         };
         if let Some(error) = report.error() {
-            eprintln!("BT_WEB the docked page could not follow its pane: {error}");
+            crate::diagnostics::stderr_line(format!(
+                "BT_WEB the docked page could not follow its pane: {error}"
+            ));
         }
         if let Err(error) = self.apply_web_outcomes(landed, outcomes) {
-            eprintln!("BT_WEB {error}");
+            crate::diagnostics::stderr_line(format!("BT_WEB {error}"));
         }
     }
 
@@ -4835,7 +4839,9 @@ impl<B: Backend> Runtime<'_, B> {
                 &mut outcomes,
             );
             if let Some(error) = report.error() {
-                eprintln!("BT_WEB the page could not follow its pane: {error}");
+                crate::diagnostics::stderr_line(format!(
+                    "BT_WEB the page could not follow its pane: {error}"
+                ));
             }
             self.window.web.insert(now, page);
             self.apply_web_outcomes(now, outcomes)?;
@@ -5113,7 +5119,7 @@ impl<B: Backend> Runtime<'_, B> {
         // solve below, so the first frame drawn against the new band is drawn
         // with the lights already on it.
         self.follow_the_window_band()?;
-        eprintln!(
+        crate::diagnostics::stderr_line(format!(
             "BT_RAIL layout={:?} mode={:?} focus={} inset={}px",
             self.window.rail.layout,
             self.window.rail.mode,
@@ -5122,7 +5128,7 @@ impl<B: Backend> Runtime<'_, B> {
             // posture's — a trace printed off the preference would report 0 for a
             // window whose panes had just moved 220px.
             self.rail_posture().terminal_inset_logical_px()
-        );
+        ));
         // An icon rail is born parked, whatever the last one was doing, and its
         // words are away with it. A pointer already standing inside it opens it
         // again on the very next move — which is the trigger doing its job, not

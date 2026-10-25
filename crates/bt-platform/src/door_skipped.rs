@@ -38,7 +38,7 @@ pub fn say(what: &str, door: &str, left: &str) {
     let line = format!("{what} was dropped without {door}, and did not wait: {left}");
     match SAY.get() {
         Some(say) => say(&line),
-        None => eprintln!("{line}"),
+        None => crate::stderr_road::say(line),
     }
 }
 

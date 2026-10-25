@@ -5,3 +5,8 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-indexing-slicing-in-tests = true
+
+# A test's `eprintln!` is the harness's output, captured per test; product code hands every
+# `stderr` line to its writer (`diagnostics::stderr_line`, T-TRACE-SINK-OFF-THE-CALLING-THREAD),
+# which the crates that write one hold with `clippy::print_stderr`.
+allow-print-in-tests = true

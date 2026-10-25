@@ -1711,16 +1711,19 @@ impl<T: StoredDocument> DocumentState<T> {
                     Reply::Waiting => None,
                     Reply::Failed(words) => {
                         self.outstanding.pop_front();
-                        eprintln!("BT_PERSIST {} was not read again: {words}", self.file);
+                        crate::diagnostics::stderr_line(format!(
+                            "BT_PERSIST {} was not read again: {words}",
+                            self.file
+                        ));
                         continue;
                     }
                     Reply::Gone => {
                         self.outstanding.pop_front();
-                        eprintln!(
+                        crate::diagnostics::stderr_line(format!(
                             "BT_PERSIST {} was not read again: {}",
                             self.file,
                             crate::persist::STORAGE_WORKER_GONE
-                        );
+                        ));
                         continue;
                     }
                 },
@@ -1821,10 +1824,10 @@ impl<T: StoredDocument> DocumentState<T> {
             }
         };
         if let Some((path, why)) = &answer.left {
-            eprintln!(
+            crate::diagnostics::stderr_line(format!(
                 "BT_PERSIST {file}: {} is left beside it: {why}",
                 path.display()
-            );
+            ));
         }
         for retired in &answer.retired {
             self.kept.retain(|kept| kept.path != *retired);
@@ -1834,9 +1837,9 @@ impl<T: StoredDocument> DocumentState<T> {
                 self.revision.landed(bytes, flight.document);
                 self.writes.record(file, Ok(()));
                 if let Some(error) = &answer.not_durable {
-                    eprintln!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_PERSIST {file} was written and is not known to be durable: {error}"
-                    );
+                    ));
                 }
                 if let Some(path) = kept {
                     // The copy of what the file held stays until a later landing
@@ -1849,11 +1852,11 @@ impl<T: StoredDocument> DocumentState<T> {
                 return true;
             }
             Outcome::Moved { bytes } => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "BT_PERSIST {file} changed on disk; the change is kept in memory and not \
                      written over it (generation {})",
                     flight.generation
-                );
+                ));
                 // (c)1's `Moved` row: the base is the revision as it stands
                 // when the answer is processed, in worker order.
                 self.keep_for_the_merge(PendingMerge {
@@ -1864,13 +1867,15 @@ impl<T: StoredDocument> DocumentState<T> {
                 });
             }
             Outcome::MovedDuringRead => {
-                eprintln!("BT_PERSIST {file} was being written by another program; not written");
+                crate::diagnostics::stderr_line(format!(
+                    "BT_PERSIST {file} was being written by another program; not written"
+                ));
             }
             Outcome::Displaced { bytes, kept } => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "BT_PERSIST {file} was edited while it was written; the edit is kept as {}",
                     kept.display()
-                );
+                ));
                 // Stored against the revision the write was conditional on, and
                 // only then does the revision become what the file holds ((c)1).
                 self.keep_for_the_merge(PendingMerge {
@@ -1898,22 +1903,25 @@ impl<T: StoredDocument> DocumentState<T> {
                     bytes: Some(theirs),
                 };
                 if !std::mem::replace(&mut self.held_for_merge, true) {
-                    eprintln!(
+                    crate::diagnostics::stderr_line(format!(
                         "BT_PERSIST {file} changed on disk while Folio had unsaved changes; held until merged"
-                    );
+                    ));
                 }
                 match (kept, &answer.not_durable) {
                     (Some(path), Some(error)) => {
-                        eprintln!(
+                        crate::diagnostics::stderr_line(format!(
                             "BT_PERSIST {file} was put back and is not known to be durable: {error}"
-                        );
+                        ));
                         self.kept.push(KeptFile {
                             path,
                             version: answer.version + 1,
                         });
                     }
                     (Some(path), None) => {
-                        eprintln!("BT_PERSIST {file}: {} is left beside it", path.display());
+                        crate::diagnostics::stderr_line(format!(
+                            "BT_PERSIST {file}: {} is left beside it",
+                            path.display()
+                        ));
                     }
                     (None, _) => {}
                 }
@@ -1965,17 +1973,21 @@ impl<T: StoredDocument> DocumentState<T> {
         let (bytes, document) = match read {
             // The file was being written; the ear has a stamp for the write.
             ReadAnswer::NotServed(why) => {
-                eprintln!("BT_PERSIST {file} was not read again: {why}");
+                crate::diagnostics::stderr_line(format!(
+                    "BT_PERSIST {file} was not read again: {why}"
+                ));
                 return;
             }
             ReadAnswer::MovedDuringRead => {
-                eprintln!(
+                crate::diagnostics::stderr_line(format!(
                     "BT_PERSIST {file} changed while it was read (generation {generation}); the next pass reads it again"
-                );
+                ));
                 return;
             }
             ReadAnswer::Unobtained(error) => {
-                eprintln!("BT_PERSIST {file} could not be read: {error}");
+                crate::diagnostics::stderr_line(format!(
+                    "BT_PERSIST {file} could not be read: {error}"
+                ));
                 news.unreadable = Some(true);
                 return;
             }
@@ -1986,7 +1998,9 @@ impl<T: StoredDocument> DocumentState<T> {
                 }
                 // No copy is kept mid-run (defect 4): the file is the person's,
                 // under its own name, and nothing will replace it.
-                eprintln!("BT_PERSIST {file} would not parse: {reason:?}");
+                crate::diagnostics::stderr_line(format!(
+                    "BT_PERSIST {file} would not parse: {reason:?}"
+                ));
                 news.unreadable = Some(true);
                 if self.held_for_merge {
                     self.held_file_moved(Some(bytes), T::default());
@@ -2105,11 +2119,11 @@ impl<T: StoredDocument> DocumentState<T> {
                     Ok(document) => document,
                     Err(reason) => {
                         match &pending.kept {
-                            Some(kept) => eprintln!(
+                            Some(kept) => crate::diagnostics::stderr_line(format!(
                                 "BT_PERSIST {file}: the edit kept as {} would not parse \
                                  ({reason:?}); it stays beside the file and is not merged",
                                 kept.display()
-                            ),
+                            )),
                             None => self.merges.push(pending),
                         }
                         continue;
