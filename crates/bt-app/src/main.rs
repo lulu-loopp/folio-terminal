@@ -314,8 +314,10 @@ use bt_viewport::{
 use runtime::platform_pointer_of;
 #[cfg(test)]
 use runtime::{
-    a_capture_still_holds_its_pointer, profile_menu_anchor, rescan_leaf_for_search,
-    resolved_theme_change, tab_surface_tip_boxes, tooltip_anchor_for,
+    a_capture_still_holds_its_pointer, a_page_is_off_the_glass, a_page_still_has_a_pane,
+    a_page_was_replaced, a_retirement_happens_on_this_turn, hole_for, profile_menu_anchor,
+    rescan_leaf_for_search, resolved_theme_change, revived_page_of, tab_surface_tip_boxes,
+    tooltip_anchor_for,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
@@ -11408,97 +11410,6 @@ enum PreviewOpenLane {
     Page,
     /// A document, through the tab's shared pool.
     Document,
-}
-
-/// **Whether the content on a web seat has been replaced by something else**
-/// (W2 slice 5).
-///
-/// The other half of "one seat shows one thing". `Runtime::open_web_page_on`
-/// already owns the half that runs when a page lands - the document under it
-/// stops being pointed at - and until slice ⑤ nothing could travel the other
-/// way, because the only door into a page was `BT_WEB_DEV`. A files column that
-/// opens pages makes it an everyday gesture: double-click `report.html`, then
-/// double-click `notes.md`, and without this the head, the foot and the tab name
-/// all say `notes.md` while a browser is still on the glass in front of the
-/// document.
-///
-/// **`None` is not "something else".** There is a window between a page being
-/// asked for and its first commit in which the pane points at nothing at all -
-/// `open_web_page_on` clears the outgoing buffer on purpose - and reading that
-/// as a replacement would close every page a frame after it opened.
-///
-/// A predicate rather than a condition written into the retirement loop,
-/// because it is a claim about content that is worth being able to ask on its
-/// own, and because the loop that consumes it is walking two maps at once.
-fn a_page_was_replaced(picture: Option<&Path>, buffer: Option<&preview::PreviewSource>) -> bool {
-    // **The exception a player needed is gone with the player** (route B slice
-    // ②, 2026-08-28; §7.44 ④).
-    //
-    // This function used to take a third argument — the recording the engine on
-    // this pane was playing — and carry a whole clause for it. Route A put a
-    // browser on a video's pane while the *pane* went on pointing at the
-    // recording, so the ordinary reading of "one seat shows one thing" looked at
-    // that pane, saw a file that was not a URL, and closed the browser inside a
-    // frame of it opening. The clause was the repair.
-    //
-    // A recording never reaches a browser now. So the ordinary reading is the
-    // whole reading again: a pane showing a picture or a document, with a page
-    // open on it, is a pane something else has landed on.
-    picture.is_some() || buffer.is_some_and(|source| source.web_url().is_none())
-}
-
-/// **Whether this page still has a pane to be drawn on** — the rule
-/// [`Runtime::advance_web_page`] retires a browser by (§7.14a, user report
-/// 2026-08-25).
-///
-/// Three facts and no fourth: whether a float is carrying this page, whether the
-/// seat it was opened on is still a preview seat in its tab's tree, and whether
-/// whatever pane it is drawn on has had [`a_page_was_replaced`] happen to it.
-///
-/// **The float answers *instead of* the tree, not beside it**, and that is the
-/// whole of this ticket's repair. Popping a pane out closes its seat — that is
-/// `pop_out_preview`'s design and not an accident of it — so a rule that only
-/// asked the tree said "this page has no pane" about the one page a reader had
-/// just carried into a window of its own, and the browser was closed inside a
-/// float that went on drawing its head, its foot and an empty middle.
-fn a_page_still_has_a_pane(floated: bool, seat_stands: bool, replaced: bool) -> bool {
-    (floated || seat_stands) && !replaced
-}
-
-/// **Whether this page must come off the glass this frame** — the other half of
-/// [`Runtime::sync_web_page`]'s answer, and the one a float changes (§7.14a).
-///
-/// Three of the four reasons are unchanged: a modal is painted over the whole
-/// window by wgpu and a page is *under* wgpu, so a hole through a scrim would be
-/// a page read clearly through a dimmed window; a failure card replaces the
-/// seat's content and the hole would erase it; and a page on a tab nobody is
-/// looking at costs nothing precisely because it is hidden.
-///
-/// **The fourth is a float's exemption from the third.** A floating window is on
-/// the glass across tab switches — that is §7.1.2's ruling and the whole of what
-/// a float is for — so "which tab is in front" says nothing about a page inside
-/// one. Written as its own clause rather than folded into the caller's `body`,
-/// because a page hidden for the wrong reason and a page with no rectangle look
-/// identical from the outside and are two different defects.
-/// **The fifth is the reader having asked to see the source instead** (user
-/// ruling 2026-08-26; DESIGN §7.7 ⑭). A page turned over with `</>` is drawn by
-/// nobody — the pane's own document pipeline is drawing that file's markup in
-/// the same rectangle — and a hole left punched over it would show a live
-/// browser through the text it is the source of.
-///
-/// It belongs here rather than in the caller's `body` for the reason written
-/// above about the third: this page **has** a rectangle and is entitled to it
-/// the moment the reader turns back, so the engine keeps being told its bounds
-/// and keeps its whole self. What it loses is one `SetIsVisible`, which is the
-/// only difference between a page that is hidden and a page that is gone.
-fn a_page_is_off_the_glass(
-    obstructed: bool,
-    floated: bool,
-    in_front: bool,
-    carded: bool,
-    sourced: bool,
-) -> bool {
-    obstructed || (!floated && !in_front) || carded || sourced
 }
 
 /// [`PreviewOpenLane`] for one path.
@@ -33039,73 +32950,6 @@ struct PreviewPlacement {
     clip: bt_render::SeatViewport,
 }
 
-/// **U8 — the preview seat's picture rides its own pane's tween.**
-///
-/// A preview pane is a pane: it FLIPs exactly as its neighbours do, its head
-/// glides with the rest of the chrome, and its picture has to travel with it or
-/// the two arrive a fifth of a second apart — which is the pane visibly coming
-/// apart, and is on screen the first time anyone opens a preview, because
-/// landing one *is* a structural edit.
-///
-/// The pair is [`animated_pane_viewports`]' and not a second sampler beside it.
-/// `preview_body_viewport` delegates to `pane_body_viewport`, so this is
-/// literally the terminal seats' computation applied to one more seat: extent
-/// from the solve, corner from the tween. That equality is what makes R2 hold
-/// here for free — no frame of a flight changes the extent, so no frame of a
-/// flight can re-run the scale worker.
-/// **A hole is only ever cut where a floor already stands** (§7.14; user ruling
-/// 2026-08-25).
-///
-/// # What a hole costs when it is wrong
-///
-/// A web pane is a hole: `bt_render::WindowRenderer::set_web_holes` writes
-/// `(0, 0, 0, 0)` over the pane's rectangle so the page composed underneath can
-/// be seen at all. Nothing else in the tree paints there — and this window is
-/// `CreateTargetForHwnd(hwnd, topmost = true)` over a per-pixel-alpha HWND, so a
-/// hole with nothing under it is not a dark rectangle, it is *the desktop*.
-///
-/// The two things that can be under it are the page's own visual and, since
-/// §7.14, the floor beneath that. **The page arrives on the browser's clock and
-/// the floor arrives on the pane's**, which is why the floor is what the hole is
-/// asked about: `floored` is what `webhost::WebSeat::place` returns, and it is
-/// `true` exactly when the compositor has been given this rectangle and did not
-/// refuse it.
-///
-/// Before this rule the hole was cut off `presence` alone, so a page's **first**
-/// open — where the engine does not exist yet and the floor was minted with it —
-/// opened a hole over nothing. Measured on the machine (release, cold profile,
-/// isolated `APPDATA`/`LOCALAPPDATA`): twelve presented frames carried the hole
-/// with no engine, spanning 403 ms, and a magenta board behind the window was
-/// photographed filling the entire pane body from 88.5 ms to 514.6 ms after the
-/// page was asked for.
-///
-/// A function and not two lines at the call site because it is the whole of the
-/// ruling and it is pure — the part that can be wrong without a window, and
-/// therefore the part a test can hold.
-///
-/// # And where in the stack it is punched (§7.14c, 2026-08-25)
-///
-/// `above` is [`bt_render::WebHole::above`] and it is this window's second
-/// answer, not the renderer's: **a page's pane is not always a seat.** A docked
-/// page passes `None` and is punched under the whole overlay stack, where every
-/// surface over its pane is entitled to cover it. A page carried into a float
-/// passes that float's own layer, because the float is its pane — a hole under
-/// the stack is a hole the float's face paints straight back over, which is the
-/// report this argument exists to answer.
-fn hole_for(
-    presence: webhost::WebPresence,
-    floored: bool,
-    above: Option<usize>,
-) -> Option<bt_render::WebHole> {
-    match presence {
-        webhost::WebPresence::Shown(bounds) if floored => Some(bt_render::WebHole {
-            rect: bounds.as_rect(),
-            above,
-        }),
-        _ => None,
-    }
-}
-
 /// **What this window knows about one animated file** (§7.44 ⑤).
 ///
 /// Three states and not an `Option`, because "asked and not answered yet" and
@@ -38933,35 +38777,6 @@ fn page_destination(target: &str) -> Option<(String, webnav::Mint)> {
         return Some((url, mint));
     }
     Some((switcher_row_destination(target)?, webnav::Mint::Nothing))
-}
-
-/// **What a restored pane's identity comes back as, when it comes back as a
-/// page** — the two stored spellings of one thing (user ruling 2026-08-23).
-///
-/// A session file, a Recent seed and a pinned row can all name a local page two
-/// ways: as the URL a page committed to (`PreviewSourceV1::Url`, written by
-/// every page opened since W2 slice ⑤) and as the path a document was opened
-/// from (`PreviewSourceV1::File`, which is what a `.html` dropped on a pane or
-/// chosen in the switcher wrote while `.html` was still text). **Both are the
-/// same file and both come back as the page**, which is this ruling in the one
-/// place a restore can apply it — the pool is seeded before a window exists, so
-/// `open_preview_source_on`'s fork is not on this path.
-///
-/// Neither spelling is trusted as a permission. The URL arm is
-/// [`page_destination`] unchanged — decode, canonicalise, mint again — and the
-/// path arm is those same three steps with no string to decode first, which is
-/// exactly what `Runtime::open_preview_web_file` does for a double click. A file
-/// that has been moved or deleted comes back as nothing at all, which is the
-/// answer §7.9 ⑤ already gives for a row this window would not navigate to now.
-fn revived_page_of(source: &preview::PreviewSource) -> Option<(String, webnav::Mint)> {
-    if let Some(url) = source.web_url() {
-        return page_destination(url);
-    }
-    let path = source_opens_as_a_page(source)?;
-    let canonical = std::fs::canonicalize(path).ok()?;
-    let mint = webnav::Mint::file(&canonical).ok()?;
-    let url = mint.target()?.to_owned();
-    Some((url, mint))
 }
 
 /// **Whether a switcher row may be written into `pins.json`** — the *first* of
@@ -56024,56 +55839,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ── The web preview (slice 1) ──────────────────────────────────────────
 
-    /// **Every page in this window has its last frame kept, and a page a modal
-    /// covers draws it** (§7.8 ⑩).
-    ///
-    /// Called at the tail of [`Self::sync_web_page`], after every page has been
-    /// told whether it is on the glass, because that is the fact the whole lane
-    /// stands on: a hidden WebView never answers a `CapturePreview`, so the ask
-    /// has to be made while the page is still up and the answer kept against the
-    /// moment it is not.
-    ///
-    /// The three things it does are one sentence each:
-    ///
-    /// * **ask** — every page on the glass is photographed on `web_thumb`'s own
-    ///   two-second clock, whether or not a card is looking at it. This is the
-    ///   line §7.11 ⑪ⓑ said would need a ruling ("真要抹掉它,得让模式关着的时候
-    ///   也照相"), and here is the ruling: the cost is the ask (0.115 ms) and a
-    ///   40 KB comparison, nothing is decoded for a page nobody is drawing, and
-    ///   what it buys is that no dialog ever opens onto a blank pane.
-    /// * **decode** — a page the dialog is standing over needs its frame *now*,
-    ///   and the bytes are already in hand. One job per page per modal, because
-    ///   `frame_job` refuses while one is out or one has landed.
-    /// * **let go** — the dialog came down, the pages are back, and forty
-    ///   megabytes of standing-in pixels are released.
-    fn keep_what_the_modal_covers(&mut self, keepsakes: Vec<PageKeepsake>, now: Instant) {
-        let demands: Vec<web_thumb::PageDemand> = self
-            .window
-            .web
-            .iter()
-            .map(|(leaf, web)| web_thumb::PageDemand {
-                leaf: *leaf,
-                url: web.identity().unwrap_or_default().to_owned(),
-                facts: web.capture_facts(),
-                card: None,
-            })
-            .collect();
-        self.photograph_pages(demands, now);
-        if keepsakes.is_empty() {
-            // Asked of the keepsakes and not of `a_modal_covers_the_window`,
-            // which would be a second reading of the same frame: a window with
-            // no page under a dialog is holding no frames for one, whichever of
-            // the two facts is the reason.
-            self.window.web_thumbs.drop_frames();
-        }
-        for keepsake in &keepsakes {
-            if let Some(job) = self.window.web_thumbs.frame_job(keepsake.leaf) {
-                self.page_shrinker().send(job);
-            }
-        }
-        self.window.page_keepsakes = keepsakes;
-    }
-
     /// **The pictures the panes under a modal draw** — one per page the dialog
     /// took off the glass, at the rectangle the page itself had (§7.8 ⑩).
     ///
@@ -56097,34 +55862,6 @@ impl<B: Backend> Runtime<'_, B> {
                 Some(page_keepsake_icon(picture, keepsake.rect))
             })
             .collect()
-    }
-
-    /// **Whether this page is what typing goes into right now** — the one
-    /// question [`Runtime::web_keyboard`] is kept against.
-    ///
-    /// [`Self::page_holds_the_keyboard`] asked of one leaf, plus the two
-    /// surfaces that stand over a page without moving the layout focus at all:
-    ///
-    /// * a **name editor** — the address field is drawn on this page's own head
-    ///   and the seat under it never stops being focused, so nothing else in
-    ///   this window would ever notice that the keys had to move;
-    /// * a **modal's scrim**, and this seat's own **fault** — a card that
-    ///   replaced the page, or a download sheet standing over it. Per leaf,
-    ///   because a card in one pane has no business taking the keyboard from the
-    ///   page in the pane beside it.
-    fn page_is_the_typing_target(&self, leaf: LeafId) -> bool {
-        self.window.rename.is_none()
-            && !self.a_modal_covers_the_window()
-            && self
-                .window
-                .web
-                .get(&leaf)
-                .is_some_and(|web| web.fault().is_none())
-            // **The leaf and not the seat** (§7.14c). A page carried into a
-            // float has no seat left in the tree, so a comparison that went
-            // through one answered `false` for it every frame — and this is the
-            // predicate the settling loop takes the keyboard back on.
-            && self.page_with_the_keyboard() == Some(leaf)
     }
 
     /// This window's thumbnail shrinker, started the first time a page is
@@ -71337,28 +71074,6 @@ fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
         pointer => unreachable!("the pointer module names every pointer kind: {pointer:?}"),
     })
 }
-/// One of this window's mouse buttons, in the vocabulary `SendMouseInput`
-/// speaks.
-///
-/// `Other` is refused rather than guessed at: WebView2 knows two X buttons and
-/// a mouse with a fifth is a mouse whose fifth button this window has never had
-/// a meaning for either.
-fn web_mouse_button(button: MouseButton, down: bool) -> Option<bt_platform::WebMouseEvent> {
-    use bt_platform::WebMouseEvent as Event;
-    Some(match (button, down) {
-        (MouseButton::Left, true) => Event::LeftDown,
-        (MouseButton::Left, false) => Event::LeftUp,
-        (MouseButton::Right, true) => Event::RightDown,
-        (MouseButton::Right, false) => Event::RightUp,
-        (MouseButton::Middle, true) => Event::MiddleDown,
-        (MouseButton::Middle, false) => Event::MiddleUp,
-        (MouseButton::Back, true) => Event::XDown(1),
-        (MouseButton::Back, false) => Event::XUp(1),
-        (MouseButton::Forward, true) => Event::XDown(2),
-        (MouseButton::Forward, false) => Event::XUp(2),
-        (MouseButton::Other(_), _) => return None,
-    })
-}
 
 /// The cursor a hosted page asked for, in winit's vocabulary.
 ///
@@ -76262,39 +75977,6 @@ fn pages_that_move_with_their_panes(
 #[must_use]
 fn a_bare_redraw_still_owes_a_present(chrome_present_pending: bool, tab_has_a_shell: bool) -> bool {
     chrome_present_pending || !tab_has_a_shell
-}
-
-/// **Whether this turn is the one a page is retired on** (§7.10 ④‴).
-///
-/// The argument is "already closing?" for each of the pages this turn found
-/// orphaned — a page whose pane has left the tree, or whose pane is now showing
-/// something else. [`webhost::WebSeat::close`] is idempotent and the wait for
-/// the browser process to end runs for as long as ten seconds
-/// (`w0p-evidence.md` §4.2), so that set stays non-empty for the whole of the
-/// wait and, on the graceful path, can stay non-empty until the deadline
-/// because the exit event never arrives at all.
-///
-/// **What the retirement owes the glass is one frame, and one is a count.** The
-/// hole a page is seen through is punched while a frame is composed, and a
-/// retirement happens after that frame — so the picture on the glass still
-/// carries the hole and a frame has to be asked for. Asking on every turn
-/// instead is a window that spends the whole ten seconds going round its own
-/// loop as fast as it can: [`Runtime::present_chrome_change`] requests a redraw
-/// whether or not it found a picture to re-queue, that redraw is answered at the
-/// tail of the same turn, and the next turn asks again. **Read off the three
-/// statements rather than timed on a machine** — it is a closed loop with no
-/// wait in it, and what that costs is whatever one present costs, which on the
-/// reporting machine is a 4K one.
-///
-/// A pure function over the one bit that separates the two, so the rule can be
-/// read without a browser: whether a page is *going* is a question about the
-/// tree, and whether it is going **now** is a question about what it was already
-/// told.
-#[must_use]
-fn a_retirement_happens_on_this_turn(
-    mut orphaned_pages_closing: impl Iterator<Item = bool>,
-) -> bool {
-    orphaned_pages_closing.any(|already_closing| !already_closing)
 }
 
 /// Whether a chrome animation's tick can be answered from the picture already
