@@ -11523,7 +11523,7 @@ crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	
 crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	Ambiguous	ends_with	1	
 crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	Ambiguous	is_some_and	1	
 crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	Ambiguous	to_str	1	
-crates/bt-testpath/src/lib.rs	bt-testpath crate::temp_path	Ambiguous	join	1	
+crates/bt-testpath/src/lib.rs	bt-testpath crate::temp_path	Ambiguous	join	1	2026-10-24: reached only from persist.rs cfg(test) DIRECTORY static (a test process scratch data directory, T-LAZY-INITIALIZERS-BEFORE-THE-LOOP); the walk does not read cfg, the product build has no such static
 crates/bt-transcript/src/lib.rs	bt-transcript crate::<CellText as From<&str>>::from	Ambiguous	len	3	
 crates/bt-transcript/src/lib.rs	bt-transcript crate::CapturedCell::carries_unclaimed_text	Ambiguous	all	1	
 crates/bt-transcript/src/lib.rs	bt-transcript crate::CapturedCell::plain	Dynamic	into	1	
