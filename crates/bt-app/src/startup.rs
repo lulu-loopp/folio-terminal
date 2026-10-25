@@ -167,25 +167,17 @@ impl<T: 'static> SettledOnce<T> {
         }
     }
 
-    #[cfg(not(test))]
+    /// A read of an unsettled cell. In a test build, a cell that names a test value is settled
+    /// by it here (a test process has no `main`); everywhere else, the panic.
     fn unsettled(&self) -> &T {
+        #[cfg(test)]
+        if let Some(make) = self.in_a_test {
+            return self.cell.get_or_init(make);
+        }
         panic!(
             "{} is read before `main` settled it (startup::SettledOnce)",
             self.what
         )
-    }
-
-    /// A test build's read of an unsettled cell: settled by the cell's test value when it names
-    /// one, the product's panic when it does not.
-    #[cfg(test)]
-    fn unsettled(&self) -> &T {
-        match self.in_a_test {
-            Some(make) => self.cell.get_or_init(make),
-            None => panic!(
-                "{} is read before `main` settled it (startup::SettledOnce)",
-                self.what
-            ),
-        }
     }
 }
 
@@ -220,7 +212,7 @@ mod tests {
     /// RED (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP) — **a settled cell has no initializer a read can
     /// run**: a read before the settle panics with the cell's name instead of making the value.
     ///
-    /// MUTATION: drop the cell's name from the test arm's panic (`panic!("read before settled")`)
+    /// MUTATION: drop the cell's name from `unsettled`'s panic (`panic!("read before settled")`)
     /// — the panic no longer says which cell was read first.
     #[test]
     fn a_settled_cell_read_before_its_settle_panics() {
