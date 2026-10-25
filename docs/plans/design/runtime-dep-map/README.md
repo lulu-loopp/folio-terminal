@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **819 items, 613 free functions and 206 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 4's head; 823, 617 and 206 before it,
+- **unclassified.tsv**: **813 items, 612 free functions and 201 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 5's head; 819, 613 and 206 before it,
+  823, 617 and 206 before batch 4,
   828, 620 and 208 before batch 3,
   837, 627 and 210 before batch 2, and 846, 634 and 212 before batch 1).
   - The plan's "106 unclassified" was the 2026-09-18 theme-regex count of
@@ -101,7 +102,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 2 | `runtime/web.rs` | moved by batch 2 | — |
    | 3 | `runtime/dpi.rs` | moved by batch 3 (4 items; `files_float_content_height`, tied with `runtime/floats.rs`, waits for that batch; `release_due_leaf_resize` stays in `main.rs`, the single writer road of `LeafSession.birth` and `.grid`), with `Runtime::page_shrinker` as the web batch's tail | — |
    | 4 | `runtime/attention.rs` | moved by batch 4 (4 items; `Runtime::reveal_in_explorer`, tied with `runtime/configuration.rs` and `runtime/floats.rs`, waits for the floats batch) | — |
-   | 5 | `runtime/palette.rs` | 7 (1 + 6) | 14 |
+   | 5 | `runtime/palette.rs` | moved by batch 5 (6 items; `Runtime::focus_seat` held, below) | — |
    | 6 | `runtime/terminal.rs` | 14 (12 + 2) | 15 |
    | 7 | `runtime/git.rs` | 14 (11 + 3) | 19 |
    | 8 | `runtime/peek.rs` | 14 (14 + 0) | 21 |
@@ -123,6 +124,17 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    `LeafSession.birth` and `LeafSession.grid`, whose other writers stay at the root, and batch 3 moved it back. It
    stays in `main.rs` until an owner is ruled for those two facts; `unclassified.tsv` keeps proposing
    `runtime/dpi.rs` for it (that column is generated), and no later batch retries the move.
+
+   **Held items** (each row's generated `called_from` home is not where it goes):
+   - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).
+   - `files_float_content_height` (tied `runtime/dpi.rs` / `runtime/floats.rs`) and
+     `Runtime::reveal_in_explorer` (tied `runtime/attention.rs` / `runtime/configuration.rs` /
+     `runtime/floats.rs`) — the owner column (`docs/ARCHITECTURE.md` §13) gives both to `runtime/floats.rs`;
+     they move with the floats batch.
+   - `Runtime::focus_seat` — its first `called_from` place is `runtime/palette.rs`, but that is three of eight
+     callers (the others are `runtime/web.rs`, `runtime/attention.rs`, `runtime/preview.rs` and `main.rs`) and it
+     is a general focus door, not the command palette's; batch 5 held it, and it waits for the topic that owns
+     seats (`runtime/panes.rs`, "seat layout"), so that it moves once.
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,

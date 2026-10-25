@@ -2789,7 +2789,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 | `keyboard.rs` | 35 | `keyboard_input` and its rung order (§8), shortcuts and key hints, the IME caret, cursor blink | session (input) | IME native affinity (§5.2); `store_keybindings`, row 20 |
 | `math.rs` | 46 | formulas in terminal and preview: requests, results, hover tools, toggles, copying LaTeX | observation (`bt-math-worker`) | — |
 | `mouse.rs` | 64 | `mouse_input` and its rungs, hover, drag and drop, wheel, the pointer cursor, asking about the link under the pointer | session (mouse reports); observation (path verification, through `main.rs`'s asks) | — |
-| `palette.rs` | 15 | the command palette | observation (`bt-index-worker`) | — |
+| `palette.rs` | 20 | the command palette | observation (`bt-index-worker`) | — |
 | `panes.rs` | 130 | seat layout, split, close, duplicate, zoom and move of panes; command rails; pane menus; `present_seats_and_commit` | session (pane birth through `create_leaf_session`); presentation (on this thread) | rows 9 and 11 |
 | `peek.rs` | 59 | the layout peek and the file glance card | observation (math, preview, git; video) | — |
 | `preview.rs` | 286 | preview panes and documents: open, land, rename, save, watch; markdown pictures, the background picture, video seats, the drop preview, clipboard pictures, the tab strip's animation | observation (`bt-preview-worker`, `bt-math-worker`; starts `background-picture` and `clipboard-picture`); ingress (`preview_watch`); hand-off | `spawn_at_priority` ×2; `bt_platform::rename_without_replacing`, row 20; row 20 (`save_preview_on`) |
@@ -2804,7 +2804,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 819 (613 free functions, 206 methods) after batch 4. The table
+into their topics batch by batch: 813 (612 free functions, 201 methods) after batch 5. The table
 below is the 2026-09-21 manifest's sort of the 201 methods then left
 (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
 
