@@ -634,6 +634,12 @@ pub(crate) enum Stop {
     /// The bundle on the image, or its copy, is not this publisher's Folio of
     /// the offered version for this machine's architecture.
     Identity,
+    /// **A signature's revocation could not be checked because where its
+    /// answer is published could not be reached** (0.4.9
+    /// T-UPDATE-OFFLINE-IDENTITY-CARD; `trust::Refusal::RevocationOffline`):
+    /// no network, or that server down. Refused as [`Self::Identity`] is —
+    /// the next press asks again.
+    Offline,
     /// The bundle could not be copied off the image.
     Copy,
     /// The rescue copy of the running build could not be made.
@@ -665,6 +671,7 @@ impl Stop {
             Self::Sums => "the image does not match its checksum",
             Self::Mount => "the image could not be attached",
             Self::Identity => "the new build is not the offered, signed Folio",
+            Self::Offline => "a signature's revocation could not be checked without the network",
             Self::Copy => "the new build could not be copied",
             Self::Clone => "the running build could not be kept aside",
             Self::TooOld => "the release needs a newer updater than this build",
