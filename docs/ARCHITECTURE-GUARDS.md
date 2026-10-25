@@ -521,13 +521,16 @@ inside a macro's arguments or a nested `fn`, and a rename `admitted as …` in a
 on the pin's receiver, matched by spelling — a same-name method of another type
 called through a rebound `trace_shutdown` would count as the road — outside any
 macro's arguments and nested `fn`. A pinned door's call that stands under a
-statement's `#[cfg…]` (the statement or block an outer `#[cfg…]` governs, or the
-block an inner `#![cfg…]` opens) is refused: the index reads a file's, an item's
-and a module's `cfg` but never a statement's, so a gated call would meet its pin
-on a build it is not in. The writer table (`PINS`) does not read statement
-`cfg`s yet — a stated gap with its own plan row. Not read: closures — a call in a
-closure's body is placed where it is written, as a landmark is, so a closure
-written after `run_app` that is never called would meet the tail's pin. An
+statement's `#[cfg…]` or `#[cfg_attr(…)]` (the statement or block an outer one
+governs, or the block an inner `#![…]` one opens) is refused: the index reads a
+file's, an item's and a module's `cfg` but never a statement's, so a gated call
+would meet its pin on a build it is not in. The writer table (`PINS`) does not
+read statement `cfg`s yet — a stated gap, T-WINDOW-WAITS-STATEMENT-CFG (0.4.9 plan
+row 60). Not read: closures and run-time-dead branches — a call in a closure's
+body, or in a branch that never runs (`if cfg!(…)`, `if false`), is placed where
+it is written, as a landmark is, and is still in the build, so a closure written
+after `run_app` that is never called, or a settle under `if false`, would meet
+the tail's pin. An
 unreadable admission is refused wherever it is (it may be a pinned door's), and
 its owner's pins are not also called "not there" (`deleting_the_tail_settle_is_red`,
 `a_second_settle_in_another_branch_is_a_surplus`,

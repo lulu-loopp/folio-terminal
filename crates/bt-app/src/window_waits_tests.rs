@@ -5343,8 +5343,9 @@ fn door_call(pin: &DoorPin) -> String {
 /// body; and a rename `admitted as …` in a `use`. Every token spelling a pinned road's method
 /// name, but its declaration, must be the call on the pin's receiver, matched by spelling, outside
 /// any macro's arguments and nested `fn`; any other position is refused. A pinned door's call
-/// under a statement's `#[cfg…]` ([`under_statement_cfg`]) is refused ([`gated`]). Not read: a
-/// closure — a call in its body is placed where it is written, as a landmark is. Every admission
+/// under a statement's `#[cfg…]` or `#[cfg_attr(…)]` ([`under_statement_cfg`]) is refused
+/// ([`gated`]). Not read: a closure or a run-time-dead branch (`if cfg!(…)`, `if false`) — a call
+/// in either is placed where it is written, as a landmark is, and is in the build. Every admission
 /// is read, so an unreadable one — which might be a pinned door's — is refused wherever it is;
 /// pins are compared for the doors of `pins` only.
 fn pinned_door_failures(
@@ -5504,10 +5505,11 @@ fn use_declaration(src: &Src, at: usize) -> Option<(Vec<Tok>, usize)> {
     Some((toks, end))
 }
 
-/// Whether `toks[index]` stands in the statement or block a `#[cfg…]` of `toks` governs, or in a
-/// block a `#![cfg…]` opens. The outer attribute governs what follows its `]` up to the first `;`
-/// or `,` at its own depth, the `}` that closes a group opened there (unless `else` follows), or
-/// the close of the group it stands in; the inner one governs the group it stands in.
+/// Whether `toks[index]` stands in the statement or block a `#[cfg…]` or `#[cfg_attr(…)]` of
+/// `toks` governs, or in a block a `#![cfg…]` / `#![cfg_attr(…)]` opens (a `cfg_attr` may carry a
+/// `cfg`, so it is read as one). The outer attribute governs what follows its `]` up to the first
+/// `;` or `,` at its own depth, the `}` that closes a group opened there (unless `else` follows),
+/// or the close of the group it stands in; the inner one governs the group it stands in.
 fn under_statement_cfg(src: &Src, toks: &[Tok], index: usize) -> bool {
     for (hash, tok) in toks.iter().enumerate() {
         if src.text(*tok) != "#" || tok.kind != Kind::Punct {
@@ -5515,7 +5517,9 @@ fn under_statement_cfg(src: &Src, toks: &[Tok], index: usize) -> bool {
         }
         let inner = src.is(toks.get(hash + 1), "!");
         let open = hash + 1 + usize::from(inner);
-        if !src.is(toks.get(open), "[") || !src.is(toks.get(open + 1), "cfg") {
+        if !src.is(toks.get(open), "[")
+            || !(src.is(toks.get(open + 1), "cfg") || src.is(toks.get(open + 1), "cfg_attr"))
+        {
             continue;
         }
         let Some(close) = closing(src, toks, open) else {
@@ -13738,6 +13742,11 @@ fn a_pinned_call_under_a_statement_cfg_is_refused() {
         (
             "ww-doors-cfg-statement",
             "#[cfg(test)] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
+        ),
+        (
+            "ww-doors-cfg-attr",
+            "#[cfg_attr(test, cfg(any()))] \
+             gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
         ),
         (
             "ww-doors-cfg-inner",
