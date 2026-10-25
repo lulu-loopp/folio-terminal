@@ -4413,7 +4413,10 @@ mod tests {
     fn run_the_start_writers(root: &Path) -> bool {
         // Settled as `main`'s claim settles it: this is a start's process of its own, under the
         // private `APPDATA` the harness handed it.
-        let storage = persist::settle_storage_dir().value().data_folder().to_path_buf();
+        let storage = persist::settle_storage_dir()
+            .value()
+            .data_folder()
+            .to_path_buf();
         let now = std::time::Instant::now();
 
         let mut session = persist::SessionStore::open();
