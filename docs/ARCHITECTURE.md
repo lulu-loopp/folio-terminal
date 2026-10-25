@@ -2771,14 +2771,14 @@ Every method below runs on the **window thread** and holds `&mut App` and
 ownership. "Asks" names the lanes of §5.1 whose requests the file sends or
 whose answers it applies; "doors and rows" names the §6 doors and the §5.3
 rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the methods K2
-(T-SPLIT-2B) has moved in since, updated with each batch (through batch 8: `profiles.rs` and
+(T-SPLIT-2B) has moved in since, updated with each batch (through batch 9: `profiles.rs` and
 `search.rs` +1 each in batch 1, `web.rs` +2 in batch 2 and +1 in batch 3, `dpi.rs` +1 in batch 3,
-`palette.rs` +5 in batch 5, `terminal.rs` +2 in batch 6, `git.rs` +3 in batch 7; batch 8 moved free functions only).
+`palette.rs` +5 in batch 5, `terminal.rs` +2 in batch 6, `git.rs` +3 in batch 7; batch 8 moved free functions only; `clipboard.rs` +1 in batch 9).
 
 | file | methods | owns | asks | doors and rows |
 |---|---|---|---|---|
 | `attention.rs` | 33 | toasts, pane notices, the Agents rows, terminal and turn-end notifications; raising, answering, marking seen and jumping to an attention request | ingress (the ledger the endpoint feeds, §7.2 — `bt_workbench::attention` since 2026-09-25, §12.1) | none; `notify::desktop_reach` and `interruption` decide what reaches the desktop |
-| `clipboard.rs` | 19 | copy, copy on select, the paste target and its delivery, the multi-line paste card | session (bytes into `InputRing`) | the clipboard read, on this thread (§7.2) |
+| `clipboard.rs` | 20 | copy, copy on select, the paste target and its delivery, the multi-line paste card | session (bytes into `InputRing`) | the clipboard read, on this thread (§7.2) |
 | `configuration.rs` | 10 | Settings ▸ About ▸ Export… and Import…, each imported part through its own door (§9) | — | `file_reads` (the settings lane, through `bt_persist::read_export`); store writes, row 20 |
 | `diagnostics.rs` | 5 | the OS theme change, application-change notes, the trace drain, grid-change scheduling | ingress (trace) | — |
 | `dpi.rs` | 12 | window resize, scale-factor change, DPI settling | session | row 12 (`flush_pending_pty_resize`) |
@@ -2807,7 +2807,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 769 (573 free functions, 196 methods) after batch 8. The table
+into their topics batch by batch: 754 (559 free functions, 195 methods) after batch 9. The table
 below is the 2026-09-21 manifest's sort of the 201 methods then left
 (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
 

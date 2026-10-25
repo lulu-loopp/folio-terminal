@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **769 items, 573 free functions and 196 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 8's head; 783, 587 and 196 before it,
+- **unclassified.tsv**: **754 items, 559 free functions and 195 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 9's head; 769, 573 and 196 before it,
+  783, 587 and 196 before batch 8,
   799, 600 and 199 before batch 7,
   813, 612 and 201 before batch 6,
   819, 613 and 206 before batch 5,
@@ -109,7 +110,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 6 | `runtime/terminal.rs` | moved by batch 6 (13 items; `deliver_osc_attention` went to `runtime/attention.rs` instead, below) | — |
    | 7 | `runtime/git.rs` | moved by batch 7 (14 items, `Runtime::expand_commit` by a ruled exception, below), with `seat_holds_the_keyboard` and `apply_leaf_metrics` as the terminal batch's tail | — |
    | 8 | `runtime/peek.rs` | moved by batch 8 (14 items; five callers inside `runtime/peek.rs` dropped their `crate::` prefix, below) | — |
-   | 9 | `runtime/clipboard.rs` | 16 (13 + 3) | 27 |
+   | 9 | `runtime/clipboard.rs` | moved by batch 9 (13 items; `offer_pty_input`, `Runtime::paste_into_settings_field` and `Runtime::glass_here` held, below), with `unstarted_pixels` and `peek_cache_key_for_decode` as the peek batch's tail | — |
    | 10 | `runtime/floats.rs` | 15 (7 + 8) | 34 |
    | 11 | `runtime/files.rs` | 19 (17 + 2) | 38 |
    | 12 | `runtime/windows.rs` | 19 (18 + 1) | 42 |
@@ -167,6 +168,14 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      the batch that moves it carries that block by hand.
    - `hyperlink_activation` — its `called_from` home is `runtime/terminal.rs`, but `ControlClickHint::of` at the root
      calls it in the product (the rule above); it moves when `ControlClickHint` does.
+   - `offer_pty_input` — its `called_from` home is `runtime/clipboard.rs`, but `write_pty_input` at the root calls it
+     in the product (the rule above); it moves when `write_pty_input` does.
+   - `Runtime::paste_into_settings_field` — its `called_from` home is `runtime/clipboard.rs`, but it writes
+     `WindowRuntime.settings`, whose census owner is `main[settings]`; the owner column wins, and K2 opens no
+     `runtime/settings.rs`, so it stays in `main.rs` with the settings topic.
+   - `Runtime::glass_here` — tied `runtime/clipboard.rs` / `runtime/mouse.rs`; its doc makes it the one door
+     `Self::drive_drag` asks before it surveys, and the owner column gives "drag and drop" to `runtime/mouse.rs`;
+     it moves with the mouse batch.
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,

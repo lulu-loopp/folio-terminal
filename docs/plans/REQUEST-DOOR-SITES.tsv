@@ -1338,10 +1338,6 @@ crates/bt-app/src/main.rs	bt-app crate::home_crumb_for	Ambiguous	next	1	unreview
 crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	as_os_str	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	len	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	map_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::input_line_needs_a_space_first	Ambiguous	all	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::input_line_needs_a_space_first	Ambiguous	chars	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::input_line_needs_a_space_first	Ambiguous	is_empty	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::input_line_needs_a_space_first	Ambiguous	is_some_and	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::leaf_resize_plan	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::leaf_resize_plan	Ambiguous	filter_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::loudest_claim	Ambiguous	max	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -2656,6 +2652,10 @@ crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::spend_paste	Path	PasteClipboardRead	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::submit_clipboard_write	Ambiguous	id	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::Runtime::submit_clipboard_write	Ambiguous	reason	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_line_needs_a_space_first	Ambiguous	all	1	unreviewed	2026-10-25: T-SPLIT-2B batch 9; the same site, moved by K2 batch 9 with `input_line_needs_a_space_first` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_line_needs_a_space_first	Ambiguous	chars	1	unreviewed	2026-10-25: T-SPLIT-2B batch 9; the same site, moved by K2 batch 9 with `input_line_needs_a_space_first` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_line_needs_a_space_first	Ambiguous	is_empty	1	unreviewed	2026-10-25: T-SPLIT-2B batch 9; the same site, moved by K2 batch 9 with `input_line_needs_a_space_first` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_line_needs_a_space_first	Ambiguous	is_some_and	1	unreviewed	2026-10-25: T-SPLIT-2B batch 9; the same site, moved by K2 batch 9 with `input_line_needs_a_space_first` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::Runtime::flush_resize_trace	Ambiguous	unwrap_or_else	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::Runtime::flush_resize_trace	Path	to_string	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/dpi.rs	bt-app crate::runtime::dpi::Runtime::trace_card_scale	Ambiguous	line_px	1	unreviewed	2026-10-25: T-SPLIT-2B batch 3; the same site, moved by K2 batch 3 with `Runtime::trace_card_scale` from main.rs into runtime/dpi.rs: K2 moves the item, not the call
