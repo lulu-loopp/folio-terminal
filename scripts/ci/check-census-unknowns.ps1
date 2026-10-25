@@ -17,9 +17,12 @@
 # (T-MOVED-NOT-ADDED-RULE, `moved-rows.ps1`): a key the merge base does not carry
 # whose `site`, `function` and `reason` are a base key's that is gone, with only
 # its `module` changed, is that key moved - when it is the one key of that
-# identity on each side and the old module no longer holds the function - and
-# its `sites` is held to the base key's. There is no rename arm here: a row has
-# no reason of its own to carry the dated reason a rename needs, so a key whose
+# identity on each side, the old module no longer lists the function and the
+# new one did not at the base - and its `sites` is held to the base key's. (A
+# same-named function in another module that takes over an unknown the old one
+# dropped passes as moved, held to the base key's `sites`, as check-dead-code's
+# U-44 rule does: the check reads the list, not the tree.) There is no rename
+# arm here: a row has no reason of its own to carry the dated reason a rename needs, so a key whose
 # function was renamed is added, as before. A key that disappeared or
 # whose `sites` went down is the list shrinking, which is what regenerating it
 # with `scripts/generate-ownership-census.ps1` after a fix writes. A key is
@@ -51,7 +54,7 @@
 # `sites` grew by one (red, naming the key), and an added annotation row that
 # says "proposed". `check-census-unknowns-tests.ps1` runs it against scratch
 # repositories (`-Repo`): a moved key passes, and an added key, a moved key whose
-# `sites` grew, a move whose old module still holds the function and an
+# `sites` grew, a move whose old module still lists the function and an
 # ambiguous move are each refused.
 
 param(
@@ -231,7 +234,7 @@ foreach ($key in $now.Keys) {
 $leftover = @($before.Keys | Where-Object { -not $now.ContainsKey($_) } | ForEach-Object { Get-MoveRow $_ })
 $tree = @($now.Keys | ForEach-Object { Get-MoveRow $_ })
 $moves = 0
-foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -Tree $tree)) {
+foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -Tree $tree -Base @($before.Keys | ForEach-Object { Get-MoveRow $_ }))) {
     $key = $result.Row
     if ($result.Verdict -eq "moved") {
         $was = $before[$result.From]

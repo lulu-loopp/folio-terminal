@@ -21,8 +21,11 @@
 # is its module and its path inside it. A row the base does not have is a gone
 # base row moved when, in the same package (the file's path before `/src/`), its
 # path inside its module is the base row's and its file and module are not -
-# when that item left one place for one other and the old place no longer holds
-# it - and it is then held to that base row: no name its base row did not read,
+# when that item left one place for one other, the old place no longer lists it
+# and the new one did not at the base - and it is then held to that base row
+# (so a same-named item at another place that takes over a read the old one
+# dropped passes as moved, as check-dead-code's U-44 rule does: the check reads
+# the list, not the tree): no name its base row did not read,
 # no more refused shapes. A row with no item (`-`) is never moved, and neither is
 # a base row with no `module` (the list before the column): it only matches by
 # key, or is removed.
@@ -149,9 +152,9 @@ foreach ($key in $now.Keys) {
 }
 $leftover = @($before.Keys | Where-Object { -not $now.Contains($_) } | ForEach-Object { $before[$_].move })
 $moves = 0
-$paired = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$paired = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $unpaired = @()
-foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -Tree @($now.Values | ForEach-Object { $_.move }))) {
+foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -Tree @($now.Values | ForEach-Object { $_.move }) -Base @($before.Values | ForEach-Object { $_.move }))) {
     $key = $result.Row
     if ($result.Verdict -eq "moved") {
         $moves += 1

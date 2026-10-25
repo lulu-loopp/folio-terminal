@@ -21,8 +21,11 @@
 # (T-MOVED-NOT-ADDED-RULE, `moved-rows.ps1`): a row the base does not have whose
 # owner, with its module taken off, and door are a gone base row's, at another
 # module, is that row moved - when that owner and door left one module for one
-# other, the old module no longer holds the owner, and the moved rows are no
-# more than the rows it had there. A reader moved into a module brings its
+# other, the old module no longer lists the owner, the new one did not at the
+# base, and the moved rows are no more than the rows it had there. (A same-named
+# owner in another module that takes over a read the old one dropped passes as
+# moved, held to the base row count, as check-dead-code's U-44 rule does: the
+# check reads the list, not the tree.) A reader moved into a module brings its
 # imports: an `(outside any item)` row the base does not have is accepted for a
 # module and door only up to the number of owners moved into that module with
 # that door in the same diff (ruling Q1 (b)), and refused beyond it. A base row
@@ -158,7 +161,7 @@ $moves = 0
 # Per module and door: the owners moved in, and the import rows accepted for them.
 $movedOwners = [Collections.Generic.Dictionary[string, Collections.Generic.HashSet[string]]]::new([StringComparer]::Ordinal)
 $results = Find-MovedRows -Unmatched @($unmatched | Where-Object { -not $_.Outside } | ForEach-Object { Get-MoveRow $_ }) `
-    -Leftover $leftover -Tree @($now | ForEach-Object { Get-MoveRow $_ })
+    -Leftover $leftover -Tree @($now | ForEach-Object { Get-MoveRow $_ }) -Base @($before | ForEach-Object { Get-MoveRow $_ })
 foreach ($result in $results) {
     $row = $result.Row
     if ($result.Verdict -eq "moved") {

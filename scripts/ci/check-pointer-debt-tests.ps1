@@ -1,7 +1,7 @@
 # Scratch-repository tests for check-pointer-debt.ps1 (T-MOVED-NOT-ADDED-RULE): the list before
 # its `module` column matches whole and pairs no move; then the unchanged list passes, a reader
 # moved to another module passes, and so does one moved that reads less; an added row, a moved
-# reader that reads more, a move whose old module still holds the owner and an ambiguous move are
+# reader that reads more, a move whose old module still lists the owner and an ambiguous move are
 # each refused; and an import row of the module a reader moved into is accepted up to the number of
 # owners moved in with its door (ruling Q1 (b)), and refused beyond it or with no reader moved.
 
@@ -90,7 +90,7 @@ try {
         Refused ($header + $scroll.Replace("scroll_tab_strip", "scroll_strip") + $scroll.Replace("scroll_tab_strip", "scroll_strip") + $scrollE.Replace("scroll_tab_strip", "scroll_strip") + $wheel + $import) `
             "an owner renamed in place (no rename arm here)" "3 row(s) were added"
         Refused ($header + (Moved $scroll) + (Moved $scroll) + $scrollE + $wheel + $import) `
-            "a move whose old module still holds the owner" "but crate still holds Runtime::scroll_tab_strip"
+            "a move whose old module still lists the owner" "but crate still lists Runtime::scroll_tab_strip"
         Refused ($header + (Moved $scroll) + (Moved $scroll).Replace("tabs", "panes") + (Moved $scrollE) + $wheel + $import) `
             "one owner arriving at two modules" "and arrived at more than one place"
 
@@ -106,6 +106,15 @@ try {
         # A row whose owner is not written in its module is malformed, not read as something else.
         Refused ($all + "crate::Runtime::x`tN-B`tcrate::other`n") "a row outside its module" `
             "a row whose owner is not written in its module"
+
+        # A move never lands where its owner was already listed at the base (review N1): with
+        # crate::f and crate::runtime::tabs::f both at the base, the tabs owner doubling while
+        # crate::f leaves is the tabs key grown, not crate::f moved.
+        $f = "crate::f`tN-B`tcrate`n"
+        $tabsF = "${tabs}::f`tN-B`t${tabs}`n"
+        Commit-Base ($header + $f + $tabsF) "a base listing one owner name in two modules"
+        Refused ($header + $tabsF + $tabsF) "a move onto a module that already listed the owner" `
+            "1 row(s) were added"
     } finally {
         Pop-Location
     }
@@ -113,5 +122,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-pointer-debt: the column's transition, unchanged, moved, moved-and-read-less, moved-and-read-more, added, still-at-its-module, ambiguous, import, two imports, unowed import, other-door import and malformed-row cases pass"
+Write-Host "check-pointer-debt: the column's transition, unchanged, moved, moved-and-read-less, moved-and-read-more, added, still-at-its-module, ambiguous, import, two imports, unowed import, other-door import, malformed-row and destination-already-listed cases pass"
 exit 0

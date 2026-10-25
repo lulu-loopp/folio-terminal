@@ -1,7 +1,7 @@
 # Scratch-repository tests for check-window-seam-native.ps1's move rule (T-MOVED-NOT-ADDED-RULE):
 # the unchanged list passes; a function moved to another module and a const moved to another file
 # pass; an added row, a method whose owner (a type) changed, a function moved onto a type's impl
-# and a function arriving at two modules are each refused. (A move whose old place still holds the
+# and a function arriving at two modules are each refused. (A move whose old place still lists the
 # row cannot be written here: a row's identity is its kind and name, so such a row matches whole.)
 
 $ErrorActionPreference = "Stop"
@@ -85,6 +85,16 @@ try {
             "method Runtime create_native: it would be method Runtime create renamed, and a rename carries a dated reason naming its ticket"
         Refused ($header + $renamed + $renamed.Replace("create_native", "create_headless") + $rebuild + $check) "two renames with one identity" `
             "more than one row of its kind and owner left or arrived, so no rename can be paired"
+
+        # A base row whose reason is already dated: a rename that keeps that reason carries no new
+        # one, and is refused (review N2).
+        $dated = "method`tRuntime`tcreate`t2026-10-24: T-X built`n"
+        Write-List ($header + $dated + $rebuild + $check)
+        & git add .
+        & git commit -q -m "a base whose reason is dated"
+        & git update-ref refs/remotes/origin/main (& git rev-parse HEAD).Trim()
+        Refused ($header + $dated.Replace("`tcreate`t", "`tcreate_native`t") + $rebuild + $check) `
+            "a rename that keeps the base row's dated reason" "a rename carries a new dated reason, and this one is the base row's"
     } finally {
         Pop-Location
     }
@@ -92,5 +102,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-window-seam-native: unchanged, moved function, moved const, reworded reason, added, method owner, onto an impl, ambiguous and renamed cases pass; and the rename arm's dated, undated and two-at-once cases pass"
+Write-Host "check-window-seam-native: unchanged, moved function, moved const, reworded reason, added, method owner, onto an impl, ambiguous and renamed cases pass; and the rename arm's dated, undated, two-at-once and kept-reason cases pass"
 exit 0

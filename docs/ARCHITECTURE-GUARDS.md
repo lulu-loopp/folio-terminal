@@ -280,8 +280,11 @@ the same site, module, function and reason) is invisible to it, by design. A
 key moved to another module is not added (T-MOVED-NOT-ADDED-RULE, the rule of
 `scripts/ci/moved-rows.ps1`): a new key whose site, function and reason are a
 gone base key's, with only its `module` changed, is that key moved when it is
-the one key of that identity on each side and the old module no longer holds
-the function, and its `sites` is held to the base key's; anything else is added,
+the one key of that identity on each side, the old module no longer lists the
+function and the new one did not at the base, and its `sites` is held to the
+base key's (the check reads the list, not the tree, so a same-named function
+elsewhere taking over an unknown the old one dropped passes as moved, held to the
+base count, as check-dead-code's U-44 rule does); anything else is added,
 as before. When red,
 fix the routing or regenerate with `scripts/generate-ownership-census.ps1` and
 justify each real multi-writer or unknown row; do not edit generated census rows

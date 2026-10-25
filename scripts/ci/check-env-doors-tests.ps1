@@ -7,7 +7,7 @@
 # module passes, and so does one moved that reads less, while a moved row reading
 # a new name or holding more refused shapes, a row arriving at two places, a row
 # moved to another package and a moved row renamed are each refused. (A move
-# whose old place still holds the item cannot be written here: the key is the
+# whose old place still lists the item cannot be written here: the key is the
 # file and the item, so such a row matches by key.)
 
 $ErrorActionPreference = "Stop"

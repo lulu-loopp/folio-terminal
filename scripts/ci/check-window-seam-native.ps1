@@ -18,7 +18,9 @@
 # whose owner is its file (`....rs`). A row of one of those shapes whose kind and
 # name are a gone base row's of the same shape, at another module or file, is
 # that row moved - when it is the one row of that kind and name on each side and
-# the old owner no longer holds it. A `method` or `trait` row's owner is its
+# the old owner no longer lists it and the new one did not at the base (a
+# same-named item taking over a place the old one dropped passes as moved, as
+# check-dead-code's U-44 rule does: the check reads the list, not the tree). A `method` or `trait` row's owner is its
 # type, which a move between files does not change: a changed owner there is
 # another type, an added row. **A renamed row is accepted only with a dated
 # reason** (the rename arm of `moved-rows.ps1`): a row the base does not carry
@@ -147,7 +149,7 @@ $added = @()
 $moves = 0
 $paired = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 $unpaired = @()
-foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -Tree $tree)) {
+foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -Tree $tree -Base @($before | ForEach-Object { Get-MoveRow $_ }))) {
     $spelled = $result.Row -replace "`t", " "
     if ($result.Verdict -eq "moved") {
         $moves += 1

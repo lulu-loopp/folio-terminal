@@ -13,18 +13,24 @@
 #                identity;
 #   * Row      - the check's own row, handed back.
 #
-# and, for the old-location test, every row of the tree as (Location, Tail). A tree row left over
-# is MOVED when, ordinally:
+# and, for the location tests, every row of the tree and every row of the base as (Location, Tail).
+# A tree row left over is MOVED when, ordinally:
 #
 #   (i)   the base rows left over with its identity all stand at one location L, and the tree rows
 #         left over with its identity all stand at one other location L';
-#   (ii)  no row of the tree has location L and its tail: the item left L (a list of literals,
-#         which name no item, passes -NoItem and the pairing alone says how many left L);
+#   (ii)  no row of the tree has location L and its tail: the old place no longer LISTS it - the
+#         list, which its generator's test holds equal to the tree's reads, not the tree's items;
+#         a same-named item at another place that takes over a read the old item dropped therefore
+#         passes as moved, held to the base row's measurement, as check-dead-code's U-44 rule does
+#         (a list of literals, which name no item, passes -NoItem and the pairing alone says how
+#         many left L);
+#   (ii') no row of the base has location L' and its tail: a move lands where the tail was not
+#         listed (with -NoItem, not asked);
 #   (iii) it pairs one-to-one, in order, with those base rows; a tree row past their number is
 #         MOVED AND GROWN.
 #
 # Anything else is ADDED (no base row has its identity, or L' is L), AMBIGUOUS ((i) fails), or
-# STILL AT ITS OLD LOCATION ((ii) fails). A moved row comes back with the base row it paired with
+# STILL AT ITS OLD LOCATION ((ii) fails), and ADDED too when (ii') fails. A moved row comes back with the base row it paired with
 # (From), so a check with a measurement judges it against that row: shrinking is allowed as for
 # any row, growing is refused.
 
@@ -33,6 +39,7 @@ function Find-MovedRows {
         [object[]]$Unmatched,
         [object[]]$Leftover,
         [object[]]$Tree,
+        [object[]]$Base,
         [switch]$NoItem
     )
     $ordinal = [StringComparer]::Ordinal
@@ -45,6 +52,10 @@ function Find-MovedRows {
     $held = [Collections.Generic.HashSet[string]]::new($ordinal)
     foreach ($row in $Tree) {
         if ($null -ne $row.Location) { [void]$held.Add("$($row.Location)`n$($row.Tail)") }
+    }
+    $heldBefore = [Collections.Generic.HashSet[string]]::new($ordinal)
+    foreach ($row in $Base) {
+        if ($null -ne $row.Location) { [void]$heldBefore.Add("$($row.Location)`n$($row.Tail)") }
     }
     $groups = [Collections.Generic.Dictionary[string, Collections.Generic.List[object]]]::new($ordinal)
     $order = [Collections.Generic.List[string]]::new()
@@ -76,6 +87,8 @@ function Find-MovedRows {
             $verdict = "added"
         } elseif (-not $NoItem -and $held.Contains("$(@($at)[0])`n$($rows[0].Tail)")) {
             $verdict = "still"
+        } elseif (-not $NoItem -and $heldBefore.Contains("$(@($to)[0])`n$($rows[0].Tail)")) {
+            $verdict = "added"
         }
         $was = if ($sources) { (@($at) | Sort-Object) -join ", " } else { $null }
         for ($k = 0; $k -lt $rows.Count; $k++) {
@@ -97,7 +110,7 @@ function Find-MovedRows {
 function Format-MoveRefusal([object]$Result) {
     switch ($Result.Verdict) {
         "ambiguous" { return "its identity left $($Result.Was) and arrived at more than one place, or left more than one: a move is paired one-to-one, and this one cannot be" }
-        "still" { return "it moved from $($Result.Was), but $($Result.Was) still holds $($Result.Tail): an item stands in one place" }
+        "still" { return "it moved from $($Result.Was), but $($Result.Was) still lists $($Result.Tail): an item stands in one place" }
         "grown" { return "it moved from $($Result.Was) with more rows than it had there: a move does not grow" }
         default { return "" }
     }

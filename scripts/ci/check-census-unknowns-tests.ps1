@@ -1,7 +1,7 @@
 # Scratch-repository tests for check-census-unknowns.ps1's move rule (T-MOVED-NOT-ADDED-RULE):
 # the unchanged list passes; an unknown moved to another module passes, and so does one moved
 # whose `sites` went down; an added unknown, a moved one whose `sites` grew, a move whose old
-# module still holds the function, an ambiguous move and a move with a renamed function are each
+# module still lists the function, an ambiguous move and a move with a renamed function are each
 # refused for their own reason. The gate's growth plants on the real tree stay in `gates-can-fail`.
 
 $ErrorActionPreference = "Stop"
@@ -86,7 +86,7 @@ try {
         & git commit -q -m "a function with two unknowns"
         & git update-ref refs/remotes/origin/main (& git rev-parse HEAD).Trim()
         Refused ($header + $moved + $other + $rail) `
-            "a move whose old module still holds the function" "but crate still holds settle"
+            "a move whose old module still lists the function" "but crate still lists settle"
         Passes ($header + $moved + $other.Replace("`tcrate`t", "`tcrate::runtime::attention`t") + $rail) `
             "both unknowns of the function moved" "0 removed, 2 moved."
     } finally {
