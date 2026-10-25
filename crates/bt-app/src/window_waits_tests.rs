@@ -3886,7 +3886,7 @@ const LANDMARKS: [(&str, &[Landmark]); 4] = [
 /// Windows transaction since U-23. B-ENDSESSION adds the system's end's write step, `exiting`
 /// then `quit_abandoned` around the one admitted wait in `session_end::settle` (the quit's `Write`
 /// on the held document; nothing is torn down).
-const PINS: [Pin; 22] = [
+const PINS: [Pin; 23] = [
     Pin {
         module: "admission",
         writer: "enter_standalone_main",
@@ -3914,6 +3914,15 @@ const PINS: [Pin; 22] = [
         writer: "settle_storage_dir",
         owner: "bt-app crate::main",
         after: Some("parse"),
+    },
+    // T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD (C1): whether `folio.msix` is beside the
+    // executable, settled in the loop's process once the running image is resolved (after the
+    // hand-over, before the event loop is built); `FolioApp::new` takes the witness.
+    Pin {
+        module: "explorer_menu",
+        writer: "settle_package",
+        owner: "bt-app crate::main",
+        after: Some("hand_over"),
     },
     Pin {
         module: "admission",

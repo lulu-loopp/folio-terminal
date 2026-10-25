@@ -465,10 +465,13 @@ writes, an `extern crate … as`); either, for a landmark no pin names
 names. When refused, rename what is not a landmark, or
 widen the grammar in its own change with a planted case.
 
-`main`'s two settles are pinned the same way (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP,
+`main`'s settles are pinned the same way (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP,
 2026-10-24): `profiles::settle_registry` as `main`'s first statement, before
 `parse`; `persist::settle_storage_dir` in the `--remove-shell-integration` door,
-before `parse`, and in the claim after the update pass, after `parse`. Every
+before `parse`, and in the claim after the update pass, after `parse`; and
+`explorer_menu::settle_package` (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD,
+2026-10-25) in the loop's process once the running image is resolved, after
+`hand_over`. Every
 pinned writer is spelled only as the call through its pin's module path,
 `module::writer(…)` (`admission::` for the role and phase writers): an import, a
 value or a rename is refused by name and path
