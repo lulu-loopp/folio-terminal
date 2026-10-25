@@ -4,8 +4,8 @@
 use crate::input::Keystroke;
 use crate::window_seam::prelude::*;
 use crate::{
-    PointerTarget, Runtime, SearchRefresh, SearchScanCache, frame_row_of_anchor, hang_watch, input,
-    marks, rescan_leaf_for_search, search, seats, tooltip, trace_sink,
+    LeafSearchRescan, LeafSession, PointerTarget, Runtime, SearchRefresh, SearchScanCache,
+    frame_row_of_anchor, hang_watch, input, marks, search, seats, tooltip, trace_sink,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -811,5 +811,78 @@ impl<B: Backend> Runtime<'_, B> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// What both ways of choosing a match owe the window: the viewport reveals it
+    /// if it is off screen, the projection is handed the new current ground, and
+    /// the counter is rebuilt around it.
+    fn after_current_hit_moved(&mut self) -> Result<()> {
+        self.reveal_current_search_hit()?;
+        if let Some(seat) = self.window.search.seat() {
+            self.install_search_highlights(seat);
+        }
+        self.after_search_change()
+    }
+}
+
+/// **Re-ask one terminal pane's search** — the scan half of `Runtime::refresh_search`, a free
+/// function so the budget each road may spend can be pinned over a real leaf.
+///
+/// `cache` is carried only while it is an answer to **the same question**: the same seat and the
+/// same [`WindowRuntime::search_revision`]. Anything else — a new query, a flipped toggle, another
+/// pane — starts a new walk, and the old cursor is never read again. The history half reads at
+/// most [`SearchRefresh::walk_budget`] owed lines on top of whatever froze since the last scan.
+pub(crate) fn rescan_leaf_for_search(
+    compiled: &bt_transcript::search::CompiledSearch,
+    leaf: &LeafSession,
+    seat: SeatId,
+    revision: u64,
+    cache: Option<&SearchScanCache>,
+    road: SearchRefresh,
+    timed: bool,
+) -> LeafSearchRescan {
+    let transcript = leaf.session.transcript();
+    // **The previous answer, and only while it is an answer to the same question.** Seat and
+    // revision are what "the same question" means here; the plane having moved under it is not a
+    // reason to throw it away, it is the reason it is passed in.
+    let previous = cache.filter(|cache| cache.seat == seat && cache.revision == revision);
+    let started = timed.then(Instant::now);
+    let history = search::scan_history_slice(
+        compiled,
+        transcript,
+        previous.map(|cache| &cache.history),
+        road.walk_budget(),
+    );
+    let history_us = started.map_or(0, |at| at.elapsed().as_micros());
+    // The two volatile planes, every time: fifty rows of grid and whatever has scrolled out but not
+    // frozen. Their cost is a property of the screen, so re-scanning them unconditionally is what
+    // buys "the word you are typing is findable the instant it is echoed".
+    let live: Vec<search::LiveRow> = leaf
+        .session
+        .live_rows()
+        .iter()
+        .enumerate()
+        .map(|(row, captured)| search::live_row(row as u32, &captured.cells))
+        .collect();
+    let volatile_hits =
+        search::scan_volatile(compiled, transcript, &live, leaf.session.grid_generation());
+    // Nothing happened when the question, the lines read and the volatile hits are all the ones the
+    // last scan saw. `reads_as` stands in for the history hits because it is what they are a
+    // function of — and it moves with a walk's cursor, so a slice is never mistaken for nothing.
+    let unchanged = previous.is_some_and(|cache| {
+        cache.history.reads_as(&history.scan) && cache.volatile_hits == volatile_hits
+    });
+    LeafSearchRescan {
+        lines_scanned: history.lines_scanned,
+        history_us,
+        live_rows: live.len(),
+        unchanged,
+        carried_complete: previous.is_some_and(|cache| cache.history.is_complete()),
+        cache: SearchScanCache {
+            seat,
+            revision,
+            history: history.scan,
+            volatile_hits,
+        },
     }
 }

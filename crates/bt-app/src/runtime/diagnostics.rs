@@ -3,13 +3,15 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    ApplicationChange, LeafOnStage, Runtime, card_trace, coalesce, resolved_theme_change,
+    ApplicationChange, LeafOnStage, Runtime, card_trace, coalesce, resolve_theme_mode,
     schedule_leaf_grid_change, system_os_theme, trace_sink,
 };
 use anyhow::Result;
-use bt_render::GridSize;
+use bt_persist::ThemeModeV1;
+use bt_render::{GridSize, Theme};
 use std::time::Instant;
 use winit::dpi::PhysicalSize;
+use winit::window::Theme as OsTheme;
 
 impl<B: Backend> Runtime<'_, B> {
     /// Windows changed its mind about light and dark.
@@ -157,5 +159,12 @@ impl<B: Backend> Runtime<'_, B> {
             pane,
         )?;
         Ok(())
+    }
+}
+
+pub(crate) fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> {
+    match mode {
+        ThemeModeV1::System => Some(resolve_theme_mode(mode, Some(os_theme))),
+        ThemeModeV1::Light | ThemeModeV1::Dark => None,
     }
 }

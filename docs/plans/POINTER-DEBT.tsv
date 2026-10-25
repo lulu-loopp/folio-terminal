@@ -112,8 +112,6 @@ crate::mouse_trace::delta_word	N-B
 crate::new_window_runtime	N-P
 crate::new_window_runtime	N-P
 crate::over_home_ground	N-E
-crate::platform_pointer_of	N-E
-crate::platform_pointer_of	N-E
 crate::protocol_mouse_button	N-B
 crate::protocol_mouse_button	N-B
 crate::protocol_mouse_button	N-B
