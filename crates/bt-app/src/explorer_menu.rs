@@ -1361,6 +1361,9 @@ pub(crate) trait Deployment {
     fn registered(&self) -> Result<Option<msix::PackageRegistration>, String>;
     /// [`bt_platform::msix::register`].
     fn register(&self, package: &Path, external: &Path) -> Result<(), String>;
+    /// Whether `path` is a file — a press's job looking for the `folio.msix` it registers
+    /// ([`start_request`]), on its worker.
+    fn holds_file(&self, path: &Path) -> bool;
 }
 
 /// This user's deployment database.
@@ -1373,6 +1376,10 @@ impl Deployment for ThisMachine {
 
     fn register(&self, package: &Path, external: &Path) -> Result<(), String> {
         msix::register(package, external)
+    }
+
+    fn holds_file(&self, path: &Path) -> bool {
+        path.is_file()
     }
 }
 
@@ -1879,23 +1886,17 @@ fn start_request(
     say: impl Fn(&str) + Send + Sync + 'static,
     install: bool,
 ) -> bool {
-    start_request_with(
-        executor,
-        say,
-        install,
-        std::sync::Arc::new(ThisMachine),
-        |path| path.is_file(),
-    )
+    start_request_with(executor, say, install, ThisMachine)
 }
 
-/// [`start_request`] with the deployment database and the job's look for the package file
-/// handed in — this machine's and `is_file` there, a test's own in the suite.
-fn start_request_with<D: Deployment + Send + Sync + 'static>(
+/// [`start_request`] with the machine the job runs against handed in — its deployment database
+/// and its look for the package file ([`Deployment::holds_file`]): this machine's there, a test's
+/// own in the suite. It goes to the job whole and is asked only there.
+fn start_request_with(
     executor: &crate::lane::Executor,
     say: impl Fn(&str) + Send + Sync + 'static,
     install: bool,
-    deployment: std::sync::Arc<D>,
-    is_file: impl Fn(&Path) -> bool + Send + 'static,
+    deployment: impl Deployment + Send + 'static,
 ) -> bool {
     let job = std::sync::Arc::new(JobExit::default());
     let ended = std::sync::Arc::clone(&job);
@@ -1910,7 +1911,9 @@ fn start_request_with<D: Deployment + Send + Sync + 'static>(
             move |_ctx| {
                 let outcome = if install {
                     // The job's own look, here on its worker: the folder as it is now.
-                    let package = package_in(this_folder().as_deref(), &is_file);
+                    let package = package_in(this_folder().as_deref(), &|path| {
+                        deployment.holds_file(path)
+                    });
                     match package.as_deref().and_then(|package| {
                         // The file, and the folder to register it against. Either being
                         // absent is the same answer, so they are fetched as one.
@@ -1941,7 +1944,7 @@ fn start_request_with<D: Deployment + Send + Sync + 'static>(
                     // package" would report success over a package that is still
                     // registered. This thread can afford the question; the one that took
                     // the press could not.
-                    let state = read_state_from(&*deployment);
+                    let state = read_state_from(&deployment);
                     match removal_for(&state) {
                         // **A question Windows refused is not an answer** (R2-20).
                         // Reporting success here would put the row on `Off` over a
@@ -1970,7 +1973,7 @@ fn start_request_with<D: Deployment + Send + Sync + 'static>(
                         Removal::AlreadyGone => Ok(false),
                     }
                 };
-                let state = read_state_from(&*deployment);
+                let state = read_state_from(&deployment);
                 // A press that worked left the registration where the reader asked
                 // for it, so a refusal of this start's renewal is no longer the
                 // row's news (U-25).
@@ -3092,6 +3095,10 @@ mod tests {
             *self.registration.lock().unwrap() = Some(registration_at(external, THIS_BUILD));
             Ok(())
         }
+
+        fn holds_file(&self, path: &Path) -> bool {
+            path.is_file()
+        }
     }
 
     fn registration_at(folder: &Path, version: msix::PackageVersion) -> msix::PackageRegistration {
@@ -3529,21 +3536,52 @@ mod tests {
         assert!(!job_in_flight(), "and the latch is let go");
     }
 
-    /// A job's look for the package file that answers `found` and sends the thread it ran on.
-    fn counted_look(
-        found: bool,
-    ) -> (
-        impl Fn(&Path) -> bool + Send + 'static,
-        std::sync::mpsc::Receiver<std::thread::ThreadId>,
-    ) {
+    /// **The machine a press's job runs against in the suite**: nothing registered, a look for
+    /// the package file that answers `finds` and sends the thread it ran on, and every
+    /// `register` written down. It goes into the job whole, so its sender ends with the job.
+    struct PressMachine {
+        finds: bool,
+        looked: std::sync::mpsc::Sender<std::thread::ThreadId>,
+        calls: std::sync::Arc<Mutex<Vec<(PathBuf, PathBuf)>>>,
+    }
+
+    /// What a test reads of a [`PressMachine`] after the job: the threads it looked on (the
+    /// channel ends when the job has ended) and its `register` calls.
+    struct PressSeen {
+        looks: std::sync::mpsc::Receiver<std::thread::ThreadId>,
+        calls: std::sync::Arc<Mutex<Vec<(PathBuf, PathBuf)>>>,
+    }
+
+    fn press_machine(finds: bool) -> (PressMachine, PressSeen) {
         let (looked, looks) = std::sync::mpsc::channel();
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
         (
-            move |_: &Path| {
-                looked.send(std::thread::current().id()).unwrap();
-                found
+            PressMachine {
+                finds,
+                looked,
+                calls: std::sync::Arc::clone(&calls),
             },
-            looks,
+            PressSeen { looks, calls },
         )
+    }
+
+    impl Deployment for PressMachine {
+        fn registered(&self) -> Result<Option<msix::PackageRegistration>, String> {
+            Ok(None)
+        }
+
+        fn register(&self, package: &Path, external: &Path) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((package.to_path_buf(), external.to_path_buf()));
+            Ok(())
+        }
+
+        fn holds_file(&self, _: &Path) -> bool {
+            self.looked.send(std::thread::current().id()).unwrap();
+            self.finds
+        }
     }
 
     /// The row's cells as a test found them, put back after a job that wrote them: they are the
@@ -3563,8 +3601,7 @@ mod tests {
     /// window thread before it started the job.
     ///
     /// MUTATION: make the look in `start_request_with` before `start_worker` and hand the path
-    /// into the body (the shape before) — the refused press counts one look on the asking thread,
-    /// and the started one's look is the asker's.
+    /// into the body (the shape before) — the refused press counts one look on the asking thread.
     #[test]
     fn a_press_looks_for_the_package_on_its_worker_and_never_on_the_asking_thread() {
         let _turn = DEPLOYMENT
@@ -3573,24 +3610,17 @@ mod tests {
         let asking = std::thread::current().id();
 
         let (executor, say, said) = refusing();
-        let (look, looks) = counted_look(false);
+        let (machine, seen) = press_machine(false);
         assert!(
             !BUSY.swap(true, Ordering::AcqRel),
             "the press takes the latch"
         );
-        let deployment = std::sync::Arc::new(FakeDeployment::holding(None));
         assert!(
-            !start_request_with(
-                &executor,
-                say,
-                true,
-                std::sync::Arc::clone(&deployment),
-                look
-            ),
+            !start_request_with(&executor, say, true, machine),
             "the door refused the start"
         );
         assert_eq!(
-            looks.iter().count(),
+            seen.looks.iter().count(),
             0,
             "a press the door refused looked at nothing"
         );
@@ -3605,23 +3635,16 @@ mod tests {
 
         let executor =
             crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default()));
-        let (look, looks) = counted_look(false);
+        let (machine, seen) = press_machine(false);
         assert!(
             !BUSY.swap(true, Ordering::AcqRel),
             "the press takes the latch"
         );
         assert!(
-            start_request_with(
-                &executor,
-                |_: &str| {},
-                true,
-                std::sync::Arc::clone(&deployment),
-                look
-            ),
+            start_request_with(&executor, |_: &str| {}, true, machine),
             "the job started"
         );
-        // The look goes with the job's body, so the channel ends when the job has ended.
-        let looked = looks.iter().collect::<Vec<_>>();
+        let looked = seen.looks.iter().collect::<Vec<_>>();
         assert_eq!(looked.len(), 1, "the job looked once: {looked:?}");
         assert_ne!(looked[0], asking, "on its worker, not on the asking thread");
         assert_eq!(
@@ -3631,7 +3654,10 @@ mod tests {
             ))),
             "a package file gone since the start is the job's own answer"
         );
-        assert!(deployment.calls().is_empty(), "and nothing was registered");
+        assert!(
+            seen.calls.lock().unwrap().is_empty(),
+            "and nothing was registered"
+        );
         assert!(!job_in_flight(), "and the latch is let go");
         forget_the_job();
     }
@@ -3656,23 +3682,16 @@ mod tests {
         );
         let executor =
             crate::lane::Executor::scripted(std::sync::Arc::new(crate::lane::Gate::default()));
-        let (look, looks) = counted_look(true);
-        let deployment = std::sync::Arc::new(FakeDeployment::holding(None));
+        let (machine, seen) = press_machine(true);
         assert!(
             !BUSY.swap(true, Ordering::AcqRel),
             "the press takes the latch"
         );
-        assert!(start_request_with(
-            &executor,
-            |_: &str| {},
-            true,
-            std::sync::Arc::clone(&deployment),
-            look
-        ));
-        assert_eq!(looks.iter().count(), 1, "the job looked once");
+        assert!(start_request_with(&executor, |_: &str| {}, true, machine));
+        assert_eq!(seen.looks.iter().count(), 1, "the job looked once");
         assert_eq!(take_outcome(), Some(Ok(true)), "and registered");
         assert_eq!(
-            deployment.calls(),
+            *seen.calls.lock().unwrap(),
             vec![(here.join(PACKAGE_FILE_NAME), here)],
             "the file the job found, against its folder"
         );
