@@ -41,6 +41,11 @@ pub(crate) use windows::recent_term_leaf_seed;
 #[cfg(test)]
 pub(crate) use diagnostics::resolved_theme_change;
 #[cfg(test)]
+pub(crate) use dpi::{
+    apply_tabs_leaf_metrics, release_due_leaf_resize, resize_worth_solving,
+    take_psreadline_resize_reanchor_input,
+};
+#[cfg(test)]
 pub(crate) use pointer::a_capture_still_holds_its_pointer;
 pub(crate) use pointer::platform_pointer_of;
 #[cfg(test)]

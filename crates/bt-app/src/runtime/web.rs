@@ -2056,6 +2056,24 @@ impl<B: Backend> Runtime<'_, B> {
             // predicate the settling loop takes the keyboard back on.
             && self.page_with_the_keyboard() == Some(leaf)
     }
+
+    /// This window's thumbnail shrinker, started the first time a page is
+    /// actually photographed.
+    ///
+    /// Lazy because most windows never open a page and a thread that decodes
+    /// nothing is still a thread; and per window for `web_thumbs`' reason — a
+    /// seat id names a seat of *this* window.
+    fn page_shrinker(&mut self) -> &web_thumb::PageShrinker {
+        self.window.web_shrinker.get_or_insert_with(|| {
+            let proxy = self.app.event_proxy.clone();
+            web_thumb::PageShrinker::start(move || {
+                // The same nudge the engine's own callbacks use: a picture that
+                // finished while the window was idle would otherwise sit unread
+                // until somebody moved the mouse.
+                let _ = proxy.send_event(AppEvent::WebPageSpoke);
+            })
+        })
+    }
 }
 
 /// **Whether the content on a web seat has been replaced by something else**

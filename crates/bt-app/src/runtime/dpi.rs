@@ -2,17 +2,20 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::Ending;
+use crate::pane_cell_metrics;
+use crate::runtime;
 use crate::window_seam::prelude::*;
 use crate::{
-    ResizeReanchor, Runtime, card_trace, dpi_snapshot, earliest_deadline,
-    ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner,
-    files_float_content_height, float, hang_watch, log_dpi_snapshot, presentation_physical_size,
-    release_due_leaf_resize, resize_worth_solving, scale_factors_match, seats,
-    take_psreadline_resize_reanchor_input, trace_sink, trace_surface_size_clamp, write_pty_input,
+    BirthWait, LeafResizeCommit, LeafSession, PaneBirth, ReleaseGrids, ResizeReanchor, Runtime,
+    TabState, TextScale, apply_leaf_metrics, card_trace, commit_leaf_resize, dpi_snapshot,
+    earliest_deadline, ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner,
+    files_float_content_height, float, focus_thumb, hang_watch, log_dpi_snapshot,
+    presentation_physical_size, psreadline_resize_repaint_input, scale_factors_match, seats,
+    service_pending_pty_resize, trace_sink, trace_surface_size_clamp, write_pty_input,
 };
-use crate::{apply_tabs_leaf_metrics, pane_cell_metrics};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
+use bt_layout::SeatKind;
 use bt_platform::admission::{admitted, doors};
 use bt_render::{FrameSource, FrameTrigger};
 use std::time::Instant;
@@ -667,4 +670,166 @@ impl<B: Backend> Runtime<'_, B> {
         );
         Ok(())
     }
+
+    /// **`card scale`** — the scale road, measured at the cards it moves
+    /// (T-CARD-TRACE, §7.1.6b′).
+    ///
+    /// The rows are the point, and they are why this station *computes* rather
+    /// than merely formats: how many rows a card holds is
+    /// [`focus_thumb::mini_rows`] of a rectangle only the column's own solve
+    /// produces, and that function rounds a border, two paddings and a line
+    /// height each on its own — so it is not a function of the logical box
+    /// alone and cannot be worked back out of the scale afterwards. Hence the
+    /// `is_on` gate, [`mouse_trace::is_on`]'s own: solving a column is not
+    /// something a display change pays for when nobody asked for a trace.
+    ///
+    /// One line per terminal mini seat, keyed by the same tab and seat every
+    /// other station of this file carries, so the scale road and the card's own
+    /// road merge on more than the timestamp. A window with no column says so in
+    /// one line rather than in silence.
+    fn trace_card_scale(&self, why: &'static str, before: f64, after: f64) {
+        if !card_trace::is_on() {
+            return;
+        }
+        let window = u64::from(self.window.window.id());
+        let scale = self.window.renderer.scale_factor() as f32;
+        let Some(geometry) = self.focus_rail_geometry_now(Instant::now()) else {
+            card_trace::line(|| card_trace::scale_without_a_column(window, why, before, after));
+            return;
+        };
+        for (index, card) in geometry.cards.iter().enumerate() {
+            let Some(tab) = self.window.tabs.get(index) else {
+                continue;
+            };
+            for seat in seats::focus_mini_seats(tab.seats.tree(), card.mini, scale) {
+                if seat.kind != SeatKind::Terminal {
+                    continue;
+                }
+                let rows = focus_thumb::mini_rows(
+                    seat.rect,
+                    focus_thumb::MiniMetrics::TERM.line_px(scale),
+                    scale,
+                );
+                card_trace::line(|| {
+                    card_trace::Scale {
+                        card: card_trace::Card {
+                            window,
+                            tab: tab.id,
+                            seat: seat.id,
+                            why,
+                        },
+                        before,
+                        after,
+                        rows,
+                    }
+                    .line()
+                });
+            }
+        }
+    }
+}
+
+pub(crate) fn take_psreadline_resize_reanchor_input(
+    reanchor: ResizeReanchor<'_>,
+    prompt_the_shell_opened: bool,
+) -> Option<&'static [u8]> {
+    std::mem::take(reanchor.pending)
+        .then(|| psreadline_resize_repaint_input(reanchor.integration, prompt_the_shell_opened))
+        .flatten()
+}
+
+/// Release whatever this one pane's quiet window has made due, and say when it could next be due.
+///
+/// The counterpart of [`schedule_leaf_grid_change`], and the only place `conpty_grid` moves: what
+/// the child was *told* is written exactly where it is told, so a drag that wanders out and comes
+/// back cancels its own request instead of replaying an intermediate size.
+pub(crate) fn release_due_leaf_resize(
+    leaf: &mut LeafSession,
+    now: Instant,
+    hand_on_the_geometry: bool,
+) -> Result<(Option<LeafResizeCommit>, Option<Instant>)> {
+    let (due, wake) =
+        service_pending_pty_resize(&mut leaf.pending_pty_resize, now, hand_on_the_geometry);
+    let Some(pending) = due else {
+        return Ok((None, wake));
+    };
+    let local_grid = leaf.grid;
+    let conpty_grid = leaf.conpty_grid;
+    let integration = leaf.integration;
+    let commit = commit_leaf_resize(
+        &mut leaf.session,
+        leaf.pty.as_mut(),
+        ResizeReanchor {
+            pending: &mut leaf.pending_psreadline_resize_reanchor,
+            integration,
+        },
+        ReleaseGrids {
+            local: local_grid,
+            conpty: conpty_grid,
+            next: pending.grid,
+        },
+        pending.physical,
+        now,
+    )?;
+    leaf.grid = pending.grid;
+    leaf.conpty_grid = pending.grid;
+    // **A shell still being born is owed this size when it lands** (T-BIRTH-OFF-WINDOW,
+    // T-FALLBACK-OWED-RESIZE): it was asked for at the grid of its request, and nothing above
+    // could tell it. A pane's first birth and a birth-death fallback carry the same landing fact.
+    if commit.told_the_child {
+        if let Some(PaneBirth {
+            waiting: BirthWait::Shell(landing),
+            ..
+        }) = leaf.birth.as_mut()
+        {
+            landing.owed_physical = Some(pending.physical);
+        }
+        runtime::owe_birth_death_fallback_resize(leaf, pending.physical);
+    }
+    Ok((Some(commit), wake))
+}
+
+/// **Every terminal leaf of `tabs`, re-derived from its own rung and re-applied** (ticket 37) —
+/// the walk behind `Runtime::apply_every_leaf_metrics`. `derive` is [`pane_cell_metrics`] bound
+/// to the window the tabs stand in.
+pub(crate) fn apply_tabs_leaf_metrics(
+    tabs: &mut [TabState],
+    mut derive: impl FnMut(TextScale) -> Result<bt_render::CellMetrics>,
+) -> Result<()> {
+    for tab in tabs {
+        for (_, leaf) in tab.leaves_mut() {
+            let metrics = derive(leaf.text_scale)?;
+            apply_leaf_metrics(leaf, metrics);
+        }
+    }
+    Ok(())
+}
+
+/// **Whether a `WindowEvent::Resized` describes a rectangle anything should be solved for.**
+///
+/// Two rectangles arrive here that are not the window's, and only one of them was ever refused.
+///
+/// * **A zero extent** is a window with no client area, which every solve below divides by.
+/// * **The icon's rectangle.** Win32 sends `WM_SIZE` with `SIZE_MINIMIZED` and a client size that
+///   belongs to the *icon* — the same fiction [`bt_platform::is_window_minimized`] documents on
+///   the `GetWindowRect` side, parked at `-32000,-32000`. On this machine it measures 314x50
+///   physical, and the whole of §4.2's chain ran on it: the seats were solved for a 314-pixel
+///   window, every pane's terminal actor reflowed into the two or three columns that fits, and
+///   after the 200 ms quiet window every pane's ConPTY was told its shell was three columns wide.
+///   Un-minimizing solves the real rectangle again and tells ConPTY again — but a reflow is not an
+///   undo, and what the user gets back is a full-width pane holding a TUI that was re-wrapped at
+///   three columns. Measured: `BT_DPI stage=resized rect=-32000,-32000,-31686,-31950
+///   inner_size=314x50` in `diagnostics.log`, twice in one run, either side of the restore.
+///
+/// Refusing it costs nothing, because nothing was ever owed: winit delivers the real rectangle
+/// again on the way back up (the same log line, `inner_size=2880x1800`, follows each icon one), so
+/// there is no state to catch up and no resize to replay. This is the same rule the snapshot path
+/// already keeps — *a rectangle nobody chose must never displace the one somebody did* — applied
+/// to the other consumer of the same fiction.
+///
+/// The test is the platform's own (`IsIconic`) and not the numbers: `-32000` is the classic
+/// shell's parking spot rather than a contract, and a magic-number guard would refuse a genuinely
+/// tiny window on a machine that parks its icons somewhere else.
+pub(crate) fn resize_worth_solving(minimized: bool, physical: PhysicalSize<u32>) -> bool {
+    !minimized && physical.width > 0 && physical.height > 0
 }
