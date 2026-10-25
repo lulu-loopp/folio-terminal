@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **754 items, 559 free functions and 195 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 9's head; 769, 573 and 196 before it,
+- **unclassified.tsv**: **734 items, 545 free functions and 189 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 10's head; 754, 559 and 195 before it,
+  769, 573 and 196 before batch 9,
   783, 587 and 196 before batch 8,
   799, 600 and 199 before batch 7,
   813, 612 and 201 before batch 6,
@@ -111,7 +112,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 7 | `runtime/git.rs` | moved by batch 7 (14 items, `Runtime::expand_commit` by a ruled exception, below), with `seat_holds_the_keyboard` and `apply_leaf_metrics` as the terminal batch's tail | — |
    | 8 | `runtime/peek.rs` | moved by batch 8 (14 items; five callers inside `runtime/peek.rs` dropped their `crate::` prefix, below) | — |
    | 9 | `runtime/clipboard.rs` | moved by batch 9 (13 items; `offer_pty_input`, `Runtime::paste_into_settings_field` and `Runtime::glass_here` held, below), with `unstarted_pixels` and `peek_cache_key_for_decode` as the peek batch's tail | — |
-   | 10 | `runtime/floats.rs` | 15 (7 + 8) | 34 |
+   | 10 | `runtime/floats.rs` | moved by batch 10 (10 items with `files_float_content_height`; `Runtime::settled_card_ink` went to `runtime/frame.rs` by its census owner; `Runtime::sweep_foot_phrases`, `Runtime::open_minted_page_on`, `revealable_preview_file`, `Runtime::open_local_path` and `reveal_ask` held, below), with nine clipboard tails | — |
    | 11 | `runtime/files.rs` | 19 (17 + 2) | 38 |
    | 12 | `runtime/windows.rs` | 19 (18 + 1) | 42 |
    | 13 | `runtime/frame.rs` | 33 (15 + 18) | 45 |
@@ -150,12 +151,12 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    **Held items** (each row's generated `called_from` home is not where it goes):
    - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).
    - `files_float_content_height` (tied `runtime/dpi.rs` / `runtime/floats.rs`) — the owner column
-     (`docs/ARCHITECTURE.md` §13) gives it to `runtime/floats.rs` ("floating windows"); it moves with the floats
-     batch.
+     (`docs/ARCHITECTURE.md` §13) gives it to `runtime/floats.rs` ("floating windows"); batch 10 moved it there.
    - `Runtime::reveal_in_explorer` — a three-way tie (`runtime/attention.rs` / `runtime/configuration.rs` /
      `runtime/floats.rs`) that the owner column does not settle: §13's "Still in `main.rs`" table lists it
-     unassigned, and its asks column names "hand-off (reveal)" for both `files.rs` and `floats.rs`. It waits for
-     a ruling at the floats batch, not for `runtime/floats.rs` by right.
+     unassigned, and its asks column names "hand-off (reveal)" for both `files.rs` and `floats.rs`. At batch 10
+     its callers were seven, one in each of seven `runtime/` files, and it has no census owner; it stays held,
+     and its home is ruled at the §13 re-sort at the end of this table, not per batch.
    - `Runtime::focus_seat` — its first `called_from` place is `runtime/palette.rs`, but that is three of eight
      callers (the others are `runtime/web.rs`, `runtime/attention.rs`, `runtime/preview.rs` and `main.rs`) and it
      is a general focus door, not the command palette's; batch 5 held it, and it waits for the topic that owns
@@ -172,10 +173,22 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      in the product (the rule above); it moves when `write_pty_input` does.
    - `Runtime::paste_into_settings_field` — its `called_from` home is `runtime/clipboard.rs`, but it writes
      `WindowRuntime.settings`, whose census owner is `main[settings]`; the owner column wins, and K2 opens no
-     `runtime/settings.rs`, so it stays in `main.rs` with the settings topic.
+     `runtime/settings.rs`, so it stays in `main.rs` with the settings topic. The hold rests on that write:
+     `Runtime::settings_field_holds_the_keyboard`, which only reads the settings field and whose one caller is
+     `Runtime::clipboard_focus`, went to `runtime/clipboard.rs` as a tail in batch 10.
    - `Runtime::glass_here` — tied `runtime/clipboard.rs` / `runtime/mouse.rs`; its doc makes it the one door
      `Self::drive_drag` asks before it surveys, and the owner column gives "drag and drop" to `runtime/mouse.rs`;
      it moves with the mouse batch.
+   - `Runtime::sweep_foot_phrases` — its `called_from` home is `runtime/floats.rs`, but it writes
+     `WindowRuntime.foot_phrases`, whose other writer, `Runtime::foot_saying`, stays at the root (the census rule
+     above); it moves when `foot_saying` does.
+   - `Runtime::open_minted_page_on` and `revealable_preview_file` — tied `runtime/floats.rs` /
+     `runtime/preview.rs`; the owner column gives preview panes and their doors to `runtime/preview.rs`, and both
+     move with the preview batch.
+   - `Runtime::open_local_path` — its `called_from` home is `runtime/floats.rs`, but
+     `Runtime::apply_settings_choice_announcing` at the root calls it in the product (the rule above).
+   - `reveal_ask` — its `called_from` home is `runtime/floats.rs`, but `Runtime::reveal_in_explorer` at the root
+     calls it in the product (the rule above); it stays with `reveal_in_explorer`.
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,

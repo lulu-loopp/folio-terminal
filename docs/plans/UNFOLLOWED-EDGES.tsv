@@ -2170,20 +2170,10 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_layout	Ambiguous	unwra
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_values	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_values	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settle_home	Ambiguous	len	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::settled_card_ink	Ambiguous	collect	2	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::settled_card_ink	Ambiguous	filter_map	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::settled_card_ink	Ambiguous	flatten	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::settled_card_ink	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	filter_map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::toggle_advanced_group	Ambiguous	retarget	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::trigger_rect	Ambiguous	then_some	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::trigger_root	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::trigger_root	Ambiguous	folder	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::trigger_root	Ambiguous	get	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::trigger_root	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::trigger_root	Ambiguous	to_string	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::uncommitted_edit_name	Ambiguous	into_owned	2	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::uncommitted_edit_name	Ambiguous	is_empty	4	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::uncommitted_edit_name	Ambiguous	map	2	
@@ -2337,10 +2327,6 @@ crates/bt-app/src/main.rs	bt-app crate::drain_leaf_pty	Ambiguous	into_iter	1
 crates/bt-app/src/main.rs	bt-app crate::drain_leaf_pty	Ambiguous	is_empty	1	
 crates/bt-app/src/main.rs	bt-app crate::drain_leaf_pty	Ambiguous	len	3	
 crates/bt-app/src/main.rs	bt-app crate::drain_leaf_pty	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Ambiguous	append	1	
-crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Ambiguous	open	1	
-crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Ambiguous	write_all	1	
-crates/bt-app/src/main.rs	bt-app crate::dump_chrome_frame	Dynamic	ink	3	
 crates/bt-app/src/main.rs	bt-app crate::dump_focus_thumb_frame	Ambiguous	as_deref	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Ambiguous	append	1	
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Ambiguous	open	1	
@@ -2487,9 +2473,6 @@ crates/bt-app/src/main.rs	bt-app crate::plan_windows	Ambiguous	clone	2
 crates/bt-app/src/main.rs	bt-app crate::plan_windows	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::plan_windows	Ambiguous	next	1	
 crates/bt-app/src/main.rs	bt-app crate::plan_windows	Dynamic	pinned	2	
-crates/bt-app/src/main.rs	bt-app crate::prepare_clipboard_paste	Ambiguous	text	1	
-crates/bt-app/src/main.rs	bt-app crate::prepare_clipboard_paste	Ambiguous	then_some	1	
-crates/bt-app/src/main.rs	bt-app crate::prepare_clipboard_paste	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::press_after_blur	Ambiguous	map_or	1	
 crates/bt-app/src/main.rs	bt-app crate::press_reaches_no_grid	Dynamic	seat_holds_a_shell	1	
 crates/bt-app/src/main.rs	bt-app crate::preview_document_height	Dynamic	mono	2	
@@ -3908,6 +3891,9 @@ crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_l
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_line_needs_a_space_first	Ambiguous	chars	1	2026-10-25: T-SPLIT-2B batch 9; the same site, moved by K2 batch 9 with `input_line_needs_a_space_first` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_line_needs_a_space_first	Ambiguous	is_empty	1	2026-10-25: T-SPLIT-2B batch 9; the same site, moved by K2 batch 9 with `input_line_needs_a_space_first` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_line_needs_a_space_first	Ambiguous	is_some_and	1	2026-10-25: T-SPLIT-2B batch 9; the same site, moved by K2 batch 9 with `input_line_needs_a_space_first` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::prepare_clipboard_paste	Ambiguous	text	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `prepare_clipboard_paste` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::prepare_clipboard_paste	Ambiguous	then_some	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `prepare_clipboard_paste` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::prepare_clipboard_paste	Ambiguous	to_owned	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `prepare_clipboard_paste` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/configuration.rs	bt-app crate::runtime::configuration::<MergeTurn as keybindings_merge::KeybindingsWindow>::keybindings_put_in_force	Ambiguous	collect	1	
 crates/bt-app/src/runtime/configuration.rs	bt-app crate::runtime::configuration::<MergeTurn as keybindings_merge::KeybindingsWindow>::keybindings_put_in_force	Ambiguous	map	1	
 crates/bt-app/src/runtime/configuration.rs	bt-app crate::runtime::configuration::Runtime::export_settings_to	Ambiguous	collect	1	
@@ -4054,6 +4040,16 @@ crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::Runtime::reve
 crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::Runtime::run_term_menu_row	Ambiguous	is_some	1	
 crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::Runtime::term_menu_subject	Ambiguous	is_empty	1	
 crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::Runtime::term_menu_subject	Ambiguous	is_some_and	1	
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::Runtime::trigger_rect	Ambiguous	then_some	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `Runtime::trigger_rect` from main.rs into runtime/floats.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::Runtime::trigger_root	Ambiguous	and_then	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `Runtime::trigger_root` from main.rs into runtime/floats.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::Runtime::trigger_root	Ambiguous	folder	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `Runtime::trigger_root` from main.rs into runtime/floats.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::Runtime::trigger_root	Ambiguous	get	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `Runtime::trigger_root` from main.rs into runtime/floats.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::Runtime::trigger_root	Ambiguous	map	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `Runtime::trigger_root` from main.rs into runtime/floats.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::Runtime::trigger_root	Ambiguous	to_string	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `Runtime::trigger_root` from main.rs into runtime/floats.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::dump_chrome_frame	Ambiguous	append	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `dump_chrome_frame` from main.rs into runtime/floats.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::dump_chrome_frame	Ambiguous	open	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `dump_chrome_frame` from main.rs into runtime/floats.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::dump_chrome_frame	Ambiguous	write_all	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `dump_chrome_frame` from main.rs into runtime/floats.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::dump_chrome_frame	Dynamic	ink	3	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `dump_chrome_frame` from main.rs into runtime/floats.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::finish_present_attempt	Ambiguous	as_micros	1	
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::present_signature	Ambiguous	collect	1	
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::present_signature	Ambiguous	is_some_and	1	
@@ -4076,6 +4072,10 @@ crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::redraw
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::redraw	Ambiguous	map	2	
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::redraw	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::redraw	Ambiguous	zip	2	
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::settled_card_ink	Ambiguous	collect	2	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `Runtime::settled_card_ink` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::settled_card_ink	Ambiguous	filter_map	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `Runtime::settled_card_ink` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::settled_card_ink	Ambiguous	flatten	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `Runtime::settled_card_ink` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::settled_card_ink	Ambiguous	map	1	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `Runtime::settled_card_ink` from main.rs into runtime/frame.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::settled_head_ink	Ambiguous	collect	2	
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::settled_head_ink	Ambiguous	filter_map	1	
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::settled_head_ink	Ambiguous	flatten	1	
