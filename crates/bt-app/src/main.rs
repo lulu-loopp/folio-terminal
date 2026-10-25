@@ -65401,6 +65401,18 @@ fn rebuild_every_native_surface(
     gpu: &mut GpuContext,
     windows: Vec<&mut WindowRuntime>,
 ) -> std::result::Result<(), RenderError> {
+    // **Every window lets go of the old swapchain first** (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE):
+    // a composition visual keeps the swapchain it shows, and through it the device, and the
+    // new device is asked of the same adapter — see `Compositor::let_go_of_the_picture`.
+    for window in &windows {
+        bt_platform::admission::admitted::<bt_platform::admission::doors::CompositorCommit, _>(
+            |token| window.compositor.let_go_of_the_picture(token),
+        )
+        .unwrap_or_else(|refused| Err(refused.to_string()))
+        .map_err(|error| {
+            RenderError::DeviceLost(format!("a window kept its old picture: {error}"))
+        })?;
+    }
     let rebuilt: Vec<RebuiltWindow<'_>> = windows
         .into_iter()
         .map(|window: &mut WindowRuntime| {

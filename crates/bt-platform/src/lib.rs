@@ -10772,12 +10772,38 @@ mod windows_impl {
             self.commit_now()
         }
 
+        /// **Let go of the swapchain the GPU visual shows**, and commit that — the first step
+        /// of building the picture again on a new device (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE).
+        ///
+        /// `SetContent` is the visual taking a reference to wgpu's swapchain, and the swapchain
+        /// holds the command queue it presents on, which holds the D3D12 device. D3D12 keeps
+        /// one device per adapter in a process, so while any of that chain is alive the driver
+        /// answers a request for a new device on the same adapter with the removed one, and
+        /// wgpu's adapter list comes back empty (`dx12 found no adapters`, the clean Win10
+        /// VM's rebuild). wgpu never empties the visual itself: dropping a surface releases
+        /// wgpu's own reference and leaves this one. The visual shows nothing until the next
+        /// surface sets its content again, which is what a window whose device is gone was
+        /// showing anyway.
+        ///
+        /// **The door** is the commit's (`doors::CompositorCommit`, row 9): one `SetContent`
+        /// and one commit, the same two calls a frame's publication makes.
+        pub fn let_go_of_the_picture(
+            &self,
+            token: WaitToken<'_, doors::CompositorCommit>,
+        ) -> Result<(), String> {
+            let _ = token;
+            unsafe { self.gpu.SetContent(None::<&IUnknown>) }.map_err(|error| {
+                compositor_failure("IDCompositionVisual::SetContent(nothing)", &error)
+            })?;
+            self.commit_now()
+        }
+
         /// **The commit with no token**, for the batches that are already admitted as a whole.
-        /// Crate-visible so `webview` can reach it; its callers are exactly seven (design note
+        /// Crate-visible so `webview` can reach it; its callers are exactly eight (design note
         /// 2026-09-26, revision (f)1): the forwarding call in [`Compositor::commit`],
         /// [`Compositor::new`] (`CompositorBirth`), [`Compositor::set_window_size`]
-        /// (`CompositorWindowSize`), and `WebHost::rehost`'s two and `WebHost::compensate`'s two
-        /// (`WebRehost`).
+        /// (`CompositorWindowSize`), `WebHost::rehost`'s two and `WebHost::compensate`'s two
+        /// (`WebRehost`), and [`Compositor::let_go_of_the_picture`] (`CompositorCommit`).
         pub(crate) fn commit_now(&self) -> Result<(), String> {
             unsafe { self.device.Commit() }
                 .map_err(|error| compositor_failure("IDCompositionDevice2::Commit", &error))
