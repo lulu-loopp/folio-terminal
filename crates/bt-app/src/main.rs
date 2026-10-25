@@ -315,10 +315,11 @@ use runtime::platform_pointer_of;
 #[cfg(test)]
 use runtime::{
     a_capture_still_holds_its_pointer, a_page_is_off_the_glass, a_page_still_has_a_pane,
-    a_page_was_replaced, a_retirement_happens_on_this_turn, apply_tabs_leaf_metrics, hole_for,
-    profile_menu_anchor, rescan_leaf_for_search, resize_worth_solving, resolved_theme_change,
-    revived_page_of, tab_surface_tip_boxes, take_psreadline_resize_reanchor_input,
-    tooltip_anchor_for,
+    a_page_was_replaced, a_retirement_happens_on_this_turn, answer_attention_in,
+    apply_tabs_leaf_metrics, hole_for, merge_notice_card, next_attention_stop, profile_menu_anchor,
+    raise_cancelled_quit_card_on, rescan_leaf_for_search, resize_worth_solving,
+    resolved_theme_change, revived_page_of, tab_surface_tip_boxes,
+    take_psreadline_resize_reanchor_input, tooltip_anchor_for,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
@@ -19714,50 +19715,6 @@ fn dispose_of_a_held_release_on_a_stop(
     }
 }
 
-/// **The cancelled quit's card, raised on `toasts`** (T-QUIT-DOCUMENTS; design note
-/// 2026-10-11, revision (d)2): an Error card anchored to the window, its statement the
-/// files that could not be saved — at most three named, then how many more — and its
-/// one verb, **Leave without this change**, the cancelled quit's only way out without
-/// them. A plain statement and no advice: the full list, with why, is in
-/// `diagnostics.log`.
-fn raise_cancelled_quit_card_on(
-    toasts: &mut toast::ToastHost,
-    cancelled: &quit::Cancelled,
-    motion: Motion,
-    now: Instant,
-) -> toast::ToastId {
-    toasts.raise(
-        toast::ToastKind::Error,
-        toast::ToastAnchor::Window,
-        None,
-        cancelled.sentence(),
-        Some(i18n::Text::QuitLeaveWithoutChange.text().to_owned()),
-        motion,
-        now,
-    )
-}
-
-/// **The storage pass's card** (T-STORE-NOTICE; design note 2026-10-11 §3.6,
-/// (b)11): its kind, its anchor and its statement — one Info card anchored to the
-/// window, its body one line per file naming what the file's values replaced and
-/// what was not applied ([`i18n::merge_notice`]). It is raised through
-/// `Runtime::toast`, which gives it no title and no verb: the file has already
-/// won, and nothing is owed. `None` for an empty notice: a clean hand edit says
-/// nothing. The full list, with every name a card cuts, is each pass's line in
-/// `diagnostics.log` (`settings_merge::Account::said`).
-fn merge_notice_card(
-    notice: &document_request::MergeNotice,
-) -> Option<(toast::ToastKind, toast::ToastAnchor, String)> {
-    if notice.files.is_empty() {
-        return None;
-    }
-    Some((
-        toast::ToastKind::Info,
-        toast::ToastAnchor::Window,
-        i18n::merge_notice(notice),
-    ))
-}
-
 /// **What became of one owed hand-editable document on a stop that cannot ask**
 /// (T-QUIT-DOCUMENTS; design note 2026-10-11, revision (d)3).
 ///
@@ -29717,36 +29674,6 @@ fn tab_trailing_targets(hand: TabTriggerHand) -> (f32, f32) {
 // [`StatusClaim::Bell`], a flat dot that a look spends. `attention_is_consumed` stays where it is —
 // the latches it retires are still latches, and red line 4 forbids it a third parameter.
 
-/// **Where `Ctrl+Shift+A` goes next** (§7.1.5b P1-8, landed with §7.1.6b′ F3).
-///
-/// The ruling in one function, and each of its three clauses is one line here:
-///
-/// * **先到先服务** — the queue is ordered by the serial each place was handed
-///   when it was taken, so the stop is the one that has been waiting longest.
-///   `min_by_key` over a serial and never over a clock: see
-///   [`LeafSession::attention`].
-/// * **已在队列中再按 = 走到下一个** — `standing_on` is the serial of the seat
-///   the keyboard is already in, if that seat is itself in the queue. When it is,
-///   the answer is the next one *after* it rather than the oldest, so a second
-///   press moves rather than staying put.
-/// * **循环** — and when there is nothing after it, the walk wraps to the oldest.
-///   Which is why the two halves below are written as one `min` on a rotated key
-///   and not as a search-then-fallback: a walk that falls back is a walk with two
-///   answers to "and then?", and the one-element queue is the case that finds it.
-///
-/// Nothing here knows what a tab or a seat is. It is handed places and hands one
-/// back, which is what lets it be replayed against a list rather than a window.
-fn next_attention_stop<T: Copy>(queue: &[(T, u64)], standing_on: Option<u64>) -> Option<T> {
-    let pivot = standing_on.unwrap_or(u64::MAX);
-    queue
-        .iter()
-        // The rotation: everything after the pivot sorts before everything at or
-        // before it. With no pivot the first half is empty and this is plain
-        // oldest-first, which is the ruling's own default.
-        .min_by_key(|(_, ticket)| (*ticket <= pivot, *ticket))
-        .map(|(place, _)| *place)
-}
-
 /// **Whether this window is out of the reader's reach altogether** (`attention` plan §5.2, C1).
 ///
 /// Two facts and one `||`, and the composition is here rather than in `bt-platform` because it is
@@ -30025,50 +29952,6 @@ fn settle_attention(
             }
         }
     }
-}
-
-/// **The out door, over the tab that holds the place** (`attention` plan §11.1.4's `Answer` row).
-///
-/// **Named for the seat and not for the tab's focus**, which is the half of the ruling the
-/// 2026-08-21 fix deliberately left alone and 2026-08-25 did not touch either: a place taken by one
-/// pane is answered in *that* pane. Typing into a sibling seat of the same tab does not retire it,
-/// because looking at a blocked agent — and typing at the shell beside it — does not unblock it.
-///
-/// A free function rather than a method, because [`Runtime::answer_attention`] is this call plus
-/// one borrow split, and a fixture holding a bare tab should exercise the window's own rule rather
-/// than a second copy of it.
-// Eight, and `settle_attention`'s allowance for its reason: every one is a different question about
-// one answer — whose panes, which of them, what kind of action it was, how far this window is from
-// the reader's eyes, what serial to draw a place from, when now is, and where the lines go. A struct
-// would move the list rather than shorten it.
-#[allow(clippy::too_many_arguments)]
-fn answer_attention_in(
-    tab: &mut TabState,
-    index: usize,
-    seat: SeatId,
-    by: UserInputKind,
-    reach: attention::Reach,
-    next_place: &mut attention::Places,
-    now: Instant,
-    trace: Option<&attention_trace::Trace>,
-) {
-    let Some(answered) = by.answer_kind() else {
-        return;
-    };
-    let Some(leaf) = tab.sessions.get_mut(&seat) else {
-        return;
-    };
-    let lines = leaf
-        .attention
-        .apply(
-            attention::Site { tab: index, seat },
-            reach,
-            attention::Event::Answer(answered),
-            next_place,
-            now,
-        )
-        .lines;
-    emit_attention_lines(trace, lines);
 }
 
 /// **A pane is going away, so the place it held goes with it** (`attention` plan §4 B4).

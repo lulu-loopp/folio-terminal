@@ -39,6 +39,10 @@ pub(crate) use windows::recent_term_leaf_seed;
 // K2 (T-SPLIT-2B): the free functions moved out of `main.rs`, named at the crate root again by
 // its `use runtime::{…}` lines so that no caller changes.
 #[cfg(test)]
+pub(crate) use attention::{
+    answer_attention_in, merge_notice_card, next_attention_stop, raise_cancelled_quit_card_on,
+};
+#[cfg(test)]
 pub(crate) use diagnostics::resolved_theme_change;
 #[cfg(test)]
 pub(crate) use dpi::{
