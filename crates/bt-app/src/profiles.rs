@@ -34,7 +34,7 @@ use std::{
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf, Prefix},
     sync::{
-        Arc, Mutex, OnceLock, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime},
@@ -59,6 +59,7 @@ use crate::{
     marks::{ChromeMark, ChromeSprite, MarkColour, OverlayLayer},
     seed::{RECENT_CAPACITY, RecentEntry, Seed, ago_label},
     settings::push_float_window,
+    startup::{Settled, SettledOnce},
 };
 
 // ── `.profile-menu` ────────────────────────────────────────────────────────
@@ -2202,7 +2203,7 @@ impl ProfileTable {
 /// their own [`Registry`] and move that. It is `crate::i18n`'s ruling verbatim —
 /// "these build their own `Current` rather than moving the process's, and that
 /// is a decision and not a shortcut" — met again one table over.
-struct Registry {
+pub(crate) struct Registry {
     /// `Arc` rather than a guard handed to callers: a draw pass reads a title, a
     /// mark and a command line from three places inside one frame, and a lock
     /// guard alive across all of that is a lock guard alive across a re-entrant
@@ -2215,15 +2216,26 @@ struct Registry {
     /// duplicate that did not advance this would be a window drawing yesterday's
     /// widths under today's words.
     revision: AtomicU64,
+    /// [`shipped`] as this registry was made with it — **asked once**: every verb that compares
+    /// against the seed (`install`'s merge, `to_file`, `restore_defaults`, a fresh id's reserved
+    /// words) reads this, so a reload does not ask the machine again (off Windows the seed
+    /// probes `$SHELL` on disk; T-LAZY-INITIALIZERS-BEFORE-THE-LOOP).
+    seed: Vec<Profile>,
 }
 
 impl Registry {
     fn shipped() -> Self {
+        Self::seeded(shipped())
+    }
+
+    /// A registry whose table in force is `seed` itself, as on a machine with no `profiles.json`.
+    fn seeded(seed: Vec<Profile>) -> Self {
         Self {
             table: RwLock::new(Arc::new(ProfileTable {
-                profiles: shipped(),
+                profiles: seed.clone(),
             })),
             revision: AtomicU64::new(0),
+            seed,
         }
     }
 
@@ -2260,7 +2272,7 @@ impl Registry {
 
     /// [`install`]'s body, over one registry.
     fn install(&self, file: &ProfilesV1) -> Vec<ProfileFault> {
-        let (profiles, faults) = merge(shipped(), file);
+        let (profiles, faults) = merge(self.seed.clone(), file);
         self.publish(profiles);
         faults
     }
@@ -2286,7 +2298,7 @@ impl Registry {
         let mut profiles = self.table().profiles.clone();
         let source = profiles.get(index)?.clone();
         let display_title = copy_title(&source.display_title, &profiles);
-        let id = fresh_id(&display_title, &profiles);
+        let id = fresh_id(&display_title, &profiles, &self.seed);
         let copy = Profile {
             id,
             // No script this build ships will ever announce a name this build
@@ -2439,9 +2451,11 @@ impl Registry {
         let Some(profile) = profiles.get(index) else {
             return false;
         };
-        let Some(seed) = shipped()
-            .into_iter()
+        let Some(seed) = self
+            .seed
+            .iter()
             .find(|shipped| shipped.id == profile.id)
+            .cloned()
         else {
             return false;
         };
@@ -2462,7 +2476,7 @@ impl Registry {
         let mut profiles = self.table().profiles.clone();
         let source = profiles.get(template)?.clone();
         let display_title = copy_title(&source.display_title, &profiles);
-        let id = fresh_id(&display_title, &profiles);
+        let id = fresh_id(&display_title, &profiles, &self.seed);
         let made = Profile {
             id,
             compared_title: None,
@@ -2494,7 +2508,7 @@ impl Registry {
 
     /// [`to_file`]'s body.
     fn to_file(&self) -> ProfilesV1 {
-        let shipped = shipped();
+        let shipped = &self.seed;
         ProfilesV1 {
             schema_version: PROFILES_SCHEMA_VERSION,
             profiles: self
@@ -2509,11 +2523,35 @@ impl Registry {
     }
 }
 
-/// The process's own registry — the table this window reads.
-static REGISTRY: OnceLock<Registry> = OnceLock::new();
+/// The process's own registry — the table this window reads, settled by [`settle_registry`].
+#[cfg(not(test))]
+static REGISTRY: SettledOnce<Registry> = SettledOnce::new(REGISTRY_IS);
 
+/// A test process has no `main`: its first read settles the table with the seed `main` settles
+/// it with.
+#[cfg(test)]
+static REGISTRY: SettledOnce<Registry> =
+    SettledOnce::settled_in_a_test_by(REGISTRY_IS, Registry::shipped);
+
+/// What [`REGISTRY`] holds, for the panic of a read before it is settled.
+const REGISTRY_IS: &str = "the profile table (profiles::registry)";
+
+/// # Panics
+///
+/// Before [`settle_registry`] ran in this process.
 fn registry() -> &'static Registry {
-    REGISTRY.get_or_init(Registry::shipped)
+    REGISTRY.get()
+}
+
+/// **Settle the process's profile table: the seed this build ships, asked of this machine
+/// once** (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP; C1). Until 2026-10-24 the table was a lazily
+/// initialised cell, and its first reader paid for the seed — off Windows a `$SHELL` probe on
+/// disk — which could be `programs_lane::request` on the window thread. `fn main` calls this as
+/// its first statement, before any branch, so every process has it settled before anything can
+/// read the table (its pin in `window_waits_tests`); `FolioApp::new` takes the witness. A
+/// later call answers the first.
+pub(crate) fn settle_registry() -> Settled<Registry> {
+    REGISTRY.settle(Registry::shipped)
 }
 
 /// The table as it stands. Cheap — a refcount bump.
@@ -2591,8 +2629,11 @@ fn merge(shipped: Vec<Profile>, file: &ProfilesV1) -> (Vec<Profile>, Vec<Profile
 /// first one it can is its id's row in force, and every later row of that id
 /// is a duplicate. The profiles merge and a press's delta read a document by
 /// this (review rounds 4 and 5).
+///
+/// The seed is the process's settled one ([`settle_registry`]), so a press's delta does not ask
+/// the machine for the seed again (off Windows, the `$SHELL` probe) on the thread that pressed.
 pub(crate) fn installable() -> impl Fn(&ProfileEntryV1) -> bool {
-    let shipped = shipped();
+    let shipped: &'static [Profile] = &registry().seed;
     let platform = SeedPlatform::of_this_build();
     move |entry: &ProfileEntryV1| {
         let seed = shipped.iter().find(|profile| profile.id == entry.id);
@@ -3804,9 +3845,9 @@ fn copy_title(source: &str, profiles: &[Profile]) -> String {
 /// can read it, and `a3f1c8e0-…` is a line nobody can read. Computed once at
 /// creation and never recomputed.
 ///
-/// The five shipped slugs are reserved words; a collision — with them, or with
-/// an id already in the table — retries with another suffix.
-fn fresh_id(display_title: &str, profiles: &[Profile]) -> String {
+/// The shipped slugs (`seed`, the registry's) are reserved words; a collision —
+/// with them, or with an id already in the table — retries with another suffix.
+fn fresh_id(display_title: &str, profiles: &[Profile], seed: &[Profile]) -> String {
     let mut stem = String::new();
     for character in display_title.chars() {
         if character.is_ascii_alphanumeric() {
@@ -3817,10 +3858,9 @@ fn fresh_id(display_title: &str, profiles: &[Profile]) -> String {
     }
     let stem = stem.trim_matches('-');
     let stem = if stem.is_empty() { "profile" } else { stem };
-    let shipped = shipped();
     let taken = |candidate: &str| {
         profiles.iter().any(|profile| profile.id == candidate)
-            || shipped.iter().any(|profile| profile.id == candidate)
+            || seed.iter().any(|profile| profile.id == candidate)
     };
     let mut seed = suffix_seed();
     loop {
@@ -16254,10 +16294,7 @@ mod tests {
     /// verbs that read nothing but the table they move (rename, duplicate,
     /// create, move).
     fn windows_registry() -> Registry {
-        Registry {
-            table: RwLock::new(Arc::new(windows_table())),
-            revision: AtomicU64::new(0),
-        }
+        Registry::seeded(windows_seed())
     }
 
     /// [`merge`] over [`windows_seed`], on the platform that seed is for.
@@ -27059,12 +27096,10 @@ mod tests {
     /// off `pwsh` in the first place.
     #[test]
     fn hiding_the_default_and_hiding_the_floor_are_both_refused() {
-        let registry = Registry {
-            table: RwLock::new(Arc::new(ProfileTable {
-                profiles: shipped_for(SeedPlatform::Windows, &FakeMachine::bare_windows()),
-            })),
-            revision: AtomicU64::new(0),
-        };
+        let registry = Registry::seeded(shipped_for(
+            SeedPlatform::Windows,
+            &FakeMachine::bare_windows(),
+        ));
         let floor = registry
             .table()
             .position_of_id(WINDOWS_POWERSHELL_ID)
@@ -27098,12 +27133,7 @@ mod tests {
     /// the ordinary first Mac profile cannot be hidden and the actual floor can.
     #[test]
     fn hiding_uses_the_fallback_floor_of_the_registrys_platform() {
-        let registry = Registry {
-            table: RwLock::new(Arc::new(ProfileTable {
-                profiles: shipped_for(SeedPlatform::MacOs, &FakeMachine::default()),
-            })),
-            revision: AtomicU64::new(0),
-        };
+        let registry = Registry::seeded(shipped_for(SeedPlatform::MacOs, &FakeMachine::default()));
         let table = registry.table();
         let first = 0;
         let floor = table.position_of_id(BOURNE_SHELL_ID).unwrap();
@@ -27546,12 +27576,7 @@ mod tests {
 
         // The macOS seed's shells do wear the chassis, so a new profile there
         // takes a colour none of them is wearing.
-        let mac = Registry {
-            table: RwLock::new(Arc::new(ProfileTable {
-                profiles: shipped_for(SeedPlatform::MacOs, &bare_macos()),
-            })),
-            revision: AtomicU64::new(0),
-        };
+        let mac = Registry::seeded(shipped_for(SeedPlatform::MacOs, &bare_macos()));
         let made = mac.create(0).expect("zsh is a row");
         let table = mac.table();
         let worn = table.profiles()[made].mark;

@@ -65292,10 +65292,15 @@ fn rebuild_every_native_surface(
 }
 
 impl<B: Backend> FolioApp<B> {
+    /// `_storage` and `_profiles` are the witnesses that `main` settled the data directory and the
+    /// profile table (`startup::Settled`, T-LAZY-INITIALIZERS-BEFORE-THE-LOOP): nothing is read
+    /// from them; that they exist is the proof the loop does not start before either.
     fn new(
         proxy: LoopProxy,
         cli: cli::CliRequest,
         delegate: Option<bt_platform::AppDelegate>,
+        _storage: startup::Settled<persist::DataDirectory>,
+        _profiles: startup::Settled<profiles::Registry>,
     ) -> Self {
         Self {
             app: None,
@@ -77656,6 +77661,12 @@ fn start_video_prewarm(prewarm: fn() -> std::io::Result<()>, say: impl Fn(&str))
 }
 
 fn main() -> Result<()> {
+    // **The profile table, settled before any branch** (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP;
+    // C1): every process this program becomes — the loop's, an argv door's, the rescue's, the
+    // hand-over's sender — has the table made here, off Windows the one `$SHELL` probe its seed
+    // costs, so no read anywhere is its first use. Pinned before `parse` in `window_waits_tests`;
+    // its witness is what `FolioApp::new` takes.
+    let registry = profiles::settle_registry();
     // **Every diagnostic door, read once, here** (`entry_doors`, T-DIAGNOSTIC-DOORS-AT-THE-ENTRY):
     // the recordings and traces this run was asked for, handed to each library that writes one
     // before any station can be reached. Nothing below reads them from the environment again.
@@ -77748,7 +77759,7 @@ fn main() -> Result<()> {
     // **The process's half of the start, in `startup::begin`'s order**: a removal verb, the
     // command line, the hand-over. What the hand-over keeps — the parsed request, the data
     // directory, and the two lines a hand-over that did not happen owes the log — comes back.
-    let (request, storage, gave_up, stood_down) = startup::begin(startup::FrontDoor {
+    let (request, settled, gave_up, stood_down) = startup::begin(startup::FrontDoor {
         removal: || {
             // **And the door that undoes what the other two registered**: somebody
             // taking Folio back out of Explorer's menu, which is the one thing this
@@ -77769,6 +77780,9 @@ fn main() -> Result<()> {
             // stopped to raise a modal nobody is in front of would be worse than an
             // uninstall that said nothing at all.
             if cli::remove_shell_integration(std::env::args_os().skip(1)) {
+                // The folder the removal reads, settled as this door always paid for it: the
+                // process has no window, so no request door can be the first to ask.
+                persist::settle_storage_dir();
                 let report = shell_integration::remove_shell_integration(
                     shell_integration::CheckAsker::Verb,
                     &shell_integration::ProbeEnvironment::Inherited,
@@ -77891,7 +77905,14 @@ fn main() -> Result<()> {
             // the literal `leave_process(code)`, and a second call spelled the same way
             // would answer that search first — turning a pin on where the run's last
             // line is written into a pin on a branch that never writes one.
-            let storage = persist::storage_dir();
+            //
+            // **Settled here, and only here in the loop's process**
+            // (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP; C1): after the update pass, before the
+            // hand-over (its pin in `window_waits_tests`); the witness rides out to
+            // `FolioApp::new`, so the loop cannot start on an unsettled directory and no reader
+            // can be the one that moves it.
+            let settled = persist::settle_storage_dir();
+            let storage = settled.value().data_folder().to_path_buf();
             //
             // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
             // only in `Starting`. A refusal is one more `None`: carry on and open a window.
@@ -77935,7 +77956,7 @@ fn main() -> Result<()> {
             {
                 bt_platform::leave_process(handed);
             }
-            (request, storage, gave_up.take(), stood_down)
+            (request, settled, gave_up.take(), stood_down)
         },
     });
     // **The thread that owns the window says so, before it owns one.** Every
@@ -77952,7 +77973,8 @@ fn main() -> Result<()> {
     // console this process borrowed is very often a pane inside another Folio.
     // Before `hang_watch::start`, so the watchdog's own line lands in the log
     // and never in somebody's shell — which is the report that opened this.
-    let channel = diagnostics::enter_resident_run(&storage);
+    let storage = settled.value().data_folder();
+    let channel = diagnostics::enter_resident_run(storage);
     // A start whose hand-over gave up says why where this run's diagnostics go
     // (0.4.8 D3), above the line that says its window saves nothing.
     if let Some(line) = gave_up {
@@ -78183,7 +78205,13 @@ fn main() -> Result<()> {
             }
         }
     };
-    let mut application = FolioApp::new(event_loop.create_proxy().into(), request, delegate);
+    let mut application = FolioApp::new(
+        event_loop.create_proxy().into(),
+        request,
+        delegate,
+        settled,
+        registry,
+    );
     let outcome = event_loop
         .run_app(&mut application)
         .map_err(|error| anyhow!(error));
