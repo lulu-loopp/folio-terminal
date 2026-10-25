@@ -415,8 +415,16 @@ pub fn settle(token: WaitToken<'_, doors::DiagnosticsSettle>) {
 /// phase, so no door admits it: the panic report's third emergency holder (revision
 /// (l)5), before the panic message the previous hook writes and the footer after it,
 /// so the lines said before the panic are above both.
+///
+/// A writer that could not be started is said here too, as [`settle`] says it: a run
+/// that never had a writer and then panicked leaves the reason in the file. Through
+/// `eprintln!`, as the hook's footer beside it, because the panic road leaves the
+/// process without flushing the trace queue.
 pub fn settle_in_panic() {
     if let Some(queue) = WRITER.get() {
+        if let Some(why) = &queue.unstarted {
+            eprintln!("{}", unstarted_line(why));
+        }
         Queue::settle_in_panic(queue, SETTLE_WITHIN);
     }
 }
@@ -531,6 +539,11 @@ impl Queue {
     }
 
     /// **Hand one line over, or count it lost. Never wait.**
+    ///
+    /// The count is taken before the send, so it errs on the safe side near a full
+    /// queue: a racing producer refused at the depth holds its count for a moment, and a
+    /// line offered in that moment can be dropped while a slot is free. Such a line is
+    /// counted and said like any other lost line.
     pub(crate) fn offer(&self, text: String) -> bool {
         let queued = self.lines.fetch_add(1, Ordering::AcqRel) < self.depth
             && matches!(self.entries.try_send(self.entry(Said::Line(text))), Ok(()));
