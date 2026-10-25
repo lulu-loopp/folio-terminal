@@ -1112,29 +1112,45 @@ Explorer verb and the toast sender's name (`Notifier::new(display_name, wake)`).
 system's own words — a dialog's title and buttons, AppKit's rows — stay the system's.
 
 Where and what to do: `crates/bt-source/tests/native_labels.rs`
-(`bt_platform_native_labels_come_from_the_caller`) reads every string literal in the
-product bytes of `menu.rs`, `macos_menu.rs`, `macos_dialogs.rs` and
-`explorer_command.rs` whole, of the `impl` blocks of `MathContextMenu`,
-`FolderPicker`, `ImagePicker` and `SaveFilePicker` on every arm, and of the dialog
-functions it names. A literal whose text begins with an ASCII capital letter is
-refused, except inside an attribute (a doc comment, a class or link name), right after
-`extern` (an ABI), and inside `Err(…)`, a `.map_err(…)` or an `.ok_or_else(…)` — an
-error text, not a label. A literal that must stay is a row of the guard's `ALLOWED`
-(file, text, reason), which only shrinks; a row no guarded item uses is refused. A
-literal inside a `macro_rules!` definition is refused by its line, because it lands in
-an expansion the reading cannot see. Its fixture (`tests/fixtures/native_labels/`)
-plants each case (`a_capitalised_literal_in_a_guarded_item_is_named`). When red, add
-the words to `i18n.rs` (English in both columns, Chinese pending with its
-`CHINESE_PENDING` rows), pass them in at the call, and take the literal out; a new
-guarded surface adds its item to the guard's lists. An entry of the guard's
+(`bt_platform_native_labels_come_from_the_caller`) reads the product bytes of
+`menu.rs`, `macos_menu.rs`, `macos_dialogs.rs` and `explorer_command.rs` whole, of
+the `impl` blocks of `MathContextMenu`, `FolderPicker`, `ImagePicker` and
+`SaveFilePicker` on every arm, and of the dialog functions it names, **and of every
+item and `const`/`static` initializer the call graph reaches from them** (a helper on
+none of the lists, a label `const` written elsewhere, a method behind a first-party
+trait object; T-NATIVE-LABELS-GUARD-REACH, 2026-10-25). An ambiguous, other-arm or
+dynamic call with candidates is followed into every candidate; one the graph cannot
+follow (a dynamic call with none, an unplaced path, a generated item, a cut-off chain,
+an unparsed body) is refused by its line unless a row of the guard's `UNREAD` (caller,
+name called, reason) reviews it; the walk stops at the items of `BOUNDARY` (item,
+reason), the candidates an ambiguous call carries and never runs (a `.push` on a
+`Vec`). **A string literal that holds a letter is a
+label** — read with its `&` mnemonics taken out and its ends trimmed, so `"&Copy"` and
+`" copy"` are labels too — and is refused, except by its place, a closed list: inside
+an attribute (a doc comment, a class or link name), right after `extern` (an ABI),
+inside `Err(…)`, a `.map_err(…)` or an `.ok_or_else(…)` (an error text), and inside
+`.expect(…)`, `panic!`, `unreachable!` or the `assert` macros (a programmer's text).
+Any other diagnostic-looking text is a row. A literal that must stay is a row of the
+guard's `ALLOWED` (file, text as written, reason); a call of a `macro_rules!` of
+`bt-platform` whose definition holds a word is refused unless the macro is a row of
+`MACROS` (name, reason; empty). A row of any of the four lists that nothing uses is
+refused, and the four only shrink: `scripts/ci/check-native-labels.ps1` (its plants in
+`check-native-labels-tests.ps1`) holds them to the merge base's, an honest move of a
+row to another file passes (`moved-rows.ps1`), and growth needs a new dated
+`// widened <date> by <ticket> (+<n> rows): <what>` line in a change to the guard's
+grammar. A literal inside a `macro_rules!` definition in the scope is refused by its
+line, because it lands in an expansion the reading cannot see. Its fixture
+(`tests/fixtures/native_labels/`) plants each case
+(`a_literal_with_a_word_in_a_guarded_item_is_named`,
+`what_a_guarded_item_reaches_is_read`). When red, add the words to `i18n.rs` (English
+in both columns, Chinese pending with its `CHINESE_PENDING` rows), pass them in at the
+call, and take the literal out; a text no person reads gets a row with its reason; a
+new guarded surface adds its item to the guard's lists. An entry of the guard's
 `FILES`, `TYPES` or `FUNCTIONS` that names nothing in the index is refused by name, so
 a renamed item cannot drop out silently, and a literal the index holds no record of is
-refused by its line. `ALLOWED` shrinks by review only: no check holds it to the merge
-base's. Not seen, as limits (widening the grammar is T-NATIVE-LABELS-GUARD-REACH, 0.4.9):
-a `const` or `static` label defined outside the scope and named from a guarded item (the
-shape `NOTIFICATION_DISPLAY_NAME` had), a crate-local `macro_rules!` defined outside the
-scope and invoked inside it, a helper function on none of the lists, and a label whose
-first character is not a capital (an `"&Copy"` mnemonic, a leading space).
+refused by its line. Not seen, as limits: a literal `bt-app` passes in (the caller's
+table is `bt-app`'s runtime tests' subject), an item a macro generates, and what a
+foreign function does with the words.
 
 ## Machine-independent paths
 
