@@ -1571,6 +1571,7 @@ impl HeadlessApplication {
                 crate::persist::DataDirectory::planted(PathBuf::new()),
             ))),
             crate::profiles::settle_registry(),
+            crate::explorer_menu::settle_package(),
         );
         application.app = Some(app);
         application.windows.insert(id, window);

@@ -1367,11 +1367,13 @@ derive for `WorkerCtx` and `WaitToken`;
 at `App::finish`'s head, in the build-error arm and after `run_app`;
 `quit_abandoned` in the `Abandon` arm; `loop_running` on `Init`; the three
 standalone entries), each spelled only as the call `admission::writer(…)`, and
-`enter_callback` at its nineteen entries; and `main`'s two settles
+`enter_callback` at its nineteen entries; and `main`'s three settles
 (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP) at theirs, each spelled only through its
 pin's module path: `profiles::settle_registry` as `main`'s first statement, before
 the parse, and `persist::settle_storage_dir` in the removal door, before the parse,
-and in the claim after the parse;
+and in the claim after the parse; and `explorer_menu::settle_package`
+(T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD) after the hand-over, once the running
+image is resolved;
 (5) no `allow` or `expect` of `clippy::disallowed_methods`, `clippy::style`,
 `clippy::all` or `warnings`, at any level, in either path spelling, inside
 `cfg_attr` at any depth — only a door's own `expect`, of which there are none until
