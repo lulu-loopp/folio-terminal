@@ -175,11 +175,21 @@ pub enum FileScoped {
     /// whole test file, not one item in it. It is a PowerShell gate and cannot
     /// ask this crate's index.
     TheTimingWideningGate,
+    /// `scripts/ci/check-test-globals.ps1`, the process-globals register's history half,
+    /// naming `crates/bt-source/tests/test_globals.rs` (T-TEST-PROCESS-GLOBALS).
+    ///
+    /// The same shape as [`Self::TheTimingWideningGate`]: an added row of a by-hand class is
+    /// admitted only under a `# widened ... (+n rows)` line in a change to the scan's grammar,
+    /// and the gate asks `git diff` whether the scan's file differs from the merge base's.
+    /// Whether a committed file changed between two commits is a fact about that file, and the
+    /// grammar is the whole test file, not one item in it. It is a PowerShell gate and cannot
+    /// ask this crate's index.
+    TheTestGlobalsWideningGate,
 }
 
 impl FileScoped {
     /// Every entry. The allowlist is small enough to be an array and only shrinks.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::VendoredAddedFiles,
         Self::TheTripwireItself,
         Self::TheDeadCodeGate,
@@ -191,6 +201,7 @@ impl FileScoped {
         Self::TheGateCanaries,
         Self::ThePsReadLineArtefactGate,
         Self::TheTimingWideningGate,
+        Self::TheTestGlobalsWideningGate,
     ];
 
     /// Where the reader lives, from the workspace root, with forward slashes.
@@ -208,6 +219,7 @@ impl FileScoped {
             Self::TheGateCanaries => ".github/workflows/ci.yml",
             Self::ThePsReadLineArtefactGate => "scripts/ci/check-psreadline-artefact.ps1",
             Self::TheTimingWideningGate => "scripts/ci/check-timing-bound.ps1",
+            Self::TheTestGlobalsWideningGate => "scripts/ci/check-test-globals.ps1",
         }
     }
 
@@ -263,6 +275,11 @@ impl FileScoped {
                 "a widening line admits rows only in a change to the scan's grammar, and whether \
                  the scan's file differs from the merge base's is a fact about that file; a \
                  PowerShell gate"
+            }
+            Self::TheTestGlobalsWideningGate => {
+                "a widening line admits by-hand rows only in a change to the scan's grammar, and \
+                 whether the scan's file differs from the merge base's is a fact about that file; \
+                 a PowerShell gate"
             }
         }
     }
