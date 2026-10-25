@@ -726,7 +726,7 @@ crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::finish_job	Ambig
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::folder_for	Ambiguous	as_os_str	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::folder_for	Ambiguous	is_empty	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::folder_for	Ambiguous	map	1	
-crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::package_file	Ambiguous	then_some	1	
+crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::package_in	Dynamic	is_file	1	2026-10-25: the look handed in (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD): a typed is_file closure at settle_package and the probe's start, Deployment::holds_file in the press's job
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::package_removal	Dynamic	on_disk	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::package_removal	Dynamic	ours	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::probe	Ambiguous	and_then	1	
@@ -758,13 +758,13 @@ crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::serve	Ambiguous	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::serves_this_folder	Ambiguous	as_deref	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::serves_this_folder	Ambiguous	is_some_and	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_probe_with	Dynamic	voice	1	
-crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request	Ambiguous	and_then	1	
-crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request	Ambiguous	finish	2	
-crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request	Ambiguous	is_ok	1	
-crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request	Ambiguous	map	2	
-crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request	Ambiguous	report	2	
-crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request	Ambiguous	text	2	
-crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request	Ambiguous	to_owned	3	
+crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request_with	Ambiguous	and_then	1	2026-10-25: moved from start_request to start_request_with with the job they are in (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD), receivers as before
+crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request_with	Ambiguous	finish	2	2026-10-25: moved from start_request to start_request_with with the job they are in (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD), receivers as before
+crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request_with	Ambiguous	is_ok	1	2026-10-25: moved from start_request to start_request_with with the job they are in (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD), receivers as before
+crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request_with	Ambiguous	map	2	2026-10-25: moved from start_request to start_request_with with the job they are in (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD), receivers as before
+crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request_with	Ambiguous	report	2	2026-10-25: moved from start_request to start_request_with with the job they are in (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD), receivers as before
+crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request_with	Ambiguous	text	2	2026-10-25: moved from start_request to start_request_with with the job they are in (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD), receivers as before
+crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::start_request_with	Ambiguous	to_owned	3	2026-10-25: moved from start_request to start_request_with with the job they are in (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD), receivers as before
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::state	Ambiguous	clone	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::state	Ambiguous	expect	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::state	Ambiguous	unwrap_or	1	
@@ -2556,7 +2556,6 @@ crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	is_empty	2
 crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	iter	1	
 crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	map	2	
 crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	zip	2	
-crates/bt-app/src/main.rs	bt-app crate::revived_page_of	Ambiguous	ok	1	
 crates/bt-app/src/main.rs	bt-app crate::run_decoration_worker	Ambiguous	and_then	1	
 crates/bt-app/src/main.rs	bt-app crate::scale_door	Ambiguous	as_micros	1	
 crates/bt-app/src/main.rs	bt-app crate::scale_door	Ambiguous	elapsed	1	
@@ -2804,7 +2803,6 @@ crates/bt-app/src/persist.rs	bt-app crate::persist::read_fault	Ambiguous	unwrap_
 crates/bt-app/src/persist.rs	bt-app crate::persist::read_fault	Dynamic	in_force	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::serve_storage_job	Ambiguous	is_err	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::serve_storage_job	Ambiguous	to_string	1	
-crates/bt-app/src/persist.rs	bt-app crate::persist::storage_dir	Ambiguous	clone	1	
 crates/bt-app/src/persist.rs	bt-app crate::persist::storage_location	Ambiguous	join	4	
 crates/bt-app/src/persist.rs	bt-app crate::persist::storage_location	Dynamic	env	4	
 crates/bt-app/src/persist.rs	bt-app crate::persist::wake_documents	Dynamic	wake	1	
@@ -3310,7 +3308,6 @@ crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::reinsert	Ambiguo
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::reinsert	Ambiguous	len	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::rename	Ambiguous	is_empty	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::rename	Ambiguous	to_owned	1	
-crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::restore_defaults	Ambiguous	find	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::restore_defaults	Ambiguous	get	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::table	Ambiguous	clone	1	
 crates/bt-app/src/profiles.rs	bt-app crate::profiles::Registry::table	Ambiguous	unwrap_or_else	1	
@@ -4762,6 +4759,7 @@ crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::warm_web_e
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Ambiguous	collect	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Ambiguous	filter_map	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::web_sheet_layers	Ambiguous	to_owned	1	
+crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::revived_page_of	Ambiguous	ok	1	2026-10-25: T-SPLIT-2B batch 2; the same site, moved with `revived_page_of` from main.rs into runtime/web.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::abandon_a_window_nothing_arrived_in	Ambiguous	enumerate	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::answer_restore	Ambiguous	is_empty	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::answer_restore	Ambiguous	saturating_sub	1	
@@ -11528,6 +11526,7 @@ crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	
 crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	Ambiguous	ends_with	1	
 crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	Ambiguous	is_some_and	1	
 crates/bt-term/src/session.rs	bt-term crate::session::win32_would_trim_the_name	Ambiguous	to_str	1	
+crates/bt-testpath/src/lib.rs	bt-testpath crate::temp_path	Ambiguous	join	1	2026-10-24: reached only from persist.rs cfg(test) DIRECTORY static (a test process scratch data directory, T-LAZY-INITIALIZERS-BEFORE-THE-LOOP); the walk does not read cfg, the product build has no such static
 crates/bt-transcript/src/lib.rs	bt-transcript crate::<CellText as From<&str>>::from	Ambiguous	len	3	
 crates/bt-transcript/src/lib.rs	bt-transcript crate::CapturedCell::carries_unclaimed_text	Ambiguous	all	1	
 crates/bt-transcript/src/lib.rs	bt-transcript crate::CapturedCell::plain	Dynamic	into	1	

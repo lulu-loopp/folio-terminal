@@ -21,6 +21,8 @@
 # line, in a change to the scan. A reason is "YYYY-MM-DD: why".
 file	global	binary	class	reason
 crates/bt-app/src/explorer_menu.rs	crate::explorer_menu::BUSY	bt-app:bin:folio	lock:DEPLOYMENT	2026-10-24: the deployment latch; the one test that takes it holds the explorer-menu tests' DEPLOYMENT turn first
+crates/bt-app/src/explorer_menu.rs	crate::explorer_menu::KNOWN	bt-app:bin:folio	lock:DEPLOYMENT	2026-10-25: the row's package state; the two press tests whose jobs write it (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD) hold the explorer-menu tests' DEPLOYMENT turn and put it back
+crates/bt-app/src/explorer_menu.rs	crate::explorer_menu::REGISTERED_HERE	bt-app:bin:folio	lock:DEPLOYMENT	2026-10-25: whether this process registered the package; the press test whose job registers (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD) holds the explorer-menu tests' DEPLOYMENT turn and puts it back
 crates/bt-app/src/headless.rs	crate::headless::shared_measure::MEASURE	bt-app:bin:folio	write-once	2026-10-24: one measuring service per process, made by get_or_init; every headless window locks it per measure, and a measure is a function of its arguments
 crates/bt-app/src/main.rs	crate::fixture_cell_metrics::MEASURED	bt-app:bin:folio	per-test key	2026-10-24: a memo keyed by (scale, size); an entry once pushed never changes, and it is the production measure of its key
 crates/bt-app/src/shell_integration.rs	crate::shell_integration::PARSE_ANSWERS	bt-app:bin:folio	per-test key	2026-10-24: keyed by the program path and argv, unique to each test that asks (census row 10)

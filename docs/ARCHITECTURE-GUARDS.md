@@ -465,6 +465,85 @@ writes, an `extern crate … as`); either, for a landmark no pin names
 names. When refused, rename what is not a landmark, or
 widen the grammar in its own change with a planted case.
 
+`main`'s settles are pinned the same way (T-LAZY-INITIALIZERS-BEFORE-THE-LOOP,
+2026-10-24): `profiles::settle_registry` as `main`'s first statement, before
+`parse`; `persist::settle_storage_dir` in the `--remove-shell-integration` door,
+before `parse`, and in the claim after the update pass, after `parse`; and
+`explorer_menu::settle_package` (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD,
+2026-10-25) in the loop's process once the running image is resolved, after
+`hand_over`. Every
+pinned writer is spelled only as the call through its pin's module path,
+`module::writer(…)` (`admission::` for the role and phase writers): an import, a
+value or a rename is refused by name and path
+(`a_pinned_settle_is_read_through_its_own_module_path`). Only the one segment
+before `::` is read, so `x::persist::settle_storage_dir(…)` for another module
+named `persist` would pass: a stated limit, the one the `admission::` rule always
+had. A pin is one call: the calls are counted per (writer, owner, landmark), and
+a second call matching a pin already met is reported as a surplus
+(`a_second_call_matching_a_pin_is_a_surplus`).
+
+A wait reached through the generic admission is pinned by its door
+(T-DOOR-PINS-BY-DOOR, 2026-10-25): `DOOR_PINS` places each call of a pinned door
+after its owner's landmark, through the same placement and count as `PINS`
+(`window_waits_tests::placed_and_counted`, one engine for both tables). Row 30's
+settle is admitted twice in `fn main`, after `build` (the build-error return) and
+after `run_app` (the tail); row 17's flush is admitted once, inside its one road
+`trace_sink::Shutdown::flush_through_its_door`, and `main` takes that road as
+`trace_shutdown.flush_through_its_door()` after `build` and after `run_app`. A
+pinned call with none found is red, a second matching one a surplus. "After
+`run_app`" is all a tail pin says: it does not pin the settle before the footer,
+or before the flush, which is the order row 30 exists for — a fixed landmark set
+cannot.
+
+What is read (`pinned_door_failures`'s grammar): every product token `admitted`,
+among the tokens of the smallest function body the index records around it, or —
+outside every recorded body (a signature, a module-level macro such as
+`define_class!`) — among its file's. Not an admission: a declaration, a method, a
+field, a `let`, a macro of the name, a name in a `use` that is not renamed, a
+path that resolves only to items the crate itself declares
+(`OnTheWorker::admitted`), and a bare name, neither called nor turbofished, that
+resolves to nothing (a local, as the `define_class!` methods' in
+`macos_http.rs`). Read first, before any resolution: an `admitted::<…>` inside a
+macro's arguments (other than `IN_PLACE_MACROS`) or inside a nested `fn`'s body —
+which the index does not record, so its calls would be the owner's, placed by
+where they are written — is refused. A path resolving to `admitted` in
+`bt_platform::admission` or `bt_effects::admission` must be the call
+`admitted::<doors::Door, …>(…)`, its first generic argument written as a path
+ending `doors::Door` that resolves to that admission's `doors`. The pair is
+stated because the `use` reader does not follow a `use` across crates; the
+consequence is that a path into any other crate is refused, not read — a third
+crate's re-export of the admission (`bt_term::admission::admitted::<…>`) would
+otherwise pass unseen. Refused by owner, line and what is written: a path that
+resolves to nothing (a name a macro-written `use` or an `extern crate … as`
+brings in), a path into another crate, a path resolving to the admission and
+another item at once, no turbofish (a door inferred from the argument), an
+imported or aliased door, another module's `doors`, the admission as a value
+(so a local named `admitted` where the name is the admission's is refused too),
+inside a macro's arguments or a nested `fn`, and a rename `admitted as …` in a
+`use`. Every token of a pinned road's name but its declaration must be the call
+on the pin's receiver, matched by spelling — a same-name method of another type
+called through a rebound `trace_shutdown` would count as the road — outside any
+macro's arguments and nested `fn`. A pinned door's call that stands under a
+statement's `#[cfg…]` or `#[cfg_attr(…)]` (the statement or block an outer one
+governs, or the block an inner `#![…]` one opens) is refused: the index reads a
+file's, an item's and a module's `cfg` but never a statement's, so a gated call
+would meet its pin on a build it is not in. The writer table (`PINS`) does not
+read statement `cfg`s yet — a stated gap, T-WINDOW-WAITS-STATEMENT-CFG (0.4.9 plan
+row 60). Not read: closures and run-time-dead branches — a call in a closure's
+body, or in a branch that never runs (`if cfg!(…)`, `if false`), is placed where
+it is written, as a landmark is, and is still in the build, so a closure written
+after `run_app` that is never called, or a settle under `if false`, would meet
+the tail's pin. An
+unreadable admission is refused wherever it is (it may be a pinned door's), and
+its owner's pins are not also called "not there" (`deleting_the_tail_settle_is_red`,
+`a_second_settle_in_another_branch_is_a_surplus`,
+`a_door_through_an_alias_or_another_module_is_refused`,
+`a_path_to_admitted_that_names_nothing_or_another_crate_is_refused`,
+`a_door_call_inside_a_nested_fn_is_refused`, `a_use_bound_is_no_use_declaration`,
+`a_pinned_call_under_a_statement_cfg_is_refused`,
+`a_module_level_macro_is_read_among_its_file`,
+`a_road_call_is_pinned_by_its_receiver`, `a_name_that_is_not_the_admission_is_not_read`).
+
 The registry's `# completions` section (S-1, 2026-10-11) is the side-effects
 contract's ledger, one row per request protocol, held by the
 `every_*completions*` tests (among them `every_worker_door_body_is_reached_from_a_completions_door`) and `every_conforming_request_door_holds_no_wait_of_its_own`

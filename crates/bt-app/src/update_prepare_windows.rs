@@ -44,7 +44,9 @@
 //!    the release carries one ([`trust::verify_release_package_under`]), and
 //!    the two Microsoft sidecars' signatures ([`trust::signature`]). Any
 //!    refusal is [`Stop::Identity`] — a release whose archive and checksum
-//!    document were both replaced consistently still fails here.
+//!    document were both replaced consistently still fails here — except a
+//!    revocation that could not be reached, [`Stop::Offline`]; every refusal
+//!    of `trust` writes its line ([`trust_refused`]).
 //! 6. **Stage**: every member copied into `set\` (`install_txn::durable_copy`:
 //!    named only once flushed, the folder flushed after), `expand\` and
 //!    `download\` removed, and **`set\` verified again as it lies** — every
@@ -386,13 +388,17 @@ pub(crate) struct Running {
 ///
 /// # Errors
 /// [`Stop::NotOurs`] for an unsigned build or one that carries no release
-/// manifest — neither is an updater build; [`Stop::Identity`] for a signature
-/// that does not pass (revocation unknown included: the next press asks
-/// again).
+/// manifest — neither is an updater build; [`Stop::Offline`] when its
+/// signature's revocation could not be reached, [`Stop::Identity`] for any
+/// other signature that does not pass (revocation unknown included: the next
+/// press asks again) — each through [`trust_refused`].
 fn running(exe: &Path, policy: &Policy) -> Result<Running, Stop> {
-    let identity = trust::identity_of(exe, policy).map_err(|refusal| match refusal {
-        Refusal::Unsigned => Stop::NotOurs,
-        _ => Stop::Identity,
+    let identity = trust::identity_of(exe, policy).map_err(|refusal| {
+        let otherwise = match refusal {
+            Refusal::Unsigned => Stop::NotOurs,
+            _ => Stop::Identity,
+        };
+        trust_refused("the running build", &refusal, otherwise)
     })?;
     let manifest = EmbeddedManifest
         .manifest_text(exe)
@@ -613,6 +619,26 @@ fn archive_refused(refusal: update_archive::Refusal) -> Stop {
     stop_for_archive(&refusal.reason)
 }
 
+/// **The stop a trust refusal is reported as, and its one line** (0.4.9
+/// T-UPDATE-OFFLINE-IDENTITY-CARD): every refusal of `trust` in this Prepare
+/// comes here, so `diagnostics.log` names the check that refused and Windows'
+/// code; a revocation that could not be reached is [`Stop::Offline`] — the
+/// card says the network was the reason — and every other refusal the step's
+/// own stop, `otherwise`. `file` names what was checked, never its path.
+fn trust_refused(file: &str, refusal: &Refusal, otherwise: Stop) -> Stop {
+    crate::diagnostics::note(&trust_refused_line(file, refusal));
+    match refusal {
+        Refusal::RevocationOffline { .. } => Stop::Offline,
+        _ => otherwise,
+    }
+}
+
+/// [`trust_refused`]'s line: what was checked, the refusal's name and
+/// Windows' code.
+fn trust_refused_line(file: &str, refusal: &Refusal) -> String {
+    format!("Folio: update job — the identity check of {file} refused: {refusal}")
+}
+
 /// The stop an archive [`Reason`] is reported as — see [`archive_refused`].
 fn stop_for_archive(reason: &Reason) -> Stop {
     match reason {
@@ -628,7 +654,8 @@ fn stop_for_archive(reason: &Reason) -> Stop {
 /// sidecars' signatures, each of which must be there (C4).
 ///
 /// # Errors
-/// [`Stop::Identity`], whichever refused.
+/// [`Stop::Identity`], whichever refused; [`Stop::Offline`] for a refusal of
+/// `trust` that could not reach revocation ([`trust_refused`]).
 fn verify_set(
     folder: &Path,
     members: &[String],
@@ -640,13 +667,14 @@ fn verify_set(
         return Err(Stop::Identity);
     }
     trust::verify_release_file_under(&folder.join(EXECUTABLE), expectation, policy)
-        .map_err(|_| Stop::Identity)?;
+        .map_err(|refusal| trust_refused(EXECUTABLE, &refusal, Stop::Identity))?;
     if has(PACKAGE) {
         trust::verify_release_package_under(&folder.join(PACKAGE), expectation, policy)
-            .map_err(|_| Stop::Identity)?;
+            .map_err(|refusal| trust_refused(PACKAGE, &refusal, Stop::Identity))?;
     }
     for sidecar in SIDECARS {
-        trust::signature(&folder.join(sidecar), policy).map_err(|_| Stop::Identity)?;
+        trust::signature(&folder.join(sidecar), policy)
+            .map_err(|refusal| trust_refused(sidecar, &refusal, Stop::Identity))?;
     }
     Ok(())
 }
@@ -676,7 +704,8 @@ fn still_staged(
 /// length, and the running build's identity as its own signature names it.
 ///
 /// # Errors
-/// [`Stop::Clone`].
+/// [`Stop::Clone`]; [`Stop::Offline`] when its signature's revocation could
+/// not be reached ([`trust_refused`]).
 fn rescue_is_the_running_build(
     rescue: &Path,
     running: &Running,
@@ -688,7 +717,8 @@ fn rescue_is_the_running_build(
     }
     match trust::identity_of(rescue, policy) {
         Ok(identity) if identity == running.identity => Ok(()),
-        _ => Err(Stop::Clone),
+        Ok(_) => Err(Stop::Clone),
+        Err(refusal) => Err(trust_refused("the rescue copy", &refusal, Stop::Clone)),
     }
 }
 
@@ -847,12 +877,13 @@ pub(crate) fn staged_as_verified(
     if !is(resume.exe, old) {
         return Err(Stop::Identity);
     }
-    let running = trust::identity_of(resume.exe, resume.policy).map_err(|_| Stop::Identity)?;
+    let running = trust::identity_of(resume.exe, resume.policy)
+        .map_err(|refusal| trust_refused("the running build", &refusal, Stop::Identity))?;
     let set = home
         .members_folder(journal.txn, Place::Set)
         .ok_or(Stop::Journal)?;
     let staged_version = trust::identity_of(&set.join(EXECUTABLE), resume.policy)
-        .map_err(|_| Stop::Identity)?
+        .map_err(|refusal| trust_refused(EXECUTABLE, &refusal, Stop::Identity))?
         .version;
     still_staged(
         &set,

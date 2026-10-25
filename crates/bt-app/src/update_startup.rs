@@ -1310,12 +1310,12 @@ mod tests {
     /// F-6: "taken in `fn main` before settings, sidecars or
     /// `launch_wire::hand_over`". The hand-over half is also a type:
     /// `launch_wire::hand_over` takes the [`super::Admitted`] only [`super::pass`] makes.
-    /// What the type cannot say — that `persist::storage_dir` (which may move
+    /// What the type cannot say — that `persist::settle_storage_dir` (which may move
     /// the data directory) and `diagnostics::enter_resident_run` come after —
     /// is read from `main`'s body.
     ///
     /// MUTATION: move the `update_startup::pass(&request)` line below
-    /// `let storage = persist::storage_dir();`.
+    /// `let settled = persist::settle_storage_dir();`.
     #[test]
     fn admission_is_taken_before_hand_over() {
         use bt_source::{Index, ItemQuery};
@@ -1329,7 +1329,7 @@ mod tests {
         let parsed = at("cli::parse(");
         let window_thread = at("bt_platform::admission::enter_window_thread()");
         let admitted = at("update_startup::pass(&request)");
-        let storage = at("persist::storage_dir()");
+        let storage = at("let settled = persist::settle_storage_dir()");
         let claim = at("persist::is_writer_of(");
         let handed_over = at("launch_wire::hand_over(");
         let resident = at("diagnostics::enter_resident_run(");
