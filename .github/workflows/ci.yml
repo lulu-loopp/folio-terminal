@@ -652,6 +652,13 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-timing-bound-tests.ps1
 
+      # The native-labels guard's ALLOWED and MACROS lists (T-NATIVE-LABELS-GUARD-REACH) are the
+      # same merge-base rule, a move honest and a growth admitted only by a widening line. Its
+      # scratch-repository suite plants each verdict.
+      - name: the native-labels gate can actually fail
+        shell: pwsh
+        run: ./scripts/ci/check-native-labels-tests.ps1
+
       # The test process-globals register (T-TEST-PROCESS-GLOBALS) admits an added row of a class
       # the guard checks, and a by-hand row only under a widening line. Its scratch-repository
       # suite plants each verdict, admitted and refused.
@@ -1251,6 +1258,10 @@ jobs:
       - name: the timing-bound test list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-timing-bound.ps1
+
+      - name: the native-labels allow lists only shrink
+        shell: pwsh
+        run: ./scripts/ci/check-native-labels.ps1
 
       - name: the test-globals register grows only by rows the guard checks
         shell: pwsh
