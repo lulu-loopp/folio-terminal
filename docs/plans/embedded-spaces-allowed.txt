@@ -120,8 +120,8 @@ crates/bt-platform/tests/macos_services.rs:230 the probe's listing: each path in
 crates/bt-pty/src/lib.rs:4144 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/src/declarations.rs:665 the spacing inside the predicate is the input under test
 crates/bt-source/src/declarations.rs:666 the spacing inside the predicate is the input under test
-crates/bt-source/src/manifest.rs:616 a manifest fixture: a trailing comment set off by spaces
-crates/bt-source/src/manifest.rs:661 code sample: the indentation after an escaped line break is the sample's own
+crates/bt-source/src/manifest.rs:643 a manifest fixture: a trailing comment set off by spaces
+crates/bt-source/src/manifest.rs:688 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/src/query.rs:902 the display form's second line, indented under the first after an escaped line break
 crates/bt-source/tests/contract.rs:385 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/contract.rs:397 code sample: the indentation after an escaped line break is the sample's own
