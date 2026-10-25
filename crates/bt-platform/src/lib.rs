@@ -19465,6 +19465,11 @@ mod compositor_arms_tests {
                 "place_web_visual",
                 "hide_web_visual",
                 "commit",
+                // T-WEBVIEW-WARMUP-DROPS-THE-DEVICE. A device rebuilt after a
+                // loss is asked for only once the old one is let go of, and the
+                // visual's swapchain is one of its holders; the macOS arm has
+                // the door and nothing to let go of.
+                "let_go_of_the_picture",
             ],
             "the DirectComposition arm is this ticket's baseline and this ticket does not touch \
              it — a change here is a change to a tree nothing in M4-1 ran"
@@ -19760,11 +19765,13 @@ mod compositor_arms_tests {
     /// `every_macos_window_door_proves_its_thread_before_it_calls_appkit` makes
     /// one file over.
     ///
-    /// **Five named exceptions, and each reaches no AppKit at all**:
+    /// **Six named exceptions, and each reaches no AppKit at all**:
     /// `gpu_visual_ptr` hands back a pointer it was given in the constructor,
     /// `skirt_covers_anything` is arithmetic over two cells, the two size
-    /// setters move those cells and nothing else, and `commit` has an empty
-    /// body because CoreAnimation commits the run loop's own transaction.
+    /// setters move those cells and nothing else, `commit` has an empty
+    /// body because CoreAnimation commits the run loop's own transaction, and
+    /// `let_go_of_the_picture` has an empty body because the old surface's
+    /// layer is taken off where the new surface is made.
     /// `new` gates through `folios_surface_view`, which is `macos_impl`'s door
     /// and asks the same question.
     ///
@@ -19780,6 +19787,7 @@ mod compositor_arms_tests {
                 "gpu_visual_ptr"
                     | "skirt_covers_anything"
                     | "commit"
+                    | "let_go_of_the_picture"
                     | "set_window_size"
                     | "set_covered_size"
             ) {
