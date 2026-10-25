@@ -200,7 +200,7 @@ impl Census {
     }
 
     /// **The counters as they stand**, for the watchdog.
-    pub(super) fn read(&self) -> Reading {
+    pub(super) fn reading(&self) -> Reading {
         Reading {
             turns: std::array::from_fn(|index| self.turns[index].load(Ordering::Relaxed)),
             wall_ns: std::array::from_fn(|index| self.wall_ns[index].load(Ordering::Relaxed)),
@@ -376,7 +376,7 @@ impl Round {
             perf(counted.clone());
             self.threads_said = Some(counted);
         }
-        let after = census.read();
+        let after = census.reading();
         let (since_ms, before) = self.last.take().unwrap_or_else(|| (0, Reading::zero()));
         perf(turns_line(
             census,
