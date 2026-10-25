@@ -85,7 +85,8 @@
 //!   leaves unresolved is refused by file and line when a candidate is a test-only callable of
 //!   the target that the caller may call and that reaches a global, or of which that cannot be
 //!   told. Unresolved edges are `Dynamic`, `Ambiguous` and `OtherArm`; a `Path` whose last
-//!   segment is a global's name is refused outright, and any other is read as every test-only
+//!   segment is a global's name is refused outright, unless the path's own place (never a
+//!   glob's) is a `thread_local!` static of the package; any other is read as every test-only
 //!   callable of its last segment's name. A call in an item-macro function is read the same
 //!   way. Also refused: a body on the walk that does not parse, a cut-off chain, a
 //!   `macro_rules!` of the package whose definition names a global, macro arguments that do not
@@ -488,6 +489,8 @@ struct Globals {
     /// Every `thread_local!` static, by package position and module path and name: not a
     /// global, and the index holds no record of it.
     thread_locals: BTreeSet<(usize, String)>,
+    /// Every module path of each package, by position.
+    modules: BTreeSet<(usize, String)>,
 }
 
 /// `segments`, written in module `module`, as an absolute `crate::…` path: `crate`, `self` and
@@ -590,6 +593,13 @@ impl Globals {
                         .extend(import.globs().iter().map(|path| absolute(module, path)));
                 }
             }
+            globals.modules.extend(
+                index
+                    .modules()
+                    .iter()
+                    .flat_map(|module| module.module_paths().iter().cloned())
+                    .map(|path| (position, path)),
+            );
             // `thread_local!` statics written in a module, read from the macro's tokens.
             for record in index.macros() {
                 if record.kind() != MacroKind::Invocation || record.name() != "thread_local" {
@@ -778,10 +788,33 @@ impl Globals {
     }
 
     /// Whether a path written in `module` names a `thread_local!` static of the package.
+    ///
+    /// Only the path's own place counts, never a glob `use`'s: a bare name is its module's or
+    /// its named `use`'s; a longer path goes through a `use` of its first segment, or is
+    /// `crate`/`self`/`super`-absolute, or names a child module of `module`, or else is read
+    /// from the crate root (the call graph writes a path it cannot place without its leading
+    /// `crate`, and a first segment that is no child module cannot be relative).
     fn names_a_thread_local(&self, position: usize, module: &str, segments: &[String]) -> bool {
-        self.places(position, module, segments)
-            .into_iter()
-            .any(|key| self.thread_locals.contains(&(position, key)))
+        let imported = self.imported.get(&(position, module.to_owned()));
+        let own = match segments {
+            [] => return false,
+            [name] => imported
+                .and_then(|bound| bound.get(name))
+                .cloned()
+                .unwrap_or_else(|| format!("{module}::{name}")),
+            [first, rest @ ..] => match imported.and_then(|bound| bound.get(first)) {
+                Some(path) => format!("{path}::{}", rest.join("::")),
+                None if matches!(first.as_str(), "crate" | "self" | "super")
+                    || self
+                        .modules
+                        .contains(&(position, absolute(module, std::slice::from_ref(first)))) =>
+                {
+                    absolute(module, segments)
+                }
+                None => format!("crate::{}", segments.join("::")),
+            },
+        };
+        self.thread_locals.contains(&(position, own))
     }
 
     fn add(&mut self, package: &str, global: Global) {
@@ -881,7 +914,10 @@ impl<'r, 'i> Reader<'r, 'i> {
                 }
                 if path.rsplit("::").next() == Some("GlobalAlloc") {
                     allocators.push(id);
-                } else if let Some(owner) = record.type_owner() {
+                } else {
+                    let owner = record
+                        .type_owner()
+                        .expect("a method of an impl block has the block's type");
                     let module = record.module_paths().into_iter().next().unwrap_or("crate");
                     for key in globals.named_keys(id.package(), module, &[vec![owner.to_owned()]]) {
                         implicit.entry(key).or_default().push(id);
