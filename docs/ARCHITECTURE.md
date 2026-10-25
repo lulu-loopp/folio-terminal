@@ -2761,7 +2761,8 @@ Every method below runs on the **window thread** and holds `&mut App` and
 `&mut WindowRuntime` (§4.3); the file a method sits in is navigation, not
 ownership. "Asks" names the lanes of §5.1 whose requests the file sends or
 whose answers it applies; "doors and rows" names the §6 doors and the §5.3
-rows its own methods reach. Counts are the census of §0.1, 2026-09-23.
+rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the methods K2
+(T-SPLIT-2B) has moved in since: one each into `profiles.rs` and `search.rs` (batch 1).
 
 | file | methods | owns | asks | doors and rows |
 |---|---|---|---|---|
@@ -2784,17 +2785,20 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23.
 | `panes.rs` | 130 | seat layout, split, close, duplicate, zoom and move of panes; command rails; pane menus; `present_seats_and_commit` | session (pane birth through `create_leaf_session`); presentation (on this thread) | rows 9 and 11 |
 | `peek.rs` | 59 | the layout peek and the file glance card | observation (math, preview, git; video) | — |
 | `preview.rs` | 286 | preview panes and documents: open, land, rename, save, watch; markdown pictures, the background picture, video seats, the drop preview, clipboard pictures, the tab strip's animation | observation (`bt-preview-worker`, `bt-math-worker`; starts `background-picture` and `clipboard-picture`); ingress (`preview_watch`); hand-off | `spawn_at_priority` ×2; `bt_platform::rename_without_replacing`, row 20; row 20 (`save_preview_on`) |
-| `profiles.rs` | 23 | the profile table: launching, menus, the editor, store and re-read, the default profile, the root menu | storage; ingress (`storage_watch`) | row 2 (`add_to_profile`) |
+| `profiles.rs` | 24 | the profile table: launching, menus, the editor, store and re-read, the default profile, the root menu | storage; ingress (`storage_watch`) | row 2 (`add_to_profile`) |
 | `quake.rs` | 9 | the summoned window: show, hide, its profile and arrangement | — | — |
-| `search.rs` | 22 | the find box, its highlights and stepping | — | row 6 (`refresh_search`) |
+| `search.rs` | 23 | the find box, its highlights and stepping | — | row 6 (`refresh_search`) |
 | `tabs.rs` | 71 | the tab strip: new, close, activate, rename, drag, tear out; the tab menu; tables | — | — |
 | `terminal.rs` | 34 | the terminal pane: `drain_pty`, command marks, scroll and column bars, restart, fonts, selection, the PowerShell intent | session (drain, pane birth) | rows 2 (`spend_powershell_intent`), 5 (`apply_terminal_font`), 19 |
 | `tooltips.rs` | 9 | tooltips | — | — |
 | `web.rs` | 36 | the web pane: open, sync and advance the page, apply its outcomes, dev tools, sheets, the colour scheme, handing a URL to the browser; the engine's warm-up (`warm_web_engine`, ticket 54); the spare controller's making and adoption (`make_spare_web_controller`, `adopt_spare_web_page`, `seat_a_web_page`, ticket 60) | hand-off; `folio-web-thumb` | web view native affinity (§5.2); row 21 |
 | `windows.rs` | 38 | windows: open, dress, show, restore, the dirty gate, the quit save, close, retire and vault a window, moves; the window's title (`want_title`, `flush_title`) | storage (`quit_save` through `SessionWriter`) | `let_the_system_translate_touch`; `Window::set_title` (§5.2, `flush_title` only); row 16 |
 
-**Still in `main.rs`** — 201 methods in the two `impl Runtime<'_>` blocks, by the
-2026-09-21 manifest (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
+**Still in `main.rs`** — the free functions and `Runtime` methods that
+`docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
+into their topics batch by batch: 836 (626 free functions, 210 methods) after batch 1. The table
+below is the 2026-09-21 manifest's sort of the 201 methods then left
+(`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
 
 | topic | methods | owns | why it has not moved |
 |---|---|---|---|
