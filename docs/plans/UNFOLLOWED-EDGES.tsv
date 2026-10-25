@@ -2128,7 +2128,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::focused_web_seat	Ambiguous	then
 crates/bt-app/src/main.rs	bt-app crate::Runtime::head_that_raised_a_layer	Ambiguous	find_map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::head_that_raised_a_layer	Ambiguous	into_iter	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::honour_command_line	Ambiguous	notice	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::leave_detached_head	Ambiguous	clone	2	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::note_terminal_thumb_hover	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::open_crumb_draft	Ambiguous	then	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::open_scheme_for_editing	Ambiguous	into_owned	1	
@@ -4140,6 +4139,7 @@ crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::graph_tab_
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::issue_git_write	Ambiguous	and_then	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::issue_git_write	Ambiguous	id	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::issue_git_write	Ambiguous	map	1	
+crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::leave_detached_head	Ambiguous	clone	2	2026-10-25: T-SPLIT-2B batch 7; the same site, moved by K2 batch 7 with `Runtime::leave_detached_head` from main.rs into runtime/git.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::markdown_gap_paragraphs	Ambiguous	map_or	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::open_float_git_document	Ambiguous	id	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::open_float_git_document	Ambiguous	map	1	

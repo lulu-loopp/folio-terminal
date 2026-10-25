@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **799 items, 600 free functions and 199 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 6's head; 813, 612 and 201 before it,
+- **unclassified.tsv**: **783 items, 587 free functions and 196 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 7's head; 799, 600 and 199 before it,
+  813, 612 and 201 before batch 6,
   819, 613 and 206 before batch 5,
   823, 617 and 206 before batch 4,
   828, 620 and 208 before batch 3,
@@ -105,7 +106,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 4 | `runtime/attention.rs` | moved by batch 4 (4 items; `Runtime::reveal_in_explorer`, tied with `runtime/configuration.rs` and `runtime/floats.rs`, held for a ruling, below) | — |
    | 5 | `runtime/palette.rs` | moved by batch 5 (6 items; `Runtime::focus_seat` held, below) | — |
    | 6 | `runtime/terminal.rs` | moved by batch 6 (13 items; `deliver_osc_attention` went to `runtime/attention.rs` instead, below) | — |
-   | 7 | `runtime/git.rs` | 14 (11 + 3) | 19 |
+   | 7 | `runtime/git.rs` | moved by batch 7 (14 items, `Runtime::expand_commit` by a ruled exception, below), with `seat_holds_the_keyboard` and `apply_leaf_metrics` as the terminal batch's tail | — |
    | 8 | `runtime/peek.rs` | 14 (14 + 0) | 21 |
    | 9 | `runtime/clipboard.rs` | 16 (13 + 3) | 27 |
    | 10 | `runtime/floats.rs` | 15 (7 + 8) | 34 |
@@ -132,6 +133,15 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    owner is "attention (→ bt-workbench)", and `docs/ARCHITECTURE.md` §12.1 lists it with the attention routing. It
    went to `runtime/attention.rs`, which keeps that fact at two writer modules (the root and `runtime/attention.rs`)
    instead of three. An item that writes facts of two different census owners is held for a ruling instead.
+   Ruled so far: `Runtime::expand_commit` (batch 7) writes `TabState.files` (owner files) and `TabState.git_trees`
+   (owner git); it went to `runtime/git.rs`, its first caller and one of its owners, because both facts were
+   already written from the root, `runtime/files.rs`, `runtime/git.rs` and `runtime/panes.rs`, so the move adds no
+   writer module.
+
+   **A product caller in another `runtime/` file imports the moved item from its new path** (`use
+   crate::runtime::<topic>::<item>;`, an import line and no body text; ruled at batch 7). What stays forbidden is a
+   non-test `use runtime::…` at the crate root to keep a root caller compiling: an item with a product caller at the
+   root waits until that caller moves.
 
    **Held items** (each row's generated `called_from` home is not where it goes):
    - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).
@@ -146,6 +156,14 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      callers (the others are `runtime/web.rs`, `runtime/attention.rs`, `runtime/preview.rs` and `main.rs`) and it
      is a general focus door, not the command palette's; batch 5 held it, and it waits for the topic that owns
      seats (`runtime/panes.rs`, "seat layout"), so that it moves once.
+   - `drain_leaf_pty` — its `called_from` home is `runtime/terminal.rs`, but it writes `LeafSession.pending_typing`,
+     whose other writer, `Runtime::queue_typing_in_the_focused_pane`, stays at the root (the census rule above).
+     Its doc comment is not above it: it stands above `synchronized_update_committed`, the function before it, and
+     runs into that function's own doc (`main.rs`, "It was invisible while `window_title` was the layer…" to
+     "…a leaf can supply none of them about itself."). `move.py` takes only the comment directly above an item, so
+     the batch that moves it carries that block by hand.
+   - `hyperlink_activation` — its `called_from` home is `runtime/terminal.rs`, but `ControlClickHint::of` at the root
+     calls it in the product (the rule above); it moves when `ControlClickHint` does.
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,

@@ -2771,9 +2771,9 @@ Every method below runs on the **window thread** and holds `&mut App` and
 ownership. "Asks" names the lanes of §5.1 whose requests the file sends or
 whose answers it applies; "doors and rows" names the §6 doors and the §5.3
 rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the methods K2
-(T-SPLIT-2B) has moved in since, updated with each batch (through batch 6: `profiles.rs` and
+(T-SPLIT-2B) has moved in since, updated with each batch (through batch 7: `profiles.rs` and
 `search.rs` +1 each in batch 1, `web.rs` +2 in batch 2 and +1 in batch 3, `dpi.rs` +1 in batch 3,
-`palette.rs` +5 in batch 5, `terminal.rs` +2 in batch 6).
+`palette.rs` +5 in batch 5, `terminal.rs` +2 in batch 6, `git.rs` +3 in batch 7).
 
 | file | methods | owns | asks | doors and rows |
 |---|---|---|---|---|
@@ -2786,7 +2786,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 | `first_run.rs` | 24 | the first-run card, the Explorer package row, the agent hook installers, the PowerShell integration offer (the PSReadLine invite and install retired 2026-10-17) | observation (the package probe); storage (the package job) | — (rows 3 and 4 done) |
 | `floats.rs` | 61 | floating windows, popups and chevron menus; the file, terminal and page menus | observation (files, git); hand-off (reveal) | — |
 | `frame.rs` | 23 | chrome refresh, frame publication and present attempts, `turn`, hyperlink activation | presentation (on this thread); session (the drain frame); observation (math); hand-off (refusals) | row 6 (the search refresh in `publish_frame`) |
-| `git.rs` | 103 | the git column, graph, compare and checkout; its menus, prompts and writes to a repository | observation (`bt-git-worker`, whose `git` children go through `quiet_command`); ingress (`git_watch`) | — |
+| `git.rs` | 106 | the git column, graph, compare and checkout; its menus, prompts and writes to a repository | observation (`bt-git-worker`, whose `git` children go through `quiet_command`); ingress (`git_watch`) | — |
 | `handoff.rs` | 4 | the `Runtime` side of the OS hand-off lane: submit, hold each request with its duty, answer a refusal at the door at once and the rest when they end | hand-off | never calls `bt_platform::handoff` itself (`no_handoff_runs_on_the_window_thread`) |
 | `i18n.rs` | 2 | applying and adopting the language | — | — |
 | `keyboard.rs` | 35 | `keyboard_input` and its rung order (§8), shortcuts and key hints, the IME caret, cursor blink | session (input) | IME native affinity (§5.2); `store_keybindings`, row 20 |
@@ -2807,7 +2807,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 799 (600 free functions, 199 methods) after batch 6. The table
+into their topics batch by batch: 783 (587 free functions, 196 methods) after batch 7. The table
 below is the 2026-09-21 manifest's sort of the 201 methods then left
 (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
 
