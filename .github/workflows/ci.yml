@@ -652,9 +652,11 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-timing-bound-tests.ps1
 
-      # The native-labels guard's ALLOWED and MACROS lists (T-NATIVE-LABELS-GUARD-REACH) are the
-      # same merge-base rule, a move honest and a growth admitted only by a widening line. Its
-      # scratch-repository suite plants each verdict.
+      # The native-labels guard's lists (T-NATIVE-LABELS-GUARD-REACH) are the same merge-base
+      # rule: its ALLOWED, MACROS, BOUNDARY and UNREAD rows only shrink, its FILES, TYPES and
+      # FUNCTIONS scope only grows and its PROGRAMMER_MACROS exemptions only shrink, a move honest
+      # and a widening admitted only by a dated line. Its scratch-repository suite plants each
+      # verdict.
       - name: the native-labels gate can actually fail
         shell: pwsh
         run: ./scripts/ci/check-native-labels-tests.ps1

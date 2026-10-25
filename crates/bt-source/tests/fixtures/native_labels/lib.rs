@@ -14,6 +14,18 @@ fn show(_title: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn show_bytes(_title: &[u8]) -> Result<(), String> {
+    Ok(())
+}
+
+fn show_c(_title: &std::ffi::CStr) -> Result<(), String> {
+    Ok(())
+}
+
+fn show_char(_key: char) -> Result<(), String> {
+    Ok(())
+}
+
 impl Menu {
     /// A literal with a word handed to a surface a person reads. PLANTED.
     pub fn planted_label(&self) -> Result<(), String> {
@@ -24,6 +36,17 @@ impl Menu {
     pub fn hidden_words(&self) -> Result<(), String> {
         show("&Copy")?;
         show(" copy")
+    }
+
+    /// A raw, a byte and a C string, each piece of `concat!`, and a mnemonic `&` at the end.
+    /// PLANTED, each. A character literal is skipped, a stated limit. PASSES.
+    pub fn other_literal_shapes(&self) -> Result<(), String> {
+        show(r"Raw label")?;
+        show_bytes(b"Byte label")?;
+        show_c(c"C label")?;
+        show(concat!("Con", "cat"))?;
+        show("Save &")?;
+        show_char('Q')
     }
 
     /// The error channel: inside `Err(…)`, a `.map_err` closure and a `.ok_or_else` closure.
@@ -71,6 +94,12 @@ pub fn labels() -> &'static str {
     "JSON"
 }
 
+/// One text written twice: one `ALLOWED` row allows one of them. PLANTED, the second, unless two
+/// rows allow both.
+pub fn twice() -> [&'static str; 2] {
+    ["Twice", "Twice"]
+}
+
 /// A literal inside a `macro_rules!` definition lands in an expansion the reader cannot see.
 /// PLANTED when the whole file is guarded, by its line, whatever its case.
 macro_rules! titled {
@@ -78,6 +107,10 @@ macro_rules! titled {
         "Unseen"
     };
 }
+
+/// An item-position macro whose tokens do not parse as items: what it writes cannot be read.
+/// PLANTED when the whole file is guarded.
+unreadable_items! { these are -> not items }
 
 /// Not a guarded item, and no guarded item calls it: its literal is not read unless the whole
 /// file is. PASSES.
@@ -143,6 +176,39 @@ impl Dialog {
     /// A path no item of the package answers. PLANTED.
     pub fn through_a_lost_path(&self) -> Result<(), String> {
         show(crate::nowhere::label())
+    }
+}
+
+/// What runs with no call edge, what an item-position macro writes, and macro arguments the
+/// call graph does not read.
+pub struct Surface;
+
+impl Surface {
+    /// (4) A `Drop` that runs at the scope's end: `reach::Guard` is named here. PLANTED (in
+    /// `reach`). `reach::Unnamed`'s, which no reached body names, PASSES.
+    pub fn through_an_implicit_call(&self) {
+        let _guard = reach::Guard;
+    }
+
+    /// (5) The functions of item-position macros: one by its selector, the ones of a type a path
+    /// names, a `thread_local!`'s initializer. PLANTED (in `reach`), with the dynamic call and the
+    /// unplaced path the type's functions write. The selector of no function of the package
+    /// PASSES, and so does the class function nothing names.
+    pub fn through_an_item_macro(&self, panel: &Object) {
+        let _ = objc2::sel!(fixtureChosen:);
+        let _ = objc2::sel!(foreignSelector:);
+        let _ = reach::Panel::shown(panel);
+        reach::SHOWN.with(|_| ());
+    }
+
+    /// (6) Macro arguments the call graph does not parse: with a call, PLANTED; `msg_send!`'s
+    /// `part: argument` list, read (PLANTED in `reach`); with no call or path, PASSES. A
+    /// `macro_rules!` of the package with no literal whose expansion calls a helper. PLANTED.
+    pub fn through_macro_arguments(&self, target: &Object) {
+        foreign::render!(rows => reach::macro_argument_label());
+        let _: () = objc2::msg_send![target, setTitle: reach::message_label()];
+        foreign::table!(rows => columns);
+        calls_helper!();
     }
 }
 

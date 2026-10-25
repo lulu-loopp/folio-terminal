@@ -9,12 +9,20 @@ $gate = Join-Path $PSScriptRoot "check-native-labels.ps1"
 $root = Join-Path ([IO.Path]::GetTempPath()) ("folio-native-labels-gate-" + [guid]::NewGuid())
 $relative = "crates/bt-source/tests/native_labels.rs"
 
-# A guard: its grammar line, its widening lines, its ALLOWED and MACROS rows, and its BOUNDARY and
-# UNREAD rows - which -Old leaves out, as the guard was before T-NATIVE-LABELS-GUARD-REACH.
+# A guard: its grammar line, its scope and exempt lists, its widening lines, its ALLOWED and
+# MACROS rows, and its BOUNDARY and UNREAD rows - which -Old leaves out, as the guard was before
+# T-NATIVE-LABELS-GUARD-REACH.
 function Write-Guard([string]$Grammar = "fn judge() {}", [string[]]$Widened = @(), [string[]]$Allowed = @(), [string[]]$Macros = @(),
-    [switch]$Old, [string[]]$Boundary = @(), [string[]]$Unread = @()) {
+    [switch]$Old, [string[]]$Boundary = @(), [string[]]$Unread = @(),
+    [string[]]$Files = @('"src/menu.rs"', '"src/dialogs.rs"'), [string[]]$Exempt = @('"panic"')) {
     $nl = "`n"
     $text = "//! the guard$nl" + $Grammar + $nl
+    $text += "const FILES: &[&str] = &[$nl"
+    foreach ($entry in $Files) { $text += "    $entry,$nl" }
+    $text += "];$nl"
+    $text += "const PROGRAMMER_MACROS: &[&str] = &[$nl"
+    foreach ($entry in $Exempt) { $text += "    $entry,$nl" }
+    $text += "];$nl"
     foreach ($line in $Widened) { $text += $line + $nl }
     $text += "const ALLOWED: &[(&str, &str, &str)] = &[$nl"
     foreach ($row in $Allowed) { $text += "    $row,$nl" }
@@ -23,10 +31,10 @@ function Write-Guard([string]$Grammar = "fn judge() {}", [string[]]$Widened = @(
     foreach ($row in $Macros) { $text += "    $row,$nl" }
     $text += "];$nl"
     if (-not $Old) {
-        $text += "const BOUNDARY: &[(&str, &str)] = &[$nl"
+        $text += "const BOUNDARY: &[(&str, &str, &str, &str)] = &[$nl"
         foreach ($row in $Boundary) { $text += "    $row,$nl" }
         $text += "];$nl"
-        $text += "const UNREAD: &[(&str, &str, &str)] = &[$nl"
+        $text += "const UNREAD: &[(&str, &str, &str, &str)] = &[$nl"
         foreach ($row in $Unread) { $text += "    $row,$nl" }
         $text += "];$nl"
     }
@@ -87,11 +95,32 @@ try {
         Write-Guard -Allowed $json -Macros '("label", "a listed macro")'
         Expect (Run-Gate 1 "a MACROS row grown with no line") "MACROS label" "a MACROS row grown with no line"
 
-        Write-Guard -Allowed $json -Boundary '("bt-platform crate::Gone::push", "a planted stop")'
-        Expect (Run-Gate 1 "a BOUNDARY row grown with no line") "BOUNDARY bt-platform crate::Gone::push" "a BOUNDARY row grown with no line"
+        Write-Guard -Allowed $json -Boundary '("bt-platform crate::f", "push", "bt-platform crate::Gone::push", "a planted drop")'
+        Expect (Run-Gate 1 "a BOUNDARY row grown with no line") "BOUNDARY bt-platform crate::f push bt-platform crate::Gone::push" "a BOUNDARY row grown with no line"
 
-        Write-Guard -Allowed $json -Unread '("bt-platform crate::f", "g", "a planted review")'
-        Expect (Run-Gate 1 "an UNREAD row grown with no line") "UNREAD bt-platform crate::f g" "an UNREAD row grown with no line"
+        Write-Guard -Allowed $json -Unread '("bt-platform crate::f", "g", "dynamic", "a planted review")'
+        Expect (Run-Gate 1 "an UNREAD row grown with no line") "UNREAD bt-platform crate::f g dynamic" "an UNREAD row grown with no line"
+
+        Write-Guard -Allowed $json -Boundary '("bt-platform crate::f", "push")'
+        Expect (Run-Gate 1 "a BOUNDARY row of the old shape") "not a row of 4 strings" "a BOUNDARY row of the old shape"
+
+        Write-Guard -Allowed $json -Files '"src/menu.rs"', '"src/dialogs.rs"', '"src/toast.rs"'
+        Expect (Run-Gate 0 "the scope grown") "only shrank" "the scope grown"
+
+        Write-Guard -Allowed $json -Files '"src/menu.rs"'
+        Expect (Run-Gate 1 "a scope entry taken off with no line") "FILES -src/dialogs.rs \(off the scope\)" "a scope entry taken off with no line"
+
+        Write-Guard -Grammar "fn judge() { widened(); }" -Widened $widened1 -Allowed $json -Files '"src/menu.rs"'
+        Expect (Run-Gate 0 "a scope entry taken off with a line") "admits its 1 row" "a scope entry taken off with a line"
+
+        Write-Guard -Allowed $json -Exempt '"panic"', '"todo"'
+        Expect (Run-Gate 1 "an exempt macro added with no line") "PROGRAMMER_MACROS \+todo \(exempt\)" "an exempt macro added with no line"
+
+        Write-Guard -Allowed $json -Exempt @()
+        Expect (Run-Gate 0 "an exempt macro taken off") "only shrank" "an exempt macro taken off"
+
+        Write-Guard -Grammar "fn judge() { widened(); }" -Widened "// widened 2026-10-25 by T-PLANT (+2 rows): a planted shape" -Allowed $json, $entity -Exempt '"panic"', '"todo"'
+        Expect (Run-Gate 0 "a row and an exempt macro with one line") "admits its 2 row" "a row and an exempt macro with one line"
 
         Write-Guard -Widened $widened1 -Allowed $json, $entity
         Expect (Run-Gate 1 "grown with a line, the grammar unchanged") "unchanged grammar" "grown with a line, the grammar unchanged"
@@ -123,5 +152,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-native-labels: no origin/main, no base, unchanged, reworded reason, shrink, lists the base lacks, growth (ALLOWED, MACROS, BOUNDARY, UNREAD), widening (grammar unchanged, exact, wrong count, +0, two), moved, moved and grown and malformed-row cases pass"
+Write-Host "check-native-labels: no origin/main, no base, unchanged, reworded reason, shrink, lists the base lacks, growth (ALLOWED, MACROS, BOUNDARY, UNREAD), widening (grammar unchanged, exact, wrong count, +0, two), moved, moved and grown, malformed-row, old-shape row, scope grown, scope taken off (with and without a line) and exempt added and taken off cases pass"
 exit 0

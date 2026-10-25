@@ -3,25 +3,30 @@
 # `crates/bt-source/tests/native_labels.rs` (T-NATIVE-LABELS-FROM-THE-CALLER, widened by
 # T-NATIVE-LABELS-GUARD-REACH) keeps the words a person reads on a native menu or dialog out of
 # `bt-platform`: a literal with a word in the guarded scope, or in what it reaches, is refused
-# unless a row of its `ALLOWED` list (file, text, reason) allows it; a call of a worded
-# `macro_rules!` is refused unless a row of its `MACROS` list (name, reason) allows it; the walk
-# stops at the items of its `BOUNDARY` list (item, reason); and an edge the call graph cannot
-# follow is refused unless a row of its `UNREAD` list (caller, name, reason) reviews it. The guard
-# holds the tree to the lists both ways (a row nothing uses is refused there); this script is the
-# history half: it compares the four lists with the merge base's, so they only shrink. A list the
-# base does not have is empty there.
+# unless a row of its `ALLOWED` list (file, text, reason) allows it; a call of a `macro_rules!`
+# of the package is refused unless a row of its `MACROS` list (name, reason) allows it; a row of
+# its `BOUNDARY` list (caller, name, candidate, reason) drops one candidate from one ambiguous
+# call; and an edge the guard cannot read is refused unless a row of its `UNREAD` list (caller,
+# name, kind, reason) reviews it. Each row allows one use. The guard holds the tree to the lists
+# both ways (a row nothing uses is refused there); this script is the history half: it compares
+# the lists with the merge base's, so the four row lists only shrink, the scope lists `FILES`,
+# `TYPES` and `FUNCTIONS` only grow, and the exempt list `PROGRAMMER_MACROS` only shrinks. A
+# list the base does not have is empty there.
 #
-# A row is its list and its columns but the reason; a reason reworded is the same row.
+# A row is its list and its columns but the reason; a reason reworded is the same row. A scope
+# or exempt entry is its list and its text; each list is a multiset.
 # **A move is not growth** (`moved-rows.ps1`, -NoItem): an ALLOWED row whose text is a gone base
 # row's, at another file, is that row moved, when the pairing is one-to-one; a move that arrives
 # with more rows than it left is refused as grown.
 #
 # **A widening admits exactly its rows** (as `check-timing-bound.ps1`): a comment line
 # `// widened <yyyy-mm-dd> by <ticket> (+<n> rows): <what>` in the guard that is new against the
-# merge base admits exactly <n> added rows across the four lists. More than one new widening line, a
-# count that is not the number of rows added, a `+0` widening, or a widening in a change that
-# leaves the guard's grammar as the base has it (the file with its four lists, its comment
-# lines and its blank lines taken out) is refused; rows added with no new widening line are refused.
+# merge base admits exactly <n> widenings: rows added to the four row lists, entries taken off
+# the scope lists and entries added to the exempt list. More than one new widening line, a
+# count that is not the number of widenings, a `+0` widening, or a widening in a change that
+# leaves the guard's grammar as the base has it (the file with its four row lists, its comment
+# lines and its blank lines taken out; the scope and exempt lists are grammar) is refused;
+# widenings with no new widening line are refused.
 
 param(
     [string]$Repo = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
@@ -98,7 +103,34 @@ function Read-Rows([string]$Text, [string]$Name, [int]$Arity) {
 }
 
 # The lists, each with its arity; the last column of a row is its reason.
-$lists = [ordered]@{ ALLOWED = 3; MACROS = 2; BOUNDARY = 2; UNREAD = 3 }
+$lists = [ordered]@{ ALLOWED = 3; MACROS = 2; BOUNDARY = 4; UNREAD = 4 }
+
+# The lists of names: the scope only grows, the exempt list only shrinks.
+$names = [ordered]@{ FILES = "grows"; TYPES = "grows"; FUNCTIONS = "grows"; PROGRAMMER_MACROS = "shrinks" }
+
+# The entries of one list of names (`const X: &[&str] = &[ "a", "b" ];`); none when the text
+# has no such list.
+function Read-Names([string]$Text, [string]$Name) {
+    $list = Find-List $Text $Name
+    if ($null -eq $list) { return , @() }
+    $body = [regex]::Replace($list.Body, '(?m)//[^\n]*$', '')
+    $rest = [regex]::Replace($body, $stringPattern, '')
+    if (($rest -replace '[\s,]', '').Length -gt 0) {
+        throw "$Relative`: the list $Name holds something that is not a string: $($rest.Trim())"
+    }
+    return , @([regex]::Matches($body, $stringPattern) | ForEach-Object { $_.Groups[1].Value })
+}
+
+# The entries of `$From` that `$Against` does not match, one for one.
+function Get-Unmatched([string[]]$From, [string[]]$Against) {
+    $left = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
+    foreach ($entry in $Against) { if ($left.ContainsKey($entry)) { $left[$entry] += 1 } else { $left[$entry] = 1 } }
+    $unmatched = @()
+    foreach ($entry in $From) {
+        if ($left.ContainsKey($entry) -and $left[$entry] -gt 0) { $left[$entry] -= 1 } else { $unmatched += $entry }
+    }
+    return , $unmatched
+}
 
 # The rows of the four lists, each a pscustomobject (Row = the identity text, Identity, Location,
 # Tail). Only an ALLOWED row has a location (its file); the others are never moved.
@@ -199,6 +231,15 @@ foreach ($result in (Find-MovedRows -Unmatched $unmatched -Leftover $leftover -T
 }
 $removed = $leftover.Count - $moves
 Write-Host "$Relative against $($base.Substring(0, 12)): $($before.Count) rows -> $($now.Count), $($added.Count) added, $removed removed, $moves moved."
+foreach ($name in $names.Keys) {
+    $nowNames = Read-Names $text $name
+    $baseNames = Read-Names $baseText $name
+    if ($names[$name] -eq "grows") {
+        foreach ($entry in (Get-Unmatched $baseNames $nowNames)) { $added += "$name -$entry (off the scope)" }
+    } else {
+        foreach ($entry in (Get-Unmatched $nowNames $baseNames)) { $added += "$name +$entry (exempt)" }
+    }
+}
 if ($refused.Count -gt 0) {
     throw ("$($refused.Count) row(s) moved in a way a move cannot:" + [Environment]::NewLine + ($refused -join [Environment]::NewLine))
 }
@@ -220,14 +261,15 @@ if ($widenings.Count -eq 1) {
     }
     if ($widening.Count -ne $added.Count) {
         throw ("the widening line admits $($widening.Count) row(s) and $($added.Count) were added:" +
-            [Environment]::NewLine + "    $($widening.Line)")
+            [Environment]::NewLine + "    $($widening.Line)" + [Environment]::NewLine +
+            (($added | ForEach-Object { "    $_" }) -join [Environment]::NewLine))
     }
     Write-Host "the widening admits its $($added.Count) row(s): $($widening.Line)"
     Write-Host "the native-labels lists grew by exactly their widening. PASS"
     exit 0
 }
 if ($added.Count -gt 0) {
-    throw ("$($added.Count) native-labels row(s) were added, and these lists only shrink:" +
+    throw ("$($added.Count) native-labels row(s) were added or scope entries taken off, and these lists only shrink (the scope only grows):" +
         [Environment]::NewLine + (($added | ForEach-Object { "    $_" }) -join [Environment]::NewLine) + [Environment]::NewLine +
         "Pass the words in from the caller's i18n table instead, or widen the guard's grammar with a dated '// widened' line.")
 }
