@@ -1841,6 +1841,21 @@ impl<B: Backend> Runtime<'_, B> {
         }
         Ok(())
     }
+
+    /// Note that this pane's bar has a reason to be up **now** — the moment its
+    /// rest is later measured from.
+    ///
+    /// Every gesture that moves the view says so through here: the wheel, the
+    /// keyboard's pages and ends, a jump off the rail, a drag of the thumb
+    /// itself and the pointer merely being in the lane. One door, because the
+    /// one thing that must not happen is a gesture that scrolls the pane and
+    /// leaves its picture of the scroll invisible.
+    pub(crate) fn wake_terminal_thumb(&mut self, seat: SeatId) {
+        let active = self.window.active_tab;
+        if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
+            leaf.thumb_awake = Instant::now();
+        }
+    }
 }
 
 /// **Whether one seat's shell is, right now, the true owner of the keyboard** —
