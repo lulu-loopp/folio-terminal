@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **640 items, 476 free functions and 164 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 14's head; 667, 495 and 172 before it,
+- **unclassified.tsv**: **613 items, 460 free functions and 153 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 15's head; 640, 476 and 164 before it,
+  667, 495 and 172 before batch 14,
   696, 509 and 187 before batch 13,
   713, 525 and 188 before batch 12,
   734, 545 and 189 before batch 11,
@@ -121,7 +122,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 12 | `runtime/windows.rs` | moved by batch 12 (15 items; `revive_plan`, `create_tab_state` and `scrollback_quota` held, below; `end_leaves_of` went to `runtime/panes.rs` by the owner column), with `files_key_within` as a tail | — |
    | 13 | `runtime/frame.rs` | moved by batch 13 (24 items; five more went to the census owners of the facts they write, `runtime/terminal.rs`, `runtime/handoff.rs`, `runtime/web.rs`, `runtime/math.rs` and `runtime/keyboard.rs`, below; `Runtime::note_card_hint`, `Runtime::advance_card_hint`, `Runtime::advance_scheme_watch`, `Runtime::advance_storage_watch`, `mark_leaf_painted` and `math_copy_window` held, below) | — |
    | 14 | `runtime/math.rs` | moved by batch 14 (17 items with `math_copy_window`; the ties `Runtime::root_choices` and `rail_overlay_layer` went to `runtime/profiles.rs` and `runtime/panes.rs` by the owner column; `math_em_milli` and `window_layout_key` held, below), with eight tails: six into `runtime/frame.rs`, `composition_outlived_its_field` into `runtime/keyboard.rs` and `Runtime::collecting_card_speakers` into `runtime/terminal.rs` (`presentation_equivalent` held, below) | — |
-   | 15 | `runtime/keyboard.rs` | 27 (13 + 14) | 50 |
+   | 15 | `runtime/keyboard.rs` | moved by batch 15 (19 items; `Runtime::answer_quit_card` and `Runtime::note_user_typing` went to `runtime/windows.rs` and `runtime/terminal.rs` by their census owners and `Runtime::page_carried_by` to `runtime/floats.rs` by the owner column, below; `Runtime::show_settings_choice_at`, `Runtime::shortcut_focus`, `Runtime::apply_settings_choice`, `Runtime::toggle_settings_panel`, `Runtime::woke_terminal_thumb`, `ime_owner`, `popup_takes_the_key`, `terminal_ime_cursor_area`, `Runtime::send_user_input`, `Runtime::return_to_live_for_input` and `Runtime::cancel_composition` held, below), with five tails into `runtime/math.rs` and `runtime/frame.rs` | — |
    | 16 | `runtime/tabs.rs` | 20 (16 + 4) | 54 |
    | 17 | `runtime/panes.rs` | 33 (24 + 9) | 65 |
    | 18 | `runtime/mouse.rs` | 49 (29 + 20) | 81 |
@@ -177,6 +178,13 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    which owns command rails and holds `rail_overlay_layers`. `Runtime::collecting_card_speakers`, tied
    frame/terminal where §13 names neither (both callers are drain roads), went to `runtime/terminal.rs`, the home of
    `Runtime::drain_pty`, by a ruling.
+   Batch 15 sent two methods whose first caller is `runtime/keyboard.rs` to their facts' owners by clause (a):
+   `Runtime::answer_quit_card` (`App.quit`, written by the root and `runtime/mouse.rs`, so either home adds a writer
+   module) to `runtime/windows.rs`, the owner, as for `end_leaves_of`; and `Runtime::note_user_typing`
+   (`LeafSession.session`, which `runtime/terminal.rs` already writes and `runtime/keyboard.rs` does not) to
+   `runtime/terminal.rs`. It settled `preedit_caret_byte` (keyboard/preview) by clause (b), since §13 gives the IME
+   caret to `runtime/keyboard.rs`, and sent `Runtime::page_carried_by` (keyboard/panes, a float's page, which §13
+   gives to neither) to `runtime/floats.rs` by a ruled owner-column exception, as `float_dock_label`.
 
    **A product caller in another `runtime/` file imports the moved item from its new path** (`use
    crate::runtime::<topic>::<item>;`, an import line and no body text; ruled at batch 7). What stays forbidden is a
@@ -213,6 +221,12 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `runtime/settings.rs`, so it stays in `main.rs` with the settings topic. The hold rests on that write:
      `Runtime::settings_field_holds_the_keyboard`, which only reads the settings field and whose one caller is
      `Runtime::clipboard_focus`, went to `runtime/clipboard.rs` as a tail in batch 10.
+     What holds it is that `runtime/clipboard.rs` would have been a new writer of `WindowRuntime.settings`.
+     Batch 15 moved `Runtime::record_settings_key` and `Runtime::settings_field_key` to `runtime/keyboard.rs`,
+     which already writes that fact, so neither adds a writer module. `settings_field_key` writes nothing else, and
+     its first caller stands. `record_settings_key` also writes `App.shortcuts`, whose owner is keyboard and which
+     `runtime/keyboard.rs` already writes; it went to one of its two owners, as `Runtime::expand_commit` did, and the
+     root stops writing `App.shortcuts`.
    - `Runtime::note_card_hint` and `Runtime::advance_card_hint` (batch 13) — their `called_from` home is
      `runtime/frame.rs`, but `note_card_hint` writes `App.settings_store`, whose census owner is
      `main[settings]`, and `runtime/frame.rs` does not write it; K2 opens no `runtime/settings.rs`, so it stays,
@@ -262,6 +276,20 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `WindowRuntime.search`, search). Its other writes (`WindowRuntime.rename`, owner tabs, and the keyboard-owned
      `composing`, `preedit` and `ime_cursor`) keyboard.rs writes already. Held for a ruling (the two-owners clause
      above).
+   - `Runtime::show_settings_choice_at`, `Runtime::shortcut_focus`, `Runtime::apply_settings_choice`,
+     `Runtime::toggle_settings_panel` and `Runtime::woke_terminal_thumb` (batch 15) — their `called_from` home is
+     `runtime/keyboard.rs` (tied for the last three), but `Runtime::show_open_settings_choice`,
+     `FolioApp::refresh_main_menu` and `install_main_menu`, `Runtime::settings_mouse_input`,
+     `Runtime::open_settings_on_row` and `Runtime::press_terminal_thumb` at the root call them in the product (the
+     rule above).
+   - `ime_owner`, `popup_takes_the_key` and `terminal_ime_cursor_area` (batch 15) — `ime_outbound.rs`, a child of
+     the crate root outside `runtime/`, names them through `use super::*`; moving them would need a root re-export,
+     so they stay, as `presentation_equivalent` does.
+   - `Runtime::send_user_input` (batch 15) — tied `runtime/keyboard.rs` / `runtime/mouse.rs`, and it writes facts of
+     two census owners, `TabState.pending_keyboard_at` (keyboard) and `WindowRuntime.placeholder_tab` (windows);
+     either home would be a new writer of the other's fact. Held for a ruling (the two-owners clause above).
+   - `Runtime::return_to_live_for_input` (batch 15) — tied `main.rs` / `runtime/keyboard.rs`; its root caller is
+     `Runtime::send_user_input`, held above, so it waits for it.
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,
