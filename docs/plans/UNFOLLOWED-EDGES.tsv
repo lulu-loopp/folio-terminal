@@ -2173,12 +2173,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	collect	1
 crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	filter_map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::toggle_advanced_group	Ambiguous	retarget	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::uncommitted_edit_name	Ambiguous	into_owned	2	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::uncommitted_edit_name	Ambiguous	is_empty	4	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::uncommitted_edit_name	Ambiguous	map	2	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::uncommitted_edit_name	Ambiguous	then_some	2	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::uncommitted_edit_name	Ambiguous	to_owned	4	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::uncommitted_edit_name	Ambiguous	to_string_lossy	2	
 crates/bt-app/src/main.rs	bt-app crate::SURFACE_SELFTEST_AFTER	Ambiguous	ok	2	
 crates/bt-app/src/main.rs	bt-app crate::SURFACE_SELFTEST_AFTER	Ambiguous	parse	1	
 crates/bt-app/src/main.rs	bt-app crate::SourceBlocks::get	Ambiguous	map	1	
@@ -2335,16 +2329,10 @@ crates/bt-app/src/main.rs	bt-app crate::earliest_named_deadline	Ambiguous	filter
 crates/bt-app/src/main.rs	bt-app crate::earliest_named_deadline	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::earliest_named_deadline	Ambiguous	min_by_key	1	
 crates/bt-app/src/main.rs	bt-app crate::earliest_named_deadline	Ambiguous	zip	1	
-crates/bt-app/src/main.rs	bt-app crate::end_leaves_of	Dynamic	reach	1	
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	into_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	unwrap_or	1	
 crates/bt-app/src/main.rs	bt-app crate::exited_tabs_the_loop_may_close	Ambiguous	collect	1	
-crates/bt-app/src/main.rs	bt-app crate::files_key_within	Ambiguous	as_os_str	1	
-crates/bt-app/src/main.rs	bt-app crate::files_key_within	Ambiguous	components	1	
-crates/bt-app/src/main.rs	bt-app crate::files_key_within	Ambiguous	fold	1	
-crates/bt-app/src/main.rs	bt-app crate::files_key_within	Ambiguous	ok	1	
-crates/bt-app/src/main.rs	bt-app crate::files_key_within	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/main.rs	bt-app crate::files_program_refused_notice	Ambiguous	text	1	
 crates/bt-app/src/main.rs	bt-app crate::files_row_display_name	Ambiguous	into_owned	2	
 crates/bt-app/src/main.rs	bt-app crate::files_row_display_name	Ambiguous	is_empty	1	
@@ -2355,7 +2343,6 @@ crates/bt-app/src/main.rs	bt-app crate::finish_leaf_birth	Ambiguous	clone	1
 crates/bt-app/src/main.rs	bt-app crate::first_term_leaf	Ambiguous	next	1	
 crates/bt-app/src/main.rs	bt-app crate::fleet_claim	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::float_trigger_tip	Ambiguous	text	1	
-crates/bt-app/src/main.rs	bt-app crate::focus_leaf_index	Ambiguous	unwrap_or	1	
 crates/bt-app/src/main.rs	bt-app crate::foot_revealed_label	Ambiguous	text	1	
 crates/bt-app/src/main.rs	bt-app crate::head_within_columns	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::home_crumb_for	Ambiguous	next	1	
@@ -2449,7 +2436,6 @@ crates/bt-app/src/main.rs	bt-app crate::pane_strip_landing	Ambiguous	map	1
 crates/bt-app/src/main.rs	bt-app crate::panic_alert_text	Ambiguous	to_string	1	
 crates/bt-app/src/main.rs	bt-app crate::panic_log_path	Ambiguous	join	1	
 crates/bt-app/src/main.rs	bt-app crate::panic_selftest_if_due	Ambiguous	elapsed	1	
-crates/bt-app/src/main.rs	bt-app crate::persisted_preview_pages	Ambiguous	clone	2	
 crates/bt-app/src/main.rs	bt-app crate::persisted_preview_row	Ambiguous	into_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::place_layer	Ambiguous	as_deref	1	
 crates/bt-app/src/main.rs	bt-app crate::place_preview_math	Ambiguous	get	1	
@@ -2558,7 +2544,6 @@ crates/bt-app/src/main.rs	bt-app crate::tabs_a_close_loses	Ambiguous	count	1
 crates/bt-app/src/main.rs	bt-app crate::tabs_a_close_loses	Ambiguous	into_iter	1	
 crates/bt-app/src/main.rs	bt-app crate::tabs_a_close_loses	Ambiguous	is_some_and	1	
 crates/bt-app/src/main.rs	bt-app crate::take_due_pty_resize	Ambiguous	then	1	
-crates/bt-app/src/main.rs	bt-app crate::tear_out_rect	Dynamic	physical	4	
 crates/bt-app/src/main.rs	bt-app crate::terminal_reference_row	Ambiguous	eq_ignore_ascii_case	3	
 crates/bt-app/src/main.rs	bt-app crate::terminal_reference_row	Dynamic	verdict	1	
 crates/bt-app/src/main.rs	bt-app crate::the_fatal_road	Dynamic	fatal	1	2026-10-24: the panic hook's three steps are handed to the_fatal_road so a test drives their order (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD review H1); its one product call names diagnostics::settle_in_panic, the previous hook and fatal
@@ -3966,6 +3951,11 @@ crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::columns_wanting
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_key_under	Ambiguous	components	1	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_key_under` from main.rs into runtime/files.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_key_under	Ambiguous	ok	1	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_key_under` from main.rs into runtime/files.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_key_under	Ambiguous	to_string_lossy	1	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_key_under` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_key_within	Ambiguous	as_os_str	1	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `files_key_within` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_key_within	Ambiguous	components	1	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `files_key_within` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_key_within	Ambiguous	fold	1	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `files_key_within` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_key_within	Ambiguous	ok	1	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `files_key_within` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_key_within	Ambiguous	to_string_lossy	1	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `files_key_within` from main.rs into runtime/files.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_locate	Ambiguous	clone	1	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_locate` from main.rs into runtime/files.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_open_chain	Ambiguous	is_empty	1	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_open_chain` from main.rs into runtime/files.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_open_chain	Ambiguous	push	1	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_open_chain` from main.rs into runtime/files.rs: K2 moves the item, not the call
@@ -4345,6 +4335,7 @@ crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::seats_
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::split_seat	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::update_chrome_hover_target_in_pane	Ambiguous	any	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::update_chrome_hover_target_in_pane	Ambiguous	flatten	1	
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::end_leaves_of	Dynamic	reach	1	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `end_leaves_of` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/peek.rs	bt-app crate::runtime::peek::Runtime::dwell_file_peek	Ambiguous	clone	2	
 crates/bt-app/src/runtime/peek.rs	bt-app crate::runtime::peek::Runtime::dwell_file_peek	Ambiguous	expect	1	
 crates/bt-app/src/runtime/peek.rs	bt-app crate::runtime::peek::Runtime::dwell_file_peek	Ambiguous	map	2	
@@ -4835,6 +4826,12 @@ crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::re
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::settle_close_wait	Ambiguous	collect	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::settle_close_wait	Ambiguous	map	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::settle_close_wait	Dynamic	finds	1	
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::uncommitted_edit_name	Ambiguous	into_owned	2	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `uncommitted_edit_name` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::uncommitted_edit_name	Ambiguous	is_empty	4	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `uncommitted_edit_name` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::uncommitted_edit_name	Ambiguous	map	2	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `uncommitted_edit_name` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::uncommitted_edit_name	Ambiguous	then_some	2	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `uncommitted_edit_name` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::uncommitted_edit_name	Ambiguous	to_owned	4	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `uncommitted_edit_name` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::uncommitted_edit_name	Ambiguous	to_string_lossy	2	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `uncommitted_edit_name` from main.rs into runtime/windows.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::vault_this_window	Ambiguous	contains	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::vault_this_window	Ambiguous	iter	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::vault_this_window	Ambiguous	map	1	
@@ -4842,6 +4839,9 @@ crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::wi
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	flatten	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	map	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	unwrap_or_default	1	
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::focus_leaf_index	Ambiguous	unwrap_or	1	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `focus_leaf_index` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::persisted_preview_pages	Ambiguous	clone	2	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `persisted_preview_pages` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::tear_out_rect	Dynamic	physical	4	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `tear_out_rect` from main.rs into runtime/windows.rs: K2 moves the item, not the call
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::bundled_sources	Ambiguous	map	1	
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::bundled_sources	Ambiguous	to_owned	2	
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::catalogue	Ambiguous	clone	1	

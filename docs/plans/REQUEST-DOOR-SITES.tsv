@@ -1283,7 +1283,6 @@ crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Dynamic	ink	3	unrevie
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Effect	std::fs::OpenOptions::create	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Effect	std::fs::OpenOptions::new	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Macro	writeln	6	std	2026-10-24: formats into a String it owns, no stream (a file write after it is its own key)
-crates/bt-app/src/main.rs	bt-app crate::end_leaves_of	Dynamic	reach	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::ensure_metrics_match_authoritative_scale	Macro	ensure	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::ensure_swapchain_matches_inner	Macro	ensure	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	into_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1305,7 +1304,6 @@ crates/bt-app/src/main.rs	bt-app crate::first_term_leaf	Ambiguous	next	1	unrevie
 crates/bt-app/src/main.rs	bt-app crate::fleet_claim	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::float_trigger_tip	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::float_trigger_tip	Path	FloatTriggerTip	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::focus_leaf_index	Ambiguous	unwrap_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::foot_revealed_label	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::foot_revealed_label	Path	FilesRevealed	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::head_within_columns	Ambiguous	to_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1419,7 +1417,6 @@ crates/bt-app/src/main.rs	bt-app crate::raster_peek_page	Ambiguous	and_then	1	un
 crates/bt-app/src/main.rs	bt-app crate::raster_peek_page	Ambiguous	modified	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::raster_peek_page	Ambiguous	ok	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::raster_peek_page	Effect	std::fs::metadata	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
-crates/bt-app/src/main.rs	bt-app crate::request_owned_window_close	Macro	anyhow	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::resolve_document_pictures	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::resolve_document_pictures	Dynamic	ask	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	map_or_else	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -2889,6 +2886,7 @@ crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::seats_
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::split_seat	Ambiguous	unwrap_or_else	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::update_chrome_hover_target_in_pane	Ambiguous	any	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::update_chrome_hover_target_in_pane	Ambiguous	flatten	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::end_leaves_of	Dynamic	reach	1	unreviewed	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `end_leaves_of` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/peek.rs	bt-app crate::runtime::peek::Runtime::file_peek_card_layers	Ambiguous	and_then	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/peek.rs	bt-app crate::runtime::peek::Runtime::file_peek_card_layers	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/peek.rs	bt-app crate::runtime::peek::Runtime::file_peek_card_layers	Ambiguous	is_some	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -3216,6 +3214,8 @@ crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::re
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	flatten	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::focus_leaf_index	Ambiguous	unwrap_or	1	unreviewed	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `focus_leaf_index` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::request_owned_window_close	Macro	anyhow	1	unreviewed	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `request_owned_window_close` from main.rs into runtime/windows.rs: K2 moves the item, not the call
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::bundled_sources	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::bundled_sources	Ambiguous	to_owned	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::catalogue	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))

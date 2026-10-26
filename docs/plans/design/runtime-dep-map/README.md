@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **713 items, 525 free functions and 188 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 11's head; 734, 545 and 189 before it,
+- **unclassified.tsv**: **696 items, 509 free functions and 187 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 12's head; 713, 525 and 188 before it,
+  734, 545 and 189 before batch 11,
   754, 559 and 195 before batch 10,
   769, 573 and 196 before batch 9,
   783, 587 and 196 before batch 8,
@@ -115,7 +116,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 9 | `runtime/clipboard.rs` | moved by batch 9 (13 items; `offer_pty_input`, `Runtime::paste_into_settings_field` and `Runtime::glass_here` held, below), with `unstarted_pixels` and `peek_cache_key_for_decode` as the peek batch's tail | — |
    | 10 | `runtime/floats.rs` | moved by batch 10 (10 items with `files_float_content_height`; `Runtime::settled_card_ink` went to `runtime/frame.rs` by its census owner; `Runtime::sweep_foot_phrases`, `Runtime::open_minted_page_on`, `revealable_preview_file`, `Runtime::open_local_path` and `reveal_ask` held, below), with nine clipboard tails | — |
    | 11 | `runtime/files.rs` | moved by batch 11 (16 items; `Runtime::focus_the_pane_a_path_landed_in` and `home_shortened_path` held, below; `float_dock_label` went to `runtime/floats.rs` by the owner column), with `Runtime::reference_cell_index`, `text_field_holding`, `paste_spelled` and `page_keepsake_icon` as tails | — |
-   | 12 | `runtime/windows.rs` | 19 (18 + 1) | 42 |
+   | 12 | `runtime/windows.rs` | moved by batch 12 (15 items; `revive_plan`, `create_tab_state` and `scrollback_quota` held, below; `end_leaves_of` went to `runtime/panes.rs` by the owner column), with `files_key_within` as a tail | — |
    | 13 | `runtime/frame.rs` | 33 (15 + 18) | 45 |
    | 14 | `runtime/keyboard.rs` | 27 (13 + 14) | 50 |
    | 15 | `runtime/math.rs` | 18 (12 + 6) | 50 |
@@ -209,6 +210,8 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `runtime/preview.rs`) that none of the three owns; it is a float's dock button, and the owner column gives
      floating windows to `runtime/floats.rs`, so it went there (a ruled owner-column exception), imported by all
      three.
+   - `revive_plan`, `create_tab_state` and `scrollback_quota` (batch 12) — their `called_from` home is
+     `runtime/windows.rs`, but the root calls each in the product (the rule above); they wait for that caller.
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,
