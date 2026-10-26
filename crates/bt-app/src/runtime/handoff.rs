@@ -18,7 +18,7 @@ use anyhow::Result;
 use crate::handoff_lane::{
     Answer, Ask, Duty, FollowUp, HandoffId, OnAccepted, RefusalWords, Reply,
 };
-use crate::{RevealedFoot, Runtime, i18n, toast};
+use crate::{FOOT_REVEAL_FEEDBACK, RevealedFoot, Runtime, i18n, toast};
 
 impl<B: Backend> Runtime<'_, B> {
     /// **Put one hand-off on the lane**, hold its request with what its answer is owed, and
@@ -116,6 +116,33 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some(notice) = words.notice {
             self.window.files_notice = Some((notice.to_owned(), Instant::now()));
             self.publish_interaction_frame()?;
+        }
+        Ok(())
+    }
+
+    /// The foot's confirmation has stood long enough: it goes back to saying
+    /// where it is (B24).
+    ///
+    /// Its own tick rather than a line inside [`Self::advance_float`], because
+    /// the two feet are drawn into two different surfaces — the float's into the
+    /// overlay stack, a docked column's into the seat chrome — and the strip that
+    /// has to be rebuilt is decided by which foot was talking. Folding it back in
+    /// would have refreshed the overlay for a change that happened in a pane, and
+    /// the pane would have kept saying "Revealed" until something else moved.
+    pub(crate) fn advance_foot_reveal(&mut self, now: Instant) -> Result<()> {
+        let Some((foot, at)) = self.window.revealed_foot else {
+            return Ok(());
+        };
+        if now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK {
+            return Ok(());
+        }
+        self.window.revealed_foot = None;
+        let changed = match foot {
+            RevealedFoot::Float(_) => self.refresh_overlay(),
+            RevealedFoot::Column(_) | RevealedFoot::Preview(_) => self.refresh_chrome(),
+        };
+        if changed {
+            self.present_chrome_change()?;
         }
         Ok(())
     }

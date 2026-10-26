@@ -1775,6 +1775,27 @@ impl<B: Backend> Runtime<'_, B> {
         let columns = self.pane_frame(seat)?.columns.get();
         hit.row.checked_mul(columns)?.checked_add(hit.column)
     }
+
+    /// Pay the flash's frames, and let it go when it is over.
+    pub(crate) fn advance_command_flash(&mut self, now: Instant) -> Result<()> {
+        if self.window.command_flash.is_none() {
+            return Ok(());
+        }
+        // On the window's own display frame — see [`Self::animation_frame_is_due`].
+        if !self.animation_frame_is_due() {
+            return Ok(());
+        }
+        let Some(flash) = self.window.command_flash.as_ref() else {
+            return Ok(());
+        };
+        if !cmdrail::flash_is_running(now.saturating_duration_since(flash.started)) {
+            self.window.command_flash = None;
+        }
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
 }
 
 /// **Whether one seat's shell is, right now, the true owner of the keyboard** —

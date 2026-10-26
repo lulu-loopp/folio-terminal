@@ -3,6 +3,7 @@
 
 use super::pointer::{Ending, Gone, Leaving, OwnerGone};
 use crate::runtime::floats::{file_menu_powers, float_dock_label};
+use crate::runtime::frame::trace_unchanged_present;
 use crate::window_seam::prelude::*;
 use crate::{
     BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due, born_in_tab,
@@ -26,7 +27,7 @@ use crate::{
     preview_trace, profiles, rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer,
     rail_zone_wants_open, restated_scroll, restore, restore_row_seed, risen_frame, row_verb,
     schedule_leaf_grid_change, scrollback_quota, seats, size_authority_for_rectangle, solve_seats,
-    solve_tree, trace_unchanged_present, video_seat, webhost,
+    solve_tree, video_seat, webhost,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};

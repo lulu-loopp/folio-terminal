@@ -2,18 +2,19 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::input::Keystroke;
+use crate::runtime::frame::dispatch_tab_decoration_tasks;
 use crate::window_seam::prelude::*;
 use crate::{
     AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath, Layered,
     MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
     PasteTarget, Popup, PreviewDocument, PreviewMathArtifact, PreviewMathKey, PreviewMathPicture,
     PreviewSurface, PreviewTextCommand, Runtime, Settled, TabState, answer_one_formula,
-    answers_for, dispatch_tab_decoration_tasks, document_formulas, dump_overlay_frame, first_run,
-    float_trigger_tip, foreground_program, formula_tools, ground_overlay_layers, hang_watch,
-    hold_failed_in_tabs, i18n, leaf_session_mut, marks, math_copy_window, math_em_milli,
-    new_tab_tip, nonzero_u32, preview, preview_select, preview_text_command, preview_trace,
-    profiles, quit, rail_overlay_layer, restore, retire_spent_math_copy, search, seats, settings,
-    tooltip, window_layout_key,
+    answers_for, document_formulas, dump_overlay_frame, first_run, float_trigger_tip,
+    foreground_program, formula_tools, ground_overlay_layers, hang_watch, hold_failed_in_tabs,
+    i18n, leaf_session_mut, marks, math_copy_window, math_em_milli, new_tab_tip, nonzero_u32,
+    preview, preview_select, preview_text_command, preview_trace, profiles, quit,
+    rail_overlay_layer, restore, retire_spent_math_copy, search, seats, settings, tooltip,
+    window_layout_key,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -2622,6 +2623,77 @@ impl<B: Backend> Runtime<'_, B> {
                     line_wrapping,
                 ));
             }
+        }
+    }
+
+    /// **Carry every journey this window is running up to the instant the frame
+    /// being composed is of** (review 2026-09-18, P1).
+    ///
+    /// The other half of the gate, and the half without which the gate is a
+    /// defect. A frame is composed for all sorts of reasons that have nothing to
+    /// do with an animation — a shell printing, a keystroke echoing, an expose —
+    /// and every one of them refuses the gate for a display frame afterwards. If
+    /// those frames drew the animation from a sample some earlier tick left
+    /// behind, a pane printing every five milliseconds would hold a journey
+    /// still for as long as it kept printing. So they do not: this is asked
+    /// first, and everything below it composes from numbers that are this
+    /// frame's.
+    ///
+    /// **Two halves, because this window draws its animations in two places.**
+    /// The overlay and the chrome are *rebuilt* from state and a clock —
+    /// `refresh_overlay` and `refresh_chrome` each read the instant themselves —
+    /// so for them carrying the journey is exactly rebuilding them. The block
+    /// changing face is the one animation whose sample is **cached**: it goes
+    /// into the session, and `refresh_projection` reads it there without ever
+    /// asking the flight what time it is, because the band's height has to move
+    /// the rows under it and the projection is where rows get their heights.
+    /// That cache is what the review found frozen.
+    ///
+    /// **And the third thing, above both of them: what has to be *serviced*
+    /// before this frame is composed at all** (closure review O4, 2026-09-18).
+    /// A journey is sampled; a decoder and a decoded animation's clock are not,
+    /// they have to be walked forward, and a frame composed without walking them
+    /// is a picture of a moment that has passed. [`Self::service_pictures`] is
+    /// therefore the first statement here, above everything that reads a layer.
+    ///
+    /// A window with nothing moving pays one `bool` and one `Option` read.
+    pub(crate) fn carry_live_journeys(&mut self, now: Instant) {
+        // The pictures, before anything is built from them and whether or not
+        // any journey is running: a frame composed for a keystroke shows the
+        // frame the decoder is on at the instant that frame is of, or a
+        // recording plays only while something else happens to be animating.
+        self.service_pictures(now);
+        // The cached one, whether or not anything else is running: a flight in
+        // hand is a flight whose two numbers this frame must be built from, and
+        // a window with no flight pays one `Option` read for the question.
+        self.sample_math_toggle(now);
+        let running = self.window.frame_clock.running();
+        if !running.any() {
+            return;
+        }
+        // **One rebuild and never two** (review 2026-09-18 round 2).
+        // `refresh_chrome` ends in `refresh_overlay` — the overlay is rebuilt
+        // from the same choke point the chrome is — so asking for both is asking
+        // for two overlay builds, which is what the review measured at four
+        // hundred a second. The chrome is the expensive lane, so it is asked for
+        // only when something that lives *in* it is mid-flight.
+        // Formula lanes are the one overlay content deliberately not rebuilt
+        // here: their owner is the frame at the present door, after every pane
+        // has been projected. If either formula journey is what made this lane
+        // live, that present-time rebuild also carries every other overlay lane,
+        // so rebuilding here would pay for the whole stack twice.
+        let formula_present = self.formula_overlay_is_active();
+        if formula_present {
+            self.window.formula_overlay_owed |= running.chrome || running.overlay;
+        }
+        if running.chrome {
+            if formula_present {
+                self.refresh_chrome_without_overlay();
+            } else {
+                self.refresh_chrome();
+            }
+        } else if running.overlay && !formula_present {
+            self.refresh_overlay();
         }
     }
 }

@@ -299,8 +299,8 @@ use bt_render::{
     WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_FADE_MS, WINDOW_TAB_PIN_REVEAL_MS,
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
     WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb, current_cursor_style, foreground_rgb,
-    frame_content_digest, frame_is_alternate_screen, gpu_power_request, scheme_in_force,
-    set_cursor_style, set_theme, theme_revision,
+    frame_is_alternate_screen, gpu_power_request, scheme_in_force, set_cursor_style, set_theme,
+    theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
@@ -317,12 +317,14 @@ use bt_viewport::{
 use runtime::platform_pointer_of;
 #[cfg(test)]
 use runtime::{
-    a_capture_still_holds_its_pointer, a_page_is_off_the_glass, a_page_still_has_a_pane,
-    a_page_was_replaced, a_retirement_happens_on_this_turn, answer_an_exit_over,
-    answer_attention_in, apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels,
-    broker_verdict, chevron_turn_target, clear_copied_selection, clipboard_focus_of,
-    column_keyboard, columns_wanting_git, drain_may_take_another_slice, dropped_files_seat_at,
-    dwm_dark_mode_owed, end_leaves_of, file_menu_powers, file_peek_promotion,
+    a_bare_redraw_still_owes_a_present, a_capture_still_holds_its_pointer, a_page_is_off_the_glass,
+    a_page_still_has_a_pane, a_page_was_replaced, a_retirement_happens_on_this_turn,
+    advance_periodic_deadline, answer_an_exit_over, answer_attention_in, apply_leaf_metrics,
+    apply_tabs_leaf_metrics, ask_for_peek_pixels, attention_ledger_deadline, broker_verdict,
+    chevron_turn_target, chrome_over, chrome_tick_reuses_picture, clear_copied_selection,
+    clipboard_focus_of, column_keyboard, columns_wanting_git, dispatch_tab_decoration_tasks,
+    drain_may_take_another_slice, dropped_files_seat_at, dwm_dark_mode_owed,
+    earliest_named_deadline, end_leaves_of, file_menu_powers, file_peek_promotion,
     files_float_content_height, files_key_under, files_key_within, files_keyboard_seat_of,
     files_locate, files_open_chain, files_root_of, files_row_activation, files_row_counts_clicks,
     files_row_entry, files_row_menu_subject, float_git_page_shown, float_viewport_rect,
@@ -335,12 +337,13 @@ use runtime::{
     peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
     peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
     persisted_window_bounds, prepare_clipboard_paste, prepare_dropped_paste, press_files_node,
-    preview_body_bar, preview_source_of_recent, profile_menu_anchor, raise_cancelled_quit_card_on,
-    raise_dirty_gate_over, recall_flash, recorded_window_placement, reference_card,
-    reference_run_rect, refused_preview_card, remember_decode, reroot_files_state,
-    rescan_leaf_for_search, resize_worth_solving, resolved_theme_change, restart_seed,
-    revived_page_of, seat_holds_the_keyboard, selection_to_copy, should_copy_on_select_release,
-    stage_paste, step_leaf_text_scale, stepped_command_mark, tab_surface_tip_boxes,
+    preview_body_bar, preview_source_of_recent, profile_menu_anchor, pty_drain_says_nothing_new,
+    pty_frame_is_unchanged, raise_cancelled_quit_card_on, raise_dirty_gate_over, recall_flash,
+    recorded_window_placement, reference_card, reference_run_rect, refused_preview_card,
+    remember_decode, reroot_files_state, rescan_leaf_for_search, resize_worth_solving,
+    resolved_theme_change, restart_seed, revived_page_of, seat_holds_the_keyboard,
+    selection_to_copy, should_copy_on_select_release, stage_paste, startup_poll_delay,
+    step_leaf_text_scale, stepped_command_mark, tab_surface_tip_boxes, take_math_worker_notice,
     take_pending_paste, take_psreadline_resize_reanchor_input, tear_out_rect,
     terminal_link_answers_a_press, text_field_holding, tooltip_anchor_for, window_minimum_changed,
 };
@@ -11191,14 +11194,6 @@ fn disable_math_worker_state(running: &mut bool, notice_pending: &mut bool) -> b
     true
 }
 
-fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
-    if std::mem::take(notice_pending) {
-        Some(math_worker_stopped_notice())
-    } else {
-        None
-    }
-}
-
 /// **The computation lane's request door for a pane's decoration work** (C1): the task goes to
 /// the share that runs its kind — a formula or a decode to `bt-math-worker`, a resample to
 /// `bt-image-scale-worker`, a printed path to `bt-path-verify-worker` — and is admitted there, or
@@ -11419,45 +11414,6 @@ fn leaf_session_mut(
 struct DecorationSenders {
     computation: Arc<computation_lane::ComputationLane>,
     foreground: mpsc::Sender<foreground_program::Request>,
-}
-
-/// Collect every pane of the tab on screen, not merely the one holding the keyboard.
-///
-/// A leaf queues its own decoration work as its own bytes are drained — that half was always per
-/// pane. What was not was the collection: dispatching through the tab's `Deref` asked the focused
-/// leaf for its queue and left every other pane's work sitting where it was written. Nothing came
-/// back for those panes, so a file reference in them was never verified, and an unverified
-/// reference wears no resting underline. Hovering the pane opened the file by another road (the
-/// peek), which is why the affordance appeared to be a thing hovering granted rather than a thing
-/// every pane is owed.
-fn dispatch_tab_decoration_tasks(
-    window: WindowId,
-    tab: &mut TabState,
-    senders: &DecorationSenders,
-    now: Instant,
-    running: &mut bool,
-    notice_pending: &mut bool,
-) -> bool {
-    let tab_id = tab.id;
-    let mut disabled = false;
-    for (seat, leaf) in tab.leaves_mut() {
-        let address = ShellAddress {
-            window,
-            leaf: LeafId {
-                tab: tab_id,
-                seat: *seat,
-            },
-        };
-        disabled |= dispatch_pending_math_tasks(
-            address,
-            &mut leaf.session,
-            &senders.computation,
-            running,
-            notice_pending,
-        );
-        foreground_program::request(leaf, address, &senders.foreground, now);
-    }
-    disabled
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -18061,22 +18017,6 @@ impl DpiRectangle {
 
 fn earliest_deadline<const N: usize>(deadlines: [Option<Instant>; N]) -> Option<Instant> {
     deadlines.into_iter().flatten().min()
-}
-
-/// The earliest appointment together with the owner that supplied it.
-///
-/// Keeping the names beside the fold, rather than reconstructing them after the
-/// fact, makes the idle probe report evidence: ties retain the first entry, just
-/// as [`Iterator::min`] did before the entries were named.
-fn earliest_named_deadline<T: Copy, const N: usize>(
-    names: [T; N],
-    deadlines: [Option<Instant>; N],
-) -> Option<(T, Instant)> {
-    names
-        .into_iter()
-        .zip(deadlines)
-        .filter_map(|(name, deadline)| deadline.map(|at| (name, at)))
-        .min_by_key(|(_, at)| *at)
 }
 
 impl TabState {
@@ -26740,38 +26680,6 @@ impl PeekThumbnail {
     }
 }
 
-/// One frame's image references, with the row stride they were scanned at.
-///
-/// The stride travels with the list because a `GridHit` is a row and a column while a reference is
-/// a set of cell indices; keeping the frame's own column count beside the scan is what makes the
-/// two the same coordinate rather than two coordinates that usually agree.
-///
-/// One hovered cell resolves to at most one reference: the first that covers it. The scan pushes
-/// printed text before link targets, so where a cell carries both — a link whose label spells the
-/// path — the answer is what the pointer is actually standing on. Both name the same file anyway.
-/// The pointer's own marks, put on the frame of the pane the pointer is standing in.
-///
-/// One window, one pointer, and therefore at most one pane wearing these: the hovered link's
-/// underline and the status line that spells its target, and the solid underline under a reference
-/// that has been verified as a picture. Which pane wears them is a question about coordinates and
-/// never about which pane holds the keyboard — this function is called for exactly the pane
-/// `WindowRuntime::hover_pane` names, whether or not that is the focused leaf.
-fn apply_hover_marks(
-    frame: &mut ViewportFrame,
-    hyperlink_hover: &HyperlinkHover,
-    hovered_reference: Option<&bt_term::FrameImageReference>,
-) {
-    if let Some(hyperlink) = hyperlink_hover.underline_target()
-        && frame.underline_hyperlink(hyperlink)
-        && hyperlink_hover.active.is_some()
-    {
-        frame.status_text = hyperlink_hover.status_text(frame.columns.get() as usize);
-    }
-    if let Some(reference) = hovered_reference {
-        frame.underline_cells(&reference.cells, true);
-    }
-}
-
 #[derive(Default)]
 struct FrameImageReferences {
     columns: u32,
@@ -28256,71 +28164,6 @@ fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &impl Wind
     window.is_iconic() || window.is_cloaked()
 }
 
-/// **Ask the desktop where this window is, on the turn that is about to decide what the reader is
-/// owed** (`attention` plan §5.2; user ruling 2026-08-28).
-///
-/// The one place the four facts of [`notify::WindowPlace`] are *read* rather than remembered, and
-/// it exists so that "sampled together, on one turn" is a call and not a convention three passes
-/// each keep on their own. **Its one caller is [`Runtime::observe_window_place`]** (ticket 48):
-/// the head of every turn, a window's birth, an attention delivery that arrives between turns, and
-/// the re-placing of a flash the taskbar lane's answer contradicts (ticket 62). The taskbar bit is
-/// the one fact here that is *not* asked: it is the taskbar lane's latest answer (ticket 62).
-/// Focus is that caller's, and it asks the window itself (`Window::has_focus`) for the reason
-/// `drain_pty` gives.
-///
-/// Between three and seven syscalls a turn — `IsIconic`, `DwmGetWindowAttribute`, and the
-/// `GetWindowRect` plus one to three `WindowFromPoint`/`GetAncestor` pairs the exposure probe
-/// costs; the taskbar's `SHAppBarMessage` is asked on `taskbar_lane` and only read here
-/// (ticket 62) — against a pass that walks every leaf of every tab. That is why
-/// the answers land in `WindowRuntime`'s fields: the drain, the strip tick and the doors that fire
-/// *inside* a turn read them back from there rather than asking again about the same instant. **This is the pass
-/// that decides a delivery**, which is what the probe is priced against; nothing on the drawing path
-/// asks any of these.
-///
-/// **Each probe is an owner-thread door** (`doors::PlaceHidden`, `doors::PlaceExposure`, row 13's
-/// residue): admitted where it is asked, and a refused probe keeps the answer of `previous`, the
-/// place this window last observed.
-fn sample_window_place(
-    window: &impl WindowHost,
-    focused: bool,
-    previous: notify::WindowPlace,
-) -> (notify::WindowPlace, bt_platform::TaskbarReading) {
-    // **Each probe under its own station** (ticket 48): two of them go to other processes —
-    // the hit tests to whatever window is under each point, `SHAppBarMessage` to the shell's
-    // taskbar — and a stall line should say which one waited.
-    // The admission's meter enters the probe's station and puts the turn's back, the
-    // `enter`/`at` pair this replaced; the fused call keeps the line
-    // `present_diagnostics_tests::existing_hidden_callers_keep_the_same_fused_value` reads.
-    let hidden = bt_platform::admission::admitted::<doors::PlaceHidden, _>(|token| {
-        window_is_hidden(token, window)
-    })
-    .unwrap_or(previous.hidden);
-    // **The taskbar is read, not asked** (ticket 62). The shell is asked on its own lane; this
-    // reads the latest answer without waiting, and — while the window is on a screen — asks the
-    // lane for a fresh one when the last request is `REFRESH_INTERVAL` old. The reading travels
-    // out beside the place, so the window can say which answer its deliveries were decided on.
-    let taskbar = hang_watch::during(hang_watch::Station::PlaceTaskbar, || {
-        taskbar_lane::observe(Instant::now(), !hidden)
-    });
-    let place = notify::WindowPlace {
-        focused,
-        hidden,
-        // **Not asked of a window that is on no screen** (user ruling 2026-09-01). While a window
-        // is iconic, `GetWindowRect` describes the icon Windows parked off-screen rather than the
-        // window — `bt_platform::is_window_minimized` says so in its own doc — so a hit test
-        // against that rectangle would be an answer about somewhere the window is not. A cloaked
-        // window is on no screen by definition. Either way the honest answer is that nothing of it
-        // is showing, and `desktop_reach` tests the hidden bit outermost anyway.
-        exposed: !hidden
-            && bt_platform::admission::admitted::<doors::PlaceExposure, _>(|token| {
-                window_is_exposed(token, window)
-            })
-            .unwrap_or(previous.exposed),
-        taskbar_is_auto_hidden: taskbar.auto_hidden,
-    };
-    (place, taskbar)
-}
-
 /// **Whether the window manager puts this window under any of its own sample points** (user ruling
 /// 2026-09-01).
 ///
@@ -28531,17 +28374,6 @@ fn expire_leaf_attention(
         .apply(at, reach, attention::Event::LeafGone, next_place, now)
         .lines;
     emit_attention_lines(trace, lines);
-}
-
-/// The next instant any pane in this window owes the loop a wake-up on the ledger's account.
-///
-/// `None` for a window with nothing standing, which is every window almost always — so an idle
-/// Folio asks for no frames at all because of this.
-fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
-    tabs.iter()
-        .flat_map(|tab| tab.leaves())
-        .filter_map(|(_, leaf)| leaf.attention_clock.deadline())
-        .min()
 }
 
 fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<String>) {
@@ -36350,32 +36182,6 @@ struct WebPlacement {
     /// (M4-3). Empty is the ordinary case and means the page has the whole of
     /// its rectangle. See [`Runtime::chrome_over`].
     cover: Vec<[f32; 4]>,
-}
-
-/// [`Runtime::chrome_over`] with the stack as a value — the whole of the rule,
-/// where a test can read it.
-///
-/// A free function for [`a_page_is_off_the_glass`]' reason: what it answers is a
-/// question about five numbers and a list, and a method would need a window to
-/// ask it.
-fn chrome_over(
-    layers: &[Option<[f32; 4]>],
-    above: Option<usize>,
-    body: Option<[f32; 4]>,
-) -> Vec<[f32; 4]> {
-    let Some(body) = body else {
-        return Vec::new();
-    };
-    let first = above.map_or(0, |level| level.saturating_add(1));
-    layers
-        .iter()
-        .skip(first)
-        .flatten()
-        .filter(|rect| {
-            rect[0] < body[2] && rect[2] > body[0] && rect[1] < body[3] && rect[3] > body[1]
-        })
-        .copied()
-        .collect()
 }
 
 /// **A page a modal has taken off the glass, and the box its last frame stands
@@ -45098,48 +44904,6 @@ impl<B: Backend> Runtime<'_, B> {
         })
     }
 
-    /// While a flash is running, one frame at the animation's own rate; nothing at
-    /// all otherwise.
-    ///
-    /// **Under reduced motion, one wake-up for the whole band and not sixty.**
-    /// The band holds one flat alpha for its 950ms ([`cmdrail::flash_alpha`]), so
-    /// the only frame it owes is the one that takes it away — asking for the
-    /// animation's rate would be paying for a picture that cannot change. This is
-    /// the same trade `Passages` makes by holding nothing at all: `Reduced` is a
-    /// genuinely idle window rather than a fast one.
-    fn command_flash_deadline(&self, now: Instant) -> Option<Instant> {
-        let flash = self.window.command_flash.as_ref().filter(|flash| {
-            cmdrail::flash_is_running(now.saturating_duration_since(flash.started))
-        })?;
-        match self.app.motion {
-            Motion::Reduced => {
-                Some(self.clamp_animation_deadline(flash.started + cmdrail::JUMP_FLASH))
-            }
-            Motion::Full => self.next_animation_deadline(),
-        }
-    }
-
-    /// Pay the flash's frames, and let it go when it is over.
-    fn advance_command_flash(&mut self, now: Instant) -> Result<()> {
-        if self.window.command_flash.is_none() {
-            return Ok(());
-        }
-        // On the window's own display frame — see [`Self::animation_frame_is_due`].
-        if !self.animation_frame_is_due() {
-            return Ok(());
-        }
-        let Some(flash) = self.window.command_flash.as_ref() else {
-            return Ok(());
-        };
-        if !cmdrail::flash_is_running(now.saturating_duration_since(flash.started)) {
-            self.window.command_flash = None;
-        }
-        if self.refresh_overlay() {
-            self.present_chrome_change()?;
-        }
-        Ok(())
-    }
-
     /// Everything the hot rail's glance card is: where it stands, what it says,
     /// what it is, and which face it wears.
     ///
@@ -46118,22 +45882,6 @@ impl<B: Backend> Runtime<'_, B> {
             self.present_chrome_change()?;
         }
         Ok(())
-    }
-
-    /// When this window next has Cards-hint work: the nudge's frames while it is
-    /// moving, and the end of the four seconds. Nothing at all for a window
-    /// whose reader has already been told (§7.21).
-    fn card_hint_deadline(&self, now: Instant) -> Option<Instant> {
-        let owner = self.window.card_hint.deadline(
-            now,
-            self.app.motion,
-            self.window.frame_clock.interval(),
-        )?;
-        if self.window.card_hint.nudge_moving(now, self.app.motion) {
-            self.next_animation_deadline().map(|frame| frame.min(owner))
-        } else {
-            Some(owner)
-        }
     }
 
     // ── the hover panels' one-at-a-time rule (user report, 2026-08-19) ───────
@@ -49198,96 +48946,6 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
-    /// The thumbs' own clock, run once per pass.
-    ///
-    /// The same shape as [`Self::advance_toasts`] and for the same reason: a bar
-    /// left alone runs out its rest and fades with the pointer and the keyboard
-    /// both still, and nothing else in this window would wake the loop to take
-    /// it off the glass. The latch is what makes the *last* frame happen — the
-    /// pass on which the fade has finished is the pass that must draw the pane
-    /// without it, and by then there is no fade left to ask about.
-    fn advance_terminal_thumbs(&mut self, now: Instant) -> Result<()> {
-        let owed = self.terminal_thumb_work(now).deadline.is_some();
-        if !owed && !self.terminal_thumb_owed_frame {
-            return Ok(());
-        }
-        // On the window's own display frame — see [`Self::animation_frame_is_due`].
-        if !self.animation_frame_is_due() {
-            return Ok(());
-        }
-        self.terminal_thumb_owed_frame = owed;
-        if self.refresh_overlay() {
-            self.present_chrome_change()?;
-        }
-        Ok(())
-    }
-
-    /// When any terminal thumb next owes a frame, **and whether any of them is
-    /// actually fading** (review round 3, 2026-09-18).
-    ///
-    /// Only the panes that are actually resting: one standing on a reason —
-    /// held, hovered, or parked in history — is not going anywhere, and a pane
-    /// with no scrollback has nothing on the glass to take off it.
-    ///
-    /// Two answers from the one walk, for [`AnimationWork`]'s stated reason and
-    /// with this host as the example: the deadline is `Some` for the whole of
-    /// [`termscroll::THUMB_REST`] as well, because the loop has to be woken when
-    /// the nine hundred milliseconds run out — and for those nine hundred
-    /// milliseconds the bar is a still picture at full strength. Reading the
-    /// deadline as the liveness kept the overlay lane open for every pane that
-    /// had been scrolled in the last second.
-    fn terminal_thumb_work(&self, now: Instant) -> AnimationWork {
-        let motion = self.app.motion;
-        let rests = self
-            .sessions
-            .iter()
-            .filter(|(seat, leaf)| {
-                leaf.projection.scroll_extent_subpixels() > 0
-                    && !leaf.session.terminal_modes().alternate_screen
-                    && !leaf.projection.is_scrolled()
-                    && self.terminal_thumb_hover != Some(**seat)
-                    && self
-                        .held_terminal_thumb_drag()
-                        .copied()
-                        .is_none_or(|drag| drag.seat != **seat)
-            })
-            .map(|(_, leaf)| leaf.thumb_awake)
-            .chain(
-                // The foot's marks, on the same clock and through the same
-                // latch. Their standing reasons are their own — a hover is not
-                // one of them — so the filter reads the horizontal axis rather
-                // than the vertical one, and a pane whose widest line fits has
-                // nothing down there to take off the glass.
-                self.sessions
-                    .iter()
-                    .filter(|(seat, leaf)| {
-                        leaf.projection.horizontal().max_x_origin().0 > 0
-                            && !leaf.session.terminal_modes().alternate_screen
-                            && !leaf.projection.horizontal().is_scrolled()
-                            && self
-                                .held_terminal_column_drag()
-                                .copied()
-                                .is_none_or(|drag| drag.seat != **seat)
-                    })
-                    .map(|(_, leaf)| leaf.column_awake),
-            );
-        let mut work = AnimationWork::default();
-        for rest in rests {
-            let due = if termscroll::fade_is_moving(rest, now, motion) {
-                self.next_animation_deadline()
-            } else {
-                termscroll::fade_wait_deadline(rest, now)
-            };
-            if let Some(due) = due {
-                work.deadline = Some(work.deadline.map_or(due, |soonest| soonest.min(due)));
-            }
-            work.moving |= termscroll::fade_is_moving(rest, now, motion);
-        }
-        // A thumb fades after the scroll that woke it: a gesture's tween.
-        work.travelling = work.moving;
-        work
-    }
-
     /// **Say that an address this window was asked to open is refused**, on the
     /// preview surface that was asked (§7.1.5g ⑦).
     ///
@@ -50562,74 +50220,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ── the floating window (§7.1.2) ────────────────────────────────────────
 
-    /// The foot's confirmation has stood long enough: it goes back to saying
-    /// where it is (B24).
-    ///
-    /// Its own tick rather than a line inside [`Self::advance_float`], because
-    /// the two feet are drawn into two different surfaces — the float's into the
-    /// overlay stack, a docked column's into the seat chrome — and the strip that
-    /// has to be rebuilt is decided by which foot was talking. Folding it back in
-    /// would have refreshed the overlay for a change that happened in a pane, and
-    /// the pane would have kept saying "Revealed" until something else moved.
-    fn advance_foot_reveal(&mut self, now: Instant) -> Result<()> {
-        let Some((foot, at)) = self.window.revealed_foot else {
-            return Ok(());
-        };
-        if now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK {
-            return Ok(());
-        }
-        self.window.revealed_foot = None;
-        let changed = match foot {
-            RevealedFoot::Float(_) => self.refresh_overlay(),
-            RevealedFoot::Column(_) | RevealedFoot::Preview(_) => self.refresh_chrome(),
-        };
-        if changed {
-            self.present_chrome_change()?;
-        }
-        Ok(())
-    }
-
-    /// A page's magnification has been said long enough: the foot goes back to
-    /// being the hover line (user ruling 2026-08-25).
-    ///
-    /// [`Self::advance_foot_reveal`]'s twin, and it is a twin rather than a line
-    /// inside it for the same reason that one is not a line inside
-    /// `advance_float`: **the slot is cleared here and not merely ignored by the
-    /// reader**, because a slot that stayed full would hand
-    /// [`Self::next_deadline`] a wake-up that is already in the past on every
-    /// turn for the rest of the session — the `WaitUntil` pin's own definition
-    /// of a loop that never sleeps.
-    fn advance_page_foot_clocks(&mut self, now: Instant) -> Result<()> {
-        let expired: Vec<LeafId> = self
-            .window
-            .web
-            .iter()
-            .filter(|(_, web)| {
-                let over = |at: Instant| now.saturating_duration_since(at) >= FOOT_REVEAL_FEEDBACK;
-                web.zoom_said().is_some_and(|(_, at)| over(at))
-                    || web.dialog_said().is_some_and(over)
-            })
-            .map(|(leaf, _)| *leaf)
-            .collect();
-        if expired.is_empty() {
-            return Ok(());
-        }
-        for leaf in expired {
-            if let Some(web) = self.window.web.get_mut(&leaf) {
-                hang_watch::during(hang_watch::Station::ClockWebZoom, || {
-                    web.forget_the_zoom_it_said()
-                });
-                hang_watch::during(hang_watch::Station::ClockWebDialog, || {
-                    web.forget_the_dialog_it_said()
-                });
-            }
-        }
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
-        }
-        Ok(())
-    }
-
     /// Whether `foot` is still showing its confirmation.
     fn foot_reveal_is_fresh(&self, foot: RevealedFoot, now: Instant) -> bool {
         self.window.revealed_foot.is_some_and(|(shown, at)| {
@@ -50740,50 +50330,6 @@ impl<B: Backend> Runtime<'_, B> {
         self.hand_off(reveal_ask(path))
     }
 
-    /// [`Self::reveal_in_explorer`] for a path a worker has already answered for — the door a
-    /// reference printed in the terminal takes (closure review of audit 3 C-2).
-    ///
-    /// The same verb and the same bridge; what differs is that the two facts the bridge needs
-    /// arrive from the pane's ledger instead of being fetched from a disk on the thread that
-    /// paints. A files column's foot keeps the asking door, because a row of the tree is a path
-    /// this window enumerated and has no ledger for.
-    ///
-    /// **It hands over the whole verdict and the bridge refuses on `exists`** (closure re-review
-    /// B-1'): the first shape of this door took a lone `bool` and the caller that should have
-    /// checked the other half did not.
-    /// **What a pane's ledger has to say to a hand-off** — the three facts the doors out of this
-    /// window ask, carried instead of fetched (audit 3 C-2; owner ruling 2026-09-21).
-    ///
-    /// A name with no verdict answers `exists: false`, which every door refuses: the routing table
-    /// has already declined to produce an arm for one, and this is the same answer said again
-    /// where the shell is actually reached, so no future caller can hand over a name nobody has
-    /// seen.
-    fn verified_target(&self, seat: SeatId, path: &Path) -> bt_platform::VerifiedTarget {
-        verified_target_of(self.seat_path_verdict(seat, path).as_ref())
-    }
-
-    /// [`Self::open_local_path`] for a path a worker has already answered for — the door a
-    /// reference printed in the terminal takes under the hand-over modifier.
-    ///
-    /// The refusal is still the door's and still spoken: "the files column does not run programs"
-    /// is a rule the reader is entitled to be told once, whichever surface asked.
-    fn open_local_path_verified(
-        &mut self,
-        path: &Path,
-        target: bt_platform::VerifiedTarget,
-    ) -> Result<()> {
-        self.hand_off(handoff_lane::Ask::new(
-            bt_platform::Handoff::OpenVerified(path.to_path_buf(), target),
-            handoff_lane::Refusal {
-                stderr: Some((
-                    "recoverable reference open failure",
-                    "open a printed reference with its default handler",
-                )),
-                program_notice: true,
-            },
-        ))
-    }
-
     /// **Hand a path nobody asked a disk about to the system's handler** — a share on another
     /// machine under `Ctrl` (ticket 14, owner ruling 2026-09-21), and a file a previewed document
     /// names under `Ctrl` (owner ruling 2026-09-23).
@@ -50800,46 +50346,6 @@ impl<B: Backend> Runtime<'_, B> {
         ))
     }
 
-    /// **Hand a URI of any scheme to whatever this machine has registered for it** — `mailto:`,
-    /// `vscode:`, `ssh:` (ticket 14, owner ruling 2026-09-21).
-    ///
-    /// Not through [`Self::hand_url_to_the_browser`]: that door is `webnav::address_bar`, which
-    /// admits the web and nothing else, and the ruling is that `Ctrl` on any scheme is the
-    /// reader's consent. What the machine has no handler for, it refuses, and the lane brings the
-    /// refusal back to the surface that asked, which says it as `refused` names.
-    fn hand_uri_to_the_system(
-        &mut self,
-        uri: &str,
-        refused: handoff_lane::OnRefused,
-    ) -> Result<()> {
-        self.hand_off(
-            handoff_lane::Ask::new(
-                bt_platform::Handoff::Address(uri.to_owned()),
-                handoff_lane::Refusal {
-                    stderr: Some((
-                        "recoverable link hand-off failure",
-                        "hand a link to its registered handler",
-                    )),
-                    program_notice: false,
-                },
-            )
-            .if_refused(refused),
-        )
-    }
-
-    fn reveal_verified(&mut self, path: &Path, target: bt_platform::VerifiedTarget) -> Result<()> {
-        self.hand_off(handoff_lane::Ask::new(
-            bt_platform::Handoff::RevealVerified(path.to_path_buf(), target),
-            handoff_lane::Refusal {
-                stderr: Some((
-                    "recoverable reveal failure",
-                    "show a verified path in the file manager",
-                )),
-                program_notice: false,
-            },
-        ))
-    }
-
     /// Whether it is worth writing down which tabs spoke on this turn.
     ///
     /// A window outside the mode has no cards to move, and one already owed a
@@ -50847,60 +50353,6 @@ impl<B: Backend> Runtime<'_, B> {
     /// is what keeps this off the price of an ordinary drain.
     fn collecting_card_speakers(&self) -> bool {
         self.window.focus_mode && !self.window.cards.owes_frame()
-    }
-
-    fn finish_synchronized_update_if_due(&mut self, now: Instant) -> Result<()> {
-        let mut active_finished = false;
-        let mut active_finished_off_focus = false;
-        let mut chrome_changed = false;
-        let active = self.window.active_tab;
-        // Which tabs had a pane's screen move here, on the drain's own terms and
-        // for [`Self::panes_spoke`]'s reason: this release is the one way a pane's
-        // picture changes without a byte arriving.
-        let mut spoke: Vec<usize> = Vec::new();
-        let collect_speakers = self.collecting_card_speakers();
-        for (index, tab) in self.window.tabs.iter_mut().enumerate() {
-            let focused = tab.focused_leaf;
-            // Per leaf: a synchronized update is a property of one screen, and
-            // two shells in one tab time out independently.
-            for (seat, leaf) in tab.leaves_mut() {
-                // The product's "if due, finish": `bt_compose::advance` is the same step for a
-                // single-call host (the web road); this loop keeps its own to read the name evidence
-                // between the two, for a due leaf only.
-                if !bt_compose::deadlines(&leaf.session).synchronized_update_due(now) {
-                    continue;
-                }
-                let name_before = leaf.name_evidence();
-                let finished = leaf
-                    .session
-                    .finish_synchronized_update(now)
-                    .context("finish timed-out DEC 2026 synchronized update")?;
-                chrome_changed |= leaf.name_evidence() != name_before;
-                if collect_speakers && finished && spoke.last() != Some(&index) {
-                    spoke.push(index);
-                }
-                if index == active && finished {
-                    active_finished = true;
-                    // **A screen that changed with no byte arriving.** The block
-                    // this closes was fed to the parser turns ago and withheld;
-                    // releasing it moves cells without anything passing through
-                    // the drain, so the drain's own account of who has spoken
-                    // never hears it. For a sibling pane that is the only notice
-                    // there is.
-                    active_finished_off_focus |= *seat != focused;
-                }
-            }
-        }
-        self.window.unpainted_pane_output |= active_finished_off_focus;
-        self.panes_spoke(&spoke, now);
-        if chrome_changed {
-            self.want_title();
-            self.refresh_chrome();
-        }
-        if active_finished {
-            self.publish_pty_drain_frame(now, false)?;
-        }
-        Ok(())
     }
 
     fn set_cursor_focus(&mut self, focused: bool, now: Instant) {
@@ -50957,129 +50409,6 @@ impl<B: Backend> Runtime<'_, B> {
     fn animating_deadline(&self, owes: bool, now: Instant) -> Option<Instant> {
         let _ = now;
         owes.then(|| self.next_animation_deadline()).flatten()
-    }
-
-    /// **Carry every journey this window is running up to the instant the frame
-    /// being composed is of** (review 2026-09-18, P1).
-    ///
-    /// The other half of the gate, and the half without which the gate is a
-    /// defect. A frame is composed for all sorts of reasons that have nothing to
-    /// do with an animation — a shell printing, a keystroke echoing, an expose —
-    /// and every one of them refuses the gate for a display frame afterwards. If
-    /// those frames drew the animation from a sample some earlier tick left
-    /// behind, a pane printing every five milliseconds would hold a journey
-    /// still for as long as it kept printing. So they do not: this is asked
-    /// first, and everything below it composes from numbers that are this
-    /// frame's.
-    ///
-    /// **Two halves, because this window draws its animations in two places.**
-    /// The overlay and the chrome are *rebuilt* from state and a clock —
-    /// `refresh_overlay` and `refresh_chrome` each read the instant themselves —
-    /// so for them carrying the journey is exactly rebuilding them. The block
-    /// changing face is the one animation whose sample is **cached**: it goes
-    /// into the session, and `refresh_projection` reads it there without ever
-    /// asking the flight what time it is, because the band's height has to move
-    /// the rows under it and the projection is where rows get their heights.
-    /// That cache is what the review found frozen.
-    ///
-    /// **And the third thing, above both of them: what has to be *serviced*
-    /// before this frame is composed at all** (closure review O4, 2026-09-18).
-    /// A journey is sampled; a decoder and a decoded animation's clock are not,
-    /// they have to be walked forward, and a frame composed without walking them
-    /// is a picture of a moment that has passed. [`Self::service_pictures`] is
-    /// therefore the first statement here, above everything that reads a layer.
-    ///
-    /// A window with nothing moving pays one `bool` and one `Option` read.
-    fn carry_live_journeys(&mut self, now: Instant) {
-        // The pictures, before anything is built from them and whether or not
-        // any journey is running: a frame composed for a keystroke shows the
-        // frame the decoder is on at the instant that frame is of, or a
-        // recording plays only while something else happens to be animating.
-        self.service_pictures(now);
-        // The cached one, whether or not anything else is running: a flight in
-        // hand is a flight whose two numbers this frame must be built from, and
-        // a window with no flight pays one `Option` read for the question.
-        self.sample_math_toggle(now);
-        let running = self.window.frame_clock.running();
-        if !running.any() {
-            return;
-        }
-        // **One rebuild and never two** (review 2026-09-18 round 2).
-        // `refresh_chrome` ends in `refresh_overlay` — the overlay is rebuilt
-        // from the same choke point the chrome is — so asking for both is asking
-        // for two overlay builds, which is what the review measured at four
-        // hundred a second. The chrome is the expensive lane, so it is asked for
-        // only when something that lives *in* it is mid-flight.
-        // Formula lanes are the one overlay content deliberately not rebuilt
-        // here: their owner is the frame at the present door, after every pane
-        // has been projected. If either formula journey is what made this lane
-        // live, that present-time rebuild also carries every other overlay lane,
-        // so rebuilding here would pay for the whole stack twice.
-        let formula_present = self.formula_overlay_is_active();
-        if formula_present {
-            self.window.formula_overlay_owed |= running.chrome || running.overlay;
-        }
-        if running.chrome {
-            if formula_present {
-                self.refresh_chrome_without_overlay();
-            } else {
-                self.refresh_chrome();
-            }
-        } else if running.overlay && !formula_present {
-            self.refresh_overlay();
-        }
-    }
-
-    /// **What is mid-flight in this window**, recomputed from scratch and told
-    /// to the frame clock once a turn (review 2026-09-18 round 2, P1).
-    ///
-    /// Every entry is a journey's own "am I still moving" — the predicate its
-    /// deadline is built from — and never the deadline itself, because several
-    /// of those also carry a clock that is not a tween: a tip's 380 ms before it
-    /// is shown, a notice's life running out, a glance card's grace. Waiting is
-    /// not moving, and a window that treated it as moving would rebuild its
-    /// interface on every keystroke for the length of every wait.
-    ///
-    /// **And every entry is arithmetic on the journey's own epoch** (review
-    /// round 3, 2026-09-18; `docs/DESIGN.md` §7.1.5p ⑬). Three of these used to
-    /// read a flag instead, and a flag is cleared by code — code that stands
-    /// behind the frame gate and that a neighbouring pane printing every five
-    /// milliseconds refuses for as long as it keeps printing. The toast's
-    /// `leaving` was the one round 3 measured at nine hundred and eighty-three
-    /// redundant overlay builds per thousand publishes; the tip's, the hint
-    /// card's and the glance card's *drawn* receipts were the same shape one
-    /// turn deep, each carrying once past its own landing. The receipts have not
-    /// gone anywhere — they are what schedules the landing frame, and they are
-    /// read by the deadlines and paid by the advances, which is where a debt
-    /// belongs. They are simply not liveness: a journey stops being live at the
-    /// instant its clock says so, whether or not anything has run.
-    ///
-    /// The cost is one pass of cheap predicates per turn, most of them an
-    /// `Option` read over an empty host. Two of them — the strip's and the
-    /// thumbs' — come from a walk the fold is about to make anyway, and are
-    /// handed in rather than walked twice.
-    fn running_journeys(&self, now: Instant, strip: bool, thumbs: bool) -> pace::Lanes {
-        let motion = self.app.motion;
-        let scale = self.window.renderer.scale_factor() as f32;
-        pace::Lanes {
-            // The strip's ring, the `˅`, a pane in flight, a card breathing, the
-            // dock's fade — and the card column's nudge, which lives here and
-            // not in the overlay: the bubble is an overlay layer but what the
-            // nudge moves is `focus_card_nudge_rows`, a chrome card. The chrome
-            // lane covers both, because `refresh_chrome` ends in
-            // `refresh_overlay`; the overlay lane would have moved the caption
-            // and left the picture (review round 3, 2026-09-18).
-            chrome: strip || self.window.card_hint.nudge_moving(now, motion),
-            overlay: thumbs
-                || self.window.tooltip.is_fading(now, motion)
-                || self.window.key_hint.is_fading(now, motion)
-                || self.window.toasts.is_animating(now, motion)
-                || self.command_flash_is_running(now)
-                || self.command_rails_are_moving(now)
-                || self.file_peek_is_fading(now)
-                || self.window.float.is_animating(now, motion, scale)
-                || self.math_tools_owe_frames(now),
-        }
     }
 
     /// Whether the jump's band is still on screen and still worth a frame — the
@@ -52346,31 +51675,6 @@ impl<B: Backend> Runtime<'_, B> {
             self.window.ime_report_due = Some(Instant::now() + Duration::from_secs(1));
         }
         self.write_ime_observation(if focused { "focus-gain" } else { "focus-loss" });
-    }
-
-    /// **The keyboard has moved; a composition does not follow it** (user report
-    /// 2026-09-12; `docs/DESIGN.md` §7.1.5a″).
-    ///
-    /// Called at the tail of every pass, beside [`Self::offer_ime_caret`] and
-    /// for that function's own stated reason: "every owner change" needs no list
-    /// of the ways the keyboard moves if the question is asked where every one
-    /// of them has already happened. A palette closing, a name box committing, a
-    /// capsule going away, a press landing in another pane, a tab switch and a
-    /// float closing are all one fact by the time this runs — the rung holding
-    /// the keyboard is not the rung the letters were typed into.
-    ///
-    /// Costs a comparison of two enums on the passes where nothing is being
-    /// composed, which is all of them but the ones a reader is typing Chinese
-    /// on.
-    fn settle_composition_owner(&mut self) -> Result<()> {
-        let holds_the_keyboard = ime_owner(self.keyboard_owner());
-        if !composition_outlived_its_field(self.window.composing, holds_the_keyboard) {
-            return Ok(());
-        }
-        let Some(started_in) = self.window.composing.take() else {
-            return Ok(());
-        };
-        self.cancel_composition(started_in, "settle_composition_owner")
     }
 
     /// **The one door a composition is ended through**, and everything that has
@@ -68079,21 +67383,6 @@ fn protocol_mouse_button(button: MouseButton) -> Option<input::MouseProtocolButt
     }
 }
 
-fn startup_poll_delay(first_text_presented: bool) -> Option<std::time::Duration> {
-    (!first_text_presented).then_some(STARTUP_PTY_POLL_INTERVAL)
-}
-
-/// Move a periodic owner's absolute appointment past the turn that just spent
-/// it. Merely reading the appointment never calls this function.
-fn advance_periodic_deadline(next: &mut Instant, now: Instant, interval: Duration) {
-    if *next > now {
-        return;
-    }
-    let missed = now.saturating_duration_since(*next).as_nanos() / interval.as_nanos() + 1;
-    let steps = u32::try_from(missed).unwrap_or(u32::MAX);
-    *next += interval * steps;
-}
-
 /// The longest a tab's name may be: `TITLE_MAX` (`docs/design/ui-mockup.html` line
 /// 2603).
 ///
@@ -72011,31 +71300,6 @@ fn frame_matches_grid(frame: &ViewportFrame, grid: GridSize) -> bool {
         && frame.grid_rows.get() == u32::from(grid.rows.get())
 }
 
-fn trace_unchanged_present(
-    enabled: bool,
-    gate: &mut present_gate::PresentGate,
-    source: FrameSource,
-    frame: Option<&ViewportFrame>,
-    slot_overwrites: u64,
-) {
-    gate.unchanged = gate.unchanged.saturating_add(1);
-    if !enabled {
-        return;
-    }
-    let started = Instant::now();
-    let content_fnv = frame.map_or(0, |frame| frame_content_digest(frame).content_fnv);
-    let alternate = frame.is_some_and(frame_is_alternate_screen);
-    crate::diagnostics::stderr_line(format!(
-        "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={} present_unchanged={} slot_overwrites={}",
-        source,
-        content_fnv,
-        u8::from(alternate),
-        started.elapsed().as_micros(),
-        gate.unchanged,
-        slot_overwrites,
-    ));
-}
-
 fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bool {
     previous.columns == next.columns
         && previous.grid_rows == next.grid_rows
@@ -72063,38 +71327,6 @@ fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bo
         // read `horizontal` off it. Keeping the old frame keeps the old origin,
         // and the next click lands on the column the reader has already left.
         && previous.horizontal == next.horizontal
-}
-
-fn pty_frame_is_unchanged(
-    pending: Option<&ViewportFrame>,
-    last_presented: Option<&ViewportFrame>,
-    next: &ViewportFrame,
-) -> bool {
-    pending
-        .or(last_presented)
-        .is_some_and(|previous| presentation_equivalent(previous, next))
-}
-
-/// Whether a PTY drain says nothing the glass is not already showing.
-///
-/// **Two halves, because a window is not one pane.** `focused_frame_unchanged`
-/// is [`pty_frame_is_unchanged`]'s answer, and it is an answer about exactly one
-/// pane: the frame [`Runtime::publish_frame_inner`] composed is the focused
-/// leaf's, and the frame it was compared against is the focused leaf's.
-/// `unpainted_pane_output` is the rest of the window — see
-/// [`WindowRuntime::unpainted_pane_output`] for what it costs to leave it out.
-///
-/// A drain may be dropped only when both halves are quiet. A sibling pane that
-/// has spoken makes the window's content new however still the focused pane is,
-/// and the composed frame — identical though it may be — is the vehicle every
-/// other pane rides to the screen on: `redraw` is where they are projected, and
-/// `redraw` runs for a frame that entered the slot and for nothing else.
-///
-/// Written as a free function taking the two facts rather than as a condition
-/// inside the publish, so that the *previous* policy — the focused frame alone —
-/// can be run through the same machinery by a test and shown to lose the pane.
-fn pty_drain_says_nothing_new(focused_frame_unchanged: bool, unpainted_pane_output: bool) -> bool {
-    focused_frame_unchanged && !unpainted_pane_output
 }
 
 /// Whether the tab strip's animation is allowed to move again.
@@ -72282,79 +71514,6 @@ fn pages_that_move_with_their_panes(
         .copied()
         .filter(|(was, now)| was != now && hosted.contains(was))
         .collect()
-}
-
-/// **Whether a redraw request that found nothing composed still owes the glass
-/// a present** (§7.10 ④‴).
-///
-/// [`Runtime::redraw`] used to answer this with `chrome_present_pending` alone,
-/// and for a tab with a shell that is the whole truth: everything that changes
-/// such a window either publishes a frame (which is then in the slot) or files
-/// this debt on its way to asking for a redraw.
-///
-/// **It is not the whole truth for a tab with no shell** (§7.1.6h), and that is
-/// the second half. Three funnels in this window answer a change that lives in
-/// retained renderer state by putting the picture that is *already on the glass*
-/// back into the slot and asking for a redraw —
-/// [`Runtime::present_chrome_change`], [`Runtime::present_peek_overlay`] and
-/// [`Runtime::represent_on_screen_frame`]. Each of them can only do the first
-/// half when there is a terminal picture to re-queue, and a tab made of a folder
-/// or a file has none, ever: `publish_frame_inner` composes none for it, and
-/// `activate_tab` empties `last_presented_frame` on the way in. So the redraw
-/// those funnels asked for arrived at a slot that was empty and a flag that was
-/// false, and was dropped — which on the machine is a preview pane, alone in a
-/// tab, whose wheel scrolls the document in memory and never draws it: **ten
-/// notches, ten scroll offsets, zero frames** (measured 2026-08-30).
-///
-/// The reading is the one `present_retained_picture` already writes down in its
-/// own words — "for it this is not the fallback path but the **only** path". A
-/// window with no shell in front of it has exactly one kind of frame, so every
-/// redraw it is asked for is that kind.
-///
-/// Costs a tab with a shell nothing: it is the same `chrome_present_pending`
-/// question it always was, and `present_retained_picture`'s own first guard
-/// turns straight back round for a shell that has not presented yet.
-#[must_use]
-fn a_bare_redraw_still_owes_a_present(chrome_present_pending: bool, tab_has_a_shell: bool) -> bool {
-    chrome_present_pending || !tab_has_a_shell
-}
-
-/// Whether a chrome animation's tick can be answered from the picture already
-/// on the glass instead of composing a new one.
-///
-/// **This is the whole of the P0 fix, as one question.** The tab strip's
-/// indeterminate ring turns at 60Hz for as long as any session has a command
-/// running, and every one of those ticks used to publish a whole-window frame:
-/// grid capture, viewport projection, inline-reference scan, IME re-anchor,
-/// text re-shaping — all to redraw a fifteen-pixel arc one degree further round.
-/// Measured at 6-8ms of main-thread CPU per tick, against a design comment that
-/// budgeted 16.5µs (see [`pace::DEFAULT_FRAME_INTERVAL`]). A command emitting *zero
-/// bytes* cost 69% of a core.
-///
-/// The licence to reuse rests on one property of this app: **nothing repaints
-/// unless something calls [`Runtime::publish_frame`]**. A fresh idle window
-/// publishes no frames at all and sits at 0.0% CPU, which is only true because
-/// every content change already announces itself with its own publish. So an
-/// animation tick that re-presents what is on the glass is never *less* correct
-/// than what already happens on the frames where `refresh_chrome` reports
-/// nothing moved, which is to present nothing whatsoever.
-///
-/// The revisions guard the one case that argument does not cover: a picture
-/// that was composed but has not reached the glass yet. Then the newest thing
-/// anyone has said is not what is being shown, and the tick composes.
-fn chrome_tick_reuses_picture(picture: PictureOnGlass) -> bool {
-    // A frame is already composed and queued; this tick's redraw request will
-    // present it. Composing a second one on top would throw the first away.
-    if picture.frame_pending {
-        return true;
-    }
-    // Nothing to reuse. One window, once.
-    if !picture.has_presented_frame {
-        return false;
-    }
-    // A held picture is the picture, by decision. Composing under a hold builds
-    // a frame the hold discards a few lines later.
-    picture.presentation_hold || picture.presented_revision == picture.content_revision
 }
 
 /// **R2's zone, as a decision instead of a method** — everything the icon rail

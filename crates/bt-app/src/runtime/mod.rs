@@ -73,6 +73,13 @@ pub(crate) use floats::{
     refused_preview_card,
 };
 #[cfg(test)]
+pub(crate) use frame::{
+    a_bare_redraw_still_owes_a_present, advance_periodic_deadline, attention_ledger_deadline,
+    chrome_over, chrome_tick_reuses_picture, dispatch_tab_decoration_tasks,
+    earliest_named_deadline, pty_drain_says_nothing_new, pty_frame_is_unchanged,
+    startup_poll_delay, take_math_worker_notice,
+};
+#[cfg(test)]
 pub(crate) use git::{
     float_git_page_shown, git_answer_notice, git_full_path, git_roots_on_glass,
     git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, graph_key_of,

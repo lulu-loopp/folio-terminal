@@ -3,10 +3,10 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    AppEvent, LeafId, PageKeepsake, PreviewSurface, RenameExit, Runtime, TabRename, WebHeadVerb,
-    WebPlacement, hang_watch, input, marks, page_destination, preview, preview_image_placement,
-    restore, seats, shown_address, source_opens_as_a_page, web_thumb, web_trace, web_warmup,
-    webhost, webnav, websheet,
+    AppEvent, FOOT_REVEAL_FEEDBACK, LeafId, PageKeepsake, PreviewSurface, RenameExit, Runtime,
+    TabRename, WebHeadVerb, WebPlacement, hang_watch, input, marks, page_destination, preview,
+    preview_image_placement, restore, seats, shown_address, source_opens_as_a_page, web_thumb,
+    web_trace, web_warmup, webhost, webnav, websheet,
 };
 use anyhow::{Result, anyhow};
 use bt_layout::SeatId;
@@ -2087,6 +2087,47 @@ impl<B: Backend> Runtime<'_, B> {
                 let _ = proxy.send_event(AppEvent::WebPageSpoke);
             })
         })
+    }
+
+    /// A page's magnification has been said long enough: the foot goes back to
+    /// being the hover line (user ruling 2026-08-25).
+    ///
+    /// [`Self::advance_foot_reveal`]'s twin, and it is a twin rather than a line
+    /// inside it for the same reason that one is not a line inside
+    /// `advance_float`: **the slot is cleared here and not merely ignored by the
+    /// reader**, because a slot that stayed full would hand
+    /// [`Self::next_deadline`] a wake-up that is already in the past on every
+    /// turn for the rest of the session — the `WaitUntil` pin's own definition
+    /// of a loop that never sleeps.
+    pub(crate) fn advance_page_foot_clocks(&mut self, now: Instant) -> Result<()> {
+        let expired: Vec<LeafId> = self
+            .window
+            .web
+            .iter()
+            .filter(|(_, web)| {
+                let over = |at: Instant| now.saturating_duration_since(at) >= FOOT_REVEAL_FEEDBACK;
+                web.zoom_said().is_some_and(|(_, at)| over(at))
+                    || web.dialog_said().is_some_and(over)
+            })
+            .map(|(leaf, _)| *leaf)
+            .collect();
+        if expired.is_empty() {
+            return Ok(());
+        }
+        for leaf in expired {
+            if let Some(web) = self.window.web.get_mut(&leaf) {
+                hang_watch::during(hang_watch::Station::ClockWebZoom, || {
+                    web.forget_the_zoom_it_said()
+                });
+                hang_watch::during(hang_watch::Station::ClockWebDialog, || {
+                    web.forget_the_dialog_it_said()
+                });
+            }
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 }
 

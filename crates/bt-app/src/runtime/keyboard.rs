@@ -9,11 +9,11 @@ use crate::window_seam::prelude::*;
 use crate::{
     ImeCaretSource, ImeOwner, KeyboardOwner, LeafId, NewWindowPlan, NoticeHost, PreviewSurface,
     RenameClipboard, RenameExit, RenameVerdict, Runtime, Step, UserInputKind, composing_event_of,
-    composition_ruling, git_graph, goto_tab_index, hang_watch, ime_caret_source, ime_commit_bytes,
-    ime_cursor_area_of, ime_outbound, ime_owner, ime_report, input, keyboard_owner_is_a_shell,
-    keyhint, marks, menubar, paste_card_key, popup_takes_the_key, preedit_caret_byte, profiles,
-    quit, rename_key, rename_pastes, restore, settings, settings_key_of, shortcuts,
-    terminal_ime_cursor_area, toast, write_pty_input,
+    composition_outlived_its_field, composition_ruling, git_graph, goto_tab_index, hang_watch,
+    ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
+    input, keyboard_owner_is_a_shell, keyhint, marks, menubar, paste_card_key, popup_takes_the_key,
+    preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore, settings,
+    settings_key_of, shortcuts, terminal_ime_cursor_area, toast, write_pty_input,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
@@ -2426,6 +2426,31 @@ impl<B: Backend> Runtime<'_, B> {
                 })
             }
         }
+    }
+
+    /// **The keyboard has moved; a composition does not follow it** (user report
+    /// 2026-09-12; `docs/DESIGN.md` §7.1.5a″).
+    ///
+    /// Called at the tail of every pass, beside [`Self::offer_ime_caret`] and
+    /// for that function's own stated reason: "every owner change" needs no list
+    /// of the ways the keyboard moves if the question is asked where every one
+    /// of them has already happened. A palette closing, a name box committing, a
+    /// capsule going away, a press landing in another pane, a tab switch and a
+    /// float closing are all one fact by the time this runs — the rung holding
+    /// the keyboard is not the rung the letters were typed into.
+    ///
+    /// Costs a comparison of two enums on the passes where nothing is being
+    /// composed, which is all of them but the ones a reader is typing Chinese
+    /// on.
+    pub(crate) fn settle_composition_owner(&mut self) -> Result<()> {
+        let holds_the_keyboard = ime_owner(self.keyboard_owner());
+        if !composition_outlived_its_field(self.window.composing, holds_the_keyboard) {
+            return Ok(());
+        }
+        let Some(started_in) = self.window.composing.take() else {
+            return Ok(());
+        };
+        self.cancel_composition(started_in, "settle_composition_owner")
     }
 }
 
