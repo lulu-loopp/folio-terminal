@@ -79,7 +79,6 @@ TabState.resize_present_owed	-	PROJ	frame	the 2026-09-25 table
 TabState.seat_layout	-	VIEW	panes	the 2026-09-25 table
 TabState.seat_overflow	-	PROJ	panes	the 2026-09-25 table
 TabState.seats	-	HUB	panes	the 2026-09-25 table
-TabState.terminal_column_hover	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.active_tab	-	HUB	tabs	the 2026-09-25 table
 WindowRuntime.advanced_reveal_sample	-	PROJ	main[settings]	the 2026-09-25 table
 WindowRuntime.animations	-	PROJ	preview	the 2026-09-25 table

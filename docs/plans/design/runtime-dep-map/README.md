@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **593 items, 446 free functions and 147 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 16's head; 613, 460 and 153 before it,
+- **unclassified.tsv**: **538 items, 411 free functions and 127 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 17's head; 593, 446 and 147 before it,
+  613, 460 and 153 before batch 16,
   640, 476 and 164 before batch 15,
   667, 495 and 172 before batch 14,
   696, 509 and 187 before batch 13,
@@ -126,14 +127,15 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 15 | `runtime/keyboard.rs` | moved by batch 15 (19 items; `Runtime::answer_quit_card` and `Runtime::note_user_typing` went to `runtime/windows.rs` and `runtime/terminal.rs` by their census owners and `Runtime::page_carried_by` to `runtime/floats.rs` by the owner column, below; `Runtime::show_settings_choice_at`, `Runtime::shortcut_focus`, `Runtime::apply_settings_choice`, `Runtime::toggle_settings_panel`, `Runtime::woke_terminal_thumb`, `ime_owner`, `popup_takes_the_key`, `terminal_ime_cursor_area`, `Runtime::send_user_input`, `Runtime::return_to_live_for_input` and `Runtime::cancel_composition` held, below), with five tails into `runtime/math.rs` and `runtime/frame.rs` | — |
    | 16 | `runtime/tabs.rs` | moved by batch 16 (14 items, with `tab_surface` by the owner column, closing the batch 1 tie row above; `tear_pane_into_tab` and `Runtime::arrival_fits` went to `runtime/panes.rs` and `Runtime::line_height_subpixels` to `runtime/mouse.rs`, below; `strip_insert_slot`, `solve_seats`, `presentation_physical_size`, `pane_can_become_a_tab`, `land_birth_death_fallback_shell`, `pane_into_tab`, `absorb_tab_sessions`, `pane_into_new_tab` and `Runtime::toggle_pin` held, below), with `grabbed_offset` and `new_tab_cwd` as tails | — |
    | 17 | `runtime/panes.rs` | 33 (24 + 9) | 65 |
-   | 18 | `runtime/mouse.rs` | 49 (29 + 20) | 81 |
+   | 18 | `runtime/mouse.rs` | moved by batch 17, before row 17 by the live map (47 items with the ties `Runtime::glass_here`, `Runtime::note_terminal_thumb_hover`, `route_forwarded_mouse_button` and `Runtime::focus_pane_at` and five tails; `Runtime::browse_for_root`, `Runtime::toggle_switcher_pin` and the tail `switcher_pin_is_allowed` went to `runtime/files.rs` and `Runtime::settle_home` to `runtime/tabs.rs` by their census owners, and the tails `Runtime::command_tick_card`, `Runtime::woke_terminal_thumb`, `page_destination` and `switcher_row_destination` to `runtime/tooltips.rs`, `runtime/terminal.rs` and `runtime/web.rs` by the owner column, below; `Runtime::scroll_settings`, `Runtime::settings_mouse_input`, `Runtime::open_settings_on_row`, `Runtime::toggle_settings_panel`, `Runtime::send_user_input` and `Runtime::toggle_pin` held, below) | — |
    | 19 | `runtime/preview.rs` | 91 (72 + 19) | 144 |
 
    **From batch 14 on, the order is the live map's** (ruled at batch 14). The smallest-sum-first rule above is
    applied to the map regenerated at each batch's base, not to this table's numbers, which were read at batch 1's
    head and drift as items move. At batch 14's base `runtime/math.rs` had 16 items (11 + 5) with a sum of 44 and
    `runtime/keyboard.rs` 26 (14 + 12) with a sum of 52, so math went first. The rows not yet moved keep their batch
-   1 numbers; each batch's judgement reads the live ones.
+   1 numbers; each batch's judgement reads the live ones. At batch 17's base `runtime/mouse.rs` had 44 items
+   (28 + 16) with a sum of 70 and `runtime/panes.rs` 33 (24 + 9) with a sum of 75, so row 18 went before row 17.
 
    **An item stays in `main.rs`, whatever its `called_from` row proposes, when moving it would make a field it
    writes a multi-writer fact** (the ownership census refuses a new one without a ruled owner; the standing rule is
@@ -192,13 +194,28 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    `Runtime::arrival_fits` (panes/tabs) to `runtime/panes.rs`, which owns the move of panes;
    `Runtime::line_height_subpixels` (mouse/tabs, a wheel notch's distance) to `runtime/mouse.rs`, which owns the
    wheel; and `tab_surface` (profiles/tabs, the batch 1 tie row) to `runtime/tabs.rs`, which owns the tab strip.
+   Batch 17 sent three methods whose first caller is `runtime/mouse.rs` to their facts' owners by clause (a):
+   `Runtime::browse_for_root` (`WindowRuntime.folder_pick`) and `Runtime::toggle_switcher_pin` (`App.pins_store`),
+   both owned by files, to `runtime/files.rs`, with `switcher_pin_is_allowed` as a tail; and `Runtime::settle_home`
+   (`TabState.flip`, owner tabs) to `runtime/tabs.rs`. It settled its ties by clause (b): `Runtime::glass_here`
+   (clipboard/mouse) and `Runtime::note_terminal_thumb_hover` and `route_forwarded_mouse_button` (mouse/pointer,
+   which §13 does not list) to `runtime/mouse.rs`, which owns drag and drop, hover and `mouse_input`'s rungs;
+   `Runtime::focus_pane_at` (mouse/preview/web) to `runtime/mouse.rs`, which already writes its one fact; and,
+   among the tails, `link_target_to_ask_about` (mouse/terminal) to `runtime/mouse.rs`, which owns asking about the
+   link under the pointer, `Runtime::command_tick_card` (mouse/tooltips, the rail's glance card) to
+   `runtime/tooltips.rs`, `Runtime::woke_terminal_thumb` (keyboard/terminal) to `runtime/terminal.rs`, which owns
+   the scroll and column bars, and `page_destination` (files/preview/web, a stored row's navigation, which
+   `runtime/web.rs`'s `revived_page_of` already asks) to `runtime/web.rs`, with its tail
+   `switcher_row_destination`.
 
    **A product caller in another `runtime/` file imports the moved item from its new path** (`use
    crate::runtime::<topic>::<item>;`, an import line and no body text; ruled at batch 7). What stays forbidden is a
    non-test `use runtime::…` at the crate root to keep a root caller compiling: an item with a product caller at the
    root waits until that caller moves. A caller inside the target module that named the item by its root path drops
    the `crate::` prefix (`crate::x(` becomes `x(`; ruled at batch 8, where five calls in `runtime/peek.rs` did); no
-   root re-export.
+   root re-export. A caller in another `runtime/` file that named the item by its root path imports it and drops
+   the prefix the same way (ruled at batch 17, where `runtime/pointer/release.rs` called
+   `crate::button_router_position(`).
 
    **Held items** (each row's generated `called_from` home is not where it goes):
    - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).
@@ -249,7 +266,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `runtime/math.rs`.
    - `Runtime::glass_here` — tied `runtime/clipboard.rs` / `runtime/mouse.rs`; its doc makes it the one door
      `Self::drive_drag` asks before it surveys, and the owner column gives "drag and drop" to `runtime/mouse.rs`;
-     it moves with the mouse batch.
+     batch 17 moved it there.
    - `Runtime::sweep_foot_phrases` — its `called_from` home is `runtime/floats.rs`, but it writes
      `WindowRuntime.foot_phrases`, whose other writer, `Runtime::foot_saying`, stays at the root (the census rule
      above); it moves when `foot_saying` does.
@@ -288,7 +305,8 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `runtime/keyboard.rs` (tied for the last three), but `Runtime::show_open_settings_choice`,
      `FolioApp::refresh_main_menu` and `install_main_menu`, `Runtime::settings_mouse_input`,
      `Runtime::open_settings_on_row` and `Runtime::press_terminal_thumb` at the root call them in the product (the
-     rule above).
+     rule above). Batch 17 moved `Runtime::press_terminal_thumb` to `runtime/mouse.rs` and
+     `Runtime::woke_terminal_thumb` with it, as a tail, to `runtime/terminal.rs` (above).
    - `ime_owner`, `popup_takes_the_key` and `terminal_ime_cursor_area` (batch 15) — `ime_outbound.rs`, a child of
      the crate root outside `runtime/`, names them through `use super::*`; moving them would need a root re-export,
      so they stay, as `presentation_equivalent` does.
@@ -313,6 +331,12 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    - `Runtime::toggle_pin` (batch 16) — tied `runtime/mouse.rs` / `runtime/tabs.rs`; it writes `TabState.pinned`,
      whose other writer, `absorb_tab_sessions`, is held at the root, so moving it would make that fact a new
      two-module one (the census rule above). It moves with `absorb_tab_sessions`.
+   - `Runtime::scroll_settings`, `Runtime::settings_mouse_input` and `Runtime::open_settings_on_row` (batch 17) —
+     their `called_from` home is `runtime/mouse.rs`, but each writes `WindowRuntime.settings_scroll`, whose census
+     owner is `main[settings]` and whose writers are the root, `runtime/keyboard.rs` and `runtime/profiles.rs`;
+     `runtime/mouse.rs` would be a new writer, and K2 opens no `runtime/settings.rs`, so they stay, as
+     `paste_into_settings_field` does. `Runtime::toggle_settings_panel` (tied with `runtime/keyboard.rs` and the
+     root) stays with them: its root caller is `Runtime::open_settings_on_row`, and it writes `settings_scroll` too.
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,
