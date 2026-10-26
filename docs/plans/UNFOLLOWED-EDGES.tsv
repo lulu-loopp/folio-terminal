@@ -2146,7 +2146,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::reread_schemes	Ambiguous	to_own
 crates/bt-app/src/main.rs	bt-app crate::Runtime::reseed_editor_env	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::reseed_editor_env	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::retire_the_stand_in	Ambiguous	saturating_sub	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::row_adopt_fits	Ambiguous	is_some	2	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::row_payload	Ambiguous	then	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_content	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_content	Ambiguous	map	1	
@@ -2160,9 +2159,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_layout	Ambiguous	unwra
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_values	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_values	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settle_home	Ambiguous	len	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	collect	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	filter_map	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::toggle_advanced_group	Ambiguous	retarget	1	
 crates/bt-app/src/main.rs	bt-app crate::SURFACE_SELFTEST_AFTER	Ambiguous	ok	2	
 crates/bt-app/src/main.rs	bt-app crate::SURFACE_SELFTEST_AFTER	Ambiguous	parse	1	
@@ -2305,7 +2301,6 @@ crates/bt-app/src/main.rs	bt-app crate::earliest_deadline	Ambiguous	flatten	1
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	into_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	unwrap_or	1	
-crates/bt-app/src/main.rs	bt-app crate::exited_tabs_the_loop_may_close	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::files_program_refused_notice	Ambiguous	text	1	
 crates/bt-app/src/main.rs	bt-app crate::files_row_display_name	Ambiguous	into_owned	2	
 crates/bt-app/src/main.rs	bt-app crate::files_row_display_name	Ambiguous	is_empty	1	
@@ -2401,8 +2396,6 @@ crates/bt-app/src/main.rs	bt-app crate::page_foot_flash	Dynamic	latest	3
 crates/bt-app/src/main.rs	bt-app crate::pane_into_new_tab	Ambiguous	unwrap_or_default	6	
 crates/bt-app/src/main.rs	bt-app crate::pane_into_new_tab	Dynamic	solve	1	
 crates/bt-app/src/main.rs	bt-app crate::pane_into_tab	Dynamic	solve	2	
-crates/bt-app/src/main.rs	bt-app crate::pane_strip_landing	Ambiguous	flatten	1	
-crates/bt-app/src/main.rs	bt-app crate::pane_strip_landing	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::panic_alert_text	Ambiguous	to_string	1	
 crates/bt-app/src/main.rs	bt-app crate::panic_log_path	Ambiguous	join	1	
 crates/bt-app/src/main.rs	bt-app crate::panic_selftest_if_due	Ambiguous	elapsed	1	
@@ -4693,9 +4686,13 @@ crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exi
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	spawn	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	then	2	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exited_tabs	Ambiguous	to_string	1	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::row_adopt_fits	Ambiguous	is_some	2	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `row_adopt_fits` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::settled_tab_ink	Ambiguous	collect	2	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::settled_tab_ink	Ambiguous	filter_map	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::settled_tab_ink	Ambiguous	map	1	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::slot_starts	Ambiguous	collect	1	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `slot_starts` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::slot_starts	Ambiguous	filter_map	1	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `slot_starts` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::slot_starts	Ambiguous	unwrap_or_default	1	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `slot_starts` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::survey_strip	Ambiguous	flatten	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::survey_strip	Ambiguous	is_some_and	2	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::survey_strip	Ambiguous	then	1	
@@ -4703,6 +4700,7 @@ crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::tab_inde
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::tab_menu_key	Ambiguous	has_submenu	2	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::tab_menu_key	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::withdraw_a_blank_page	Ambiguous	unwrap_or_default	1	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::exited_tabs_the_loop_may_close	Ambiguous	collect	1	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `exited_tabs_the_loop_may_close` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	and_then	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	as_bytes	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	into_owned	1	
@@ -4710,6 +4708,8 @@ crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	map_or_else	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	text	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	to_string_lossy	1	
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_strip_landing	Ambiguous	flatten	1	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `pane_strip_landing` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::pane_strip_landing	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `pane_strip_landing` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::begin_local_selection	Ambiguous	clone	3	
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::begin_local_selection	Ambiguous	context	4	
 crates/bt-app/src/runtime/terminal.rs	bt-app crate::runtime::terminal::Runtime::command_marks_watermark	Ambiguous	wrapping_add	1	

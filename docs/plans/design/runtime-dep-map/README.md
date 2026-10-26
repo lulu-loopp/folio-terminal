@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **613 items, 460 free functions and 153 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 15's head; 640, 476 and 164 before it,
+- **unclassified.tsv**: **593 items, 446 free functions and 147 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 16's head; 613, 460 and 153 before it,
+  640, 476 and 164 before batch 15,
   667, 495 and 172 before batch 14,
   696, 509 and 187 before batch 13,
   713, 525 and 188 before batch 12,
@@ -108,7 +109,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | # | topic | items (functions + methods) | call sites in |
    |---:|---|---:|---:|
    | 1 | `runtime/pointer/ending.rs`, `runtime/pointer/mod.rs`, `runtime/diagnostics.rs`, `runtime/profiles.rs`, `runtime/search.rs`, `runtime/tooltips.rs` | moved by batch 1 | — |
-   | — | `runtime/profiles.rs` | 1 (1 + 0): `tab_surface`, tied with `runtime/tabs.rs` | 2 |
+   | — | `runtime/profiles.rs` | closed by batch 16: `tab_surface`, tied with `runtime/tabs.rs`, went to `runtime/tabs.rs` by the owner column (§13 gives it the tab strip) | — |
    | 2 | `runtime/web.rs` | moved by batch 2 | — |
    | 3 | `runtime/dpi.rs` | moved by batch 3 (4 items; `files_float_content_height`, tied with `runtime/floats.rs`, waits for that batch; `release_due_leaf_resize` stays in `main.rs`, the single writer road of `LeafSession.birth` and `.grid`), with `Runtime::page_shrinker` as the web batch's tail | — |
    | 4 | `runtime/attention.rs` | moved by batch 4 (4 items; `Runtime::reveal_in_explorer`, tied with `runtime/configuration.rs` and `runtime/floats.rs`, held for a ruling, below) | — |
@@ -123,7 +124,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 13 | `runtime/frame.rs` | moved by batch 13 (24 items; five more went to the census owners of the facts they write, `runtime/terminal.rs`, `runtime/handoff.rs`, `runtime/web.rs`, `runtime/math.rs` and `runtime/keyboard.rs`, below; `Runtime::note_card_hint`, `Runtime::advance_card_hint`, `Runtime::advance_scheme_watch`, `Runtime::advance_storage_watch`, `mark_leaf_painted` and `math_copy_window` held, below) | — |
    | 14 | `runtime/math.rs` | moved by batch 14 (17 items with `math_copy_window`; the ties `Runtime::root_choices` and `rail_overlay_layer` went to `runtime/profiles.rs` and `runtime/panes.rs` by the owner column; `math_em_milli` and `window_layout_key` held, below), with eight tails: six into `runtime/frame.rs`, `composition_outlived_its_field` into `runtime/keyboard.rs` and `Runtime::collecting_card_speakers` into `runtime/terminal.rs` (`presentation_equivalent` held, below) | — |
    | 15 | `runtime/keyboard.rs` | moved by batch 15 (19 items; `Runtime::answer_quit_card` and `Runtime::note_user_typing` went to `runtime/windows.rs` and `runtime/terminal.rs` by their census owners and `Runtime::page_carried_by` to `runtime/floats.rs` by the owner column, below; `Runtime::show_settings_choice_at`, `Runtime::shortcut_focus`, `Runtime::apply_settings_choice`, `Runtime::toggle_settings_panel`, `Runtime::woke_terminal_thumb`, `ime_owner`, `popup_takes_the_key`, `terminal_ime_cursor_area`, `Runtime::send_user_input`, `Runtime::return_to_live_for_input` and `Runtime::cancel_composition` held, below), with five tails into `runtime/math.rs` and `runtime/frame.rs` | — |
-   | 16 | `runtime/tabs.rs` | 20 (16 + 4) | 54 |
+   | 16 | `runtime/tabs.rs` | moved by batch 16 (14 items, with `tab_surface` by the owner column, closing the batch 1 tie row above; `tear_pane_into_tab` and `Runtime::arrival_fits` went to `runtime/panes.rs` and `Runtime::line_height_subpixels` to `runtime/mouse.rs`, below; `strip_insert_slot`, `solve_seats`, `presentation_physical_size`, `pane_can_become_a_tab`, `land_birth_death_fallback_shell`, `pane_into_tab`, `absorb_tab_sessions`, `pane_into_new_tab` and `Runtime::toggle_pin` held, below), with `grabbed_offset` and `new_tab_cwd` as tails | — |
    | 17 | `runtime/panes.rs` | 33 (24 + 9) | 65 |
    | 18 | `runtime/mouse.rs` | 49 (29 + 20) | 81 |
    | 19 | `runtime/preview.rs` | 91 (72 + 19) | 144 |
@@ -185,6 +186,12 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    `runtime/terminal.rs`. It settled `preedit_caret_byte` (keyboard/preview) by clause (b), since §13 gives the IME
    caret to `runtime/keyboard.rs`, and sent `Runtime::page_carried_by` (keyboard/panes, a float's page, which §13
    gives to neither) to `runtime/floats.rs` by a ruled owner-column exception, as `float_dock_label`.
+   Batch 16 sent `tear_pane_into_tab`, whose first caller is `runtime/tabs.rs`, to `runtime/panes.rs` by clause (a):
+   it writes `TabState.seats` (owner panes), which `runtime/panes.rs` writes and `runtime/tabs.rs` does not, and
+   `TabState.landing`, of which it is the only writer, moved with it. It settled three ties by clause (b):
+   `Runtime::arrival_fits` (panes/tabs) to `runtime/panes.rs`, which owns the move of panes;
+   `Runtime::line_height_subpixels` (mouse/tabs, a wheel notch's distance) to `runtime/mouse.rs`, which owns the
+   wheel; and `tab_surface` (profiles/tabs, the batch 1 tie row) to `runtime/tabs.rs`, which owns the tab strip.
 
    **A product caller in another `runtime/` file imports the moved item from its new path** (`use
    crate::runtime::<topic>::<item>;`, an import line and no body text; ruled at batch 7). What stays forbidden is a
@@ -290,6 +297,22 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      either home would be a new writer of the other's fact. Held for a ruling (the two-owners clause above).
    - `Runtime::return_to_live_for_input` (batch 15) — tied `main.rs` / `runtime/keyboard.rs`; its root caller is
      `Runtime::send_user_input`, held above, so it waits for it.
+   - `strip_insert_slot`, `solve_seats`, `presentation_physical_size` and `pane_can_become_a_tab` (batch 16) — their
+     `called_from` home is `runtime/tabs.rs` (tied with `main.rs` for the last), but `cli_tab_slot`,
+     `create_tab_state` and `Runtime::create`, `Runtime::create`, and `plan_for` at the root call them in the
+     product (the rule above).
+   - `land_birth_death_fallback_shell` (batch 16) — its `called_from` home is `runtime/tabs.rs`, but it writes
+     `LeafSession.spawn_fallback`, whose census owner is the root's leaf-birth road (`finish_leaf_birth`), and
+     `runtime/tabs.rs` would be a new writer; by clause (a) it stays with its owner.
+   - `pane_into_tab`, `absorb_tab_sessions` and `pane_into_new_tab` (batch 16) — their `called_from` home is
+     `runtime/tabs.rs` (the last two are tails of this batch's moves), but each writes facts of more than one census
+     owner and would make `runtime/tabs.rs` a new writer of some: `pane_into_tab` of panes' (`focused_leaf`,
+     `seats`, `seat_layout`, `seat_overflow`) and preview's (`preview_views`); `absorb_tab_sessions` of panes',
+     tabs' (`pinned`) and preview's; `pane_into_new_tab` of files', git's and preview's. Held for a ruling (the
+     two-owners clause above).
+   - `Runtime::toggle_pin` (batch 16) — tied `runtime/mouse.rs` / `runtime/tabs.rs`; it writes `TabState.pinned`,
+     whose other writer, `absorb_tab_sessions`, is held at the root, so moving it would make that fact a new
+     two-module one (the census rule above). It moves with `absorb_tab_sessions`.
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,

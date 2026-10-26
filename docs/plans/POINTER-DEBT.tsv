@@ -49,7 +49,6 @@ crate::Runtime::settings_mouse_input	N-E	crate
 crate::Runtime::settings_mouse_input	N-P	crate
 crate::Runtime::settings_mouse_input	N-P	crate
 crate::Runtime::toggle_settings_panel	N-P	crate
-crate::Runtime::track_grabbed	N-E	crate
 crate::TabPress::armed	N-E	crate
 crate::TabPress::settled	N-E	crate
 crate::TabPress::travelled	N-E	crate
@@ -483,6 +482,7 @@ crate::runtime::tabs::Runtime::scroll_tab_strip	N-P	crate::runtime::tabs
 crate::runtime::tabs::Runtime::settle_strip_reorder	N-E	crate::runtime::tabs
 crate::runtime::tabs::Runtime::survey_strip	N-E	crate::runtime::tabs
 crate::runtime::tabs::Runtime::tab_list_target_at	N-E	crate::runtime::tabs
+crate::runtime::tabs::Runtime::track_grabbed	N-E	crate::runtime::tabs
 crate::runtime::terminal (outside any item)	N-E	crate::runtime::terminal
 crate::runtime::terminal::Runtime::screen_to_client	N-E	crate::runtime::terminal
 crate::runtime::terminal::Runtime::screen_to_client	N-E	crate::runtime::terminal

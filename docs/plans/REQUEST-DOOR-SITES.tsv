@@ -1149,9 +1149,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_layout	Ambiguous	unwra
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_values	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_values	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settle_home	Ambiguous	len	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	filter_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::slot_starts	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::write_editor_field	Path	ProfilesNameBlank	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::write_editor_field	Path	ProfilesNameTaken	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::write_editor_field	Path	ProfilesProgramHasArguments	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1272,8 +1269,6 @@ crates/bt-app/src/main.rs	bt-app crate::ensure_swapchain_matches_inner	Macro	ens
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	into_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	to_string_lossy	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	unwrap_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::exited_tabs_the_loop_may_close	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::exited_tabs_the_loop_may_close	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::files_a_tab_stands_on	Ambiguous	into_path_and_tail	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::files_program_refused_notice	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::files_program_refused_notice	Path	FilesProgramRefused	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -3128,8 +3123,13 @@ crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::reap_exi
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::settled_tab_ink	Ambiguous	collect	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::settled_tab_ink	Ambiguous	filter_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::settled_tab_ink	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::slot_starts	Ambiguous	collect	1	unreviewed	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `slot_starts` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::slot_starts	Ambiguous	filter_map	1	unreviewed	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `slot_starts` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::slot_starts	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `slot_starts` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::tab_index	Ambiguous	unwrap_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::withdraw_a_blank_page	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::exited_tabs_the_loop_may_close	Ambiguous	collect	1	unreviewed	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `exited_tabs_the_loop_may_close` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::exited_tabs_the_loop_may_close	Ambiguous	filter	1	unreviewed	2026-10-26: T-SPLIT-2B batch 16; the same site, moved by K2 batch 16 with `exited_tabs_the_loop_may_close` from main.rs into runtime/tabs.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	and_then	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	as_bytes	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::keep_birth_death_face	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
