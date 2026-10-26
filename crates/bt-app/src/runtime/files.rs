@@ -2,20 +2,18 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::input::Keystroke;
+use crate::runtime::floats::float_dock_label;
 use crate::window_seam::prelude::*;
 use crate::{
     ColumnKeyboard, FOOT_REVEAL_FEEDBACK, FileMenuTarget, FileMenuTreeRow, FilesEditPlace,
     FilesEditRow, FilesFocusArrival, FilesLocate, FolderPick, FootSaying, LeafId, PointerTarget,
     ReferenceCard, RenameSubject, RevealedFoot, RowActivation, RowHost, Runtime, SplitSeed,
-    TabClick, TabRename, answers_for, column_keyboard, columns_wanting_git, dropped_files_seat_at,
-    files, files_key_under, files_keyboard_seat_of, files_locate, files_open_chain,
-    files_row_activation, files_row_counts_clicks, files_row_entry, files_row_menu_subject, float,
-    float_dock_label, folder_pick_outcome, foot_revealed_label, git_panel, hang_watch,
-    home_shortened_path, i18n, marks, palette_index, press_files_node, preview, profiles,
-    reroot_files_state, seats, settings, toast,
+    TabClick, TabRename, answers_for, files, float, foot_revealed_label, git_panel, hang_watch,
+    home_shortened_path, i18n, marks, palette_index, preview, profiles, seats, settings, toast,
 };
+use crate::{FilesRoot, TabState, files_key_within, pane_folder};
 use anyhow::Result;
-use bt_layout::SeatId;
+use bt_layout::{SeatId, SeatLayout};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
@@ -791,7 +789,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// rather than through the `Deref`, so this is answerable on a tab whose
     /// keyboard is somewhere unexpected.
     fn files_root_for_new_pane(&self) -> crate::FilesRoot {
-        crate::files_root_of(
+        files_root_of(
             self.sessions
                 .get(&self.focused_leaf)
                 .map(|leaf| leaf.folder(&crate::pane_folder::SystemProcessFolders)),
@@ -1132,7 +1130,7 @@ impl<B: Backend> Runtime<'_, B> {
                     run: path_box,
                     lead: &text,
                     flash: said.as_deref(),
-                    notice: crate::folder_foot_notice(&state),
+                    notice: folder_foot_notice(&state),
                     cut: seats::LeadCut::Front,
                     font_px: font,
                     gap_px: seats::FILES_FOOT_NOTICE_GAP_LOGICAL_PX * scale,
@@ -2134,11 +2132,7 @@ impl<B: Backend> Runtime<'_, B> {
         let (mode, root, notice) = {
             let win = self.window.float.drawn().find(|win| win.epoch == id)?;
             let files = &win.files()?.files;
-            (
-                win.mode,
-                files.root.clone(),
-                crate::folder_foot_notice(files),
-            )
+            (win.mode, files.root.clone(), folder_foot_notice(files))
         };
         let palette = bt_render::chrome_palette();
         let mut quads = Vec::new();
@@ -3132,6 +3126,369 @@ impl<B: Backend> Runtime<'_, B> {
             ) || self.panel_covers(position)
         });
         dropped_files_seat_at(&self.seat_layout, position, covered)
+    }
+}
+
+/// What a press on one node of a files tree does to that column's durable state.
+///
+/// Returns whether the press *opened* a directory, which is the one outcome that
+/// owes a fresh read — a fold is a statement about what you want to look at and
+/// costs the filesystem nothing.
+///
+/// Both kinds of node take the selection, which is what keeps the mouse and the
+/// keyboard telling one story about where you are. Pulled out of the runtime
+/// method around it because this is the whole of what a click *means*, and it is
+/// answerable without a window, a worker or a frame.
+pub(crate) fn press_files_node(
+    state: &mut seats::FilesLeafState,
+    key: &str,
+    kind: files::RowKind,
+) -> bool {
+    state.sel = Some(key.to_owned());
+    match kind {
+        files::RowKind::Directory { open: true } => {
+            state.open.remove(key);
+            false
+        }
+        files::RowKind::Directory { open: false } => {
+            state.open.insert(key.to_owned());
+            true
+        }
+        // A folder that resolves to one of its own ancestors takes the selection
+        // and nothing else: opening it would show you the place you are already
+        // standing, one level further in, for ever.
+        files::RowKind::Cycle | files::RowKind::File | files::RowKind::Notice(_) => false,
+    }
+}
+
+/// Point one column's durable state at another folder (E56).
+///
+/// Reports whether anything moved, which is what tells the caller whether a
+/// cache is owed dropping and a frame is owed drawing — and what makes choosing
+/// the folder you are already in cost nothing rather than silently throwing your
+/// expansion away.
+pub(crate) fn reroot_files_state(state: &mut seats::FilesLeafState, root: &str) -> bool {
+    if state.root == root {
+        return false;
+    }
+    state.root = root.to_owned();
+    // A root someone chose is a folder they named, not the home folder standing in for one.
+    state.folder_unknown = false;
+    // A `/src` left open under the old root is not the `/src` of the new one.
+    // Honouring it would unfold whatever happens to be called that, which is a
+    // tree opening itself at a folder you have never seen.
+    state.open.clear();
+    state.sel = None;
+    true
+}
+
+/// [`FilesLocate`] for standing a column on `folder` and selecting `file` in
+/// it, given the tab's column and the root it stands on (`None` for a tab with
+/// no column).
+///
+/// The one decision [`Runtime::locate_folder_in_files_column`] makes, out of
+/// the runtime so the three arms can be asked of it: inside the tree, outside
+/// it, and no tree at all. **The root is only ever replaced, never restored**:
+/// nothing here or in the verb remembers the root it replaced (owner,
+/// 2026-09-23 — the column does not switch back).
+pub(crate) fn files_locate(
+    column: Option<(SeatId, &str)>,
+    folder: &Path,
+    file: Option<&str>,
+) -> FilesLocate {
+    let inside =
+        column.and_then(|(seat, root)| files_key_within(root, folder).map(|key| (seat, key)));
+    match inside {
+        Some((seat, key)) => FilesLocate::Inside {
+            seat,
+            select: file.map_or_else(|| key.clone(), |name| files::child_key(&key, name)),
+        },
+        None => FilesLocate::Root {
+            select: file.map(|name| files::child_key("", name)),
+        },
+    }
+}
+
+/// Every folder that has to be open for one node id to be a drawn row — **the
+/// node itself included** — root first.
+///
+/// Root first because that is the order the tree reads them in, so a column that
+/// has read nothing asks the worker for its directories in the order it will
+/// draw them rather than from the bottom up.
+///
+/// The root's own id is `""`, and it is in the list: a tree draws its root's
+/// children whether or not anything ever "opened" it, and asking for it here is
+/// what makes the refresh reach the top level too.
+pub(crate) fn files_open_chain(key: &str) -> Vec<String> {
+    let mut chain = vec![String::new()];
+    let mut built = String::new();
+    for segment in key.split('/').filter(|segment| !segment.is_empty()) {
+        built = files::child_key(&built, segment);
+        chain.push(built.clone());
+    }
+    chain
+}
+
+pub(crate) fn files_row_activation(root: &str, key: &str) -> RowActivation {
+    if !files::root_is_addressable(root) {
+        return RowActivation::Nowhere;
+    }
+    RowActivation::Preview(files::full_path(root, key))
+}
+
+/// **Which menu a row raises, if it raises one** (user ruling 2026-08-25).
+///
+/// Pure, and it is the one place the ruling that ended K143's "目录行不弹" is
+/// written down: a file row and a folder row each have a menu, and the two rows
+/// that lead nowhere have none.
+///
+/// **A `Cycle` and a `Notice` still raise nothing**, and the two refusals are
+/// not the same refusal. A cycle is a folder that resolves to one of its own
+/// ancestors: its fold would show you the place you are already standing, and
+/// `New terminal here` would put a shell somewhere you can reach by another
+/// name — the same sentence [`files_row_entry`] already makes about entering
+/// one. A notice names no folder at all, so it has no path for the three verbs
+/// under the rule.
+pub(crate) fn files_row_menu_subject(kind: files::RowKind) -> Option<profiles::FileMenuSubject> {
+    match kind {
+        files::RowKind::File => Some(profiles::FileMenuSubject::File),
+        files::RowKind::Directory { open } => {
+            Some(profiles::FileMenuSubject::Folder { expanded: open })
+        }
+        files::RowKind::Cycle | files::RowKind::Notice(_) => None,
+    }
+}
+
+/// Where a row's name **leads**, which is [`files_row_activation`]'s sentence
+/// said about the other kind of node (user ruling, 2026-08-19).
+///
+/// A file row's second press opens the file; a folder row's second press stands
+/// the whole column in that folder. Pure, and deliberately the same shape as its
+/// twin above: one root, one stable id, one answer, and the same last sentence —
+/// a column with no root leads nowhere, because it was never pointed anywhere.
+///
+/// Only a real directory answers. A `Cycle` row is a folder that resolves to one
+/// of its own ancestors, and entering it would be a way of standing where you
+/// already stand; a `Notice` names no folder at all.
+pub(crate) fn files_row_entry(root: &str, key: &str, kind: files::RowKind) -> Option<String> {
+    if !files::root_is_addressable(root) || !matches!(kind, files::RowKind::Directory { .. }) {
+        return None;
+    }
+    Some(files::full_path(root, key).display().to_string())
+}
+
+/// Whether the double-click counter pairs on this kind of row at all.
+///
+/// **Both kinds of node, since 2026-08-19.** It used to be files alone, because
+/// a folder row's second press meant nothing and a chain that ran through one
+/// would have turned two folds into an opening. Now a folder row carries a verb
+/// of its own ([`files_row_entry`]), so the row that breaks a chain is the row
+/// that leads nowhere and shows nothing: a cycle, or a notice.
+pub(crate) fn files_row_counts_clicks(kind: files::RowKind) -> bool {
+    matches!(
+        kind,
+        files::RowKind::File | files::RowKind::Directory { .. }
+    )
+}
+
+/// The files column a stored [`LeafId`] still names on the tab in front of you.
+///
+/// The whole of D47's self-healing, in one place and answerable without a
+/// window. A keyboard lent to a column has three ways of coming back that
+/// nothing bothers to announce — the tab was switched, the column was closed,
+/// the seat is not a files column any more — and answering them at the *read*
+/// rather than at each of the writes is what makes it impossible to miss one.
+pub(crate) fn files_keyboard_seat_of(owner: Option<LeafId>, tab: &TabState) -> Option<SeatId> {
+    let owner = owner?;
+    (owner.tab == tab.id
+        && tab.files.contains_key(&owner.seat)
+        && tab.seats.files().contains(&owner.seat))
+    .then_some(owner.seat)
+}
+
+/// **Focus follows the visible view** (焦点跟随可见视图, 2026-08-19).
+///
+/// D47 lends the keyboard to a *column*, and until this ruling the router under
+/// it asked one question — is this seat a files column — and then handed every
+/// key to the **tree**. A column standing on its Git page therefore answered its
+/// arrows with a list nobody could see: the tree's selection and its scroll
+/// moved in the dark, and `Enter` opened a preview of a file the reader had
+/// never chosen and could not have pointed at. Nothing reached a shell, which is
+/// why it was silent; state changed under the user, which is why it was a bug.
+///
+/// **The page that is drawn, not the page the column is turned to.** The
+/// argument is `git_pages_shown` — the frame's own record of which columns put a
+/// Git page on the glass — and not `FilesLeafState::view`, which is the same
+/// distinction [`Runtime::git_surfaces_on_screen`] draws and the wheel router
+/// already relies on. A column whose `view` is `Git` while the master switch is
+/// off, or while it is collapsed or not laid out, is showing its tree; its keys
+/// are the tree's, and one fact answers for the paint, the wheel, the hit test
+/// and the keyboard alike.
+///
+/// It is deliberately **total**: there is no third answer, which is what stops
+/// the fix from replacing a silent wrong owner with a silent *absent* one — a
+/// column that took a press and then let the arrows fall through to a shell
+/// behind it would be the same report wearing different clothes.
+pub(crate) fn column_keyboard(
+    seat: SeatId,
+    drawn_git_pages: &BTreeMap<SeatId, git_panel::GitPanelContent>,
+) -> ColumnKeyboard {
+    if drawn_git_pages.contains_key(&seat) {
+        ColumnKeyboard::GitPage
+    } else {
+        ColumnKeyboard::Tree
+    }
+}
+
+/// The files tree's stable id for `directory`, under a column rooted at `root` —
+/// or `None` when that column is not looking at it.
+///
+/// [`files::full_path`]'s inverse, and the only one: a key is the path's
+/// segments under the root joined with `/`, so the way back is to strip the root
+/// and walk what is left. A component that is not a plain name (a `..`, a drive
+/// prefix) means the path is not under this root in the sense the tree means,
+/// and answers `None` rather than a key that would resolve somewhere else.
+#[must_use]
+pub(crate) fn files_key_under(root: &str, directory: &std::path::Path) -> Option<String> {
+    let rest = directory.strip_prefix(root).ok()?;
+    let mut key = String::new();
+    for component in rest.components() {
+        let std::path::Component::Normal(segment) = component else {
+            return None;
+        };
+        key.push('/');
+        key.push_str(&segment.to_string_lossy());
+    }
+    Some(key)
+}
+
+/// **What a returned folder pick actually asks the window to do**, if anything.
+///
+/// Split out of [`Runtime::apply_folder_pick_result`] so that the three ways a
+/// chooser can come back with nothing — cancelled, failed, or asked for by a
+/// verb that has since been forgotten — are one function with one answer instead
+/// of three arms nested inside a method that needs a live window and a COM
+/// apartment to reach. The dialog itself is never involved: this takes the
+/// answer, not the question.
+pub(crate) fn folder_pick_outcome(
+    asked: Option<FolderPick>,
+    result: Result<Option<PathBuf>, String>,
+) -> Option<(FolderPick, PathBuf)> {
+    match result {
+        Ok(Some(path)) => Some((asked?, path)),
+        // **Cancelled is silent.** No toast, no notice, nothing on screen: a
+        // cancel is the user saying "never mind", and a window that answers that
+        // with a card has not listened.
+        Ok(None) => None,
+        // A chooser that could not be shown leaves everything where it was, and
+        // says so to the log rather than in a banner about COM apartments. The
+        // caller logs it; this only reports that nothing is owed.
+        Err(error) => {
+            crate::diagnostics::stderr_line(format!("recoverable folder chooser failure: {error}"));
+            None
+        }
+    }
+}
+
+/// **R31's gate**: which columns owe the repository a question this frame.
+///
+/// Two conditions and no others. The master switch must be on, and a column must
+/// actually be *showing* its Git page — not merely have one available, and not
+/// merely be rooted somewhere that happens to be a repository. A column on its
+/// tree costs exactly what it cost before the Git panel existed: no process at
+/// all.
+///
+/// A free function taking the facts rather than a method reading them off
+/// `self`, because "with the panel off, nothing is asked" is the promise the
+/// switch exists *for*, and a promise that can only be checked by starting a
+/// window is a promise nothing checks. A column with no root is dropped here
+/// too — an unrooted column has no folder to probe.
+#[must_use]
+pub(crate) fn columns_wanting_git(
+    panel_on: bool,
+    columns: &[(SeatId, seats::FilesView, String)],
+) -> Vec<(SeatId, String)> {
+    if !panel_on {
+        return Vec::new();
+    }
+    columns
+        .iter()
+        .filter(|(_, view, root)| *view == seats::FilesView::Git && !root.trim().is_empty())
+        .map(|(seat, _, root)| (*seat, root.clone()))
+        .collect()
+}
+
+/// **The rule [`Runtime::dropped_files_seat`] applies, with the window's two
+/// questions already answered** (GitHub issue #1 ②).
+///
+/// `position` is where the pointer is — not where it was — and `covered` is
+/// whether a floating window or an open rail has claimed that point. A free
+/// function so the routing can be read against a real solved layout without a
+/// window: which pane a point falls in is arithmetic, and arithmetic is the half
+/// of this that can go wrong silently.
+///
+/// **`None` is a refusal, and the fallback that used to stand here is gone**
+/// (review 2026-09-17 P1-b). It answered the *focused* pane for a point that
+/// named no pane — no cursor at all, a point a float or an open rail had
+/// claimed, a point on a divider or on chrome — and that was an untruthful aim
+/// twice over: the comment one surface up already said such a drop reaches no
+/// shell, and the owner's rule for this whole gesture is that **the target
+/// decides**. A path is not a keystroke; "I could not tell where you let go, so
+/// I typed it where you were last typing" is the one answer a drop must not
+/// give, and since 2026-09-17 it would also have taken the keyboard there and
+/// brought the window forward for it.
+///
+/// **No platform is kept on the old road**, which was checked rather than
+/// assumed: `bt_platform::pointer_position_in_window` is implemented on both
+/// systems this product ships on — `GetCursorPos` through `ScreenToClient` on
+/// Windows, `NSEvent.mouseLocation` through the view on macOS — so `None` here
+/// is a window on a session with no desktop to read, and a refusal is the honest
+/// answer for it too.
+pub(crate) fn dropped_files_seat_at(
+    layout: &SeatLayout,
+    position: Option<PhysicalPosition<f64>>,
+    covered: bool,
+) -> Option<SeatId> {
+    match position {
+        Some(position) if !covered => seats::pane_at(layout, position.x, position.y),
+        // No cursor, or a point that belongs to something standing over the
+        // panes: this window does not know where the file was let go of, and an
+        // unknown target is a refusal.
+        Some(_) | None => None,
+    }
+}
+
+/// **The folder a files card or a files column taken from a pane is rooted at** (issue #28,
+/// T-CWD-FROM-PROCESS): the folder the pane is standing in ([`LeafSession::folder`] — its shell's
+/// last report, else its shell process's folder, else the folder it was opened in), and the
+/// account's home only when none of those can be said — which the root carries, so the card and
+/// the column say "Folder unknown" rather than showing a home folder as the pane's.
+///
+/// One reader for both doors, the folder button's card ([`Runtime::trigger_root`]) and
+/// `Ctrl+Shift+B` ([`Runtime::files_root_for_new_pane`]). `None` is no pane to ask.
+pub(crate) fn files_root_of(
+    folder: Option<pane_folder::PaneFolder>,
+    environment: &dyn bt_pty::ShellEnvironment,
+) -> FilesRoot {
+    match folder.and_then(pane_folder::PaneFolder::into_folder) {
+        Some(folder) => FilesRoot::known(folder.display().to_string()),
+        None => FilesRoot {
+            root: profiles::home_directory(environment)
+                .map(|home| home.display().to_string())
+                .unwrap_or_default(),
+            folder_unknown: true,
+        },
+    }
+}
+
+/// **What a files foot hangs on its right hand for `state`'s root**: "Folder unknown" while the
+/// root is the account's home standing in for a pane's folder nobody could say
+/// ([`seats::FilesLeafState::folder_unknown`]), else nothing — a tree has no other standing fact.
+pub(crate) fn folder_foot_notice(state: &seats::FilesLeafState) -> &'static str {
+    if state.folder_unknown {
+        i18n::Text::FilesFolderUnknown.text()
+    } else {
+        ""
     }
 }
 

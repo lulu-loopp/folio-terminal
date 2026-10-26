@@ -16,7 +16,7 @@ use crate::{
 };
 use crate::{
     GlassHere, ImeOwner, PasteFacts, PasteRoad, PendingPaste, TabId, TabState, ime_owner, input,
-    paste_spelled, quit, shell_literal, text_field_holding,
+    quit, shell_literal,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -1239,6 +1239,48 @@ impl<B: Backend> Runtime<'_, B> {
                 .focus()
                 .is_some_and(|target| self.window.settings.text_field(target).is_some())
     }
+}
+
+/// **Which text field holds the keyboard**, read off the rung the ladder
+/// resolved ([`ime_owner`]) — or `None` when what holds it is not a text field
+/// (B-AUDIT-046 RT-1).
+///
+/// The rungs *are* the enumeration: every rung that is a one-line field answers
+/// with itself, and the match is total, so a rung added to [`ImeOwner`] has to
+/// say here whether a paste goes into it. The one field that is not a rung of
+/// its own is the settings dialog's: the dialog is a modal, and whether its
+/// focus is a text field is the one extra fact this is handed
+/// ([`Runtime::settings_field_holds_the_keyboard`]).
+///
+/// The preview's document is not here: it takes a paste through its own door
+/// (`ClipboardSeat::PreviewDocument`), because it keeps the file's line breaks
+/// where a one-line field keeps the first line.
+#[must_use]
+pub(crate) fn text_field_holding(rung: ImeOwner, settings_field: bool) -> Option<TextFieldSeat> {
+    match rung {
+        ImeOwner::Rename => Some(TextFieldSeat::TabName),
+        ImeOwner::GitPrompt => Some(TextFieldSeat::GitPrompt),
+        ImeOwner::Palette => Some(TextFieldSeat::Palette),
+        ImeOwner::GraphSearch => Some(TextFieldSeat::GraphSearch),
+        ImeOwner::Search => Some(TextFieldSeat::FindBar),
+        ImeOwner::Modal => settings_field.then_some(TextFieldSeat::Settings),
+        ImeOwner::FilesTree | ImeOwner::Preview | ImeOwner::Shell => None,
+    }
+}
+
+/// **A paste whose bytes are already spelled**, with everything else a paste owes: the
+/// selection goes, the view returns to the bottom, and the bytes go out in one write
+/// ([`paste_text`]'s tail, and the whole of a PowerShell input-line paste — 0.4.4 ticket 03).
+fn paste_spelled<T>(
+    session: &mut DualPlaneSession,
+    projection: &mut ViewportProjection,
+    bytes: &[u8],
+    write: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
+    session.set_view_selection(None);
+    projection.set_selection(None);
+    projection.scroll_to_bottom();
+    write(bytes)
 }
 
 /// **The one rule for whether a paste asks** (owner's rulings 2026-09-22, 0.4.4 ticket 02).

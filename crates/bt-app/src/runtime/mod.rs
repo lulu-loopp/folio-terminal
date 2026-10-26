@@ -48,13 +48,20 @@ pub(crate) use clipboard::{
     input_line_needs_a_space_first, paste_answer_text, paste_body, paste_card_step,
     paste_offer_is_kept, paste_target_is_live, paste_text, pending_paste_in,
     prepare_clipboard_paste, prepare_dropped_paste, selection_to_copy, stage_paste,
-    take_pending_paste,
+    take_pending_paste, text_field_holding,
 };
 #[cfg(test)]
 pub(crate) use diagnostics::resolved_theme_change;
 #[cfg(test)]
 pub(crate) use dpi::{
     apply_tabs_leaf_metrics, resize_worth_solving, take_psreadline_resize_reanchor_input,
+};
+#[cfg(test)]
+pub(crate) use files::{
+    column_keyboard, columns_wanting_git, dropped_files_seat_at, files_key_under,
+    files_keyboard_seat_of, files_locate, files_open_chain, files_root_of, files_row_activation,
+    files_row_counts_clicks, files_row_entry, files_row_menu_subject, folder_foot_notice,
+    folder_pick_outcome, press_files_node, reroot_files_state,
 };
 #[cfg(test)]
 pub(crate) use floats::{

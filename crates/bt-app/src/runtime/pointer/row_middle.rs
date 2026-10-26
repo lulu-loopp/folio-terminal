@@ -7,10 +7,11 @@
 //! held as [`super::CaptureOwner::RowMiddlePress`], the one owner latched by the middle button, so its
 //! release is the slot's and reaches it wherever the button comes up; the release decides.
 
+use crate::runtime::files::files_row_activation;
 use crate::window_seam::prelude::*;
 use crate::{
     DragLatch, FilesEditRow, PointerTarget, RowActivation, RowHost, RowMiddlePress, Runtime, files,
-    files_row_activation, float, seats,
+    float, seats,
 };
 use anyhow::Result;
 use std::time::Instant;

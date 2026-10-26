@@ -1763,6 +1763,18 @@ impl<B: Backend> Runtime<'_, B> {
             leaf.session.re_ask_about_link_target(path);
         }
     }
+
+    /// The flat index [`RowHost::Terminal`] carries, for a hit on `seat`'s own
+    /// frame — the one place `row * columns + column` is spelled, so the writer
+    /// and every reader of that number agree about which way round it goes.
+    pub(crate) fn reference_cell_index(
+        &self,
+        seat: SeatId,
+        hit: bt_render::GridHit,
+    ) -> Option<u32> {
+        let columns = self.pane_frame(seat)?.columns.get();
+        hit.row.checked_mul(columns)?.checked_add(hit.column)
+    }
 }
 
 /// **Whether one seat's shell is, right now, the true owner of the keyboard** —

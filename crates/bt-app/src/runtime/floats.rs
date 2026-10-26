@@ -2,27 +2,29 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::{Gone, OwnerGone};
+use crate::runtime::files::{files_root_of, files_row_activation, files_row_menu_subject};
+use crate::web_thumb;
 use crate::window_seam::prelude::*;
 use crate::{
     CardWords, DropLanding, FileMenuState, FileMenuTarget, FileMenuTreeRow, HoverFloat, Layered,
     LeafId, MenuPaint, OwnTrigger, PAGE_SPINNER_STROKE_LOGICAL_PX, PointerTarget, PopoverTrigger,
     Popup, PopupOwner, PopupsUp, PreviewDocument, PreviewHeadFrame, PreviewImageState, PreviewPane,
     PreviewRailFrame, PreviewSurface, RevealedFoot, RowActivation, RowHost, Runtime, TabRename,
-    TabSurface, TermMenuState, card_trace, display_title, favicon, files, files_row_activation,
-    files_row_menu_subject, float, git, git_graph, git_panel, hang_watch, i18n,
-    indeterminate_start_milliturns, marks, menubar, page_keepsake_icon, popup_owner, preview,
-    preview_select, profiles, restore, revealable_preview_file, risen_frame, seats, shown_address,
-    update, webhost, webnav,
+    TabSurface, TermMenuState, card_trace, display_title, favicon, files, float, git, git_graph,
+    git_panel, hang_watch, i18n, indeterminate_start_milliturns, marks, menubar, popup_owner,
+    preview, preview_select, profiles, restore, revealable_preview_file, risen_frame, seats,
+    shown_address, update, webhost, webnav,
 };
 use crate::{
     FilesRoot, RESIZING_CARD_TRANSITION, ReferenceCard, RevealTween, TerminalReference,
-    entry_doors, files_root_of, pane_folder,
+    entry_doors, pane_folder,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::Travel;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::MouseScrollDelta;
@@ -3831,6 +3833,45 @@ impl<B: Backend> Runtime<'_, B> {
                 Some(page_keepsake_icon(picture, keepsake.rect))
             })
             .collect()
+    }
+}
+
+/// The caption on the float's dock button.
+///
+/// Written in its own case and upper-cased at the point of drawing, because
+/// `text-transform: uppercase` is a *presentation* of a word and not the word:
+/// the tooltip beside it says "Dock as a pane on the left" in sentence case, and
+/// storing the shouted form would make the two disagree about what the button is
+/// called.
+pub(crate) fn float_dock_label() -> &'static str {
+    i18n::Text::FloatDock.text()
+}
+
+/// **One kept frame, as the textured quad both of its two hosts draw it with**
+/// (§7.8 ⑩).
+///
+/// A free function because the two hosts are a pane and a float and they differ
+/// in *which list* the quad joins, not in what it is — the same division of
+/// labour a preview picture already has between the seat lane and a float's own
+/// layer, and the reason a second spelling of these seven fields would be a
+/// second place for them to drift.
+///
+/// **Clipped to its own rectangle**, which is not redundant: the texture is the
+/// size the page's viewport was when it was photographed, and a pane resized
+/// while the dialog stands over it — the settings window is resizable — would
+/// otherwise paint the older, larger frame over its neighbours. Inside the box,
+/// the sampler stretches, which is §7.11 ⑪ⓒ's answer said again: a frame of the
+/// layout that has just gone is closer to the truth than a blank.
+fn page_keepsake_icon(picture: &web_thumb::Picture, rect: [f32; 4]) -> bt_render::ChromeIcon {
+    bt_render::ChromeIcon {
+        key: picture.key.clone(),
+        rect,
+        rgba: Arc::clone(&picture.rgba),
+        width_px: picture.width_px,
+        height_px: picture.height_px,
+        opacity: 1.0,
+        clip: Some(rect),
+        above_text: false,
     }
 }
 

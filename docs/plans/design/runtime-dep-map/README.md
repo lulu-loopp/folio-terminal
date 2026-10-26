@@ -198,6 +198,14 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    a batch regenerates their lists and the moved rows pass as moved.
    `REQUEST-DOOR-SITES.tsv` and `UNFOLLOWED-EDGES.tsv` keep their dated-reason rule: a
    batch re-keys their moved rows with a dated reason, as batch 1 did.
+   **The census's unknown sites are the exception among the five** (added at batch 10): `docs/plans/design/ownership-census-unknowns.tsv`
+   is hand-edited and `scripts/generate-ownership-census.ps1` removes a resolved row but adds none, so the batch
+   does not regenerate a moved row into place. Each batch's judgement lists the unknown-site rows of the items it
+   moves, and the move commit or the generated commit re-keys their `module` column to the new module (the same
+   site and reason); bt-source's census test refuses a moved site as a new unknown until then, and
+   `check-census-unknowns.ps1` passes it as moved. Batch 10 found its two rows (`trigger_root`, `trigger_rect`)
+   at the bt-source gate. So a batch's judgement covers seven lists: these five, `REQUEST-DOOR-SITES.tsv` and
+   `UNFOLLOWED-EDGES.tsv`.
 
 2. **The 395 items whose callers are mostly other `main.rs` items follow their
    callers.** Regenerate the map after each batch. An item whose callers have moved

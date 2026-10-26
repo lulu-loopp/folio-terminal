@@ -3,6 +3,7 @@
 
 use super::pointer::{Ending, Gone, Leaving, OwnerGone};
 use crate::runtime::floats::file_menu_powers;
+use crate::runtime::floats::float_dock_label;
 use crate::window_seam::prelude::*;
 use crate::{
     BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due, born_in_tab,
@@ -18,8 +19,8 @@ use crate::{
     RAIL_TRANSITION, RevealTween, RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed,
     TabId, TabState, TabSurface, TearOut, animated_pane_viewports, attention_trace,
     auto_split_axis, card_trace, clamp_into_body, closing_this_pane_closes_the_tab, cmdrail,
-    column_notch, create_leaf_session, end_leaves_of, files, float, float_dock_label, glyph_trace,
-    hang_watch, host_screen_after, leaf_resize_plan, marks, mouse_trace, notice, notify,
+    column_notch, create_leaf_session, end_leaves_of, files, float, glyph_trace, hang_watch,
+    host_screen_after, leaf_resize_plan, marks, mouse_trace, notice, notify,
     pages_that_move_with_their_panes, palette, pane_fade_veil_layers, panel_opacity,
     persisted_pane_count, picture_channel_owner, popup_owner, present_diagnostics,
     presentation_physical_size, preview, preview_image_placement, preview_trace, profiles,

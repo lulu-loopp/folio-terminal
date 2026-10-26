@@ -4,6 +4,7 @@
 use super::pointer::{Gone, OwnerGone};
 use crate::computation_lane::{Asking, ComputationId};
 use crate::input::Keystroke;
+use crate::runtime::floats::float_dock_label;
 use crate::runtime::git::graph_key_of;
 use crate::runtime::peek::{peek_scale_task, preview_body_bar, scroll_bar_layer};
 use crate::window_seam::prelude::*;
@@ -32,11 +33,11 @@ use crate::{
     build_preview_text_body, clipboard_picture, create_leaf_session, crumb_segments,
     deliver_clipboard_picture, diagnostics, documents_held_in, documents_held_mut_in,
     documents_pictures, earliest_deadline, file_peek, files, files_a_tab_stands_on,
-    files_row_display_name, float, float_dock_label, folded_levels, foot_revealed_label,
-    forget_a_picture, forget_standing_answers, git_panel, hang_watch, hex_peek, highlight, i18n,
-    image_clamped_pan, image_destination, image_is_pannable, image_meta_sentence, image_pan_key,
-    image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale, image_zoom_settles,
-    image_zoom_toggled, ime_owner, input, markdown_empty_page_offset, markdown_prose_composition,
+    files_row_display_name, float, folded_levels, foot_revealed_label, forget_a_picture,
+    forget_standing_answers, git_panel, hang_watch, hex_peek, highlight, i18n, image_clamped_pan,
+    image_destination, image_is_pannable, image_meta_sentence, image_pan_key, image_raster_cap,
+    image_zoom_caption, image_zoom_key, image_zoom_scale, image_zoom_settles, image_zoom_toggled,
+    ime_owner, input, markdown_empty_page_offset, markdown_prose_composition,
     markdown_prose_paragraphs, markdown_runs, markdown_source_cell, markdown_source_offset_at,
     marks, measure_preview_links, notice, owe_sharpened_rasters, page_address_hand_off,
     page_destination, page_foot_flash, page_foot_lead, page_source_file, picture_channel_owner,
