@@ -5,6 +5,7 @@ use super::pointer::CaptureOwner;
 use super::pointer::{Gone, OwnerGone};
 use crate::computation_lane::Asking;
 use crate::runtime::git::git_document_question;
+use crate::runtime::panes::risen_frame;
 use crate::window_seam::prelude::*;
 use crate::{
     ClickIntent, DECODE_UNSTARTED, PeekCache, PreviewDocument, PreviewOpenLane, TabState,
@@ -17,7 +18,7 @@ use crate::{
     PeekSurface, PeekThumbnail, PeekThumbnailTarget, PreviewPane, PreviewSurface, ReferenceCard,
     RowHost, Runtime, ScaleWorkerRequest, ScrollThumbState, ShellAddress, file_peek, files, float,
     git, git_panel, hang_watch, i18n, input, mark_opacity, marks, peek_strip, preview, profiles,
-    ring_arc, risen_frame, seats, session_is_breathing, tooltip, wait_pulse,
+    ring_arc, seats, session_is_breathing, tooltip, wait_pulse,
 };
 use anyhow::Context;
 use anyhow::Result;

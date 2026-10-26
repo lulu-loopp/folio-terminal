@@ -2,10 +2,11 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::input::Keystroke;
+use crate::runtime::panes::frame_row_of_anchor;
 use crate::window_seam::prelude::*;
 use crate::{
     LeafSearchRescan, LeafSession, PointerTarget, Runtime, SearchRefresh, SearchScanCache,
-    frame_row_of_anchor, hang_watch, input, marks, search, seats, tooltip,
+    hang_watch, input, marks, search, seats, tooltip,
 };
 use anyhow::Result;
 use bt_layout::SeatId;

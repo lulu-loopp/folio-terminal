@@ -6,6 +6,7 @@ use crate::input::Keystroke;
 use crate::runtime::mouse::recoverable_wheel_scroll_amount;
 use crate::runtime::panes::end_leaves_of;
 use crate::runtime::panes::tear_pane_into_tab;
+use crate::runtime::windows::dirty_gate_names;
 use crate::window_seam::prelude::*;
 use crate::{
     BlankPage, BlankPageReturn, Drag, DragCarry, DragHandover, DragSource, DropLanding, Fading,
@@ -14,10 +15,9 @@ use crate::{
     RenameSubject, RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId,
     TabMenuState, TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
     absorb_tab_sessions, attention_trace, banner_line, create_tab_state, diagnostics,
-    dirty_gate_names, exit_diagnostics, float, notify, pane_can_become_a_tab, pane_into_new_tab,
-    pane_into_tab, partition_clamped, presentation_physical_size, preview, profiles, pty_door,
-    restore, scrollback_quota, seats, seed, settle_pin_partition, settling, solve_seats,
-    strip_insert_slot, webnav,
+    exit_diagnostics, float, notify, pane_into_new_tab, pane_into_tab, partition_clamped,
+    presentation_physical_size, preview, profiles, pty_door, restore, scrollback_quota, seats,
+    seed, settle_pin_partition, settling, solve_seats, strip_insert_slot, webnav,
 };
 use crate::{LeafView, TextScale, webhost};
 use anyhow::Context;
@@ -4010,6 +4010,52 @@ impl<B: Backend> Runtime<'_, B> {
         // shifts every index after it by one.
         let to = partition_clamped(&pinned, index, carry.origin.min(pinned.len() - 1));
         self.move_tab_with_flip(index, to, now, None);
+    }
+}
+
+/// **Which panes may become a tab of their own, stated once and asked in two
+/// places.**
+///
+/// The limit that used to live here was `tab_can_host`, and it forbade the wrong
+/// thing. It asked whether a *tree* held exactly one terminal leaf, on the
+/// argument that a tab is a tree and a shell; U12 made a tab a tree and a
+/// **fleet**, so two shells in a tab is now the ordinary case and N159's merge
+/// and N161's replace are the gestures that put them there. That guard is gone.
+///
+/// What replaced it was I106's, narrower and about the **strip**: a `TabState`
+/// required a non-empty `sessions` and a `focused_leaf` naming one of them, so a
+/// files column or a preview reaching the strip would have been a tab whose
+/// terminal has no session — the 2026-07-16 crash. Its own note recorded that
+/// this was "a limit, not a ruling": I106 never said such a pane may not leave
+/// its tab, it said it must become a **files tab**, and files tabs did not
+/// exist.
+///
+/// **§7.1.6h built them, so the limit is spent.** A files column becomes a tab
+/// identified by its folder and a preview one identified by its file; both are
+/// nameable, drawable, closable and restorable, and neither holds a shell.
+///
+/// **`Placeholder` is still refused, and that is why this function is still
+/// here** rather than deleting itself the way the old note predicted. A
+/// placeholder is a leaf whose `kind` this build did not recognise when it read
+/// the session file. A tab made of one could say nothing about itself, be named
+/// by nothing and be reopened as nothing — the strip entry equivalent of the
+/// silent promotion §1.1 forbids. It stays a *visible* refusal for M147's
+/// reason: the strip has no dashed form to wear, so the honest way to say "not
+/// this one" is to draw no caret at all.
+///
+/// Asked where M147 can act on the answer: [`Runtime::tear_out_is_hostable`]
+/// declines to offer a tear-out the release could not perform, and
+/// [`Runtime::plan_for`] turns down a replace whose ejected pane could not be one.
+/// A drop that cannot happen must not be drawn as one that can.
+pub(crate) fn pane_can_become_a_tab(kind: bt_layout::SeatKind) -> bool {
+    match kind {
+        // Every kind a person can deliberately put in a tab. Written out rather
+        // than as a `_` arm so that a fifth kind has to answer this question on
+        // the way in.
+        bt_layout::SeatKind::Terminal
+        | bt_layout::SeatKind::Files
+        | bt_layout::SeatKind::Preview => true,
+        bt_layout::SeatKind::Placeholder => false,
     }
 }
 

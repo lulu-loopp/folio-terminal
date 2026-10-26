@@ -44,7 +44,7 @@ use crate::{
     markdown_empty_page_offset, markdown_prose_composition, markdown_prose_paragraphs,
     markdown_runs, markdown_source_cell, markdown_source_offset_at, marks, measure_preview_links,
     notice, owe_sharpened_rasters, page_address_hand_off, page_foot_flash, page_foot_lead,
-    page_source_file, picture_channel_owner, picture_errand, picture_files_of, pictures_awaited_by,
+    page_source_file, picture_errand, picture_files_of, pictures_awaited_by,
     pictures_need_handing_over, place_preview_math, present_diagnostics, preview,
     preview_block_bar_at, preview_block_wheel, preview_caret_prose, preview_caret_row,
     preview_copies_on_select, preview_document_height, preview_document_key,
@@ -14420,6 +14420,30 @@ impl<B: Backend> Runtime<'_, B> {
         });
         self.finish_present_attempt(attempt, &result);
         result
+    }
+}
+
+/// **Which picture a placement is about**, as
+/// [`bt_render::PreviewImage::owner`] spells it (§7.1.6k⁷).
+///
+/// The seat channel is a list, so the per-frame door that moves a picture
+/// through its pane's FLIP ([`bt_render::WindowRenderer::place_preview_image`])
+/// has to name one of several. A **seat number** is that name: the pictures the
+/// renderer is holding are the panes of the tab on the glass, and a seat number
+/// is unique inside its own tab (§7.12 ⓑ) — the property that makes `SeatId` the
+/// right half of `LeafId` to carry here, and the reason a lane belonging to
+/// another tab was refused a rectangle before this list existed.
+///
+/// A float never comes down this channel — its picture rides its own overlay
+/// layer — so nothing it could be given here would ever be looked up. It answers
+/// all the same, because a function that can only be called about some of its
+/// input is a rule waiting to be broken; the number is out of every seat's
+/// range and therefore matches nothing.
+#[must_use]
+pub(crate) fn picture_channel_owner(surface: PreviewSurface) -> u64 {
+    match surface {
+        PreviewSurface::Seat(leaf) => leaf.seat.0,
+        PreviewSurface::Float(_) | PreviewSurface::Peek => u64::MAX,
     }
 }
 

@@ -3,10 +3,10 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    AttentionDelivery, Motion, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane,
-    PointerTarget, PreviewSurface, Runtime, TabState, TaskbarFlash, UserInputKind, WindowRuntime,
-    attention, attention_trace, document_request, emit_attention_lines, float, i18n, marks, notice,
-    notify, profiles, quit, seats, taskbar_lane, toast,
+    AttentionDelivery, LeafSession, Motion, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST,
+    OverInPane, PointerTarget, PreviewSurface, Runtime, TabState, TaskbarFlash, UserInputKind,
+    WindowRuntime, attention, attention_trace, document_request, emit_attention_lines, float, i18n,
+    marks, notice, notify, profiles, quit, seats, taskbar_lane, toast,
 };
 use crate::{attention_delivery, attention_map, hang_watch};
 use anyhow::Result;
@@ -1182,6 +1182,26 @@ impl<B: Backend> Runtime<'_, B> {
         }
         Ok(())
     }
+}
+
+/// **A pane is going away, so the place it held goes with it** (`attention` plan §4 B4).
+///
+/// One leaf, and only ever asked by [`end_leaves_of`], which is the one step all five roads that
+/// end a pane take. The window's serial is not wound back — a place that was handed out was handed
+/// out, and the ledger says why in its own words.
+pub(crate) fn expire_leaf_attention(
+    at: attention::Site,
+    reach: attention::Reach,
+    leaf: &mut LeafSession,
+    next_place: &mut attention::Places,
+    now: Instant,
+    trace: Option<&attention_trace::Trace>,
+) {
+    let lines = leaf
+        .attention
+        .apply(at, reach, attention::Event::LeafGone, next_place, now)
+        .lines;
+    emit_attention_lines(trace, lines);
 }
 
 /// **The other lane: what a program wrote down its own tty** (`attention` plan §11.6, slice A1).

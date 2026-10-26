@@ -36,8 +36,8 @@ pub(crate) use tabs::owe_birth_death_fallback_resize;
 pub(crate) use windows::AfterTheWait;
 #[cfg(test)]
 pub(crate) use windows::{
-    answer_an_exit_over, broker_verdict, dwm_dark_mode_owed, focus_leaf_index,
-    persisted_window_bounds, preview_source_of_recent, raise_dirty_gate_over,
+    answer_an_exit_over, broker_verdict, dirty_gate_names, dwm_dark_mode_owed, focus_leaf_index,
+    lines_phrase, persisted_window_bounds, preview_source_of_recent, raise_dirty_gate_over,
     recent_term_leaf_seed, recorded_window_placement, tear_out_rect, window_minimum_changed,
 };
 // K2 (T-SPLIT-2B): the free functions moved out of `main.rs`, named at the crate root again by
@@ -110,7 +110,13 @@ pub(crate) use mouse::{
 #[cfg(test)]
 pub(crate) use palette::recall_flash;
 #[cfg(test)]
-pub(crate) use panes::{end_leaves_of, rail_overlay_layer, tear_pane_into_tab};
+pub(crate) use panes::{
+    births_due, clamp_into_body, column_notch, end_leaves_of, frame_row_of_anchor, gate_title_over,
+    host_screen_after, land_successor, landed_source, leaf_resize_plan,
+    pages_that_move_with_their_panes, pane_fade_veil_layers, panel_opacity, popup_owner,
+    rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer, rail_zone_wants_open,
+    restated_scroll, row_arrival_seat, size_authority_for_rectangle, tear_pane_into_tab,
+};
 #[cfg(test)]
 pub(crate) use peek::{
     ask_for_peek_pixels, file_peek_promotion, let_go_unnamed_peek_records, peek_body_kind,
@@ -128,8 +134,8 @@ pub(crate) use search::rescan_leaf_for_search;
 pub(crate) use tabs::{
     absorb_tab_into_layout, absorb_tab_into_strip, blank_page_return,
     exited_tabs_the_loop_may_close, grabbed_offset, new_tab_cwd, new_tab_leaf_seed,
-    pane_strip_landing, row_strip_landing, stepped_tab, tab_close_action, tab_surface,
-    two_tabs_mut,
+    pane_can_become_a_tab, pane_strip_landing, row_strip_landing, stepped_tab, tab_close_action,
+    tab_surface, two_tabs_mut,
 };
 #[cfg(test)]
 pub(crate) use terminal::{

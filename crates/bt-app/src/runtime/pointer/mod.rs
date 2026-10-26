@@ -35,8 +35,9 @@ pub(crate) use router::{
     FloatFacts, Plane, PointerFacts, PointerHit, PointerScene, walk_pointer_layers,
 };
 
+use crate::runtime::panes::risen_frame;
 use crate::window_seam::prelude::*;
-use crate::{PreviewSurface, Runtime, float, git_panel, hang_watch, risen_frame, seats};
+use crate::{PreviewSurface, Runtime, float, git_panel, hang_watch, seats};
 use anyhow::Result;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;

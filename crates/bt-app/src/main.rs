@@ -324,41 +324,46 @@ use runtime::{
     a_right_press_is_on_the_pane_menus_head, absorb_tab_into_layout, absorb_tab_into_strip,
     advance_periodic_deadline, answer_an_exit_over, answer_attention_in, answer_one_formula,
     answered_once, answers_for, apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels,
-    attention_ledger_deadline, blank_page_return, broker_verdict, button_router_position,
-    chevron_turn_target, chrome_over, chrome_tick_reuses_picture, claimed_by,
-    clear_copied_selection, clipboard_focus_of, column_keyboard, columns_wanting_git,
-    composing_event_of, composition_outlived_its_field, composition_ruling,
-    dispatch_decoration_task, dispatch_pending_math_tasks, dispatch_tab_decoration_tasks,
-    document_formulas, drain_may_take_another_slice, drain_whole_units, dropped_files_seat_at,
-    dwm_dark_mode_owed, earliest_named_deadline, end_leaves_of, exited_tabs_the_loop_may_close,
-    file_menu_powers, file_peek_promotion, files_float_content_height, files_key_under,
-    files_key_within, files_keyboard_seat_of, files_locate, files_open_chain, files_root_of,
-    files_row_activation, files_row_counts_clicks, files_row_entry, files_row_menu_subject,
-    float_git_page_shown, float_grasp, float_viewport_rect, focus_leaf_index, folder_foot_notice,
-    folder_pick_outcome, git_answer_notice, git_full_path, git_roots_on_glass,
+    attention_ledger_deadline, births_due, blank_page_return, broker_verdict,
+    button_router_position, chevron_turn_target, chrome_over, chrome_tick_reuses_picture,
+    claimed_by, clamp_into_body, clear_copied_selection, clipboard_focus_of, column_keyboard,
+    column_notch, columns_wanting_git, composing_event_of, composition_outlived_its_field,
+    composition_ruling, dirty_gate_names, dispatch_decoration_task, dispatch_pending_math_tasks,
+    dispatch_tab_decoration_tasks, document_formulas, drain_may_take_another_slice,
+    drain_whole_units, dropped_files_seat_at, dwm_dark_mode_owed, earliest_named_deadline,
+    end_leaves_of, exited_tabs_the_loop_may_close, file_menu_powers, file_peek_promotion,
+    files_float_content_height, files_key_under, files_key_within, files_keyboard_seat_of,
+    files_locate, files_open_chain, files_root_of, files_row_activation, files_row_counts_clicks,
+    files_row_entry, files_row_menu_subject, float_git_page_shown, float_grasp,
+    float_viewport_rect, focus_leaf_index, folder_foot_notice, folder_pick_outcome,
+    frame_row_of_anchor, gate_title_over, git_answer_notice, git_full_path, git_roots_on_glass,
     git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, glance_may_arm,
     glass_allows_a_drop, glass_allows_a_text_write, goto_tab_index, grabbed_offset, graph_key_of,
-    ground_overlay_layers, hold_failed_in_tabs, hole_for, ime_caret_source, ime_commit_bytes,
-    ime_cursor_area_of, in_drain_feed_turn, input_line_needs_a_space_first,
-    keyboard_owner_is_a_shell, landing_for_aim, let_go_unnamed_peek_records,
-    link_target_to_ask_about, live_viewport_mouse_hit, local_image_activation, math_copy_window,
-    math_worker_stopped_notice, merge_notice_card, new_tab_cwd, new_tab_leaf_seed, new_tab_tip,
-    next_attention_stop, over_home_ground, page_destination, pane_strip_landing, paste_answer_text,
-    paste_body, paste_card_key, paste_card_step, paste_offer_is_kept, paste_target_is_live,
-    paste_text, peek_body_kind, peek_cache_key_for_decode, peek_card_opened, peek_files_named,
-    peek_foot_press, peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
-    persisted_window_bounds, pointer_cursor, preedit_caret_byte, prepare_clipboard_paste,
-    prepare_dropped_paste, press_after_blur, press_belongs_to_the_window, press_files_node,
-    press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity,
-    preview_body_bar, preview_source_of_recent, profile_menu_anchor, pty_drain_says_nothing_new,
-    pty_frame_is_unchanged, rail_overlay_layer, raise_cancelled_quit_card_on,
+    ground_overlay_layers, hold_failed_in_tabs, hole_for, host_screen_after, ime_caret_source,
+    ime_commit_bytes, ime_cursor_area_of, in_drain_feed_turn, input_line_needs_a_space_first,
+    keyboard_owner_is_a_shell, land_successor, landed_source, landing_for_aim, leaf_resize_plan,
+    let_go_unnamed_peek_records, lines_phrase, link_target_to_ask_about, live_viewport_mouse_hit,
+    local_image_activation, math_copy_window, math_worker_stopped_notice, merge_notice_card,
+    new_tab_cwd, new_tab_leaf_seed, new_tab_tip, next_attention_stop, over_home_ground,
+    page_destination, pages_that_move_with_their_panes, pane_can_become_a_tab,
+    pane_fade_veil_layers, pane_strip_landing, panel_opacity, paste_answer_text, paste_body,
+    paste_card_key, paste_card_step, paste_offer_is_kept, paste_target_is_live, paste_text,
+    peek_body_kind, peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
+    peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
+    persisted_window_bounds, pointer_cursor, popup_owner, preedit_caret_byte,
+    prepare_clipboard_paste, prepare_dropped_paste, press_after_blur, press_belongs_to_the_window,
+    press_files_node, press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing,
+    pressed_row_identity, preview_body_bar, preview_source_of_recent, profile_menu_anchor,
+    pty_drain_says_nothing_new, pty_frame_is_unchanged, rail_change_strands_its_popups,
+    rail_is_searching, rail_overlay_layer, rail_zone_wants_open, raise_cancelled_quit_card_on,
     raise_dirty_gate_over, recall_flash, recorded_window_placement,
     recoverable_wheel_scroll_amount, reference_card, reference_run_rect, refused_preview_card,
     release_verdict, remember_decode, rename_key, reroot_files_state, rescan_leaf_for_search,
-    resize_worth_solving, resolved_theme_change, restart_seed, retire_spent_math_copy,
-    revived_page_of, right_press_raises_terminal_menu, route_forwarded_mouse_button,
-    route_forwarded_mouse_motion, row_strip_landing, seat_holds_the_keyboard, selection_to_copy,
-    should_copy_on_select_release, stage_paste, startup_poll_delay, step_leaf_text_scale,
+    resize_worth_solving, resolved_theme_change, restart_seed, restated_scroll,
+    retire_spent_math_copy, revived_page_of, right_press_raises_terminal_menu,
+    route_forwarded_mouse_button, route_forwarded_mouse_motion, row_arrival_seat,
+    row_strip_landing, seat_holds_the_keyboard, selection_to_copy, should_copy_on_select_release,
+    size_authority_for_rectangle, stage_paste, startup_poll_delay, step_leaf_text_scale,
     stepped_command_mark, stepped_tab, switcher_pin_is_allowed, switcher_row_destination,
     tab_close_action, tab_surface, tab_surface_tip_boxes, take_math_worker_notice,
     take_pending_paste, take_psreadline_resize_reanchor_input, tear_out_rect, tear_pane_into_tab,
@@ -9812,20 +9817,6 @@ fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
     }
 }
 
-/// `n lines`, and `1 line` for the one that is not plural.
-///
-/// A function rather than a `format!` at the call site because the singular is
-/// exactly the sort of thing that is right in the first sentence somebody writes
-/// and wrong in the second: this window says "1 line" in one place today and
-/// will say it in every gate, tip and card that ever counts rows.
-fn lines_phrase(lines: usize) -> String {
-    if lines == 1 {
-        "1 line".to_owned()
-    } else {
-        format!("{lines} lines")
-    }
-}
-
 /// A terminal pane's context menu while it is up (ticket #62).
 ///
 /// [`GitMenuState`]'s shape with a seat in it, and self-contained for a reason of
@@ -15552,27 +15543,6 @@ impl ApplicationChange {
     }
 }
 
-/// What a pseudoconsole's answer to "clear your own buffer" means for this window.
-///
-/// A free function so the one decision in `Runtime::clear_pane_screen` that cannot be seen from
-/// the screen is testable on its own: **`Ok(false)` is not a failure**, it is the operating
-/// system's inbox pseudoconsole saying it exports no clear at all, and an error is a call that
-/// really was made and really did not work. Both mean the same thing to the screen — there is a
-/// buffer out there still laid out the old way — and both must therefore stop this window moving
-/// any rows.
-fn host_screen_after(answer: Result<bool, bt_pty::PtyError>) -> bt_term::HostScreen {
-    match answer {
-        Ok(true) => bt_term::HostScreen::Cleared,
-        Ok(false) => bt_term::HostScreen::Untold,
-        Err(error) => {
-            // Said rather than swallowed: this window's screen is still going to be right, and
-            // the only thing lost is the host's agreement about the rows above.
-            crate::diagnostics::stderr_line(format!("BT_CLEAR host buffer not cleared: {error}"));
-            bt_term::HostScreen::Untold
-        }
-    }
-}
-
 struct Runtime<'a, B: Backend = Native> {
     app: &'a mut App<B>,
     window: &'a mut WindowRuntime<B>,
@@ -17537,42 +17507,6 @@ fn active_item_mut<T>(items: &mut [T], active: usize) -> &mut T {
     &mut items[active]
 }
 
-/// Who owns the rectangle the seats are about to be solved into (user ruling 2026-08-08).
-///
-/// Judged on **the rectangle the solver actually receives**, never on the `Resized` payload. The
-/// two are not the same number: winit announces a transient outer size during startup — measured
-/// here as an 826x1271 delivery while the window's own inner size was still 800x1200 — and reading
-/// authority off that made a freshly restored session look like a window somebody had dragged.
-/// The presentation rectangle is the one the layout is a function of, so it is the one provenance
-/// has to be a function of too.
-///
-/// Three rules, and they are deliberately not symmetric:
-///
-/// - `None` means the program has a rectangle *pending*: it has just asked the window to be some
-///   size and does not yet know what the OS made of the request. The next rectangle to arrive is
-///   that answer, whatever it turns out to be, and it is the program's. Claiming this way rather
-///   than by recording a size up front is what keeps the rule free of tolerances — the program
-///   never has to predict how Windows will round its own request.
-/// - A rectangle that differs from the claimed one was not asked for by this process, and taking
-///   hold of the window frame is how a user says "this is my size now".
-/// - Sovereignty, once taken, is returned only by another claim — never by a later rectangle that
-///   happens to land back on the claimed size. A hand that drags a window back through its opening
-///   size has not changed its mind about owning it.
-///
-/// Pure, so the rule is pinned by tests rather than by whatever order a given Windows build
-/// chooses to deliver `ScaleFactorChanged` and `Resized` in.
-fn size_authority_for_rectangle(
-    current: SizePolicy,
-    claimed: Option<PhysicalSize<u32>>,
-    rectangle: PhysicalSize<u32>,
-) -> (SizePolicy, Option<PhysicalSize<u32>>) {
-    match claimed {
-        None => (current, Some(rectangle)),
-        Some(claimed) if claimed != rectangle => (SizePolicy::Sovereign, Some(claimed)),
-        Some(claimed) => (current, Some(claimed)),
-    }
-}
-
 /// **What a DPI change owes while the hand is still on the frame** (user ruling
 /// 2026-08-31).
 ///
@@ -18207,77 +18141,6 @@ impl TabState {
     }
 }
 
-/// The dirty buffers one gate is about, by name and in the pool's own order —
-/// [`Runtime::gate_dirty_names`]' list, over the window's tabs and which one is
-/// active, so that the gate's decision ([`raise_dirty_gate_over`]) can be run on
-/// real tabs without a window.
-fn dirty_gate_names(
-    tabs: &[TabState],
-    active_tab: usize,
-    request: &restore::GateRequest,
-) -> Vec<String> {
-    // **Each name says which tab it is in** (B1, user ruling 2026-08-25),
-    // and it is added here because here is the only place that can see a
-    // tab: the card is handed a list of lines and has no window to ask.
-    //
-    // A shut is the one request whose list can span more than one tab, so it
-    // is the one that needs saying — but the sentence is added by every one
-    // of the three, because a reader looking at a card does not know which
-    // question raised it and a name that carries its room in one card and
-    // not in another is two cards.
-    // **And a clean buffer whose save has not landed** (S-6b, the coordinator's
-    // ruling on R1): the close would leave nobody to say how that save ended.
-    let one_tab = |tab: &TabState| {
-        let where_ = tab.display_title();
-        tab.preview_pool
-            .close_names()
-            .map(|name| unsaved_line(name, &where_))
-            .collect::<Vec<_>>()
-    };
-    match request {
-        // The pane's tab, the tab, or every tab: the pools the close would lose.
-        restore::GateRequest::ClosePane(_)
-        | restore::GateRequest::CloseTab(_)
-        | restore::GateRequest::Shut
-        | restore::GateRequest::ShutWithTheRun(_) => tabs_a_close_loses(tabs, active_tab, request)
-            .into_iter()
-            .flatten()
-            .flat_map(one_tab)
-            .collect(),
-        // A discard names one file, and it is never empty — which matters,
-        // because `raise_dirty_gate` treats an empty list as "there is
-        // nothing to ask about" and lets the verb through. There is always
-        // something to ask about here: that is what makes it a discard.
-        restore::GateRequest::GitDiscard { path, .. } => vec![path.clone()],
-        // A ref deletion names the ref, for the same reason and with the
-        // same consequence: the list is never empty, so `raise_dirty_gate`
-        // never lets one of these through unasked.
-        restore::GateRequest::GitDeleteBranch { name, .. }
-        | restore::GateRequest::GitDeleteTag { name, .. } => vec![name.clone()],
-        // A detaching checkout names where it is about to put you, and it is
-        // never empty either — `said` is a short hash and a subject, or a
-        // tag's name, worked out at the moment the menu row was pressed and
-        // carried rather than looked up again from a history that may have
-        // been re-read since.
-        restore::GateRequest::GitCheckout { said, .. } => vec![said.clone()],
-        // **An empty scrollback is asked nothing** (ticket #62), which is
-        // the emptiness rule this list was written for, applied to a fourth
-        // subject: `raise_dirty_gate` reads an empty list as "there is
-        // nothing to lose here" and lets the verb through, and a pane whose
-        // history and staging are both empty has nothing an ED3 could take.
-        // The clear still runs; it simply runs unasked, because a question
-        // whose only honest answer is "nothing happens either way" is not a
-        // question.
-        restore::GateRequest::ClearScrollback(seat) => active_item(tabs, active_tab)
-            .sessions
-            .get(seat)
-            .map(|leaf| leaf.session.scrollback_line_count())
-            .filter(|lines| *lines > 0)
-            .map(|lines| vec![lines_phrase(lines)])
-            .unwrap_or_default(),
-    }
-}
-
 /// **The tabs whose pools one close would lose** — `None` for a request that is
 /// not a close of a pane, a tab or a window.
 fn tabs_a_close_loses<'t>(
@@ -18318,27 +18181,6 @@ fn tabs_a_close_loses<'t>(
             Some(tabs.iter().collect())
         }
         _ => None,
-    }
-}
-
-/// **The title of the question a gate puts over these tabs** — the request's own
-/// ([`restore::GateRequest::title`]), but for a close that would lose no edits,
-/// only saves that have not landed (S-6b): its words are then that, since
-/// "discard unsaved changes" would not be true of a clean buffer.
-fn gate_title_over(
-    tabs: &[TabState],
-    active_tab: usize,
-    request: &restore::GateRequest,
-) -> &'static str {
-    match tabs_a_close_loses(tabs, active_tab, request) {
-        Some(losing)
-            if !losing
-                .iter()
-                .any(|tab| tab.preview_pool.a_close_loses_edits()) =>
-        {
-            restore::gate_save_not_landed_title()
-        }
-        _ => request.title(),
     }
 }
 
@@ -21431,27 +21273,6 @@ enum SelectionDragMode {
     Line,
 }
 
-/// A pointer put inside a pane's body, answered in that body's own coordinates.
-///
-/// This says *which pane's coordinates*, and stops there. Which cell those
-/// coordinates land on — including what a point in the grid's margin or past the
-/// last column means — is [`bt_render::CellMetrics::clamped_hit_test_frame`]'s
-/// answer to give, because that is where the padding, the cell width and the row
-/// map live. Clamping to a cell here would need a second copy of all three.
-///
-/// The box is half-open, the same way [`Runtime::pane_hit_context`] tests it: the
-/// far edges belong to the next pane, so the last point still inside this one is
-/// a unit short of them. A body of no width at all — which no solved pane has —
-/// collapses to its origin rather than inverting the range.
-fn clamp_into_body(body: bt_render::SeatViewport, x: f64, y: f64) -> (f64, f64) {
-    let last_x = f64::from(body.width.saturating_sub(1));
-    let last_y = f64::from(body.height.saturating_sub(1));
-    (
-        (x - f64::from(body.x)).clamp(0.0, last_x),
-        (y - f64::from(body.y)).clamp(0.0, last_y),
-    )
-}
-
 #[derive(Default)]
 struct ClickTracker {
     last_at: Option<Instant>,
@@ -22107,58 +21928,6 @@ enum Step {
     Forward,
 }
 
-/// `.cmdrail.srch-mode` — whether one pane's rail is carrying search results
-/// rather than its command ledger (§7.1.5d, S4).
-///
-/// **Two conditions, and the second is not the prototype's.** `srchRail()` marks
-/// the rail the moment a capsule exists on the pane, so its commands recede at
-/// `Ctrl+F`, before a letter is typed — a rail going grey to answer a question
-/// nobody has asked, which a reader reads as their history having gone away. An
-/// empty field has asked nothing; the takeover begins with the first character.
-///
-/// A free function so the four cases can be stated without a window: the search is
-/// a singleton, so "which pane" is a comparison and not a lookup, and the whole of
-/// the mode switch is these two clauses.
-fn rail_is_searching(search_seat: Option<SeatId>, query: &str, seat: SeatId) -> bool {
-    search_seat == Some(seat) && !query.is_empty()
-}
-
-/// Which presentation row of `frame` is showing `anchor`, or `None` when the
-/// content it names is not on the glass at all.
-///
-/// Answered out of the frame's own `cell_anchors`, which is the list the paint and
-/// every pointer verb already read: the row a flash lights has to be the row the
-/// user is looking at, and a second derivation of "where that content went" is a
-/// second thing that can be off by one. An unorderable pair — the alternate
-/// screen's isolated namespace — is skipped rather than guessed at, which is the
-/// same silence `command_mark_at_or_before` keeps for it.
-fn frame_row_of_anchor(
-    frame: &ViewportFrame,
-    anchor: &bt_doc::ContentAnchor,
-) -> Option<bt_viewport::FrameVisualRow> {
-    let columns = frame.columns.get() as usize;
-    let mut found = None;
-    for row in 0..frame.drawable_rows() {
-        let start = &frame.cell_anchors.get(row * columns)?.start;
-        match bt_doc::compare_anchors(start, anchor) {
-            Ok(order) if order.is_le() => found = Some(row),
-            // The first row that begins after the anchor ends the search: rows are
-            // in document order, so nothing further down can contain it.
-            Ok(_) => break,
-            Err(_) => continue,
-        }
-    }
-    let row = found?;
-    // The greatest row that *begins* at or before the anchor is only the row
-    // showing it if the anchor is also within that row's own span. Without this,
-    // an anchor below the last drawable row would light the last one.
-    let end = &frame.cell_anchors.get(row * columns + columns - 1)?.end;
-    bt_doc::compare_anchors(anchor, end)
-        .ok()
-        .filter(|order| order.is_le())?;
-    frame.row_map.get(row).copied()
-}
-
 /// **What an open name editor is editing** (user ruling 2026-08-19).
 ///
 /// The editor was a tab's for a year and is now two surfaces' — a tab's manual
@@ -22395,24 +22164,6 @@ enum FilesEditRow<'a> {
     /// A row `files::insert_pending_row` puts into the list, standing in this
     /// folder — `New file…` and `New folder…`.
     New { parent: &'a str, folder: bool },
-}
-
-/// **One row of an exit card: a file, and the tab it is in** (B1, user ruling
-/// 2026-08-25).
-///
-/// A free function because both collectors need it and neither owns the other:
-/// the shut gate reads one window's tabs and the quit card reads every window's,
-/// and a card whose rows were built two ways would be two cards.
-///
-/// A tab with nothing to call itself contributes no dash and no empty room —
-/// `display_title` can be a blank string on a tab whose shell has said nothing
-/// yet, and `notes.md — ` is a sentence with a hole in it.
-fn unsaved_line(name: &str, tab: &str) -> String {
-    let tab = tab.trim();
-    if tab.is_empty() {
-        return name.to_owned();
-    }
-    format!("{name} \u{2014} {tab}")
 }
 
 /// **Where a file name's stem ends** — the one place this window decides that,
@@ -23993,30 +23744,6 @@ const IMAGE_ZOOM_STEP: f32 = 1.25;
 const IMAGE_ZOOM_MIN: f32 = 0.10;
 const IMAGE_ZOOM_MAX: f32 = 8.0;
 
-/// **Which picture a placement is about**, as
-/// [`bt_render::PreviewImage::owner`] spells it (§7.1.6k⁷).
-///
-/// The seat channel is a list, so the per-frame door that moves a picture
-/// through its pane's FLIP ([`bt_render::WindowRenderer::place_preview_image`])
-/// has to name one of several. A **seat number** is that name: the pictures the
-/// renderer is holding are the panes of the tab on the glass, and a seat number
-/// is unique inside its own tab (§7.12 ⓑ) — the property that makes `SeatId` the
-/// right half of `LeafId` to carry here, and the reason a lane belonging to
-/// another tab was refused a rectangle before this list existed.
-///
-/// A float never comes down this channel — its picture rides its own overlay
-/// layer — so nothing it could be given here would ever be looked up. It answers
-/// all the same, because a function that can only be called about some of its
-/// input is a rule waiting to be broken; the number is out of every seat's
-/// range and therefore matches nothing.
-#[must_use]
-fn picture_channel_owner(surface: PreviewSurface) -> u64 {
-    match surface {
-        PreviewSurface::Seat(leaf) => leaf.seat.0,
-        PreviewSurface::Float(_) | PreviewSurface::Peek => u64::MAX,
-    }
-}
-
 /// **What one preview surface is showing**, in the three shapes the recording
 /// sweep can act on (user report 2026-08-28; `docs/DESIGN.md` §7.44 ⑬).
 ///
@@ -24717,75 +24444,6 @@ enum ColumnNotch {
     List,
     /// Aim the window of the terminal seat under the pointer (§7.1.6b′ ③).
     Aim,
-}
-
-/// **The list first** (user ruling 2026-08-21, the same day's correction of
-/// §7.1.6b′ ③).
-///
-/// The first landing of the aim asked for no modifier and stood at the top of
-/// the column's wheel door, on the sentence this house answers everywhere else
-/// — *the innermost scroller under the pointer takes the notch*. That sentence
-/// was quoted about the wrong pair of things. **Aiming is not a scroller**: it
-/// points one seat's window at a row, and it can neither run out of travel nor
-/// tell the reader it has. The thing on this surface with content out of sight
-/// is the **column**, and a card's mini seat covers all but the few pixels of
-/// gap between one card and the next — so the reading that reached the build
-/// spent every notch a reader could aim at the list on something else, and the
-/// fourth card of four could not be brought on screen at all (user report,
-/// with a photograph, 2026-08-21).
-///
-/// So the plain wheel is the column's, unconditionally and in the same words as
-/// every other list in this window, and the aim moves onto a modifier.
-///
-/// **A column with nothing below the fold does nothing.** The plain notch is not
-/// quietly re-read as an aim when the list has no travel left: a gesture that
-/// changed meaning with the number of tabs open would be a gesture the reader
-/// has to count furniture to predict, and the reader who scrolls a short column
-/// is telling us they wanted the list.
-///
-/// # Why `Alt`
-///
-/// It is the one modifier this window has not already spent on the wheel.
-/// `Shift`+wheel is taken twice over — it is the preview body's *other axis*
-/// (`scroll_preview_body`) and it is [`wheel_route`]'s explicit "this notch is
-/// mine, not the program's" override, which is §7.1.5f's sentence in the wheel's
-/// own words. `Ctrl`+wheel is the pair Windows reports AltGr as when it is
-/// joined by `Alt`, and it is also the chord every desktop reserves for scale;
-/// this build spends it on nothing today, and leaving it unspent is what keeps
-/// that door open. `Alt`+wheel is claimed by nothing in this build: no chrome
-/// scroller reads it, and the one place `Alt` reaches a shell at all is the
-/// modifier bit of an SGR mouse report — which is a *pane's* business, and the
-/// column is chrome, so the two can never be the same notch.
-///
-/// **`Ctrl+Alt` is not carved out of it.** Discipline ② of the shortcut table
-/// forbids `Ctrl+Alt` chords because Windows reports AltGr as that pair and a
-/// binding there steals a character from every layout that composes with it. A
-/// wheel notch composes no character, so there is nothing for it to steal, and
-/// an exception here would only mean that a reader resting a hand on the wrong
-/// key gets a gesture that silently stops working.
-///
-/// # On a Mac it is `⌥`, and it is read off the hand
-///
-/// **What this is handed is `WindowRuntime::modifiers_held`, not
-/// `modifiers`** (T-MAC-LIVE, §13.33 ①). The two differ on exactly one machine
-/// and for exactly one key: M1-7 ruled that `Option` is text, so
-/// [`input::effective_modifiers`] takes the `Alt` winit reports for it out of
-/// the state every chord and every text box reads (§13.13 ③). Handed that
-/// state, this function answered `List` to every notch a Mac could produce —
-/// the aim was unreachable there from the day the port landed, and no setting
-/// the reader could change would have revealed it, because the setting they
-/// would have had to change is about what `⌥a` **types**.
-///
-/// A notch types nothing. So the reading here is the plain one: the aim is the
-/// notch turned with `Option` under the hand, whatever the keyboard has been
-/// told to make of that key, which is also the only reading that lets the
-/// gesture be written down once for both dialects.
-fn column_notch(modifiers: ModifiersState) -> ColumnNotch {
-    if modifiers.contains(cardhint::CARD_AIM_MODIFIER) {
-        ColumnNotch::Aim
-    } else {
-        ColumnNotch::List
-    }
 }
 
 /// Whether the picture is bigger than the body it is seen through, on either
@@ -27111,26 +26769,6 @@ fn settle_attention(
             }
         }
     }
-}
-
-/// **A pane is going away, so the place it held goes with it** (`attention` plan §4 B4).
-///
-/// One leaf, and only ever asked by [`end_leaves_of`], which is the one step all five roads that
-/// end a pane take. The window's serial is not wound back — a place that was handed out was handed
-/// out, and the ledger says why in its own words.
-fn expire_leaf_attention(
-    at: attention::Site,
-    reach: attention::Reach,
-    leaf: &mut LeafSession,
-    next_place: &mut attention::Places,
-    now: Instant,
-    trace: Option<&attention_trace::Trace>,
-) {
-    let lines = leaf
-        .attention
-        .apply(at, reach, attention::Event::LeafGone, next_place, now)
-        .lines;
-    emit_attention_lines(trace, lines);
 }
 
 fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<String>) {
@@ -30683,83 +30321,6 @@ fn preview_image_placement(
     })
 }
 
-/// **U8, P177 — the veil an arriving pane fades in from behind.**
-///
-/// `if (!b) { … el.style.transition = "opacity .18s ease"; el.style.opacity = "";
-/// … return; }` (mock-up 6570-6575). A pane with no "before" rectangle does not
-/// FLIP, it fades, and the early `return` on 6573 makes the two *alternatives*
-/// rather than stages: a pane that came from somewhere slides, a pane that did
-/// not exist appears. [`PaneTween::FadeIn`] already models it and
-/// [`PaneMotion::opacity_of`] already answers it; this is the drawing.
-///
-/// **Ruling — the fade is carried by a veil in the ground colour, not by
-/// per-fragment alpha.** The arriving pane is drawn exactly as it is drawn at
-/// rest, and its rectangle is then covered by [`ChromePalette::seat_body`] — the
-/// palette's own "exactly `--termbg`" — at `1 - opacity`, decaying to nothing.
-///
-/// Over the ground that is *exactly* CSS `opacity`: the composite
-/// `termbg·(1-a) + pane·a` is what an element at opacity `a` over a `--termbg`
-/// backdrop produces, and the ground under a pane's box is `--termbg` — it is
-/// the terminal pass's own clear colour, and A1 rules that `--panel` shows only
-/// in the gap a divider drag opens.
-///
-/// The literal thing — a uniform alpha on the pane's own draws — is refused, and
-/// not for effort. A terminal seat's glyph colours live inside its cosmic-text
-/// buffers, and glyphon's `TextArea` carries no uniform alpha multiplier, so a
-/// per-seat opacity would mean rebuilding every glyph buffer on every frame of a
-/// 180ms fade: a text-relayout storm traded for a resize storm, which is the
-/// same bug wearing a different coat, and U8 exists partly to refuse the first
-/// one.
-///
-/// **Where it diverges, stated rather than hidden.** Where a *still-moving
-/// neighbour* is crossing the arriving pane's box, the veil covers that
-/// neighbour too, whereas CSS would blend the arriving pane over it. What that
-/// reads as is "this ground has not settled yet", which is true; what it is not
-/// is a pixel-exact transcription. It is also bounded: a fade lasts 180ms of the
-/// FLIP's 200ms, only a neighbour whose own flight crosses the new pane's box
-/// can be caught by it, and what shows through is the colour that box is about
-/// to be anyway.
-///
-/// One fill per arriving pane, on the seat's own solved rectangle. An arriving
-/// pane does not FLIP, so its box *is* the final rect — checked rather than
-/// assumed, because a veil hung on a moving box would be a hole travelling
-/// across the layout.
-fn pane_fade_veil_layers(
-    motion: &PaneMotion,
-    panes: &[(SeatId, [f32; 4])],
-    now: Instant,
-    preference: Motion,
-    palette: ChromePalette,
-) -> Vec<marks::OverlayLayer> {
-    let quads: Vec<bt_render::OverlayQuad> = panes
-        .iter()
-        .filter_map(|&(seat, rect)| {
-            let alpha = 1.0 - motion.opacity_of(seat, now, preference);
-            if alpha <= 0.0 {
-                return None;
-            }
-            debug_assert_eq!(
-                motion.transform_of(seat, now, preference),
-                PaneTransform::IDENTITY,
-                "a fading pane is never also displaced (mock-up 6573 returns), so \
-                 its veil may be hung on the rectangle the solver gave it"
-            );
-            Some(bt_render::OverlayQuad {
-                rect,
-                color: palette.seat_body,
-                alpha: alpha.clamp(0.0, 1.0),
-            })
-        })
-        .collect();
-    if quads.is_empty() {
-        return Vec::new();
-    }
-    vec![marks::OverlayLayer {
-        quads,
-        ..marks::OverlayLayer::default()
-    }]
-}
-
 /// Every family the overlay carries, held apart so that **the one thing that
 /// decides what covers what is a list you can read** ([`OverlayStack::flattened`]).
 ///
@@ -31336,15 +30897,6 @@ fn dump_focus_thumb_frame(
     });
 }
 
-fn risen_frame(frame: [f32; 4], fade: float::FloatFade) -> [f32; 4] {
-    [
-        frame[0],
-        frame[1] - fade.rise,
-        frame[2],
-        frame[3] - fade.rise,
-    ]
-}
-
 /// What is in the hand (J111).
 ///
 /// The mock-up's line 6352 is the whole argument for this enum existing at all:
@@ -31845,10 +31397,6 @@ impl RowVerb {
             Self::Split | Self::Refused => None,
         }
     }
-}
-
-fn row_arrival_seat(kind: RowPayloadKind) -> bt_layout::Seat {
-    bt_layout::Seat::new(bt_layout::SeatId(0), kind.leaf_kind())
 }
 
 fn row_verb(
@@ -32639,52 +32187,6 @@ enum HandoverInto {
     },
     /// **F1/F5 — a window of its own**, standing where the hand let go.
     NewWindow { pointer: (i32, i32), grip: TearGrip },
-}
-
-/// **Which panes may become a tab of their own, stated once and asked in two
-/// places.**
-///
-/// The limit that used to live here was `tab_can_host`, and it forbade the wrong
-/// thing. It asked whether a *tree* held exactly one terminal leaf, on the
-/// argument that a tab is a tree and a shell; U12 made a tab a tree and a
-/// **fleet**, so two shells in a tab is now the ordinary case and N159's merge
-/// and N161's replace are the gestures that put them there. That guard is gone.
-///
-/// What replaced it was I106's, narrower and about the **strip**: a `TabState`
-/// required a non-empty `sessions` and a `focused_leaf` naming one of them, so a
-/// files column or a preview reaching the strip would have been a tab whose
-/// terminal has no session — the 2026-07-16 crash. Its own note recorded that
-/// this was "a limit, not a ruling": I106 never said such a pane may not leave
-/// its tab, it said it must become a **files tab**, and files tabs did not
-/// exist.
-///
-/// **§7.1.6h built them, so the limit is spent.** A files column becomes a tab
-/// identified by its folder and a preview one identified by its file; both are
-/// nameable, drawable, closable and restorable, and neither holds a shell.
-///
-/// **`Placeholder` is still refused, and that is why this function is still
-/// here** rather than deleting itself the way the old note predicted. A
-/// placeholder is a leaf whose `kind` this build did not recognise when it read
-/// the session file. A tab made of one could say nothing about itself, be named
-/// by nothing and be reopened as nothing — the strip entry equivalent of the
-/// silent promotion §1.1 forbids. It stays a *visible* refusal for M147's
-/// reason: the strip has no dashed form to wear, so the honest way to say "not
-/// this one" is to draw no caret at all.
-///
-/// Asked where M147 can act on the answer: [`Runtime::tear_out_is_hostable`]
-/// declines to offer a tear-out the release could not perform, and
-/// [`Runtime::plan_for`] turns down a replace whose ejected pane could not be one.
-/// A drop that cannot happen must not be drawn as one that can.
-fn pane_can_become_a_tab(kind: bt_layout::SeatKind) -> bool {
-    match kind {
-        // Every kind a person can deliberately put in a tab. Written out rather
-        // than as a `_` arm so that a fifth kind has to answer this question on
-        // the way in.
-        bt_layout::SeatKind::Terminal
-        | bt_layout::SeatKind::Files
-        | bt_layout::SeatKind::Preview => true,
-        bt_layout::SeatKind::Placeholder => false,
-    }
 }
 
 /// **N158's second half — an unpinned tab cannot take a slot ahead of the pinned
@@ -34710,14 +34212,6 @@ fn seeded_tab(seed: &seed::Seed) -> TabV1 {
     }
 }
 
-/// How many panes a persisted tab held — the number its badge would show.
-fn persisted_pane_count(node: &LayoutNodeV1) -> usize {
-    match node {
-        LayoutNodeV1::Leaf(_) => 1,
-        LayoutNodeV1::Split(split) => split.children.iter().map(|c| persisted_pane_count(c)).sum(),
-    }
-}
-
 /// The first terminal leaf of a persisted tree, in the order the tree is drawn.
 /// A tab's identity is the terminal it holds; a files-only tab has none, and
 /// seeds as a default shell rather than refusing to come back at all.
@@ -35952,47 +35446,6 @@ enum PopupOwner {
     /// place that has to learn a seat, and the exhaustive match below is what
     /// will make it say so.
     Stage,
-}
-
-/// **Which surface each popup is an extension of**, given the surface the tab
-/// list is currently drawn on.
-///
-/// Exhaustive on [`Popup`] for [`PopupsUp::holds`]'s reason: a ninth popup does
-/// not compile until it has said where it grows from.
-fn popup_owner(popup: Popup, tabs: TabSurface) -> PopupOwner {
-    match popup {
-        // The `+`'s own `˅`, wherever the `+` is — the strip's, the rail's, or
-        // the focus column's. `profile_menu_anchor` hangs the box off that same
-        // answer, so the menu and its owner can never name two different
-        // buttons.
-        Popup::Profile => PopupOwner::Tabs(tabs),
-        // **And the menu a right press on a tab raises** (丙2), for the same
-        // reason and by the same derivation: it is raised *on the tab list*,
-        // wherever that list is being drawn, so a hand that has reached it has
-        // not left the rail — and a rail that read the menu beside it as "the
-        // pointer has gone" would retract out from under the very list it just
-        // grew. That is the 2026-08-25 report exactly, and this line is why it
-        // cannot happen a second time.
-        Popup::Tab => PopupOwner::Tabs(tabs),
-        // Everything else is raised by a press somewhere in the panes: a files
-        // column's root button and its rows, a pane head's `⌄`, the commit
-        // graph's branch filter, a preview head's switcher, a repository row,
-        // and a terminal's own right press.
-        //
-        // **The palette is on this side despite being raised by no press at
-        // all** (DESIGN.md §7.55). It is not an extension of the tab list — it
-        // is a box over the stage that happens to be able to *name* tabs — and
-        // a rail that held itself out because the palette was up would be
-        // holding out for a surface that is nowhere near it.
-        Popup::Root
-        | Popup::File
-        | Popup::Pane
-        | Popup::GraphFilter
-        | Popup::Preview
-        | Popup::GitMenu
-        | Popup::TermMenu
-        | Popup::Palette => PopupOwner::Stage,
-    }
 }
 
 /// **Every panel this window raises by *hovering*** — [`Popup`]'s twin, one
@@ -38652,39 +38105,6 @@ impl LeafSession {
     }
 }
 
-/// What one birth is due for now, if anything: a row-waiting birth whose rows `rows_decide`, a
-/// locale-waiting birth once `locale_settled` (a reading has finished), a shell birth whose shell
-/// has answered.
-fn birth_due(
-    birth: &PaneBirth,
-    rows_decide: &dyn Fn(&LeafSeed) -> bool,
-    locale_settled: bool,
-) -> Option<BirthDue> {
-    match &birth.waiting {
-        BirthWait::Programs { .. } => rows_decide(&birth.seed).then_some(BirthDue::Rows),
-        BirthWait::Locale => locale_settled.then_some(BirthDue::Rows),
-        BirthWait::Shell(landing) => landing.shell.answered().then_some(BirthDue::Shell),
-    }
-}
-
-/// **The one scan of a pane's births** (round 2): both places a birth can sit — the pane's own
-/// and a *Restart shell* successor's — in each of its waits, so no birth is one no landing pass
-/// looks at.
-fn births_due(
-    leaf: &LeafSession,
-    rows_decide: &dyn Fn(&LeafSeed) -> bool,
-    locale_settled: bool,
-) -> Vec<(BirthAt, BirthDue)> {
-    [BirthAt::Pane, BirthAt::Successor]
-        .into_iter()
-        .filter_map(|at| {
-            leaf.birth_at(at)
-                .and_then(|birth| birth_due(birth, rows_decide, locale_settled))
-                .map(|due| (at, due))
-        })
-        .collect()
-}
-
 /// **What a *Restart shell* successor's shell landing came to.**
 enum SuccessorLanding {
     /// Its shell has not answered.
@@ -38693,35 +38113,6 @@ enum SuccessorLanding {
     Refused(anyhow::Error),
     /// It was born and is taken off the pane, to take the pane's place.
     Landed(Box<LeafSession>),
-}
-
-/// Land the successor's shell, if it answered ([`land_shell_birth`]); a landed or refused
-/// successor leaves the pane, which then has no restart in flight.
-fn land_successor(leaf: &mut LeafSession, note: impl FnMut(&str)) -> Result<SuccessorLanding> {
-    let Some(successor) = leaf.successor.as_deref_mut() else {
-        return Ok(SuccessorLanding::Waiting);
-    };
-    if !successor.shell_answered() {
-        return Ok(SuccessorLanding::Waiting);
-    }
-    let refusal = land_shell_birth(successor, note)?;
-    let Some(landed) = leaf.successor.take() else {
-        return Ok(SuccessorLanding::Waiting);
-    };
-    Ok(match refusal {
-        Some(refusal) => SuccessorLanding::Refused(refusal),
-        None => SuccessorLanding::Landed(landed),
-    })
-}
-
-/// **The ConPTY source the startup trace records for a pane that has just landed** — its
-/// shell's, or `not-started` for a birth that failed (round 2: a failed identity shell is a
-/// launch shell the trace no longer waits for, and is not a probe's direct input).
-fn landed_source(leaf: &LeafSession, refused: bool) -> Option<String> {
-    if refused {
-        return Some("not-started".to_owned());
-    }
-    conpty_source_of(Some(leaf))
 }
 
 /// **A terminal pane's metrics for a test**, measured once per (scale, size) per process by the
@@ -42607,74 +41998,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ────────────────────────── the command marks rail ──────────────────────────
 
-    /// The jump flash, as a band across the row it landed on.
-    ///
-    /// It is read out of the pane's **last presented frame** rather than from the
-    /// projection, and that is what makes it honest across a scroll: the frame is
-    /// the picture on the glass, its `cell_anchors` say which content each row is
-    /// showing, and a row that has since scrolled out simply is not found and is
-    /// not drawn. Nothing here re-derives where a row "should" be.
-    fn command_flash_layer(
-        &self,
-        palette: &bt_render::ChromePalette,
-        scale: f32,
-    ) -> Option<marks::OverlayLayer> {
-        let flash = self.window.command_flash.as_ref()?;
-        let elapsed = Instant::now().saturating_duration_since(flash.started);
-        // **The pane's own ring, before the row's body is asked for** (§7.55 ⑨).
-        //
-        // Before, and not inside the row's arm with a fallback, because the two
-        // are alternatives: the ring is drawn for a pane that has no row worth
-        // pointing at, and `command_rail_body` answers `None` for an alternate
-        // screen (§3.2 suspends the rail's *picture* there) — which is exactly
-        // the case the ring exists for. A ring reached through that `?` would
-        // never be drawn at all, which is the report this arm answers.
-        let anchor = match &flash.band {
-            FlashBand::Pane => {
-                let alpha =
-                    cmdrail::flash_fade(elapsed, self.app.motion, |x| cubic_bezier(x, EASE))?
-                        * cmdrail::JUMP_FLASH_RING_OPACITY;
-                let rect = seats::pane_rect(&self.seat_layout, flash.seat)?;
-                return Some(marks::OverlayLayer {
-                    quads: cmdrail::flash_ring_quads(rect, alpha, scale, palette),
-                    ..marks::OverlayLayer::default()
-                });
-            }
-            FlashBand::Row(anchor) => anchor,
-        };
-        let alpha = cmdrail::flash_alpha(elapsed, self.app.motion, |x| cubic_bezier(x, EASE))?;
-        let body = self.command_rail_body(flash.seat)?;
-        let frame = self.pane_frame(flash.seat)?;
-        let row = frame_row_of_anchor(frame, anchor)?;
-        // Padding only, and padding is window chrome: it is the same at every text size, so it
-        // is read through the window's named base interface (ticket 37).
-        let padding_px = self.window.renderer.base_metrics().padding_px;
-        let top =
-            body[1] + padding_px + row.top_subpixels as f32 / bt_viewport::SUBPIXELS_PER_PX as f32;
-        let bottom = top + row.height_subpixels as f32 / bt_viewport::SUBPIXELS_PER_PX as f32;
-        // Clipped to the body, because a row half scrolled past the top of the
-        // viewport must flash the half that is there and never a strip of the pane
-        // head above it.
-        let band = [
-            body[0],
-            top.max(body[1]),
-            // Short of the reserved scroll lane, which is the mock-up's own
-            // arrangement seen from the other side: `.term` carries an 18px right
-            // padding and the flash is a background on a block inside it, so the
-            // band has never reached under the rail. The text half of that
-            // arrangement is enforced now (2026-09-23): a pane with a rail is
-            // given a grid whose last column ends left of the rail's resting band
-            // (`cmdrail::terminal_grid_for`). The band itself is unchanged — it is
-            // a row's background, not text, and runs to the lane as it always did.
-            body[2] - bt_render::TERMINAL_SCROLL_LANE_LOGICAL_PX * scale,
-            bottom.min(body[3]),
-        ];
-        Some(marks::OverlayLayer {
-            quads: cmdrail::flash_quads(band, alpha, scale, palette),
-            ..marks::OverlayLayer::default()
-        })
-    }
-
     // ────────────────────────── in-pane search (§7.1.5d) ──────────────────────────
 
     // -- the PowerShell integration notice (7.1.6j) -------------------------
@@ -43333,105 +42656,6 @@ impl<B: Backend> Runtime<'_, B> {
             viewport: self.window.seat_viewport,
             scale_ppm: seats::scale_ppm(self.window.renderer.dpi_milli().get()),
         })
-    }
-
-    /// Run the plan (M155/M156).
-    fn plan_for(&self, inputs: &PlanInputs) -> Option<seats::DropPlan> {
-        let aim = inputs.landing.layout_aim()?;
-        // **A row's centre verbs move no rectangles at all**, so the layout the
-        // drop would make is the layout that is already on screen. That is a
-        // *plan* rather than an absence of one, and it has to be: M147 wants the
-        // pane named — with a word on it when the verb is real ("Open in this
-        // preview") and traced and wordless when it is refused — and the whole
-        // of that drawing is `dock_overlay` reading a plan. Running `plan_drop`
-        // here instead would ask for `ReplaceSeat`, which swaps the target leaf
-        // for a *fresh* one: a new seat id, a lost pin, and a content plane left
-        // filed under a pane that no longer exists. Retargeting is not a tree
-        // edit, and the plan must not pretend it is one.
-        if let Some(payload) = inputs.source.row()
-            && let DropLanding::SeatCentre { target } = inputs.landing
-        {
-            let kind = self.seats.tree().find_seat(target).map(|seat| seat.kind);
-            let mut plan =
-                self.seats
-                    .plan_content_drop(&self.seat_metrics(), inputs.viewport, target)?;
-            // **And the same plan carries the 2026-09-16 text verb**, which
-            // moves no rectangle either: the box over a terminal's middle is the
-            // live layout with `Paste path` written in it, exactly as a
-            // preview's is with "Open in this preview". Asking which *verb*
-            // rather than comparing against `Retarget` is what keeps the promise
-            // on screen and the release reading one table.
-            let verb = row_verb(payload.kind, inputs.landing, kind);
-            // **A paste with nothing to paste into is refused while the hand is
-            // still open** (review 2026-09-17). `row_verb` reads the seat's
-            // *kind*, and a terminal seat with no shell behind it is a kind
-            // without a session — `paste_paths_into` would find no recipient and
-            // return in silence, which is M147's silent refusal exactly. The
-            // outline is the answer instead, and it is the same question the
-            // release asks, asked by the same function.
-            let honoured = verb.content_target() == Some(target)
-                && (!matches!(verb, RowVerb::PastePath(_))
-                    || self.paste_offer_at(Some(inputs.landing)).is_some());
-            if !honoured {
-                plan.refuse();
-            }
-            return Some(plan);
-        }
-        // An edge or a rim is a space verb whichever source asked for it, so a
-        // row arrives here as the one leaf it becomes — a page for a file, a
-        // tree for a folder ([`RowPayloadKind::leaf_kind`]). The seat id is a
-        // placeholder: `plan_drop` renumbers everything that arrives out of its
-        // own counters and reports the pairs in [`seats::DropPlan::arrived`],
-        // which is where the commit reads the identity that actually landed.
-        let arriving = inputs
-            .source
-            .row()
-            .map(|payload| bt_layout::LayoutNode::seat(row_arrival_seat(payload.kind)));
-        let cargo = match (&inputs.cargo, &arriving, &inputs.source) {
-            // M156① — a tab arrives as its whole layout, and since §7.1.6k′ so
-            // does a pane the spring left behind in another tab. Which of the
-            // two this is was decided once, in [`Runtime::plan_inputs_for`].
-            (Some(tree), _, _) => seats::DropCargo::Layout(tree),
-            (_, Some(leaf), _) => seats::DropCargo::Layout(leaf),
-            // M156② — a pane of *this* tree arrives as the seat it already is,
-            // fixed column and all. `inputs.cargo` being `None` for a pane is
-            // exactly the statement that the seat is one this tree owns.
-            (None, None, DragSource::Pane(leaf)) => seats::DropCargo::Pane(leaf.seat),
-            (None, None, DragSource::Tab(_) | DragSource::Row(_)) => return None,
-        };
-        let mut plan = self
-            .seats
-            .plan_drop(&self.seat_metrics(), inputs.viewport, aim, cargo)?;
-        // A drop this window's strip cannot hold is refused here rather than at
-        // the release, and that ordering is the whole of M147: refuse at the
-        // release and the box stays blue right up until the hand opens on
-        // nothing, which is the picture "this app is broken" makes too.
-        //
-        // The limit is I106's and it is narrow. N161/K125 — a centre that ejects
-        // the target pane into the strip — and [`pane_can_become_a_tab`] is what
-        // that pane has to answer. A drop on a files column's middle would push a
-        // files column out as a tab with nothing running in it. Every other
-        // landing here moves panes only inside one tree and asks nothing of the
-        // strip.
-        //
-        // **Asked of the source again since B4** (user ruling 2026-08-25). It
-        // was asked of the cargo while "arrives as a subtree" and "evicts the
-        // target" were the same fact; the ruling separates them. A pane's centre
-        // now trades wherever the pane came from — the displaced pane goes into
-        // the slot the traveller vacated and never becomes a tab — so the only
-        // hand left that turns a pane out into the strip is a whole tab's, and
-        // that is what this asks about.
-        if let DropLanding::SeatCentre { target } = inputs.landing
-            && matches!(inputs.source, DragSource::Tab(_))
-            && !self
-                .seats
-                .tree()
-                .find_seat(target)
-                .is_some_and(|seat| pane_can_become_a_tab(seat.kind))
-        {
-            plan.refuse();
-        }
-        Some(plan)
     }
 
     /// **Note whether this window is in Cards, and raise the bubble on the frame
@@ -46836,119 +46060,11 @@ impl<B: Backend> Runtime<'_, B> {
         });
     }
 
-    /// **The two facts a pane head's run is drawn and hit-tested by**, read off
-    /// this window once (裁4, 2026-08-26).
-    ///
-    /// One reader for the paint, the fade register and the hit test, on
-    /// [`seats::head_run_revealed`]'s own argument: the moment the three of them
-    /// assemble this pair for themselves is the moment one of them forgets the
-    /// second arm and a head goes dark under its own open menu.
-    fn head_run(&self) -> seats::HeadRun {
-        seats::HeadRun {
-            hovered: self.window.seat_pointer.pane_hover,
-            raised: self.head_that_raised_a_layer().map(|layer| layer.seat),
-        }
-    }
-
-    /// **Which pane head put the layer that is standing on the glass** — the
-    /// second of [`Self::head_run`]'s two facts (user ruling 2026-08-27).
-    ///
-    /// [`popup_owner`]'s own sentence with a seat in it. A layer is not a
-    /// rectangle that happens to be floating over this window: it is an
-    /// extension of the control that raised it, and the head that raised one is
-    /// therefore a head with something of its own on screen — so it goes on
-    /// showing its controls, exactly as the surface under any other popup does.
-    /// 裁4 (2026-08-26) ruled that for the `⌄`; the ruling that added this
-    /// function extends it to the head's other door, whose flyout is dropped in
-    /// the same place and reached the same way.
-    ///
-    /// **Exhaustive over [`HoverFloat`] and over [`float::FloatTrigger`]**, for
-    /// [`popup_owner`]'s reason: a fifth layer, or a fourth way to raise a
-    /// flyout, does not compile until it has said whether a head is behind it.
-    /// That is also why there is no second boolean anywhere — the answer is
-    /// derived from what each layer already records about where it came from,
-    /// and nothing here asks where a rectangle happens to be.
-    fn head_that_raised_a_layer(&self) -> Option<seats::PaneLayer> {
-        HoverFloat::ALL.into_iter().find_map(|layer| match layer {
-            // Every [`Popup`] at once, because that is how `HoverFloat` carries
-            // them — so the arm asks which one, and answers for each. Three of
-            // the eight are raised by a control standing in a head; the other
-            // five are raised by a tab, a row, a toolbar or a body.
-            HoverFloat::Menu => self.popups_up().any().and_then(|popup| match popup {
-                // The palette is raised by a chord and hangs off nothing, so
-                // there is no head for a hover float to have come out of.
-                Popup::Palette => None,
-                // The head's own `⌄` — 裁4's case, the one this rule started as,
-                // and one of the two doors a lone pane's corner draws.
-                Popup::Pane => self.window.pane_menu.as_ref().map(|menu| seats::PaneLayer {
-                    seat: menu.seat,
-                    door: Some(icons::ActionIcon::OpenPaneMenu),
-                }),
-                // A files column's root button, which is the leading control of
-                // that column's head — not one of the corner's pair, because a
-                // files column always wears a head.
-                Popup::Root => self
-                    .window
-                    .root_menu
-                    .seat()
-                    .map(|seat| seats::PaneLayer { seat, door: None }),
-                // A preview head's name, which *is* the switcher when the pool
-                // holds more than one buffer.
-                Popup::Preview => self
-                    .preview_menu_seat()
-                    .map(|seat| seats::PaneLayer { seat, door: None }),
-                // The `+`'s list, a file row's menu, the graph toolbar's branch
-                // filter, a repository row's menu, the terminal's own right
-                // press, and the menu a right press on a tab raises. None of
-                // them is dropped from a head.
-                Popup::Profile
-                | Popup::File
-                | Popup::GraphFilter
-                | Popup::GitMenu
-                | Popup::TermMenu
-                | Popup::Tab => None,
-            }),
-            // **The head's 🗀** — and only it. A flyout summoned from a tab's
-            // folder hangs off the strip, and one summoned from a folder printed
-            // in a pane's own output (§7.29) hangs off the text, which is not
-            // the head either. A leaf in some other tab names a seat this tab
-            // does not have, so the tab is checked rather than assumed.
-            HoverFloat::Flyout => match self.window.float.peek().and_then(|win| win.origin) {
-                Some(float::FloatTrigger::Pane(leaf)) => (leaf.tab
-                    == self
-                        .window
-                        .tabs
-                        .get(self.window.active_tab)
-                        .map(|tab| tab.id)?)
-                .then_some(seats::PaneLayer {
-                    seat: leaf.seat,
-                    door: Some(icons::ActionIcon::OpenFilesPane),
-                }),
-                Some(float::FloatTrigger::Tab(_) | float::FloatTrigger::Reference { .. })
-                | None => None,
-            },
-            // A file row's glance card and a tab's layout peek are raised by a
-            // row and by a tab. Neither is a head, and neither has ever hidden
-            // one.
-            HoverFloat::Glance | HoverFloat::LayoutPeek => None,
-        })
-    }
-
     // ── P81: a tree row is a drag source ────────────────────────────────────
 
     // ── P143-P150: the glance card ──────────────────────────────────────────
 
     // ── the three dirty gates (P123-P125, `DESIGN.md` §7.1.3) ───────────────
-
-    /// The dirty buffers one gate is about, by name and in the pool's own order.
-    ///
-    /// Three questions, one list-maker. What differs between them is only *which*
-    /// pools are at risk: a pane and a tab put one tab's pool at risk, and a shut
-    /// puts every tab's — and the mock-up's own `state.tabs.flatMap(poolDirtyNames)`
-    /// says the third in as many words (P125).
-    fn gate_dirty_names(&self, request: &restore::GateRequest) -> Vec<String> {
-        dirty_gate_names(&self.window.tabs, self.window.active_tab, request)
-    }
 
     // ── quitting (multiwindow slice E2, `DESIGN.md` §2.9) ───────────────────
 
@@ -47013,33 +46129,6 @@ impl<B: Backend> Runtime<'_, B> {
     // ── the pane head's own menu (user rulings, 2026-08-15, 2026-08-16) ─────
 
     // ── the commit graph's toolbar (T1/T2/T3/T4/T5, v2 ③) ──────────────────
-
-    /// **The axis a split with no direction of its own takes** (user ruling,
-    /// 2026-08-16, `settings.json` v6).
-    ///
-    /// One reader for every such verb — the duplicate chord, `Split with…`,
-    /// `New terminal in folder…`, `Duplicate pane` — because the ruling is that
-    /// they all obey one setting, and a second place that read it would be a
-    /// second place that could stop.
-    ///
-    /// `Auto` is the pane's longer side, which is what all four of them did
-    /// before the setting existed and what Windows Terminal's `duplicatePane`
-    /// means by `split: "auto"`. The measurement is the solver's own rectangle,
-    /// never a guess (red line L10).
-    ///
-    /// The picker's four zones deliberately do not come through here: a zone
-    /// *is* a direction, and a setting that overrode the thing the hand just
-    /// pointed at would be the setting overruling the gesture.
-    fn settings_split_axis(&self, seat: SeatId) -> Axis {
-        // The pane is measured whatever the setting says, because measuring is
-        // cheap and because a branch that skipped it would make `Auto` the only
-        // path that touches the solver — which is how a rectangle nobody asks
-        // for goes stale unnoticed.
-        split_axis(
-            self.app.settings_store.loaded().split_direction,
-            self.pane_split_axis(seat),
-        )
-    }
 
     // ── the floating window (§7.1.2) ────────────────────────────────────────
 
@@ -48257,29 +47346,6 @@ impl<B: Backend> Runtime<'_, B> {
     // ── The web preview (slice 1) ──────────────────────────────────────────
 
     // ── The page's own chrome (slice ④) ────────────────────────────────────
-
-    /// The seat this window's page is on, when that seat is the one holding the
-    /// keyboard.
-    ///
-    /// **`focused_preview_seat` and never `focused_leaf`**, for
-    /// [`Self::page_holds_the_keyboard`]'s reason and found the same way: the
-    /// latter only ever names a seat that is in `sessions`, so it is never a
-    /// preview seat and a chord routed through it never fires. One predicate,
-    /// asked twice, is how the two came to differ in the first place — so this
-    /// is now that predicate.
-    /// **Docked only, and that is the point of it** (§7.14c). Every caller hangs
-    /// something off the pane's own head — a search capsule, an address editor —
-    /// and a page carried into a float has no head in the layout to hang it on:
-    /// its seat was closed by `pop_out_preview` and has no rectangle at all. So
-    /// the page with the keyboard is asked for first, and then whether it still
-    /// has a seat; a floated page answers `None` here and holds the keyboard
-    /// anyway, which are two different facts and now say so.
-    fn focused_web_seat(&self) -> Option<SeatId> {
-        let leaf = self.page_with_the_keyboard()?;
-        self.float_holding_the_page(leaf)
-            .is_none()
-            .then_some(leaf.seat)
-    }
 
     /// **Take away the tab a window opened holding, now that the tab it was
     /// opened for has arrived** (multiwindow slice F1c).
@@ -67629,158 +66695,6 @@ fn card_picture_in<'a>(cache: &'a PeekCache, path: &Path) -> Option<focus_thumb:
     }
 }
 
-/// **Which of a seat move's re-keyings a page has to follow** (§7.10 ④‴).
-///
-/// `moves` is the whole transaction — every `(was, now)` pair the gesture
-/// produced, in the order it produced them — and this picks out the ones the
-/// window's page table has an entry for. A pair whose two halves are equal is
-/// not a move at all and is dropped here rather than at
-/// [`webhost::WebSeat::rehost`]'s door, which answers `AddressOnly` for it: the
-/// point of asking is that a pane which did not travel must not be taken out of
-/// the table and put back, because a *trade* interleaves two journeys and the
-/// second one's key is the first one's old key.
-///
-/// A pure function so the rule can be read without a browser: what a page is
-/// owed by a move is a fact about the two addresses, and the only thing that
-/// needs an engine is the handing over itself.
-///
-/// **The recording table asks it too** (§7.44 ⑮), which is why `hosted` is a set
-/// of leaves and not the page map itself: what this decides is a fact about two
-/// addresses and a list of the ones somebody is holding something for, and both
-/// window-level tables a pane can be behind — the browser and the decoder — ask
-/// exactly that. See [`Runtime::carry_the_recordings_of_moved_panes`].
-#[must_use]
-fn pages_that_move_with_their_panes(
-    hosted: &BTreeSet<LeafId>,
-    moves: &[(LeafId, LeafId)],
-) -> Vec<(LeafId, LeafId)> {
-    moves
-        .iter()
-        .copied()
-        .filter(|(was, now)| was != now && hosted.contains(was))
-        .collect()
-}
-
-/// **R2's zone, as a decision instead of a method** — everything the icon rail
-/// consults to answer "should I be open", with no window and no clock in it.
-///
-/// `position` is the pointer in physical pixels, `rail_right` the physical x the
-/// rail the zone is *aiming* at ends on, and `rail_top` the title bar's lower
-/// edge — the rail begins there, so a pointer up in the caption run is not in
-/// the rail however far left it is.
-///
-/// `peek_origin` is the live transient peek's trigger, or `None` when no peek is
-/// up. **The trigger and not a flag**, and that is the whole of this function's
-/// reason to exist:
-///
-/// **G102 — the rail has unfinished business.** A rectangle can only ever answer
-/// "is the pointer near the rail", and a transient peek is the case where that
-/// is the wrong question: a peek hanging off a *rail row* floats out past the
-/// rail's own edge, so moving onto the thing the rail just opened would
-/// otherwise read as having left it — and the rail would retract out from under
-/// it, taking the anchor with it.
-///
-/// **That clause belongs to [`float::FloatTrigger::Tab`] alone.** A rail row is
-/// a tab, and in the vertical layout `hit_rail_chrome` is the only thing that
-/// produces `ChromeTarget::TabFiles` — so under an icon rail (the only posture
-/// [`Runtime::drive_rail_zone`] runs in) a `Tab` peek *is* a peek hanging off a
-/// rail row. A [`float::FloatTrigger::Pane`] peek is the folder button on a
-/// terminal pane's own head — or, on a lone pane, the one in its top-right
-/// corner (2026-08-25) — out in the panes and nowhere near the rail; it
-/// overhangs nothing of the rail's, so the rail has no business being held open
-/// by it. Asking only "is a peek up" made every pane head a second, invisible
-/// rail trigger: hovering a pane's folder icon opened its flyout *and* rolled
-/// the rail out from the left edge, with the pointer never having gone near it
-/// (user report, 2026-08-15).
-///
-/// A **pinned** window holds nothing open whatever it was summoned from, and the
-/// mock-up is explicit about why (8735-8738): it has been torn off into a
-/// free-floating window, so the rail is free to retract normally. That falls out
-/// of the argument rather than being tested here — the caller reads
-/// [`float::FloatHost::peek`], which is the transient slot and only ever that.
-fn rail_zone_wants_open(
-    position: Option<PhysicalPosition<f64>>,
-    rail_right: f64,
-    rail_top: f64,
-    peek_origin: Option<float::FloatTrigger>,
-    popup_from_the_rail: bool,
-) -> bool {
-    let inside = position.is_some_and(|position| position.y >= rail_top && position.x < rail_right);
-    inside || matches!(peek_origin, Some(float::FloatTrigger::Tab(_))) || popup_from_the_rail
-}
-
-/// **Whether this change of posture leaves the rail's own popups hanging.**
-///
-/// §7.1.6e″'s third clause — the one that keeps rule ① honest in the other
-/// direction. A popup the rail grew holds the panel out for as long as it is up,
-/// so the *hover* zone can no longer retract out from under one; what can still
-/// take the panel away underneath it is a change of posture, which does not go
-/// past the zone at all:
-///
-/// * **The fold** (`.panel-toggle`, `Ctrl+B`). The rail leaves the screen
-///   entirely and `rail_geometry` stops answering, so `profile_menu_anchor` has
-///   no box — a menu that is open, draws nothing, and swallows the keyboard.
-///   Only the folding direction: un-folding strands nothing.
-/// * **The tab list moving house** — `Tab layout` from vertical to horizontal,
-///   or `Sidebar` from expanded to icons. The first hands the `+` to the strip
-///   and the second rebuilds the rail parked at the top of its list
-///   (`set_rail_state`'s "born parked"), and a menu that was the sidebar's is
-///   then hanging off a button in another surface or another place.
-///
-/// Focus mode is deliberately not here: the card column keeps the `+` and its
-/// `˅` (§7.1.6b′), so the menu changes owner rather than losing one.
-fn rail_change_strands_its_popups(from: seats::RailState, to: seats::RailState) -> bool {
-    (from.layout, from.mode) != (to.layout, to.mode) || (to.collapsed && !from.collapsed)
-}
-
-/// The rail's own level of the overlay stack — [`seats::WindowChrome::rail`]
-/// lifted into the overlay's vocabulary, or nothing when there is no rail.
-///
-/// **The lift keeps the surface class, and that is the whole of §7.1.6c-4f's
-/// second amendment.** The rail is not drawn in the chrome pass at all — R1 puts
-/// it on a floating level, because an open icon rail overlaps the terminal for
-/// 174 of its 220 pixels and a rail drawn under the panes would simply vanish
-/// the moment it opened. So `ChromeSurface` never reached the pipeline that
-/// reads it: every rail quad came out of here as an `OverlayQuad { alpha: 1.0 }`,
-/// and the one-translucency ruling of 2026-08-18 landed on every band in the
-/// window except the one this function carries. Measured at 30% over a bright
-/// desktop, the tab strip let it through and the rail did not — a dark column
-/// down the left edge of a window you could see the desk through.
-///
-/// A ground therefore travels the ground channel and everything else stays a
-/// quad. The comment this replaces was right about the ink and wrong about only
-/// one thing: "chrome fills are opaque by construction" is true of a hairline,
-/// a hover pill and a landing wash, and false of the panel they are struck on.
-///
-/// **The surface's opacity is still the fold** — `.rail { transition: …
-/// opacity .18s ease }` with `.window.rail-collapsed .rail { opacity: 0 }`
-/// (mock-up 814/823). CSS `opacity` on the element the layer *is*, so the panel
-/// and everything standing in it leave together rather than the ground going
-/// while the icons stay — and since ticket 46 literally together: the band is
-/// one [`bt_render::OverlayGroup`], drawn whole and put back once. Its ground
-/// is put back by cross-fade rather than over — see [`bt_render::OverlayGroup`]
-/// — which is what lets a *fading* panel still be glass instead of going opaque
-/// on its way out.
-///
-/// Red gate: send the grounds through the quad channel as this used to and the
-/// pin below finds the rail's panel among the fills; drop the fold and a
-/// collapsing rail pops instead of fading.
-/// **How opaque the panel on the left is drawn** — the fold's own number, and a
-/// flat `1.0` while the card column is up (§7.1.6b′).
-///
-/// Its own function because it is a *rule* and not a reading: the fold is the
-/// `Sidebar` row's business, the card column is not wired to that row, and the
-/// place those two facts meet has to be somewhere a test can stand.
-///
-/// Red gate: return `fold` unconditionally — which is what this used to do — and
-/// [`the_card_column_is_never_faded_by_a_fold_that_is_not_its_own`] goes red, as
-/// the screen did: a window whose sidebar was folded away entered focus mode and
-/// drew nothing in a card-wide column that was nevertheless solved for, hit-
-/// tested and clickable.
-fn panel_opacity(state: seats::RailState, fold: f32) -> f32 {
-    if state.draws_focus_rail() { 1.0 } else { fold }
-}
-
 /// **The one place a chosen (layout, sidebar mode) pair becomes a `RailState`.**
 ///
 /// Every route into the rail goes through here — today the settings dialog's two
@@ -67842,41 +66756,6 @@ struct LeafResizeTarget {
     seat: SeatId,
     body: bt_render::SeatViewport,
     focused: bool,
-}
-
-/// The whole geometry decision [`Runtime::resize_leaves_to_layout`] makes, with
-/// no renderer and no session in it: seats and a solved layout in, one rectangle
-/// per terminal leaf out.
-///
-/// `focused` enters the answer **only as a flag**. It says which leaf's carry
-/// goes through the ConPTY quiet window; it does not and must not reach any
-/// `body`. Sizing a shell is a question about a
-/// rectangle, and which pane holds the keyboard is not one of that rectangle's
-/// inputs — the version of this code that let the two mix is the one that told a
-/// narrow focused pane it had the primary pane's columns.
-///
-/// **A seat that is not being shown as a pane is not in the plan at all**, which
-/// is [`seats::shell_body_viewport`]'s whole subject: an unplaced seat has no
-/// rectangle, and a seat the concession ladder folded into a bar has one that is
-/// chrome. Either way the leaf keeps the width it last really had until a later
-/// solve puts a pane back under it.
-fn leaf_resize_plan(
-    seats: &seats::Seats,
-    layout: &SeatLayout,
-    focused: SeatId,
-    scale: f32,
-) -> Vec<LeafResizeTarget> {
-    seats
-        .terminals()
-        .into_iter()
-        .filter_map(|seat| {
-            seats::shell_body_viewport(seats, layout, seat, scale).map(|body| LeafResizeTarget {
-                seat,
-                body,
-                focused: seat == focused,
-            })
-        })
-        .collect()
 }
 
 /// One tree solved into one box, with L4's presentation standing behind it.
@@ -68007,18 +66886,6 @@ enum WindowPosture {
     Normal,
     Maximized,
     Minimized,
-}
-
-/// One scroll offset, measured at one scale, said again in another's pixels —
-/// see [`Runtime::restate_panel_scroll`] for what it is for and why it is a
-/// ratio.
-///
-/// Its own function so the property can be tested against the very arithmetic
-/// the window runs: what a column looks like after a display change is a fact
-/// about this number and the geometry it is handed to, and a test that
-/// multiplied by its own ratio would be a test of itself.
-fn restated_scroll(scroll: f32, measured_at: f64, now_at: f64) -> f32 {
-    scroll * (now_at / measured_at) as f32
 }
 
 /// A saved size, or the product's opening size when the saved one is not a size

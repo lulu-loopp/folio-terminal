@@ -10,8 +10,8 @@ use crate::{
     App, AppEvent, BrokerAim, BrokerRelease, Drag, DragHandover, DragSource, FormulaSwitches,
     HandoverInto, INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts,
     NewWindowPlan, PreviewRestore, PtyWakeSignal, RAIL_TRANSITION, RenameExit, RenameSubject,
-    RevealTween, Runtime, TabSeed, TabState, TearGrip, WindowPosture, WindowRuntime,
-    attention_trace, close_wait_over, create_tab_state, dirty_gate_names, dpi_snapshot,
+    RevealTween, Runtime, TabSeed, TabState, TearGrip, WindowPosture, WindowRuntime, active_item,
+    attention_trace, close_wait_over, create_tab_state, dpi_snapshot,
     ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner, first_term_leaf,
     float, git, hang_watch, i18n, ime_outbound, ime_report, install_page_ground_color,
     install_theme_class_background, marks, mouse_trace, new_window_runtime, notify,
@@ -19,7 +19,7 @@ use crate::{
     rail_state_for, render_sidebar_mode, render_tab_layout, restore, restore_row_seed,
     restore_window_placement, revive_plan, scrollback_quota, seats, seed, seeded_tab,
     session_sidebar_mode, session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at,
-    startup_window_rect, toast, unsaved_line, where_a_save_stands, window_surface_target,
+    startup_window_rect, tabs_a_close_loses, toast, where_a_save_stands, window_surface_target,
 };
 use crate::{LeafView, TextScale, owner_door, revived_profile};
 use anyhow::Context;
@@ -2533,6 +2533,109 @@ impl<B: Backend> Runtime<'_, B> {
         }
         Ok(())
     }
+}
+
+/// `n lines`, and `1 line` for the one that is not plural.
+///
+/// A function rather than a `format!` at the call site because the singular is
+/// exactly the sort of thing that is right in the first sentence somebody writes
+/// and wrong in the second: this window says "1 line" in one place today and
+/// will say it in every gate, tip and card that ever counts rows.
+pub(crate) fn lines_phrase(lines: usize) -> String {
+    if lines == 1 {
+        "1 line".to_owned()
+    } else {
+        format!("{lines} lines")
+    }
+}
+
+/// The dirty buffers one gate is about, by name and in the pool's own order —
+/// [`Runtime::gate_dirty_names`]' list, over the window's tabs and which one is
+/// active, so that the gate's decision ([`raise_dirty_gate_over`]) can be run on
+/// real tabs without a window.
+pub(crate) fn dirty_gate_names(
+    tabs: &[TabState],
+    active_tab: usize,
+    request: &restore::GateRequest,
+) -> Vec<String> {
+    // **Each name says which tab it is in** (B1, user ruling 2026-08-25),
+    // and it is added here because here is the only place that can see a
+    // tab: the card is handed a list of lines and has no window to ask.
+    //
+    // A shut is the one request whose list can span more than one tab, so it
+    // is the one that needs saying — but the sentence is added by every one
+    // of the three, because a reader looking at a card does not know which
+    // question raised it and a name that carries its room in one card and
+    // not in another is two cards.
+    // **And a clean buffer whose save has not landed** (S-6b, the coordinator's
+    // ruling on R1): the close would leave nobody to say how that save ended.
+    let one_tab = |tab: &TabState| {
+        let where_ = tab.display_title();
+        tab.preview_pool
+            .close_names()
+            .map(|name| unsaved_line(name, &where_))
+            .collect::<Vec<_>>()
+    };
+    match request {
+        // The pane's tab, the tab, or every tab: the pools the close would lose.
+        restore::GateRequest::ClosePane(_)
+        | restore::GateRequest::CloseTab(_)
+        | restore::GateRequest::Shut
+        | restore::GateRequest::ShutWithTheRun(_) => tabs_a_close_loses(tabs, active_tab, request)
+            .into_iter()
+            .flatten()
+            .flat_map(one_tab)
+            .collect(),
+        // A discard names one file, and it is never empty — which matters,
+        // because `raise_dirty_gate` treats an empty list as "there is
+        // nothing to ask about" and lets the verb through. There is always
+        // something to ask about here: that is what makes it a discard.
+        restore::GateRequest::GitDiscard { path, .. } => vec![path.clone()],
+        // A ref deletion names the ref, for the same reason and with the
+        // same consequence: the list is never empty, so `raise_dirty_gate`
+        // never lets one of these through unasked.
+        restore::GateRequest::GitDeleteBranch { name, .. }
+        | restore::GateRequest::GitDeleteTag { name, .. } => vec![name.clone()],
+        // A detaching checkout names where it is about to put you, and it is
+        // never empty either — `said` is a short hash and a subject, or a
+        // tag's name, worked out at the moment the menu row was pressed and
+        // carried rather than looked up again from a history that may have
+        // been re-read since.
+        restore::GateRequest::GitCheckout { said, .. } => vec![said.clone()],
+        // **An empty scrollback is asked nothing** (ticket #62), which is
+        // the emptiness rule this list was written for, applied to a fourth
+        // subject: `raise_dirty_gate` reads an empty list as "there is
+        // nothing to lose here" and lets the verb through, and a pane whose
+        // history and staging are both empty has nothing an ED3 could take.
+        // The clear still runs; it simply runs unasked, because a question
+        // whose only honest answer is "nothing happens either way" is not a
+        // question.
+        restore::GateRequest::ClearScrollback(seat) => active_item(tabs, active_tab)
+            .sessions
+            .get(seat)
+            .map(|leaf| leaf.session.scrollback_line_count())
+            .filter(|lines| *lines > 0)
+            .map(|lines| vec![lines_phrase(lines)])
+            .unwrap_or_default(),
+    }
+}
+
+/// **One row of an exit card: a file, and the tab it is in** (B1, user ruling
+/// 2026-08-25).
+///
+/// A free function because both collectors need it and neither owns the other:
+/// the shut gate reads one window's tabs and the quit card reads every window's,
+/// and a card whose rows were built two ways would be two cards.
+///
+/// A tab with nothing to call itself contributes no dash and no empty room —
+/// `display_title` can be a blank string on a tab whose shell has said nothing
+/// yet, and `notes.md — ` is a sentence with a hole in it.
+fn unsaved_line(name: &str, tab: &str) -> String {
+    let tab = tab.trim();
+    if tab.is_empty() {
+        return name.to_owned();
+    }
+    format!("{name} \u{2014} {tab}")
 }
 
 pub(crate) fn window_minimum_changed(applied: &mut Option<(i64, i64)>, next: (i64, i64)) -> bool {
