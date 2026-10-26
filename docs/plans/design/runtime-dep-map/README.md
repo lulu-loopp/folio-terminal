@@ -257,9 +257,11 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    - `math_em_milli` and `window_layout_key` (batch 14) — their `called_from` home is `runtime/math.rs`, but
      `PreviewMathCache::picture` and `bare_leaf` at the root call them in the product (the rule above).
    - `Runtime::cancel_composition` (batch 14) — no root product caller, and its home would be
-     `runtime/keyboard.rs`, but it writes facts of three census owners, none of them keyboard:
-     `TabState.git_graph_view` (git), `WindowRuntime.palette` (palette) and `WindowRuntime.search` (search). Held
-     for a ruling (the two-owners clause above).
+     `runtime/keyboard.rs`, but it writes three facts that keyboard.rs does not write, of three census owners,
+     none of them keyboard (`TabState.git_graph_view`, git; `WindowRuntime.palette`, palette;
+     `WindowRuntime.search`, search). Its other writes (`WindowRuntime.rename`, owner tabs, and the keyboard-owned
+     `composing`, `preedit` and `ime_cursor`) keyboard.rs writes already. Held for a ruling (the two-owners clause
+     above).
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,
