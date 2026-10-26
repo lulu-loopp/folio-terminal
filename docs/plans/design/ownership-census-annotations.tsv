@@ -103,7 +103,6 @@ WindowRuntime.float_hover	-	VIEW	floats	the 2026-09-25 table
 WindowRuntime.focus_mode	-	VIEW	focus	proposed by census-1
 WindowRuntime.focus_reveal	-	VIEW	focus	proposed by census-1
 WindowRuntime.folder_pick	-	ASYNC	files	the 2026-09-25 table
-WindowRuntime.formula_overlay_owed	-	PROJ	math	the 2026-09-25 table
 WindowRuntime.frame_clock	-	PROJ	frame	the 2026-09-25 table
 WindowRuntime.git_graphs_shown	-	PROJ	git	the 2026-09-25 table
 WindowRuntime.git_menu	-	VIEW	git	the 2026-09-25 table

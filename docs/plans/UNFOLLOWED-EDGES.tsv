@@ -2060,7 +2060,6 @@ crates/bt-app/src/main.rs	bt-app crate::RevealTween::sample	Ambiguous	as_secs_f3
 crates/bt-app/src/main.rs	bt-app crate::Runtime::add_scheme	Ambiguous	text	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::add_scheme	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::add_scheme	Ambiguous	to_string	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::advance_page_foot_clocks	Dynamic	over	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::aim_focus_card_window	Ambiguous	find	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::aim_focus_card_window	Dynamic	aim_line	3	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::animating_deadline	Ambiguous	flatten	1	
@@ -2223,8 +2222,6 @@ crates/bt-app/src/main.rs	bt-app crate::TransferRefusal::notice	Ambiguous	text	2
 crates/bt-app/src/main.rs	bt-app crate::TransferRefusal::notice	Ambiguous	to_owned	2	
 crates/bt-app/src/main.rs	bt-app crate::Windows::in_order_mut	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::Windows::in_order_mut	Ambiguous	map	2	
-crates/bt-app/src/main.rs	bt-app crate::advance_periodic_deadline	Ambiguous	as_nanos	1	
-crates/bt-app/src/main.rs	bt-app crate::advance_periodic_deadline	Ambiguous	unwrap_or	1	
 crates/bt-app/src/main.rs	bt-app crate::animation_refusal_notice	Ambiguous	text	3	
 crates/bt-app/src/main.rs	bt-app crate::answer_one_picture	Ambiguous	clone	2	
 crates/bt-app/src/main.rs	bt-app crate::answered_once	Ambiguous	clone	2	
@@ -2237,7 +2234,6 @@ crates/bt-app/src/main.rs	bt-app crate::apply_stored_terminal_font	Ambiguous	as_
 crates/bt-app/src/main.rs	bt-app crate::apply_stored_terminal_font	Ambiguous	elapsed	1	
 crates/bt-app/src/main.rs	bt-app crate::apply_stored_terminal_font	Ambiguous	is_empty	1	
 crates/bt-app/src/main.rs	bt-app crate::apply_stored_terminal_font	Ambiguous	len	1	
-crates/bt-app/src/main.rs	bt-app crate::attention_ledger_deadline	Ambiguous	deadline	1	
 crates/bt-app/src/main.rs	bt-app crate::birth_due	Ambiguous	then_some	1	
 crates/bt-app/src/main.rs	bt-app crate::birth_due	Dynamic	rows_decide	1	
 crates/bt-app/src/main.rs	bt-app crate::births_due	Ambiguous	collect	1	
@@ -2265,7 +2261,6 @@ crates/bt-app/src/main.rs	bt-app crate::choose_restored_placement	Ambiguous	or_e
 crates/bt-app/src/main.rs	bt-app crate::choose_restored_placement	Ambiguous	total_cmp	1	
 crates/bt-app/src/main.rs	bt-app crate::choose_restored_placement	Ambiguous	width	1	
 crates/bt-app/src/main.rs	bt-app crate::choose_restored_placement	Dynamic	fit	2	
-crates/bt-app/src/main.rs	bt-app crate::chrome_over	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::claimed_by	Ambiguous	any	1	
 crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	chars	1	
 crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	collect	2	
@@ -2325,10 +2320,6 @@ crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Ambiguous	open	1
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Ambiguous	write_all	1	
 crates/bt-app/src/main.rs	bt-app crate::dump_overlay_frame	Dynamic	ink	3	
 crates/bt-app/src/main.rs	bt-app crate::earliest_deadline	Ambiguous	flatten	1	
-crates/bt-app/src/main.rs	bt-app crate::earliest_named_deadline	Ambiguous	filter_map	1	
-crates/bt-app/src/main.rs	bt-app crate::earliest_named_deadline	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::earliest_named_deadline	Ambiguous	min_by_key	1	
-crates/bt-app/src/main.rs	bt-app crate::earliest_named_deadline	Ambiguous	zip	1	
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	into_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	unwrap_or	1	
@@ -2528,7 +2519,6 @@ crates/bt-app/src/main.rs	bt-app crate::start_video_prewarm	Dynamic	prewarm	1
 crates/bt-app/src/main.rs	bt-app crate::start_video_prewarm	Dynamic	say	1	
 crates/bt-app/src/main.rs	bt-app crate::startable_profile	Dynamic	available	1	
 crates/bt-app/src/main.rs	bt-app crate::startable_profile	Dynamic	startable	2	
-crates/bt-app/src/main.rs	bt-app crate::startup_poll_delay	Ambiguous	then_some	1	
 crates/bt-app/src/main.rs	bt-app crate::startup_window_rect	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::startup_window_rect	Ambiguous	saturating_add	2	
 crates/bt-app/src/main.rs	bt-app crate::startup_window_rect	Ambiguous	unwrap_or	2	
@@ -2550,8 +2540,6 @@ crates/bt-app/src/main.rs	bt-app crate::the_fatal_road	Dynamic	fatal	1	2026-10-2
 crates/bt-app/src/main.rs	bt-app crate::the_fatal_road	Dynamic	previous	1	2026-10-24: the panic hook's three steps are handed to the_fatal_road so a test drives their order (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD review H1); its one product call names diagnostics::settle_in_panic, the previous hook and fatal
 crates/bt-app/src/main.rs	bt-app crate::the_fatal_road	Dynamic	settle	1	2026-10-24: the panic hook's three steps are handed to the_fatal_road so a test drives their order (T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD review H1); its one product call names diagnostics::settle_in_panic, the previous hook and fatal
 crates/bt-app/src/main.rs	bt-app crate::title_layer	Ambiguous	is_empty	1	
-crates/bt-app/src/main.rs	bt-app crate::trace_unchanged_present	Ambiguous	as_micros	1	
-crates/bt-app/src/main.rs	bt-app crate::trace_unchanged_present	Ambiguous	elapsed	1	
 crates/bt-app/src/main.rs	bt-app crate::unsaved_line	Ambiguous	is_empty	1	
 crates/bt-app/src/main.rs	bt-app crate::video_frame_texture_key	Ambiguous	as_nanos	1	
 crates/bt-app/src/main.rs	bt-app crate::video_frame_texture_key	Ambiguous	map_or_else	1	
@@ -4078,6 +4066,17 @@ crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::turn	A
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::turn	Ambiguous	is_some	1	
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::turn	Ambiguous	map	2	
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::turn	Ambiguous	then	1	
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::advance_periodic_deadline	Ambiguous	as_nanos	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `advance_periodic_deadline` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::advance_periodic_deadline	Ambiguous	unwrap_or	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `advance_periodic_deadline` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::attention_ledger_deadline	Ambiguous	deadline	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `attention_ledger_deadline` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::chrome_over	Ambiguous	collect	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `chrome_over` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::earliest_named_deadline	Ambiguous	filter_map	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `earliest_named_deadline` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::earliest_named_deadline	Ambiguous	map	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `earliest_named_deadline` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::earliest_named_deadline	Ambiguous	min_by_key	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `earliest_named_deadline` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::earliest_named_deadline	Ambiguous	zip	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `earliest_named_deadline` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::startup_poll_delay	Ambiguous	then_some	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `startup_poll_delay` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::trace_unchanged_present	Ambiguous	as_micros	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `trace_unchanged_present` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::trace_unchanged_present	Ambiguous	elapsed	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `trace_unchanged_present` from main.rs into runtime/frame.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::apply_git_results	Ambiguous	accept	1	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::apply_git_results	Ambiguous	as_path	2	
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::apply_git_results	Ambiguous	clone	3	
@@ -4761,6 +4760,7 @@ crates/bt-app/src/runtime/update_card.rs	bt-app crate::runtime::update_card::Run
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::adopt_spare_web_page	Ambiguous	as_micros	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::adopt_spare_web_page	Ambiguous	elapsed	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::adopt_spare_web_page	Ambiguous	unwrap_or_default	1	
+crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::advance_page_foot_clocks	Dynamic	over	1	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `advance_page_foot_clocks` from main.rs into runtime/web.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::apply_web_outcomes	Ambiguous	forget	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::apply_web_outcomes	Ambiguous	learn	1	
 crates/bt-app/src/runtime/web.rs	bt-app crate::runtime::web::Runtime::apply_web_outcomes	Ambiguous	to_owned	1	

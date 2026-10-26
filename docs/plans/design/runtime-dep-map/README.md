@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **696 items, 509 free functions and 187 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 12's head; 713, 525 and 188 before it,
+- **unclassified.tsv**: **667 items, 495 free functions and 172 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 13's head; 696, 509 and 187 before it,
+  713, 525 and 188 before batch 12,
   734, 545 and 189 before batch 11,
   754, 559 and 195 before batch 10,
   769, 573 and 196 before batch 9,
@@ -117,7 +118,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 10 | `runtime/floats.rs` | moved by batch 10 (10 items with `files_float_content_height`; `Runtime::settled_card_ink` went to `runtime/frame.rs` by its census owner; `Runtime::sweep_foot_phrases`, `Runtime::open_minted_page_on`, `revealable_preview_file`, `Runtime::open_local_path` and `reveal_ask` held, below), with nine clipboard tails | — |
    | 11 | `runtime/files.rs` | moved by batch 11 (16 items; `Runtime::focus_the_pane_a_path_landed_in` and `home_shortened_path` held, below; `float_dock_label` went to `runtime/floats.rs` by the owner column), with `Runtime::reference_cell_index`, `text_field_holding`, `paste_spelled` and `page_keepsake_icon` as tails | — |
    | 12 | `runtime/windows.rs` | moved by batch 12 (15 items; `revive_plan`, `create_tab_state` and `scrollback_quota` held, below; `end_leaves_of` went to `runtime/panes.rs` by the owner column), with `files_key_within` as a tail | — |
-   | 13 | `runtime/frame.rs` | 33 (15 + 18) | 45 |
+   | 13 | `runtime/frame.rs` | moved by batch 13 (24 items; five more went to the census owners of the facts they write, `runtime/terminal.rs`, `runtime/handoff.rs`, `runtime/web.rs`, `runtime/math.rs` and `runtime/keyboard.rs`, below; `Runtime::note_card_hint`, `Runtime::advance_card_hint`, `Runtime::advance_scheme_watch`, `Runtime::advance_storage_watch`, `mark_leaf_painted` and `math_copy_window` held, below) | — |
    | 14 | `runtime/keyboard.rs` | 27 (13 + 14) | 50 |
    | 15 | `runtime/math.rs` | 18 (12 + 6) | 50 |
    | 16 | `runtime/tabs.rs` | 20 (16 + 4) | 54 |
@@ -157,6 +158,13 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    `runtime/preview.rs` both write that fact already, so either home leaves the writer set as it is, and it has one
    first caller and no tie. Neither case applies, so the first caller stands, and it went to `runtime/windows.rs`,
    beside `answer_exit`, as an exit-gate step.
+   Batch 13 sent five methods whose first caller is `runtime/frame.rs` to their facts' owners by clause (a),
+   because `runtime/frame.rs` would have been a new writer and the owner's module already writes the fact:
+   `Runtime::advance_command_flash` (`WindowRuntime.command_flash`) to `runtime/terminal.rs`,
+   `Runtime::advance_foot_reveal` (`WindowRuntime.revealed_foot`) to `runtime/handoff.rs`,
+   `Runtime::advance_page_foot_clocks` (`WindowRuntime.web`) to `runtime/web.rs`, `Runtime::carry_live_journeys`
+   (`WindowRuntime.formula_overlay_owed`, of which math becomes the only writer) to `runtime/math.rs`, and
+   `Runtime::settle_composition_owner` (`WindowRuntime.composing`) to `runtime/keyboard.rs`.
 
    **A product caller in another `runtime/` file imports the moved item from its new path** (`use
    crate::runtime::<topic>::<item>;`, an import line and no body text; ruled at batch 7). What stays forbidden is a
@@ -193,6 +201,18 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `runtime/settings.rs`, so it stays in `main.rs` with the settings topic. The hold rests on that write:
      `Runtime::settings_field_holds_the_keyboard`, which only reads the settings field and whose one caller is
      `Runtime::clipboard_focus`, went to `runtime/clipboard.rs` as a tail in batch 10.
+   - `Runtime::note_card_hint` and `Runtime::advance_card_hint` (batch 13) — their `called_from` home is
+     `runtime/frame.rs`, but `note_card_hint` writes `App.settings_store`, whose census owner is
+     `main[settings]`, and `runtime/frame.rs` does not write it; K2 opens no `runtime/settings.rs`, so it stays,
+     as `paste_into_settings_field` does. The two are `WindowRuntime.card_hint`'s only writers, so
+     `advance_card_hint` stays with it: moving one alone would make that fact a new two-module one.
+   - `Runtime::advance_scheme_watch`, `Runtime::advance_storage_watch` and `mark_leaf_painted` (batch 13) — their
+     `called_from` home is `runtime/frame.rs`, but they write `App.scheme_watch` (other writers `add_scheme` and
+     `create`), `App.storage_watch` (other writer `create`) and `LeafSession.last_seen_revision` (other writer
+     `mark_leaf_seen`), whose other writers stay at the root (the census rule above). `advance_storage_watch`
+     also writes facts of several census owners.
+   - `math_copy_window` (batch 13) — tied `main.rs` / `runtime/frame.rs` / `runtime/math.rs`, and
+     `retire_spent_math_copy` at the root calls it in the product (the rule above).
    - `Runtime::glass_here` — tied `runtime/clipboard.rs` / `runtime/mouse.rs`; its doc makes it the one door
      `Self::drive_drag` asks before it surveys, and the owner column gives "drag and drop" to `runtime/mouse.rs`;
      it moves with the mouse batch.

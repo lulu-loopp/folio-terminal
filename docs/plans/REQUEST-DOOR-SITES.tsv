@@ -1227,9 +1227,6 @@ crates/bt-app/src/main.rs	bt-app crate::build_preview_text_body	Ambiguous	filter
 crates/bt-app/src/main.rs	bt-app crate::build_preview_text_body	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::build_preview_text_body	Dynamic	cut	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::build_preview_text_body	Dynamic	run	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::chrome_over	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::chrome_over	Ambiguous	copied	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::chrome_over	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	chars	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	collect	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -2762,6 +2759,9 @@ crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::settle
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::settled_head_ink	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::trace_present	Ambiguous	as_micros	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::trace_present	Ambiguous	elapsed	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::chrome_over	Ambiguous	collect	1	unreviewed	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `chrome_over` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::chrome_over	Ambiguous	copied	1	unreviewed	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `chrome_over` from main.rs into runtime/frame.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::chrome_over	Ambiguous	filter	1	unreviewed	2026-10-25: T-SPLIT-2B batch 13; the same site, moved by K2 batch 13 with `chrome_over` from main.rs into runtime/frame.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::ask_git_for_column	Ambiguous	is_empty	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	and_then	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/git.rs	bt-app crate::runtime::git::Runtime::build_git_graph	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
