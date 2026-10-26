@@ -143,15 +143,20 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    already written from the root, `runtime/files.rs`, `runtime/git.rs` and `runtime/panes.rs`, so the move adds no
    writer module.
 
-   **The owner column decides only when it changes something** (refined at batch 12): it decides when the move
-   would change a fact's writer set, or when the census names an owner for the item's own fact; otherwise the first
-   caller decides. The rule exists to keep a fact's writer modules from growing and to move a writer toward its
-   owner. `end_leaves_of` (batch 12) writes `LeafSession.pty`, whose census owner is panes, and its first caller,
-   `runtime/windows.rs`, would add a non-owner writer module, so it went to `runtime/panes.rs` (with
-   `LeafSession.attention_ended`, which it alone writes). `answer_an_exit_over` (batch 12) writes
-   `TabState.preview_pool`, whose census owner is preview, but `runtime/windows.rs` and `runtime/preview.rs` both
-   write that fact already, so either home leaves the writer set as it is; the first caller stands, and it went to
-   `runtime/windows.rs`, beside `answer_exit`, as an exit-gate step.
+   **The owner column decides only when it changes something** (refined at batch 12; reworded after its review).
+   A census owner does not win just because it exists. The owner column decides in two cases:
+   (a) when the move would change the writer set of a fact the item writes, the owner's module takes the item;
+   (b) when the callers tie, §13's owner column settles the tie, as it did for `float_dock_label`,
+   `files_float_content_height`, `Runtime::glass_here`, `Runtime::open_minted_page_on` and
+   `revealable_preview_file`. Otherwise the first caller decides. The rule exists to keep a fact's writer modules
+   from growing and to move a writer toward its owner. `end_leaves_of` (batch 12) writes `LeafSession.pty`, whose
+   census owner is panes. Either home adds a writer module: its first caller, `runtime/windows.rs`, would add a
+   non-owner, and `runtime/panes.rs` is a new writer of that fact too. What decides is that panes is the owner, so
+   it went to `runtime/panes.rs` (with `LeafSession.attention_ended`, which it alone writes). `answer_an_exit_over`
+   (batch 12) writes `TabState.preview_pool`, whose census owner is preview. `runtime/windows.rs` and
+   `runtime/preview.rs` both write that fact already, so either home leaves the writer set as it is, and it has one
+   first caller and no tie. Neither case applies, so the first caller stands, and it went to `runtime/windows.rs`,
+   beside `answer_exit`, as an exit-gate step.
 
    **A product caller in another `runtime/` file imports the moved item from its new path** (`use
    crate::runtime::<topic>::<item>;`, an import line and no body text; ruled at batch 7). What stays forbidden is a
