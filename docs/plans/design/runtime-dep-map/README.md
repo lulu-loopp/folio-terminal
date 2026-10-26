@@ -320,7 +320,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `WindowRuntime.foot_phrases`, whose other writer, `Runtime::foot_saying`, stayed at the root (the census rule
      above); it moved when `foot_saying` did. A fact with no owner moves with all its writers to the first caller's
      module, never one writer alone (ruled at batch 21, above): batch 21 moved both to `runtime/preview.rs`, called by
-     `runtime/floats.rs`'s `sweep_command_rails`.
+     `runtime/floats.rs`'s `refresh_chrome_with_overlay`.
    - `Runtime::open_minted_page_on` and `revealable_preview_file` — tied `runtime/floats.rs` /
      `runtime/preview.rs`; the owner column gives preview panes and their doors to `runtime/preview.rs`; batch 21,
      the third of the preview batches, moved both there.
@@ -441,6 +441,18 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `runtime/preview.rs`, but their root caller is `push_markdown_table`, held above, so they wait for it.
    - `tab_owes_frame` (batch 20) — its `called_from` home is `runtime/preview.rs`, but `PaneMotion`'s
      `settle_frame_debt` at the root calls it in the product (the rule above).
+   - `files_row_display_name` (found at batch 21's review) — its `called_from` home is `runtime/preview.rs` (five
+     of six), but `create_tab_state` at the root calls it in the product (the rule above).
+   - `home_crumb_for`, `open_local_path_ask` and `printable_address` (found at batch 21's review) — tied `main.rs` /
+     `runtime/preview.rs`, but `home_shortened_path_on`, `Runtime::open_local_path` and
+     `HyperlinkHover::status_text_in` at the root call them in the product (the rule above). `open_local_path_ask`
+     waits with `Runtime::open_local_path`, held above.
+   - `row_verb` (since batch 18, found at batch 21's review) — its `called_from` home is `runtime/panes.rs` (two of
+     three), but `DropLanding::caption` at the root calls it in the product (the rule above).
+   - `preview_caret_prose` (ruled at batch 21's review) — tied `preview_viewport.rs` / `runtime/preview.rs`, but
+     `preview_viewport.rs`, a module of the crate root outside `runtime/`, names it through `use crate::*;` (in
+     `Runtime::prepare_markdown_caret_view`); moving it would need a root re-export or an import there, so it stays,
+     as `push_markdown_table` does.
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,
