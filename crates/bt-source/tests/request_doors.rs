@@ -8,7 +8,8 @@
 //! * **(i) an effect**: a foreign callee that is a `# vocabulary` path, or under `std::fs`,
 //!   `std::net`, `std::process`, `std::os::{windows, unix}::fs` or the `std::io` read and write
 //!   traits and handles, a `Path`'s question to the disk (`is_file`, `exists`, `metadata`, …), or
-//!   `std::env::set_current_dir` (C1 names the file system; ruling Q3); a
+//!   `std::env::set_current_dir` (C1 names the file system; ruling Q3), but never a method of a
+//!   `Metadata`, `FileType` or `Permissions` value, which reads the value ([`PURE_FS_VALUES`]); a
 //!   function of the `windows` crate's file-system, registry and I/O modules, or a shell call that
 //!   starts a process or opens a file (the coordinator's ruling extending Q3,
 //!   [`WIN32_EFFECT_MODULES`], [`EFFECT_FUNCTIONS`]); a first-party `# vocabulary` entry reached;
@@ -178,6 +179,24 @@ const EFFECT_FUNCTIONS: &[&str] = &[
     "windows::Win32::UI::Shell::ShellExecuteW",
     "windows::Win32::UI::Shell::ShellExecuteExW",
     "windows::Win32::UI::Shell::SHCreateStreamOnFileEx",
+];
+
+/// **The standard file-system values whose methods read only the value** (ruling D2 of
+/// T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE, 2026-10-26): a `Metadata`, a `FileType` or a `Permissions`
+/// is what a disk question already answered, and every method of it (and of the platform
+/// extension traits that read it: `MetadataExt`, `FileTypeExt`, `PermissionsExt`) reads or sets
+/// that value, never the disk. Under [`EFFECT_NAMESPACES`]' `std::fs::` and
+/// `std::os::{windows, unix}::fs::` they are no effect; the question that made the value
+/// (`std::fs::metadata`, `File::metadata`, `DirEntry::file_type`, …) still is.
+const PURE_FS_VALUES: &[&str] = &[
+    "std::fs::Metadata::",
+    "std::fs::FileType::",
+    "std::fs::Permissions::",
+    "std::os::windows::fs::MetadataExt::",
+    "std::os::windows::fs::FileTypeExt::",
+    "std::os::unix::fs::MetadataExt::",
+    "std::os::unix::fs::FileTypeExt::",
+    "std::os::unix::fs::PermissionsExt::",
 ];
 
 /// The `windows` crate's modules of the file system, the registry and file I/O (the coordinator's
@@ -365,9 +384,10 @@ fn generated_is_covered(by: &str) -> bool {
 fn is_effect(rules: &Rules, path: &str) -> bool {
     rules.vocabulary.contains(path)
         || EFFECT_FUNCTIONS.contains(&path)
-        || EFFECT_NAMESPACES
+        || (EFFECT_NAMESPACES
             .iter()
             .any(|namespace| path.starts_with(namespace))
+            && !PURE_FS_VALUES.iter().any(|value| path.starts_with(value)))
         || path.rsplit_once("::").is_some_and(|(module, name)| {
             WIN32_EFFECT_MODULES.contains(&module) && name.chars().any(|c| c.is_ascii_lowercase())
         })
@@ -1272,6 +1292,20 @@ fn the_effect_and_blocking_lists_cover_win32_paths_and_parks() {
             "Effect std::path::Path::exists",
             "Effect windows::Win32::Storage::FileSystem::DeleteFileW",
         ]
+    );
+}
+
+/// RED (ruling D2 of T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE) — **a method of a file-system value is
+/// no effect; the question that made it is**: `Metadata::is_file`, `Metadata::len`,
+/// `Permissions::from_mode` and `MetadataExt::file_attributes` pass, `std::fs::metadata` fails.
+///
+/// MUTATION: drop the [`PURE_FS_VALUES`] exception from [`is_effect`] — the four accessors are
+/// `Effect` findings.
+#[test]
+fn a_file_system_values_accessor_is_no_effect_and_its_question_is() {
+    assert_eq!(
+        judge_fixture("submit_reads_a_value"),
+        ["Effect std::fs::metadata"]
     );
 }
 

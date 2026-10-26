@@ -339,6 +339,17 @@ pub fn submit_asks_the_disk(lane: &'static Lane, job: u32) {
     submit(lane, job);
 }
 
+/// D2: the methods of a value a disk question already answered read the value; the question
+/// itself is the effect.
+pub fn submit_reads_a_value(lane: &'static Lane, job: u32, meta: &std::fs::Metadata) {
+    let _ = meta.is_file();
+    let _ = meta.len();
+    let _ = std::fs::Permissions::from_mode(0o700);
+    let _ = std::os::windows::fs::MetadataExt::file_attributes(meta);
+    let _ = std::fs::metadata("job");
+    submit(lane, job);
+}
+
 /// R2: the worker's lock under an alias of `Mutex`.
 pub type Held = Mutex<u32>;
 

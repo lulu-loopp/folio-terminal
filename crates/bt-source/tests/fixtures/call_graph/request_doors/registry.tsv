@@ -44,4 +44,5 @@ submit_strays	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
 submit_copies	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
 submit_far	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
 submit_asks_the_disk	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
+submit_reads_a_value	window	std::sync::Condvar::notify_one, spawn@0	—	Lane::mailbox
 prewarm	main (before the loop)	—	—	—

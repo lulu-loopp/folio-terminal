@@ -612,7 +612,8 @@ process` is not walked, and those rows are a closed list (`window_waits_tests::N
 walked door that reaches one is a `NotWalked` violation, since the reach contradicts the row, and
 moving a row out of the walk is a diff that list names. The walk fails on an effect (a
 `# vocabulary` path; under `std::fs`, `std::net`, `std::process`, `std::os::{windows, unix}::fs` or
-the `std::io` read and write handles; a `Path`'s or `PathBuf`'s question to the disk (`is_file`,
+the `std::io` read and write handles, but not a method of a `Metadata`, `FileType` or
+`Permissions` value or of their `*Ext` traits, which reads the value (ruling D2, 2026-10-26); a `Path`'s or `PathBuf`'s question to the disk (`is_file`,
 `exists`, `metadata`, `read_dir`, `canonicalize`, …); `std::env::set_current_dir`; a function of the `windows`
 crate's `Storage::FileSystem`, `System::Registry` and `System::IO` modules, or the shell's
 `ShellExecute(Ex)W` and `SHCreateStreamOnFileEx`), an `# entrances` item, an owner door's or a
