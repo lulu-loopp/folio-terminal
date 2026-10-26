@@ -143,7 +143,6 @@ crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_prob
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	find	1	
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	into_owned	1	
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	is_absolute	1	
-crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	is_file	1	
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	iter	3	
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	map	3	
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	map_or_else	1	
@@ -823,12 +822,9 @@ crates/bt-app/src/files.rs	bt-app crate::files::names_are_one	Ambiguous	flat_map
 crates/bt-app/src/files.rs	bt-app crate::files::notice_row	Ambiguous	text	3	
 crates/bt-app/src/files.rs	bt-app crate::files::notice_row	Ambiguous	to_owned	3	
 crates/bt-app/src/files.rs	bt-app crate::files::parent_key	Ambiguous	to_owned	1	
-crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	file_name	1	
-crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	file_type	1	
 crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	is_ok_and	1	
 crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	is_symlink	1	2026-10-26: FileType::is_symlink, an accessor of the value DirEntry::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	map	1	
-crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	path	2	
 crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	to_str	1	
 crates/bt-app/src/files.rs	bt-app crate::files::root_is_addressable	Ambiguous	is_empty	1	
 crates/bt-app/src/files.rs	bt-app crate::files::run_dir_worker	Dynamic	execute	1	
@@ -3539,8 +3535,6 @@ crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::documents_directory	Am
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::documents_for_module_root	Ambiguous	find	1	
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::documents_for_module_root	Ambiguous	to_owned	1	
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::installed_build	Ambiguous	then_some	1	
-crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::installed_disk::<System as Disk>::entries	Ambiguous	file_name	1	
-crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::installed_disk::<System as Disk>::entries	Ambiguous	file_type	1	
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::installed_disk::with	Dynamic	f	1	
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::legacy_roots	Ambiguous	collect	1	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::module_rows	Ambiguous	expect	2	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row
@@ -3604,8 +3598,6 @@ crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders:
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::Announcement::sentence	Ambiguous	to_string	1	
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::ask	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::ask	Dynamic	wake	1	
-crates/bt-app/src/recovered.rs	bt-app crate::recovered::copies_in	Ambiguous	file_name	1	
-crates/bt-app/src/recovered.rs	bt-app crate::recovered::copies_in	Ambiguous	file_type	1	
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::copies_in	Ambiguous	into_owned	1	
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::copies_in	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::look	Ambiguous	count	1	
@@ -5368,9 +5360,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::row_menu_items	Ambiguous	t
 crates/bt-app/src/settings.rs	bt-app crate::settings::run_font_lane	Dynamic	(value)	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::scheme_index	Ambiguous	or_else	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::scheme_index	Ambiguous	unwrap_or	1	
-crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	file_name	1	
-crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	is_file	2	
-crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	join	3	
+crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	join	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	then_some	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::shortcut_undelivered_note	Ambiguous	text	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::sidebar_label	Ambiguous	text	2	
@@ -5449,7 +5439,6 @@ crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnv
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnvironment::program	Ambiguous	collect	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnvironment::program	Ambiguous	into_owned	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnvironment::program	Ambiguous	is_absolute	1	
-crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnvironment::program	Ambiguous	is_file	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnvironment::program	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProfileRevision::read	Ambiguous	kind	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProfileRevision::read	Ambiguous	to_string	1	
@@ -5519,7 +5508,6 @@ crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_module_path	Ambiguous	trim_end_matches	2	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_module_path	Dynamic	expand	4	2026-10-20: T-INTEGRATION-INJECT-2-BUILD: a handed-in closure or function value; its doors are reached at the definer (closure bodies walked with the definer; a value named is an edge)
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_module_path	Dynamic	same	2	2026-10-20: T-INTEGRATION-INJECT-2-BUILD: a handed-in closure or function value; its doors are reached at the definer (closure bodies walked with the definer; a value named is an edge)
-crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_with_prepared_and_retry	Ambiguous	is_file	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_with_prepared_and_retry	Dynamic	prepare	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_with_prepared_and_retry	Dynamic	retry	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::composed_powershell_arguments	Ambiguous	push	4	
@@ -5643,7 +5631,6 @@ crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershe
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershell_profile_seen	Ambiguous	lock	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershell_profile_seen	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershell_script_for_birth	Ambiguous	clone	2	
-crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershell_script_for_birth	Ambiguous	is_file	2	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershell_single_quoted	Ambiguous	chars	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::probe_profile_observation	Ambiguous	ok	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::probe_profile_observation_unless	Dynamic	ask	1	
@@ -8152,7 +8139,6 @@ crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::han
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over	Ambiguous	openURL	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over_through	Ambiguous	and_then	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over_through	Ambiguous	to_string	1	
-crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over_through	Ambiguous	try_exists	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over_through	Dynamic	claimed	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over_through	Dynamic	open	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::open_folder_in_finder	Ambiguous	URLForApplicationWithBundleIdentifier	1	
@@ -8234,7 +8220,6 @@ crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::p
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::program_on_path	Ambiguous	extend	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::program_on_path	Ambiguous	is_absolute	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::program_on_path	Ambiguous	is_empty	2	
-crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::program_on_path	Ambiguous	is_file	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::program_on_path	Ambiguous	unwrap_or_default	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::read_directory	Dynamic	call	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::shell_execute_w	Ambiguous	as_mut	1	
@@ -8529,13 +8514,10 @@ crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::plist_st
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::plist_string	Ambiguous	ok_or_else	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::plist_string	Dynamic	unwritable	2	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	collect	1	
-crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	file_name	1	
-crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	file_type	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	is_ok_and	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	kind	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map_err	1	
-crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	path	1	
 crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::hand_over_on	Dynamic	on_reply	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::<Client as crate::launch_conversation::Connection>::hear	Ambiguous	truncate	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::Instance::open	Ambiguous	unwrap_or	2	
