@@ -6,10 +6,11 @@ use super::pointer::{Gone, OwnerGone};
 use crate::computation_lane::Asking;
 use crate::runtime::git::git_document_question;
 use crate::runtime::panes::risen_frame;
+use crate::runtime::preview::documents_held_in;
 use crate::window_seam::prelude::*;
 use crate::{
     ClickIntent, DECODE_UNSTARTED, PeekCache, PreviewDocument, PreviewOpenLane, TabState,
-    computation_lane, documents_held_in, lane, preview_open_lane,
+    computation_lane, lane, preview_open_lane,
 };
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,

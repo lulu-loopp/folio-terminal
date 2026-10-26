@@ -127,6 +127,18 @@ pub(crate) use peek::{
 pub(crate) use pointer::a_capture_still_holds_its_pointer;
 pub(crate) use pointer::platform_pointer_of;
 #[cfg(test)]
+pub(crate) use preview::{
+    build_preview_diff_body, build_preview_markdown_body, build_preview_table_body,
+    build_preview_text_body, documents_held_in, documents_held_mut_in, folded_levels,
+    markdown_chip_ground, markdown_empty_page_offset, markdown_prose_paragraphs,
+    markdown_source_cell, markdown_source_offset_at, preview_block_bar_at, preview_block_wheel,
+    preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
+    preview_document_max_scroll, preview_edit_bands, preview_link_activation,
+    preview_link_answers_a_press, preview_press_opens_its_link, preview_selection_bands,
+    preview_text_box_at, preview_wrap_columns, push_markdown_source_block,
+    step_preview_caret_by_row,
+};
+#[cfg(test)]
 pub(crate) use profiles::profile_menu_anchor;
 #[cfg(test)]
 pub(crate) use search::rescan_leaf_for_search;
