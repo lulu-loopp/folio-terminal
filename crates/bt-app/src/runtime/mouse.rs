@@ -6466,21 +6466,6 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(true)
     }
 
-    /// Note that this pane's bar has a reason to be up **now** — the moment its
-    /// rest is later measured from.
-    ///
-    /// Every gesture that moves the view says so through here: the wheel, the
-    /// keyboard's pages and ends, a jump off the rail, a drag of the thumb
-    /// itself and the pointer merely being in the lane. One door, because the
-    /// one thing that must not happen is a gesture that scrolls the pane and
-    /// leaves its picture of the scroll invisible.
-    pub(crate) fn wake_terminal_thumb(&mut self, seat: SeatId) {
-        let active = self.window.active_tab;
-        if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
-            leaf.thumb_awake = Instant::now();
-        }
-    }
-
     /// A press in a terminal pane's lane.
     ///
     /// Returns whether the press was the bar's. Two gestures, told apart by
@@ -6651,10 +6636,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// declines the two kinds of row that lead nowhere. This one answers "which
     /// row", because the glance card has its own rules about which kinds of row
     /// it will show and the drag has different ones again.
-    pub(crate) fn row_under(
-        &mut self,
-        position: PhysicalPosition<f64>,
-    ) -> Option<(RowHost, usize)> {
+    fn row_under(&mut self, position: PhysicalPosition<f64>) -> Option<(RowHost, usize)> {
         match self.pointer_target_at(position) {
             Some(PointerTarget::Float(id, float::FloatPart::Row(index))) => {
                 Some((RowHost::Float(id), index))
