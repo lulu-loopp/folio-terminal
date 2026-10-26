@@ -1196,23 +1196,6 @@ crates/bt-app/src/main.rs	bt-app crate::animation_refusal_notice	Path	PreviewAni
 crates/bt-app/src/main.rs	bt-app crate::animation_refusal_notice	Path	PreviewAnimationFileTooLong	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::animation_refusal_notice	Path	PreviewAnimationTooLarge	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::answer_one_picture	Ambiguous	clone	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	checked_sub	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	enumerate	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	len	16	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	map_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	push	19	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	runs	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	saturating_sub	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_markdown_body	Ambiguous	to_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_text_body	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_text_body	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_text_body	Ambiguous	contains	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_text_body	Ambiguous	filter	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_text_body	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_text_body	Dynamic	cut	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::build_preview_text_body	Dynamic	run	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	chars	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	collect	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1274,7 +1257,6 @@ crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	len	1	u
 crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	map_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::loudest_claim	Ambiguous	max	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::loudest_claim	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::markdown_chip_ground	Dynamic	same_row	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::markdown_chip_tip	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::markdown_chip_tip	Path	MarkdownImageRemote	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::markdown_fence_highlight	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1289,11 +1271,6 @@ crates/bt-app/src/main.rs	bt-app crate::markdown_image_card	Dynamic	text	4	unrev
 crates/bt-app/src/main.rs	bt-app crate::markdown_image_card	Path	MarkdownImageRemote	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::markdown_image_card	Path	MarkdownImageUnreadable	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::markdown_item_runs	Ambiguous	extend	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::markdown_prose_paragraphs	Ambiguous	as_str	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::markdown_prose_paragraphs	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::markdown_prose_paragraphs	Ambiguous	contains	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::markdown_prose_paragraphs	Ambiguous	map	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::markdown_prose_paragraphs	Ambiguous	splice	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::markdown_prose_runs	Dynamic	run	4	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::markdown_table_columns	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::markdown_table_columns	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1310,7 +1287,6 @@ crates/bt-app/src/main.rs	bt-app crate::measure_markdown_intrinsics	Dynamic	meas
 crates/bt-app/src/main.rs	bt-app crate::measure_markdown_local	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::measure_markdown_local	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::measure_markdown_local	Dynamic	measure	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::measure_preview_links	Ambiguous	get	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::native_window_of	Ambiguous	as_raw	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::native_window_of	Ambiguous	context	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::native_window_of	Macro	anyhow	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1322,10 +1298,6 @@ crates/bt-app/src/main.rs	bt-app crate::page_foot_flash	Dynamic	latest	3	unrevie
 crates/bt-app/src/main.rs	bt-app crate::page_foot_flash	Path	WebDialogDismissed	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::persisted_preview_row	Ambiguous	into_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::place_layer	Ambiguous	as_deref	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::place_preview_math	Ambiguous	get	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::place_preview_math	Ambiguous	map_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::preview_document_height	Dynamic	mono	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::preview_edit_bands	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::preview_open_externally_label	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::preview_open_externally_label	Path	PreviewOpenExternally	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::preview_opened_label	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1341,11 +1313,6 @@ crates/bt-app/src/main.rs	bt-app crate::preview_rail_tip_text	Path	PreviewFlipTo
 crates/bt-app/src/main.rs	bt-app crate::preview_rail_tip_text	Path	PreviewFlipToRendered	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::preview_rail_tip_text	Path	PreviewFlipToSource	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::preview_rail_tip_text	Path	PreviewRailOpenTip	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::preview_selection_bands	Ambiguous	filter_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::preview_selection_bands	Ambiguous	into_iter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::preview_selection_bands	Dynamic	measure	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::preview_text_boxes	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::preview_text_boxes	Ambiguous	get	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::printable_address	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::printable_address	Ambiguous	is_control	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::printable_address	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1353,17 +1320,6 @@ crates/bt-app/src/main.rs	bt-app crate::profile_banner_name	Ambiguous	unwrap_or_
 crates/bt-app/src/main.rs	bt-app crate::prose_source_lines	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::prose_source_lines	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::pty_size	Ambiguous	min	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Ambiguous	and_then	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Ambiguous	columns	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Ambiguous	contains	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Ambiguous	filter	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Ambiguous	max	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Ambiguous	runs	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Dynamic	cut	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Dynamic	mono	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::push_markdown_source_block	Dynamic	row_rect	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::push_markdown_table	Ambiguous	as_deref_mut	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::raster_peek_page	Ambiguous	and_then	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::raster_peek_page	Ambiguous	modified	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -3078,6 +3034,50 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::vi
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::video_meta_sentence	Ambiguous	join	1	std	2026-10-24: a slice's, a string list's or a path's join: no file, no wait
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::video_meta_sentence	Ambiguous	then_some	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::video_shape_of	Ambiguous	flatten	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_markdown_body	Ambiguous	checked_sub	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_markdown_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_markdown_body	Ambiguous	collect	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_markdown_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_markdown_body	Ambiguous	enumerate	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_markdown_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_markdown_body	Ambiguous	len	16	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_markdown_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_markdown_body	Ambiguous	map	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_markdown_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_markdown_body	Ambiguous	map_or	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_markdown_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_markdown_body	Ambiguous	push	19	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_markdown_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_markdown_body	Ambiguous	runs	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_markdown_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_markdown_body	Ambiguous	saturating_sub	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_markdown_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_markdown_body	Ambiguous	to_owned	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_markdown_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_text_body	Ambiguous	clone	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_text_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_text_body	Ambiguous	collect	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_text_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_text_body	Ambiguous	contains	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_text_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_text_body	Ambiguous	filter	2	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_text_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_text_body	Ambiguous	map	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_text_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_text_body	Dynamic	cut	3	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_text_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::build_preview_text_body	Dynamic	run	3	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `build_preview_text_body` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::markdown_chip_ground	Dynamic	same_row	2	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `markdown_chip_ground` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::markdown_prose_paragraphs	Ambiguous	as_str	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `markdown_prose_paragraphs` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::markdown_prose_paragraphs	Ambiguous	collect	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `markdown_prose_paragraphs` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::markdown_prose_paragraphs	Ambiguous	contains	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `markdown_prose_paragraphs` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::markdown_prose_paragraphs	Ambiguous	map	3	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `markdown_prose_paragraphs` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::markdown_prose_paragraphs	Ambiguous	splice	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `markdown_prose_paragraphs` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::measure_preview_links	Ambiguous	get	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `measure_preview_links` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::place_preview_math	Ambiguous	get	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `place_preview_math` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::place_preview_math	Ambiguous	map_or	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `place_preview_math` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::preview_document_height	Dynamic	mono	2	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `preview_document_height` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::preview_edit_bands	Ambiguous	collect	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `preview_edit_bands` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::preview_selection_bands	Ambiguous	filter_map	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `preview_selection_bands` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::preview_selection_bands	Ambiguous	into_iter	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `preview_selection_bands` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::preview_selection_bands	Dynamic	measure	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `preview_selection_bands` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::preview_text_boxes	Ambiguous	clone	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `preview_text_boxes` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::preview_text_boxes	Ambiguous	get	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `preview_text_boxes` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::push_markdown_source_block	Ambiguous	and_then	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `push_markdown_source_block` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::push_markdown_source_block	Ambiguous	clone	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `push_markdown_source_block` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::push_markdown_source_block	Ambiguous	columns	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `push_markdown_source_block` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::push_markdown_source_block	Ambiguous	contains	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `push_markdown_source_block` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::push_markdown_source_block	Ambiguous	filter	2	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `push_markdown_source_block` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::push_markdown_source_block	Ambiguous	map	1	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `push_markdown_source_block` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::push_markdown_source_block	Ambiguous	max	2	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `push_markdown_source_block` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::push_markdown_source_block	Ambiguous	runs	3	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `push_markdown_source_block` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::push_markdown_source_block	Dynamic	cut	2	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `push_markdown_source_block` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::push_markdown_source_block	Dynamic	mono	3	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `push_markdown_source_block` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::push_markdown_source_block	Dynamic	row_rect	2	unreviewed	2026-10-26: T-SPLIT-2B batch 19; the same site, moved by K2 batch 19 with `push_markdown_source_block` from main.rs into runtime/preview.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/profiles.rs	bt-app crate::runtime::profiles::Runtime::profile_menu_layout	Ambiguous	as_ref	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/profiles.rs	bt-app crate::runtime::profiles::Runtime::profile_menu_layout	Ambiguous	flatten	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/profiles.rs	bt-app crate::runtime::profiles::Runtime::root_choices	Ambiguous	as_deref	1	unreviewed	2026-10-25: T-SPLIT-2B batch 14; the same site, moved by K2 batch 14 with `root_choices` from main.rs into runtime/profiles.rs: K2 moves the item, not the call
