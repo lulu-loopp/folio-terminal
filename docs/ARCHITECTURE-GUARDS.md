@@ -374,7 +374,10 @@ base's row had (`check-unfollowed-edges-tests.ps1` plants each verdict). When re
 receiver or resolve the call; when the door reach must go blind there, regenerate with
 `scripts/generate-unfollowed-edges.ps1` and date the reason. A function the walk reaches for the
 first time brings its sites in as added keys — expected, and each takes a dated reason like any
-other. The per-door counts are printed by
+other. A row whose name is a file-system question (`is_file`, `exists`, `metadata`, `file_type`, …)
+always carries a dated reason — the request-door guard cannot classify it —, held by
+`every_file_system_shaped_unfollowed_edge_carries_a_dated_reason` (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE):
+type the receiver, and the guard sees the question as the effect it is. The per-door counts are printed by
 `window_waits_tests::the_unfollowed_edges_of_each_completions_door_are_printed`, a diagnostic.
 
 How a guard uses it: build the resolver once over the packages it judges, with `Arms` saying which

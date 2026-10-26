@@ -1309,6 +1309,27 @@ fn a_file_system_values_accessor_is_no_effect_and_its_question_is() {
     );
 }
 
+/// RED (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE) — **a path question on an untyped receiver is not
+/// classified; written on a typed one it is an effect**: the closure handed to a
+/// `&dyn Fn(&Path) -> bool` parameter (as `bt_platform::program_in_directories` takes one) gets no
+/// type from it, so `path.is_file()` is `Ambiguous` and no `Effect`; with its parameter written
+/// `&Path` it is `Effect std::path::Path::is_file`. The call of the parameter is `Dynamic` in both.
+///
+/// MUTATION: write the untyped door's parameter as `path: &std::path::Path` — its `Ambiguous`
+/// finding becomes the `Effect`; drop `std::path::Path::is_file` from [`EFFECT_FUNCTIONS`] — the
+/// typed door's `Effect` goes.
+#[test]
+fn a_path_question_is_an_effect_only_on_a_typed_receiver() {
+    assert_eq!(
+        judge_fixture("submit_probes_untyped"),
+        ["Ambiguous is_file", "Dynamic is_file"]
+    );
+    assert_eq!(
+        judge_fixture("submit_probes_typed"),
+        ["Dynamic is_file", "Effect std::path::Path::is_file"]
+    );
+}
+
 /// RED (review nits 3, 4) — **the registry's cells read or are refused**: a bare key that names
 /// one name of two modules on one arm is refused, a key qualified by its module names one item,
 /// and a key naming one item per platform's module is admitted; a first-party `# vocabulary` path

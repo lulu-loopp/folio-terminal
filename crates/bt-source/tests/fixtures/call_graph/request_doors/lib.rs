@@ -339,6 +339,24 @@ pub fn submit_asks_the_disk(lane: &'static Lane, job: u32) {
     submit(lane, job);
 }
 
+/// T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE: a helper handed a path question, as
+/// `bt_platform::program_in_directories` is.
+pub fn look(is_file: &dyn Fn(&std::path::Path) -> bool) -> bool {
+    is_file(std::path::Path::new("job"))
+}
+
+/// The question handed on a closure whose parameter is not written: the receiver is untyped.
+pub fn submit_probes_untyped(lane: &'static Lane, job: u32) {
+    let _ = look(&|path| path.is_file());
+    submit(lane, job);
+}
+
+/// The same question with the parameter's type written: the receiver is a `Path`.
+pub fn submit_probes_typed(lane: &'static Lane, job: u32) {
+    let _ = look(&|path: &std::path::Path| path.is_file());
+    submit(lane, job);
+}
+
 /// D2: the methods of a value a disk question already answered read the value; the question
 /// itself is the effect.
 pub fn submit_reads_a_value(lane: &'static Lane, job: u32, meta: &std::fs::Metadata) {
