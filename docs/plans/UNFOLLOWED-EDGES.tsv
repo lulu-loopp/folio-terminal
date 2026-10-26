@@ -7859,7 +7859,7 @@ crates/bt-platform/src/contained_panic.rs	bt-platform crate::contained_panic::co
 crates/bt-platform/src/contained_panic.rs	bt-platform crate::contained_panic::contain	Ambiguous	set	1	
 crates/bt-platform/src/contained_panic.rs	bt-platform crate::contained_panic::contain	Dynamic	work	1	
 crates/bt-platform/src/contained_panic.rs	bt-platform crate::contained_panic::is_contained	Ambiguous	get	1	
-crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::FileIdentity::of	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value File::metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
+crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::FileIdentity::of	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value file.metadata() returned: no disk question itself; the question, file.metadata() on the File that File::open returned, is not typed either (the engine reads no foreign function's return type) and is followed by the one-candidate rule into bt-effects' Reader::metadata rather than classified - plan row 68 (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::FileIdentity::of	Ambiguous	len	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::copy_new	Ambiguous	create_new	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::copy_new	Ambiguous	open	1	
@@ -11081,7 +11081,7 @@ crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::build_resample_p
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::build_resample_pool	Ambiguous	start_handler	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::build_resample_pool	Dynamic	start	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	by_ref	1	
-crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value the read ledger's Reader::metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
+crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value file.metadata() returned: no disk question itself; the question is not typed (file is the read ledger's Reader, untyped after map_err) and is reached only by the one-candidate rule's follow into bt-effects' Reader::metadata, not classified at this site - plan row 68 (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	len	6	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	map_err	3	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	take	1	
@@ -11136,7 +11136,7 @@ crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::normalized_local
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::normalized_local_path_key	Ambiguous	to_ascii_lowercase	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::normalized_local_path_key	Ambiguous	to_string_lossy	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	by_ref	1	
-crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value the read ledger's Reader::metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
+crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value file.metadata() returned: no disk question itself; the question is not typed (file is the read ledger's Reader, untyped after map_err) and is reached only by the one-candidate rule's follow into bt-effects' Reader::metadata, not classified at this site - plan row 68 (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	len	5	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	map_err	3	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	take	1	
