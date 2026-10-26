@@ -296,7 +296,7 @@ pub fn sweep(agents: &Path) -> Result<Swept, Refusal> {
     };
     let mut ours = Vec::new();
     for entry in listed {
-        let entry = entry.map_err(|error| Refusal::List {
+        let entry: std::fs::DirEntry = entry.map_err(|error| Refusal::List {
             path: agents.to_path_buf(),
             error,
         })?;

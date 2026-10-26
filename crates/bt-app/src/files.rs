@@ -1120,7 +1120,9 @@ pub fn read_directory(path: &Path) -> DirOutcome {
         // A name that vanishes between the directory being opened and being
         // walked is a name that is no longer in the directory, which is exactly
         // what leaving it out says.
-        let Ok(entry) = entry else { continue };
+        let Ok(entry): std::io::Result<std::fs::DirEntry> = entry else {
+            continue;
+        };
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
