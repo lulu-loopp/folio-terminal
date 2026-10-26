@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **667 items, 495 free functions and 172 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 13's head; 696, 509 and 187 before it,
+- **unclassified.tsv**: **640 items, 476 free functions and 164 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 14's head; 667, 495 and 172 before it,
+  696, 509 and 187 before batch 13,
   713, 525 and 188 before batch 12,
   734, 545 and 189 before batch 11,
   754, 559 and 195 before batch 10,
@@ -119,12 +120,18 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 11 | `runtime/files.rs` | moved by batch 11 (16 items; `Runtime::focus_the_pane_a_path_landed_in` and `home_shortened_path` held, below; `float_dock_label` went to `runtime/floats.rs` by the owner column), with `Runtime::reference_cell_index`, `text_field_holding`, `paste_spelled` and `page_keepsake_icon` as tails | — |
    | 12 | `runtime/windows.rs` | moved by batch 12 (15 items; `revive_plan`, `create_tab_state` and `scrollback_quota` held, below; `end_leaves_of` went to `runtime/panes.rs` by the owner column), with `files_key_within` as a tail | — |
    | 13 | `runtime/frame.rs` | moved by batch 13 (24 items; five more went to the census owners of the facts they write, `runtime/terminal.rs`, `runtime/handoff.rs`, `runtime/web.rs`, `runtime/math.rs` and `runtime/keyboard.rs`, below; `Runtime::note_card_hint`, `Runtime::advance_card_hint`, `Runtime::advance_scheme_watch`, `Runtime::advance_storage_watch`, `mark_leaf_painted` and `math_copy_window` held, below) | — |
-   | 14 | `runtime/keyboard.rs` | 27 (13 + 14) | 50 |
-   | 15 | `runtime/math.rs` | 18 (12 + 6) | 50 |
+   | 14 | `runtime/math.rs` | moved by batch 14 (17 items with `math_copy_window`; the ties `Runtime::root_choices` and `rail_overlay_layer` went to `runtime/profiles.rs` and `runtime/panes.rs` by the owner column; `math_em_milli` and `window_layout_key` held, below), with eight tails: six into `runtime/frame.rs`, `composition_outlived_its_field` into `runtime/keyboard.rs` and `Runtime::collecting_card_speakers` into `runtime/terminal.rs` (`presentation_equivalent` held, below) | — |
+   | 15 | `runtime/keyboard.rs` | 27 (13 + 14) | 50 |
    | 16 | `runtime/tabs.rs` | 20 (16 + 4) | 54 |
    | 17 | `runtime/panes.rs` | 33 (24 + 9) | 65 |
    | 18 | `runtime/mouse.rs` | 49 (29 + 20) | 81 |
    | 19 | `runtime/preview.rs` | 91 (72 + 19) | 144 |
+
+   **From batch 14 on, the order is the live map's** (ruled at batch 14). The smallest-sum-first rule above is
+   applied to the map regenerated at each batch's base, not to this table's numbers, which were read at batch 1's
+   head and drift as items move. At batch 14's base `runtime/math.rs` had 16 items (11 + 5) with a sum of 44 and
+   `runtime/keyboard.rs` 26 (14 + 12) with a sum of 52, so math went first. The rows not yet moved keep their batch
+   1 numbers; each batch's judgement reads the live ones.
 
    **An item stays in `main.rs`, whatever its `called_from` row proposes, when moving it would make a field it
    writes a multi-writer fact** (the ownership census refuses a new one without a ruled owner; the standing rule is
@@ -165,6 +172,11 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    `Runtime::advance_page_foot_clocks` (`WindowRuntime.web`) to `runtime/web.rs`, `Runtime::carry_live_journeys`
    (`WindowRuntime.formula_overlay_owed`, of which math becomes the only writer) to `runtime/math.rs`, and
    `Runtime::settle_composition_owner` (`WindowRuntime.composing`) to `runtime/keyboard.rs`.
+   Batch 14 settled two ties by clause (b): `Runtime::root_choices` (math/mouse/profiles) went to
+   `runtime/profiles.rs`, which owns the root menu, and `rail_overlay_layer` (math/panes) to `runtime/panes.rs`,
+   which owns command rails and holds `rail_overlay_layers`. `Runtime::collecting_card_speakers`, tied
+   frame/terminal where §13 names neither (both callers are drain roads), went to `runtime/terminal.rs`, the home of
+   `Runtime::drain_pty`, by a ruling.
 
    **A product caller in another `runtime/` file imports the moved item from its new path** (`use
    crate::runtime::<topic>::<item>;`, an import line and no body text; ruled at batch 7). What stays forbidden is a
@@ -212,7 +224,8 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `mark_leaf_seen`), whose other writers stay at the root (the census rule above). `advance_storage_watch`
      also writes facts of several census owners.
    - `math_copy_window` (batch 13) — tied `main.rs` / `runtime/frame.rs` / `runtime/math.rs`, and
-     `retire_spent_math_copy` at the root calls it in the product (the rule above).
+     `retire_spent_math_copy` at the root called it in the product (the rule above); batch 14 moved both to
+     `runtime/math.rs`.
    - `Runtime::glass_here` — tied `runtime/clipboard.rs` / `runtime/mouse.rs`; its doc makes it the one door
      `Self::drive_drag` asks before it surveys, and the owner column gives "drag and drop" to `runtime/mouse.rs`;
      it moves with the mouse batch.
@@ -237,6 +250,16 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      three.
    - `revive_plan`, `create_tab_state` and `scrollback_quota` (batch 12) — their `called_from` home is
      `runtime/windows.rs`, but the root calls each in the product (the rule above); they wait for that caller.
+   - `presentation_equivalent` (batch 14) — its root caller, `pty_frame_is_unchanged`, moved to `runtime/frame.rs`
+     in batch 13, but `present_gate.rs`, a module outside `runtime/`, calls it by its root path
+     (`crate::presentation_equivalent(`). Moving it would change that call's text or need a root re-export, so it
+     stays.
+   - `math_em_milli` and `window_layout_key` (batch 14) — their `called_from` home is `runtime/math.rs`, but
+     `PreviewMathCache::picture` and `bare_leaf` at the root call them in the product (the rule above).
+   - `Runtime::cancel_composition` (batch 14) — no root product caller, and its home would be
+     `runtime/keyboard.rs`, but it writes facts of three census owners, none of them keyboard:
+     `TabState.git_graph_view` (git), `WindowRuntime.palette` (palette) and `WindowRuntime.search` (search). Held
+     for a ruling (the two-owners clause above).
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,
