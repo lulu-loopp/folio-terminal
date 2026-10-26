@@ -252,8 +252,16 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    moves, and the move commit or the generated commit re-keys their `module` column to the new module (the same
    site and reason); bt-source's census test refuses a moved site as a new unknown until then, and
    `check-census-unknowns.ps1` passes it as moved. Batch 10 found its two rows (`trigger_root`, `trigger_rect`)
-   at the bt-source gate. So a batch's judgement covers seven lists: these five, `REQUEST-DOOR-SITES.tsv` and
-   `UNFOLLOWED-EDGES.tsv`.
+   at the bt-source gate. **The census's annotations are the eighth list** (added at batch 14, after batch 13 found
+   it): `docs/plans/design/ownership-census-annotations.tsv` is hand-edited and names the owner of every proven
+   multi-writer fact. A move that leaves a fact with exactly one writer module makes that fact's row stale, and
+   the batch removes it in its generated commit. Batch 13 moved `Runtime::carry_live_journeys` into
+   `runtime/math.rs` and removed `WindowRuntime.formula_overlay_owed`'s row. bt-source's census test names a stale
+   row ("is not a proven multi-writer fact"). The other direction, a move that makes a fact multi-writer, would
+   need a new row, but the census rule above already holds such an item in `main.rs`, so the stale direction is
+   the one a judgement checks: for each fact a moved item writes, it asks whether the move leaves one writer
+   module. So a batch's judgement covers eight lists: these five, `REQUEST-DOOR-SITES.tsv`,
+   `UNFOLLOWED-EDGES.tsv` and the census annotations.
 
 2. **The 395 items whose callers are mostly other `main.rs` items follow their
    callers.** Regenerate the map after each batch. An item whose callers have moved
