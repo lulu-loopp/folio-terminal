@@ -6,6 +6,7 @@ use crate::computation_lane::{Asking, ComputationId};
 use crate::input::Keystroke;
 use crate::runtime::floats::float_dock_label;
 use crate::runtime::git::graph_key_of;
+use crate::runtime::keyboard::preedit_caret_byte;
 use crate::runtime::math::answers_for;
 use crate::runtime::peek::{peek_scale_task, preview_body_bar, scroll_bar_layer};
 use crate::window_seam::prelude::*;
@@ -42,9 +43,9 @@ use crate::{
     markdown_runs, markdown_source_cell, markdown_source_offset_at, marks, measure_preview_links,
     notice, owe_sharpened_rasters, page_address_hand_off, page_destination, page_foot_flash,
     page_foot_lead, page_source_file, picture_channel_owner, picture_errand, picture_files_of,
-    pictures_awaited_by, pictures_need_handing_over, place_preview_math, preedit_caret_byte,
-    present_diagnostics, preview, preview_block_bar_at, preview_block_wheel, preview_caret_prose,
-    preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
+    pictures_awaited_by, pictures_need_handing_over, place_preview_math, present_diagnostics,
+    preview, preview_block_bar_at, preview_block_wheel, preview_caret_prose, preview_caret_row,
+    preview_copies_on_select, preview_document_height, preview_document_key,
     preview_document_max_scroll, preview_edit, preview_edit_bands, preview_image_placement,
     preview_link_activation, preview_link_answers_a_press, preview_live,
     preview_open_externally_label, preview_open_lane, preview_opened_label,

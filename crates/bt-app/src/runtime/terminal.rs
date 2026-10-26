@@ -1805,6 +1805,26 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn collecting_card_speakers(&self) -> bool {
         self.window.focus_mode && !self.window.cards.owes_frame()
     }
+
+    /// **The reader's own bytes went into this pane** (review row R1-24).
+    ///
+    /// Called from the four doors a person's own input reaches a shell through —
+    /// the keyboard, a paste, an IME commit and a files-row insert — and from
+    /// nowhere else. A wheel forwarded to a full-screen program is not somebody
+    /// typing at a prompt, and neither is a terminal protocol reply, a resize
+    /// repair chord, or the one line a restored pane puts back on the prompt
+    /// itself.
+    ///
+    /// What it buys is on `CommandMark::typed_by_user`: the command text this
+    /// window remembers across a restart is read off the screen, and a program
+    /// printing `OSC 133` marks decides what is on the screen. This is the one
+    /// fact about a command that such a program cannot produce.
+    pub(crate) fn note_user_typing(&mut self, seat: SeatId) {
+        let active = self.window.active_tab;
+        if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
+            leaf.session.note_user_input();
+        }
+    }
 }
 
 /// **Whether one seat's shell is, right now, the true owner of the keyboard** —

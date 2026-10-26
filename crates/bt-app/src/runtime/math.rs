@@ -10,7 +10,7 @@ use crate::{
     FOOT_REVEAL_FEEDBACK, Layered, MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand,
     Motion, OverlayStack, PasteTarget, Popup, PreviewDocument, PreviewMathArtifact,
     PreviewMathCache, PreviewMathKey, PreviewMathPicture, PreviewSurface, PreviewTextCommand,
-    Runtime, Settled, ShellAddress, TabState, cardhint, claimed_by, entry_doors, first_run,
+    Runtime, Settled, ShellAddress, TabId, TabState, cardhint, entry_doors, first_run,
     foreground_program, formula_tools, hang_watch, i18n, marks, math_em_milli, nonzero_u32,
     preview, preview_select, preview_trace, profiles, quit, restore, search, seats, settings,
     tooltip, window_layout_key,
@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::window::WindowId;
 
 impl<B: Backend> Runtime<'_, B> {
     /// What one of those boxes says.
@@ -2781,6 +2782,43 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn animating_deadline(&self, owes: bool, now: Instant) -> Option<Instant> {
         let _ = now;
         owes.then(|| self.next_animation_deadline()).flatten()
+    }
+
+    /// **The staged card's head, if the column is drawing it whole** (§7.21) —
+    /// what the bubble's tail is allowed to bite.
+    ///
+    /// The head and not the body, because the head is the part of a card that is
+    /// a *card*: it carries the tab's name and its mark, and it is the same
+    /// twenty-eight pixels whatever `Card height` is set to. A tail aimed at the
+    /// middle of a 320px body would point at a row of somebody's build log.
+    ///
+    /// **Whole, and that is the clip test rather than a margin.** The column's
+    /// viewport is the one rectangle every other question about this list is
+    /// asked against (`focus_thumb`'s gate two, `focus_rail_chrome`'s own clip),
+    /// and a head half cut off by it is a head whose middle is not where the
+    /// arithmetic thinks it is. `None` here is what sends the bubble to the
+    /// floor seat, which is [`cardhint::place`]'s own second answer.
+    fn staged_card_head(&self, now: Instant) -> Option<[f32; 4]> {
+        let geometry = self.focus_rail_geometry_now(now)?;
+        let card = geometry.cards.get(self.window.active_tab)?;
+        let [list_top, list_bottom] = geometry.viewport;
+        (card.head[1] >= list_top && card.head[3] <= list_bottom).then_some(card.head)
+    }
+}
+
+/// **May this window take this answer?**
+///
+/// Free and total so the rule can be read without a `Runtime` — the only two
+/// facts it needs are the window's name and the tabs standing in its strip, and
+/// [`Runtime::owns`] is the one caller that supplies them.
+pub(crate) fn claimed_by(
+    owner: AnswerOwner,
+    window: WindowId,
+    tabs: impl IntoIterator<Item = TabId>,
+) -> bool {
+    match owner {
+        AnswerOwner::Tab(tab) => tabs.into_iter().any(|open| open == tab),
+        AnswerOwner::Window(id) => id == window,
     }
 }
 

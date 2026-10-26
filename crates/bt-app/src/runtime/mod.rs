@@ -75,7 +75,7 @@ pub(crate) use floats::{
 #[cfg(test)]
 pub(crate) use frame::{
     a_bare_redraw_still_owes_a_present, advance_periodic_deadline, attention_ledger_deadline,
-    chrome_over, chrome_tick_reuses_picture, dispatch_pending_math_tasks,
+    chrome_over, chrome_tick_reuses_picture, dispatch_decoration_task, dispatch_pending_math_tasks,
     dispatch_tab_decoration_tasks, earliest_named_deadline, math_worker_stopped_notice,
     pty_drain_says_nothing_new, pty_frame_is_unchanged, startup_poll_delay,
     take_math_worker_notice, verified_target_of, window_is_exposed, window_is_hidden,
@@ -86,11 +86,15 @@ pub(crate) use git::{
     git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, graph_key_of,
 };
 #[cfg(test)]
-pub(crate) use keyboard::composition_outlived_its_field;
+pub(crate) use keyboard::{
+    composing_event_of, composition_outlived_its_field, composition_ruling, goto_tab_index,
+    ime_caret_source, ime_commit_bytes, ime_cursor_area_of, keyboard_owner_is_a_shell,
+    paste_card_key, preedit_caret_byte, rename_key,
+};
 #[cfg(test)]
 pub(crate) use math::{
-    answer_one_formula, answers_for, document_formulas, ground_overlay_layers, hold_failed_in_tabs,
-    math_copy_window, new_tab_tip, retire_spent_math_copy,
+    answer_one_formula, answers_for, claimed_by, document_formulas, ground_overlay_layers,
+    hold_failed_in_tabs, math_copy_window, new_tab_tip, retire_spent_math_copy,
 };
 #[cfg(test)]
 pub(crate) use palette::recall_flash;

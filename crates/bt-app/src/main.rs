@@ -271,7 +271,6 @@ use bt_persist::{
     SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1, SessionWindowV1, TabV1,
     TermLeafV1, ThemeModeV1, WindowBoundsV1,
 };
-use input::Keystroke;
 use text_scale::{TextScale, TextStep};
 use wake_owner::WakeOwner;
 use window_seam::prelude::*;
@@ -322,8 +321,9 @@ use runtime::{
     advance_periodic_deadline, answer_an_exit_over, answer_attention_in, answer_one_formula,
     answers_for, apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels,
     attention_ledger_deadline, broker_verdict, chevron_turn_target, chrome_over,
-    chrome_tick_reuses_picture, clear_copied_selection, clipboard_focus_of, column_keyboard,
-    columns_wanting_git, composition_outlived_its_field, dispatch_pending_math_tasks,
+    chrome_tick_reuses_picture, claimed_by, clear_copied_selection, clipboard_focus_of,
+    column_keyboard, columns_wanting_git, composing_event_of, composition_outlived_its_field,
+    composition_ruling, dispatch_decoration_task, dispatch_pending_math_tasks,
     dispatch_tab_decoration_tasks, document_formulas, drain_may_take_another_slice,
     dropped_files_seat_at, dwm_dark_mode_owed, earliest_named_deadline, end_leaves_of,
     file_menu_powers, file_peek_promotion, files_float_content_height, files_key_under,
@@ -332,24 +332,26 @@ use runtime::{
     float_git_page_shown, float_viewport_rect, focus_leaf_index, folder_foot_notice,
     folder_pick_outcome, git_answer_notice, git_full_path, git_roots_on_glass,
     git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, glass_allows_a_text_write,
-    graph_key_of, ground_overlay_layers, hold_failed_in_tabs, hole_for, in_drain_feed_turn,
-    input_line_needs_a_space_first, let_go_unnamed_peek_records, local_image_activation,
-    math_copy_window, math_worker_stopped_notice, merge_notice_card, new_tab_tip,
-    next_attention_stop, paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept,
-    paste_target_is_live, paste_text, peek_body_kind, peek_cache_key_for_decode, peek_card_opened,
-    peek_files_named, peek_foot_press, peek_page_texture_key, peek_reads_the_file, peek_scale_task,
-    pending_paste_in, persisted_window_bounds, prepare_clipboard_paste, prepare_dropped_paste,
+    goto_tab_index, graph_key_of, ground_overlay_layers, hold_failed_in_tabs, hole_for,
+    ime_caret_source, ime_commit_bytes, ime_cursor_area_of, in_drain_feed_turn,
+    input_line_needs_a_space_first, keyboard_owner_is_a_shell, let_go_unnamed_peek_records,
+    local_image_activation, math_copy_window, math_worker_stopped_notice, merge_notice_card,
+    new_tab_tip, next_attention_stop, paste_answer_text, paste_body, paste_card_key,
+    paste_card_step, paste_offer_is_kept, paste_target_is_live, paste_text, peek_body_kind,
+    peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
+    peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
+    persisted_window_bounds, preedit_caret_byte, prepare_clipboard_paste, prepare_dropped_paste,
     press_files_node, preview_body_bar, preview_source_of_recent, profile_menu_anchor,
     pty_drain_says_nothing_new, pty_frame_is_unchanged, rail_overlay_layer,
     raise_cancelled_quit_card_on, raise_dirty_gate_over, recall_flash, recorded_window_placement,
-    reference_card, reference_run_rect, refused_preview_card, remember_decode, reroot_files_state,
-    rescan_leaf_for_search, resize_worth_solving, resolved_theme_change, restart_seed,
-    retire_spent_math_copy, revived_page_of, seat_holds_the_keyboard, selection_to_copy,
-    should_copy_on_select_release, stage_paste, startup_poll_delay, step_leaf_text_scale,
-    stepped_command_mark, tab_surface_tip_boxes, take_math_worker_notice, take_pending_paste,
-    take_psreadline_resize_reanchor_input, tear_out_rect, terminal_link_answers_a_press,
-    text_field_holding, tooltip_anchor_for, verified_target_of, window_is_exposed,
-    window_is_hidden, window_minimum_changed,
+    reference_card, reference_run_rect, refused_preview_card, remember_decode, rename_key,
+    reroot_files_state, rescan_leaf_for_search, resize_worth_solving, resolved_theme_change,
+    restart_seed, retire_spent_math_copy, revived_page_of, seat_holds_the_keyboard,
+    selection_to_copy, should_copy_on_select_release, stage_paste, startup_poll_delay,
+    step_leaf_text_scale, stepped_command_mark, tab_surface_tip_boxes, take_math_worker_notice,
+    take_pending_paste, take_psreadline_resize_reanchor_input, tear_out_rect,
+    terminal_link_answers_a_press, text_field_holding, tooltip_anchor_for, verified_target_of,
+    window_is_exposed, window_is_hidden, window_minimum_changed,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
@@ -1319,31 +1321,6 @@ enum PasteCardKey {
     Answer(PasteAnswer),
     /// Put the focus on this word.
     Focus(PasteAnswer),
-}
-
-/// **The only keys the card answers** — a standard two-button dialog (owner's ruling
-/// 2026-09-23, superseding the 2026-09-22 "`Tab` = Join"): `Tab` and `Shift+Tab` move the focus
-/// between the two words (with two words, both directions wrap to the other one), `Enter`
-/// activates the word that has the focus, and `Esc` cancels. Everything else — a letter, a chord,
-/// `Ctrl+V` again, a modified `Enter` — is `None`, reaches nothing, and leaves the card up.
-fn paste_card_key(
-    key: &Key,
-    modifiers: ModifiersState,
-    focus: PasteAnswer,
-) -> Option<PasteCardKey> {
-    let other = match focus {
-        PasteAnswer::RunLineByLine => PasteAnswer::Join,
-        PasteAnswer::Join | PasteAnswer::Cancel => PasteAnswer::RunLineByLine,
-    };
-    match key {
-        Key::Named(NamedKey::Tab) if modifiers.is_empty() || modifiers == ModifiersState::SHIFT => {
-            Some(PasteCardKey::Focus(other))
-        }
-        _ if !modifiers.is_empty() => None,
-        Key::Named(NamedKey::Enter) => Some(PasteCardKey::Answer(focus)),
-        Key::Named(NamedKey::Escape) => Some(PasteCardKey::Answer(PasteAnswer::Cancel)),
-        _ => None,
-    }
 }
 
 /// The clipboard picture worker's one-slot mailbox, on
@@ -11089,57 +11066,6 @@ fn disable_math_worker_state(running: &mut bool, notice_pending: &mut bool) -> b
     true
 }
 
-/// **The computation lane's request door for a pane's decoration work** (C1): the task goes to
-/// the share that runs its kind — a formula or a decode to `bt-math-worker`, a resample to
-/// `bt-image-scale-worker`, a printed path to `bt-path-verify-worker` — and is admitted there, or
-/// refused at that share's door and handed back as the task it was.
-fn dispatch_decoration_task(
-    leaf: ShellAddress,
-    task: SessionDecorationTask,
-    lane: &computation_lane::ComputationLane,
-) -> std::result::Result<(), (lane::Refused, SessionDecorationTask)> {
-    match task {
-        SessionDecorationTask::Math(task) => lane
-            .decorate(MathWorkerRequest::Math {
-                leaf,
-                task,
-                foreground_rgb: foreground_rgb(),
-            })
-            .map(|_| ())
-            .map_err(|(refused, request)| (refused, session_task_of(request))),
-        SessionDecorationTask::InlineImage(task) => lane
-            .decorate(MathWorkerRequest::InlineImage { leaf, task })
-            .map(|_| ())
-            .map_err(|(refused, request)| (refused, session_task_of(request))),
-        SessionDecorationTask::ScaleInlineImage(task) => lane
-            .scale(ScaleWorkerRequest::InlineImage { leaf, task })
-            .map(|_| ())
-            .map_err(|(refused, request)| match request {
-                ScaleWorkerRequest::InlineImage { task, .. } => {
-                    (refused, SessionDecorationTask::ScaleInlineImage(task))
-                }
-                _ => unreachable!("the door hands back the request it was given"),
-            }),
-        // **Its own share** — see [`PathWorkerRequest`]. A stat that blocks for the redirector's
-        // timeout must not stand in front of a formula the reader is waiting on.
-        SessionDecorationTask::VerifyPath(path) => lane
-            .verify(PathWorkerRequest { leaf, path })
-            .map(|_| ())
-            .map_err(|(refused, request)| {
-                (refused, SessionDecorationTask::VerifyPath(request.path))
-            }),
-    }
-}
-
-/// The session's task a pane's formula or decode request was made of, handed back.
-fn session_task_of(request: MathWorkerRequest) -> SessionDecorationTask {
-    match request {
-        MathWorkerRequest::Math { task, .. } => SessionDecorationTask::Math(task),
-        MathWorkerRequest::InlineImage { task, .. } => SessionDecorationTask::InlineImage(task),
-        _ => unreachable!("the door hands back the request it was given"),
-    }
-}
-
 /// **What one drain of the computation lane hands the windows**: the answers, each under the
 /// identity of the request it answers — a failed window request's settled as its surface's own
 /// error answer among them ([`settle_failure`]) — the failed pane tasks to hold and the animation
@@ -11202,17 +11128,6 @@ fn sort_math_terminals(ended: Vec<computation_lane::Ended>) -> MathAnswers {
         }
     }
     answers
-}
-
-/// **Which of the computation lane's shares a pane's task goes to.**
-fn share_of(task: &SessionDecorationTask) -> computation_lane::Share {
-    match task {
-        SessionDecorationTask::Math(_) | SessionDecorationTask::InlineImage(_) => {
-            computation_lane::Share::Decoration
-        }
-        SessionDecorationTask::ScaleInlineImage(_) => computation_lane::Share::Scale,
-        SessionDecorationTask::VerifyPath(_) => computation_lane::Share::Path,
-    }
 }
 
 /// The worker lanes a tab's decoration dispatch hands work to, cloned out of [`App`] so the
@@ -16194,18 +16109,6 @@ enum AnswerOwner {
     Window(WindowId),
 }
 
-/// **May this window take this answer?**
-///
-/// Free and total so the rule can be read without a `Runtime` — the only two
-/// facts it needs are the window's name and the tabs standing in its strip, and
-/// [`Runtime::owns`] is the one caller that supplies them.
-fn claimed_by(owner: AnswerOwner, window: WindowId, tabs: impl IntoIterator<Item = TabId>) -> bool {
-    match owner {
-        AnswerOwner::Tab(tab) => tabs.into_iter().any(|open| open == tab),
-        AnswerOwner::Window(id) => id == window,
-    }
-}
-
 /// **Why a tab was not moved into another window** (F1b).
 ///
 /// Every one of these is decided in the transaction's *prepare*, before anything
@@ -20426,22 +20329,6 @@ enum ImeCaretSource {
     Nowhere,
 }
 
-/// The rung, resolved to where its caret comes from. **Total**, and the one place
-/// that decides.
-#[must_use]
-fn ime_caret_source(owner: ImeOwner) -> ImeCaretSource {
-    match owner {
-        ImeOwner::Rename
-        | ImeOwner::GraphSearch
-        | ImeOwner::GitPrompt
-        | ImeOwner::Preview
-        | ImeOwner::Search
-        | ImeOwner::Palette => ImeCaretSource::Field,
-        ImeOwner::Modal | ImeOwner::FilesTree => ImeCaretSource::Nowhere,
-        ImeOwner::Shell => ImeCaretSource::TerminalCursor,
-    }
-}
-
 /// The ladder, as a function of who holds the keyboard.
 #[must_use]
 fn ime_owner(owner: KeyboardOwner) -> ImeOwner {
@@ -20607,149 +20494,6 @@ struct CompositionRuling {
     /// other, by any rung of the ladder.
     deliver: bool,
     next: ComposingAfter,
-}
-
-/// **A composition belongs to the field it began in, and a cancel is a request**
-/// (§7.1.5a″; review 2026-09-17 P2).
-///
-/// [`Runtime::cancel_composition`] asks an input method to stop; `ImmNotifyIME`
-/// answers a bool and §7.1.5a″ already names a method that says no. And whether
-/// it says yes or no, **the answer arrives after the keyboard has already
-/// moved**: winit buffers its callbacks until the application returns
-/// (`platform_impl/windows/event_loop/runner.rs`, `macos/app_state.rs`), so the
-/// events an ending composition produces are delivered against the field the
-/// gesture moved to. Every rung of `ime_input` resolves the owner *now*, so
-/// those letters would be inserted into whatever the keyboard has arrived in.
-/// The ruling is that this must never happen, and a request cannot be what
-/// enforces it.
-///
-/// **The rule, in full.** A composition's **origin** is the identity of the
-/// keyboard owner it began under ([`CompositionOrigin`]), set by the first
-/// non-empty pre-edit. A **commit** is delivered only when there is no
-/// composition behind it — which is how an input method sends a single
-/// character — or when its origin is the field that would receive it now;
-/// otherwise it is discarded, everywhere. The origin is **not** cleared by
-/// `cancel_composition`, by `Ime::Enabled` or `Ime::Disabled`, or by the window
-/// losing and regaining focus: those are lifecycle notices about the method, and
-/// a barrier a notice can take down is not a barrier.
-///
-/// **What ends a composition, given that a cancel cannot be trusted to.** An
-/// empty pre-edit is the letters coming off the glass, and it is the last thing
-/// every ending does. Where it arrives says what it is:
-///
-/// * **in the field the composition began in** — the reader pressed `Esc` where
-///   they were typing — it is simply over;
-/// * **anywhere else** — the ending crossed a field boundary, which is exactly
-///   the case this whole rule is about — it puts the composition into
-///   [`Composing::Retiring`], and the **very next composition event** decides.
-///   A commit is that composition finishing with a result and is judged by the
-///   origin (so a refused cancel's letters are discarded); anything else means
-///   it finished without one, and the composition retires with no verdict owed.
-///
-/// **That next-event boundary is exact rather than approximate**, and pinned
-/// winit is what makes it so: every `Ime::Commit` it emits is sent immediately
-/// after an `Ime::Preedit("")` — adjacent send calls, not adjacent source lines
-/// — at all three sites, with no event in between (see [`Composing::Retiring`]
-/// for the file and line of each). So a finishing commit cannot arrive anywhere
-/// but immediately after its own clear, and an honoured cancel — whose empty
-/// pre-edit comes alone — is not mistaken for one. No clock and no turn boundary
-/// is involved. **The adjacency proves there is no event between a clear and its
-/// result; it does not prove that the clear this window is looking at was the
-/// first one** (bound ③).
-///
-/// **Three bounds, stated rather than hidden.**
-///
-/// ① A method that answers a refused cancel with a *non-empty* pre-edit is
-/// indistinguishable from a reader beginning to type, so it re-homes. Those
-/// letters are drawn at the new caret before any commit — a picture that can be
-/// seen and refused, not bytes on a command line — and the alternative is
-/// refusing the first real composition after every focus change.
-///
-/// ② A composition abandoned with **no event at all** — no commit and no empty
-/// pre-edit — leaves its origin standing, so the next committed character in
-/// another field arrives as `Retiring` + commit and is discarded. That is one
-/// character, after which the window is idle and everything works; and it is
-/// indistinguishable by event order from a refused cancel's late result, which
-/// is the thing §7.1.5a″ forbids. The conservative side is the ruling's own:
-/// never insert into a field the text did not begin in. Neither pinned backend
-/// produces it — an ending always emits its result or its empty pre-edit — so
-/// the order that would pay for it is one that has to be invented.
-///
-/// ③ **A double clear followed by the old result is delivered**, and this is the
-/// bound the next-event boundary buys the other two with. `In(A)` → the
-/// cancel-time empty pre-edit arrives at B → `Retiring(A)` → a *second* empty
-/// pre-edit arrives at B → `Idle`, because an empty pre-edit with no commit
-/// behind it is exactly what an honoured cancel looks like → `Commit(old text)`
-/// is then judged against `Idle` and **reaches B**. It is not a hole that could
-/// be closed by looking harder: those two states are the same states an honoured
-/// cancel followed by the reader's own punctuation passes through, which is the
-/// case ② above pays for, and the two orders are identical event for event.
-/// Refusing here would put the honoured cancel's cost back.
-///
-/// Windows can *represent* it — a zero `lparam` clears the composition string
-/// without disabling composition (`event_loop.rs:1537-1542`), so a later
-/// `GCS_RESULTSTR` on the same context can still send the pair — and macOS
-/// cannot, because `unmarkText` removes the marked text that `insertText:`
-/// requires before it will commit at all (`view.rs:340`, `:411`). No supported
-/// input method is shown to clear its composition string and then commit the old
-/// text, so this is a shape the platform admits rather than a sequence anything
-/// is known to produce.
-fn composition_ruling(
-    state: &Composing,
-    here: &CompositionOrigin,
-    event: ComposingEvent,
-) -> CompositionRuling {
-    match event {
-        ComposingEvent::Opens => CompositionRuling {
-            deliver: true,
-            next: ComposingAfter::AdoptHere,
-        },
-        ComposingEvent::Clears => CompositionRuling {
-            deliver: true,
-            next: match state {
-                // An ending that has not crossed a boundary, and an empty
-                // pre-edit with nothing behind it: over, with nothing owed.
-                Composing::Idle => ComposingAfter::Unchanged,
-                Composing::In(origin) if origin == here => ComposingAfter::Idle,
-                // The ending reached us in another field. One event decides.
-                Composing::In(_) => ComposingAfter::Retire,
-                // A second empty pre-edit with no commit between: the first
-                // ending had no result, so there is nothing left to judge.
-                Composing::Retiring(_) => ComposingAfter::Idle,
-            },
-        },
-        ComposingEvent::Commits => CompositionRuling {
-            deliver: state.origin().is_none_or(|origin| origin == here),
-            next: ComposingAfter::Idle,
-        },
-    }
-}
-
-/// Which of the three a winit composition event is, or `None` for the two that
-/// are the window's own bookkeeping.
-///
-/// Written beside [`composition_ruling`] rather than inside it so that the
-/// ruling can be read — and tested — without constructing winit's event.
-const fn composing_event_of(event: &Ime) -> Option<ComposingEvent> {
-    match event {
-        Ime::Preedit(text, _) if !text.is_empty() => Some(ComposingEvent::Opens),
-        Ime::Preedit(..) => Some(ComposingEvent::Clears),
-        Ime::Commit(_) => Some(ComposingEvent::Commits),
-        Ime::Enabled | Ime::Disabled => None,
-    }
-}
-
-/// Whether a shell has the keyboard — `InputOwner == Terminal`.
-///
-/// **A blink means "typing lands here", and nothing else** (user report + ruling,
-/// 2026-08-13). The split block had already ruled that an unfocused pane's caret
-/// freezes and fades, but it was written when the only way to lose the keyboard
-/// was to focus *another terminal*: it answered "which pane" and never "which
-/// kind of thing". Every owner above is a way for the keyboard to leave every
-/// shell at once, and against all of them the window's one lit caret was claiming
-/// a keystroke it would not receive.
-fn keyboard_owner_is_a_shell(owner: KeyboardOwner) -> bool {
-    matches!(ime_owner(owner), ImeOwner::Shell)
 }
 
 /// A foot that is confirming a reveal.
@@ -22384,27 +22128,6 @@ fn contains_point(rect: [f32; 4], position: PhysicalPosition<f64>) -> bool {
     x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3]
 }
 
-fn settings_key_of(key: &Key, modifiers: ModifiersState, repeat: bool) -> settings::SettingsKey {
-    if modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() {
-        return settings::SettingsKey::Other;
-    }
-    match key {
-        Key::Named(NamedKey::Tab) => settings::SettingsKey::Tab {
-            backwards: modifiers.shift_key(),
-        },
-        Key::Named(NamedKey::ArrowDown) => settings::SettingsKey::Down,
-        Key::Named(NamedKey::ArrowUp) => settings::SettingsKey::Up,
-        // The two that cross between the rail and the page (2026-08-17).
-        Key::Named(NamedKey::ArrowLeft) => settings::SettingsKey::Left,
-        Key::Named(NamedKey::ArrowRight) => settings::SettingsKey::Right,
-        Key::Named(NamedKey::Home) => settings::SettingsKey::Home,
-        Key::Named(NamedKey::End) => settings::SettingsKey::End,
-        Key::Named(NamedKey::Enter | NamedKey::Space) if !repeat => settings::SettingsKey::Activate,
-        Key::Named(NamedKey::Escape) if !repeat => settings::SettingsKey::Escape,
-        _ => settings::SettingsKey::Other,
-    }
-}
-
 /// A files tree's own click counter — [`TabClicks`] for rows.
 ///
 /// **Identity is the row's stable id and never its index**, which is the same
@@ -23587,130 +23310,6 @@ impl TabRename {
 struct RenameClipboard {
     /// What this press wants put on the clipboard, if anything.
     copied: Option<String>,
-}
-
-/// Whether this press is the one that has to read the clipboard first.
-///
-/// Split out so that the reading happens *before* the editor is borrowed, which
-/// is the borrow order `settings_field_key` already keeps for the same reason.
-///
-/// **The window's own paste predicate** (B-AUDIT-046 RT-1): `Shift+Insert` and
-/// `Ctrl+Shift+V` are a paste in this box exactly as they are at the terminal's
-/// rung, rather than a `Ctrl+V` of its own spelling.
-fn rename_pastes(key: &Key, modifiers: ModifiersState) -> bool {
-    input::is_paste_shortcut(key, modifiers)
-}
-
-fn rename_key(
-    editor: &mut TabRename,
-    key: &Key,
-    modifiers: ModifiersState,
-    clipboard: &mut RenameClipboard,
-) -> RenameVerdict {
-    use text_field::TextMove;
-    // A chord is not text: an Alt- or Win-modified key is swallowed unhandled,
-    // and letting it through to the terminal is exactly what §7.1.5 forbids.
-    //
-    // **`Ctrl` is no longer part of that sentence** (0.3). It was, for as long as
-    // this editor had no clipboard and no word verbs — "the editor has no verb
-    // for it" was true, and swallowing was the honest answer. The migration onto
-    // `TextField` gave it both, so the chords below are verbs this field really
-    // has; what is left in the swallow arm is every `Ctrl` chord it still has no
-    // answer for, which goes nowhere for the reason it always did.
-    //
-    // **Both halves are asked of the platform since M1-7**, and on this one they
-    // answer exactly what they answered before: the modifier a chord of this
-    // application wears is Control here and Command on a Mac, and the one that
-    // is left over is the child's. So the swallow arm keeps `Win`-modified keys
-    // out of this field here and `Ctrl`-modified ones out of it there, and the
-    // verbs below open on the one modifier that means *this window* on the
-    // machine they are being pressed on.
-    let chorded = modifiers.alt_key() || input::is_terminal_chord(modifiers);
-    // AltGr arrives as Ctrl+Alt and is *typing*, so it is not a chord at all —
-    // `preview_edit::command` makes the same exemption on the one other surface
-    // that takes characters. (It still falls into the swallow arm above, as it
-    // always has; this only keeps the doors below from opening on it.)
-    let control = input::is_command_chord_alone(modifiers);
-    let shift = modifiers.shift_key();
-    // A copy and a cut put the same run on the clipboard and differ in what they
-    // leave behind, so the run is taken once — and a press with nothing selected
-    // puts nothing there rather than emptying it.
-    let take_selection = |editor: &TabRename| {
-        let selected = editor.field.selected_text();
-        (!selected.is_empty()).then(|| selected.to_owned())
-    };
-    match key {
-        Key::Named(NamedKey::Enter) => return RenameVerdict::Commit,
-        Key::Named(NamedKey::Escape) => return RenameVerdict::Cancel,
-        _ if chorded => {}
-        // **`Ctrl+A` — select the whole draft** (user ruling 2026-08-20), and it
-        // is **not a row of `shortcuts::BINDINGS`**: that table is the registry
-        // of chords this window *claims from a shell*, and while this editor
-        // holds the keyboard there is no shell to claim anything from. The way
-        // back to the suffix a file's box deliberately leaves out of its opening
-        // selection.
-        Key::Character(text) if control && text.eq_ignore_ascii_case("a") => {
-            editor.field.select_all();
-        }
-        Key::Character(text) if control && text.eq_ignore_ascii_case("c") => {
-            clipboard.copied = take_selection(editor);
-        }
-        Key::Character(text) if control && text.eq_ignore_ascii_case("x") => {
-            clipboard.copied = take_selection(editor);
-            if clipboard.copied.is_some() {
-                editor.field.delete();
-                editor.clamp_scroll();
-            }
-        }
-        // Every other `Ctrl`-letter chord: swallowed, for the reason the whole
-        // ladder is ordered by — the thing underneath this editor is a shell.
-        _ if control && !matches!(key, Key::Named(_)) => {}
-        // `Ctrl+Backspace` takes the word behind the caret, and the word is the
-        // one `Ctrl+←` stops at — which is what stops the two disagreeing about
-        // where a word starts.
-        Key::Named(NamedKey::Backspace) if control => {
-            editor.field.delete_word_back();
-            editor.clamp_scroll();
-        }
-        Key::Named(NamedKey::Backspace) => {
-            editor.field.backspace();
-            editor.clamp_scroll();
-        }
-        Key::Named(NamedKey::Delete) => {
-            editor.field.delete();
-            editor.clamp_scroll();
-        }
-        Key::Named(NamedKey::ArrowLeft) => {
-            editor.field.step(
-                if control {
-                    TextMove::WordLeft
-                } else {
-                    TextMove::Left
-                },
-                shift,
-            );
-            editor.clamp_scroll();
-        }
-        Key::Named(NamedKey::ArrowRight) => editor.field.step(
-            if control {
-                TextMove::WordRight
-            } else {
-                TextMove::Right
-            },
-            shift,
-        ),
-        Key::Named(NamedKey::Home) => {
-            editor.field.step(TextMove::Home, shift);
-            editor.first_visible = 0;
-        }
-        Key::Named(NamedKey::End) => editor.field.step(TextMove::End, shift),
-        // `Space` is the one printable character winit reports as a named key,
-        // so it needs the same door the characters use rather than a verb.
-        Key::Named(NamedKey::Space) => editor.insert(" "),
-        Key::Character(text) => editor.insert(text),
-        _ => {}
-    }
-    RenameVerdict::Held
 }
 
 /// **What `Ctrl` would do with a settled link, when that is worth a sentence**
@@ -35128,16 +34727,6 @@ fn stepped_tab(tab_count: usize, active_tab: usize, forward: bool) -> Option<usi
     Some((active_tab + step) % tab_count)
 }
 
-/// Where Ctrl+Shift+1..9 lands, if it lands anywhere.
-///
-/// The chord names an ordinal the user can count on the strip, so it is 1-based
-/// here and 0-based nowhere else; an ordinal past the end of the strip is
-/// ignored rather than clamped onto the last tab.
-fn goto_tab_index(tab_count: usize, ordinal: u8) -> Option<usize> {
-    let index = usize::from(ordinal).checked_sub(1)?;
-    (index < tab_count).then_some(index)
-}
-
 fn tab_close_action(tab_count: usize, active_tab: usize, closing: usize) -> TabCloseAction {
     debug_assert!(tab_count > 0 && active_tab < tab_count && closing < tab_count);
     if tab_count == 1 {
@@ -44535,12 +44124,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     // -- the PowerShell integration notice (7.1.6j) -------------------------
 
-    /// Whether the focused pane has a strip up — the Esc ladder's question.
-    fn focused_pane_wears_notice(&self) -> bool {
-        self.notice_on(NoticeHost::Seat(self.focused_leaf))
-            .is_some()
-    }
-
     /// The settings dialog's placement in the window as it is now, or `None`
     /// when it is shut — or open but unhostable, which is the same thing to
     /// everyone downstream.
@@ -45294,27 +44877,6 @@ impl<B: Backend> Runtime<'_, B> {
             plan.refuse();
         }
         Some(plan)
-    }
-
-    /// **The staged card's head, if the column is drawing it whole** (§7.21) —
-    /// what the bubble's tail is allowed to bite.
-    ///
-    /// The head and not the body, because the head is the part of a card that is
-    /// a *card*: it carries the tab's name and its mark, and it is the same
-    /// twenty-eight pixels whatever `Card height` is set to. A tail aimed at the
-    /// middle of a 320px body would point at a row of somebody's build log.
-    ///
-    /// **Whole, and that is the clip test rather than a margin.** The column's
-    /// viewport is the one rectangle every other question about this list is
-    /// asked against (`focus_thumb`'s gate two, `focus_rail_chrome`'s own clip),
-    /// and a head half cut off by it is a head whose middle is not where the
-    /// arithmetic thinks it is. `None` here is what sends the bubble to the
-    /// floor seat, which is [`cardhint::place`]'s own second answer.
-    fn staged_card_head(&self, now: Instant) -> Option<[f32; 4]> {
-        let geometry = self.focus_rail_geometry_now(now)?;
-        let card = geometry.cards.get(self.window.active_tab)?;
-        let [list_top, list_bottom] = geometry.viewport;
-        (card.head[1] >= list_top && card.head[3] <= list_bottom).then_some(card.head)
     }
 
     /// **Note whether this window is in Cards, and raise the bubble on the frame
@@ -46112,123 +45674,6 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
-    /// One key press into whichever of the editor's fields has the focus, and
-    /// whether it was the field's.
-    ///
-    /// **Above the dialog's own focus walk and below its Esc**, which is where a
-    /// text control belongs in a ladder: while the caret is in a box the letters
-    /// are the box's, but `Tab` still walks and `Esc` still climbs a rung, so
-    /// nothing in the dialog becomes unreachable from a field. It is the shape
-    /// `search_field_key` already has one surface over, and the arrows are the
-    /// field's for the reason a focused slider's are the slider's — you are
-    /// *inside* a control.
-    ///
-    /// Every edit is written straight through to the table
-    /// ([`Self::write_editor_field`]), because this dialog has no commit: what
-    /// you typed is what is stored, at the keystroke.
-    fn settings_field_key(&mut self, event: &Keystroke) -> Result<bool> {
-        use text_field::TextMove;
-        let Some(target) = self.window.settings.focus() else {
-            return Ok(false);
-        };
-        if self.window.settings.menu().is_some() || self.window.settings.row_menu().is_some() {
-            return Ok(false);
-        }
-        // **Asked of the panel and not of the editor** (§7.54e ⑤): the summoned
-        // terminal's startup command is a field on an ordinary page, and what a
-        // typed key does to a field must not depend on which page it is on. One
-        // handler, one set of rules about `Home`, `Ctrl+A` and a paste with a
-        // newline in it.
-        if self.window.settings.text_field(target).is_none() {
-            return Ok(false);
-        }
-        // **The clipboard's chord is a paste into this field**, by the window's
-        // own predicate — `Shift+Insert` included — and through the one door
-        // every field's paste goes through (B-AUDIT-046 RT-1).
-        if input::is_paste_shortcut(&event.logical_key, self.window.modifiers) {
-            if !event.repeat {
-                self.paste_into_field(TextFieldSeat::Settings)?;
-            }
-            return Ok(true);
-        }
-        let shift = self.window.modifiers.shift_key();
-        // The application's modifier — see `search_field_key`'s note (M1-7).
-        let control = input::is_command_chord(self.window.modifiers);
-        let Some(field) = self.window.settings.text_field_mut(target) else {
-            return Ok(false);
-        };
-        let mut edited = false;
-        match &event.logical_key {
-            // **Enter writes and keeps the focus** (plan §3.5). The write has
-            // already happened — every change went through on its own keystroke
-            // — so what is left is that the key belongs to the field and must
-            // not fall through to the focus walk's `activate`.
-            Key::Named(NamedKey::Enter) => {}
-            Key::Named(NamedKey::Backspace) => edited = field.backspace(),
-            Key::Named(NamedKey::Delete) => edited = field.delete(),
-            Key::Named(NamedKey::ArrowLeft) => field.step(
-                if control {
-                    TextMove::WordLeft
-                } else {
-                    TextMove::Left
-                },
-                shift,
-            ),
-            Key::Named(NamedKey::ArrowRight) => field.step(
-                if control {
-                    TextMove::WordRight
-                } else {
-                    TextMove::Right
-                },
-                shift,
-            ),
-            Key::Named(NamedKey::Home) => field.step(TextMove::Home, shift),
-            Key::Named(NamedKey::End) => field.step(TextMove::End, shift),
-            // Text, and therefore behind the guard the arm at the bottom of this
-            // match is behind (M1-7).
-            Key::Named(NamedKey::Space) if input::types_a_character(self.window.modifiers) => {
-                field.insert(" ");
-                edited = true;
-            }
-            Key::Character(letter) if control => {
-                if matches!(letter.as_str(), "a" | "A") {
-                    field.select_all();
-                }
-            }
-            // Whatever the keyboard produced, which is the layout's answer and
-            // not this build's: a French `é` and a Chinese IME's commit arrive
-            // the same way.
-            //
-            // **Unless a chord produced it** (M1-7, X-3 §4 ③). This arm is the
-            // one that takes *every* key the arms above did not, so it is the one
-            // that typed a `c` into the profile's path field when somebody
-            // pressed `Cmd+C` over it. The modifier that is not this platform's
-            // application modifier reaches here — a `Win` chord on this machine,
-            // a `Ctrl` chord on a Mac — and it is not text either.
-            _ if input::types_a_character(self.window.modifiers) => {
-                let Some(text) = event.text.as_ref() else {
-                    return Ok(false);
-                };
-                let text: String = text.chars().filter(|glyph| !glyph.is_control()).collect();
-                if text.is_empty() {
-                    return Ok(false);
-                }
-                field.insert(&text);
-                edited = true;
-            }
-            // A chord this field has no verb for. Swallowed, as every key is
-            // while the caret is in a field of this dialog.
-            _ => {}
-        }
-        if edited {
-            self.write_editor_field(target)?;
-        }
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
-        }
-        Ok(true)
-    }
-
     /// **Everything the Profiles page's editor does to the table**, whichever
     /// door it came through — a press or an `Enter` on the ring.
     ///
@@ -46646,105 +46091,6 @@ impl<B: Backend> Runtime<'_, B> {
                 None,
                 fault,
             )?;
-        }
-        Ok(())
-    }
-
-    /// One press, while a shortcut row is listening.
-    ///
-    /// **The judging happens in `shortcuts.rs`, the state machine in
-    /// `settings.rs`, and the two are joined here** — which is what keeps the
-    /// recorder and a hand-edited `keybindings.json` answering to one rule:
-    /// [`shortcuts::Shortcuts::verdict_for`] is the same call
-    /// `apply_overrides` makes at the file's door.
-    ///
-    /// The chord is built from `key_without_modifiers` and not from the produced
-    /// logical key (Q6), so what comes back is the glyph printed on the key that
-    /// was pressed rather than the one Shift made of it — which is what makes
-    /// the caps the panel draws afterwards the caps on the user's own board.
-    fn record_settings_key(&mut self, event: &Keystroke) -> Result<()> {
-        let Some(row) = self.window.settings.recording_row() else {
-            return Ok(());
-        };
-        let base = event.key_without_modifiers();
-        let input = match shortcuts::classify_recording(&base, self.window.modifiers) {
-            shortcuts::RecordedKey::Modifier => settings::RecordInput::Modifier {
-                caps: shortcuts::live_caps(self.window.modifiers),
-            },
-            shortcuts::RecordedKey::Cancel => settings::RecordInput::Cancel,
-            shortcuts::RecordedKey::Unbind => settings::RecordInput::Unbind,
-            shortcuts::RecordedKey::Confirm => settings::RecordInput::Confirm,
-            shortcuts::RecordedKey::Unusable => settings::RecordInput::Unusable,
-            shortcuts::RecordedKey::Chord(chord) => {
-                let lines = self.app.shortcuts.editor_rows();
-                let id = lines
-                    .get(row)
-                    .and_then(|line| line.ids.first().copied())
-                    .unwrap_or_default();
-                let verdict = self.app.shortcuts.verdict_for(id, &chord);
-                // **A conflict is the one refusal with a way out** (user ruling
-                // 2026-08-26). It arrives as its own input carrying the id of
-                // the row that has the chord, because the sentence beside it is
-                // an offer and the state machine has to be able to act on the
-                // offer without reading the sentence back.
-                match (verdict.holder(), verdict.swap_offer()) {
-                    (Some(holder), Some(hint)) => settings::RecordInput::Conflict {
-                        caps: shortcuts::chord_caps(&chord),
-                        chord,
-                        holder: holder.to_owned(),
-                        hint,
-                    },
-                    _ => {
-                        let refusal = match verdict {
-                            shortcuts::ChordVerdict::Free => None,
-                            refused => Some(refused.hint().into_owned()),
-                        };
-                        settings::RecordInput::Candidate {
-                            caps: shortcuts::chord_caps(&chord),
-                            chord,
-                            refusal,
-                        }
-                    }
-                }
-            }
-        };
-        match self.window.settings.record(input) {
-            settings::RecordVerdict::Moved | settings::RecordVerdict::Ended => {}
-            settings::RecordVerdict::Commit(index, chord) => {
-                let lines = self.app.shortcuts.editor_rows();
-                if let Some(line) = lines.get(index)
-                    && let Some(id) = line.ids.first()
-                {
-                    self.app.shortcuts.set(id, chord);
-                    self.store_keybindings();
-                }
-                let (rows, shortcuts, profile_lines, scheme_files, values) =
-                    self.settings_content();
-                let content =
-                    self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
-                self.window.settings.keep_focus_reachable(content);
-            }
-            settings::RecordVerdict::Swap {
-                row: index,
-                chord,
-                take_from,
-            } => {
-                let lines = self.app.shortcuts.editor_rows();
-                if let Some(line) = lines.get(index)
-                    && let Some(id) = line.ids.first()
-                {
-                    self.app.shortcuts.take_chord_from(&take_from, id, chord);
-                    self.store_keybindings();
-                }
-                let (rows, shortcuts, profile_lines, scheme_files, values) =
-                    self.settings_content();
-                let content =
-                    self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
-                self.window.settings.keep_focus_reachable(content);
-            }
-        }
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
         }
         Ok(())
     }
@@ -47903,23 +47249,6 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(true)
     }
 
-    /// Split the focused terminal pane, seating a second shell beside it.
-    ///
-    /// The creation entry U12 was missing. Two things happen together and must:
-    /// the tree gains a Terminal leaf, and that leaf gains a shell. A seat with
-    /// no session is a black rectangle nothing will ever draw into, and a
-    /// session with no seat is a process nobody can see or reach — so the solver
-    /// is asked first, and if it refuses the split for want of room, nothing at
-    /// all is spawned.
-    ///
-    /// I88's rule for a new tab, read for a new pane: the arriving shell opens
-    /// where the pane it was split from is standing, by that pane's own OSC 7
-    /// report. A pane whose shell has never named a directory hands over
-    /// nothing, and the new shell starts where it always did.
-    fn split_focused_terminal(&mut self, dir: Axis) -> Result<()> {
-        self.split_terminal_seat(self.focused_leaf, dir)
-    }
-
     /// D40: pressing anywhere in a pane moves the layout focus there.
     ///
     /// Anywhere at all — the head, the terminal's own body, a preview's body —
@@ -48562,40 +47891,6 @@ impl<B: Backend> Runtime<'_, B> {
             // keyboard is somewhere else, or a chord aimed at a shell in the
             // pane beside it would be taken by a document nobody is typing into.
             web_page: self.page_holds_the_keyboard(),
-        }
-    }
-
-    /// **Which field the keyboard is in, named down to the instance**
-    /// (§7.1.5a″; review 2026-09-17 P2).
-    ///
-    /// [`Self::keyboard_owner`] read one grain finer. The ladder it goes through
-    /// is `ime_owner`'s own, unchanged and not copied — this only attaches the
-    /// id that tells one instance of a rung from the next, because "the field
-    /// this composition began in" is a question two terminals and two preview
-    /// surfaces can answer differently while `ImeOwner` cannot.
-    ///
-    /// Asked twice per composition event, and that is deliberate: once to record
-    /// where a composition begins, and once, later, to ask whether the letters
-    /// are still that field's. Both readings are of this same function, so they
-    /// cannot disagree for a reason that is not about the window.
-    fn composition_origin_now(&self) -> CompositionOrigin {
-        match ime_owner(self.keyboard_owner()) {
-            ImeOwner::Rename => CompositionOrigin::Rename(
-                self.window
-                    .rename
-                    .as_ref()
-                    .map(|editor| editor.subject.clone()),
-            ),
-            ImeOwner::GraphSearch => {
-                CompositionOrigin::GraphSearch(self.preview_keyboard_surface())
-            }
-            ImeOwner::GitPrompt => CompositionOrigin::GitPrompt,
-            ImeOwner::Palette => CompositionOrigin::Palette,
-            ImeOwner::Modal => CompositionOrigin::Modal,
-            ImeOwner::FilesTree => CompositionOrigin::FilesTree(self.files_keyboard_seat()),
-            ImeOwner::Preview => CompositionOrigin::Preview(self.preview_keyboard_surface()),
-            ImeOwner::Search => CompositionOrigin::Search(self.window.search.seat()),
-            ImeOwner::Shell => CompositionOrigin::Shell(self.paste_target(self.focused_leaf)),
         }
     }
 
@@ -49505,21 +48800,6 @@ impl<B: Backend> Runtime<'_, B> {
         Some(restore::quit_layout(&content, width, height, scale))
     }
 
-    /// Spend the summary card's one answer, whichever window it was pressed in.
-    fn answer_quit_card(&mut self, answer: quit::QuitAnswer) -> Result<()> {
-        let Some(quit) = self.app.quit.as_mut() else {
-            return Ok(());
-        };
-        if !quit.is_asking() {
-            return Ok(());
-        }
-        quit.answer(answer);
-        if self.refresh_overlay() {
-            self.present_chrome_change()?;
-        }
-        Ok(())
-    }
-
     // ── the preview's filename switcher (P130-P137) ─────────────────────────
 
     /// **Keep this switcher row, or stop keeping it** —
@@ -49689,23 +48969,6 @@ impl<B: Backend> Runtime<'_, B> {
         self.window.revealed_foot.is_some_and(|(shown, at)| {
             shown == foot && now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK
         })
-    }
-
-    /// **Which page a float is carrying**, if it is carrying one.
-    ///
-    /// [`float::FloatPreview::page`] read through the window's own map, so that
-    /// the answer is a page this window still has rather than a leaf a float
-    /// remembers: the two part company for exactly as long as it takes the
-    /// retirement loop to run, and every reader here wants the live one.
-    fn page_carried_by(&self, id: float::FloatId) -> Option<LeafId> {
-        let leaf = self
-            .window
-            .float
-            .drawn()
-            .find(|win| win.epoch == id)?
-            .preview()?
-            .page?;
-        self.window.web.contains_key(&leaf).then_some(leaf)
     }
 
     /// **The card a window with nothing to draw wears**, drawn into its body
@@ -49933,26 +49196,6 @@ impl<B: Backend> Runtime<'_, B> {
         self.clear_selection();
         self.shell_mut().projection.scroll_to_bottom();
         changed
-    }
-
-    /// **The reader's own bytes went into this pane** (review row R1-24).
-    ///
-    /// Called from the four doors a person's own input reaches a shell through —
-    /// the keyboard, a paste, an IME commit and a files-row insert — and from
-    /// nowhere else. A wheel forwarded to a full-screen program is not somebody
-    /// typing at a prompt, and neither is a terminal protocol reply, a resize
-    /// repair chord, or the one line a restored pane puts back on the prompt
-    /// itself.
-    ///
-    /// What it buys is on `CommandMark::typed_by_user`: the command text this
-    /// window remembers across a restart is read off the screen, and a program
-    /// printing `OSC 133` marks decides what is on the screen. This is the one
-    /// fact about a command that such a program cannot produce.
-    fn note_user_typing(&mut self, seat: SeatId) {
-        let active = self.window.active_tab;
-        if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
-            leaf.session.note_user_input();
-        }
     }
 
     fn send_user_input(
@@ -50703,11 +49946,6 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
-    /// Door 2's verb: one chord, both directions, because the mode is one bit.
-    fn toggle_focus_mode(&mut self) -> Result<()> {
-        self.set_focus_mode(!self.window.focus_mode)
-    }
-
     // ── the command palette (DESIGN.md §7.55) ──────────────────────────────
 
     /// **Open the settings dialog on one row.**
@@ -51224,33 +50462,6 @@ impl<B: Backend> Runtime<'_, B> {
         self.float_holding_the_page(leaf)
             .is_none()
             .then_some(leaf.seat)
-    }
-
-    /// **`Ctrl+Shift+L` — the address of this tab, from anywhere in the window**
-    /// (§7.7 ⑨, Claude 定 2026-08-24).
-    ///
-    /// [`Self::open_web_address`] with the one assumption it is allowed to make
-    /// taken away. `Ctrl+L` is in force only over a page, so it may ask for the
-    /// focused page and stop when there is none; this chord answers with the
-    /// hands on a shell, where "there is none" is the ordinary case and the only
-    /// useful answer is to make one.
-    ///
-    /// The fork is the whole function, and both arms end in the same place —
-    /// [`Self::open_web_address_on`] — because a caret in an address is one verb
-    /// and a second seeding of the same field is how the two doors onto it would
-    /// come to disagree.
-    fn open_address_here(&mut self) -> Result<()> {
-        // The field that is open leaves first, by its own rules, so the question
-        // below is asked of the tab as it stands rather than as it stood: a
-        // press that takes back a blank page has to find the tab without one.
-        self.finish_rename(RenameExit::Blur)?;
-        match self.page_on_the_landing_pane() {
-            Some(seat) => {
-                let leaf = self.leaf_here(seat);
-                self.open_web_address_on(leaf)
-            }
-            None => self.mint_a_blank_page_and_open_its_address(),
-        }
     }
 
     /// **Take away the tab a window opened holding, now that the tab it was
@@ -66449,36 +65660,6 @@ fn web_page_cursor(system_cursor_id: u32) -> Option<winit::window::CursorIcon> {
     })
 }
 
-/// Where the IME's caret is drawn inside a composition — or `None` for "at
-/// the end".
-///
-/// winit hands over `Some((start, end))`, and the pair means **two different
-/// things** depending on whether it is collapsed. Collapsed (`start == end`) it
-/// is `GCS_CURSORPOS`, the caret proper. Open (`start < end`) it is not a caret
-/// at all: winit derives it from `GCS_COMPATTR`, and it is the *target clause*
-/// — the run of characters the IME has marked `ATTR_TARGET_CONVERTED` /
-/// `ATTR_TARGET_NOTCONVERTED`, which Microsoft Pinyin does now and then during
-/// ordinary typing (the syllable it is currently converting), and which spike
-/// 04 happened never to catch. Reading `start` as the caret in that case put
-/// the bar in the middle of `ran` (user report, 2026-08-16: "ra|n", not every
-/// time, same pinyin). A clause is a highlight, not a position; while the IME
-/// is showing one, the caret belongs where every terminal draws it — at the end
-/// of the composition — which is what `None` means downstream
-/// (`bt_render::compose_preedit` takes `text.len()`).
-///
-/// Styling the clause itself is still the day-someone-asks item spike 04 left
-/// it as; this only stops mistaking it for a caret.
-fn preedit_caret_byte(cursor_range: Option<(usize, usize)>) -> Option<usize> {
-    match cursor_range {
-        Some((start, end)) if start == end => Some(start),
-        _ => None,
-    }
-}
-
-fn ime_commit_bytes(text: &str) -> Vec<u8> {
-    text.as_bytes().to_vec()
-}
-
 /// The payload and later path refusals are separate causes, both delivered to the app's toast host.
 #[derive(Default)]
 struct PreparedClipboardPaste {
@@ -71215,31 +70396,6 @@ fn solve_seats<G: Glass>(
     // solved into rather than against one recomputed from the same inputs and
     // hoped to agree (A12, T228).
     (layout, overflow, terminal, viewport)
-}
-
-/// A caret rectangle the frame produced, moved from the terminal seat's
-/// coordinates into the window's — what winit and IMM32 are asking for.
-///
-/// The identity for a lone leaf is the point: its seat origin is `(0, 0)`, so
-/// this is the number that was passed before seats existed.
-/// A caret's line box, as winit and IMM32 want it: a whole-pixel origin and a
-/// size, both in window pixels.
-///
-/// The **size is the line**, not the bar: `set_ime_cursor_area` places the
-/// candidate window clear of `position + size`, so handing it the caret's own
-/// hairline height would hang the list halfway up the field it is meant to stand
-/// under. One pixel is the floor on both axes because a zero-sized exclusion
-/// rectangle is not one.
-#[must_use]
-fn ime_cursor_area_of(line: [f32; 4]) -> ImeCursorArea {
-    let x = line[0].round();
-    let y = line[1].round();
-    ImeCursorArea {
-        x: x as i32,
-        y: y as i32,
-        width: (line[2].round() - x).max(1.0) as u32,
-        height: (line[3].round() - y).max(1.0) as u32,
-    }
 }
 
 fn window_ime_cursor_area(seat: SeatViewport, area: ImeCursorArea) -> ImeCursorArea {

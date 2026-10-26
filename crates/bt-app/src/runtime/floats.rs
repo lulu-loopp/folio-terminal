@@ -3834,6 +3834,23 @@ impl<B: Backend> Runtime<'_, B> {
             })
             .collect()
     }
+
+    /// **Which page a float is carrying**, if it is carrying one.
+    ///
+    /// [`float::FloatPreview::page`] read through the window's own map, so that
+    /// the answer is a page this window still has rather than a leaf a float
+    /// remembers: the two part company for exactly as long as it takes the
+    /// retirement loop to run, and every reader here wants the live one.
+    pub(crate) fn page_carried_by(&self, id: float::FloatId) -> Option<LeafId> {
+        let leaf = self
+            .window
+            .float
+            .drawn()
+            .find(|win| win.epoch == id)?
+            .preview()?
+            .page?;
+        self.window.web.contains_key(&leaf).then_some(leaf)
+    }
 }
 
 /// The caption on the float's dock button.

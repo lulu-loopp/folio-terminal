@@ -8,23 +8,23 @@ use crate::window_seam::prelude::*;
 use crate::{
     AnimationWork, BrokerAim, DecorationSenders, Drag, FILES_NOTICE_DWELL, FOOT_REVEAL_FEEDBACK,
     Fading, FrameImageReferences, FrameTraces, GhostFace, HyperlinkActivation, HyperlinkHover,
-    LeafId, Motion, PaneDraw, PictureOnGlass, PointerTarget, PresentIntent, Runtime,
-    STARTUP_PTY_POLL_INTERVAL, SearchRefresh, ShellAddress, TabPress, TabState, cmdrail,
-    computation_lane, disable_math_worker_state, dispatch_decoration_task, files,
+    LeafId, MathWorkerRequest, Motion, PaneDraw, PathWorkerRequest, PictureOnGlass, PointerTarget,
+    PresentIntent, Runtime, STARTUP_PTY_POLL_INTERVAL, ScaleWorkerRequest, SearchRefresh,
+    ShellAddress, TabPress, TabState, cmdrail, computation_lane, disable_math_worker_state, files,
     foreground_program, git, handoff_lane, hang_watch, hyperlink_activation, i18n, ime_outbound,
     lane, mark_leaf_painted, notify, pace, present_diagnostics, present_gate,
-    presentation_equivalent, preview, seats, settings, settling, share_of, taskbar_lane,
-    termscroll, toast, update, webhost,
+    presentation_equivalent, preview, seats, settings, settling, taskbar_lane, termscroll, toast,
+    update, webhost,
 };
 use anyhow::Context;
 use anyhow::Result;
 use bt_layout::SeatId;
 use bt_platform::admission::{WaitToken, doors};
 use bt_render::{
-    FrameSource, FrameTrigger, PresentOutcome, compose_preedit, frame_content_digest,
-    frame_is_alternate_screen,
+    FrameSource, FrameTrigger, PresentOutcome, compose_preedit, foreground_rgb,
+    frame_content_digest, frame_is_alternate_screen,
 };
-use bt_term::DualPlaneSession;
+use bt_term::{DualPlaneSession, SessionDecorationTask};
 use bt_viewport::{HyperlinkHit, ViewportFrame};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -2973,6 +2973,68 @@ impl<B: Backend> Runtime<'_, B> {
             && self.window.command_flash.as_ref().is_some_and(|flash| {
                 cmdrail::flash_is_running(now.saturating_duration_since(flash.started))
             })
+    }
+}
+
+/// **The computation lane's request door for a pane's decoration work** (C1): the task goes to
+/// the share that runs its kind — a formula or a decode to `bt-math-worker`, a resample to
+/// `bt-image-scale-worker`, a printed path to `bt-path-verify-worker` — and is admitted there, or
+/// refused at that share's door and handed back as the task it was.
+pub(crate) fn dispatch_decoration_task(
+    leaf: ShellAddress,
+    task: SessionDecorationTask,
+    lane: &computation_lane::ComputationLane,
+) -> std::result::Result<(), (lane::Refused, SessionDecorationTask)> {
+    match task {
+        SessionDecorationTask::Math(task) => lane
+            .decorate(MathWorkerRequest::Math {
+                leaf,
+                task,
+                foreground_rgb: foreground_rgb(),
+            })
+            .map(|_| ())
+            .map_err(|(refused, request)| (refused, session_task_of(request))),
+        SessionDecorationTask::InlineImage(task) => lane
+            .decorate(MathWorkerRequest::InlineImage { leaf, task })
+            .map(|_| ())
+            .map_err(|(refused, request)| (refused, session_task_of(request))),
+        SessionDecorationTask::ScaleInlineImage(task) => lane
+            .scale(ScaleWorkerRequest::InlineImage { leaf, task })
+            .map(|_| ())
+            .map_err(|(refused, request)| match request {
+                ScaleWorkerRequest::InlineImage { task, .. } => {
+                    (refused, SessionDecorationTask::ScaleInlineImage(task))
+                }
+                _ => unreachable!("the door hands back the request it was given"),
+            }),
+        // **Its own share** — see [`PathWorkerRequest`]. A stat that blocks for the redirector's
+        // timeout must not stand in front of a formula the reader is waiting on.
+        SessionDecorationTask::VerifyPath(path) => lane
+            .verify(PathWorkerRequest { leaf, path })
+            .map(|_| ())
+            .map_err(|(refused, request)| {
+                (refused, SessionDecorationTask::VerifyPath(request.path))
+            }),
+    }
+}
+
+/// The session's task a pane's formula or decode request was made of, handed back.
+fn session_task_of(request: MathWorkerRequest) -> SessionDecorationTask {
+    match request {
+        MathWorkerRequest::Math { task, .. } => SessionDecorationTask::Math(task),
+        MathWorkerRequest::InlineImage { task, .. } => SessionDecorationTask::InlineImage(task),
+        _ => unreachable!("the door hands back the request it was given"),
+    }
+}
+
+/// **Which of the computation lane's shares a pane's task goes to.**
+fn share_of(task: &SessionDecorationTask) -> computation_lane::Share {
+    match task {
+        SessionDecorationTask::Math(_) | SessionDecorationTask::InlineImage(_) => {
+            computation_lane::Share::Decoration
+        }
+        SessionDecorationTask::ScaleInlineImage(_) => computation_lane::Share::Scale,
+        SessionDecorationTask::VerifyPath(_) => computation_lane::Share::Path,
     }
 }
 

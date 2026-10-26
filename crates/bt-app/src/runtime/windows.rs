@@ -2518,6 +2518,21 @@ impl<B: Backend> Runtime<'_, B> {
             RenameSubject::WebAddress { .. } => None,
         }
     }
+
+    /// Spend the summary card's one answer, whichever window it was pressed in.
+    pub(crate) fn answer_quit_card(&mut self, answer: quit::QuitAnswer) -> Result<()> {
+        let Some(quit) = self.app.quit.as_mut() else {
+            return Ok(());
+        };
+        if !quit.is_asking() {
+            return Ok(());
+        }
+        quit.answer(answer);
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn window_minimum_changed(applied: &mut Option<(i64, i64)>, next: (i64, i64)) -> bool {
