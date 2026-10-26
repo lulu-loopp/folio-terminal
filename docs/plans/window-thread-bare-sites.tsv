@@ -172,7 +172,6 @@ bt-platform	[windows]	crate::video::engine::Engine::wait_for_metadata	std::threa
 bt-platform	[windows]	crate::video::engine::Pump::run	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[windows]	crate::video::engine::can_play_types	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::video::within_budget	std::sync::mpsc::Receiver::recv_timeout	1
-bt-platform	[windows]	crate::windows_impl::<DirWatch as Drop>::drop	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::windows_impl::close	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::windows_impl::directory_folds_case	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::windows_impl::write_to_console	windows::Win32::Foundation::CloseHandle	1
