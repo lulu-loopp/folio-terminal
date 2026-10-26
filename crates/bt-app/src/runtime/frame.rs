@@ -9,12 +9,12 @@ use crate::{
     AnimationWork, BrokerAim, DecorationSenders, Drag, FILES_NOTICE_DWELL, FOOT_REVEAL_FEEDBACK,
     Fading, FrameImageReferences, FrameTraces, GhostFace, HyperlinkActivation, HyperlinkHover,
     LeafId, MathWorkerRequest, Motion, PaneDraw, PathWorkerRequest, PictureOnGlass, PointerTarget,
-    PresentIntent, Runtime, STARTUP_PTY_POLL_INTERVAL, ScaleWorkerRequest, SearchRefresh,
-    ShellAddress, TabPress, TabState, cmdrail, computation_lane, disable_math_worker_state, files,
-    foreground_program, git, handoff_lane, hang_watch, hyperlink_activation, i18n, ime_outbound,
-    lane, mark_leaf_painted, notify, pace, present_diagnostics, present_gate,
-    presentation_equivalent, preview, seats, settings, settling, taskbar_lane, termscroll, toast,
-    update, webhost,
+    PresentIntent, PreviewSurface, Runtime, STARTUP_PTY_POLL_INTERVAL, ScaleWorkerRequest,
+    SearchRefresh, ShellAddress, TabPress, TabState, cmdrail, computation_lane,
+    disable_math_worker_state, files, foreground_program, git, handoff_lane, hang_watch,
+    hyperlink_activation, i18n, ime_outbound, lane, mark_leaf_painted, notify, pace,
+    present_diagnostics, present_gate, presentation_equivalent, preview, seats, settings, settling,
+    taskbar_lane, termscroll, toast, update, webhost,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -2973,6 +2973,37 @@ impl<B: Backend> Runtime<'_, B> {
             && self.window.command_flash.as_ref().is_some_and(|flash| {
                 cmdrail::flash_is_running(now.saturating_duration_since(flash.started))
             })
+    }
+
+    /// **The play button, rasterised, for the lane that draws over a picture**
+    /// (user ruling 2026-08-27; `docs/DESIGN.md` §7.23 ⑩).
+    ///
+    /// Empty for every surface that is not a docked seat showing a playable
+    /// video with nothing already on it — the same set
+    /// [`Self::seats_wearing_a_play_button`] answers, asked of one surface, so
+    /// the control that is drawn and the press that is accepted cannot come
+    /// apart.
+    ///
+    /// The two sprites are cut by [`seats::preview_play_button_sprites`], which
+    /// is the one place the circle's geometry is written and the very function
+    /// [`seats::hit_preview_play`] measures the press against.
+    pub(crate) fn play_button_rasters(
+        &mut self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+    ) -> Vec<bt_render::ChromeIcon> {
+        let PreviewSurface::Seat(leaf) = surface else {
+            return Vec::new();
+        };
+        if leaf.tab != self.id || !self.seats_wearing_a_play_button().contains(&leaf.seat) {
+            return Vec::new();
+        }
+        let hovered =
+            self.window.seat_pointer.hover == Some(seats::ChromeTarget::PreviewPlay(leaf.seat));
+        let sprites =
+            seats::preview_play_button_sprites(body, hovered, scale, &bt_render::chrome_palette());
+        self.window.chrome_marks.resolve(&sprites)
     }
 }
 

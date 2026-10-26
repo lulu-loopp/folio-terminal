@@ -1,12 +1,13 @@
 //! `web` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::runtime::preview::preview_image_placement;
 use crate::window_seam::prelude::*;
 use crate::{
     AppEvent, FOOT_REVEAL_FEEDBACK, LeafId, PageKeepsake, PreviewSurface, RenameExit, Runtime,
-    TabRename, WebHeadVerb, WebPlacement, hang_watch, input, marks, preview,
-    preview_image_placement, restore, seats, shown_address, source_opens_as_a_page, web_thumb,
-    web_trace, web_warmup, webhost, webnav, websheet,
+    TabRename, WebHeadVerb, WebPlacement, hang_watch, input, marks, preview, restore, seats,
+    shown_address, source_opens_as_a_page, web_thumb, web_trace, web_warmup, webhost, webnav,
+    websheet,
 };
 use anyhow::{Result, anyhow};
 use bt_layout::SeatId;

@@ -6,6 +6,7 @@ use crate::runtime::attention::expire_leaf_attention;
 use crate::runtime::floats::{file_menu_powers, float_dock_label};
 use crate::runtime::frame::trace_unchanged_present;
 use crate::runtime::preview::picture_channel_owner;
+use crate::runtime::preview::preview_image_placement;
 use crate::runtime::tabs::pane_can_become_a_tab;
 use crate::runtime::windows::dirty_gate_names;
 use crate::window_seam::prelude::*;
@@ -23,12 +24,12 @@ use crate::{
     NewWindowPlan, NoticeHost, PaneDraw, PaneMenuState, PaneTransform, PopoverTrigger, Popup,
     PopupOwner, PresentIntent, PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY,
     RAIL_TRANSITION, RevealTween, RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed,
-    TabId, TabState, TabSurface, TearOut, animated_pane_viewports, attention_trace,
-    auto_split_axis, card_trace, closing_this_pane_closes_the_tab, cmdrail, create_leaf_session,
-    files, float, glyph_trace, hang_watch, marks, mouse_trace, notice, notify, palette,
-    present_diagnostics, presentation_physical_size, preview, preview_image_placement,
-    preview_trace, profiles, restore, restore_row_seed, row_verb, schedule_leaf_grid_change,
-    scrollback_quota, seats, solve_seats, solve_tree, video_seat, webhost,
+    TabId, TabState, TabSurface, TearOut, attention_trace, auto_split_axis, card_trace,
+    closing_this_pane_closes_the_tab, cmdrail, create_leaf_session, files, float, glyph_trace,
+    hang_watch, marks, mouse_trace, notice, notify, palette, present_diagnostics,
+    presentation_physical_size, preview, preview_trace, profiles, restore, restore_row_seed,
+    row_verb, schedule_leaf_grid_change, scrollback_quota, seats, solve_seats, solve_tree,
+    video_seat, webhost,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -6068,6 +6069,72 @@ impl<B: Backend> Runtime<'_, B> {
             .is_none()
             .then_some(leaf.seat)
     }
+}
+
+/// **U8, R3 — a mid-FLIP terminal pane's viewport and scissor.**
+///
+/// `body` is what `pane_body_viewport` answered: the pane's content rectangle at
+/// its **final** size, and this function does not change that size — not by a
+/// pixel, not at any point of the flight. The extent comes from the solve and
+/// only the corner comes from the tween, which is R2 made structural rather than
+/// promised: a grid reflow is a function of the extent, so an extent no
+/// animation can touch is a ConPTY resize no animation can cause.
+///
+/// The mock-up gets the same result by composing two transforms — `scale(s)` on
+/// the pane and `scale(1/s)` on an inner wrapper (6584-6586) — because CSS can
+/// only move a laid-out box by transforming it, so the outer scale is
+/// unavoidable and the inner one is there to cancel it. Multiplied out, the pair
+/// says exactly what these two rectangles say. Transcribing the CSS literally —
+/// scaling this crate's viewport by `s` — would reflow the grid on every frame
+/// of the animation and hand ConPTY a resize storm, which is precisely what the
+/// counter-scale exists to prevent.
+///
+/// The viewport can legitimately hang off the surface: a pane growing leftward
+/// out of a closed sibling is laid out at its final width from the corner it
+/// still occupies, so its right edge is past the window's until it lands. That
+/// is legal for a viewport and not for a scissor, which is why only the second
+/// of the pair is clamped, and it is clamped where it is validated.
+///
+/// At rest the transform is the identity, both rectangles are `body`, and every
+/// value the renderer sees is the one that was there before U8.
+pub(crate) fn animated_pane_viewports(
+    body: bt_render::SeatViewport,
+    pane: [f32; 4],
+    transform: PaneTransform,
+) -> (bt_render::SeatViewport, bt_render::SeatViewport) {
+    let viewport = bt_render::SeatViewport {
+        x: (body.x as f32 + transform.dx).round().max(0.0) as u32,
+        y: (body.y as f32 + transform.dy).round().max(0.0) as u32,
+        width: body.width,
+        height: body.height,
+    };
+    let content = [
+        viewport.x as f32,
+        viewport.y as f32,
+        (viewport.x + viewport.width) as f32,
+        (viewport.y + viewport.height) as f32,
+    ];
+    // The animating box, cropped to the content it is cropping. Intersecting
+    // rather than taking the box whole is what makes this equal `body` at rest:
+    // the box is the *whole* pane, head included, and the head is chrome that
+    // this seat does not draw.
+    //
+    // A box that misses its own content entirely is not a state the arithmetic
+    // can reach — the box always contains the corner the content is drawn from —
+    // so the fallback is the content itself rather than an empty rectangle the
+    // scissor would reject.
+    let clip = seats::box_intersection(transform.applied_to(pane), content).unwrap_or(content);
+    let left = clip[0].round().max(0.0);
+    let top = clip[1].round().max(0.0);
+    (
+        viewport,
+        bt_render::SeatViewport {
+            x: left as u32,
+            y: top as u32,
+            width: (clip[2].round() - left).max(1.0) as u32,
+            height: (clip[3].round() - top).max(1.0) as u32,
+        },
+    )
 }
 
 /// What a pseudoconsole's answer to "clear your own buffer" means for this window.

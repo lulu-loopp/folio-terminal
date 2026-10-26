@@ -9,61 +9,57 @@ use crate::runtime::git::graph_key_of;
 use crate::runtime::keyboard::preedit_caret_byte;
 use crate::runtime::math::answers_for;
 use crate::runtime::mouse::wheel_points_sideways;
+use crate::runtime::panes::animated_pane_viewports;
 use crate::runtime::peek::{peek_scale_task, preview_body_bar, scroll_bar_layer};
 use crate::runtime::web::page_destination;
 use crate::window_seam::prelude::*;
 use crate::{
     ADDRESS_FIELD_WANTS_THE_WHOLE_HEAD, AnimationEntry, AnimationWork, AppEvent, AttentionDelivery,
     BackgroundDecode, BlockScrollPaint, BuiltMarkdown, ClickIntent, ClipboardPictureAnswer,
-    ClipboardPictureJob, DOCK_PREVIEW_FADE, DiffRow, DocumentMath, DocumentPictures, DragLatch,
-    DrawnAnimation, DropPreview, FOOT_REVEAL_FEEDBACK, FileMenuTarget, FilePick, FillSent,
-    FoldedLevel, FootSaying, ForeignPane, FormulaSwitches, FrameTraces, HyperlinkActivation,
-    ImageDrag, ImageGrasp, ImageZoom, ImeOwner, LeafId, LeafSeed, LocalKnown,
-    MARKDOWN_CHIP_INSET_LOGICAL_PX, MARKDOWN_CHIP_PADDING_LOGICAL_PX,
+    ClipboardPictureInbox, ClipboardPictureJob, DOCK_PREVIEW_FADE, DiffRow, DocumentMath,
+    DocumentPictures, DragLatch, DrawnAnimation, DropPreview, FOOT_REVEAL_FEEDBACK, FileMenuTarget,
+    FilePick, FillSent, FoldedLevel, FootSaying, ForeignPane, FormulaSwitches, FrameTraces,
+    HyperlinkActivation, IMAGE_PAN_KEY_SHIFT_STEP, IMAGE_PAN_KEY_STEP, IMAGE_ZOOM_MAX,
+    IMAGE_ZOOM_MIN, IMAGE_ZOOM_STEP, ImageDrag, ImageGrasp, ImageZoom, ImageZoomMode, ImeOwner,
+    LeafId, LeafSeed, LocalKnown, MARKDOWN_CHIP_INSET_LOGICAL_PX, MARKDOWN_CHIP_PADDING_LOGICAL_PX,
     MARKDOWN_CHIP_RADIUS_LOGICAL_PX, MarkdownBlockLayout, MarkdownCaretBlock, MarkdownCaretPaint,
-    MarkdownCaretSeat, MarkdownLive, MarkdownPage, MarkdownPicture, MarkdownPreedit,
-    MarkdownProseBlock, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest, MarkdownSink,
-    MarkdownSourceBlock, MarkdownSourceBytes, MarkdownStyle, MathWorkerRequest, Motion,
-    NO_HIGHLIGHTING, NoticeHost, PAGE_ADDRESS_REFUSAL, PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey,
-    PageHandOff, PagePicture, PasteTarget, PeekAsk, PeekCacheEntry, PeekThumbnailTarget,
-    PictureErrand, PictureOnGlass, PictureReach, PictureRefusal, PictureUndo, PopoverTrigger,
+    MarkdownCaretSeat, MarkdownLive, MarkdownPage, MarkdownPicture, MarkdownPictures,
+    MarkdownPreedit, MarkdownProseBlock, MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest,
+    MarkdownSink, MarkdownSourceBlock, MarkdownSourceBytes, MarkdownStyle, MathWorkerRequest,
+    Motion, NO_HIGHLIGHTING, NoticeHost, PAGE_ADDRESS_REFUSAL, PREVIEW_IMAGE_FIT_HEIGHT_FRACTION,
+    PREVIEW_IMAGE_FIT_WIDTH_FRACTION, PREVIEW_IMAGE_TEXTURE_SHARE, PREVIEW_IMAGE_TEXTURE_SLACK,
+    PREVIEW_REFUSAL_HOLD, PageArt, PageArtKey, PageHandOff, PagePicture, PaneTransform,
+    PasteTarget, PeekAsk, PeekCache, PeekCacheEntry, PeekThumbnailTarget, PictureErrand,
+    PictureOnGlass, PictureReach, PictureRefusal, PictureUndo, PictureWaitFor, PopoverTrigger,
     Popup, PresentIntent, PreviewBlockDrag, PreviewBodyDrag, PreviewChipAt, PreviewChipTip,
     PreviewDocument, PreviewDocumentKey, PreviewEditPaint, PreviewHeadFrame, PreviewHexHover,
     PreviewHighlightMeasure, PreviewImageState, PreviewLink, PreviewLinkSite, PreviewMathSite,
-    PreviewOpenLane, PreviewPane, PreviewParseKey, PreviewPreedit, PreviewRailFrame,
-    PreviewSurface, PreviewTextBox, PreviewTextDrag, PreviewTextPiece, PreviewTextSite,
-    PreviewTextWhere, ProseParagraph, ReferenceRow, RenameSubject, Reparse, RevealTween,
-    RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest, ScrollThumbState, SourceBlocks, Step,
-    SurfacePixels, SurfaceSubject, TabClick, TabId, TabRename, TabState, TabTriggerHand,
-    VideoGlance, VideoPictureClick, VideoPicturePress, VideoShape, WINDOW_RESIZE_QUIET,
-    WebHeadVerb, WindowRuntime, animation, animation_layer_key, animation_refusal_notice,
-    answer_one_picture, attention_trace, clipboard_picture, create_leaf_session, crumb_segments,
-    deliver_clipboard_picture, diagnostics, documents_pictures, earliest_deadline, file_peek,
-    files, files_a_tab_stands_on, files_row_display_name, float, foot_revealed_label,
-    forget_a_picture, forget_standing_answers, git_panel, hang_watch, hex_peek, highlight, i18n,
-    image_clamped_pan, image_destination, image_is_pannable, image_meta_sentence, image_pan_key,
-    image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_scale, image_zoom_settles,
-    image_zoom_toggled, ime_owner, input, markdown_image_card, markdown_image_extent,
-    markdown_item_runs, markdown_prose_runs, markdown_runs, marks, note_link_sites,
-    note_math_sites, note_text_site, notice, owe_sharpened_rasters, page_address_hand_off,
-    page_foot_flash, page_foot_lead, page_source_file, picture_errand, picture_files_of,
-    pictures_awaited_by, pictures_need_handing_over, present_diagnostics, preview,
-    preview_caret_prose, preview_edit, preview_image_placement, preview_live,
+    PreviewOpenLane, PreviewPane, PreviewParseKey, PreviewPlacement, PreviewPreedit,
+    PreviewRailFrame, PreviewSurface, PreviewTextBox, PreviewTextDrag, PreviewTextPiece,
+    PreviewTextSite, PreviewTextWhere, ProseParagraph, ReferenceRow, RenameSubject, Reparse,
+    RevealTween, RevealedFoot, RowActivation, Runtime, ScaleWorkerRequest, ScrollThumbState,
+    SourceBlocks, Step, SurfacePixels, SurfaceSubject, TabClick, TabId, TabRename, TabState,
+    TabTriggerHand, VideoGlance, VideoPictureClick, VideoPicturePress, VideoShape,
+    WINDOW_RESIZE_QUIET, WebHeadVerb, WindowRuntime, animation, attention_trace, clipboard_picture,
+    create_leaf_session, crumb_segments, diagnostics, earliest_deadline, file_peek, files,
+    files_a_tab_stands_on, files_row_display_name, float, foot_revealed_label,
+    forget_standing_answers, git_panel, hang_watch, hex_peek, highlight, i18n, ime_owner, input,
+    markdown_image_card, markdown_image_extent, markdown_item_runs, markdown_prose_runs,
+    markdown_runs, marks, note_link_sites, note_math_sites, note_text_site, notice,
+    page_address_hand_off, page_foot_flash, page_foot_lead, page_source_file, pane_content,
+    present_diagnostics, preview, preview_caret_prose, preview_edit, preview_live,
     preview_open_externally_label, preview_open_lane, preview_opened_label,
     preview_page_browser_hand_off, preview_press, preview_provenance, preview_rail_tip_text,
     preview_select, preview_tab_index_among, preview_text, preview_trace, preview_viewport,
     preview_watch, preview_wrap, profiles, push_markdown_table, reference_activation,
-    resolve_document_pictures, revealable_preview_file, scale_ppm, scrollback_quota, seats,
-    settings, settle_attention, shown_address, source_opens_as_a_page, strip_animation_tick_is_due,
-    surface_pixels, surface_subject_of, surface_takes_image_zoom, switcher_rows, tab_owes_frame,
-    tab_trailing_targets, table_block, text_field, tick_owes_a_present, toast, tooltip,
-    video_frame_texture_key, video_seat, video_still_destination, viewport_of_rect, webhost,
-    webnav, window_taskbar_progress,
+    revealable_preview_file, scale_ppm, scrollback_quota, seats, settings, settle_attention,
+    shown_address, source_opens_as_a_page, switcher_rows, tab_owes_frame, tab_trailing_targets,
+    table_block, text_field, toast, tooltip, video_seat, webhost, webnav, window_taskbar_progress,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
 use anyhow::Result;
-use bt_layout::SeatId;
+use bt_layout::{SeatId, SeatLayout};
 use bt_math::MathMode;
 use bt_render::{
     FrameSource, FrameTrigger, ImeCursorArea, PREVIEW_BODY_INSET_LOGICAL_PX, Preedit,
@@ -76,7 +72,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
 use winit::event::{Ime, MouseScrollDelta};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 impl<B: Backend> Runtime<'_, B> {
     /// Prefer the live column's order, including watcher refreshes. A preview
@@ -10669,7 +10665,7 @@ impl<B: Backend> Runtime<'_, B> {
         let window = &mut *self.window;
         window
             .animations
-            .forget_surfaces_gone(|surface| crate::animation_surface_exists(&window.tabs, surface));
+            .forget_surfaces_gone(|surface| animation_surface_exists(&window.tabs, surface));
         if !self.app.math_worker_running {
             return;
         }
@@ -14461,6 +14457,1247 @@ impl<B: Backend> Runtime<'_, B> {
         };
         preview_live::selection_span(content, blocks, ranges, maps, &caret, pane.md_select())
     }
+
+    /// **Every surface that could be showing an animation**, which is every
+    /// preview surface plus the glance card.
+    ///
+    /// The card is added by hand for the reason `preview_surfaces` leaves it
+    /// out: it is window-scoped rather than tab-scoped and is not focusable,
+    /// hit-testable or scrollable through the machinery that walk is for. It is
+    /// drawable, which is what this walk is for.
+    fn animated_surfaces(&self) -> Vec<PreviewSurface> {
+        let mut surfaces = self.preview_surfaces();
+        surfaces.push(PreviewSurface::Peek);
+        surfaces
+    }
+}
+
+/// **Put an answer down, but only if it is the one being waited for**
+/// (review X-3).
+///
+/// Free rather than a method because the caller is a worker thread holding
+/// nothing but the `Arc` — there is no mailbox on that side, and there must not
+/// be: the whole point is that the generation it is compared against is read
+/// under the same lock the write takes, not carried over from when the job
+/// started.
+pub(crate) fn deliver_clipboard_picture(
+    inbox: &std::sync::Mutex<ClipboardPictureInbox>,
+    answer: ClipboardPictureAnswer,
+) {
+    let mut inbox = inbox
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if inbox.wanted == answer.generation {
+        inbox.landed = Some(answer);
+    }
+}
+
+/// **What the shared GPU cache calls one decoded video frame**: the file, when it was last
+/// written, and the size it came back at.
+///
+/// [`peek_page_texture_key`]'s twin, and for its reasons: two files are two pictures, one file
+/// rewritten is two pictures, and one file decoded into two boxes is two rasters of the same
+/// picture. A picture file needs none of this — its texture is named by a hash of its own bytes —
+/// and a frame cannot be, because the bytes it was decoded from are a container this process
+/// never held whole.
+pub(crate) fn video_frame_texture_key(
+    path: &Path,
+    mtime: Option<SystemTime>,
+    width: u32,
+    height: u32,
+) -> String {
+    let stamp = mtime
+        .and_then(|mtime| mtime.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map_or_else(|| "?".to_owned(), |since| since.as_nanos().to_string());
+    format!("video-frame:{}:{stamp}:{width}x{height}", path.display())
+}
+
+/// **What one page's pictures are**, resolved against the document's own
+/// directory and the theme in force (user ruling 2026-08-28; §7.1.3k).
+///
+/// A free function with the disk injected, and that is what makes ③ provable
+/// rather than merely intended: `ask` is the **only** door to a file in this
+/// function, so a gate that owns one and counts what reaches it is asserting
+/// that a remote source produces no read, no request and no lane traffic — not
+/// that today's code happens to take a different branch.
+///
+/// [`preview::link_action`] does the resolving, and it does it because a
+/// picture's `src` and a link's target are the same kind of string written in
+/// the same file: relative to the document, `file:` understood, absolute
+/// honoured, every other scheme refused. A second rule for the second one would
+/// be a second answer to "what is `../assets/a.png` relative to".
+pub(crate) fn resolve_document_pictures(
+    blocks: &[preview::MarkdownBlock],
+    document: Option<&Path>,
+    theme: bt_render::Theme,
+    reach: PictureReach,
+    standing: &DocumentPictures,
+    ask: &mut dyn FnMut(&Path, bool, Option<&MarkdownPicture>) -> PagePicture,
+) -> DocumentPictures {
+    // **Which sources are near enough to be worth a disk** (review row R1-8,
+    // adversarial review 2026-09-08). A source is asked for when *any* of the
+    // blocks carrying it is in reach, which is why this is a pass of its own: a
+    // page that shows one badge twice, once at the top and once at the bottom,
+    // has one entry in `by_source`, and the entry has to be the answer for the
+    // occurrence that is on screen.
+    let mut wanted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut ordinal = 0_usize;
+    for block in blocks {
+        if let preview::MarkdownBlock::Image(image) = block {
+            if reach.holds(ordinal) {
+                wanted.insert(image.source_for(theme));
+            }
+            ordinal += 1;
+        }
+    }
+    let mut pictures = DocumentPictures::default();
+    for block in blocks {
+        let preview::MarkdownBlock::Image(image) = block else {
+            continue;
+        };
+        let source = image.source_for(theme);
+        if pictures.by_source.contains_key(source) {
+            continue;
+        }
+        let resolved = match document {
+            Some(document) => preview::link_action(source, document),
+            // A document with no path on a disk — a buffer minted from a stream
+            // — has no directory for a relative source to be relative *to*, and
+            // saying so is more honest than picking one.
+            None => preview::LinkAction::Nowhere,
+        };
+        let picture = match resolved {
+            preview::LinkAction::Web(url) => MarkdownPicture::Remote(url),
+            // A picture addressed by a scheme this window has no reader for is nothing to draw:
+            // a source is fetched, never handed over.
+            preview::LinkAction::Nowhere
+            | preview::LinkAction::Scheme(_)
+            | preview::LinkAction::Unnamed(_) => MarkdownPicture::Nowhere,
+            // **A source this window will not go looking at** (route E of the untrusted-path
+            // audit, 2026-09-08). `![](\\attacker\share\x.png)` inside a document rendered on a
+            // hover used to reach `ask` — which is `request_peek_pixels` — and the picture was
+            // fetched over SMB with no click anywhere. It draws what a picture this window cannot
+            // read draws, because that is what it is: the file is not this window's to open.
+            preview::LinkAction::Refused(_) => MarkdownPicture::Failed,
+            // **The answer this page already has is part of the question**
+            // (user report 2026-09-10) — see [`answer_one_picture`], which is
+            // what reads it.
+            preview::LinkAction::Preview(path) if wanted.contains(source) => {
+                let PagePicture { picture, waiting } = ask(&path, image.fill, standing.get(source));
+                // **And what this page is still waiting to see from that file**,
+                // which is what a decode landing is delivered against — see
+                // [`DocumentPictures::waiting`]. Written here because this is
+                // where the file and the answer about it are both in hand.
+                if let Some(wait) = waiting {
+                    pictures.waiting.insert(path.clone(), wait);
+                }
+                pictures.files.insert(path);
+                picture
+            }
+            // **A picture the reader is nowhere near** — see [`PictureReach`].
+            // It draws what a picture that has not arrived draws, because that is
+            // what it is: nothing has been asked for it and nothing will be until
+            // the page is scrolled far enough that it is worth a read. Nor does
+            // the watch follow a file this page is not showing.
+            preview::LinkAction::Preview(_) => MarkdownPicture::Loading,
+        };
+        pictures.by_source.insert(source.to_owned(), picture);
+    }
+    pictures
+}
+
+/// **What one of a page's pictures draws, and whether this window still has to
+/// ask the disk for it.**
+///
+/// The body of [`Runtime::resolve_document_pictures`]'s closure, out here where
+/// three real caches can be put in front of it — [`forget_a_picture`]'s shape
+/// and for its reason: a `Runtime` needs a device layer and a window to exist,
+/// and what a test has to be able to hold is the caches.
+///
+/// # An answer is an answer (user report 2026-09-10, `docs/DESIGN.md` §7.1.3u)
+///
+/// The decode store is a **cache**: bounded in bytes ([`MAX_PEEK_CACHE_BYTES`])
+/// and letting go of its least recently used entry whenever a decode arrives.
+/// The reach a page asks for is bounded in *pictures*
+/// ([`MARKDOWN_PICTURE_MARGIN`]), not in bytes — so a README whose screenshots
+/// are 3200×2000 wants nine decodes of 24 MiB against a 192 MiB ceiling, and
+/// every decode that lands throws out one the page is still drawing.
+///
+/// Before this, a miss read as *never asked*. The page asked again, the answer
+/// evicted the next one, and the window spent the rest of its life decoding the
+/// same nine files: 1922 decodes in 45 seconds, measured, each one taking a full
+/// document re-flow and a full chrome rebuild with it. The window thread never
+/// reached a redraw, so the picture on the glass stopped moving while the
+/// process went on answering messages — a frozen window that Windows calls
+/// responsive and the hang watchdog, which times one turn, never sees.
+///
+/// So the answer this page was already given is part of the question. A page
+/// that has been told what a file's pixels are keeps that answer when the cache
+/// lets the pixels go, and **asks for nothing**: what it draws, it holds. Only a
+/// picture it can neither draw nor resample from what it has in hand is asked
+/// for again — and that ask is latched by the cache's own `Pending`.
+///
+/// `needs_pixels` is set rather than the door being called from in here, because
+/// the door is `Runtime::request_peek_pixels` and there is exactly one of it
+/// (routes A and E of the untrusted-path audit): it wants the whole runtime, and
+/// this wants two of its caches. The caller spends the flag the moment these
+/// borrows end.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn answer_one_picture(
+    peek_cache: &mut PeekCache,
+    markdown_pictures: &mut MarkdownPictures,
+    standing: Option<&MarkdownPicture>,
+    path: &Path,
+    fill: bool,
+    measure_px: f32,
+    now: Instant,
+    needs_pixels: &mut bool,
+) -> PagePicture {
+    let cache_key = bt_term::normalized_local_image_path_key(path);
+    // Whether a read for this file is already out. It decides nothing about what
+    // the page *draws* — that is the answer below — and everything about whether
+    // this pass is the one that must ask: the store's own `Pending` is the latch
+    // that keeps one read from becoming one read per frame.
+    let read_is_out = matches!(
+        peek_cache.get(&cache_key),
+        Some(PeekCacheEntry::Pending { .. })
+    );
+    // What this window is holding, and what it has merely been told. The decode
+    // cache is the first; the answer the page is standing on is the second, and
+    // it outlives the pixels.
+    let known = match peek_cache.get(&cache_key) {
+        Some(PeekCacheEntry::Ready {
+            key,
+            rgba,
+            width_px,
+            height_px,
+            ..
+        }) => Some((key.clone(), Some(Arc::clone(rgba)), [*width_px, *height_px])),
+        Some(PeekCacheEntry::Failed(_)) => return PagePicture::drawn(MarkdownPicture::Failed),
+        // **A read is out, or the store has let the pixels go** — and the page's
+        // answer to both is the same one, which is why they are one arm. It
+        // keeps drawing what it was drawing rather than going blank, and it goes
+        // on down this function either way, because what it is drawing may still
+        // be the soft raster the decode is wanted to sharpen.
+        Some(PeekCacheEntry::Pending { .. }) | None => match standing {
+            // Answered once, and the cache has since let the pixels go. The
+            // decode's own size and its content key are the whole of what the
+            // passes below need; `rgba` is the decode's own pixels only while
+            // the exact-size resample has not landed — which is exactly when
+            // those pixels are still wanted.
+            //
+            // **The content key and not the texture key**
+            // ([`MarkdownPicture::content`]): the two are the same string until
+            // the resample lands and different for ever after, and reading the
+            // second here is the edit path's own freeze.
+            Some(MarkdownPicture::Ready {
+                content,
+                rgba,
+                raster,
+                native,
+                ..
+            }) => Some((
+                content.clone(),
+                (raster == native).then(|| Arc::clone(rgba)),
+                *native,
+            )),
+            // Answered "this file will not decode", and nobody is answering it
+            // again. While a read *is* out the alt text stands instead, because
+            // the thing that is about to be true is not known yet.
+            Some(MarkdownPicture::Failed) if !read_is_out => {
+                return PagePicture::drawn(MarkdownPicture::Failed);
+            }
+            _ => None,
+        },
+    };
+    let Some((content, native_rgba, native)) = known else {
+        // Never answered, or answered and asked for again. The caller's door is
+        // the very one the image pane and the glance card ask through, so a
+        // picture already decoded for one of them is already decoded for this
+        // page.
+        *needs_pixels = !read_is_out;
+        return PagePicture {
+            picture: MarkdownPicture::Loading,
+            waiting: Some(PictureWaitFor::Pixels),
+        };
+    };
+    if native[0] == 0 || native[1] == 0 {
+        return PagePicture::drawn(MarkdownPicture::Failed);
+    }
+    let [drawn_width, drawn_height] = markdown_image_extent(native, measure_px, fill);
+    // **The CPU never upsamples** — `preview_image_extent`'s `.min(1.0)`
+    // is that cap, and it is asked here for the same reason the image
+    // pane asks it: above 100% the extra pixels do not exist, and the
+    // magnification is the sampler's to carry.
+    let (cap_width, cap_height) = image_raster_cap(native);
+    let Some((raster_width, raster_height)) = bt_render::preview_image_extent(
+        (drawn_width.round().max(1.0) as u32).min(cap_width),
+        (drawn_height.round().max(1.0) as u32).min(cap_height),
+        native[0],
+        native[1],
+    ) else {
+        return PagePicture::drawn(MarkdownPicture::Failed);
+    };
+    // **What the page is already drawing, at the size it is already drawing it.**
+    // The exact-size rasters are a cache like the decode store beside them —
+    // bounded and evicting — so the same law applies to them: whether the store
+    // still holds a picture must not decide whether this page asks the disk for
+    // one. A page holding the very pixels this pass would produce has nothing to
+    // ask anybody. All three parts are the question: these bytes (`content`), at
+    // this size, in hand.
+    let held_exactly = matches!(
+        standing,
+        Some(MarkdownPicture::Ready { content: held, raster, .. })
+            if *held == content && *raster == [raster_width, raster_height]
+    );
+    let key = MarkdownRasterKey {
+        content: content.clone(),
+        width_px: raster_width,
+        height_px: raster_height,
+    };
+    let mut waiting = None;
+    match markdown_pictures.raster(&key) {
+        Some(MarkdownRaster::Ready {
+            key,
+            rgba,
+            width_px,
+            height_px,
+        }) => {
+            return PagePicture::drawn(MarkdownPicture::Ready {
+                key: key.clone(),
+                content,
+                rgba: Arc::clone(rgba),
+                raster: [*width_px, *height_px],
+                native,
+            });
+        }
+        Some(MarkdownRaster::Pending) => {}
+        None => match &native_rgba {
+            Some(rgba) if !held_exactly => markdown_pictures.owe(
+                MarkdownRasterRequest {
+                    key,
+                    rgba: Arc::clone(rgba),
+                    native,
+                },
+                now,
+            ),
+            // The resample is made from the decode's own pixels and this window
+            // has let them go. Ask once — the page keeps drawing meanwhile, and
+            // the store's own `Pending` is what stops it asking twice. A page
+            // standing on the finished raster asks for nothing at all: the pass
+            // it would buy is the pass it is already holding.
+            //
+            // **And the ask is written down as a dependency** (§7.1.3u ③), which
+            // is the half that was missing: a read this page made for itself but
+            // was not recorded as waiting for is a decode that lands in the store
+            // with nobody owed anything, and the picture stays soft until the
+            // reader happens to touch something. See
+            // [`DocumentPictures::sharpening`].
+            None if !held_exactly => {
+                *needs_pixels = !read_is_out;
+                waiting = Some(PictureWaitFor::Sharpening(key));
+            }
+            _ => {}
+        },
+    }
+    let picture = match native_rgba {
+        Some(rgba) if !held_exactly => MarkdownPicture::Ready {
+            key: content.clone(),
+            content,
+            rgba,
+            raster: native,
+            native,
+        },
+        _ => standing.cloned().unwrap_or(MarkdownPicture::Loading),
+    };
+    PagePicture { picture, waiting }
+}
+
+/// **A decode has landed: owe the exact-size pass to every page that was holding
+/// the picture and waiting for these pixels to sharpen it** (§7.1.3u ③).
+///
+/// The delivery half of [`DocumentPictures::sharpening`], and the reason that set
+/// is a dependency rather than a note about a request. A page whose standing
+/// answer is a soft raster asks for the file again because the resample has to be
+/// made from the decode's own pixels; the decode then landed in the store and
+/// nothing was owed anything, because the page was in neither of the sets a
+/// completion is delivered against. It sharpened on the next rebuild the page
+/// happened to have for some other reason — a scroll, a keystroke, a theme
+/// change — which is "the picture stays soft until you touch something".
+///
+/// **And it owes the resample without owing a re-flow.** The page already knows
+/// how large this picture is: its intrinsic dimensions have not changed, no block
+/// is a different height, and nothing about the document's shape is different
+/// from what is already on the glass. What changes is how sharp one picture is,
+/// and that is the scale lane's errand alone — see
+/// [`WindowRuntime::send_owed_markdown_rasters`], which the settle deadline
+/// filed here wakes.
+///
+/// A page that wanted this raster for a *different* content key is skipped: the
+/// file on the disk is not the file it was answered about, and that is
+/// [`WindowRuntime::forget_the_picture_in`]'s errand rather than this one's.
+pub(crate) fn owe_sharpened_rasters<'a>(
+    markdown_pictures: &mut MarkdownPictures,
+    pages: impl Iterator<Item = &'a DocumentPictures>,
+    cache_key: &str,
+    content: &str,
+    rgba: &Arc<[u8]>,
+    native: [u32; 2],
+    now: Instant,
+) -> bool {
+    let mut owed = false;
+    for page in pages {
+        for (file, key) in page.sharpening() {
+            if bt_term::normalized_local_image_path_key(file) != cache_key || key.content != content
+            {
+                continue;
+            }
+            markdown_pictures.owe(
+                MarkdownRasterRequest {
+                    key: key.clone(),
+                    rgba: Arc::clone(rgba),
+                    native,
+                },
+                now,
+            );
+            owed = true;
+        }
+    }
+    owed
+}
+
+/// [`SurfaceSubject`] read off the things that can fill a preview surface.
+///
+/// A free function over the pane and one fact about the page rather than a
+/// method on the runtime, because what this has to get right is *which fields
+/// are consulted* — and that is a claim a test can put a real [`PreviewPane`]
+/// to, while a `Runtime` is a thing no test in this file can build.
+///
+/// **The page is asked first** for [`Runtime::preview_rail_kind`]'s own
+/// reason: an engine composed under this window's glass is what the reader is
+/// looking at, whatever else the pane still remembers. No recording is ever
+/// behind one — route B retired the shell page (§7.44 ④) — so a surface that has
+/// become a page has stopped being about the recording it was playing.
+pub(crate) fn surface_subject_of(
+    pane: Option<&PreviewPane>,
+    stands_on_a_page: bool,
+) -> SurfaceSubject {
+    if stands_on_a_page {
+        return SurfaceSubject::Elsewhere;
+    }
+    let Some(pane) = pane else {
+        return SurfaceSubject::Unfilled;
+    };
+    match pane.content() {
+        pane_content::PaneContent::Picture(picture) => {
+            SurfaceSubject::File(picture.image().path.clone())
+        }
+        // A buffer with no path is a commit graph or a diff range: content, and
+        // not this file's.
+        pane_content::PaneContent::Document(view)
+        | pane_content::PaneContent::Page(view)
+        | pane_content::PaneContent::GitGraph(view) => view
+            .source()
+            .file_path()
+            .map_or(SurfaceSubject::Elsewhere, |path| {
+                SurfaceSubject::File(path.to_path_buf())
+            }),
+        pane_content::PaneContent::Empty => SurfaceSubject::Unfilled,
+    }
+}
+
+/// The scale a mode resolves to against a given body — the one place `Fit`
+/// becomes a number.
+///
+/// Fit is `object-fit: contain` inside the body's **image column**, which is
+/// [`PREVIEW_IMAGE_FIT_WIDTH_FRACTION`] × [`PREVIEW_IMAGE_FIT_HEIGHT_FRACTION`]
+/// of the body and not the body: the 30% of height it gives up is where the meta
+/// line under it stands (mock-up 606, and the note beside the constants). It also
+/// never enlarges — a 32px icon in a 900px pane is drawn at 32px, because a Fit
+/// that upscaled would make "fit" and "100%" mean different things on small
+/// pictures and there would be no way back to the true pixels.
+fn image_zoom_scale(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> f32 {
+    match zoom.mode {
+        ImageZoomMode::Fit => image_fit_scale(body, image_px),
+        ImageZoomMode::Scale(scale) => scale.clamp(IMAGE_ZOOM_MIN, IMAGE_ZOOM_MAX),
+    }
+}
+
+fn image_fit_scale(body: [f32; 4], image_px: [u32; 2]) -> f32 {
+    let (width, height) = (image_px[0] as f32, image_px[1] as f32);
+    if width <= 0.0 || height <= 0.0 {
+        return 1.0;
+    }
+    let column_width = ((body[2] - body[0]) * PREVIEW_IMAGE_FIT_WIDTH_FRACTION).max(1.0);
+    let column_height = ((body[3] - body[1]) * PREVIEW_IMAGE_FIT_HEIGHT_FRACTION).max(1.0);
+    (column_width / width).min(column_height / height).min(1.0)
+}
+
+/// **The one rectangle.** Where the picture lands inside a body, given how it is
+/// being looked at — the same answer for the painter, for the resample target,
+/// for the foot's arithmetic and for every clamp.
+///
+/// `body` is left/top/right/bottom in physical pixels; the returned rectangle is
+/// in the same coordinates and may extend past the body on either side, which is
+/// exactly what "zoomed in" looks like and what the seat's own scissor is for.
+///
+/// The picture is always **the body's centre plus the pan**, and the pan is
+/// always clamped by the scroller's rule: an axis where the picture is smaller
+/// than the body has no pan at all (it is centred, because a small picture
+/// pinned to a corner reads as a layout bug), and an axis where it is larger may
+/// travel only until its own edge reaches the body's — never far enough to open
+/// a gap. That single sentence is what makes a drag, a wheel, a resize and a
+/// double click all leave the picture somewhere legal without any of them
+/// knowing about the others.
+pub(crate) fn image_destination(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> [f32; 4] {
+    let scale = image_zoom_scale(body, image_px, zoom);
+    let drawn = [image_px[0] as f32 * scale, image_px[1] as f32 * scale];
+    let mut rect = [0.0f32; 4];
+    for axis in 0..2 {
+        let (near, far) = (body[axis], body[axis + 2]);
+        let centre = (near + far) / 2.0;
+        let pan = clamp_image_pan(far - near, drawn[axis], zoom.pan[axis]);
+        rect[axis] = centre - drawn[axis] / 2.0 + pan;
+        rect[axis + 2] = rect[axis] + drawn[axis];
+    }
+    rect
+}
+
+/// **Where a video's still frame lands in a preview body** — the one rule a
+/// video is drawn by, still or playing (user ruling 2026-08-28; §7.42).
+///
+/// [`image_destination`]'s sibling, and the difference between them is
+/// deliberately not a parameter on it: a picture's rectangle answers to a zoom,
+/// a pan and a fit fraction, and a video's answers to none of the three. It
+/// fills its body at its own proportion, centred, always — which is what
+/// [`bt_render::video_fit_extent`] means and what the renderer draws a *playing*
+/// video by, in [`bt_render::video_frame_rect`]. The two are the same size for
+/// the same box because one of them is the other's caller.
+///
+/// A body with no area answers with the body, which draws nothing and is what
+/// every caller above already handles.
+///
+/// # It is the caller and not a second rule (2026-08-28)
+///
+/// This used to *restate* the rule — fit the extent, then centre it on the
+/// body's own floating-point midpoint — and a restatement is a second rule
+/// however short it is. The two disagreed by **half a pixel** whenever the
+/// leftover was odd: a 160×120 recording in a 960×556 body is 741 wide, the
+/// leftover is 219, and `video_frame_rect` splits that by an integer floor to
+/// 109 while a midpoint subtraction gives 109.5. Half a pixel is exactly the
+/// flicker a reader sees when they press play, which is what
+/// `the_still_and_the_first_played_frame_share_a_rect` was written to catch and
+/// what it caught.
+///
+/// So the still is now placed by the same function the playing layer is placed
+/// by, and there is nothing left here that could drift from it.
+pub(crate) fn video_still_destination(body: [f32; 4], video_px: [u32; 2]) -> [f32; 4] {
+    viewport_of_rect(body)
+        .and_then(|box_| bt_render::video_frame_rect(box_, video_px[0], video_px[1]))
+        .unwrap_or(body)
+}
+
+/// The pan a zoom actually gets to keep against this body, read out of the one
+/// rectangle rather than recomputed — what the painter is handed and what a
+/// resize writes back so the stored pan and the drawn one never drift apart.
+pub(crate) fn image_clamped_pan(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> [f32; 2] {
+    let rect = image_destination(body, image_px, zoom);
+    [
+        (rect[0] + rect[2] - body[0] - body[2]) / 2.0,
+        (rect[1] + rect[3] - body[1] - body[3]) / 2.0,
+    ]
+}
+
+/// How far the picture may be carried on one axis: nowhere while it fits, and at
+/// most half the overflow once it does not.
+fn clamp_image_pan(body_extent: f32, drawn_extent: f32, pan: f32) -> f32 {
+    let slack = (drawn_extent - body_extent) / 2.0;
+    if slack <= 0.0 {
+        0.0
+    } else {
+        pan.clamp(-slack, slack)
+    }
+}
+
+/// The pan that keeps the point under the pointer under the pointer while the
+/// scale changes from `old` to `new`.
+///
+/// `point` is the pointer measured **from the body's centre**, because that is
+/// where [`image_destination`] hangs the picture from; expressing it any other
+/// way would make this function depend on the body rectangle it deliberately
+/// does not take.
+///
+/// The derivation is one line. A picture point `u` (from the picture's own
+/// centre, in native pixels) is drawn at `pan + u·s`. Asking for the same `u`
+/// under the same `point` before and after gives `u = (point − pan)/old` and
+/// `point = pan′ + u·new`, so `pan′ = point − (point − pan)·new/old`. Clamping
+/// is deliberately **not** done here: the clamp needs the body and the drawn
+/// extent, [`image_destination`] already owns both, and a second copy of it here
+/// is a second place for the two to disagree.
+pub(crate) fn zoom_about(point: [f32; 2], old: f32, new: f32, pan: [f32; 2]) -> [f32; 2] {
+    if old <= 0.0 {
+        return pan;
+    }
+    let ratio = new / old;
+    [
+        point[0] - (point[0] - pan[0]) * ratio,
+        point[1] - (point[1] - pan[1]) * ratio,
+    ]
+}
+
+/// One wheel notch over the picture (or several, for a free-spinning wheel).
+///
+/// **No `Ctrl` required, and `Ctrl` changes nothing** (user ruling, 2026-08-16).
+/// A preview body showing a picture has no other axis for a notch to be spent
+/// on: it does not scroll, because the picture is not a document — so making the
+/// wheel mean "zoom" is not stealing a gesture, it is giving one back. Every
+/// image viewer on the desk does exactly this; the `Ctrl` in a *browser*'s zoom
+/// exists only because the page underneath does scroll.
+///
+/// The step is applied to the **resolved** scale, so the first notch out of `Fit`
+/// starts from the size on screen rather than jumping to 100%, and the mode
+/// becomes `Scale` at that moment — which is the point after which resizing the
+/// pane stops re-fitting.
+pub(crate) fn image_zoom_notch(
+    zoom: ImageZoom,
+    notches: f32,
+    body: [f32; 4],
+    image_px: [u32; 2],
+    pointer: [f32; 2],
+) -> ImageZoom {
+    if notches == 0.0 {
+        return zoom;
+    }
+    let old = image_zoom_scale(body, image_px, zoom);
+    let new = (old * IMAGE_ZOOM_STEP.powf(notches)).clamp(IMAGE_ZOOM_MIN, IMAGE_ZOOM_MAX);
+    if new == old {
+        return zoom;
+    }
+    let centre = [(body[0] + body[2]) / 2.0, (body[1] + body[3]) / 2.0];
+    let point = [pointer[0] - centre[0], pointer[1] - centre[1]];
+    ImageZoom {
+        mode: ImageZoomMode::Scale(new),
+        pan: zoom_about(point, old, new, zoom.pan),
+    }
+}
+
+/// **Does this move change how many of the picture's pixels are on screen?**
+///
+/// The one question [`Runtime::set_preview_image_zoom`] has to answer before it
+/// decides whether the exact-size raster is owed again, and it is asked of the
+/// *mode* rather than of the whole zoom because the two halves of an
+/// [`ImageZoom`] are answered by two different machines. The **mode** is how big
+/// the picture is drawn, which is what the resample lane is for; the **pan** is
+/// where inside its body it stands, which the sampler does for free out of a
+/// raster it is already holding.
+///
+/// So a drag across a zoomed picture — a run of dozens of pointer moves, each
+/// one a new pan — asks the lane nothing at all, while a wheel that moves the
+/// scale by any amount starts the settle again.
+pub(crate) fn image_zoom_settles(held: ImageZoom, wanted: ImageZoom) -> bool {
+    held.mode != wanted.mode
+}
+
+/// Whether the picture is bigger than the body it is seen through, on either
+/// axis — the condition for a drag to have anywhere to go.
+///
+/// It is also the condition for the *cursor* to become a hand, because those two
+/// must be the same fact: a grab cursor over a picture that cannot move is the
+/// window advertising a gesture it will then ignore.
+pub(crate) fn image_is_pannable(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> bool {
+    let rect = image_destination(body, image_px, zoom);
+    rect[2] - rect[0] > body[2] - body[0] || rect[3] - rect[1] > body[3] - body[1]
+}
+
+/// A double click on the picture, and the `0` / `1` keys' shared destination.
+///
+/// **Fit ↔ 100%, and the 100% is centred rather than about the pointer** (ruling
+/// 2026-08-16). The two candidates are honest and this one is chosen because a
+/// double click is *two* clicks: the pointer is wherever the second one landed,
+/// which is within a few pixels of the first but not at it, and anchoring a jump
+/// of up to 8× to a point that moved between the halves of one gesture puts the
+/// picture somewhere the hand did not ask for. A wheel notch is a single event
+/// aimed at a single point and keeps its anchor; a toggle is a command and lands
+/// on the middle. Going the other way — 100% back to Fit — has no anchor to
+/// argue about at all.
+pub(crate) fn image_zoom_toggled(zoom: ImageZoom) -> ImageZoom {
+    if zoom.is_fit() {
+        ImageZoom::scaled(1.0)
+    } else {
+        ImageZoom::FIT
+    }
+}
+
+/// The keyboard's four verbs while a preview seat holds the keyboard.
+///
+/// `+`/`=` and `-` step by the same notch the wheel spends, **about the body's
+/// centre** — a key has no pointer, and the centre is the only point on screen a
+/// keyboard gesture can be said to be aimed at. `0` is Fit and `1` is 100%, which
+/// is the pair every viewer binds and the same two ends the double click swings
+/// between.
+///
+/// `=` is bound beside `+` because on a US layout `+` is a shifted `=`, so a hand
+/// reaching for "bigger" without shift lands there; binding only `+` makes the
+/// key work or not depending on how hard you pressed it.
+pub(crate) fn image_zoom_key(
+    zoom: ImageZoom,
+    key: &Key,
+    body: [f32; 4],
+    image_px: [u32; 2],
+) -> Option<ImageZoom> {
+    let Key::Character(text) = key else {
+        return None;
+    };
+    let centre = [(body[0] + body[2]) / 2.0, (body[1] + body[3]) / 2.0];
+    match text.as_str() {
+        "+" | "=" => Some(image_zoom_notch(zoom, 1.0, body, image_px, centre)),
+        "-" | "_" => Some(image_zoom_notch(zoom, -1.0, body, image_px, centre)),
+        "0" => Some(ImageZoom::FIT),
+        "1" => Some(ImageZoom::scaled(1.0)),
+        _ => None,
+    }
+}
+
+/// **The arrows' pan over a picture zoomed past its box**, or `None` when they
+/// are not the picture's to spend (T-PICTURE-KEYS-PAN-AND-ZOOM).
+///
+/// The arrows move the **view** the way they point, as every scroller's arrow
+/// does: `→` shows more of the right side, so the picture travels left. The
+/// carried pan goes through [`image_clamped_pan`] — the drag's clamp, not a
+/// second one — so at an edge the press is answered with the pan it already had.
+///
+/// **`None` while the picture fits its body on both axes** ([`image_is_pannable`],
+/// the drag's and the grab cursor's own condition, so the hand and the keys say
+/// one fact), and that is the whole of how the arrows are shared: a picture with
+/// nothing hidden has nothing to pan, and its `←`/`→` keep travelling the folder
+/// ([`preview_neighbours::key`]). Once it is drawn larger than its body on
+/// *either* axis every arrow is the pan's, including the axis that does not
+/// move: a reader zoomed into a tall picture who presses `←` is asking to look
+/// left, not for the previous file. `Ctrl`, `Alt` and the command key are not
+/// taken, so a chord keeps whatever it means elsewhere.
+pub(crate) fn image_pan_key(
+    zoom: ImageZoom,
+    key: &Key,
+    modifiers: ModifiersState,
+    body: [f32; 4],
+    image_px: [u32; 2],
+) -> Option<ImageZoom> {
+    let towards: [f32; 2] = match key {
+        Key::Named(NamedKey::ArrowLeft) => [-1.0, 0.0],
+        Key::Named(NamedKey::ArrowRight) => [1.0, 0.0],
+        Key::Named(NamedKey::ArrowUp) => [0.0, -1.0],
+        Key::Named(NamedKey::ArrowDown) => [0.0, 1.0],
+        _ => return None,
+    };
+    let step = if modifiers.is_empty() {
+        IMAGE_PAN_KEY_STEP
+    } else if modifiers == ModifiersState::SHIFT {
+        IMAGE_PAN_KEY_SHIFT_STEP
+    } else {
+        return None;
+    };
+    if !image_is_pannable(body, image_px, zoom) {
+        return None;
+    }
+    let extent = [body[2] - body[0], body[3] - body[1]];
+    let carried = ImageZoom {
+        pan: [
+            zoom.pan[0] - towards[0] * extent[0] * step,
+            zoom.pan[1] - towards[1] * extent[1] * step,
+        ],
+        ..zoom
+    };
+    Some(ImageZoom {
+        pan: image_clamped_pan(body, image_px, carried),
+        ..carried
+    })
+}
+
+/// **What this surface has to draw with** — the decode if the store still holds
+/// it, the standing answer if it does not (§7.1.3u ③).
+///
+/// `refit_preview_picture`'s cache half, out here where a test can put a real
+/// [`PeekCache`] in front of it — [`answer_one_picture`]'s arrangement and for
+/// its reason.
+///
+/// **A miss is not "never asked".** The pane consulted the decode store and
+/// nothing else, so with a visible working set over [`MAX_PEEK_CACHE_BYTES`]
+/// every decode that landed evicted a picture another host was drawing, the
+/// refit that arrival triggered found that miss, asked again, and the cycle ran
+/// on its own with no input — §7.1.3u's report in the consumer that fix did not
+/// touch. The answer a surface was already given is a `PeekThumbnail`: it names
+/// the decode it was resampled from ([`PeekThumbnail::content_key`]), and the
+/// decode's own dimensions are beside it on the picture. That is everything the
+/// arithmetic below it needs.
+pub(crate) fn surface_pixels(
+    peek_cache: &mut PeekCache,
+    standing: Option<&str>,
+    native: Option<(u32, u32)>,
+    stated: Option<(u32, u32)>,
+    cache_key: &str,
+) -> SurfacePixels {
+    // What the surface holds, which outlives the pixels it was made from: the
+    // content key of the raster on the glass ([`PeekThumbnail::content_key`]) and
+    // the decode's own dimensions, which is the whole of what the arithmetic
+    // downstream asks of a decode.
+    let held = standing
+        .zip(native)
+        .map(|(content, native)| (content.to_owned(), [native.0, native.1]));
+    match peek_cache.get(cache_key) {
+        Some(PeekCacheEntry::Ready {
+            key,
+            rgba,
+            width_px,
+            height_px,
+            native_size,
+        }) => SurfacePixels::Decoded {
+            content: key.clone(),
+            rgba: Arc::clone(rgba),
+            native: [*width_px, *height_px],
+            stated: *native_size,
+        },
+        Some(PeekCacheEntry::Failed(reason)) => SurfacePixels::Failed(reason.clone()),
+        // A read is out. What this surface is holding stays on the glass while
+        // the answer travels, rather than the picture vanishing and coming back.
+        Some(PeekCacheEntry::Pending { .. }) => match held {
+            Some((content, native)) => SurfacePixels::Standing {
+                content,
+                native,
+                stated,
+                read_is_out: true,
+            },
+            None => SurfacePixels::Nothing { asked: true },
+        },
+        None => match held {
+            Some((content, native)) => SurfacePixels::Standing {
+                content,
+                native,
+                stated,
+                read_is_out: false,
+            },
+            None => SurfacePixels::Nothing { asked: false },
+        },
+    }
+}
+
+/// **What this surface must do about its pixels, once the geometry has said what
+/// size it wants** (§7.1.3u ③).
+///
+/// The sentence the loop turned on, in one place: *residency in a bounded cache
+/// is not the same question as whether an answer exists*. A surface holding the
+/// very raster this frame wants has nothing to ask anybody, whatever either
+/// store happens to hold this instant — and that is the first line here rather
+/// than the last, because it is the line that ends the cycle.
+pub(crate) fn picture_errand(pixels: &SurfacePixels, held_exactly: bool) -> PictureErrand {
+    if held_exactly {
+        return PictureErrand::Nothing;
+    }
+    match pixels {
+        SurfacePixels::Decoded { .. } => PictureErrand::Resample,
+        // The resample is made from the decode's own pixels and this window has
+        // let them go. Ask once — the surface keeps drawing meanwhile, and the
+        // store's own `Pending` is what stops it asking twice.
+        SurfacePixels::Standing {
+            read_is_out: false, ..
+        }
+        | SurfacePixels::Nothing { asked: false } => PictureErrand::Read,
+        SurfacePixels::Standing {
+            read_is_out: true, ..
+        }
+        | SurfacePixels::Nothing { asked: true }
+        | SurfacePixels::Failed(_) => PictureErrand::Wait,
+    }
+}
+
+/// What the meta line under the picture says about how it is being looked at —
+/// the last field of "1280 × 800 · PNG · 214 KB · Fit".
+///
+/// It is on the sentence that was already there rather than in a corner of its
+/// own, because it is the same kind of fact as the other three: *what you are
+/// looking at*. A percentage is rounded to whole percent — the wheel's own steps
+/// land on 78%, 98%, 122% and nobody is served by a second decimal — and `Fit`
+/// says the word instead of the number it currently happens to be, because that
+/// is the difference the mode makes: one of them follows the pane and one does
+/// not.
+pub(crate) fn image_zoom_caption(body: [f32; 4], image_px: [u32; 2], zoom: ImageZoom) -> String {
+    if zoom.is_fit() {
+        return "Fit".to_owned();
+    }
+    // **One spelling of a magnification for the whole window** (user ruling
+    // 2026-08-25): a page's foot says its zoom in these words too, and a percent
+    // written out at both ends is a build in which one of them grows a decimal
+    // place and the other does not.
+    i18n::zoom_percent(f64::from(image_zoom_scale(body, image_px, zoom)))
+}
+
+/// The largest raster this picture may keep resident, in native pixels.
+///
+/// **Zooming to 100% asks for the decode's own pixels, and some decodes are
+/// enormous.** Before a picture could be magnified this never came up: the
+/// display raster was a fit inside a pane and therefore bounded by the *screen*.
+/// A 6000×4000 photograph at 100% is 91 MiB of RGBA against a 64 MiB shared
+/// budget, and the LRU's answer to one texture larger than the whole budget is
+/// to refuse it outright — the picture would simply vanish at the moment it was
+/// zoomed in on, which is the worst possible time for it to.
+///
+/// So the resident raster is capped, by area, at this picture's share of the
+/// budget, and the magnification above that point is carried by the sampler.
+/// What the user sees is a very large picture going soft at high zoom, which is
+/// what every viewer that does not implement tiled decoding does, and what they
+/// do *not* see is it disappearing. The cap preserves the aspect ratio, so the
+/// box handed to [`bt_render::preview_image_extent`] is still a box that picture
+/// fits exactly.
+///
+/// **The cap is not applied the instant the share is crossed** — see
+/// [`PREVIEW_IMAGE_TEXTURE_SLACK`]. A decode inside the slack keeps every one of
+/// its pixels, which is also the only way a picture at 100% is ever the picture
+/// the file holds.
+pub(crate) fn image_raster_cap(image_px: [u32; 2]) -> (u32, u32) {
+    let (width, height) = (f64::from(image_px[0]), f64::from(image_px[1]));
+    let bytes = width * height * 4.0;
+    let allowance =
+        bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES as f64 * PREVIEW_IMAGE_TEXTURE_SHARE;
+    if bytes <= allowance * PREVIEW_IMAGE_TEXTURE_SLACK || bytes <= 0.0 {
+        return (image_px[0], image_px[1]);
+    }
+    let scale = (allowance / bytes).sqrt();
+    (
+        (width * scale).floor().max(1.0) as u32,
+        (height * scale).floor().max(1.0) as u32,
+    )
+}
+
+/// `.pv-meta`'s whole text: what the file is, and how it is being looked at.
+///
+/// Everything it can say and nothing it cannot — a field the window has not been
+/// told yet is left out rather than printed as a placeholder, which is what lets
+/// the line *grow* as the decoder and the worker answer instead of flickering
+/// through three shapes. The zoom is last because it is the only field that is
+/// not about the file: the first three would travel with a copy of the picture
+/// to another machine, and this one is a fact about this pane at this moment, so
+/// it stands where the eye leaves the sentence. It is also never alone — a bare
+/// "Fit" under a picture the window cannot yet name the size of would be a word
+/// with no sentence around it.
+///
+/// **`shown` is the second field and not a second line** (owner's ruling
+/// 2026-09-12). A picture with more pixels than this build holds is reduced
+/// rather than refused, so `native` stops being the size of the pixels on the
+/// glass — and both numbers are about the file being looked at, which is what
+/// this sentence is for. It rides here, immediately after the size it qualifies
+/// (`6000 × 4000 · shown at 5016 × 3344 · PNG · 92.0 MB · Fit`), because a second
+/// strip saying the same kind of thing in another corner is how a pane comes to
+/// state one picture's size twice.
+pub(crate) fn image_meta_sentence(
+    native: Option<(u32, u32)>,
+    shown: Option<(u32, u32)>,
+    extension: Option<&str>,
+    bytes: Option<u64>,
+    zoom: Option<&str>,
+) -> Option<String> {
+    // The zoom is appended only to a sentence that already exists, which is what
+    // "never alone" means above — so the three fields about the file are joined
+    // first and the one about this pane rides on their answer. One joiner for
+    // all four ([`preview::join_facts`]), because a middle dot spelled at each
+    // site is a middle dot that can drift.
+    let file = preview::join_facts([
+        native.map(|(width, height)| preview::format_pixel_size(width, height)),
+        shown
+            .filter(|_| native.is_some())
+            .map(|(width, height)| i18n::picture_shown_at(width, height)),
+        extension.map(str::to_owned),
+        bytes.map(preview::format_byte_size),
+    ])?;
+    preview::join_facts([Some(file), zoom.map(str::to_owned)])
+}
+
+/// Whether a surface may be zoomed at all.
+///
+/// **The glance card mirrors and never zooms** (P143's read-only, and the
+/// 2026-08-13 ruling that made the card a `PreviewSurface` in the first place).
+/// It has its own [`PreviewPane`] and therefore its own zoom field, and this is
+/// what keeps that field at `Fit` forever: the read door answers `Fit` for it
+/// whatever is stored, and the write doors decline. Said once, here, rather than
+/// as a condition repeated at each of the five gestures — one of which would
+/// eventually be written without it.
+pub(crate) fn surface_takes_image_zoom(surface: PreviewSurface) -> bool {
+    !matches!(surface, PreviewSurface::Peek)
+}
+
+/// **The sentence one refused animation earns in the foot of the pane**, or
+/// `None` for the two refusals that are not news (user report 2026-09-10).
+///
+/// A free function and not a method, because the whole of the decision is the
+/// refusal: which surface asked, what the file is called and where the pane is
+/// have nothing to do with it, and taking a `&self` for it would be a rule that
+/// can only be tested by building a window.
+///
+/// See [`Runtime::animation_refusal_notice`] for what asks, and
+/// [`animation::AnimationRefusal::is_worth_saying`] for why two of the five say
+/// nothing: a `.gif` that is one still picture looks exactly like a still
+/// picture, which is what it is.
+///
+/// **Three sentences and not two** (user report 2026-09-12). "Its frames are
+/// each too big to keep two of" and "it is longer than this window will read"
+/// were one refusal wearing one sentence, and the sentence was the first one —
+/// so a reader whose 11.7 MB recording was declined for its *length* was told
+/// its picture was too large — about a file whose frames compose to 11.5 MB,
+/// well inside the ceiling that sentence is about.
+pub(crate) fn animation_refusal_notice(
+    refusal: animation::AnimationRefusal,
+) -> Option<&'static str> {
+    if !refusal.is_worth_saying() {
+        return None;
+    }
+    Some(match refusal {
+        animation::AnimationRefusal::FrameTooLarge => i18n::Text::PreviewAnimationTooLarge.text(),
+        animation::AnimationRefusal::FileTooLong => i18n::Text::PreviewAnimationFileTooLong.text(),
+        _ => i18n::Text::PreviewAnimationBroken.text(),
+    })
+}
+
+/// **What the renderer is to call one animation's picture** (adversarial review
+/// 2026-09-11, B3).
+///
+/// The surface says where it is drawn and the serial says *which playback it
+/// is*, and the second half is the finding: the key used to be the surface
+/// alone, while the renderer's upload gate compares a generation counter that
+/// every animation starts at one. So a box handed a second file went on holding
+/// the first file's texture and rejecting the second's frames until the second's
+/// counter climbed past the first's — a wait measured in thousands of frames,
+/// with the new file's name over the old file's picture.
+///
+/// A free function rather than a `format!` at the call site because it is the
+/// rule and not a detail of one caller: the identity of a playing picture is one
+/// decision, and the day a fourth surface is added it should not be possible to
+/// spell it differently there.
+pub(crate) fn animation_layer_key(surface: PreviewSurface, serial: u64) -> String {
+    format!("gif:{surface:?}:{serial}")
+}
+
+/// **Whether a surface is still in the window**, for [`AnimationCache::forget_surfaces_gone`].
+///
+/// A surface is in the window while some tab holds its view — a seat of a tab in the background
+/// as much as one on the glass, and a float filed under whichever tab it was torn from — and the
+/// card is the window's own. Asked of every tab and not of the tree on the glass, because a
+/// background tab's panes are exactly the ones that resume, and a surface the walk wrongly
+/// thought gone would make every walk an open. A free function over the tabs for
+/// [`files_a_tab_stands_on`]'s reason: it is the rule, and tabs are what a test can build.
+pub(crate) fn animation_surface_exists(tabs: &[TabState], surface: PreviewSurface) -> bool {
+    surface == PreviewSurface::Peek
+        || tabs
+            .iter()
+            .any(|tab| tab.preview_panes.get(surface).is_some())
+}
+
+/// A rectangle as the renderer's own viewport, or `None` for one with no area —
+/// a float mid-collapse, a card that has not been laid out.
+pub(crate) fn viewport_of_rect(rect: [f32; 4]) -> Option<bt_render::SeatViewport> {
+    let width = (rect[2] - rect[0]).round();
+    let height = (rect[3] - rect[1]).round();
+    if width < 1.0 || height < 1.0 {
+        return None;
+    }
+    Some(bt_render::SeatViewport {
+        x: rect[0].max(0.0).round() as u32,
+        y: rect[1].max(0.0).round() as u32,
+        width: width as u32,
+        height: height as u32,
+    })
+}
+
+pub(crate) fn preview_image_placement(
+    seats: &seats::Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+    transform: PaneTransform,
+) -> Option<PreviewPlacement> {
+    let body = seats::preview_body_viewport(seats, layout, seat, scale)?;
+    let device = layout.get(seat)?.device_rect?;
+    let pane = [
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ];
+    let (placed, clip) = animated_pane_viewports(body, pane, transform);
+    Some(PreviewPlacement {
+        body,
+        seat: placed,
+        clip,
+    })
+}
+
+/// **Everything one window remembers about the picture in one file, forgotten**
+/// (user report 2026-08-31).
+///
+/// [`Runtime::forget_the_picture_in`]'s mechanism, a free function for
+/// [`files_a_tab_stands_on`]'s reason: what has to be checkable is that all
+/// three caches let go together, and three real caches are exactly what a test
+/// can build without a GPU.
+///
+/// The three are keyed two different ways and both are why this is one function.
+/// `peek_cache` and `video_facts` are keyed by the **path**, normalized once by
+/// [`bt_term::normalized_local_image_path_key`] so that the two agree about what
+/// "the same file" is; the exact-size rasters are keyed by a hash of the file's
+/// own **bytes**, so they cannot serve the old picture for the new file and what
+/// has to move is the generation every page reads.
+///
+/// Nothing here touches a disk. It ends the window's right to answer from
+/// memory; the asking belongs to the frame, down the lane it already has.
+pub(crate) fn forget_a_picture(
+    peek_cache: &mut PeekCache,
+    video_facts: &mut BTreeMap<String, preview::VideoFacts>,
+    pictures: &mut MarkdownPictures,
+    path: &Path,
+) {
+    let key = bt_term::normalized_local_image_path_key(path);
+    peek_cache.remove(&key);
+    video_facts.remove(&key);
+    pictures.forget(path);
+}
+
+/// **The markdown pictures every one of these surfaces is holding** — the one
+/// walk the three sets below are built from (§7.1.3u ③).
+///
+/// A surface showing anything but a markdown page contributes nothing, which is
+/// why this is a filter and not a fold: the question every caller is asking is
+/// about pages, and there is exactly one place that decides which surfaces are
+/// pages.
+fn documents_pictures<'a>(
+    holders: impl Iterator<Item = &'a PreviewPane>,
+) -> impl Iterator<Item = &'a DocumentPictures> {
+    holders.filter_map(|pane| match pane.doc() {
+        PreviewDocument::Markdown { pictures, .. } => Some(pictures),
+        _ => None,
+    })
+}
+
+/// **Which pictures the documents on these surfaces are still waiting to see**
+/// — [`Runtime::markdown_pictures_awaited`]'s body, out here for
+/// [`files_a_tab_stands_on`]'s reason.
+pub(crate) fn pictures_awaited_by<'a>(
+    holders: impl Iterator<Item = &'a PreviewPane>,
+) -> BTreeSet<PathBuf> {
+    documents_pictures(holders)
+        .flat_map(|pictures| pictures.awaited().cloned())
+        .collect()
+}
+
+/// **Every picture file the documents on these surfaces are showing** —
+/// [`Runtime::markdown_picture_files`]'s body, out here for the same reason.
+pub(crate) fn picture_files_of<'a>(
+    holders: impl Iterator<Item = &'a PreviewPane>,
+) -> BTreeSet<PathBuf> {
+    documents_pictures(holders)
+        .flat_map(|pictures| pictures.files.iter().cloned())
+        .collect()
+}
+
+/// Whether the tab strip's animation is allowed to move again.
+///
+/// A rate is only a rate if something enforces it. `about_to_wait` runs after
+/// *every* event rather than only when a deadline expires, and the present each
+/// tick asks for is itself an event — so without this the ring simply ran as
+/// fast as the loop could turn, measured at 120 steps a second against a
+/// declared 62.5.
+///
+/// **The rate is the window's own display frame** (closure review 2,
+/// 2026-09-18). It was [`pace::DEFAULT_FRAME_INTERVAL`], a flat sixteen milliseconds,
+/// and a window has no business keeping two rates: on a 144 Hz panel the
+/// display gate admitted a turn seven milliseconds after a present and this one
+/// turned it away, which is how a picture that had arrived could find every door
+/// shut — the state the review's counterexample is built on. One clock, read
+/// from the glass ([`pace::FrameClock::interval`]), and the constant stays only
+/// as the fallback that clock is born with.
+///
+/// The first tick of a window's life is always due: there is no last one to be
+/// too soon after.
+/// **Whether the picture service has anything to hand the renderer** (closure
+/// review 2, 2026-09-18, P2).
+///
+/// Three reasons and there is no fourth, which is what makes the answer `false`
+/// on the turns that matter — every one of a printing neighbour's. **A new
+/// generation** is new pixels, from a decoder or from a decoded animation's
+/// clock. **A membership change** is a seat opened, closed, faulted or swept,
+/// which is the one case where the list itself is a different length. **A box
+/// that has moved** is a pane in FLIP or a float on its way in or out: every
+/// *event* that moves a picture's rectangle already ends in
+/// `Runtime::refresh_preview_for_layout`, and those two are the rectangles that
+/// move on a clock instead.
+///
+/// What it is worth: a paused recording standing in a still pane was having the
+/// whole layer list rebuilt on every turn *and* again at the head of every
+/// compose — two thousand reconstructions and some eight thousand allocations
+/// over a thousand five-millisecond presents of a neighbouring shell, for the
+/// same pixels in the same rectangle with nothing in this window moving.
+///
+/// **The third reason is a fact about the past and not about this instant**
+/// (closure review 3, 2026-09-18). It asked "is a box moving *now*", and the one
+/// frame a moving box most needs handed over is the one where it has just
+/// stopped: a four-hundred-pixel FLIP under a paused picture had its last
+/// hand-over one frame short of the end — clip `x = 49` where the pane lands at
+/// `0` — and then every reason went false together, so the layer kept the stale
+/// clip until something unrelated happened to invalidate it. The tick pays the
+/// pane's own debt and retires the tween; nothing on the chrome, overlay or
+/// pane-draw road hands the *video* layers over. So the question is whether a
+/// box has moved **since the last decision**, which is true on exactly one more
+/// service than "is moving" is — the one that carries the final geometry — and
+/// false on every service after it. An ended tween does not come back to life:
+/// `boxes_were_moving` is what the caller stored on the previous decision and is
+/// overwritten by this one.
+///
+/// A free function so that the sentence the service acts on and the sentence a
+/// test counts are the same sentence ([`tick_owes_a_present`]'s arrangement).
+pub(crate) fn pictures_need_handing_over(
+    frames_arrived: bool,
+    membership_moved: bool,
+    boxes_are_moving: bool,
+    boxes_were_moving: bool,
+) -> bool {
+    frames_arrived || membership_moved || boxes_are_moving || boxes_were_moving
+}
+
+pub(crate) fn strip_animation_tick_is_due(
+    last: Option<Instant>,
+    now: Instant,
+    frame: Duration,
+) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= frame)
+}
+
+/// **Whether an animation tick owes the glass a present** — the three debts a
+/// tick may be carrying, and the one that was missing.
+///
+/// [`Runtime::advance_strip_animation`] asks twice whether a frame is owed. The
+/// first question is cheap and lets an idle window return before it builds
+/// anything; this is the second, asked after the chrome has been rebuilt, and
+/// until 2026-08-28 it was written as `!self.refresh_chrome() && !panes_owe`.
+///
+/// **A decoded picture is not in the chrome.** A playing recording and a running
+/// `.gif` are a layer list handed to `bt_render::WindowRenderer::set_video_layers`
+/// and drawn from renderer state at present time, so `chrome_changed` can never
+/// become `true` because a frame arrived. The tick that had just collected a new
+/// picture returned one line before the present that would have shown it, and
+/// the recording only reached the glass as a passenger on some *other* debt —
+/// which, while the control bar is up, its own clock and scrubber supply on
+/// nearly every tick. `VIDEO_BAR_IDLE_REST + VIDEO_BAR_FADE` after the reader's
+/// last act the bar rests, the chrome goes quiet, and the picture stops: two
+/// seconds of video and then a photograph that jumps forward the moment the
+/// pointer moves. Measured on the machine as eight seconds of byte-identical
+/// captures with the recording's own burnt-in counter thirty-eight seconds
+/// further on behind it.
+///
+/// So the rule is three debts and not two, and it is a named function rather
+/// than a longer `if` because the reason the third one exists is the whole of
+/// what a reader needs and none of it is visible at the call site.
+#[must_use]
+pub(crate) fn tick_owes_a_present(
+    chrome_changed: bool,
+    panes_owe: bool,
+    pictures_owe: bool,
+) -> bool {
+    chrome_changed || panes_owe || pictures_owe
 }
 
 /// The key one buffer earns at one width and scale.

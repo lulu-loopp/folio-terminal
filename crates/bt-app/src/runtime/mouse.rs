@@ -4,6 +4,7 @@
 use crate::PtyTarget;
 use crate::runtime::files::{files_row_activation, press_files_node};
 use crate::runtime::panes::risen_frame;
+use crate::runtime::preview::image_zoom_notch;
 use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, BrokerAim, DividerDrag, DividerGrip, Drag, DragBroker, DragCarry, DragGuard,
@@ -15,10 +16,9 @@ use crate::{
     PreviewSurface, RenameExit, RenameSubject, RowActivation, RowHost, RowPayload, RowPayloadKind,
     RowPress, Runtime, SpringGate, TabClick, TabId, TearGrip, TerminalColumnDrag,
     TerminalReference, TerminalThumbDrag, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst,
-    WheelRoute, crumb_segments, files, first_run, float, formula_tools, hang_watch,
-    image_zoom_notch, input, marks, mouse_trace, palette, profiles, restore, seats, settings,
-    settling, toast, tooltip, update, web_page_cursor, websheet, wheel_zoom_notches,
-    write_pty_input,
+    WheelRoute, crumb_segments, files, first_run, float, formula_tools, hang_watch, input, marks,
+    mouse_trace, palette, profiles, restore, seats, settings, settling, toast, tooltip, update,
+    web_page_cursor, websheet, wheel_zoom_notches, write_pty_input,
 };
 use crate::{TextSizeAim, TextStep};
 use anyhow::Context;

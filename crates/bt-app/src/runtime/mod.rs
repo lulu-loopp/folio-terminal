@@ -111,11 +111,12 @@ pub(crate) use mouse::{
 pub(crate) use palette::recall_flash;
 #[cfg(test)]
 pub(crate) use panes::{
-    births_due, clamp_into_body, column_notch, end_leaves_of, frame_row_of_anchor, gate_title_over,
-    host_screen_after, land_successor, landed_source, leaf_resize_plan,
-    pages_that_move_with_their_panes, pane_fade_veil_layers, panel_opacity, popup_owner,
-    rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer, rail_zone_wants_open,
-    restated_scroll, row_arrival_seat, size_authority_for_rectangle, tear_pane_into_tab,
+    animated_pane_viewports, births_due, clamp_into_body, column_notch, end_leaves_of,
+    frame_row_of_anchor, gate_title_over, host_screen_after, land_successor, landed_source,
+    leaf_resize_plan, pages_that_move_with_their_panes, pane_fade_veil_layers, panel_opacity,
+    popup_owner, rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer,
+    rail_zone_wants_open, restated_scroll, row_arrival_seat, size_authority_for_rectangle,
+    tear_pane_into_tab,
 };
 #[cfg(test)]
 pub(crate) use peek::{
@@ -128,15 +129,22 @@ pub(crate) use pointer::a_capture_still_holds_its_pointer;
 pub(crate) use pointer::platform_pointer_of;
 #[cfg(test)]
 pub(crate) use preview::{
+    animation_layer_key, animation_refusal_notice, animation_surface_exists, answer_one_picture,
     build_preview_diff_body, build_preview_markdown_body, build_preview_table_body,
-    build_preview_text_body, documents_held_in, documents_held_mut_in, folded_levels,
-    markdown_chip_ground, markdown_empty_page_offset, markdown_prose_paragraphs,
-    markdown_source_cell, markdown_source_offset_at, preview_block_bar_at, preview_block_wheel,
+    build_preview_text_body, deliver_clipboard_picture, documents_held_in, documents_held_mut_in,
+    folded_levels, forget_a_picture, image_clamped_pan, image_destination, image_is_pannable,
+    image_meta_sentence, image_pan_key, image_raster_cap, image_zoom_caption, image_zoom_key,
+    image_zoom_notch, image_zoom_settles, image_zoom_toggled, markdown_chip_ground,
+    markdown_empty_page_offset, markdown_prose_paragraphs, markdown_source_cell,
+    markdown_source_offset_at, owe_sharpened_rasters, picture_errand, picture_files_of,
+    pictures_awaited_by, pictures_need_handing_over, preview_block_bar_at, preview_block_wheel,
     preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
-    preview_document_max_scroll, preview_edit_bands, preview_link_activation,
-    preview_link_answers_a_press, preview_press_opens_its_link, preview_selection_bands,
-    preview_text_box_at, preview_wrap_columns, push_markdown_source_block,
-    step_preview_caret_by_row,
+    preview_document_max_scroll, preview_edit_bands, preview_image_placement,
+    preview_link_activation, preview_link_answers_a_press, preview_press_opens_its_link,
+    preview_selection_bands, preview_text_box_at, preview_wrap_columns, push_markdown_source_block,
+    resolve_document_pictures, step_preview_caret_by_row, strip_animation_tick_is_due,
+    surface_pixels, surface_subject_of, surface_takes_image_zoom, tick_owes_a_present,
+    video_frame_texture_key, video_still_destination, viewport_of_rect, zoom_about,
 };
 #[cfg(test)]
 pub(crate) use profiles::profile_menu_anchor;
