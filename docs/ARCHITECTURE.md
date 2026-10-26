@@ -2771,9 +2771,9 @@ Every method below runs on the **window thread** and holds `&mut App` and
 ownership. "Asks" names the lanes of §5.1 whose requests the file sends or
 whose answers it applies; "doors and rows" names the §6 doors and the §5.3
 rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the methods K2
-(T-SPLIT-2B) has moved in since, updated with each batch (through batch 19: `profiles.rs` and
+(T-SPLIT-2B) has moved in since, updated with each batch (through batch 20: `profiles.rs` and
 `search.rs` +1 each in batch 1, `web.rs` +2 in batch 2 and +1 in batch 3, `dpi.rs` +1 in batch 3,
-`palette.rs` +5 in batch 5, `terminal.rs` +2 in batch 6, `git.rs` +3 in batch 7; batch 8 moved free functions only; `clipboard.rs` +1 in batch 9; `floats.rs` +4, `frame.rs` +1 and `clipboard.rs` +1 in batch 10; `terminal.rs` +1 in batch 11; `windows.rs` +1 in batch 12; `frame.rs` +10, `terminal.rs` +1, `handoff.rs` +1, `web.rs` +1, `math.rs` +1 and `keyboard.rs` +1 in batch 13; `math.rs` +5, `profiles.rs` +1, `frame.rs` +1 and `terminal.rs` +1 in batch 14; `keyboard.rs` +7, `floats.rs` +1, `windows.rs` +1, `terminal.rs` +1 and `math.rs` +1 in batch 15; `tabs.rs` +4, `panes.rs` +1 and `mouse.rs` +1 in batch 16; `mouse.rs` +14, `files.rs` +2, `tabs.rs` +1, `tooltips.rs` +1 and `terminal.rs` +2 in batch 17; `panes.rs` +7 in batch 18; `preview.rs` +2 in batch 19).
+`palette.rs` +5 in batch 5, `terminal.rs` +2 in batch 6, `git.rs` +3 in batch 7; batch 8 moved free functions only; `clipboard.rs` +1 in batch 9; `floats.rs` +4, `frame.rs` +1 and `clipboard.rs` +1 in batch 10; `terminal.rs` +1 in batch 11; `windows.rs` +1 in batch 12; `frame.rs` +10, `terminal.rs` +1, `handoff.rs` +1, `web.rs` +1, `math.rs` +1 and `keyboard.rs` +1 in batch 13; `math.rs` +5, `profiles.rs` +1, `frame.rs` +1 and `terminal.rs` +1 in batch 14; `keyboard.rs` +7, `floats.rs` +1, `windows.rs` +1, `terminal.rs` +1 and `math.rs` +1 in batch 15; `tabs.rs` +4, `panes.rs` +1 and `mouse.rs` +1 in batch 16; `mouse.rs` +14, `files.rs` +2, `tabs.rs` +1, `tooltips.rs` +1 and `terminal.rs` +2 in batch 17; `panes.rs` +7 in batch 18; `preview.rs` +2 in batch 19; `preview.rs` +1 and `frame.rs` +1 in batch 20).
 
 | file | methods | owns | asks | doors and rows |
 |---|---|---|---|---|
@@ -2785,7 +2785,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 | `files.rs` | 61 | the files column and its float: the tree, rename, new, delete, locate, pins, drops, the palette's roots | observation (`bt-files-worker`, `bt-index-worker`); ingress (`files_watch`); hand-off (reveal) | `bt_platform::rename_without_replacing`, `create_dir`, `File::create_new` here, row 20; `files::read_directory` has no door (§6) |
 | `first_run.rs` | 24 | the first-run card, the Explorer package row, the agent hook installers, the PowerShell integration offer (the PSReadLine invite and install retired 2026-10-17) | observation (the package probe); storage (the package job) | — (rows 3 and 4 done) |
 | `floats.rs` | 66 | floating windows, popups and chevron menus; the file, terminal and page menus | observation (files, git); hand-off (reveal) | — |
-| `frame.rs` | 35 | chrome refresh, frame publication and present attempts, `turn`, hyperlink activation | presentation (on this thread); session (the drain frame); observation (math); hand-off (refusals) | row 6 (the search refresh in `publish_frame`) |
+| `frame.rs` | 36 | chrome refresh, frame publication and present attempts, `turn`, hyperlink activation | presentation (on this thread); session (the drain frame); observation (math); hand-off (refusals) | row 6 (the search refresh in `publish_frame`) |
 | `git.rs` | 106 | the git column, graph, compare and checkout; its menus, prompts and writes to a repository | observation (`bt-git-worker`, whose `git` children go through `quiet_command`); ingress (`git_watch`) | — |
 | `handoff.rs` | 5 | the `Runtime` side of the OS hand-off lane: submit, hold each request with its duty, answer a refusal at the door at once and the rest when they end | hand-off | never calls `bt_platform::handoff` itself (`no_handoff_runs_on_the_window_thread`) |
 | `i18n.rs` | 2 | applying and adopting the language | — | — |
@@ -2795,7 +2795,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 | `palette.rs` | 20 | the command palette | observation (`bt-index-worker`) | — |
 | `panes.rs` | 138 | seat layout, split, close, duplicate, zoom and move of panes; command rails; pane menus; `present_seats_and_commit` | session (pane birth through `create_leaf_session`); presentation (on this thread) | rows 9 and 11 |
 | `peek.rs` | 59 | the layout peek and the file glance card | observation (math, preview, git; video) | — |
-| `preview.rs` | 288 | preview panes and documents: open, land, rename, save, watch; markdown pictures, the background picture, video seats, the drop preview, clipboard pictures, the tab strip's animation | observation (`bt-preview-worker`, `bt-math-worker`; starts `background-picture` and `clipboard-picture`); ingress (`preview_watch`); hand-off | `spawn_at_priority` ×2; `bt_platform::rename_without_replacing`, row 20; row 20 (`save_preview_on`) |
+| `preview.rs` | 289 | preview panes and documents: open, land, rename, save, watch; markdown pictures, the background picture, video seats, the drop preview, clipboard pictures, the tab strip's animation | observation (`bt-preview-worker`, `bt-math-worker`; starts `background-picture` and `clipboard-picture`); ingress (`preview_watch`); hand-off | `spawn_at_priority` ×2; `bt_platform::rename_without_replacing`, row 20; row 20 (`save_preview_on`) |
 | `profiles.rs` | 25 | the profile table: launching, menus, the editor, store and re-read, the default profile, the root menu | storage; ingress (`storage_watch`) | row 2 (`add_to_profile`) |
 | `quake.rs` | 9 | the summoned window: show, hide, its profile and arrangement | — | — |
 | `search.rs` | 23 | the find box, its highlights and stepping | — | row 6 (`refresh_search`) |
@@ -2807,7 +2807,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 459 (341 free functions, 118 methods) after batch 19. The table
+into their topics batch by batch: 419 (303 free functions, 116 methods) after batch 20. The table
 below is the 2026-09-21 manifest's sort of the 201 methods then left
 (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
 

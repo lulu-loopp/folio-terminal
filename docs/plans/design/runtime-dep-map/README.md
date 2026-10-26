@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **459 items, 341 free functions and 118 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 19's head; 503, 383 and 120 before it,
+- **unclassified.tsv**: **419 items, 303 free functions and 116 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 20's head; 459, 341 and 118 before it,
+  503, 383 and 120 before batch 19,
   538, 411 and 127 before batch 18,
   593, 446 and 147 before batch 17,
   613, 460 and 153 before batch 16,
@@ -130,7 +131,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 16 | `runtime/tabs.rs` | moved by batch 16 (14 items, with `tab_surface` by the owner column, closing the batch 1 tie row above; `tear_pane_into_tab` and `Runtime::arrival_fits` went to `runtime/panes.rs` and `Runtime::line_height_subpixels` to `runtime/mouse.rs`, below; `strip_insert_slot`, `solve_seats`, `presentation_physical_size`, `pane_can_become_a_tab`, `land_birth_death_fallback_shell`, `pane_into_tab`, `absorb_tab_sessions`, `pane_into_new_tab` and `Runtime::toggle_pin` held, below), with `grabbed_offset` and `new_tab_cwd` as tails | — |
    | 17 | `runtime/panes.rs` | moved by batch 18 (29 items with the tie `Runtime::plan_for` and the tails `birth_due`, `row_arrival_seat`, `frame_row_of_anchor` and `Runtime::head_that_raised_a_layer`; `expire_leaf_attention` went to `runtime/attention.rs` by its census owner, and `picture_channel_owner` and the tails `pane_can_become_a_tab` and `dirty_gate_names`, with its own tails `lines_phrase` and `unsaved_line`, to `runtime/preview.rs`, `runtime/tabs.rs` and `runtime/windows.rs` by the owner column, below; `restore_row_seed`, `Runtime::append_edge`, `auto_split_axis`, `decided_birth`, `resolved_birth_seed`, `create_leaf_session`, `born_in_tab`, `Runtime::focus_rail_geometry_now`, `Runtime::focus_rail_geometry_at`, `Runtime::plan_inputs_for`, `animated_pane_viewports`, `closing_this_pane_closes_the_tab`, `solve_tree`, `Runtime::aim_focus_card_window`, `schedule_leaf_grid_change`, `land_shell_birth`, `deliver_held_input`, `Runtime::focus_the_pane_a_path_landed_in`, `pane_into_new_tab` and `Runtime::focus_seat` held, below) | — |
    | 18 | `runtime/mouse.rs` | moved by batch 17, before row 17 by the live map (46 items with the ties `Runtime::glass_here`, `Runtime::note_terminal_thumb_hover`, `route_forwarded_mouse_button` and `Runtime::focus_pane_at` and four tails; `Runtime::browse_for_root`, `Runtime::toggle_switcher_pin` and the tail `switcher_pin_is_allowed` went to `runtime/files.rs` and `Runtime::settle_home` to `runtime/tabs.rs` by their census owners, and the tails `Runtime::command_tick_card`, `Runtime::woke_terminal_thumb`, `Runtime::wake_terminal_thumb`, `page_destination` and `switcher_row_destination` to `runtime/tooltips.rs`, `runtime/terminal.rs` and `runtime/web.rs` by the owner column, below; `Runtime::scroll_settings`, `Runtime::settings_mouse_input`, `Runtime::open_settings_on_row`, `Runtime::toggle_settings_panel`, `Runtime::send_user_input` and `Runtime::toggle_pin` held, below) | — |
-   | 19 | `runtime/preview.rs` | cut into three batches by sub-topic (ruled at batch 19, below): batch 19 moved the document bodies (44 items, with `markdown_gap_paragraph` by the owner column, below; `push_markdown_table` held, below); batch 20 takes pictures, zoom, video and surfaces (39), and batch 21 pages, sources, the foot, crumbs, hand-off, refusal cards, switcher rows, the taskbar and landing (51) | — |
+   | 19 | `runtime/preview.rs` | cut into three batches by sub-topic (ruled at batch 19, below): batch 19 moved the document bodies (44 items, with `markdown_gap_paragraph` by the owner column, below; `push_markdown_table` held, below); batch 20 moved pictures, zoom, video and surfaces (40 items, with `animated_pane_viewports` by the owner column and `Runtime::play_button_rasters` by its census owner, below; eight held, below), and batch 21 takes pages, sources, the foot, crumbs, hand-off, refusal cards, switcher rows, the taskbar and landing (51) | — |
 
    **From batch 14 on, the order is the live map's** (ruled at batch 14). The smallest-sum-first rule above is
    applied to the map regenerated at each batch's base, not to this table's numbers, which were read at batch 1's
@@ -144,7 +145,9 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    fixed point it came to 139 items, 134 after the holds, so it was cut into three batches by sub-topic, each under
    about 60 items (ruled at batch 19): the document bodies (44), then pictures, zoom, video and surfaces (39), then
    pages, sources, the foot, crumbs, hand-off, refusal cards, switcher rows, the taskbar and landing (51). The order
-   is the one in which every tail's root callers move in the same batch or an earlier one.
+   is the one in which every tail's root callers move in the same batch or an earlier one. At batch 20's base the
+   pictures group, re-derived against the live map, was still 39, and `animated_pane_viewports` joined it as a tail,
+   its only root caller, `preview_image_placement`, moving in the same batch: 40.
 
    **An item stays in `main.rs`, whatever its `called_from` row proposes, when moving it would make a field it
    writes a multi-writer fact** (the ownership census refuses a new one without a ruled owner; the standing rule is
@@ -228,6 +231,12 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    beside `popup_owner`) to `runtime/panes.rs`, `pane_can_become_a_tab` (panes/tabs) to `runtime/tabs.rs`, which owns
    tear out, and `dirty_gate_names` (panes/tabs/windows) to `runtime/windows.rs`, which owns the dirty gate, with its
    own tails `lines_phrase` and `unsaved_line`.
+   Batch 20 sent `Runtime::play_button_rasters`, whose first caller is `runtime/preview.rs`, to `runtime/frame.rs` by
+   clause (a): it writes `WindowRuntime.chrome_marks` (owner frame), whose writer modules were the root and
+   `runtime/floats.rs`; its first caller would have left them at `runtime/floats.rs` and `runtime/preview.rs`, and
+   the owner's module leaves them at `runtime/floats.rs` and `runtime/frame.rs`. It settled the tail
+   `animated_pane_viewports` (panes/preview, the pane-motion viewports) by clause (b) to `runtime/panes.rs`, which
+   owns the move of panes.
 
    **A product caller in another `runtime/` file imports the moved item from its new path** (`use
    crate::runtime::<topic>::<item>;`, an import line and no body text; ruled at batch 7). What stays forbidden is a
@@ -361,12 +370,12 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `paste_into_settings_field` does. `Runtime::toggle_settings_panel` (tied with `runtime/keyboard.rs` and the
      root) stays with them: its root caller is `Runtime::open_settings_on_row`, and it writes `settings_scroll` too.
    - `restore_row_seed`, `Runtime::append_edge`, `decided_birth`, `create_leaf_session`,
-     `Runtime::focus_rail_geometry_now`, `Runtime::plan_inputs_for`, `animated_pane_viewports`,
-     `closing_this_pane_closes_the_tab` and `solve_tree` (batch 18) — their `called_from` home is `runtime/panes.rs`
-     (tied with `main.rs` for the last four), but `FolioApp::settle_restore_answer`, `FolioApp::settle_arrival`,
-     `birth_here`, `create_tab_state`, `Runtime::card_mini_size` and `Runtime::refresh_focus_thumbnails`,
-     `Runtime::plan_inputs`, `preview_image_placement`, `pane_into_tab` and `solve_seats` at the root call them in
-     the product (the rule above). Their ties wait with them: `auto_split_axis` behind `Runtime::append_edge`,
+     `Runtime::focus_rail_geometry_now`, `Runtime::plan_inputs_for`, `closing_this_pane_closes_the_tab` and
+     `solve_tree` (batch 18) — their `called_from` home is `runtime/panes.rs` (tied with `main.rs` for the last
+     three), but `FolioApp::settle_restore_answer`, `FolioApp::settle_arrival`, `birth_here`, `create_tab_state`,
+     `Runtime::card_mini_size` and `Runtime::refresh_focus_thumbnails`, `Runtime::plan_inputs`, `pane_into_tab` and
+     `solve_seats` at the root call them in the product (the rule above).
+     Their ties wait with them: `auto_split_axis` behind `Runtime::append_edge`,
      `resolved_birth_seed` behind `decided_birth`, `born_in_tab` behind `create_leaf_session` and
      `Runtime::focus_rail_geometry_at` behind `Runtime::focus_rail_geometry_now`.
    - `Runtime::aim_focus_card_window`, `schedule_leaf_grid_change` and `land_shell_birth` (batch 18) — their
@@ -392,6 +401,19 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      stays at the root (the census rule above); `LeafSession.attention`, owner attention, is also written at the root
      by `deliver_attention` and `FolioApp::transfer_tab`. `tab_queue_leader`, whose root callers are all in
      `settle_attention`, waits with it.
+   - `animated_pane_viewports` (held at batch 18, behind `preview_image_placement`) — tied `runtime/panes.rs` /
+     `runtime/preview.rs` once its root caller moved; it is the pane-motion viewports, and the owner column gives
+     the move of panes to `runtime/panes.rs` (clause (b)); batch 20 moved it there, imported by `runtime/preview.rs`.
+   - `markdown_image_card` and `markdown_item_runs` (batch 20) — their `called_from` home is `runtime/preview.rs`
+     (tied with `main.rs`), but `measure_markdown_block` at the root calls them in the product (the rule above).
+   - `markdown_prose_runs` (batch 20) — its `called_from` home is `runtime/preview.rs` (tied with `main.rs`), but
+     `measure_markdown_local` at the root calls it in the product (the rule above).
+   - `reference_activation` (batch 20) — its `called_from` home is `runtime/preview.rs` (tied with `main.rs`), but
+     its root caller is `hyperlink_activation`, held above, so it waits for it.
+   - `note_link_sites`, `note_math_sites` and `note_text_site` (batch 20) — their `called_from` home is
+     `runtime/preview.rs`, but their root caller is `push_markdown_table`, held above, so they wait for it.
+   - `tab_owes_frame` (batch 20) — its `called_from` home is `runtime/preview.rs`, but `PaneMotion`'s
+     `settle_frame_debt` at the root calls it in the product (the rule above).
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,
