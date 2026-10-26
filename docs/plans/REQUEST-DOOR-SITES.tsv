@@ -1111,7 +1111,6 @@ crates/bt-app/src/main.rs	bt-app crate::PreviewTextPiece::shaped_range	Ambiguous
 crates/bt-app/src/main.rs	bt-app crate::PreviewTextPiece::shaped_range	Dynamic	map	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::RevealTween::sample	Ambiguous	as_secs_f32	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::cancel_composition	Ambiguous	set_preedit	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::command_flash_layer	Ambiguous	saturating_duration_since	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::editor_subject	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::editor_subject	Ambiguous	into_iter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::editor_subject	Ambiguous	iter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1120,9 +1119,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::editor_subject	Ambiguous	positi
 crates/bt-app/src/main.rs	bt-app crate::Runtime::editor_subject	Ambiguous	unwrap_or_default	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::editor_subject	Ambiguous	zip	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::editor_subject	Path	text	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::focused_web_seat	Ambiguous	then_some	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::head_that_raised_a_layer	Ambiguous	find_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::head_that_raised_a_layer	Ambiguous	into_iter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::open_crumb_draft	Ambiguous	then	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::push_float_refusal_card	Ambiguous	then_some	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::push_float_refusal_card	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1249,14 +1245,6 @@ crates/bt-app/src/main.rs	bt-app crate::cwd_leaf	Ambiguous	then	1	unreviewed	202
 crates/bt-app/src/main.rs	bt-app crate::cwd_leaf	Ambiguous	to_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::cwd_leaf	Ambiguous	trim_end_matches	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::cwd_leaf	Ambiguous	unwrap_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::dirty_gate_names	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::dirty_gate_names	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::dirty_gate_names	Ambiguous	flat_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::dirty_gate_names	Ambiguous	flatten	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::dirty_gate_names	Ambiguous	get	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::dirty_gate_names	Ambiguous	map	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::dirty_gate_names	Ambiguous	scrollback_line_count	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::dirty_gate_names	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::display_scale_factor	Ambiguous	to_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::display_scale_factor	Ambiguous	trim_end_matches	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::dump_focus_thumb_frame	Ambiguous	as_deref	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1284,8 +1272,6 @@ crates/bt-app/src/main.rs	bt-app crate::home_crumb_for	Ambiguous	next	1	unreview
 crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	as_os_str	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	len	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	map_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::leaf_resize_plan	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::leaf_resize_plan	Ambiguous	filter_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::loudest_claim	Ambiguous	max	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::loudest_claim	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::markdown_chip_ground	Dynamic	same_row	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1414,7 +1400,6 @@ crates/bt-app/src/main.rs	bt-app crate::tabs_a_close_loses	Ambiguous	seats_in_or
 crates/bt-app/src/main.rs	bt-app crate::tabs_a_close_loses	Ambiguous	tree	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::title_layer	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::title_layer	Ambiguous	is_empty	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::unsaved_line	Ambiguous	is_empty	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::video_still_destination	Ambiguous	unwrap_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::winit_outer_rect	Ambiguous	saturating_add	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/marks.rs	bt-app crate::marks::Backdrop::luminance_under	Dynamic	covers	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -2835,6 +2820,7 @@ crates/bt-app/src/runtime/panes.rs	Runtime::submit_clipboard_write	OwnerDoor	Run
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::aimed_seat_kind	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::close_pane	Ambiguous	proceeds	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::close_pane	Ambiguous	unwrap_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::command_flash_layer	Ambiguous	saturating_duration_since	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `command_flash_layer` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::command_rail_layers	Ambiguous	collect	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::command_rail_layers	Ambiguous	filter_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::command_rail_layers	Ambiguous	then	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -2849,6 +2835,9 @@ crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::dirty_
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::docked_chrome_target_at	Ambiguous	collect	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::docked_chrome_target_at	Ambiguous	filter_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::docked_chrome_target_at	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::focused_web_seat	Ambiguous	then_some	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `focused_web_seat` from main.rs into runtime/panes.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::head_that_raised_a_layer	Ambiguous	find_map	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `head_that_raised_a_layer` from main.rs into runtime/panes.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::head_that_raised_a_layer	Ambiguous	into_iter	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `head_that_raised_a_layer` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::pane_draws	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::pane_draws	Ambiguous	filter_map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::put_the_ratio_back	Ambiguous	extent	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -2872,6 +2861,8 @@ crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::split_
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::update_chrome_hover_target_in_pane	Ambiguous	any	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::update_chrome_hover_target_in_pane	Ambiguous	flatten	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::end_leaves_of	Dynamic	reach	1	unreviewed	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `end_leaves_of` from main.rs into runtime/panes.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::leaf_resize_plan	Ambiguous	collect	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `leaf_resize_plan` from main.rs into runtime/panes.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::leaf_resize_plan	Ambiguous	filter_map	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `leaf_resize_plan` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::rail_overlay_layer	Ambiguous	collect	2	unreviewed	2026-10-25: T-SPLIT-2B batch 14; the same site, moved by K2 batch 14 with `rail_overlay_layer` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::rail_overlay_layer	Ambiguous	map	2	unreviewed	2026-10-25: T-SPLIT-2B batch 14; the same site, moved by K2 batch 14 with `rail_overlay_layer` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/peek.rs	bt-app crate::runtime::peek::Runtime::file_peek_card_layers	Ambiguous	and_then	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -3214,8 +3205,17 @@ crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::re
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	flatten	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::window_snapshot	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::dirty_gate_names	Ambiguous	collect	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `dirty_gate_names` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::dirty_gate_names	Ambiguous	filter	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `dirty_gate_names` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::dirty_gate_names	Ambiguous	flat_map	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `dirty_gate_names` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::dirty_gate_names	Ambiguous	flatten	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `dirty_gate_names` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::dirty_gate_names	Ambiguous	get	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `dirty_gate_names` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::dirty_gate_names	Ambiguous	map	2	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `dirty_gate_names` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::dirty_gate_names	Ambiguous	scrollback_line_count	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `dirty_gate_names` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::dirty_gate_names	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `dirty_gate_names` from main.rs into runtime/windows.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::focus_leaf_index	Ambiguous	unwrap_or	1	unreviewed	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `focus_leaf_index` from main.rs into runtime/windows.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::request_owned_window_close	Macro	anyhow	1	unreviewed	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `request_owned_window_close` from main.rs into runtime/windows.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::unsaved_line	Ambiguous	is_empty	1	unreviewed	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `unsaved_line` from main.rs into runtime/windows.rs: K2 moves the item, not the call
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::bundled_sources	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::bundled_sources	Ambiguous	to_owned	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/schemes.rs	bt-app crate::schemes::catalogue	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))

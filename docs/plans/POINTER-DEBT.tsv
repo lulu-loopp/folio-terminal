@@ -96,7 +96,6 @@ crate::new_window_runtime	N-P	crate
 crate::new_window_runtime	N-P	crate
 crate::quake::SummonScreen::under_the_pointer	N-P	crate::quake
 crate::quake::SummonScreen::under_the_pointer	N-S	crate::quake
-crate::rail_zone_wants_open	N-E	crate
 crate::runtime::attention (outside any item)	N-E	crate::runtime::attention
 crate::runtime::attention::Runtime::docked_notice_at	N-E	crate::runtime::attention
 crate::runtime::attention::Runtime::drive_notice_hover	N-E	crate::runtime::attention
@@ -417,6 +416,7 @@ crate::runtime::panes::Runtime::scroll_rail	N-P	crate::runtime::panes
 crate::runtime::panes::Runtime::set_rail_state	N-P	crate::runtime::panes
 crate::runtime::panes::Runtime::settle_command_rail	N-E	crate::runtime::panes
 crate::runtime::panes::Runtime::wheel_rail_trace	N-E	crate::runtime::panes
+crate::runtime::panes::rail_zone_wants_open	N-E	crate::runtime::panes
 crate::runtime::peek (outside any item)	N-B	crate::runtime::peek
 crate::runtime::peek (outside any item)	N-E	crate::runtime::peek
 crate::runtime::peek::Runtime::drag_file_peek_thumb	N-E	crate::runtime::peek
