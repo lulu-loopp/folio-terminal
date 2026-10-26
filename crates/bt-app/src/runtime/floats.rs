@@ -5,6 +5,7 @@ use super::pointer::{Gone, OwnerGone};
 use crate::runtime::files::{files_root_of, files_row_activation, files_row_menu_subject};
 use crate::runtime::panes::popup_owner;
 use crate::runtime::panes::risen_frame;
+use crate::runtime::preview::{revealable_preview_file, shown_address};
 use crate::web_thumb;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -14,8 +15,7 @@ use crate::{
     PreviewRailFrame, PreviewSurface, RevealedFoot, RowActivation, RowHost, Runtime, TabRename,
     TabSurface, TermMenuState, card_trace, display_title, favicon, files, float, git, git_graph,
     git_panel, hang_watch, i18n, indeterminate_start_milliturns, marks, menubar, preview,
-    preview_select, profiles, restore, revealable_preview_file, seats, shown_address, update,
-    webhost, webnav,
+    preview_select, profiles, restore, seats, update, webhost, webnav,
 };
 use crate::{
     FilesRoot, RESIZING_CARD_TRANSITION, ReferenceCard, RevealTween, TerminalReference,

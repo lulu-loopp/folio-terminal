@@ -325,21 +325,23 @@ use runtime::{
     advance_periodic_deadline, animated_pane_viewports, animation_layer_key,
     animation_refusal_notice, animation_surface_exists, answer_an_exit_over, answer_attention_in,
     answer_one_formula, answer_one_picture, answered_once, answers_for, apply_leaf_metrics,
-    apply_tabs_leaf_metrics, ask_for_peek_pixels, attention_ledger_deadline, births_due,
-    blank_page_return, broker_verdict, build_preview_diff_body, build_preview_markdown_body,
-    build_preview_table_body, build_preview_text_body, button_router_position, chevron_turn_target,
-    chrome_over, chrome_tick_reuses_picture, claimed_by, clamp_into_body, clear_copied_selection,
-    clipboard_focus_of, column_keyboard, column_notch, columns_wanting_git, composing_event_of,
-    composition_outlived_its_field, composition_ruling, deliver_clipboard_picture,
+    apply_tabs_leaf_metrics, ask_for_peek_pixels, ask_to_open, attention_ledger_deadline,
+    births_due, blank_page_return, broker_verdict, build_preview_diff_body,
+    build_preview_markdown_body, build_preview_table_body, build_preview_text_body,
+    button_router_position, chevron_turn_target, chrome_over, chrome_tick_reuses_picture,
+    claimed_by, clamp_into_body, clear_copied_selection, clipboard_focus_of, column_keyboard,
+    column_notch, columns_wanting_git, composing_event_of, composition_outlived_its_field,
+    composition_ruling, crumb_segments, crumb_segments_on, deliver_clipboard_picture,
     dirty_gate_names, dispatch_decoration_task, dispatch_pending_math_tasks,
     dispatch_tab_decoration_tasks, document_formulas, documents_held_in, documents_held_mut_in,
     drain_may_take_another_slice, drain_whole_units, dropped_files_seat_at, dwm_dark_mode_owed,
     earliest_named_deadline, end_leaves_of, exited_tabs_the_loop_may_close, file_menu_powers,
-    file_peek_promotion, files_float_content_height, files_key_under, files_key_within,
-    files_keyboard_seat_of, files_locate, files_open_chain, files_root_of, files_row_activation,
-    files_row_counts_clicks, files_row_entry, files_row_menu_subject, float_git_page_shown,
-    float_grasp, float_viewport_rect, focus_leaf_index, folded_levels, folder_foot_notice,
-    folder_pick_outcome, forget_a_picture, frame_row_of_anchor, gate_title_over, git_answer_notice,
+    file_peek_answer, file_peek_promotion, files_float_content_height, files_key_under,
+    files_key_within, files_keyboard_seat_of, files_locate, files_open_chain, files_root_of,
+    files_row_activation, files_row_counts_clicks, files_row_entry, files_row_menu_subject,
+    float_git_page_shown, float_grasp, float_viewport_rect, focus_leaf_index, folded_levels,
+    folder_foot_notice, folder_pick_outcome, foot_revealed_label, forget_a_picture,
+    forget_standing_answers, frame_row_of_anchor, gate_title_over, git_answer_notice,
     git_full_path, git_roots_on_glass, git_surfaces_the_kernel_moved, git_surfaces_wanting_reread,
     glance_may_arm, glass_allows_a_drop, glass_allows_a_text_write, goto_tab_index, grabbed_offset,
     graph_key_of, ground_overlay_layers, hold_failed_in_tabs, hole_for, host_screen_after,
@@ -352,39 +354,45 @@ use runtime::{
     markdown_chip_ground, markdown_empty_page_offset, markdown_prose_paragraphs,
     markdown_source_cell, markdown_source_offset_at, math_copy_window, math_worker_stopped_notice,
     merge_notice_card, new_tab_cwd, new_tab_leaf_seed, new_tab_tip, next_attention_stop,
-    over_home_ground, owe_sharpened_rasters, page_destination, pages_that_move_with_their_panes,
+    over_home_ground, owe_sharpened_rasters, page_address_hand_off, page_destination,
+    page_foot_flash, page_foot_lead, page_source_file, pages_that_move_with_their_panes,
     pane_can_become_a_tab, pane_fade_veil_layers, pane_strip_landing, panel_opacity,
     paste_answer_text, paste_body, paste_card_key, paste_card_step, paste_offer_is_kept,
-    paste_target_is_live, paste_text, peek_body_kind, peek_cache_key_for_decode, peek_card_opened,
-    peek_files_named, peek_foot_press, peek_page_texture_key, peek_reads_the_file, peek_scale_task,
-    pending_paste_in, persisted_window_bounds, picture_errand, picture_files_of,
-    pictures_awaited_by, pictures_need_handing_over, pointer_cursor, popup_owner,
-    preedit_caret_byte, prepare_clipboard_paste, prepare_dropped_paste, press_after_blur,
-    press_belongs_to_the_window, press_files_node, press_pins_a_peek, press_reaches_no_grid,
-    press_spends_itself_closing, pressed_row_identity, preview_block_bar_at, preview_block_wheel,
-    preview_body_bar, preview_caret_row, preview_copies_on_select, preview_document_height,
-    preview_document_key, preview_document_max_scroll, preview_edit_bands, preview_image_placement,
-    preview_link_activation, preview_link_answers_a_press, preview_press_opens_its_link,
-    preview_selection_bands, preview_source_of_recent, preview_text_box_at, preview_wrap_columns,
-    profile_menu_anchor, pty_drain_says_nothing_new, pty_frame_is_unchanged,
-    push_markdown_source_block, rail_change_strands_its_popups, rail_is_searching,
-    rail_overlay_layer, rail_zone_wants_open, raise_cancelled_quit_card_on, raise_dirty_gate_over,
-    recall_flash, recorded_window_placement, recoverable_wheel_scroll_amount, reference_card,
-    reference_run_rect, refused_preview_card, release_verdict, remember_decode, rename_key,
-    reroot_files_state, rescan_leaf_for_search, resize_worth_solving, resolve_document_pictures,
-    resolved_theme_change, restart_seed, restated_scroll, retire_spent_math_copy, revived_page_of,
-    right_press_raises_terminal_menu, route_forwarded_mouse_button, route_forwarded_mouse_motion,
-    row_arrival_seat, row_strip_landing, seat_holds_the_keyboard, selection_to_copy,
-    should_copy_on_select_release, size_authority_for_rectangle, stage_paste, startup_poll_delay,
+    paste_target_is_live, paste_text, peek_awaits, peek_body_kind, peek_cache_key_for_decode,
+    peek_card_opened, peek_files_named, peek_foot_press, peek_page_texture_key,
+    peek_reads_the_file, peek_scale_task, pending_paste_in, persisted_window_bounds,
+    picture_errand, picture_files_of, pictures_awaited_by, pictures_need_handing_over,
+    pointer_cursor, popup_owner, preedit_caret_byte, prepare_clipboard_paste,
+    prepare_dropped_paste, press_after_blur, press_belongs_to_the_window, press_files_node,
+    press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity,
+    preview_block_bar_at, preview_block_wheel, preview_body_bar, preview_caret_row,
+    preview_copies_on_select, preview_document_height, preview_document_key,
+    preview_document_max_scroll, preview_edit_bands, preview_image_placement,
+    preview_link_activation, preview_link_answers_a_press, preview_opened_label,
+    preview_page_browser_hand_off, preview_page_hand_off, preview_press_opens_its_link,
+    preview_rail_tip_text, preview_selection_bands, preview_source_of_recent,
+    preview_tab_index_among, preview_text_box_at, preview_wrap_columns, profile_menu_anchor,
+    pty_drain_says_nothing_new, pty_frame_is_unchanged, push_markdown_source_block,
+    rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer, rail_zone_wants_open,
+    raise_cancelled_quit_card_on, raise_dirty_gate_over, recall_flash, recorded_window_placement,
+    recoverable_wheel_scroll_amount, reference_card, reference_run_rect, refused_preview_card,
+    release_verdict, remember_decode, rename_key, reroot_files_state, rescan_leaf_for_search,
+    resize_worth_solving, resolve_document_pictures, resolved_theme_change, restart_seed,
+    restated_scroll, retire_spent_math_copy, revived_page_of, right_press_raises_terminal_menu,
+    route_forwarded_mouse_button, route_forwarded_mouse_motion, row_arrival_seat,
+    row_strip_landing, seat_holds_the_keyboard, selection_to_copy, should_copy_on_select_release,
+    size_authority_for_rectangle, source_opens_as_a_page, stage_paste, startup_poll_delay,
     step_leaf_text_scale, step_preview_caret_by_row, stepped_command_mark, stepped_tab,
     strip_animation_tick_is_due, surface_pixels, surface_subject_of, surface_takes_image_zoom,
-    switcher_pin_is_allowed, switcher_row_destination, tab_close_action, tab_surface,
-    tab_surface_tip_boxes, take_math_worker_notice, take_pending_paste,
-    take_psreadline_resize_reanchor_input, tear_out_rect, tear_pane_into_tab,
-    terminal_link_answers_a_press, text_field_holding, tick_owes_a_present, tooltip_anchor_for,
-    two_tabs_mut, upright_wheel, verified_target_of, video_frame_texture_key,
-    video_still_destination, viewport_of_rect, wheel_axis, wheel_points_sideways, wheel_route,
-    wheel_steps_text_size, window_is_exposed, window_is_hidden, window_minimum_changed, zoom_about,
+    surfaces_reading, switcher_pin_is_allowed, switcher_row_destination, switcher_rows,
+    tab_close_action, tab_surface, tab_surface_tip_boxes, tab_trailing_targets,
+    take_math_worker_notice, take_pending_paste, take_psreadline_resize_reanchor_input,
+    tear_out_rect, tear_pane_into_tab, terminal_link_answers_a_press, text_field_holding,
+    tick_owes_a_present, tooltip_anchor_for, two_tabs_mut, unverified_reference_handoff,
+    upright_wheel, verified_target_of, video_frame_texture_key, video_still_destination,
+    viewport_of_rect, wheel_axis, wheel_points_sideways, wheel_route, wheel_steps_text_size,
+    window_is_exposed, window_is_hidden, window_minimum_changed, window_taskbar_progress,
+    zoom_about,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
@@ -4348,20 +4356,6 @@ struct NoticeStrip {
     say: String,
 }
 
-/// **Where in the strip the tab a preview surface belongs to is standing** —
-/// found by the tab's own name and by nothing else (§7.12 ⓑ).
-///
-/// A free function and not a method for the reason every lookup in this file
-/// that is pinned by value is one: what is under test is the *lookup*, and a
-/// `Runtime` is a surface, a compositor and
-/// four Win32 bridges. It is one line, and being one line is the finding — the
-/// line it replaced walked the window asking each tab's tree whether it held a
-/// seat with this number, which answered "yes" from any tab that happened to
-/// have numbered a preview pane the same way.
-fn preview_tab_index_among(tabs: &[TabState], tab: TabId) -> Option<usize> {
-    tabs.iter().position(|state| state.id == tab)
-}
-
 /// Everything **one** preview surface is showing, and how it is being looked at.
 ///
 /// # Why this is a struct now (slice 5)
@@ -5000,36 +4994,6 @@ impl PreviewPane {
                 .as_deref()
                 .is_some_and(|path| source.file_path() == Some(path))
     }
-}
-
-/// **Every surface reading this document, the glance card included** (user
-/// report 2026-08-28; `docs/DESIGN.md` §7.45 ②).
-///
-/// One walk, and the card is in it, because the readers of one file are not all
-/// in one map: a pane's view is its tab's ([`PreviewPanes`]) and the card's is
-/// the window's ([`WindowRuntime::peek_pane`]), for [`PreviewSurface::Peek`]'s
-/// own stated reason — one pointer, one glance. A walk of the tab's map alone
-/// therefore answers "nobody is reading this" about a file a card is standing
-/// on, and a body that lands with nobody reading it is a body nothing redraws.
-///
-/// **Identity is the file and nothing else.** Both halves ask
-/// [`PreviewPane::is_reading`], the one question a pane is asked, so a card
-/// cannot be matched by the row it was raised over, by where that row was in a
-/// list, or by which slot the document happened to be filed in.
-fn surfaces_reading(
-    panes: &PreviewPanes,
-    card: Option<&PreviewPane>,
-    source: &preview::PreviewSource,
-) -> Vec<PreviewSurface> {
-    let mut showing: Vec<PreviewSurface> = panes
-        .iter()
-        .filter(|(_, pane)| pane.is_reading(source))
-        .map(|(surface, _)| surface)
-        .collect();
-    if card.is_some_and(|card| card.is_reading(source)) {
-        showing.push(PreviewSurface::Peek);
-    }
-    showing
 }
 
 /// **The route a landed head read takes to the glass** (user report 2026-08-28;
@@ -7314,104 +7278,6 @@ impl ChevronGates {
     }
 }
 
-/// Where a row's name opens (K156).
-///
-/// Pure, and there is one answer for every file it can name: §7.1.3's ruling
-/// that activating a file opens its preview, with the "no preview" card standing
-/// in for what this window cannot display. The only row that goes nowhere is one
-/// in a column with no root, which is not a file that failed — it is a column
-/// that was never pointed anywhere.
-/// **One path, as the breadcrumb row reads it** (user ruling 2026-08-24): each
-/// segment's name, and the place a press on that segment leads.
-///
-/// Pure, and a free function for that reason — the walk has nothing to do with a
-/// window, and a rule about what `D:` means is a rule worth testing without one.
-///
-/// **The root is one segment and not two.** `Path::components` reports a Windows
-/// path's drive and its separator separately (`Prefix("D:")`, `RootDir`), and a
-/// row that drew both would offer the reader a folder called `\`. So the
-/// separator is folded into the drive it belongs to: `D:\a\b\c.md` reads
-/// `D: › a › b › c.md`, and pressing `D:` stands the column at `D:\`.
-///
-/// `.` and `..` are kept as they are written. They are legitimate segments of a
-/// relative path, resolving them here would be this function inventing a place
-/// the reader never named, and every path this window actually shows a rail for
-/// arrived from the filesystem already absolute.
-///
-/// **Off Windows the row starts at `~` or at a name, never at `/`** (owner
-/// ruling 2026-09-12, §13.32 ③). This is the ambient reader; the rule itself is
-/// [`crumb_segments_on`], which takes the platform and the home directory as
-/// values so that either shape can be read on either machine.
-fn crumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
-    crumb_segments_on(
-        path,
-        bt_platform::host_platform(),
-        profiles::home_directory(&bt_pty::SystemShellEnvironment).as_deref(),
-    )
-}
-
-/// **The two shapes a breadcrumb row can have, chosen by the platform**
-/// (owner ruling 2026-09-12, §13.32 ③).
-///
-/// Windows is [`crumb_segments_rooted`] unchanged: `C: › Users › alice ›
-/// notes.md`, drive first, because a drive is a place a reader of that machine
-/// navigates to and `%USERPROFILE%` is not a word Explorer says.
-///
-/// Off Windows the owner's report was `/ › Users › alice › .zcompdump`, and
-/// a bare `/` is not what a Mac shows anybody. Two rules replace it, and they
-/// are Finder's path bar with the volume dropped:
-///
-/// * a path **under the reader's home** starts at one `~` crumb that stands for
-///   the whole run above it — `~ › .zcompdump`, `~ › folio-port › repo › …`;
-/// * a path **outside it** starts at its own first component, with no root
-///   crumb in front — `Applications › Utilities › …`.
-///
-/// **`~` is a crumb like any other**: the place it points at is the home
-/// directory itself, so a press on it stands the files column there and the
-/// tip under it prints the path in full. Nothing downstream learns a special
-/// case — the fold, the tips, the double-click and the width measurement all
-/// read the same `(name, target)` pairs they always did.
-///
-/// `home` is a value rather than a read inside this function for
-/// [`first_run::Capability`]'s reason: what a Mac's rail says is a claim a
-/// Windows runner is entitled to check. It is ignored unless it is **rooted** —
-/// an empty `HOME` is a prefix of every path, and a row that answered `~ › / ›
-/// Applications` to it would be worse than the row this ruling replaced.
-///
-/// Rooted and not [`Path::is_absolute`], which would undo the whole point of
-/// taking the platform as a value: that method answers by the *running* host's
-/// rules, so `/Users/…` is absolute on a Mac and not absolute on Windows, and
-/// the Mac shape would then be unreadable from here. Asking what the first
-/// component *is* is the same question asked of the path itself.
-fn crumb_segments_on(
-    path: &Path,
-    platform: bt_platform::HostPlatform,
-    home: Option<&Path>,
-) -> Vec<(String, PathBuf)> {
-    let mut segments = crumb_segments_rooted(path);
-    if platform == bt_platform::HostPlatform::Windows {
-        return segments;
-    }
-    match home_crumb_for(path, platform, home) {
-        Some(home) => {
-            segments.drain(..crumb_segments_rooted(home).len());
-            segments.insert(
-                0,
-                (seats::PREVIEW_CRUMB_HOME.to_owned(), home.to_path_buf()),
-            );
-        }
-        None => {
-            if segments
-                .first()
-                .is_some_and(|(name, _)| name == std::path::MAIN_SEPARATOR_STR)
-            {
-                segments.remove(0);
-            }
-        }
-    }
-    segments
-}
-
 /// **The one question either surface asks about `~`, asked in one place**
 /// (owner ruling 2026-09-12, §13.32 ③; the feet joined the rail at §13.40).
 ///
@@ -7486,109 +7352,6 @@ fn home_shortened_path(path: &str) -> std::borrow::Cow<'_, str> {
     )
 }
 
-/// The walk itself — every component a segment, the root folded into whatever
-/// stands at the top of the path.
-fn crumb_segments_rooted(path: &Path) -> Vec<(String, PathBuf)> {
-    let mut segments: Vec<(String, PathBuf)> = Vec::new();
-    let mut built = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::RootDir => {
-                built.push(std::path::MAIN_SEPARATOR_STR);
-                // The separator belongs to the drive that just went in; on a
-                // path that begins with one there is no drive, and the root is
-                // then a segment in its own right because it is the only name
-                // the top of that tree has.
-                match segments.last_mut() {
-                    Some(last) => last.1.clone_from(&built),
-                    None => {
-                        segments.push((std::path::MAIN_SEPARATOR_STR.to_owned(), built.clone()))
-                    }
-                }
-            }
-            other => {
-                built.push(other.as_os_str());
-                segments.push((
-                    other.as_os_str().to_string_lossy().into_owned(),
-                    built.clone(),
-                ));
-            }
-        }
-    }
-    segments
-}
-
-/// **What one preview-rail control's tip says** (user ruling 2026-08-25).
-///
-/// A free function of the facts rather than a method, because that is what makes
-/// it answerable: three of the five wordings are a *state* — which face the flip
-/// would turn to, which kind of address the `⧉` copies — and two are a **path**,
-/// which is the whole reason these controls needed tips rather than captions.
-///
-/// - **`</>`** names the destination, not the state, on the reload/stop
-///   precedent: the button changes, so one word for both would describe what it
-///   was a press ago.
-/// - **`⧉`** says `Copy address` over a page and `Copy path` over a file. One
-///   verb, two kinds of address, and this is the one place the difference is
-///   spoken — the glyph is the same on both rows deliberately.
-/// - **`Open ⌄`** names the first row of its list and says there is more, which
-///   is [`i18n::Text::PaneChevronTip`]'s own shape.
-/// - **A segment** says the whole place it names, because the word drawn in it
-///   is only that place's last piece — `RootMenuRow`'s tip is the same sentence
-///   about the same kind of caption.
-/// - **`…`** says the run of levels it is standing in for, **root first**: it is
-///   a stretch of a path being read left to right, and the reader's eye is
-///   already travelling that way along the row it sits in. (The *menu* behind it
-///   is deepest-first, which is a list of destinations rather than a piece of a
-///   path — Explorer draws the same two orders for the same two things.)
-fn preview_rail_tip_text(
-    tip: seats::PreviewRailTip,
-    kind: seats::PreviewRailKind,
-    segments: &[(String, PathBuf)],
-    folded: &[usize],
-    flip_to_source: bool,
-    lock: &str,
-) -> String {
-    match tip {
-        // **The way back is named by what is on the other side of it**, and the
-        // two rails have two different things there (user ruling 2026-08-26): a
-        // markdown file's far face is a rendering this window made, a page's is
-        // the page itself. `View rendered` over a browser would be this row
-        // calling a live site a render of the file underneath it. The way *to*
-        // the source is one sentence on both, because it is one file.
-        seats::PreviewRailTip::Flip => if flip_to_source {
-            i18n::Text::PreviewFlipToSource
-        } else {
-            match kind {
-                seats::PreviewRailKind::Address => i18n::Text::PreviewFlipToPage,
-                seats::PreviewRailKind::Crumbs => i18n::Text::PreviewFlipToRendered,
-            }
-        }
-        .text()
-        .to_owned(),
-        seats::PreviewRailTip::Copy => match kind {
-            seats::PreviewRailKind::Address => i18n::Text::PreviewCopyAddress.text().to_owned(),
-            seats::PreviewRailKind::Crumbs => i18n::Text::FileMenuCopyPath.text().to_owned(),
-        },
-        seats::PreviewRailTip::Open => i18n::Text::PreviewRailOpenTip.text().to_owned(),
-        // **The padlock says the reason and nothing else** (owner's ruling
-        // 2026-09-12). It is the sentence the band used to print — `Read-only ·
-        // over 8 MB`, `This GIF's frames are too large to play` — handed in by
-        // the caller, because only the window holding the buffer knows which of
-        // them this file is owed.
-        seats::PreviewRailTip::Lock => lock.to_owned(),
-        seats::PreviewRailTip::Fold => folded
-            .iter()
-            .filter_map(|depth| segments.get(*depth).map(|(name, _)| name.as_str()))
-            .collect::<Vec<&str>>()
-            .join(&format!(" {} ", seats::PREVIEW_CRUMB_SEPARATOR)),
-        seats::PreviewRailTip::Crumb(depth) => segments
-            .get(depth)
-            .map(|(_, target)| target.display().to_string())
-            .unwrap_or_default(),
-    }
-}
-
 /// **Where a locate lands in the files column** (user ruling 2026-08-25; the
 /// file arm, 2026-09-20).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7601,130 +7364,6 @@ enum FilesLocate {
     /// (the existing one re-rooted, or one seated), and `select` is the file's
     /// row in it when a file was named.
     Root { select: Option<String> },
-}
-
-/// **How this window spells an address it is showing you** (user ruling
-/// 2026-08-25).
-///
-/// A real address is its URL; **a local file is a path** — `D:\Developer\notes.html`
-/// and not `file:///D:/Developer/notes.html`. The ruling arrived as two
-/// screenshots of one machine: a page's band under a globe said the URI form
-/// while the preview beside it said the OS form, for two files on the same disk.
-///
-/// One function, so that the row, the field it seeds and the band underneath
-/// cannot spell one file three ways — and a *display* function only: what the
-/// engine navigates to, what a mint compares and what `session.json` keeps are
-/// all still the URI. See [`webnav::local_path_form`] for why a `file:` URL this
-/// product did not mint is left exactly as it arrived.
-fn shown_address(url: &str) -> String {
-    webnav::local_path_form(url).unwrap_or_else(|| url.to_owned())
-}
-
-/// The left hand of a **page**'s foot: nothing, until the pointer is over a link
-/// (user ruling 2026-08-25).
-///
-/// **The band keeps its job and loses its echo.** §7.7 ③ gave a page's foot two
-/// jobs at once — the landing band that says where this seat's content lives, and
-/// the hover line that says where a link under the pointer would go — and it kept
-/// both because the hover line had nowhere else in the pane to stand. Then the
-/// 2026-08-24 ruling gave the page an address row of its own, and the band's first
-/// job became a second printing of the row two lines above it: one address, said
-/// twice, in one pane. §7.7's own note booked that as a debt and named this exact
-/// settlement as the way out.
-///
-/// So the foot is the hover line and only the hover line. The strip itself does
-/// **not** retire — that is the difference from the file pane, where the
-/// breadcrumb row took the whole question over and `preview_pane_geometry`
-/// collapses the band; here there is still something that has to appear on
-/// hover, and a band that appeared and disappeared under the pointer would move
-/// the page's own bottom edge every time the pointer crossed a link.
-///
-/// A target this window will not follow is written out in full and stamped
-/// with why — `· address invalid` or `· blocked` (2026-08-20's terminal
-/// hover-line ruling, the same words from [`LinkRefusal::suffix`]; owner ruling
-/// 2026-10-06, the suffix says what is true). The stamp is on the hovered target
-/// only: the seat's own URL committed, so it is by definition one this window
-/// went to, and there is no longer any rest state in which it could be stamped.
-/// **Both addresses are handed in, and the page's own is deliberately unused.**
-/// What the ruling changed is *which of the two this band prints*, and a
-/// signature that had already dropped the one it stopped printing would leave
-/// the decision nowhere — the caller would look as though it never had a choice.
-/// The underscore is the ruling: this band is given the page's address and does
-/// not print it.
-fn page_foot_lead(_page_url: &str, hover: &str) -> String {
-    if hover.is_empty() {
-        // At rest the address row above says where this is, and this band saying
-        // it again is the duplication the ruling retired.
-        return String::new();
-    }
-    // The *resolved* target, not the `href` as written — `#/download` written out
-    // as `http://127.0.0.1:5173/download` — and a local file spelled as a path,
-    // because a link into a local file is a local file (`shown_address`).
-    let mut lead = shown_address(hover);
-    if !matches!(webnav::address_bar(hover), webnav::Decision::Navigate(_)) {
-        lead.push_str(LinkRefusal::of_address(hover).suffix(i18n::current()));
-    }
-    lead
-}
-
-/// The word a **page**'s foot is flashing instead of its hover line, if any
-/// (user ruling 2026-08-25).
-///
-/// **A zoom says its own number, on the band's one flash clock.** `Ctrl`+wheel
-/// moved the engine's `ZoomFactor` and said nothing at all, which made it the
-/// only gesture in this window that changes what a reader is looking at without
-/// telling them what it changed it to. The picture beside it has said its
-/// percentage since the day it could be zoomed, so the words are the picture's
-/// exactly — [`i18n::zoom_percent`], one spelling for both — and the *place* is
-/// the one band this pane owns. A page has no meta line to hang it under: its
-/// body is the engine's glass and this window draws nothing on it.
-///
-/// **The same clock, not a second one** ([`FOOT_REVEAL_FEEDBACK`]): this band
-/// already flashes "Opened" for a duration and then goes back to being the hover
-/// line, and a percentage that faded on its own schedule would be a second
-/// rhythm on one strip. `100%` is said like every other rung — the way back to
-/// unzoomed is a detent (`webhost::zoom_step`), and a detent nobody confirms is
-/// the one rung a reader cannot tell they have reached.
-///
-/// **And a message the page was not allowed to put on the screen** (R1-21).
-/// The engine's own `alert`, `confirm` and `prompt` windows are off, so a page
-/// asking for one is answered on the spot and told nothing opened; this band is
-/// where the reader is told the same thing, because a message that vanished
-/// with no trace is a page that looks broken. It is a third thing on one clock
-/// and not a clock of its own, for the reason the zoom is on this one:
-/// 「一排按钮是程序把自己的判断交还给读者」 applies to bands too, and a strip
-/// with three rhythms on it is three strips.
-///
-/// **The later gesture owns the strip**, because each of these answers something
-/// that was just done and the older one is answering a question the hand has
-/// already moved on from.
-fn page_foot_flash(
-    zoomed: Option<(f64, Instant)>,
-    opened: Option<Instant>,
-    dismissed: Option<Instant>,
-    now: Instant,
-) -> Option<String> {
-    let fresh = |at: Instant| now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK;
-    // The later gesture owns the strip — each of these answers something that
-    // was just done, and the older one answers a question the hand has left.
-    // Written as a fold over the three rather than as a match over their
-    // combinations, because a fourth would otherwise be eight arms.
-    let mut said: Option<(Instant, String)> = None;
-    let mut latest = |at: Instant, text: String| {
-        if fresh(at) && said.as_ref().is_none_or(|(before, _)| *before <= at) {
-            said = Some((at, text));
-        }
-    };
-    if let Some((factor, at)) = zoomed {
-        latest(at, i18n::zoom_percent(factor));
-    }
-    if let Some(at) = opened {
-        latest(at, preview_opened_label().to_owned());
-    }
-    if let Some(at) = dismissed {
-        latest(at, i18n::Text::WebDialogDismissed.text().to_owned());
-    }
-    said.map(|(_, text)| text)
 }
 
 /// A file's own name, for the preview head and the buffer that fills it.
@@ -7869,30 +7508,6 @@ fn preview_open_lane(path: &Path) -> PreviewOpenLane {
         return PreviewOpenLane::Page;
     }
     PreviewOpenLane::Document
-}
-
-/// **The path a preview source is really a page for** (user ruling 2026-08-23,
-/// 「一个名字只该有一个含义」; `docs/DESIGN.md` §7.10 ⑥).
-///
-/// [`preview_open_lane`] answers for a path somebody is *opening*; this answers
-/// for an identity that is already in hand — a row from the switcher, a line
-/// from `session.json`, a seed from the vault, a file dropped on a pane — and it
-/// is deliberately the same question, asked through the same function, because
-/// the ruling is precisely that there is only one.
-///
-/// It is what `Runtime::open_preview_source_on` consults, and that is the whole
-/// mechanism: **the pool's own door is the one door**, so a `.html` cannot land
-/// as a document by arriving through a gesture nobody thought to fork. The doors
-/// that used to have to remember are the drop (`open_preview_onto`), the
-/// switcher's pool row (`choose_preview_row`), the files column's double click
-/// and the scheme editor; not one of them mentions a page.
-///
-/// A source with no file behind it is not a page however it is spelled — a git
-/// diff of `docs/design/ui-mockup.html` is a reading of a repository — and
-/// [`preview::PreviewSource::Web`] is already one, so it is not here either.
-fn source_opens_as_a_page(source: &preview::PreviewSource) -> Option<PathBuf> {
-    let path = source.file_path()?;
-    (preview_open_lane(path) == PreviewOpenLane::Page).then(|| path.to_path_buf())
 }
 
 /// **Which of the glance card's four bodies a row earns** — see
@@ -16821,11 +16436,6 @@ enum DividerGrip {
     },
 }
 
-/// What a foot says while it is confirming a reveal (B24).
-fn foot_revealed_label() -> &'static str {
-    i18n::Text::FilesRevealed.text()
-}
-
 /// How long that confirmation stands before the path comes back (B24) — the
 /// mock-up's own `setTimeout(…, 1300)` in `revealFolderFeedback`, which is one
 /// function serving the flyout's foot and the pane's alike.
@@ -16840,19 +16450,6 @@ const FOOT_REVEAL_FEEDBACK: Duration = Duration::from_millis(1300);
 /// bar takes before it goes ([`video_seat::VIDEO_BAR_IDLE_REST`]) — one number
 /// in this window for "long enough to have been read".
 const PREVIEW_REFUSAL_HOLD: Duration = Duration::from_secs(2);
-/// `.pv-unknown button` at rest (mock-up 4987).
-fn preview_open_externally_label() -> &'static str {
-    i18n::Text::PreviewOpenExternally.text()
-}
-/// And for [`FOOT_REVEAL_FEEDBACK`] after it is pressed (mock-up 7823-7829).
-///
-/// **1300ms, not the mock-up's 1100.** The prototype grew four of these
-/// acknowledgements at four durations — 1100, 1300, 1400, 1500 — and none of the
-/// differences was ever a decision. Ruling 6 (2026-08-12) collapses them onto
-/// the one that was reasoned about: `revealFolderFeedback`'s.
-fn preview_opened_label() -> &'static str {
-    i18n::Text::PreviewOpened.text()
-}
 
 /// **What one preview seat's card says**, owned, because a failure's sentence is
 /// built from a host or a scheme and a `&'static str` cannot carry one (§7.7 ④).
@@ -20312,52 +19909,6 @@ impl bt_term::Weighed for PeekCacheEntry {
     }
 }
 
-/// **Whether the file's read in flight awaits the answer to the request `asked`**
-/// (T-PEEK-ANSWER-IDENTITY; [`AnimationCache::awaits`]'s rule, for the peek cache) — the one
-/// question a peek answer may be filed for. An answer under any other identity is set aside: its
-/// read was let go of — the file changed under it ([`forget_a_picture`]) — and a newer one asked
-/// in its place, or none.
-fn peek_awaits(peek_cache: &PeekCache, key: &str, asked: computation_lane::ComputationId) -> bool {
-    matches!(
-        peek_cache.peek(key),
-        Some(PeekCacheEntry::Pending { asked: awaited }) if *awaited == asked
-    )
-}
-
-/// **The worker's answer to the peek read `asked`, filed** (T-PEEK-ANSWER-IDENTITY) — a file's
-/// decode or a video's frame (`Ok`, the `Ready` entry it makes), or the failure that came home
-/// for it: its decode's, or a video's with no frame (`Err`).
-///
-/// Filed only for the read in flight that awaits `asked` ([`peek_awaits`]): the answer to a read
-/// the window has let go of is set aside — it was read from bytes the file no longer holds, and
-/// the window's newer read is the one filed. A failure is filed only for a file some surface
-/// names (T-PEEK-CACHE-QUESTION-RECORDS; [`AnimationCache::answered_for_nobody`]'s rule): for a
-/// file no surface names by the time it lands, its read in flight is let go of and nothing is
-/// filed, since a record nobody is showing would be one [`let_go_unnamed_peek_records`] exists to
-/// end. Pixels are filed either way: they are weight, which the budget governs. `true` when the
-/// answer was the awaited one — the one case in which the surfaces standing on the file are told.
-fn file_peek_answer(
-    peek_cache: &mut PeekCache,
-    named: &BTreeSet<String>,
-    key: String,
-    asked: computation_lane::ComputationId,
-    answer: Result<PeekCacheEntry, bt_term::InlineImageDecodeError>,
-) -> bool {
-    if !peek_awaits(peek_cache, &key, asked) {
-        return false;
-    }
-    match answer {
-        Ok(pixels) => peek_cache.insert(key, pixels),
-        Err(failure) if named.contains(&key) => {
-            peek_cache.insert(key, PeekCacheEntry::Failed(failure));
-        }
-        Err(_) => {
-            peek_cache.remove(&key);
-        }
-    }
-    true
-}
-
 /// **What became of a request for a file's pixels** ([`ask_for_peek_pixels`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PeekAsk {
@@ -22252,15 +21803,6 @@ struct TerminalReference {
 /// [`WindowRuntime::pointer_reference`].
 type PointerReferenceMemo = RefCell<Option<((SeatId, u32), Option<TerminalReference>)>>;
 
-/// **The request [`Runtime::open_unverified_reference`] puts on the OS hand-off lane** — the files
-/// column's door, which reads `names_a_program` (ticket 14).
-///
-/// A free function so the road from the table's arm to the door can be driven through the real
-/// lane in a test: a share handed over must meet the program list a local file meets.
-fn unverified_reference_handoff(path: &Path) -> bt_platform::Handoff {
-    bt_platform::Handoff::Open(path.to_path_buf())
-}
-
 /// **A files row's open, as the OS hand-off lane is asked it** — the system's default handler for
 /// `path`, refused in the files row's words (`Runtime::open_local_path`).
 fn open_local_path_ask(path: &Path) -> handoff_lane::Ask {
@@ -22310,65 +21852,6 @@ const UNVERIFIED_REFERENCE_REFUSAL: handoff_lane::Refusal = handoff_lane::Refusa
 // not distinguish `TIMELINE.HTM` from `timeline.htm` would leave this window
 // doing two things with one file.
 
-/// The file a preview seat would hand to a browser, when its content is a page
-/// (user ruling 2026-08-20, §7.1.5g).
-///
-/// **One predicate for both halves of the button**: whether the head draws the
-/// arrow at all, and which path a press on it gives the shell. Written once
-/// because the two are the same question — a button that can be lit over
-/// something it will not open is the class of bug `PreviewHeadTools`' own note
-/// exists to make impossible, and a second reading of "which file" is how a
-/// button comes to hand over whatever the *focused* seat is showing rather than
-/// the one it stands on.
-///
-/// It composes the two functions that already answer the halves —
-/// [`preview::PreviewSource::file_path`], the one door every file-only
-/// capability asks through, and [`path_opens_as_a_page`], this window's own
-/// reading of what names a page. So a document this window composed out of a
-/// repository answers `None` however its path inside the repo is spelled: it is
-/// not a file, so it is not a page.
-///
-/// **The question is "is this a page", not "is this HTML"** (user ruling
-/// 2026-08-23, the second ruling of that day; §7.10 ⑥). It asked
-/// the narrower `names_an_html_page` until then, which had been the same question while
-/// `html` and `htm` were the only spellings this window opened on the engine's
-/// lane. That morning's ruling put `pdf` on that lane too, and the two
-/// predicates came apart: one class, two heads — a local `.html` page wore the
-/// arrow and a local `.pdf` page did not. So the arrow now asks the lane's own
-/// predicate, which is the only place the page class is written down, and a
-/// third spelling of the class cannot appear here because there is nothing here
-/// to spell it with.
-///
-/// **And the `.pdf` is the member of the class that needs this button most.**
-/// The browser's own reader prints, rotates and annotates where the embedded
-/// one does not, and the head's other door out — `</>`, the page's developer
-/// tools — has nothing to show over a PDF. An `.html` page shut out of a
-/// browser at least keeps its source; a `.pdf` would have kept nothing.
-///
-/// **And a page that is being *rendered* is still a file** (user ruling
-/// 2026-08-23). Until that ruling the arrow was drawn over a `.html` shown as
-/// source and went out the moment the same file rendered — the source view was
-/// the only thing the seat could do with a page, so `PreviewSource::Web` had
-/// never needed an answer here. Now the render is what a double click gets, and
-/// a seat with no way to the real browser would be §7.1.5g ②″'s complaint
-/// upside down: a reader shut out of the page's own front. So a `file:` page
-/// answers with the path underneath it, taken back off the URL by the one
-/// function that reads a `file:` URL as the path it names
-/// ([`webnav::LocalFileUrl`]) — never by string surgery, and never for an
-/// address from anywhere else, which is why a page on `http` still answers
-/// `None` here: it has no *file* to hand anybody, and is handed to the browser
-/// as an address by the caller ([`preview_page_browser_hand_off`], ticket 39).
-fn preview_page_hand_off(source: &preview::PreviewSource) -> Option<PathBuf> {
-    if let Some(url) = source.web_url() {
-        let path = webnav::LocalFileUrl::parse(url)?.into_path_and_tail().0;
-        return path_opens_as_a_page(&path).then_some(path);
-    }
-    source
-        .file_path()
-        .filter(|path| path_opens_as_a_page(path))
-        .map(Path::to_path_buf)
-}
-
 /// **What a press on a page's `↗` hands to the machine** (§7.1.5g; ticket 39,
 /// owner ruling 2026-09-23: 「这个肯定是要能打开的」).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22386,57 +21869,6 @@ enum PageHandOff {
     Address(String),
 }
 
-/// **The arrow's road is a property of the address, decided once.**
-///
-/// * A `file:` URL [`webnav::LocalFileUrl`] reads is a file on this machine,
-///   whatever kind of file: it takes the file door, so the program list
-///   applies — a `file:///…/x.exe` never leaves as a bare address for the
-///   shell to run.
-/// * A `file:` URL naming a share on another machine takes the share's door,
-///   the one `Ctrl` on a printed share takes.
-/// * Any other `file:` URL leaves by no road: a path never leaves as a URI
-///   (the reference table's rule, `terminal_reference_row`), because the shell
-///   would read it a second way and skip the list.
-/// * Every other address — `http`, `https`, whatever the engine is standing
-///   on — is handed over as that address.
-///
-/// A seat showing a file rather than an engine page answers with
-/// [`preview_page_hand_off`], which keeps its page-ness contract for the head
-/// that asks whether to draw the arrow at all.
-///
-/// Until ticket 39 the press asked [`preview_page_hand_off`] alone, so a page
-/// on `http://127.0.0.1:8732/…` drew the arrow in its head and its address row
-/// and both did nothing.
-fn preview_page_browser_hand_off(source: &preview::PreviewSource) -> Option<PageHandOff> {
-    let Some(url) = source.web_url() else {
-        return preview_page_hand_off(source).map(PageHandOff::File);
-    };
-    if let Some(local) = webnav::LocalFileUrl::parse(url) {
-        return Some(PageHandOff::File(local.into_path_and_tail().0));
-    }
-    if webnav::scheme_of(url).as_deref() == Some("file") {
-        return bt_platform::file_uri_to_path(url)
-            .filter(|path| bt_transcript::paths::is_a_share_on_another_machine(path))
-            .map(PageHandOff::Share);
-    }
-    Some(PageHandOff::Address(url.to_owned()))
-}
-
-/// **What the address arm puts on the OS hand-off lane, and what a refusal of
-/// it raises on the surface that was pressed** — the address unchanged, and the
-/// notice a refused address already has on a preview surface (ticket 14's
-/// `HyperlinkActivation::Scheme` arm), so a page the machine cannot open is not
-/// silent either.
-fn page_address_hand_off(
-    surface: PreviewSurface,
-    address: &str,
-) -> (bt_platform::Handoff, handoff_lane::OnRefused) {
-    (
-        bt_platform::Handoff::Address(address.to_owned()),
-        handoff_lane::OnRefused::PreviewAddressRefused(surface, address.to_owned()),
-    )
-}
-
 /// **The stderr words of a refused page address** — this button's own.
 const PAGE_ADDRESS_REFUSAL: handoff_lane::Refusal = handoff_lane::Refusal {
     stderr: Some((
@@ -22445,36 +21877,6 @@ const PAGE_ADDRESS_REFUSAL: handoff_lane::Refusal = handoff_lane::Refusal {
     )),
     program_notice: false,
 };
-
-/// **The file a page's `</>` would show you**, or `None` when that page has no
-/// second face (user ruling 2026-08-26; DESIGN §7.7 ⑭).
-///
-/// Two refusals, and each is a different sentence rather than two spellings of
-/// caution:
-///
-/// * **A remote page has no source on this disk.** `https://example.com/a.html`
-///   answers `None` because [`webnav::LocalFileUrl`] reads `file:` URLs and
-///   nothing else, and what a server sent is not a file — the bytes the engine
-///   rendered were never on this machine to be opened. Fetching them again to
-///   show them would be this window running a second, weaker browser beside the
-///   one already on the seat.
-/// * **A `.pdf` has no text in it.** That is [`preview::PageGlance`]'s whole
-///   judgement and it is asked here rather than restated: the page class already
-///   carries a column saying which of its members this window can read, the
-///   glance card has been reading it since 2026-08-25, and a second table would
-///   be the defect §7.10 ⑥ was written out of.
-///
-/// The tail (`#section`, `?q=`) is dropped exactly as [`preview_page_hand_off`]
-/// drops it: what the reader asked for is the file, and a fragment is a place
-/// inside the *rendered* page rather than inside its bytes.
-///
-/// A free function of the URL, so that the whole of the offer can be read
-/// without a window: this is the predicate the rail's button set is drawn from
-/// and the one the flip verb consents to, and both must be the same sentence.
-fn page_source_file(url: &str) -> Option<PathBuf> {
-    let path = webnav::LocalFileUrl::parse(url)?.into_path_and_tail().0;
-    (preview::path_page_glance(&path) == Some(preview::PageGlance::Source)).then_some(path)
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum LocalImageActivation {
@@ -23003,44 +22405,6 @@ struct TabTriggerHand {
     /// **A peek this tab's folder summoned is on screen**
     /// ([`Runtime::peeking_tab`]).
     peeking: bool,
-}
-
-/// `(how open the trailing run stands, how lit the folder is)` for one tab.
-///
-/// The width first. H76/H104's ladder gives the folder three rungs of *light* —
-/// dark at rest, half-lit while the pointer is anywhere on the tab, full while
-/// it is on the trigger itself, with the active tab exempt from none of it —
-/// and the run it stands in is opened by the pointer alone.
-///
-/// **And by a peek hanging off it, which is this function's reason for
-/// existing.** A folder that has summoned a float is a folder still in use: the
-/// hand walks off the tab and *into the window it just opened*, which is the
-/// whole of what a peek is for (§7.1.2「hover 瞬态 peek …离开宽限 220ms」 — a
-/// grace exists precisely because the pointer is expected to leave the trigger).
-/// A run that closed on that move took the trigger's rectangle with it, and a
-/// trigger with no rectangle is a trigger that has **died** as far as
-/// [`Runtime::trigger_rect`] can tell — which is the question
-/// [`Runtime::advance_float`] asks before it takes a peek down whose header has
-/// gone away. So the peek dissolved on the first move toward it, every time,
-/// and the folder it came from blinked out from under it (user report,
-/// 2026-08-17). Held open, the trigger also stays *hittable*, which is what
-/// `drive_float_hover`'s `on_trigger` reads when the hand comes back and what
-/// §7.1.2's「再点触发器」needs to exist at all.
-///
-/// Only the transient peek is named here, and only a **tab**'s trigger: a
-/// pinned float is exempt from that dismissal by ruling, and a pane head's
-/// folder is not reveal-scaled — it has its box at rest and only its opacity
-/// moves ([`seats::pane_head_geometry`]).
-fn tab_trailing_targets(hand: TabTriggerHand) -> (f32, f32) {
-    let run = hand.pinned || hand.hovered || hand.peeking;
-    let lit = if hand.on_trigger || hand.peeking {
-        1.0
-    } else if hand.hovered {
-        seats::TAB_FILES_TRIGGER_REVEAL
-    } else {
-        0.0
-    };
-    (f32::from(u8::from(run)), lit)
 }
 
 // **`attention_is_asked` and `attention_ticket` stood here until A2, and what took them away is
@@ -24075,124 +23439,6 @@ fn indeterminate_start_milliturns(elapsed: Duration, motion: Motion) -> u16 {
 /// How far round the ring a progress report reaches, in thousandths of a turn.
 fn sweep_milliturns(percent: u8) -> u16 {
     u16::from(percent.min(100)) * 10
-}
-
-/// How loud one progress report is. Higher wins the window's taskbar button.
-///
-/// `Indeterminate` sits **below** the three determinate states rather than
-/// beside them, and that placement is the whole of the "a determinate reading
-/// wins the value" rule: a sweeping bar has nowhere to put a number, so a rule
-/// that ranked it above `Normal` would have to be followed by a second rule
-/// undoing itself for the value. It is also the least informative of the four —
-/// it says only that something is happening — so losing to a report that can
-/// say how far it has got costs nothing.
-fn taskbar_severity(state: ProgressState) -> u8 {
-    match state {
-        ProgressState::Error(_) => 3,
-        ProgressState::Paused(_) => 2,
-        ProgressState::Normal(_) => 1,
-        ProgressState::Indeterminate => 0,
-    }
-}
-
-/// How far along one progress report says it is, for ranking only.
-///
-/// A report with no percentage reads as 100 for the same reason [`ring_arc`]
-/// draws it as a full turn with nothing remembered: `OSC 9;4` states 2 and 4
-/// carry the percentage optionally because they are a change to a run already
-/// on the wire, and when no number was ever on the wire there is nothing to
-/// treat as less than finished.
-fn taskbar_completion(state: ProgressState) -> u8 {
-    match state {
-        ProgressState::Normal(percent) => percent.min(100),
-        ProgressState::Error(percent) | ProgressState::Paused(percent) => {
-            percent.map_or(100, |percent| percent.min(100))
-        }
-        ProgressState::Indeterminate => 100,
-    }
-}
-
-/// The one reading this window's taskbar button carries, folded out of every
-/// progress report in the window (Windows landing block slice 1).
-///
-/// # It mirrors one real report, whole
-///
-/// A window has one taskbar button and a button has one bar, so the fold has to
-/// end at a single reading — and the reading it ends at is **one session's
-/// report, carried across intact**, never a tuple assembled out of two. That is
-/// [`TabState::fleet_progress`]'s discipline kept ("a mean, a sum or a max would
-/// have the ring reporting a run that nothing is actually doing"), and it is why
-/// the obvious-sounding "most severe state, least-finished percentage" is *not*
-/// what this does: a window holding a failure at 80% and a download at 10% would
-/// paint the button red at 10%, a failure at a percentage that failure never
-/// had. The button says red at 80%, because that is a thing that happened.
-///
-/// # But it ranks by severity, not by seat order
-///
-/// This **overturns** `fleet_progress`'s "the first one reported, in seat order"
-/// for the window-level fold, deliberately (DESIGN.md §7.3). The ring can afford
-/// first-in-order because it is drawn *beside* the tab that owns it: whichever
-/// pane it picked, the pane is one click away and the choice is answerable. The
-/// taskbar button is one line for a whole window and it is looked at when Folio
-/// is **not on screen** — it is the only reading the user has. A rule that could
-/// hide a failed build behind an earlier-seated download that happens to still
-/// be running would make it a bar nobody can trust, and an untrustworthy bar is
-/// worse than no bar. So the window's line is its worst news:
-/// error > paused > normal > indeterminate, ties broken by the **least**
-/// finished report — the taskbar answers "how far is the least-finished thing I
-/// am waiting on" — and remaining ties by the order the reports arrive, which is
-/// tab order and then seat order, both functions of the tree and never of a
-/// hash.
-///
-/// # Every session, not every tab's pick
-///
-/// The fold runs over sessions and not over `fleet_progress` per tab, because a
-/// tab's own first-in-order pick would drop the failure before the window ever
-/// saw it — the window would inherit a rule it just overturned.
-///
-/// # What is deliberately not here
-///
-/// Only `OSC 9;4` drives this. `busy`, `unread-ok`, `unread-fail`,
-/// `waiting-for-answer` and `bell` (DESIGN.md §7.1.5b) stay off the taskbar in
-/// this slice: none of them is a *quantity*, and answering "the user is being
-/// waited on" with a paused bar at some invented fullness would be inventing
-/// semantics the protocol does not have. Surfacing attention is the attention
-/// queue's block, which owns a badge shaped like the question.
-fn window_taskbar_progress(
-    reports: impl Iterator<Item = ProgressState>,
-) -> bt_platform::TaskbarProgress {
-    // `min_by_key` returns the *first* of several equal minima, which is what
-    // makes "then the order they arrive in" a tiebreak this fold gets for free
-    // rather than a third component nobody could test.
-    let loudest = reports.min_by_key(|state| {
-        (
-            std::cmp::Reverse(taskbar_severity(*state)),
-            taskbar_completion(*state),
-        )
-    });
-    let Some(state) = loudest else {
-        return bt_platform::TaskbarProgress::CLEARED;
-    };
-    bt_platform::TaskbarProgress {
-        state: match state {
-            ProgressState::Normal(_) => bt_platform::TaskbarProgressState::Normal,
-            ProgressState::Error(_) => bt_platform::TaskbarProgressState::Error,
-            ProgressState::Paused(_) => bt_platform::TaskbarProgressState::Paused,
-            ProgressState::Indeterminate => bt_platform::TaskbarProgressState::Indeterminate,
-        },
-        // Out of 100 and not out of the run's own units, because 100 is all the
-        // protocol ever gives: `OSC 9;4` states a percentage. The `None` cases
-        // are the two the protocol leaves open — a failure or a pause that named
-        // no number keeps whatever the bar already showed, which is the run's
-        // last real percentage repainted in the new colour.
-        value: match state {
-            ProgressState::Normal(percent) => Some((u64::from(percent.min(100)), 100)),
-            ProgressState::Error(percent) | ProgressState::Paused(percent) => {
-                percent.map(|percent| (u64::from(percent.min(100)), 100))
-            }
-            ProgressState::Indeterminate => None,
-        },
-    }
 }
 
 /// This window's taskbar button, and the reading it is carrying.
@@ -25982,25 +25228,6 @@ enum OpenAsked {
     Unstarted,
     /// Turned away at the door (the lane is full): nothing is filed, so the next walk asks again.
     TurnedAway,
-}
-
-/// **Ask the computation lane to open one animated file for the window at `leaf`** — what
-/// [`AnimationCache::ask_for_showing`] hears of each file it asks: admitted under the identity the
-/// lane minted, which the decode in flight is recorded under and its answer is filed by; its thread
-/// not started; or turned away at the door.
-fn ask_to_open(
-    computation: &computation_lane::ComputationLane,
-    leaf: ShellAddress,
-    path: &Path,
-) -> OpenAsked {
-    match computation.decorate(MathWorkerRequest::PeekAnimation {
-        leaf,
-        path: path.to_owned(),
-    }) {
-        Ok(asked) => OpenAsked::Asked(asked),
-        Err((lane::Refused::NotStarted(_), _)) => OpenAsked::Unstarted,
-        Err(_) => OpenAsked::TurnedAway,
-    }
 }
 
 /// **What sending one fill came to** — see [`AnimationCache::send_fill`].
@@ -30171,117 +29398,6 @@ fn persisted_preview_row(
         source.file_path()?.to_string_lossy().into_owned(),
         bt_persist::PreviewSourceV1::File,
     ))
-}
-
-/// **The switcher's whole list, in one place** — the tab's pool with the kept
-/// rows lifted to the top (P130-P137, user ruling 2026-08-19, W2 slice ③).
-///
-/// **The dropdown is the honest inventory of hidden state** (P130, `DESIGN.md`
-/// §7.1.3): the pool's own order, every buffer in it, and each one's dirty bit —
-/// a list that showed only the clean ones, or only the recent ones, would be the
-/// window deciding which unsaved edits you are allowed to know about.
-///
-/// **Files and pages in one list and one index space** (`docs/DESIGN.md` §7.7 ⑤).
-/// Nothing here branches on which of the two a row is except the two places where
-/// they genuinely differ: which pin category the row belongs to, and what an
-/// *unopened* kept row is called.
-///
-/// A free function, taking the three things it reads, so that "the switcher lists
-/// a page exactly as it lists a file" is a claim a test can make without a window.
-fn switcher_rows(
-    pool: &preview::PreviewPool,
-    current: Option<&preview::PreviewSource>,
-    kept: &[(bt_persist::PinKind, String)],
-) -> Vec<profiles::PreviewMenuItem> {
-    let live: Vec<profiles::PreviewMenuItem> = pool
-        .buffers()
-        .enumerate()
-        .map(|(index, buffer)| profiles::PreviewMenuItem {
-            name: buffer.name().to_owned(),
-            dirty: buffer.dirty(),
-            current: Some(buffer.source()) == current,
-            // **A file and a page can both be kept, and each under its own
-            // category** (W2 slice ③). A diff and a commit's reading of a file
-            // cannot: they are documents this window computed, and keeping one
-            // would be keeping the question.
-            keep: preview_menu_target(buffer.source()),
-            pinned: false,
-            pool: Some(index),
-        })
-        .collect();
-    // **The kept rows first, and each of them once** (user ruling 2026-08-19). A
-    // kept target that is also open is *lifted* out of the list below rather than
-    // copied above it, which is the ruling's own "PINNED 与最近列表不留双副本" —
-    // and a kept target nobody has opened is a row with no buffer behind it,
-    // which is what makes the section survive a restart.
-    //
-    // **Both categories, in the file's own order** (`pins.json` is one table and
-    // array order is display order), and the lift compares the pair rather than
-    // the string: `pins::row_of` identifies a row by category and target
-    // together, and a switcher that compared only targets would let a pinned file
-    // stand in for a pinned page.
-    let kept: Vec<profiles::PreviewMenuTarget> = kept
-        .iter()
-        .map(|(kind, target)| profiles::PreviewMenuTarget {
-            kind: *kind,
-            target: target.clone(),
-        })
-        .collect();
-    // A row that cannot be kept can never match a kept one, and the `Folder`
-    // category is how that is said in this type rather than by a second `Option`
-    // in the comparison: the switcher never draws a folder, so no row it holds
-    // can carry that category honestly.
-    let unkeepable = profiles::PreviewMenuTarget {
-        kind: bt_persist::PinKind::Folder,
-        target: String::new(),
-    };
-    let (pinned, rest) = pins::lift_pinned(&kept, &live, |item| {
-        item.keep.clone().unwrap_or_else(|| unkeepable.clone())
-    });
-    pinned
-        .into_iter()
-        .map(|keep| {
-            let open = live.iter().find(|item| item.keep.as_ref() == Some(&keep));
-            profiles::PreviewMenuItem {
-                // The pool's own name where there is a pool entry, and the
-                // target's own where there is not: a file by its last segment, a
-                // page by its site — the same two functions every other surface
-                // that names an unopened row uses, so a kept thing reads the same
-                // before and after it is opened.
-                name: open.map_or_else(
-                    || match keep.kind {
-                        bt_persist::PinKind::Url => webnav::site_label(&keep.target),
-                        _ => files_row_display_name(Path::new(&keep.target)),
-                    },
-                    |item| item.name.clone(),
-                ),
-                dirty: open.is_some_and(|item| item.dirty),
-                current: open.is_some_and(|item| item.current),
-                keep: Some(keep),
-                pinned: true,
-                pool: open.and_then(|item| item.pool),
-            }
-        })
-        .chain(rest)
-        .collect()
-}
-
-/// **What a switcher row keeps, and under which category** — `None` for a
-/// buffer that cannot be kept at all.
-///
-/// The pin file's vocabulary, derived from this window's identity type in one
-/// place. A file is a `file` row and a page is a `url` row; a git-backed document
-/// is neither, because keeping it would keep a question this window asked rather
-/// than a place somebody went.
-fn preview_menu_target(source: &preview::PreviewSource) -> Option<profiles::PreviewMenuTarget> {
-    let (target, kind) = persisted_preview_row(source)?;
-    Some(profiles::PreviewMenuTarget {
-        kind: match kind {
-            bt_persist::PreviewSourceV1::File => bt_persist::PinKind::File,
-            bt_persist::PreviewSourceV1::Url => bt_persist::PinKind::Url,
-        },
-        target,
-    })
 }
 
 /// [`persisted_preview_row`] in the vault's own spelling — see
@@ -36095,20 +35211,6 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     outcome
 }
 
-/// **What Explorer can be pointed at, for a buffer** (G-3).
-///
-/// A file, always. A git document, only when the working-tree file it is a
-/// reading of is still on the disk — which for a diff of a deletion, or a
-/// `git show` of a file that has since been removed, it is not. The existence
-/// check is here rather than in [`preview::PreviewSource`] because that module
-/// answers about identities and this is a question about a disk.
-fn revealable_preview_file(source: &preview::PreviewSource) -> Option<PathBuf> {
-    match source.file_path() {
-        Some(path) => Some(path.to_path_buf()),
-        None => source.repo_file().filter(|path| path.is_file()),
-    }
-}
-
 /// **Everything a window is born with that is not the same in every window.**
 ///
 /// One list rather than two constructors (multiwindow slice C). A
@@ -36630,30 +35732,6 @@ fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {
         }
     }
     wanted
-}
-
-/// **One file moved: every surface holding an answer about it drops that
-/// answer** (§7.1.3u, and its third report).
-///
-/// [`Runtime::forget_the_picture_in`]'s fourth ledger, and the one the three
-/// caches in [`forget_a_picture`] cannot speak for. Since §7.1.3u an answer
-/// outlives the pixels — which is what stops a bounded cache sending this window
-/// round the same nine decodes for ever — and this is the one case where the
-/// answer is *wrong*: the bytes behind the path are not the bytes it was given.
-///
-/// **Both kinds of holder, because there are two.** A markdown page holds its
-/// answers in [`DocumentPictures`]; a picture *pane* holds its own in
-/// [`PreviewImageState`] — the content key of the raster it is drawing and the
-/// decode's own dimensions — and since that answer is now read in front of the
-/// decode store ([`surface_pixels`]), a pane that kept it would go on drawing the
-/// old picture of a file that has been replaced under it, and would never ask for
-/// the new one. What it does not touch is the pane's own `path`: which file this
-/// surface is showing has not changed, only what is in it.
-fn forget_standing_answers<'a>(holders: impl Iterator<Item = &'a mut PreviewPane>, path: &Path) {
-    let key = bt_term::normalized_local_image_path_key(path);
-    for pane in holders {
-        pane.forget_standing_answers(&key);
-    }
 }
 
 impl<B: Backend> settings::geometry::PointerHost for Runtime<'_, B> {
@@ -38165,38 +37243,6 @@ impl<B: Backend> Runtime<'_, B> {
         self.present_chrome_change()
     }
 
-    /// **B22 — which split wears cards this frame, and how far in**, for
-    /// [`seats::ChromeContent::resizing_cards`].
-    ///
-    /// Sampled here and handed over as a number, exactly as
-    /// [`Runtime::pane_transforms`] hands the pane FLIP over: `seats` has an
-    /// explicit invariant that nothing in it knows what time it is.
-    ///
-    /// `None` at a zero inset rather than `Some(0.0)`, because the two are the
-    /// same picture and only one of them is a fact — see
-    /// [`seats::resizing_card_inset`] for why a card of zero size is not a card.
-    fn resizing_cards_frame(&self, now: Instant) -> Option<seats::ResizingCards> {
-        let split = self.window.resizing_card_split?;
-        let (inset, _) = self
-            .window
-            .resizing_card_transition
-            .sample(now, self.app.motion);
-        (inset > 0.0).then_some(seats::ResizingCards { split, inset })
-    }
-
-    /// The card inset as the chrome would *draw* it — whole physical pixels of
-    /// margin and radius — or `None` when there is no card.
-    ///
-    /// Quantised for the reason the pin's reveal and the dock box's fade are:
-    /// `ease` has a long flat tail in which the transition is crawling through
-    /// less than a pixel and the drawn card is byte-identical, and comparing the
-    /// raw fraction would owe a present on every wake-up of the hundred
-    /// milliseconds.
-    fn drawn_resizing_card(&self, now: Instant) -> Option<(f32, f32)> {
-        let cards = self.resizing_cards_frame(now)?;
-        seats::resizing_card_inset(self.window.renderer.scale_factor() as f32, cards.inset)
-    }
-
     // ────────────────────────── the command marks rail ──────────────────────────
 
     // ────────────────────────── in-pane search (§7.1.5d) ──────────────────────────
@@ -38796,67 +37842,6 @@ impl<B: Backend> Runtime<'_, B> {
         let card = self.focus_rail_geometry_now(Instant::now())?;
         let mini = card.cards.first()?.mini;
         Some((mini[2] - mini[0], mini[3] - mini[1]))
-    }
-
-    /// What the plan on screen must be a function of, or `None` when there is no
-    /// dock to draw.
-    fn plan_inputs(&self) -> Option<PlanInputs> {
-        self.plan_inputs_for(self.held_drag()?)
-    }
-
-    /// The same question asked of a drag the caller is holding.
-    ///
-    /// [`Runtime::release_drag`] takes the drag out of the window before it
-    /// decides anything — a gesture that has ended must not be in flight while
-    /// its own consequences run — so the commit cannot ask `self.drag` what it
-    /// was aiming at. It asks the drag it has.
-    fn plan_inputs_for(&self, drag: &Drag) -> Option<PlanInputs> {
-        let landing = drag.landing?;
-        // The strip's two landings draw themselves in the strip (K124: "the
-        // preview in the strip is the ghost now"), so there is no dock box for
-        // them and never was one to fade.
-        landing.layout_aim()?;
-        let showing = self.window.tabs[self.window.active_tab].id;
-        // **The one place a source is turned into the *shape* it arrives in**
-        // (M156, and §7.1.6k′'s addition to it). `Some` means "a whole subtree
-        // arrives and is renumbered on the way in"; `None` means "a seat of the
-        // tree being planned changes places and keeps its own name".
-        //
-        // Written here rather than in [`Runtime::plan_for`] because this is the
-        // cache key: the shape is part of what the plan is a function of, and a
-        // spring that moves the view mid-gesture changes the shape without
-        // changing the landing.
-        let cargo = match &drag.source {
-            // A row arrives as one leaf, and that leaf is built where the plan
-            // is (see [`Runtime::plan_for`]) — a row has no tree of its own to
-            // carry, which is the whole difference between it and a tab.
-            DragSource::Row(_) => None,
-            // **§7.1.6k′ — a pane is one shape at home and the other away.** In
-            // the tab on screen it is a seat this tree owns, so it arrives *as
-            // itself*: the same `Seat`, the same id, its fixed extent along
-            // with it, and a centre that trades payloads rather than evicting
-            // anybody (L138). Once the spring has left the hand in one tab and
-            // the view in another, that seat is not in the tree being planned
-            // at all — it is a subtree from another room, exactly like a tab's,
-            // and it arrives the way one does.
-            DragSource::Pane(leaf) if leaf.tab == showing => None,
-            DragSource::Pane(leaf) => Some(bt_layout::LayoutNode::seat(
-                self.tab_state(leaf.tab)?
-                    .seats
-                    .tree()
-                    .find_seat(leaf.seat)?
-                    .clone(),
-            )),
-            DragSource::Tab(id) => Some(self.tab_state(*id)?.seats.tree().clone()),
-        };
-        Some(PlanInputs {
-            landing,
-            source: drag.source.clone(),
-            tree: self.seats.tree().clone(),
-            cargo,
-            viewport: self.window.seat_viewport,
-            scale_ppm: seats::scale_ppm(self.window.renderer.dpi_milli().get()),
-        })
     }
 
     /// **Note whether this window is in Cards, and raise the bubble on the frame
@@ -40568,19 +39553,6 @@ impl<B: Backend> Runtime<'_, B> {
         )
     }
 
-    /// The draft in the box open on **this seat's** crumb tail, if one is (B5).
-    ///
-    /// Read twice a frame — once to measure the row and once to draw it — so it
-    /// is a question about the window rather than a value carried between the
-    /// two: a copy passed along would be a second place the answer lives, and
-    /// the two readers run either side of a geometry pass.
-    fn open_crumb_draft(&self, surface: PreviewSurface) -> Option<String> {
-        self.window.rename.as_ref().and_then(|editor| {
-            matches!(&editor.subject, RenameSubject::PreviewCrumb { surface: at, .. } if *at == surface)
-                .then(|| editor.text().to_owned())
-        })
-    }
-
     /// **`Install fonts…`: open the system's own Fonts page** (user ruling
     /// 2026-08-19).
     ///
@@ -41318,177 +40290,9 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ── the plural content plane (slice 5) ──────────────────────────────────
 
-    /// **The source file this surface is showing instead of its page**, or
-    /// `None` when it is showing the page (user ruling 2026-08-26).
-    ///
-    /// A comparison and not a flag, which is [`PreviewPane::page_source`]'s own
-    /// note: the pane remembers *which file* it was turned to, and this asks
-    /// whether that is still the file the seat is on. A page that has since
-    /// navigated somewhere else answers `None` with nothing having been cleared
-    /// — the reader is looking at the new page, which is what pressing an
-    /// address bar means — and a page that comes back answers again.
-    fn page_source_shown_on(&self, surface: PreviewSurface) -> Option<&Path> {
-        // Cheapest question first and on purpose: every surface in this window
-        // asks this on the way to its buffer, and all but a flipped page leave
-        // here without touching the web map or parsing a URL.
-        let reading = self.preview_pane(surface)?.page_source()?;
-        let page = self.preview_page_source_file(surface)?;
-        (page == reading).then_some(reading)
-    }
-
-    /// **The page lane asked the disk and the disk said no** — the file on the
-    /// surface it was aimed at, with the reason on it (user ruling 2026-08-23;
-    /// §7.39; §7.14f).
-    ///
-    /// It used to be `open_preview_file`, and that was right while `.html` was
-    /// text: the document lane would read the file, fail, and print the fault
-    /// itself. It cannot be that any more for two reasons at once — the fork on
-    /// the pool's door would send it straight back here, and a page-named file
-    /// is not read as text by anything in this window, so nothing downstream
-    /// would ever produce the sentence.
-    ///
-    /// So the reason travels the one hop from where it was learned to the buffer
-    /// that has to say it. `PreviewBuffer::accept` is the same door a head read's
-    /// refusal comes through; there is no second way for a buffer to be refused.
-    ///
-    /// **There is no second spelling that picks the surface itself.** A promoted
-    /// page that turns out not to be on the disk owes its refusal to *the float*
-    /// (§7.39), and since §7.14f a dropped one owes it to the seat it was dropped
-    /// on, for the same reason: the card belongs where the reader is looking,
-    /// which is where they aimed. The one door that has no surface of its own
-    /// ([`Self::open_preview_web_file`]) resolves the landing rule before it gets
-    /// here, so the caller always has one to name.
-    fn land_page_refusal_on(
-        &mut self,
-        surface: PreviewSurface,
-        path: PathBuf,
-        refusal: preview::PreviewRefusal,
-    ) -> Result<()> {
-        let name = files_row_display_name(&path);
-        let source = preview::PreviewSource::file(path);
-        self.land_preview_source_on(surface, source.clone(), name)?;
-        if let Some(buffer) = self.preview_pool.get_mut(&source) {
-            buffer.accept(preview::HeadOutcome::Refused(refusal));
-        }
-        self.refresh_preview_body();
-        self.present_chrome_change()
-    }
-
-    /// The same, on a pane the caller has already named (user ruling
-    /// 2026-08-27; §7.23 ⑩).
-    ///
-    /// [`Self::open_minted_page`]'s split, and it is
-    /// [`Self::open_preview_image_on`]'s split for the same reason: the play
-    /// verb knows exactly which pane it was pressed on, and letting
-    /// [`Self::open_web_page_with`] choose — which asks the tab for *its* page
-    /// seat — would put a player on a pane in the corner of the tab that
-    /// happened to be showing a `.html`.
-    fn open_minted_page_on(&mut self, leaf: LeafId, mint: webnav::Mint) -> Result<()> {
-        let Some(url) = self.gated_minted_target(&mint) else {
-            return Ok(());
-        };
-        self.open_web_page_on(leaf, &url, mint)
-    }
-
-    /// **The URL a mint stands for, put through the door on the way out.**
-    ///
-    /// Lifted out of [`Self::open_minted_page`] when the play verb needed the
-    /// same three lines: every navigation this product starts has been through
-    /// `webnav::check`, and a second door written beside the first is how one of
-    /// them stops being checked.
-    fn gated_minted_target(&self, mint: &webnav::Mint) -> Option<String> {
-        let asked = mint
-            .target()
-            .expect("a mint made by `Mint::file` names the URL it minted")
-            .to_owned();
-        match webnav::check(&asked, webnav::Origin::HostMinted(mint)) {
-            webnav::Decision::Navigate(url) => Some(url),
-            // Unreachable by construction and reported rather than asserted: the
-            // gate is the thing being relied on, and a gate that can only be
-            // observed by a panic is a gate nobody would dare move.
-            _ => {
-                crate::diagnostics::stderr_line(format!(
-                    "BT_WEB refused a target it minted itself: {asked}"
-                ));
-                None
-            }
-        }
-    }
-
     // ── the head's furniture (P11-P31) ──────────────────────────────────────
 
     // ── the foot (P32-P35) ──────────────────────────────────────────────────
-
-    /// **Turn a local page over — the page ⇄ its own source** (user ruling
-    /// 2026-08-26; DESIGN §7.7 ⑭).
-    ///
-    /// [`Self::flip_preview_source_on`]'s other arm, and the difference between
-    /// them is only who draws the far face: markdown's is a parser in this
-    /// process and a page's is a browser in another one. Everything the reader
-    /// can name is the same — the same button, the same glyph pair, the same
-    /// per-surface memory, the same tooltip rule that the word says where a
-    /// press *goes*.
-    ///
-    /// **Nothing here navigates and nothing here closes.** Turning to the source
-    /// writes one path onto the pane; turning back clears it. The engine learns
-    /// about it exactly once, a frame later, as [`a_page_is_off_the_glass`]'s
-    /// fifth reason — a `SetIsVisible(false)` and a hole not punched. The page
-    /// keeps its history, its scroll, its form fields and its process, because
-    /// none of them was asked a question. That is the whole of why this is not
-    /// "close the page and open the file", which is what a `pane.source()` swap
-    /// would have been.
-    ///
-    /// **The source is read the way the glance reads it** — through the pool's
-    /// one door and then [`preview::PreviewBuffer::read_a_pages_bytes_as_text`],
-    /// which is the single place the "a page whose bytes are text is text" rule
-    /// lives. So it gets the same head read, the same 64KB cap, the same
-    /// highlighter an `.rs` file gets, and a second reader of `.html` has not
-    /// been written.
-    fn flip_page_source_on(&mut self, surface: PreviewSurface, path: PathBuf) -> Result<()> {
-        if self.page_source_shown_on(surface).is_some() {
-            self.preview_pane_mut(surface).turn_page_to(None);
-        } else {
-            self.land_page_source_on(surface, path);
-        }
-        // The body's shape changed under a rectangle that did not, so the layout
-        // is re-asked before the chrome is dressed to it — the same order a
-        // buffer landing takes.
-        self.refresh_preview_for_layout();
-        self.refresh_chrome();
-        self.present_chrome_change()
-    }
-
-    /// Put this page's file in the pool as text and ask the disk for it — the
-    /// half of [`Self::flip_page_source_on`] that turns *to* the source.
-    ///
-    /// [`Self::land_preview_source_on`] with the two things a page must not do
-    /// taken out: it does not touch `pane.source()` (the seat is still on its
-    /// page) and it does not file a view (the caret and the scroll it would
-    /// restore belong to a document this surface is not on). What is left is the
-    /// pool's own door, the promotion, and one question for the worker — asked
-    /// through `claim_head_read`, so a file already out with it, or already
-    /// read, costs nothing.
-    fn land_page_source_on(&mut self, surface: PreviewSurface, path: PathBuf) {
-        let name = files_row_display_name(&path);
-        let source = preview::PreviewSource::file(path.clone());
-        let tab = self.id;
-        let window = self.window_id();
-        let shown = self.preview_panes.showing();
-        let buffer = self.preview_pool.open(source.clone(), name, &shown);
-        buffer.read_a_pages_bytes_as_text();
-        let wants_read = buffer.claim_head_read();
-        self.preview_pane_mut(surface).turn_page_to(Some(path));
-        if let Some(want) = wants_read
-            && !self.app.preview_worker.request(preview::PreviewRequest {
-                window,
-                tab,
-                source,
-                want,
-            })
-        {
-            self.disable_preview_worker();
-        }
-    }
 
     // `current_preview_buffer` stood here — the buffer "the" preview seat was
     // showing, `preview_buffer_on` asked about `seats::Seats::preview`. Its last
@@ -41512,48 +40316,6 @@ impl<B: Backend> Runtime<'_, B> {
     // it: the geometry, the visibility rule and both maps a hand can run
     // backwards live there, where they can be asked the questions a hand asks
     // without a window, a shell or a GPU.
-
-    /// **Say that an address this window was asked to open is refused**, on the
-    /// preview surface that was asked (§7.1.5g ⑦).
-    ///
-    /// The window's one door for 「这件事刚刚发生」 ([`Self::toast`]), which is
-    /// also the one that makes the notice stand where the attention already is
-    /// rather than in a corner. It carries the same two facts the terminal's
-    /// hover line carries when a press is refused, in the same words and with the
-    /// same control characters made printable: the address, and why it was
-    /// refused ([`LinkRefusal`]). No new sentence is minted for a fact this window already has one
-    /// for.
-    fn say_address_refused(
-        &mut self,
-        surface: PreviewSurface,
-        url: &str,
-        refusal: LinkRefusal,
-    ) -> Result<()> {
-        let body = format!(
-            "{}{}",
-            printable_address(url),
-            refusal.suffix(i18n::current())
-        );
-        self.toast(toast::ToastKind::Error, surface.toast_anchor(), None, body)
-    }
-
-    /// Hand one file to the system's default handler and acknowledge the press.
-    ///
-    /// The card's button says `Opened` for 1300ms after — the window-level ack
-    /// [`Self::preview_open_button_label`] reads — and it is one timer because it
-    /// is one press at a time, whichever surface's card was the one pressed.
-    ///
-    /// The ack is the lane's to trigger since 2026-09-22: it is drawn when the system has taken
-    /// the file, which is what `Opened` claims.
-    fn open_path_in_default_app(&mut self, path: &Path) -> Result<()> {
-        self.hand_off(
-            open_local_path_ask(path).when_handed_over(handoff_lane::OnAccepted::PreviewOpened),
-        )?;
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
-        }
-        Ok(())
-    }
 
     // ── the quick edit (mock-up 4980-4983, 7858-7886) ───────────────────────
     //
@@ -42049,132 +40811,6 @@ fn measure_markdown_block(
 }
 
 impl<B: Backend> Runtime<'_, B> {
-    /// The address of the shell under the keyboard.
-    ///
-    /// The peek and the preview are window-level affordances whose answers land in app-side
-    /// caches rather than in any session, so the seat they carry only distinguishes one request
-    /// from another; naming the focused leaf keeps that address a real one.
-    fn focused_leaf_id(&self) -> LeafId {
-        LeafId {
-            tab: self.id,
-            seat: self.focused_leaf,
-        }
-    }
-
-    /// [`Self::focused_leaf_id`] with the window on the front of it.
-    fn focused_shell_address(&self) -> ShellAddress {
-        ShellAddress {
-            window: self.window_id(),
-            leaf: self.focused_leaf_id(),
-        }
-    }
-
-    /// **The one door a landed head read leaves by** (user report 2026-08-28;
-    /// `docs/DESIGN.md` §7.45 ②).
-    ///
-    /// Both slots a document can arrive in — the tab's pool and the glance's own
-    /// off-pool buffer — come out here, so "who was reading this, and does the
-    /// glass owe a frame for it" is answered once rather than once per slot.
-    ///
-    /// It used to be answered twice, and the two answers disagreed. The card's
-    /// own slot asked for a frame outright; the pool's asked the tab's
-    /// `preview_panes` and nobody else — and the card's view is not in that map,
-    /// it is the window's ([`PreviewSurface::Peek`]). So a card standing on a
-    /// **pooled** file took its answer, filed it, and never redrew: the head, the
-    /// type chip and the foot were there and the document was blank. A pooled
-    /// file is an ordinary one — a name restored out of a saved session carries
-    /// no text (P151), and a body a watcher marked stale owes a re-read — so this
-    /// was every card over a file this tab had ever previewed. The next hover
-    /// found the text already in the pool and drew it synchronously, which is
-    /// exactly what "empty the first time, right the second" was.
-    ///
-    /// Answers whether the glass owes a frame.
-    fn settle_landed_head(
-        &mut self,
-        index: usize,
-        source: &preview::PreviewSource,
-        content: Option<preview_text::Text>,
-        carded: bool,
-    ) -> bool {
-        let showing = surfaces_reading(
-            &self.window.tabs[index].preview_panes,
-            // **The card reads the tab in front** — [`Self::mature_file_peek`]
-            // points its surface at the row through that tab's pool — so it is a
-            // reader of this answer only while this answer is that tab's.
-            (index == self.window.active_tab).then_some(&self.window.peek_pane),
-            source,
-        );
-        // A body has just arrived under a caret that was restored from the view
-        // store, and the file may not be the one it was remembered against — a
-        // buffer evicted and re-read is a fresh read of a file that has had time
-        // to change. Healed here rather than trusted, which is the same
-        // discipline the scroll offset is held to two lines from a body landing.
-        // Through [`Self::preview_pane_mut`], the one door that knows the card's
-        // view is not in any tab's map.
-        if let Some(content) = content {
-            for surface in &showing {
-                self.preview_pane_mut(*surface).heal_caret(&content);
-            }
-        }
-        !showing.is_empty() && (index == self.window.active_tab || carded)
-    }
-
-    /// **What one foot is saying this frame, and how far it has dissolved.**
-    ///
-    /// `wanted` is the receipt the window would print with no transition at all,
-    /// or `None` for the standing fact underneath it. What comes back is the same
-    /// thing except during the ninety milliseconds after it changes, when it is
-    /// briefly the *old* phrase on its way out — see
-    /// [`settling::Crossfade`] for why the two take turns in the box rather than
-    /// overlapping in it, and for why the hold in front of them is untouched.
-    ///
-    /// The second half of the answer is the *dissolve* rather than the ink,
-    /// spelled that way for the paint's benefit: it is zero at rest, so every
-    /// builder that never learned about this draws exactly the strip it drew
-    /// before ([`seats::FootStrip::dissolved`]).
-    fn foot_saying(
-        &mut self,
-        key: FootSaying,
-        wanted: Option<&str>,
-        now: Instant,
-    ) -> (Option<String>, f32) {
-        let motion = self.app.motion;
-        let (said, ink) = self.window.foot_phrases.say(&key, wanted, now, motion);
-        (said, 1.0 - ink)
-    }
-
-    /// **Forget the feet that are not there any more.**
-    ///
-    /// [`Self::sweep_command_rails`]' own sentence, one strip along: an entry
-    /// here is a *memory* of the last phrase and so cannot retire itself the way
-    /// a fade does, and a column torn out of the tree would otherwise leave one
-    /// behind for whatever seat id the solver hands out next.
-    fn sweep_foot_phrases(&mut self) {
-        // The seats that still exist, off the same solve everything else this
-        // frame is built from, and the float windows that are still live.
-        let columns: std::collections::BTreeSet<SeatId> = self
-            .seat_layout
-            .rects
-            .iter()
-            .map(|placement| placement.id)
-            .collect();
-        let floats: std::collections::BTreeSet<float::FloatId> = self
-            .window
-            .float
-            .live_windows()
-            .map(float::FloatWin::id)
-            .collect();
-        self.window.foot_phrases.retain(|key| match key {
-            FootSaying::Column(seat) | FootSaying::PageTag(seat) => columns.contains(seat),
-            // A leaf and a seat are the same number inside one tab, and this
-            // sweep is about the tab on screen — the same identity the foot was
-            // dressed under.
-            FootSaying::Preview(PreviewSurface::Seat(leaf)) => columns.contains(&leaf.seat),
-            FootSaying::Preview(_) => true,
-            FootSaying::Float(id) | FootSaying::FloatPreview(id) => floats.contains(id),
-        });
-    }
-
     // ── P81: a tree row is a drag source ────────────────────────────────────
 
     // ── P143-P150: the glance card ──────────────────────────────────────────
@@ -42247,58 +40883,6 @@ impl<B: Backend> Runtime<'_, B> {
 
     // ── the floating window (§7.1.2) ────────────────────────────────────────
 
-    /// Whether `foot` is still showing its confirmation.
-    fn foot_reveal_is_fresh(&self, foot: RevealedFoot, now: Instant) -> bool {
-        self.window.revealed_foot.is_some_and(|(shown, at)| {
-            shown == foot && now.saturating_duration_since(at) < FOOT_REVEAL_FEEDBACK
-        })
-    }
-
-    /// **The card a window with nothing to draw wears**, drawn into its body
-    /// (§7.39; owner's ruling 2026-09-12).
-    ///
-    /// [`refused_preview_card`]'s second host. The pane builds its own
-    /// [`CardWords`] and hands them to the paint through
-    /// [`seats::PreviewCardContent`]; a float has no seat and no dressing pass,
-    /// so it builds the same words here and pushes them through the same
-    /// [`seats::push_preview_card`] — which is what keeps a refused file from
-    /// looking like two different things on the two surfaces, and what puts the
-    /// button where [`Self::float_hit_at`] goes looking for it.
-    ///
-    /// Both of the window's refusals come through here: the document nothing in
-    /// this window reads, and the picture this window would not draw.
-    fn push_float_refusal_card(
-        &mut self,
-        id: float::FloatId,
-        body: [f32; 4],
-        scale: f32,
-        palette: &bt_render::ChromePalette,
-        words: &CardWords,
-    ) -> float::FloatBody {
-        let button_text_px = self.window.renderer.measure_chrome_text(
-            &mut self.app.gpu,
-            words.verb.as_deref().unwrap_or_default(),
-            seats::PREVIEW_CARD_BUTTON_FONT_LOGICAL_PX * scale,
-        );
-        let card = seats::PreviewCardContent {
-            notice: &words.notice,
-            address: (!words.address_line.is_empty()).then_some(words.address_line.as_str()),
-            detail: &words.detail_lines,
-            mark: words.mark,
-            fault: words.fault,
-            button: words.verb.as_deref(),
-            button_text_px,
-            button_hovered: self.window.float_hover == Some((id, float::FloatPart::CardButton)),
-        };
-        let (mut sprites, mut labels) = (Vec::new(), Vec::new());
-        seats::push_preview_card(body, &card, scale, palette, &mut sprites, &mut labels);
-        float::FloatBody {
-            quads: Vec::new(),
-            labels,
-            sprites,
-        }
-    }
-
     /// Hand one path to the system's default handler, and say so when the window
     /// declines. The answer arrives later, on the OS hand-off lane's completion
     /// (2026-09-22); a caller that owes the reader something on success hands
@@ -42338,22 +40922,6 @@ impl<B: Backend> Runtime<'_, B> {
     /// is a worse answer than a button that quietly did nothing.
     fn reveal_in_explorer(&mut self, path: &Path) -> Result<()> {
         self.hand_off(reveal_ask(path))
-    }
-
-    /// **Hand a path nobody asked a disk about to the system's handler** — a share on another
-    /// machine under `Ctrl` (ticket 14, owner ruling 2026-09-21), and a file a previewed document
-    /// names under `Ctrl` (owner ruling 2026-09-23).
-    ///
-    /// The files column's door ([`bt_platform::Handoff::Open`]) and not the verified one: nothing
-    /// here has a ledger answer, because a share is never asked about and a document's targets are
-    /// never probed. The door reads `names_a_program`, so either meets the program list a printed
-    /// local file meets, refused in the same words; on Windows it asks no disk, and on the OS
-    /// hand-off lane a cold `\\server` holds nothing but that lane.
-    fn open_unverified_reference(&mut self, path: &Path) -> Result<()> {
-        self.hand_off(handoff_lane::Ask::new(
-            unverified_reference_handoff(path),
-            UNVERIFIED_REFERENCE_REFUSAL,
-        ))
     }
 
     fn set_cursor_focus(&mut self, focused: bool, now: Instant) {
@@ -42397,40 +40965,6 @@ impl<B: Backend> Runtime<'_, B> {
                 millihertz.unwrap_or_default(),
             ));
         }
-    }
-
-    /// The rail as the chrome would draw it, quantised to what can reach the
-    /// glass: its width in whole physical pixels, and its label fade in the
-    /// 1/255 a sprite's alpha resolves to.
-    ///
-    /// Read here rather than inside the chrome build for [`Self::drawn_dock_reveal`]'s
-    /// reason: a debt has to be noticed by the thing that decides whether to
-    /// build at all.
-    ///
-    /// Through [`Self::sampled_rail`], so the debt is settled against the very
-    /// state the chrome will be built from. Reading the two tweens again here
-    /// would be a second opinion about the same instant, and the frame it would
-    /// get wrong is the one where they disagree.
-    /// How far the card column's list is displaced this frame, in whole physical
-    /// pixels — [`Runtime::drawn_rail`]'s opposite number for the entrance.
-    ///
-    /// The *displacement* and not the tween's position, because that is what
-    /// reaches the glass: `focus_rail_entrance` turns the reveal into one offset
-    /// applied to rectangles, and two reveals that round to the same offset draw
-    /// the same picture. It answers `0` whenever the column is home or absent,
-    /// which is every frame of a window that is not entering the mode.
-    fn drawn_focus_reveal(&self, now: Instant) -> i32 {
-        // No column, no displacement. Without this the answer would be "one
-        // whole column's width" for every frame of every window that is not in
-        // focus mode — a stable number, so it owes no frames, but a false one,
-        // and the next reader of this ledger would have to know why.
-        if !self.rail_posture().draws_focus_rail() {
-            return 0;
-        }
-        let reveal = self.window.focus_reveal.sample(now, self.app.motion).0;
-        let scale = self.window.renderer.scale_factor() as f32;
-        let width = self.rail_posture().width_logical_px() * scale;
-        (width * (1.0 - reveal.clamp(0.0, 1.0))).round() as i32
     }
 
     /// A tab with no shell has no live view to return to and no selection to
