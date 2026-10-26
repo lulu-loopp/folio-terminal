@@ -208,7 +208,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    a batch regenerates their lists and the moved rows pass as moved.
    `REQUEST-DOOR-SITES.tsv` and `UNFOLLOWED-EDGES.tsv` keep their dated-reason rule: a
    batch re-keys their moved rows with a dated reason, as batch 1 did.
-   **The census's unknown sites are the exception among the five** (added at batch 10): `docs/plans/design/ownership-census-unknowns.tsv`
+   **The census's unknown sites are the exception among the five** (added at batch 11, after batch 10 found the problem): `docs/plans/design/ownership-census-unknowns.tsv`
    is hand-edited and `scripts/generate-ownership-census.ps1` removes a resolved row but adds none, so the batch
    does not regenerate a moved row into place. Each batch's judgement lists the unknown-site rows of the items it
    moves, and the move commit or the generated commit re-keys their `module` column to the new module (the same
