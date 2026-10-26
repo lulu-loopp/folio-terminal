@@ -6295,4 +6295,31 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn a_gesture_holds_the_pointer(&self) -> bool {
         self.app.pointer_capture.is_some()
     }
+
+    /// How far one wheel event moves a vertical scroller, in physical pixels.
+    ///
+    /// The system's own "lines per notch" measured against the terminal's line,
+    /// because that is the height Windows is answering about; `page` is what the
+    /// user's "one screen at a time" setting means for *this* scroller, and it is
+    /// the caller's to supply since only the caller knows how tall its viewport
+    /// is. Shared by every vertical scroller in the chrome so a notch means the
+    /// same distance in all of them.
+    /// **How tall one line is in this window** — the unit every chrome scroller
+    /// converts a wheel notch into.
+    ///
+    /// Read off the renderer's metrics rather than off a shell's projection, and
+    /// the difference matters twice. It is *correct*: the strip, the rail and
+    /// the settings sheet are not scrolling a terminal, and what they want is
+    /// "one of this product's lines" — the number the metrics own and every
+    /// projection is derived from, so the two agree by construction rather than
+    /// by coincidence. And it is *total*: a tab with no shell has no projection
+    /// to ask (§7.1.6h), and a rail that stopped scrolling because the tab
+    /// beside it happened to be a folder would be a scroller whose behaviour
+    /// depended on something the reader cannot see.
+    pub(crate) fn line_height_subpixels(&self) -> std::num::NonZeroI64 {
+        // **The chrome's scroll distance, not a pane's** (ticket 37): the Settings size at window
+        // scale, through the named base interface. A strip or a list that scrolled by the focused
+        // pane's row height would scroll further every time that pane's text grew.
+        self.window.renderer.base_metrics().cell_height_subpixels()
+    }
 }

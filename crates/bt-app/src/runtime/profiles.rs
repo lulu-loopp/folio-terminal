@@ -1,11 +1,12 @@
 //! `profiles` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::runtime::tabs::tab_surface;
 use crate::window_seam::prelude::*;
 use crate::{
     FilesFocusArrival, LeafSession, MachineNews, Popup, ProgramNews, Runtime, ShownProgramRows,
     TabSurface, cli, i18n, launch_wire, pane_folder, persist, profiles, programs_lane, seats,
-    settings, shell_integration, tab_surface, text_field, toast,
+    settings, shell_integration, text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;

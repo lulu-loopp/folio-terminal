@@ -99,7 +99,7 @@ pub(crate) use math::{
 #[cfg(test)]
 pub(crate) use palette::recall_flash;
 #[cfg(test)]
-pub(crate) use panes::{end_leaves_of, rail_overlay_layer};
+pub(crate) use panes::{end_leaves_of, rail_overlay_layer, tear_pane_into_tab};
 #[cfg(test)]
 pub(crate) use peek::{
     ask_for_peek_pixels, file_peek_promotion, let_go_unnamed_peek_records, peek_body_kind,
@@ -113,6 +113,13 @@ pub(crate) use pointer::platform_pointer_of;
 pub(crate) use profiles::profile_menu_anchor;
 #[cfg(test)]
 pub(crate) use search::rescan_leaf_for_search;
+#[cfg(test)]
+pub(crate) use tabs::{
+    absorb_tab_into_layout, absorb_tab_into_strip, blank_page_return,
+    exited_tabs_the_loop_may_close, grabbed_offset, new_tab_cwd, new_tab_leaf_seed,
+    pane_strip_landing, row_strip_landing, stepped_tab, tab_close_action, tab_surface,
+    two_tabs_mut,
+};
 #[cfg(test)]
 pub(crate) use terminal::{
     apply_leaf_metrics, drain_may_take_another_slice, in_drain_feed_turn, local_image_activation,

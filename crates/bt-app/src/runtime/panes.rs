@@ -9,7 +9,7 @@ use crate::{
     BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due, born_in_tab,
     conpty_source_of, decided_birth, deliver_held_input, diagnostics, exit_diagnostics,
     expire_leaf_attention, i18n, land_shell_birth, land_successor, landed_source,
-    resolved_birth_seed, toast,
+    pane_into_new_tab, resolved_birth_seed, seed, toast,
 };
 use crate::{
     ColumnNotch, CommandFlash, DividerDrag, DividerGrip, Drag, DragCarry, DragHandover, DragSource,
@@ -31,7 +31,7 @@ use crate::{
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
-use bt_layout::{Axis, SeatId, SeatMetrics, SizePolicy};
+use bt_layout::{Axis, SeatId, SeatLayout, SeatMetrics, SizePolicy};
 use bt_render::{FrameSource, FrameTrigger, GridSize, PresentOutcome, PresentPhase, Travel};
 use bt_viewport::horizontal::ContentColumn;
 use bt_viewport::{ViewSelection, ViewportFrame};
@@ -5716,6 +5716,82 @@ impl<B: Backend> Runtime<'_, B> {
         }
         (seat_ids, seat_frames)
     }
+
+    /// The same question with the arriving shape handed in (multiwindow slice
+    /// F2).
+    ///
+    /// Split out because across a window boundary the pane is not in this
+    /// window's tabs to be found: the subtree travels on the broker
+    /// ([`DragBroker::cargo_tree`]) and this window answers about *its* tree with
+    /// *its* viewport and *its* setting, which is the only place those three
+    /// live. One author for "will it fit", asked by two callers.
+    pub(crate) fn arrival_fits(&self, target: TabId, arriving: &bt_layout::LayoutNode) -> bool {
+        let Some(into) = self.tab_state(target) else {
+            return false;
+        };
+        into.seats
+            .plan_drop(
+                &self.seat_metrics(),
+                self.window.seat_viewport,
+                seats::LayoutAim::Rim(self.append_edge()),
+                seats::DropCargo::Layout(arriving),
+            )
+            .is_some_and(|plan| plan.fits())
+    }
+}
+
+/// **N157/K123 — tear a pane out of its tab and into one of its own.**
+///
+/// `detachLeaf` and `extractPaneToTab` as one verb, because they are one gesture:
+/// the leaf leaves the tree, its sibling is promoted and the run it left is
+/// re-balanced (G79/G80, all of which `close_seat` already does), and the pane
+/// arrives in the strip as a tab holding the shell it was already running.
+///
+/// **N158 — the new tab is unpinned, and the ruling's own argument is why.** Pin
+/// follows content only when the content was moved *for* you; here you aimed at
+/// the strip and made a new tab, so the new tab is simply unpinned. It is the
+/// exact opposite of [`Runtime::absorb_tab`]'s ejected pane (N160②), which was
+/// displaced rather than aimed, and the distinction is the ruling's rather than
+/// this function's.
+///
+/// The [`Seat`] is cloned *before* the tree edit, because after `close_seat` the
+/// tree no longer has it to be asked about and everything durable about the pane
+/// — its kind, its fixed extent — lives on it (§5).
+///
+/// **The tab it returns is already wearing `.landing`** (N157, mock-up 3514:
+/// `renderWithPaneFlip(before)` and then the 200ms wash on the tab that just
+/// appeared). It is started here rather than at the window's insertion because
+/// it is a fact about the gesture, not about the plumbing — and because this is
+/// the arrival that most needs announcing: every other tab that appears in the
+/// strip was dragged there under your eye, whereas N157 deliberately leaves you
+/// in the layout you were in, so without the wash a tab merely *exists* that did
+/// not a frame ago, in a run you are not looking at.
+///
+/// `None` when the seat is not in this tree, or when it is the last one (G84 —
+/// `close_seat` refuses to empty a tree, so the gesture is a no-op rather than a
+/// tab that closes behind your back). The tree is untouched on both paths.
+///
+/// There used to be a third: "or when it holds no session". §7.1.6h removed it
+/// along with the premise — a pane with no session is now a tab with no session,
+/// and the only kind still turned away is turned away one step further upstream,
+/// by [`pane_can_become_a_tab`], before the gesture is ever offered.
+pub(crate) fn tear_pane_into_tab(
+    from: &mut TabState,
+    metrics: &SeatMetrics,
+    seat: SeatId,
+    id: TabId,
+    now: Instant,
+    motion: Motion,
+    solve: impl FnOnce(&seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>),
+) -> Option<TabState> {
+    let seat = from.seats.tree().find_seat(seat)?.clone();
+    if !from.seats.close_seat(metrics, seat.id) {
+        return None;
+    }
+    let pinned = seed::PinMigration::DraggedOutToNewTab.resulting_pin(from.pinned);
+    let mut torn = pane_into_new_tab(from, &seat, id, pinned, solve)?;
+    torn.landing.start(now, motion);
+    Some(torn)
 }
 
 pub(crate) fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> marks::Band {

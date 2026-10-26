@@ -318,40 +318,42 @@ use runtime::platform_pointer_of;
 use runtime::{
     a_bare_redraw_still_owes_a_present, a_capture_still_holds_its_pointer, a_page_is_off_the_glass,
     a_page_still_has_a_pane, a_page_was_replaced, a_retirement_happens_on_this_turn,
-    advance_periodic_deadline, answer_an_exit_over, answer_attention_in, answer_one_formula,
-    answers_for, apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels,
-    attention_ledger_deadline, broker_verdict, chevron_turn_target, chrome_over,
-    chrome_tick_reuses_picture, claimed_by, clear_copied_selection, clipboard_focus_of,
-    column_keyboard, columns_wanting_git, composing_event_of, composition_outlived_its_field,
-    composition_ruling, dispatch_decoration_task, dispatch_pending_math_tasks,
-    dispatch_tab_decoration_tasks, document_formulas, drain_may_take_another_slice,
-    dropped_files_seat_at, dwm_dark_mode_owed, earliest_named_deadline, end_leaves_of,
-    file_menu_powers, file_peek_promotion, files_float_content_height, files_key_under,
-    files_key_within, files_keyboard_seat_of, files_locate, files_open_chain, files_root_of,
-    files_row_activation, files_row_counts_clicks, files_row_entry, files_row_menu_subject,
-    float_git_page_shown, float_viewport_rect, focus_leaf_index, folder_foot_notice,
-    folder_pick_outcome, git_answer_notice, git_full_path, git_roots_on_glass,
-    git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, glass_allows_a_text_write,
-    goto_tab_index, graph_key_of, ground_overlay_layers, hold_failed_in_tabs, hole_for,
-    ime_caret_source, ime_commit_bytes, ime_cursor_area_of, in_drain_feed_turn,
-    input_line_needs_a_space_first, keyboard_owner_is_a_shell, let_go_unnamed_peek_records,
-    local_image_activation, math_copy_window, math_worker_stopped_notice, merge_notice_card,
-    new_tab_tip, next_attention_stop, paste_answer_text, paste_body, paste_card_key,
-    paste_card_step, paste_offer_is_kept, paste_target_is_live, paste_text, peek_body_kind,
-    peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
-    peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
+    absorb_tab_into_layout, absorb_tab_into_strip, advance_periodic_deadline, answer_an_exit_over,
+    answer_attention_in, answer_one_formula, answers_for, apply_leaf_metrics,
+    apply_tabs_leaf_metrics, ask_for_peek_pixels, attention_ledger_deadline, blank_page_return,
+    broker_verdict, chevron_turn_target, chrome_over, chrome_tick_reuses_picture, claimed_by,
+    clear_copied_selection, clipboard_focus_of, column_keyboard, columns_wanting_git,
+    composing_event_of, composition_outlived_its_field, composition_ruling,
+    dispatch_decoration_task, dispatch_pending_math_tasks, dispatch_tab_decoration_tasks,
+    document_formulas, drain_may_take_another_slice, dropped_files_seat_at, dwm_dark_mode_owed,
+    earliest_named_deadline, end_leaves_of, exited_tabs_the_loop_may_close, file_menu_powers,
+    file_peek_promotion, files_float_content_height, files_key_under, files_key_within,
+    files_keyboard_seat_of, files_locate, files_open_chain, files_root_of, files_row_activation,
+    files_row_counts_clicks, files_row_entry, files_row_menu_subject, float_git_page_shown,
+    float_viewport_rect, focus_leaf_index, folder_foot_notice, folder_pick_outcome,
+    git_answer_notice, git_full_path, git_roots_on_glass, git_surfaces_the_kernel_moved,
+    git_surfaces_wanting_reread, glass_allows_a_text_write, goto_tab_index, grabbed_offset,
+    graph_key_of, ground_overlay_layers, hold_failed_in_tabs, hole_for, ime_caret_source,
+    ime_commit_bytes, ime_cursor_area_of, in_drain_feed_turn, input_line_needs_a_space_first,
+    keyboard_owner_is_a_shell, let_go_unnamed_peek_records, local_image_activation,
+    math_copy_window, math_worker_stopped_notice, merge_notice_card, new_tab_cwd,
+    new_tab_leaf_seed, new_tab_tip, next_attention_stop, pane_strip_landing, paste_answer_text,
+    paste_body, paste_card_key, paste_card_step, paste_offer_is_kept, paste_target_is_live,
+    paste_text, peek_body_kind, peek_cache_key_for_decode, peek_card_opened, peek_files_named,
+    peek_foot_press, peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
     persisted_window_bounds, preedit_caret_byte, prepare_clipboard_paste, prepare_dropped_paste,
     press_files_node, preview_body_bar, preview_source_of_recent, profile_menu_anchor,
     pty_drain_says_nothing_new, pty_frame_is_unchanged, rail_overlay_layer,
     raise_cancelled_quit_card_on, raise_dirty_gate_over, recall_flash, recorded_window_placement,
     reference_card, reference_run_rect, refused_preview_card, remember_decode, rename_key,
     reroot_files_state, rescan_leaf_for_search, resize_worth_solving, resolved_theme_change,
-    restart_seed, retire_spent_math_copy, revived_page_of, seat_holds_the_keyboard,
-    selection_to_copy, should_copy_on_select_release, stage_paste, startup_poll_delay,
-    step_leaf_text_scale, stepped_command_mark, tab_surface_tip_boxes, take_math_worker_notice,
-    take_pending_paste, take_psreadline_resize_reanchor_input, tear_out_rect,
-    terminal_link_answers_a_press, text_field_holding, tooltip_anchor_for, verified_target_of,
-    window_is_exposed, window_is_hidden, window_minimum_changed,
+    restart_seed, retire_spent_math_copy, revived_page_of, row_strip_landing,
+    seat_holds_the_keyboard, selection_to_copy, should_copy_on_select_release, stage_paste,
+    startup_poll_delay, step_leaf_text_scale, stepped_command_mark, stepped_tab, tab_close_action,
+    tab_surface, tab_surface_tip_boxes, take_math_worker_notice, take_pending_paste,
+    take_psreadline_resize_reanchor_input, tear_out_rect, tear_pane_into_tab,
+    terminal_link_answers_a_press, text_field_holding, tooltip_anchor_for, two_tabs_mut,
+    verified_target_of, window_is_exposed, window_is_hidden, window_minimum_changed,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
@@ -17524,29 +17526,6 @@ fn active_item_mut<T>(items: &mut [T], active: usize) -> &mut T {
     &mut items[active]
 }
 
-/// Two distinct entries of one run, both mutable — what a gesture that moves
-/// something *between* tabs needs and cannot otherwise have.
-///
-/// Every verb before U12 stage C touched one tab: `self.tabs[i]`, or the active
-/// one through the deref. A merge touches two at once by definition, and the
-/// borrow checker is right to refuse two `&mut` out of the same `Vec` on faith.
-/// `split_at_mut` is the proof it will accept — the two halves cannot overlap —
-/// and stating it once here is what keeps the unpleasantness out of the verbs.
-///
-/// Panics when the indices are equal or out of range, which are both the caller
-/// having asked a question with no answer rather than a case to degrade into: a
-/// tab merging with itself is K129's, refused three layers up.
-fn two_tabs_mut<T>(items: &mut [T], a: usize, b: usize) -> (&mut T, &mut T) {
-    assert_ne!(a, b, "two_tabs_mut needs two different tabs");
-    if a < b {
-        let (head, tail) = items.split_at_mut(b);
-        (&mut head[a], &mut tail[0])
-    } else {
-        let (head, tail) = items.split_at_mut(a);
-        (&mut tail[0], &mut head[b])
-    }
-}
-
 /// Who owns the rectangle the seats are about to be solved into (user ruling 2026-08-08).
 ///
 /// Judged on **the rectangle the solver actually receives**, never on the `Resized` payload. The
@@ -18682,32 +18661,6 @@ fn keep_owed_documents_over(
         say.say(&i18n::stopped_changes_lost(&lost));
     }
     kept
-}
-
-/// **Which of the tabs whose shells have all exited the loop may close on its
-/// own** (ticket 58, coordinator ruling 2026-09-25): those whose close is
-/// nothing to ask, in the order given.
-///
-/// The cleanup asks the gate's own question without putting it. A tab whose
-/// close would ask — an unsaved preview beside the dead shell — or that finds
-/// another question up is left standing, shell and all: whether its edits go
-/// is the reader's turn, taken through the tab's own close, not the loop's.
-/// Putting the question from here re-asked every turn after a Cancel, because
-/// the shell is still gone on the next one.
-fn exited_tabs_the_loop_may_close(
-    gate: &restore::DirtyGate,
-    tabs: &[TabState],
-    active_tab: usize,
-    exited: Vec<usize>,
-) -> Vec<usize> {
-    exited
-        .into_iter()
-        .filter(|&index| {
-            let at_risk =
-                dirty_gate_names(tabs, active_tab, &restore::GateRequest::CloseTab(index));
-            gate.verdict(&at_risk).proceeds()
-        })
-        .collect()
 }
 
 /// **The ended tabs whose close waits for saves on their way** (S-6b, the
@@ -22533,26 +22486,6 @@ enum BlankPageReturn {
     PutTheDocumentBack(preview::PreviewSource),
     /// The pane was already open and showing nothing.
     LeaveThePaneEmpty,
-}
-
-/// **What a blank page's landing owes back**, read off the pane as it stood
-/// *before* the page arrived.
-///
-/// A free function and not two lines inside the door, because it is the whole of
-/// what "the door can be taken back" means and it has to be answerable without a
-/// window: the two facts it reads are gone the instant the page lands, and a
-/// rule that could only be checked by opening a browser is a rule nobody checks.
-fn blank_page_return(
-    the_pane_was_already_open: bool,
-    was_showing: Option<preview::PreviewSource>,
-) -> BlankPageReturn {
-    if !the_pane_was_already_open {
-        return BlankPageReturn::TakeThePane;
-    }
-    was_showing.map_or(
-        BlankPageReturn::LeaveThePaneEmpty,
-        BlankPageReturn::PutTheDocumentBack,
-    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31752,23 +31685,6 @@ enum OverlayBand {
     WindowRing,
 }
 
-/// K115 — how far from its slot a grabbed tab is drawn, given where the hand
-/// wants it.
-///
-/// The strip has one axis, so the tab travels in `x` and the row it lives in does
-/// not move at all. `viewport` is the strip's own clip box: a tab held past
-/// either end stops at the end rather than being carried out over the caption
-/// buttons or off the window's left edge, and the *clamped* position is what the
-/// reorder is then judged from — the tab you can see is the tab that decides.
-///
-/// The upper bound is written as a `max` of the lower one rather than trusted,
-/// because a strip narrower than one tab has none: the two bounds cross, and the
-/// leading edge is the one that must win.
-fn grabbed_offset(slot_left: f32, tab_width: f32, viewport: [f32; 2], want_left: f32) -> f32 {
-    let [view_left, view_right] = viewport;
-    want_left.clamp(view_left, (view_right - tab_width).max(view_left)) - slot_left
-}
-
 /// The nearest slot to `to` that a tab now at `from` may legally occupy — F57
 /// stated for a move that geometry did not choose.
 ///
@@ -32984,144 +32900,6 @@ fn landing_for_aim(
     (source.pane_here(showing) != Some(target)).then_some(landing)
 }
 
-/// **What a tab list offers a pane, stated once** — §7.1.6k's whole decision, as
-/// six plain facts and no window.
-///
-/// The two offers a run makes a pane are read off two different questions about
-/// one pointer, and which one is being asked is decided here rather than inside
-/// [`Runtime::survey_strip`], for [`landing_for_aim`]'s reason: this is a
-/// *ruling*, and a ruling that needs a `Renderer` to state is a ruling no test
-/// ever reads back.
-///
-/// * `offers` — [`seats::PaneOffers`], §7.1.6b′ ②, split in half on 2026-08-23
-///   and withdrawn outright on 2026-08-29. Every surface answers
-///   [`seats::PaneOffers::BOTH`] today; the two bits stay because the two verbs
-///   are still two questions about one pointer and this function still asks
-///   them one at a time. It is asked per verb rather than once at the top
-///   because a refusal of the *source* is exactly the shape the user threw out.
-/// * `over` — the tab whose own rectangle the pointer is standing on
-///   ([`seats::TabRun::slot_at`]), and `None` for the run's padding.
-/// * `holding` — the tab the pane in the hand lives in.
-/// * `showing` — the tab whose layout is on the stage right now, which the
-///   spring can have moved away from `holding` at any point in the gesture. It
-///   is [`landing_for_aim`]'s own second argument and it is here for the same
-///   reason: whether a room is "the one you are standing in" is a fact about
-///   the *view*, and a pane is a tab and a seat (K135).
-/// * `adopt_fits` — whether that tab's tree can actually take another pane
-///   (H93/M147). A tab that lights up under the pointer and then does nothing
-///   when the hand opens is the silent refusal M147 forbids, and the strip has
-///   no dashed form to wear instead — so it says no by not lighting up. **Not
-///   consulted for the pane's own tab**: a pane that is already a leaf of that
-///   tree fits in it by standing there, and asking `plan_drop` would be asking
-///   whether the tree could hold one *more* — a question about a world that is
-///   not the one the gesture is in.
-/// * `extract_slot` — the slot a tear-out would take, or `None` when the pane
-///   cannot become a tab of its own ([`Runtime::tear_out_is_hostable`]).
-///
-/// **A refused adopt does not fall through to the tear-out**, and that is a rule
-/// rather than an omission. The mock-up's own sentence about the centre zone
-/// applies unchanged: a gesture whose meaning depends on arithmetic nobody can
-/// see — the same pointer on the same tab meaning "put it in here" in a small
-/// window and "make a new tab" in a large one — is worse than a gesture that
-/// says no. The pointer is aimed at a room; if the room will not take it, there
-/// is nothing there.
-fn pane_strip_landing(
-    offers: seats::PaneOffers,
-    over: Option<TabId>,
-    holding: TabId,
-    showing: TabId,
-    adopt_fits: bool,
-    extract_slot: Option<usize>,
-) -> Option<DropLanding> {
-    // **§7.1.6k″ (user's report 2026-08-24) — your own tab is a room too, from
-    // the moment you are no longer standing in it.**
-    //
-    // The rule this replaces was `tab != holding`, and its stated reason was
-    // that the hand-over "would do nothing": appending a pane to the end of the
-    // tree it is already in is K135's sentence one surface up. That reason is
-    // true at home and **false the instant the spring has moved the stage**. The
-    // pane is still filed under `holding`, the stage belongs to somebody else,
-    // and the entry the hand is resting on is the only thing on screen that can
-    // give the gesture its own tab back. Refusing it is what left the user's
-    // drag one-way: out to any tab, never back.
-    //
-    // So the condition is about the *view* and not about the hand alone. Away
-    // from home, `holding`'s entry answers `StripAdopt` like any other entry —
-    // which is what arms the spring ([`Runtime::drive_drag`] reads the survey's
-    // answer, never the pointer's coordinates), so the way back is the same
-    // quarter-second rest as the way out, on the same clock, with no second
-    // gesture invented for it.
-    //
-    // At home the old sentence stands **unchanged**, and now for a reason that
-    // is visible rather than merely arithmetic: a landing that means nothing at
-    // all would light a tab up and then do nothing when the hand opened, which
-    // is the silent refusal M147 forbids. Away from home the landing *does*
-    // something you can watch — the stage comes back — so lighting the entry is
-    // the truth. The tear-out that pointer has always been offered goes on being
-    // offered, and **since 2026-08-29 a card column's own card offers it too**:
-    // the column answers `BOTH` now, so a pane rested on the card it lives in
-    // while that card is the one on the stage gets the strip's own answer, which
-    // is the tear-out at that slot. The silence that used to stand here was ②'s
-    // and it went with ② — keeping it would have meant a branch that reads
-    // "unless this is a card column", which is the second set of rules ①
-    // forbids.
-    if let Some(tab) = over
-        && (tab != holding || showing != holding)
-    {
-        return (offers.adopt && (adopt_fits || tab == holding))
-            .then_some(DropLanding::StripAdopt { tab });
-    }
-    // Still no fall-through from a refused adopt, and now not from a refused
-    // *offer* either: the paragraph above is about a pointer that named a room,
-    // and a room that will not take it leaves nothing there.
-    offers
-        .extract
-        .then_some(extract_slot)
-        .flatten()
-        .map(|slot| DropLanding::StripExtract { slot })
-}
-
-/// **What a tab list offers a row, stated once** — §7.1.1's two tab-strip verbs
-/// (user ruling 2026-07-17, landed 2026-08-30), as three plain facts and no
-/// window.
-///
-/// [`pane_strip_landing`]'s sibling and deliberately the same shape: a run
-/// answers two questions about one pointer, and which of them is being asked is
-/// decided here rather than inside [`Runtime::survey_strip`], for
-/// [`landing_for_aim`]'s reason — this is a *ruling*, and a ruling that needs a
-/// `Renderer` to state is a ruling no test ever reads back.
-///
-/// * `over` — the tab whose own rectangle the pointer is standing on
-///   ([`seats::TabRun::slot_at`]), and `None` for the run's padding: the gap
-///   between two entries and the tail past the last one.
-/// * `adopt_fits` — whether that tab can actually take this payload
-///   ([`Runtime::row_adopt_fits`]). A tab that lights up under the pointer and
-///   then does nothing when the hand opens is the silent refusal M147 forbids,
-///   and the strip has no dashed form to wear instead — so it says no by not
-///   lighting up.
-/// * `slot` — where a new entry would land, already clamped past the pinned
-///   partition ([`strip_insert_slot`]), so the caret the reader watches and the
-///   slot the release inserts at are one number (N158).
-///
-/// **A row is never turned away from the padding, and a pane sometimes is.**
-/// That asymmetry is a fact about the two payloads rather than an oversight: a
-/// pane over the padding has to be able to *leave* the tree it is standing in,
-/// and G84 forbids emptying one, so `extract_slot` is an `Option` there. A row
-/// leaves nothing behind — it is a path, and the tab it becomes is built out of
-/// that path from nothing — so there is no such question to ask.
-///
-/// **A refused adopt does not fall through to the new tab**, exactly as it does
-/// not for a pane, and the argument is the one the mock-up makes about the
-/// centre zone: a gesture whose meaning depends on arithmetic nobody can see —
-/// the same pointer on the same tab meaning "open it in here" in a large window
-/// and "make a new tab" in a small one — is worse than a gesture that says no.
-fn row_strip_landing(over: Option<TabId>, adopt_fits: bool, slot: usize) -> Option<DropLanding> {
-    match over {
-        Some(tab) => adopt_fits.then_some(DropLanding::StripAdopt { tab }),
-        None => Some(DropLanding::StripExtract { slot }),
-    }
-}
-
 /// **Which end of a tree an arriving pane joins** — §7.1.6k's "追加为树末尾分屏".
 ///
 /// The direction is [`split_axis`]'s answer and never a second one: a user who
@@ -33630,77 +33408,6 @@ fn pane_can_become_a_tab(kind: bt_layout::SeatKind) -> bool {
 fn strip_insert_slot(raw: usize, pinned: &[bool]) -> usize {
     let lead = pinned.iter().take_while(|pinned| **pinned).count();
     raw.clamp(lead, pinned.len())
-}
-
-/// **F57's one enforcement point: put the run back in its partition and keep the
-/// active tab naming the tab it named.**
-///
-/// The two clamps above ([`strip_insert_slot`], [`partition_clamped`]) keep an
-/// *arriving* or *moving* tab on its own side of the seam, and they are enough
-/// for every gesture that only changes a position. They are not enough for a
-/// gesture that changes a **flag**: a tab that becomes pinned where it stands is
-/// suddenly a pinned tab behind unpinned ones, and no amount of clamping the
-/// other tabs' movements repairs it, because nothing moved.
-///
-/// There are exactly two such gestures — the pin control ([`Runtime::toggle_pin`])
-/// and N160①'s "pin follows content" ([`absorb_tab_sessions`], which ORs the
-/// source's pin into a target that keeps its slot) — and until this existed only
-/// the first one normalized, inline. That is the whole of the bug this function
-/// was written for: a pinned tab dragged onto an unpinned one left the strip
-/// reading pinned, unpinned, unpinned, **pinned** — the partition broken at the
-/// only place that had no copy of the enforcement.
-///
-/// Sorted rather than rotated because [`seed::normalize_pins`] is documented
-/// stable: both runs keep their relative order, so the repair moves exactly the
-/// tab whose flag changed and tells no other tab where to stand.
-///
-/// The active tab is followed **by identity**. It is stored as a position, and a
-/// position means a different tab after a sort — the same reasoning `move_tab_
-/// with_flip` gives for adjusting rather than re-deriving, arriving at the
-/// opposite mechanism because here the run's *order* changed and not its length.
-/// **The strip's half of a merge: the source leaves, the displaced pane arrives,
-/// and F57 is settled over what is left.**
-///
-/// A free function for the reason [`absorb_tab_into_layout`] and
-/// [`tear_pane_into_tab`] are: this is where the *list* is edited, and a test
-/// that cannot reach it can only re-implement it and then check its own copy.
-/// The bug this was split out for lived exactly here — in the two lines between
-/// the removal and the insertion, on a list no test had ever held.
-///
-/// `index` is the departing tab's slot; `ejected` is the pane a `ReplaceSeat`
-/// landing turned out of the target, which becomes a tab of its own.
-fn absorb_tab_into_strip(
-    tabs: &mut Vec<TabState>,
-    active_tab: &mut usize,
-    index: usize,
-    ejected: Option<TabState>,
-) {
-    tabs.remove(index);
-    if index < *active_tab {
-        *active_tab -= 1;
-    }
-    if let Some(ejected) = ejected {
-        // L139 — the displaced pane takes the slot the source tab is vacating,
-        // clamped behind whatever pinned run the removal has left.
-        let pinned = tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>();
-        let slot = strip_insert_slot(index, &pinned);
-        tabs.insert(slot, ejected);
-        if slot <= *active_tab {
-            *active_tab += 1;
-        }
-    }
-    // **N160① changed a flag, so the clamp above cannot be the whole answer.**
-    // `absorb_tab_into_layout` may have just pinned the target where it stands,
-    // and a target that does not move cannot be put right by a rule about where
-    // *other* tabs may land. Unconditional rather than asked only when the pin
-    // moved: "is the run still partitioned" is cheaper than the bookkeeping that
-    // would decide whether to ask it, and a condition is one more thing that can
-    // be wrong on a path added later.
-    //
-    // After the ejection rather than before, so both of the list's edits are in
-    // before the invariant is settled — normalizing between them would put the
-    // run right and then insert into the run it had just repaired.
-    settle_pin_partition(tabs, active_tab);
 }
 
 fn settle_pin_partition(tabs: &mut [TabState], active_tab: &mut usize) {
@@ -34713,33 +34420,6 @@ impl CursorBlink {
 enum TabCloseAction {
     CloseWindow,
     Keep { active_tab: usize },
-}
-
-/// Where Ctrl+Tab and Ctrl+Shift+Tab land, wrapping at both ends.
-///
-/// A lone tab is already the answer to "next tab", so nothing moves and the
-/// window does not flash a re-activation at a key that had nothing to do.
-fn stepped_tab(tab_count: usize, active_tab: usize, forward: bool) -> Option<usize> {
-    if tab_count < 2 {
-        return None;
-    }
-    let step = if forward { 1 } else { tab_count - 1 };
-    Some((active_tab + step) % tab_count)
-}
-
-fn tab_close_action(tab_count: usize, active_tab: usize, closing: usize) -> TabCloseAction {
-    debug_assert!(tab_count > 0 && active_tab < tab_count && closing < tab_count);
-    if tab_count == 1 {
-        return TabCloseAction::CloseWindow;
-    }
-    let active_tab = if closing == active_tab {
-        closing.min(tab_count - 2)
-    } else if closing < active_tab {
-        active_tab - 1
-    } else {
-        active_tab
-    };
-    TabCloseAction::Keep { active_tab }
 }
 
 /// How launch divides the last session: what opens now, and what it has to ask
@@ -37292,82 +36972,6 @@ fn split_axis(direction: bt_persist::SplitDirectionV1, auto: Axis) -> Axis {
         bt_persist::SplitDirectionV1::Auto => auto,
         bt_persist::SplitDirectionV1::Right => Axis::Row,
         bt_persist::SplitDirectionV1::Down => Axis::Col,
-    }
-}
-
-/// **Where a new tab's shell stands** — the folder somebody named, or the one
-/// the pane you were looking at is standing in.
-///
-/// A free function for [`split_axis`]'s reason: it is the whole of what
-/// `New terminal in folder…` promises, and a promise that needs a live window
-/// and a ConPTY to state is a promise no test ever reads back.
-///
-/// **A named place wins outright.** `cwd_for_spawn` answers "where does a tab
-/// opened from *this* pane start", which is the right question for the `+` and
-/// for every picker row, and the wrong one for a row whose entire content is a
-/// folder the user just pointed at in a dialog. Feeding the chosen folder
-/// through the inheritance instead would let the pane under the menu overrule
-/// the answer — silently, and only on machines where the two profiles' spellings
-/// disagree.
-///
-/// Both branches end in the target profile's own namespace, which is what
-/// [`LeafSeed::cwd`] means by contract. The chooser speaks Windows, so a named
-/// place is crossed from there; a profile with no name for it inherits nothing
-/// rather than a path it cannot read, and starts where a fresh tab of that
-/// profile starts — `cwd_for_spawn`'s own rule, not a second one.
-///
-/// **And the two branches are two kinds of place** (GitHub issue #16): the named one is
-/// [`profiles::SeedPlace::Named`] and outranks the profile's own starting place; the one carried
-/// from the focused pane is [`profiles::SeedPlace::Carried`] and does not.
-fn new_tab_cwd(
-    profile: &str,
-    place: Option<&Path>,
-    source_profile: &str,
-    focused: Option<&profiles::SeedPlace>,
-) -> Option<profiles::SeedPlace> {
-    // **Both profiles are named by id and placed against the table here**, one
-    // call before the answer is used. `index_of_id` is the standing rule for an
-    // id the table no longer holds — the fallback profile, never the reader's
-    // configured default — so a folder crossed for a profile that has been
-    // deleted is crossed into the namespace of the shell that is really going to
-    // start.
-    let (profile, source_profile) = (
-        profiles::index_of_id(profile),
-        profiles::index_of_id(source_profile),
-    );
-    match place {
-        Some(place) => profiles::translate_cwd(
-            profiles::PathNamespace::Windows,
-            profiles::paths(profile),
-            place,
-        )
-        .map(profiles::SeedPlace::Named),
-        // The source's folder keeps its kind across the crossing: carried for the `+` and a
-        // picker row, named for `Duplicate tab` of a pane born in a named folder.
-        None => focused.and_then(|focused| {
-            profiles::cwd_for_spawn(source_profile, profile, Some(focused.path()))
-                .map(|crossed| focused.with_path(crossed))
-        }),
-    }
-}
-
-/// **The seed of every new tab** — the `+`, a picker row, `Duplicate tab`, `New terminal in
-/// folder…`, a folder row's `New terminal here`, and a second launch handed over to this one
-/// (which is also where a Service and a folder given to the Dock icon land). One function, so
-/// `Runtime::new_tab_seeded_from` and the pin on GitHub issue #16 build the same seed.
-fn new_tab_leaf_seed(
-    profile: &str,
-    place: Option<&Path>,
-    source_profile: &str,
-    source_cwd: Option<&profiles::SeedPlace>,
-) -> LeafSeed {
-    LeafSeed {
-        profile: profile.to_owned(),
-        cwd: new_tab_cwd(profile, place, source_profile, source_cwd),
-        unknown_profile_id: None,
-        card_skip: 0,
-        prefill: None,
-        carried_environment: None,
     }
 }
 
@@ -40632,60 +40236,6 @@ fn pane_into_new_tab(
     Some(tab)
 }
 
-/// **N157/K123 — tear a pane out of its tab and into one of its own.**
-///
-/// `detachLeaf` and `extractPaneToTab` as one verb, because they are one gesture:
-/// the leaf leaves the tree, its sibling is promoted and the run it left is
-/// re-balanced (G79/G80, all of which `close_seat` already does), and the pane
-/// arrives in the strip as a tab holding the shell it was already running.
-///
-/// **N158 — the new tab is unpinned, and the ruling's own argument is why.** Pin
-/// follows content only when the content was moved *for* you; here you aimed at
-/// the strip and made a new tab, so the new tab is simply unpinned. It is the
-/// exact opposite of [`Runtime::absorb_tab`]'s ejected pane (N160②), which was
-/// displaced rather than aimed, and the distinction is the ruling's rather than
-/// this function's.
-///
-/// The [`Seat`] is cloned *before* the tree edit, because after `close_seat` the
-/// tree no longer has it to be asked about and everything durable about the pane
-/// — its kind, its fixed extent — lives on it (§5).
-///
-/// **The tab it returns is already wearing `.landing`** (N157, mock-up 3514:
-/// `renderWithPaneFlip(before)` and then the 200ms wash on the tab that just
-/// appeared). It is started here rather than at the window's insertion because
-/// it is a fact about the gesture, not about the plumbing — and because this is
-/// the arrival that most needs announcing: every other tab that appears in the
-/// strip was dragged there under your eye, whereas N157 deliberately leaves you
-/// in the layout you were in, so without the wash a tab merely *exists* that did
-/// not a frame ago, in a run you are not looking at.
-///
-/// `None` when the seat is not in this tree, or when it is the last one (G84 —
-/// `close_seat` refuses to empty a tree, so the gesture is a no-op rather than a
-/// tab that closes behind your back). The tree is untouched on both paths.
-///
-/// There used to be a third: "or when it holds no session". §7.1.6h removed it
-/// along with the premise — a pane with no session is now a tab with no session,
-/// and the only kind still turned away is turned away one step further upstream,
-/// by [`pane_can_become_a_tab`], before the gesture is ever offered.
-fn tear_pane_into_tab(
-    from: &mut TabState,
-    metrics: &SeatMetrics,
-    seat: SeatId,
-    id: TabId,
-    now: Instant,
-    motion: Motion,
-    solve: impl FnOnce(&seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>),
-) -> Option<TabState> {
-    let seat = from.seats.tree().find_seat(seat)?.clone();
-    if !from.seats.close_seat(metrics, seat.id) {
-        return None;
-    }
-    let pinned = seed::PinMigration::DraggedOutToNewTab.resulting_pin(from.pinned);
-    let mut torn = pane_into_new_tab(from, &seat, id, pinned, solve)?;
-    torn.landing.start(now, motion);
-    Some(torn)
-}
-
 /// **Everything one seat's content plane holds, moved into another tab under the
 /// id it now answers to.**
 ///
@@ -41271,48 +40821,6 @@ fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[
         }),
         "N159: an arrived Terminal leaf has no shell filed under its new id"
     );
-}
-
-/// **The whole tab-to-tab side of a merge (N159) and of a replace (N161), as one
-/// verb — so that the order the two rulings have to be applied in is production
-/// code rather than a comment at a call site.**
-///
-/// [`absorb_tab_sessions`] is N159 alone and [`pane_into_new_tab`] is the
-/// ejection alone; what only shows up when they run together is **N160's two
-/// halves pulling in opposite directions on the same field**. N160① makes the
-/// target pinned because the tab it absorbed was pinned. N160② gives the ejected
-/// pane the pin of the tab it was *living under*. Run them in the written order
-/// and the ejected pane inherits a pin that arrived a microsecond ago on somebody
-/// else's tab — a pane pushed out of an unpinned tab would come back pinned
-/// because the tab that displaced it happened to be.
-///
-/// So the host's pin is read **first**, before N160① can move it, and that
-/// ordering lives here where a test can run it. Doing it at the window's call
-/// site would have made it the one line of this gesture that nothing could reach.
-///
-/// Answers the tab the ejected pane became, or `None` for a plain merge — a
-/// landing on an edge or a rim displaces nobody, and that absence is L136/L139's
-/// distinction rather than a failure.
-///
-/// The window's own half is what remains: which strip entries these two tabs
-/// are, and which slot the ejection takes (L139). See [`Runtime::absorb_tab`].
-fn absorb_tab_into_layout(
-    source: &mut TabState,
-    target: &mut TabState,
-    arrived: &[(SeatId, SeatId)],
-    displaced: Option<&bt_layout::Seat>,
-    ejected_id: TabId,
-    solve: impl FnOnce(&seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>),
-) -> Option<TabState> {
-    let host_pinned = seed::PinMigration::PoppedOut.resulting_pin(target.pinned);
-    absorb_tab_sessions(source, target, arrived);
-    let ejected =
-        displaced.and_then(|seat| pane_into_new_tab(target, seat, ejected_id, host_pinned, solve));
-    debug_assert!(
-        target.sessions_match_terminals(),
-        "item 6: the absorbing tab's shells and its Terminal leaves are the same set"
-    );
-    ejected
 }
 
 /// **How long one turn may spend reading shells before it hands the window
@@ -47487,16 +46995,6 @@ impl<B: Backend> Runtime<'_, B> {
         self.present_chrome_change()
     }
 
-    /// **Issue one navigation the host itself minted** — step 3 and step 4 of
-    /// [`Self::open_preview_web_file`], and the one door a minted target leaves
-    /// by.
-    fn open_minted_page(&mut self, mint: webnav::Mint) -> Result<()> {
-        let Some(url) = self.gated_minted_target(&mint) else {
-            return Ok(());
-        };
-        self.open_web_page_with(&url, mint)
-    }
-
     /// The same, on a pane the caller has already named (user ruling
     /// 2026-08-27; §7.23 ⑩).
     ///
@@ -49232,87 +48730,6 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
-    /// K114/K115 — hold the grabbed tab under the pointer and answer with how far
-    /// it now sits from its own slot.
-    ///
-    /// One axis, because a tab run has one: the tab travels along it and does not
-    /// move across it at all — `x` in the strip, `y` in the rail (mock-up's
-    /// `trackGrabbed`, 6646-6665). Clamped to the run's own viewport, so the tab
-    /// you are holding cannot be carried out over the caption buttons, off the
-    /// window's left edge, or past the rail's head or foot.
-    fn track_grabbed(&self, position: PhysicalPosition<f64>) -> Option<f32> {
-        let drag = self.held_drag()?;
-        let (tab, carry) = (drag.tab()?, drag.tab_carry()?);
-        let index = self
-            .window
-            .tabs
-            .iter()
-            .position(|candidate| candidate.id == tab)?;
-        let run = self.tab_run(Instant::now())?;
-        Some(grabbed_offset(
-            run.start(index)?,
-            run.extent(index)?,
-            run.viewport,
-            run.pos(position.x, position.y) - carry.grab,
-        ))
-    }
-
-    /// **M147 for §7.1.1's second tab-strip verb** — whether `target` can
-    /// actually take this payload.
-    ///
-    /// [`Runtime::pane_adopt_fits`]'s counterpart, and it is a different
-    /// computation for the same reason the commits are: a pane joins a tree at
-    /// its rim through [`seats::Seats::plan_drop`], while a row goes through the
-    /// tab's own content doors — which either **reuse a pane that is already
-    /// there** or mint one by their own edit ([`seats::Seats::add_preview`]'s
-    /// `LandPreview`, [`seats::Seats::add_files_pane`]'s leading rim). Asking
-    /// `plan_drop` about a rim would be asking a question about a world the
-    /// gesture is not in.
-    ///
-    /// So the promise is the *same edit the release will run*, on a copy of that
-    /// tab's tree: `Seats` is cheap to clone, both edits leave the tree untouched
-    /// when they refuse, and the copy is dropped on the spot. One tree walk per
-    /// pointer move, on a tree of a few leaves, and only while a row is actually
-    /// resting on a tab.
-    ///
-    /// A file's reuse always fits and [`seats::Seats::add_preview`] answers it
-    /// first: a tab that already has an unlocked preview pane moves no rectangle
-    /// at all. A folder has no reuse — §7.1.1's folder verb on a strip entry is
-    /// the space one, so the column is always a new pane and always has to fit.
-    fn row_adopt_fits(&self, kind: RowPayloadKind, target: TabId) -> bool {
-        let Some(into) = self.tab_state(target) else {
-            return false;
-        };
-        let mut probe = into.seats.clone();
-        let metrics = self.seat_metrics();
-        match kind {
-            RowPayloadKind::File => probe.add_preview(&metrics).is_some(),
-            RowPayloadKind::Folder => probe.add_files_pane(&metrics, None).is_some(),
-        }
-    }
-
-    /// The same question with the arriving shape handed in (multiwindow slice
-    /// F2).
-    ///
-    /// Split out because across a window boundary the pane is not in this
-    /// window's tabs to be found: the subtree travels on the broker
-    /// ([`DragBroker::cargo_tree`]) and this window answers about *its* tree with
-    /// *its* viewport and *its* setting, which is the only place those three
-    /// live. One author for "will it fit", asked by two callers.
-    fn arrival_fits(&self, target: TabId, arriving: &bt_layout::LayoutNode) -> bool {
-        let Some(into) = self.tab_state(target) else {
-            return false;
-        };
-        into.seats
-            .plan_drop(
-                &self.seat_metrics(),
-                self.window.seat_viewport,
-                seats::LayoutAim::Rim(self.append_edge()),
-                seats::DropCargo::Layout(arriving),
-            )
-            .is_some_and(|plan| plan.fits())
-    }
-
     /// **Which end of a tab's tree an arriving pane joins** — the window's half
     /// of [`trailing_edge`].
     ///
@@ -49396,22 +48813,6 @@ impl<B: Backend> Runtime<'_, B> {
             spring: SpringGate::default(),
             guard: DragGuard::sample(),
         });
-    }
-
-    /// Where every slot begins on the run's own axis, in list order — the left
-    /// edges of the strip, the top edges of the rail.
-    ///
-    /// This is what the FLIP deltas are struck from, and it is why they needed no
-    /// axis of their own: a displacement is one number, and the tween that runs
-    /// it down to nothing never asked which direction it pointed in.
-    fn slot_starts(&self, now: Instant) -> Vec<f32> {
-        self.tab_run(now)
-            .map(|run| {
-                (0..run.slots.len())
-                    .filter_map(|index| run.start(index))
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     /// Put the carried thing back in the slot the drag began in — the FLIP home
@@ -50202,33 +49603,6 @@ impl<B: Backend> Runtime<'_, B> {
         // ordinary debounce rather than once per notch.
         self.mark_session_dirty(now);
         Ok(true)
-    }
-
-    /// How far one wheel event moves a vertical scroller, in physical pixels.
-    ///
-    /// The system's own "lines per notch" measured against the terminal's line,
-    /// because that is the height Windows is answering about; `page` is what the
-    /// user's "one screen at a time" setting means for *this* scroller, and it is
-    /// the caller's to supply since only the caller knows how tall its viewport
-    /// is. Shared by every vertical scroller in the chrome so a notch means the
-    /// same distance in all of them.
-    /// **How tall one line is in this window** — the unit every chrome scroller
-    /// converts a wheel notch into.
-    ///
-    /// Read off the renderer's metrics rather than off a shell's projection, and
-    /// the difference matters twice. It is *correct*: the strip, the rail and
-    /// the settings sheet are not scrolling a terminal, and what they want is
-    /// "one of this product's lines" — the number the metrics own and every
-    /// projection is derived from, so the two agree by construction rather than
-    /// by coincidence. And it is *total*: a tab with no shell has no projection
-    /// to ask (§7.1.6h), and a rail that stopped scrolling because the tab
-    /// beside it happened to be a folder would be a scroller whose behaviour
-    /// depended on something the reader cannot see.
-    fn line_height_subpixels(&self) -> std::num::NonZeroI64 {
-        // **The chrome's scroll distance, not a pane's** (ticket 37): the Settings size at window
-        // scale, through the named base interface. A strip or a list that scrolled by the focused
-        // pane's row height would scroll further every time that pane's text grew.
-        self.window.renderer.base_metrics().cell_height_subpixels()
     }
 
     /// Read the open picker's thumb backwards into an offset (§7.1.6c-5).
@@ -66240,25 +65614,6 @@ fn display_title(
         announcements,
     )
     .0
-}
-
-/// **Which surface this window is drawing its tab list on** — §7.1.6e″'s one
-/// author, and the precedence [`profile_menu_anchor`] walks for the `+`'s box.
-///
-/// `focus_column` is "the card column is on screen", which is focus mode and
-/// nothing else: [`seats::focus_rail_geometry`] answers `Some` for every window
-/// wearing [`seats::RailState::focus`], because the column is a fixed width and
-/// has no fold of its own. It is taken as a bare fact rather than re-derived
-/// here so that the anchor and the owner ask the *same* question of the *same*
-/// frame.
-fn tab_surface(focus_column: bool, layout: seats::TabLayoutMode) -> TabSurface {
-    if focus_column {
-        return TabSurface::FocusColumn;
-    }
-    match layout {
-        seats::TabLayoutMode::Vertical => TabSurface::Rail,
-        seats::TabLayoutMode::Horizontal => TabSurface::Strip,
-    }
 }
 
 #[cfg(test)]

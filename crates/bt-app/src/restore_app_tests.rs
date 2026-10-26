@@ -432,7 +432,7 @@ fn a_tab_whose_shell_has_exited_beside_an_unsaved_preview_is_not_asked_about_aga
 
     let reap = squeezed(method_body("Runtime", "reap_exited_tabs"));
     let filtered = reap
-        .find("letexited=crate::exited_tabs_the_loop_may_close(")
+        .find("letexited=exited_tabs_the_loop_may_close(")
         .expect("the cleanup filters the ended tabs");
     let closes = reap
         .find("self.close_tab(index)?")
