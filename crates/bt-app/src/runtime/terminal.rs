@@ -1796,6 +1796,15 @@ impl<B: Backend> Runtime<'_, B> {
         }
         Ok(())
     }
+
+    /// Whether it is worth writing down which tabs spoke on this turn.
+    ///
+    /// A window outside the mode has no cards to move, and one already owed a
+    /// frame is going to draw them anyway — so both gather nothing at all, which
+    /// is what keeps this off the price of an ordinary drain.
+    pub(crate) fn collecting_card_speakers(&self) -> bool {
+        self.window.focus_mode && !self.window.cards.owes_frame()
+    }
 }
 
 /// **Whether one seat's shell is, right now, the true owner of the keyboard** —

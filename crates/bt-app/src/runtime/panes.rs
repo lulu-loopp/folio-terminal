@@ -24,7 +24,7 @@ use crate::{
     leaf_resize_plan, marks, mouse_trace, notice, notify, pages_that_move_with_their_panes,
     palette, pane_fade_veil_layers, panel_opacity, persisted_pane_count, picture_channel_owner,
     popup_owner, present_diagnostics, presentation_physical_size, preview, preview_image_placement,
-    preview_trace, profiles, rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer,
+    preview_trace, profiles, rail_change_strands_its_popups, rail_is_searching,
     rail_zone_wants_open, restated_scroll, restore, restore_row_seed, risen_frame, row_verb,
     schedule_leaf_grid_change, scrollback_quota, seats, size_authority_for_rectangle, solve_seats,
     solve_tree, video_seat, webhost,
@@ -5716,6 +5716,50 @@ impl<B: Backend> Runtime<'_, B> {
         }
         (seat_ids, seat_frames)
     }
+}
+
+pub(crate) fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> marks::Band {
+    if rail.quads.is_empty()
+        && rail.labels.is_empty()
+        && rail.sprites.is_empty()
+        && rail.images.is_empty()
+    {
+        return marks::Band::default();
+    }
+    let (grounds, quads): (Vec<bt_render::ChromeQuad>, Vec<bt_render::ChromeQuad>) = rail
+        .quads
+        .iter()
+        .partition(|quad| quad.surface == bt_render::ChromeSurface::Ground);
+    let panel = marks::OverlayLayer {
+        grounds: grounds
+            .into_iter()
+            .map(|quad| bt_render::OverlayGround {
+                rect: quad.rect,
+                color: quad.color,
+            })
+            .collect(),
+        quads: quads
+            .into_iter()
+            .map(|quad| bt_render::OverlayQuad {
+                rect: quad.rect,
+                color: quad.color,
+                alpha: 1.0,
+            })
+            .collect(),
+        labels: rail.labels.clone(),
+        sprites: rail.sprites.clone(),
+        // The cards' page pictures, which are not marks and are never
+        // rasterized — see `seats::ChromeGroup::images`. They join the icon
+        // channel *after* the column's own marks, which is the order they must
+        // paint in: a picture is content and the marks around it are chrome.
+        images: rail.images.clone(),
+        ..marks::OverlayLayer::default()
+    };
+    // The fold is the panel's CSS `opacity`, so it is the surface's: the panel
+    // and everything standing in it drawn whole and put back once (ticket 46).
+    // The ground cross-fades on the way back — it is the window — and the shade
+    // it casts on the panes is laid over them; see `bt_render::OverlayGroup`.
+    marks::Band::surface(vec![panel], fold.clamp(0.0, 1.0), [0.0, 0.0])
 }
 
 /// **The ending step: every road that ends a pane retires its shell and expires its attention

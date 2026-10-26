@@ -289,7 +289,7 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 use bt_doc::Bias;
 #[cfg(test)]
 use bt_persist::WindowStateV1;
-use bt_platform::admission::{WaitToken, doors};
+use bt_platform::admission::doors;
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtyError, PtySession, PtySize};
 use bt_render::{
     ChromePalette, CursorStyle, DEVICE_REBUILD_ATTEMPTS, DeviceLossPilot, Flight, FrameSource,
@@ -319,33 +319,37 @@ use runtime::platform_pointer_of;
 use runtime::{
     a_bare_redraw_still_owes_a_present, a_capture_still_holds_its_pointer, a_page_is_off_the_glass,
     a_page_still_has_a_pane, a_page_was_replaced, a_retirement_happens_on_this_turn,
-    advance_periodic_deadline, answer_an_exit_over, answer_attention_in, apply_leaf_metrics,
-    apply_tabs_leaf_metrics, ask_for_peek_pixels, attention_ledger_deadline, broker_verdict,
-    chevron_turn_target, chrome_over, chrome_tick_reuses_picture, clear_copied_selection,
-    clipboard_focus_of, column_keyboard, columns_wanting_git, dispatch_tab_decoration_tasks,
-    drain_may_take_another_slice, dropped_files_seat_at, dwm_dark_mode_owed,
-    earliest_named_deadline, end_leaves_of, file_menu_powers, file_peek_promotion,
-    files_float_content_height, files_key_under, files_key_within, files_keyboard_seat_of,
-    files_locate, files_open_chain, files_root_of, files_row_activation, files_row_counts_clicks,
-    files_row_entry, files_row_menu_subject, float_git_page_shown, float_viewport_rect,
-    focus_leaf_index, folder_foot_notice, folder_pick_outcome, git_answer_notice, git_full_path,
-    git_roots_on_glass, git_surfaces_the_kernel_moved, git_surfaces_wanting_reread,
-    glass_allows_a_text_write, graph_key_of, hole_for, in_drain_feed_turn,
+    advance_periodic_deadline, answer_an_exit_over, answer_attention_in, answer_one_formula,
+    answers_for, apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels,
+    attention_ledger_deadline, broker_verdict, chevron_turn_target, chrome_over,
+    chrome_tick_reuses_picture, clear_copied_selection, clipboard_focus_of, column_keyboard,
+    columns_wanting_git, composition_outlived_its_field, dispatch_pending_math_tasks,
+    dispatch_tab_decoration_tasks, document_formulas, drain_may_take_another_slice,
+    dropped_files_seat_at, dwm_dark_mode_owed, earliest_named_deadline, end_leaves_of,
+    file_menu_powers, file_peek_promotion, files_float_content_height, files_key_under,
+    files_key_within, files_keyboard_seat_of, files_locate, files_open_chain, files_root_of,
+    files_row_activation, files_row_counts_clicks, files_row_entry, files_row_menu_subject,
+    float_git_page_shown, float_viewport_rect, focus_leaf_index, folder_foot_notice,
+    folder_pick_outcome, git_answer_notice, git_full_path, git_roots_on_glass,
+    git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, glass_allows_a_text_write,
+    graph_key_of, ground_overlay_layers, hold_failed_in_tabs, hole_for, in_drain_feed_turn,
     input_line_needs_a_space_first, let_go_unnamed_peek_records, local_image_activation,
-    merge_notice_card, next_attention_stop, paste_answer_text, paste_body, paste_card_step,
-    paste_offer_is_kept, paste_target_is_live, paste_text, peek_body_kind,
-    peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
-    peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
-    persisted_window_bounds, prepare_clipboard_paste, prepare_dropped_paste, press_files_node,
-    preview_body_bar, preview_source_of_recent, profile_menu_anchor, pty_drain_says_nothing_new,
-    pty_frame_is_unchanged, raise_cancelled_quit_card_on, raise_dirty_gate_over, recall_flash,
-    recorded_window_placement, reference_card, reference_run_rect, refused_preview_card,
-    remember_decode, reroot_files_state, rescan_leaf_for_search, resize_worth_solving,
-    resolved_theme_change, restart_seed, revived_page_of, seat_holds_the_keyboard,
-    selection_to_copy, should_copy_on_select_release, stage_paste, startup_poll_delay,
-    step_leaf_text_scale, stepped_command_mark, tab_surface_tip_boxes, take_math_worker_notice,
-    take_pending_paste, take_psreadline_resize_reanchor_input, tear_out_rect,
-    terminal_link_answers_a_press, text_field_holding, tooltip_anchor_for, window_minimum_changed,
+    math_copy_window, math_worker_stopped_notice, merge_notice_card, new_tab_tip,
+    next_attention_stop, paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept,
+    paste_target_is_live, paste_text, peek_body_kind, peek_cache_key_for_decode, peek_card_opened,
+    peek_files_named, peek_foot_press, peek_page_texture_key, peek_reads_the_file, peek_scale_task,
+    pending_paste_in, persisted_window_bounds, prepare_clipboard_paste, prepare_dropped_paste,
+    press_files_node, preview_body_bar, preview_source_of_recent, profile_menu_anchor,
+    pty_drain_says_nothing_new, pty_frame_is_unchanged, rail_overlay_layer,
+    raise_cancelled_quit_card_on, raise_dirty_gate_over, recall_flash, recorded_window_placement,
+    reference_card, reference_run_rect, refused_preview_card, remember_decode, reroot_files_state,
+    rescan_leaf_for_search, resize_worth_solving, resolved_theme_change, restart_seed,
+    retire_spent_math_copy, revived_page_of, seat_holds_the_keyboard, selection_to_copy,
+    should_copy_on_select_release, stage_paste, startup_poll_delay, step_leaf_text_scale,
+    stepped_command_mark, tab_surface_tip_boxes, take_math_worker_notice, take_pending_paste,
+    take_psreadline_resize_reanchor_input, tear_out_rect, terminal_link_answers_a_press,
+    text_field_holding, tooltip_anchor_for, verified_target_of, window_is_exposed,
+    window_is_hidden, window_minimum_changed,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
@@ -491,12 +495,6 @@ const DEFAULT_FROZEN_LINE_QUOTA: NonZeroUsize =
     };
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const HYPERLINK_HOVER_DELAY: Duration = Duration::from_millis(300);
-/// See [`i18n::Text::MathWorkerStopped`] — one of three sentences deliberately
-/// cut to one pattern, because a worker dying is a feature going away and all
-/// three have to say which half still works.
-fn math_worker_stopped_notice() -> &'static str {
-    i18n::Text::MathWorkerStopped.text()
-}
 /// What the tree says when a row it will not open is activated.
 ///
 /// **Short on purpose.** The status overlay is right-aligned into the pane's own
@@ -3489,51 +3487,6 @@ impl PreviewMathCache {
     }
 }
 
-/// **What one of a page's formulas draws, and whether the engine still has to be
-/// asked for it** (§7.1.3u ③).
-///
-/// [`answer_one_picture`]'s twin, and the same sentence about the same mistake:
-/// *a miss reads as never asked*. [`PreviewMathCache`] is bounded in bytes and
-/// evicts by last use, while a page asks for every formula on it — so a document
-/// whose distinct rasters are worth more than the budget evicts one the page is
-/// still drawing on every arrival, and the rebuild that arrival causes asks for
-/// it again.
-///
-/// So the answer a page was already given is part of the question. A page that
-/// has been told what `$E = mc^2$` looks like at this size in this ink keeps
-/// that picture when the cache lets the pixels go, and asks for nothing: the
-/// picture is an `Arc`, so what it draws it holds and nothing is copied.
-///
-/// Out here as a free function for [`answer_one_picture`]'s reason: a `Runtime`
-/// needs a device layer and a window to exist, and what a test has to be able to
-/// put in front of this is the real cache.
-fn answer_one_formula(
-    cache: &mut PreviewMathCache,
-    standing: &DocumentMath,
-    key: &PreviewMathKey,
-    needs_typesetting: &mut bool,
-) -> Option<PreviewMathPicture> {
-    // Cloned out before the arms run: the artifact is a handle to shared pixels,
-    // and holding a borrow of the cache across a call that may add to it is the
-    // one thing this map cannot do.
-    match cache.get(key).cloned() {
-        Some(PreviewMathArtifact::Ready(picture)) => Some(picture),
-        // The engine could not set it, and that is an answer: the source stands.
-        Some(PreviewMathArtifact::Refused) => None,
-        // A question is already out — this page's or another's. What this page
-        // has, it goes on drawing meanwhile.
-        Some(PreviewMathArtifact::Pending) => standing.answer(key).cloned(),
-        None => match standing.answer(key) {
-            // Answered once, and the cache has since let the pixels go.
-            Some(picture) => Some(picture.clone()),
-            None => {
-                *needs_typesetting = true;
-                None
-            }
-        },
-    }
-}
-
 /// **What one picture on a markdown page is, once the document's own directory
 /// and the theme in force have been applied** (user ruling 2026-08-28;
 /// `docs/DESIGN.md` §7.1.3k).
@@ -6319,64 +6272,6 @@ struct PreviewMathSite {
     paragraph: usize,
     run: usize,
     picture: PreviewMathPicture,
-}
-
-/// Every formula one parsed document holds, in the order the page meets them.
-///
-/// **One walk, read by the one place that asks.** Duplicates are left in: the
-/// cache is keyed by content, so a document that writes `$n$` forty times asks
-/// once and finds it already in flight thirty-nine times, and de-duplicating
-/// here would be a second answer to a question the cache has already answered.
-fn document_formulas(
-    blocks: &[preview::MarkdownBlock],
-    metrics: seats::PreviewMarkdownMetrics,
-) -> Vec<(String, MathMode, f32)> {
-    fn inline(spans: &[preview::Span], em_px: f32, found: &mut Vec<(String, MathMode, f32)>) {
-        found.extend(
-            spans
-                .iter()
-                .filter_map(|span| span.math_source())
-                .map(|source| (source.to_owned(), MathMode::Inline, em_px)),
-        );
-    }
-    let mut found = Vec::new();
-    for block in blocks {
-        match block {
-            preview::MarkdownBlock::Math { source } => {
-                found.push((source.clone(), MathMode::Display, metrics.font_size));
-            }
-            // **A heading's formula is set at the heading's size.** Every letter
-            // beside it is, and one that stayed at body size in a masthead would
-            // read as a footnote that had wandered into it.
-            preview::MarkdownBlock::Heading { level, spans } => {
-                inline(spans, metrics.heading_font(*level), &mut found);
-            }
-            preview::MarkdownBlock::Paragraph(spans) => {
-                inline(spans, metrics.font_size, &mut found);
-            }
-            preview::MarkdownBlock::List { items, .. } => {
-                for spans in items {
-                    inline(spans, metrics.font_size, &mut found);
-                }
-            }
-            preview::MarkdownBlock::Quote(lines) => {
-                for spans in lines {
-                    inline(spans, metrics.font_size, &mut found);
-                }
-            }
-            preview::MarkdownBlock::Table { rows, .. } => {
-                for cell in rows.iter().flatten() {
-                    inline(cell, metrics.font_size, &mut found);
-                }
-            }
-            // A fence's dollars are a fence's, a rule has none, and a picture's
-            // alt text is drawn as the words it is rather than parsed as prose.
-            preview::MarkdownBlock::Code { .. }
-            | preview::MarkdownBlock::Rule
-            | preview::MarkdownBlock::Image(_) => {}
-        }
-    }
-    found
 }
 
 /// Note every link in `spans` against the paragraph about to be pushed.
@@ -11309,23 +11204,6 @@ fn sort_math_terminals(ended: Vec<computation_lane::Ended>) -> MathAnswers {
     answers
 }
 
-/// **Hold a failed pane task in the pane that asked**, if that pane is still there: its session
-/// holds it until new input that could change its answer. Answers whether a pane took it.
-fn hold_failed_in_tabs(
-    tabs: &mut [TabState],
-    leaf: ShellAddress,
-    task: SessionDecorationTask,
-) -> bool {
-    let Some(index) = tabs.iter().position(|tab| tab.id == leaf.leaf.tab) else {
-        return false;
-    };
-    let Some(session) = leaf_session_mut(tabs, index, leaf.leaf.seat) else {
-        return false;
-    };
-    session.hold_decoration_task_until_new_input(task);
-    true
-}
-
 /// **Which of the computation lane's shares a pane's task goes to.**
 fn share_of(task: &SessionDecorationTask) -> computation_lane::Share {
     match task {
@@ -11335,78 +11213,6 @@ fn share_of(task: &SessionDecorationTask) -> computation_lane::Share {
         SessionDecorationTask::ScaleInlineImage(_) => computation_lane::Share::Scale,
         SessionDecorationTask::VerifyPath(_) => computation_lane::Share::Path,
     }
-}
-
-/// **Hand a pane's queued decoration work to the computation lane.**
-///
-/// - A share that refuses because it is full stops only its own work for this hand-out: the
-///   rest of the pane's tasks for that share are kept in the pane, and the other two shares are
-///   still handed theirs — the three bounds exist so that the shares do not block each other.
-///   What a full share refused waits at the head of the pane's queues for the next hand-out (the
-///   next output, frame or answer).
-/// - A share whose thread the door could not start refuses the task, which goes back to the
-///   pane, and the pane hands nothing more out until its next new input
-///   (`DualPlaneSession::pause_hand_out_until_new_input`): the start is tried again by new input,
-///   once, never by every hand-out that finds the queues as they were.
-/// - A share whose worker has ended turns the lane off: a one-way feature downgrade, never a
-///   terminal/runtime error.
-fn dispatch_pending_math_tasks(
-    leaf: ShellAddress,
-    session: &mut DualPlaneSession,
-    lane: &computation_lane::ComputationLane,
-    running: &mut bool,
-    notice_pending: &mut bool,
-) -> bool {
-    if !*running {
-        return false;
-    }
-    let mut full = BTreeSet::new();
-    let mut kept = Vec::new();
-    let mut disabled = false;
-    while let Some(task) = session.take_decoration_worker_task() {
-        let share = share_of(&task);
-        if full.contains(&share) {
-            kept.push(task);
-            continue;
-        }
-        match dispatch_decoration_task(leaf, task, lane) {
-            Ok(()) => {}
-            Err((lane::Refused::Full { .. }, task)) => {
-                full.insert(share);
-                kept.push(task);
-            }
-            Err((lane::Refused::NotStarted(_), task)) => {
-                kept.push(task);
-                session.pause_hand_out_until_new_input();
-                break;
-            }
-            Err((lane::Refused::Faulted(_), task)) => {
-                kept.push(task);
-                disabled = disable_math_worker_state(running, notice_pending);
-                break;
-            }
-            Err((lane::Refused::TwinEnded, _)) => {
-                unreachable!("a request joins only one still waiting in line")
-            }
-        }
-    }
-    // Back at the head of their queues, in the order they were taken.
-    for task in kept.into_iter().rev() {
-        session.give_back_decoration_worker_task(task);
-    }
-    disabled
-}
-
-/// The session filed under one seat of one tab, or nothing if that pane has since closed.
-fn leaf_session_mut(
-    tabs: &mut [TabState],
-    index: usize,
-    seat: SeatId,
-) -> Option<&mut DualPlaneSession> {
-    tabs[index]
-        .sessions
-        .get_mut(&seat)
-        .map(|leaf| &mut leaf.session)
 }
 
 /// The worker lanes a tab's decoration dispatch hands work to, cloned out of [`App`] so the
@@ -16346,42 +16152,6 @@ mod layer_shape_tests {
     }
 }
 
-/// **Take one window's answers out of the batch, and leave every other window's
-/// exactly where they were** (user report, 2026-08-23).
-///
-/// The four decoration lanes are the application's (§2.4 rule 1) and each has one
-/// answer channel for the whole process. So the application is what drains a
-/// lane, once, and this is the step each window then performs on what came out —
-/// [`AnswerOwner`] is what "its own" means, and since F1b that is a question
-/// about the tab an answer names rather than about the window it was asked from.
-///
-/// A window that *drained* instead took every pending answer, matched the ones
-/// belonging to another window's `TabId(1)` against its own tab of that number,
-/// and dropped them where they stood. Nothing asks twice — a head read has spent
-/// [`preview::PreviewBuffer::claim_head_read`], a directory is already
-/// `mark_pending` — so in every window but the first, the files column stayed
-/// empty for ever, no printed path was ever verified, and a markdown file opened
-/// into the preview pane drew its head, its foot and the two hairlines between
-/// them and nothing else. Photographed on the machine, two windows of one
-/// process, in the same second.
-///
-/// The order of what is taken is preserved, and so is the order of what is left:
-/// a lane's answers are a sequence and re-ordering them here would be a second
-/// place that decides which of two reads of one directory is the newer.
-fn answers_for<T>(batch: &mut Vec<T>, mine: impl Fn(&T) -> bool) -> Vec<T> {
-    let mut taken = Vec::new();
-    let mut theirs = Vec::with_capacity(batch.len());
-    for answer in batch.drain(..) {
-        if mine(&answer) {
-            taken.push(answer);
-        } else {
-            theirs.push(answer);
-        }
-    }
-    *batch = theirs;
-    taken
-}
-
 /// **Who an answer belongs to** — and therefore which window may take it out of
 /// the one batch the application drained (F1b).
 ///
@@ -20263,12 +20033,6 @@ enum DividerGrip {
     },
 }
 
-/// What every folder trigger's tip says (H108) — `title="Peek files here"` on
-/// the tab's and on the pane head's alike.
-fn float_trigger_tip() -> &'static str {
-    i18n::Text::FloatTriggerTip.text()
-}
-
 /// What a foot says while it is confirming a reveal (B24).
 fn foot_revealed_label() -> &'static str {
     i18n::Text::FilesRevealed.text()
@@ -20700,30 +20464,6 @@ fn ime_owner(owner: KeyboardOwner) -> ImeOwner {
     } else {
         ImeOwner::Shell
     }
-}
-
-/// **Whether a composition has outlived the field it was typed into** (user
-/// report 2026-09-12; `docs/DESIGN.md` §7.1.5a″).
-///
-/// The ruling in one line: **a composition belongs to the field it started in,
-/// and when that field goes away the composition is cancelled — never committed
-/// into whatever is holding the keyboard next.** The reporter typed `gif` into
-/// the command palette with an input method on, picked the file, and the
-/// palette closed with the candidate list still floating over the picture it had
-/// opened, attached to nothing; clicking the page did not put it away, because
-/// nothing in this window had ever ended a composition and Windows only ends one
-/// on a blur.
-///
-/// A function of the two rungs and of nothing else, so that every site the
-/// keyboard can move at is answered by the same sentence rather than by its own
-/// idea of when a field has gone: what makes a composition stale is not which
-/// gesture moved the keyboard, it is that the keyboard is somewhere else.
-#[must_use]
-fn composition_outlived_its_field(
-    composing: Option<ImeOwner>,
-    holds_the_keyboard: ImeOwner,
-) -> bool {
-    composing.is_some_and(|started_in| started_in != holds_the_keyboard)
 }
 
 /// **The field a composition began in, named exactly enough to tell it from the
@@ -26211,28 +25951,6 @@ enum PreviewTextCommand {
     Clear,
 }
 
-/// Which of the three a key is, if it is one.
-///
-/// `Ctrl+C` and `Ctrl+Shift+C` both copy, unlike in the terminal where the
-/// unshifted one has to reach a shell when nothing is selected: there is no
-/// shell under a rendered page, so there is nothing for it to fall through to.
-fn preview_text_command(key: &Key, modifiers: ModifiersState) -> Option<PreviewTextCommand> {
-    if let Key::Named(NamedKey::Escape) = key {
-        return Some(PreviewTextCommand::Clear);
-    }
-    if !modifiers.control_key() || modifiers.alt_key() {
-        return None;
-    }
-    let Key::Character(text) = key else {
-        return None;
-    };
-    match text.as_str() {
-        "c" | "C" => Some(PreviewTextCommand::Copy),
-        "a" | "A" => Some(PreviewTextCommand::SelectAll),
-        _ => None,
-    }
-}
-
 /// A double click on the picture, and the `0` / `1` keys' shared destination.
 ///
 /// **Fit ↔ 100%, and the 100% is centred rather than about the pointer** (ruling
@@ -27361,26 +27079,6 @@ fn link_target_to_ask_about(
     bt_transcript::paths::may_read_unasked(&path, namer).then_some(path)
 }
 
-/// **What a pane's ledger has to say to a hand-off** (audit 3 C-2; owner rulings 2026-09-21).
-///
-/// A free function so the road from a real file to a real door argument can be driven in a test
-/// without a window: `verify_path` → this → the door's own argument builder. That road is what the
-/// closure review r6 found broken — every fixture in the suite carried no resolved name, so the
-/// doors were only ever exercised on the fallback.
-///
-/// A name with no verdict answers `exists: false`, which every door refuses.
-fn verified_target_of(verdict: Option<&bt_term::PathVerdict>) -> bt_platform::VerifiedTarget {
-    let Some(verdict) = verdict else {
-        return bt_platform::VerifiedTarget::absent();
-    };
-    bt_platform::VerifiedTarget {
-        exists: verdict.exists,
-        is_directory: verdict.directory,
-        executable: verdict.executable,
-        resolved: verdict.door_ready.clone(),
-    }
-}
-
 // `names_an_html_page` stood here from §7.1.5g (user ruling 2026-08-20) until
 // 2026-08-25. It answered "is this HTML", and while `html` and `htm` were the
 // only spellings on the engine's lane that was the same question as "is this a
@@ -28140,47 +27838,6 @@ fn tab_trailing_targets(hand: TabTriggerHand) -> (f32, f32) {
 // program can **withdraw**, and the bell keeps exactly the claim it always honestly had:
 // [`StatusClaim::Bell`], a flat dot that a look spends. `attention_is_consumed` stays where it is —
 // the latches it retires are still latches, and red line 4 forbids it a third parameter.
-
-/// **Whether this window is out of the reader's reach altogether** (`attention` plan §5.2, C1).
-///
-/// Two facts and one `||`, and the composition is here rather than in `bt-platform` because it is
-/// a *policy* — "hidden" is the name this product gives to the union of them — while the two calls
-/// underneath are readings. A third condition, "completely covered by another window", used to be
-/// deliberately absent from every fact this module held; it is now [`window_is_exposed`]'s, and it
-/// is a **separate** bit rather than a third arm of this `||`. Minimised and cloaked are the window
-/// telling us where it is; covered is somebody else's window standing in front of one that is
-/// perfectly on screen, and [`notify::desktop_reach`] answers the two differently — see
-/// [`attention::Reach::Toast`].
-///
-/// A window whose handle cannot be got is reported reachable, on
-/// [`bt_platform::cloaked_from_attribute`]'s reasoning: under-stating flashes a taskbar button
-/// nobody sees, and over-stating puts a toast in front of somebody who is looking straight at the
-/// pane it is about.
-///
-/// **An owner-thread door** (`doors::PlaceHidden`, row 13's residue), minted only in
-/// [`sample_window_place`].
-fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &impl WindowHost) -> bool {
-    let _ = token;
-    window.is_iconic() || window.is_cloaked()
-}
-
-/// **Whether the window manager puts this window under any of its own sample points** (user ruling
-/// 2026-09-01).
-///
-/// The window-handle half of [`bt_platform::window_is_exposed`], and it is here for
-/// [`window_is_hidden`]'s reason: the composition is one line, and where it lives is where the
-/// failure policy is stated. **A window whose handle cannot be got is reported exposed**, which is
-/// the same direction that function takes and the same direction
-/// [`bt_platform::cloaked_from_attribute`] argues for — of the two wrong answers, one leaves the
-/// reader with the marks inside a window they are looking at, and the other puts a toast on a
-/// desktop they can see.
-///
-/// **An owner-thread door** (`doors::PlaceExposure`, row 13's residue), minted only in
-/// [`sample_window_place`].
-fn window_is_exposed(token: WaitToken<'_, doors::PlaceExposure>, window: &impl WindowHost) -> bool {
-    let _ = token;
-    window.is_exposed()
-}
 
 /// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
 ///
@@ -32003,29 +31660,6 @@ fn pane_fade_veil_layers(
     }]
 }
 
-/// The overlay's ground floor, in the order it paints: the arriving panes' veil,
-/// then the dock drawing over it, and everything else stacked on top by
-/// [`Runtime::refresh_overlay`].
-///
-/// The veil has to be *in* the overlay at all because the overlay pass is the
-/// only one that runs over the whole window above seat chrome and above chrome
-/// text — a pane's caption is chrome text, and a fade that did not reach it
-/// would be a title arriving at full strength over a body that is not there yet.
-///
-/// And it has to be at the *bottom* of it. The dock drawing is already the
-/// lowest thing the overlay carries (`#dock-shift` 24 and `#dock-preview` 25
-/// against `.combo-menu`'s 30 and `.tip`'s 60), for the reason
-/// [`Runtime::dock_overlay_layers`] gives: it is a drawing *on* the layout
-/// rather than a surface floating over the window. A veil is a drawing on one
-/// pane, which is a step lower still — a menu, a dialog or a tip that is somehow
-/// up while the layout is changing must cover it, because those surfaces are the
-/// window talking to you and the veil is the window rearranging itself.
-fn ground_overlay_layers(veil: Vec<marks::OverlayLayer>, dock: marks::Band) -> marks::Band {
-    let mut layers = marks::Band::from(veil);
-    layers.append(dock);
-    layers
-}
-
 /// Every family the overlay carries, held apart so that **the one thing that
 /// decides what covers what is a list you can read** ([`OverlayStack::flattened`]).
 ///
@@ -32639,75 +32273,6 @@ fn dump_focus_thumb_frame(
             pages.dropped_stale,
         )
     });
-}
-
-/// The same probe, for the overlay stack — see [`dump_chrome_frame`].
-///
-/// Both channels, because "which pass painted this" is half of any answer the
-/// dump is asked for: chrome is drawn under the overlays, so a stray box that is
-/// *behind* a pane head's caption came from the first and one in front of it from
-/// the second, and reading one file with both in it settles that without a second
-/// run.
-fn dump_overlay_frame(band: &marks::Band) {
-    let Some(path) = entry_doors::installed().chrome_dump.clone() else {
-        return;
-    };
-    use std::fmt::Write as _;
-    let layers = &band.layers;
-    let mut out = String::new();
-    let ink = |color: [u8; 3]| format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]);
-    let _ = writeln!(out, "=== overlay frame: {} layers", layers.len());
-    for group in &band.groups {
-        let _ = writeln!(
-            out,
-            "group  {:?} opacity={:.3} offset={:?}",
-            group.layers, group.opacity, group.offset
-        );
-    }
-    for (index, layer) in layers.iter().enumerate() {
-        let _ = writeln!(
-            out,
-            "--- layer {index} opacity={:.3} body={}",
-            layer.opacity,
-            layer.body.is_some()
-        );
-        for quad in &layer.quads {
-            let _ = writeln!(
-                out,
-                "quad   {:?} {} alpha={:.3}",
-                quad.rect,
-                ink(quad.color),
-                quad.alpha
-            );
-        }
-        for sprite in &layer.sprites {
-            let _ = writeln!(
-                out,
-                "sprite {:?} {} opacity={:.3} mark={:?}",
-                sprite.rect,
-                ink(sprite.color),
-                sprite.opacity,
-                sprite.mark
-            );
-        }
-        for label in &layer.labels {
-            let _ = writeln!(
-                out,
-                "label  {:?} {} {:?}",
-                label.rect,
-                ink(label.color),
-                label.text
-            );
-        }
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        use std::io::Write as _;
-        let _ = file.write_all(out.as_bytes());
-    }
 }
 
 fn risen_frame(frame: [f32; 4], fade: float::FloatFade) -> [f32; 4] {
@@ -45556,35 +45121,6 @@ impl<B: Backend> Runtime<'_, B> {
         Some((stored, file))
     }
 
-    /// **Hand one band of the overlay to the arrival register** — see
-    /// [`arrival::Passages::stage`].
-    ///
-    /// The one door, so that "how a popup arrives" is a fact about this window
-    /// rather than about each of the thirteen bands: the span, the curve, the
-    /// travel and the reduced-motion branch are all inside, and a call site says
-    /// only which band it is and which way that band grew.
-    fn stage(
-        &mut self,
-        band: Layered,
-        layers: marks::Band,
-        travel: Option<Travel>,
-        now: Instant,
-    ) -> marks::Band {
-        let scale = self.window.renderer.scale_factor() as f32;
-        let motion = self.app.motion;
-        self.window
-            .passages
-            .stage(band, layers, travel, now, motion, scale)
-    }
-
-    /// The same for a surface that fades itself in and only wants the way out.
-    fn stage_departure(&mut self, band: Layered, layers: marks::Band, now: Instant) -> marks::Band {
-        let motion = self.app.motion;
-        self.window
-            .passages
-            .stage_departure(band, layers, now, motion)
-    }
-
     /// **The box a card's picture is drawn in, in this window's own pixels** —
     /// what a window carrying a pane needs to be told before it can make one
     /// (B2).
@@ -45779,32 +45315,6 @@ impl<B: Backend> Runtime<'_, B> {
         let card = geometry.cards.get(self.window.active_tab)?;
         let [list_top, list_bottom] = geometry.viewport;
         (card.head[1] >= list_top && card.head[3] <= list_bottom).then_some(card.head)
-    }
-
-    /// Paint the Cards bubble, and say which way it grew.
-    ///
-    /// The travel rides back with the layers rather than being asked for
-    /// separately, because it is a fact about *this* placement: the bubble that
-    /// bit a card grew away from that card, and the one that fell back to the
-    /// corner grew off the floor. A caller that had to ask twice could pair one
-    /// frame's box with another frame's direction.
-    fn card_hint_layer(&mut self, now: Instant) -> (Vec<marks::OverlayLayer>, Option<Travel>) {
-        if !self.window.card_hint.showing() {
-            return (Vec::new(), None);
-        }
-        let head = self.staged_card_head(now);
-        let scale = self.window.renderer.scale_factor() as f32;
-        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
-        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        let layout = cardhint::place(
-            head,
-            (width as f32, height as f32),
-            scale,
-            &mut |run, size| renderer.measure_chrome_text(gpu, run, size),
-        );
-        let palette = bt_render::chrome_palette();
-        let travel = cardhint::travel(&layout);
-        (cardhint::build(&layout, &palette, scale), Some(travel))
     }
 
     /// **Note whether this window is in Cards, and raise the bubble on the frame
@@ -49614,21 +49124,6 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
-    /// **May this window take that answer out of the application's batch?**
-    /// (F1b — see [`AnswerOwner`].)
-    ///
-    /// The one place the two facts meet, and the reason there is only one: the
-    /// strip is the sole author of "which window this tab is in", so a claim is
-    /// read straight off it rather than off a `WindowId` some request wrote down
-    /// earlier and no longer speaks for.
-    fn owns(&self, owner: AnswerOwner) -> bool {
-        claimed_by(
-            owner,
-            self.window_id(),
-            self.window.tabs.iter().map(|tab| tab.id),
-        )
-    }
-
     /// [`Self::focused_leaf_id`] with the window on the front of it.
     fn focused_shell_address(&self) -> ShellAddress {
         ShellAddress {
@@ -49867,37 +49362,6 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     // ── P143-P150: the glance card ──────────────────────────────────────────
-
-    /// The places this column could be pointed at (E54): its own root, the home folder, the
-    /// shells' folders the menu took as it opened ([`Self::shell_folders_for_the_root_menu`]) and
-    /// the remembered folders, the kept ones first.
-    fn root_choices(&self, seat: SeatId) -> Vec<profiles::RootChoice> {
-        let tab = &self.window.tabs[self.window.active_tab];
-        // Taken when the menu opened ([`Self::shell_folders_for_the_root_menu`]): the menu is
-        // laid out every frame it is up, and a pane's folder is read on an ask, not per frame.
-        let cwds = &self.window.root_menu_shell_folders;
-        let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
-            .map(|home| home.display().to_string());
-        // The remembered folders come from the application and not from this
-        // window, which is the whole of "every window offers the same list":
-        // there is one store, and a window's root menu is a view of it.
-        let found = profiles::root_choices(
-            &tab.files_state(seat).root,
-            home.as_deref(),
-            cwds,
-            self.app.recent_folders.entries(),
-        );
-        // **What the user said to keep goes on top** (user ruling 2026-08-19).
-        // Applied here rather than inside `root_choices` because that function
-        // answers "what did this window find", which is a question about shells
-        // and a home directory; what somebody chose to keep is a different
-        // question with a file behind it, and folding the two would make the
-        // pure one need a store.
-        profiles::apply_pins(
-            found,
-            &self.app.pins_store.targets(bt_persist::PinKind::Folder),
-        )
-    }
 
     /// `Browse…` — ask the system for a folder the quick list could not name
     /// (E55).
@@ -50346,15 +49810,6 @@ impl<B: Backend> Runtime<'_, B> {
         ))
     }
 
-    /// Whether it is worth writing down which tabs spoke on this turn.
-    ///
-    /// A window outside the mode has no cards to move, and one already owed a
-    /// frame is going to draw them anyway — so both gather nothing at all, which
-    /// is what keeps this off the price of an ordinary drain.
-    fn collecting_card_speakers(&self) -> bool {
-        self.window.focus_mode && !self.window.cards.owes_frame()
-    }
-
     fn set_cursor_focus(&mut self, focused: bool, now: Instant) {
         // The one place window focus changes hands — both `Focused(true)` and
         // `Focused(false)` arrive here — so the strip's copy is recorded here
@@ -50396,29 +49851,6 @@ impl<B: Backend> Runtime<'_, B> {
                 millihertz.unwrap_or_default(),
             ));
         }
-    }
-
-    /// **The next frame an animation that is still running is owed**, and
-    /// nothing at all once it has landed.
-    ///
-    /// The one shape every animated clock in this window reports its debt in, so
-    /// that "I am animating" is said in one place and paced in one place rather
-    /// than thirteen times with a constant each. `owes` is the animation's own
-    /// judgement and is all it is asked for; when the loop should next look is
-    /// not a question any single animation is in a position to answer.
-    fn animating_deadline(&self, owes: bool, now: Instant) -> Option<Instant> {
-        let _ = now;
-        owes.then(|| self.next_animation_deadline()).flatten()
-    }
-
-    /// Whether the jump's band is still on screen and still worth a frame — the
-    /// first half of [`Self::command_flash_deadline`], which is the half that
-    /// says whether anything is moving.
-    fn command_flash_is_running(&self, now: Instant) -> bool {
-        self.app.motion == Motion::Full
-            && self.window.command_flash.as_ref().is_some_and(|flash| {
-                cmdrail::flash_is_running(now.saturating_duration_since(flash.started))
-            })
     }
 
     /// The rail as the chrome would draw it, quantised to what can reach the
@@ -67047,39 +66479,6 @@ fn ime_commit_bytes(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
 
-/// **The copy tick's own clock, read in one place** (audit 2026-09-15, RB-1).
-///
-/// `Some(the one instant the acknowledgement is due to come down)` while it is
-/// still up, and `None` the moment it is spent — which is both *"draw the
-/// sheets again"* and *"ask the loop for nothing"*, because they are one fact
-/// and were two readings of one field before this existed.
-///
-/// A free function and not a method so the arithmetic can be pinned without a
-/// window, which is the arrangement `formula_tools` keeps for the marks
-/// themselves: the defect this closes is a deadline in the past, and a deadline
-/// is a number.
-fn math_copy_window(said_at: Option<&Instant>, now: Instant) -> Option<Instant> {
-    said_at
-        .map(|at| *at + FOOT_REVEAL_FEEDBACK)
-        .filter(|due| now < *due)
-}
-
-/// **Take a spent acknowledgement off the window**, and answer whether *this*
-/// call is the one that took it (RB-1).
-///
-/// The answer is what buys the single overlay rebuild that turns the tick back
-/// into the pair of sheets. It is `true` exactly once per copy: the second call
-/// past the same expiry finds nothing and asks for nothing, which is what keeps
-/// a retired tick from repainting the band on every turn for ever — the shape of
-/// the defect, moved one field over.
-fn retire_spent_math_copy(said: &mut Option<(MathBlockAnchor, Instant)>, now: Instant) -> bool {
-    if said.is_some() && math_copy_window(said.as_ref().map(|(_, at)| at), now).is_none() {
-        *said = None;
-        return true;
-    }
-    false
-}
-
 /// The payload and later path refusals are separate causes, both delivered to the app's toast host.
 #[derive(Default)]
 struct PreparedClipboardPaste {
@@ -68099,21 +67498,6 @@ fn resolved_language_on(stored: bt_persist::LanguageV1, os_ui_language: &str) ->
 /// in, in one place so that two of them cannot drift apart.
 fn banner_line(text: &str) -> String {
     format!("\x1b[2m[{APP_NAME}] {text}\x1b[0m\r\n")
-}
-
-/// `title="New tab (${defaultProfile().title})"` — mock-up 4367 and 4369.
-///
-/// One function for the two buttons that wear it, because the mock-up writes the
-/// same template literal twice, once for the horizontal strip and once for the
-/// rail, and "two surfaces, one sentence" is `UI-UX.md` §549 principle 7's own
-/// rule about this exact pair. A second spelling here is how the rail's `+` comes
-/// to promise a shell the strip's `+` does not.
-///
-/// The parentheses are the mock-up's and not a stylistic choice: the tip names
-/// the *verb* first and qualifies it, so that a user who reads only the first two
-/// words has still read the truth.
-fn new_tab_tip(profile: &str) -> String {
-    i18n::new_tab_tip(profiles::identity_title(profile))
 }
 
 fn resolve_title(
@@ -71634,50 +71018,6 @@ fn rail_change_strands_its_popups(from: seats::RailState, to: seats::RailState) 
 /// tested and clickable.
 fn panel_opacity(state: seats::RailState, fold: f32) -> f32 {
     if state.draws_focus_rail() { 1.0 } else { fold }
-}
-
-fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> marks::Band {
-    if rail.quads.is_empty()
-        && rail.labels.is_empty()
-        && rail.sprites.is_empty()
-        && rail.images.is_empty()
-    {
-        return marks::Band::default();
-    }
-    let (grounds, quads): (Vec<bt_render::ChromeQuad>, Vec<bt_render::ChromeQuad>) = rail
-        .quads
-        .iter()
-        .partition(|quad| quad.surface == bt_render::ChromeSurface::Ground);
-    let panel = marks::OverlayLayer {
-        grounds: grounds
-            .into_iter()
-            .map(|quad| bt_render::OverlayGround {
-                rect: quad.rect,
-                color: quad.color,
-            })
-            .collect(),
-        quads: quads
-            .into_iter()
-            .map(|quad| bt_render::OverlayQuad {
-                rect: quad.rect,
-                color: quad.color,
-                alpha: 1.0,
-            })
-            .collect(),
-        labels: rail.labels.clone(),
-        sprites: rail.sprites.clone(),
-        // The cards' page pictures, which are not marks and are never
-        // rasterized — see `seats::ChromeGroup::images`. They join the icon
-        // channel *after* the column's own marks, which is the order they must
-        // paint in: a picture is content and the marks around it are chrome.
-        images: rail.images.clone(),
-        ..marks::OverlayLayer::default()
-    };
-    // The fold is the panel's CSS `opacity`, so it is the surface's: the panel
-    // and everything standing in it drawn whole and put back once (ticket 46).
-    // The ground cross-fades on the way back — it is the window — and the shade
-    // it casts on the panes is laid over them; see `bt_render::OverlayGroup`.
-    marks::Band::surface(vec![panel], fold.clamp(0.0, 1.0), [0.0, 0.0])
 }
 
 /// **The one place a chosen (layout, sidebar mode) pair becomes a `RailState`.**

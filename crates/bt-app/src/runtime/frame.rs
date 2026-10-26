@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::TabId;
+use crate::runtime::math::math_copy_window;
 use crate::wake_owner::WakeOwner;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -9,22 +10,23 @@ use crate::{
     Fading, FrameImageReferences, FrameTraces, GhostFace, HyperlinkActivation, HyperlinkHover,
     LeafId, Motion, PaneDraw, PictureOnGlass, PointerTarget, PresentIntent, Runtime,
     STARTUP_PTY_POLL_INTERVAL, SearchRefresh, ShellAddress, TabPress, TabState, cmdrail,
-    dispatch_pending_math_tasks, files, foreground_program, git, handoff_lane, hang_watch,
-    hyperlink_activation, ime_outbound, mark_leaf_painted, math_copy_window,
-    math_worker_stopped_notice, notify, pace, present_diagnostics, present_gate,
-    presentation_equivalent, preview, seats, settings, settling, taskbar_lane, termscroll, toast,
-    update, verified_target_of, webhost, window_is_exposed, window_is_hidden,
+    computation_lane, disable_math_worker_state, dispatch_decoration_task, files,
+    foreground_program, git, handoff_lane, hang_watch, hyperlink_activation, i18n, ime_outbound,
+    lane, mark_leaf_painted, notify, pace, present_diagnostics, present_gate,
+    presentation_equivalent, preview, seats, settings, settling, share_of, taskbar_lane,
+    termscroll, toast, update, webhost,
 };
 use anyhow::Context;
 use anyhow::Result;
 use bt_layout::SeatId;
-use bt_platform::admission::doors;
+use bt_platform::admission::{WaitToken, doors};
 use bt_render::{
     FrameSource, FrameTrigger, PresentOutcome, compose_preedit, frame_content_digest,
     frame_is_alternate_screen,
 };
+use bt_term::DualPlaneSession;
 use bt_viewport::{HyperlinkHit, ViewportFrame};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use winit::dpi::PhysicalPosition;
@@ -2962,6 +2964,152 @@ impl<B: Backend> Runtime<'_, B> {
                 || self.math_tools_owe_frames(now),
         }
     }
+
+    /// Whether the jump's band is still on screen and still worth a frame — the
+    /// first half of [`Self::command_flash_deadline`], which is the half that
+    /// says whether anything is moving.
+    fn command_flash_is_running(&self, now: Instant) -> bool {
+        self.app.motion == Motion::Full
+            && self.window.command_flash.as_ref().is_some_and(|flash| {
+                cmdrail::flash_is_running(now.saturating_duration_since(flash.started))
+            })
+    }
+}
+
+/// See [`i18n::Text::MathWorkerStopped`] — one of three sentences deliberately
+/// cut to one pattern, because a worker dying is a feature going away and all
+/// three have to say which half still works.
+pub(crate) fn math_worker_stopped_notice() -> &'static str {
+    i18n::Text::MathWorkerStopped.text()
+}
+
+/// **Hand a pane's queued decoration work to the computation lane.**
+///
+/// - A share that refuses because it is full stops only its own work for this hand-out: the
+///   rest of the pane's tasks for that share are kept in the pane, and the other two shares are
+///   still handed theirs — the three bounds exist so that the shares do not block each other.
+///   What a full share refused waits at the head of the pane's queues for the next hand-out (the
+///   next output, frame or answer).
+/// - A share whose thread the door could not start refuses the task, which goes back to the
+///   pane, and the pane hands nothing more out until its next new input
+///   (`DualPlaneSession::pause_hand_out_until_new_input`): the start is tried again by new input,
+///   once, never by every hand-out that finds the queues as they were.
+/// - A share whose worker has ended turns the lane off: a one-way feature downgrade, never a
+///   terminal/runtime error.
+pub(crate) fn dispatch_pending_math_tasks(
+    leaf: ShellAddress,
+    session: &mut DualPlaneSession,
+    lane: &computation_lane::ComputationLane,
+    running: &mut bool,
+    notice_pending: &mut bool,
+) -> bool {
+    if !*running {
+        return false;
+    }
+    let mut full = BTreeSet::new();
+    let mut kept = Vec::new();
+    let mut disabled = false;
+    while let Some(task) = session.take_decoration_worker_task() {
+        let share = share_of(&task);
+        if full.contains(&share) {
+            kept.push(task);
+            continue;
+        }
+        match dispatch_decoration_task(leaf, task, lane) {
+            Ok(()) => {}
+            Err((lane::Refused::Full { .. }, task)) => {
+                full.insert(share);
+                kept.push(task);
+            }
+            Err((lane::Refused::NotStarted(_), task)) => {
+                kept.push(task);
+                session.pause_hand_out_until_new_input();
+                break;
+            }
+            Err((lane::Refused::Faulted(_), task)) => {
+                kept.push(task);
+                disabled = disable_math_worker_state(running, notice_pending);
+                break;
+            }
+            Err((lane::Refused::TwinEnded, _)) => {
+                unreachable!("a request joins only one still waiting in line")
+            }
+        }
+    }
+    // Back at the head of their queues, in the order they were taken.
+    for task in kept.into_iter().rev() {
+        session.give_back_decoration_worker_task(task);
+    }
+    disabled
+}
+
+/// **What a pane's ledger has to say to a hand-off** (audit 3 C-2; owner rulings 2026-09-21).
+///
+/// A free function so the road from a real file to a real door argument can be driven in a test
+/// without a window: `verify_path` → this → the door's own argument builder. That road is what the
+/// closure review r6 found broken — every fixture in the suite carried no resolved name, so the
+/// doors were only ever exercised on the fallback.
+///
+/// A name with no verdict answers `exists: false`, which every door refuses.
+pub(crate) fn verified_target_of(
+    verdict: Option<&bt_term::PathVerdict>,
+) -> bt_platform::VerifiedTarget {
+    let Some(verdict) = verdict else {
+        return bt_platform::VerifiedTarget::absent();
+    };
+    bt_platform::VerifiedTarget {
+        exists: verdict.exists,
+        is_directory: verdict.directory,
+        executable: verdict.executable,
+        resolved: verdict.door_ready.clone(),
+    }
+}
+
+/// **Whether this window is out of the reader's reach altogether** (`attention` plan §5.2, C1).
+///
+/// Two facts and one `||`, and the composition is here rather than in `bt-platform` because it is
+/// a *policy* — "hidden" is the name this product gives to the union of them — while the two calls
+/// underneath are readings. A third condition, "completely covered by another window", used to be
+/// deliberately absent from every fact this module held; it is now [`window_is_exposed`]'s, and it
+/// is a **separate** bit rather than a third arm of this `||`. Minimised and cloaked are the window
+/// telling us where it is; covered is somebody else's window standing in front of one that is
+/// perfectly on screen, and [`notify::desktop_reach`] answers the two differently — see
+/// [`attention::Reach::Toast`].
+///
+/// A window whose handle cannot be got is reported reachable, on
+/// [`bt_platform::cloaked_from_attribute`]'s reasoning: under-stating flashes a taskbar button
+/// nobody sees, and over-stating puts a toast in front of somebody who is looking straight at the
+/// pane it is about.
+///
+/// **An owner-thread door** (`doors::PlaceHidden`, row 13's residue), minted only in
+/// [`sample_window_place`].
+pub(crate) fn window_is_hidden(
+    token: WaitToken<'_, doors::PlaceHidden>,
+    window: &impl WindowHost,
+) -> bool {
+    let _ = token;
+    window.is_iconic() || window.is_cloaked()
+}
+
+/// **Whether the window manager puts this window under any of its own sample points** (user ruling
+/// 2026-09-01).
+///
+/// The window-handle half of [`bt_platform::window_is_exposed`], and it is here for
+/// [`window_is_hidden`]'s reason: the composition is one line, and where it lives is where the
+/// failure policy is stated. **A window whose handle cannot be got is reported exposed**, which is
+/// the same direction that function takes and the same direction
+/// [`bt_platform::cloaked_from_attribute`] argues for — of the two wrong answers, one leaves the
+/// reader with the marks inside a window they are looking at, and the other puts a toast on a
+/// desktop they can see.
+///
+/// **An owner-thread door** (`doors::PlaceExposure`, row 13's residue), minted only in
+/// [`sample_window_place`].
+pub(crate) fn window_is_exposed(
+    token: WaitToken<'_, doors::PlaceExposure>,
+    window: &impl WindowHost,
+) -> bool {
+    let _ = token;
+    window.is_exposed()
 }
 
 pub(crate) fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {

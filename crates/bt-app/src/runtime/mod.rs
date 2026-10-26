@@ -75,9 +75,10 @@ pub(crate) use floats::{
 #[cfg(test)]
 pub(crate) use frame::{
     a_bare_redraw_still_owes_a_present, advance_periodic_deadline, attention_ledger_deadline,
-    chrome_over, chrome_tick_reuses_picture, dispatch_tab_decoration_tasks,
-    earliest_named_deadline, pty_drain_says_nothing_new, pty_frame_is_unchanged,
-    startup_poll_delay, take_math_worker_notice,
+    chrome_over, chrome_tick_reuses_picture, dispatch_pending_math_tasks,
+    dispatch_tab_decoration_tasks, earliest_named_deadline, math_worker_stopped_notice,
+    pty_drain_says_nothing_new, pty_frame_is_unchanged, startup_poll_delay,
+    take_math_worker_notice, verified_target_of, window_is_exposed, window_is_hidden,
 };
 #[cfg(test)]
 pub(crate) use git::{
@@ -85,9 +86,16 @@ pub(crate) use git::{
     git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, graph_key_of,
 };
 #[cfg(test)]
+pub(crate) use keyboard::composition_outlived_its_field;
+#[cfg(test)]
+pub(crate) use math::{
+    answer_one_formula, answers_for, document_formulas, ground_overlay_layers, hold_failed_in_tabs,
+    math_copy_window, new_tab_tip, retire_spent_math_copy,
+};
+#[cfg(test)]
 pub(crate) use palette::recall_flash;
 #[cfg(test)]
-pub(crate) use panes::end_leaves_of;
+pub(crate) use panes::{end_leaves_of, rail_overlay_layer};
 #[cfg(test)]
 pub(crate) use peek::{
     ask_for_peek_pixels, file_peek_promotion, let_go_unnamed_peek_records, peek_body_kind,

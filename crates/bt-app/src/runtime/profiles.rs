@@ -986,6 +986,37 @@ impl<B: Backend> Runtime<'_, B> {
             .map(|cwd| cwd.display().to_string())
             .collect()
     }
+
+    /// The places this column could be pointed at (E54): its own root, the home folder, the
+    /// shells' folders the menu took as it opened ([`Self::shell_folders_for_the_root_menu`]) and
+    /// the remembered folders, the kept ones first.
+    pub(crate) fn root_choices(&self, seat: SeatId) -> Vec<profiles::RootChoice> {
+        let tab = &self.window.tabs[self.window.active_tab];
+        // Taken when the menu opened ([`Self::shell_folders_for_the_root_menu`]): the menu is
+        // laid out every frame it is up, and a pane's folder is read on an ask, not per frame.
+        let cwds = &self.window.root_menu_shell_folders;
+        let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
+            .map(|home| home.display().to_string());
+        // The remembered folders come from the application and not from this
+        // window, which is the whole of "every window offers the same list":
+        // there is one store, and a window's root menu is a view of it.
+        let found = profiles::root_choices(
+            &tab.files_state(seat).root,
+            home.as_deref(),
+            cwds,
+            self.app.recent_folders.entries(),
+        );
+        // **What the user said to keep goes on top** (user ruling 2026-08-19).
+        // Applied here rather than inside `root_choices` because that function
+        // answers "what did this window find", which is a question about shells
+        // and a home directory; what somebody chose to keep is a different
+        // question with a file behind it, and folding the two would make the
+        // pure one need a store.
+        profiles::apply_pins(
+            found,
+            &self.app.pins_store.targets(bt_persist::PinKind::Folder),
+        )
+    }
 }
 
 /// The same walk, keeping the answer to "which layer won?" that

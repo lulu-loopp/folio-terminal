@@ -3,28 +3,31 @@
 
 use crate::input::Keystroke;
 use crate::runtime::frame::dispatch_tab_decoration_tasks;
+use crate::runtime::panes::rail_overlay_layer;
 use crate::window_seam::prelude::*;
 use crate::{
-    AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath, Layered,
-    MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
-    PasteTarget, Popup, PreviewDocument, PreviewMathArtifact, PreviewMathKey, PreviewMathPicture,
-    PreviewSurface, PreviewTextCommand, Runtime, Settled, TabState, answer_one_formula,
-    answers_for, document_formulas, dump_overlay_frame, first_run, float_trigger_tip,
-    foreground_program, formula_tools, ground_overlay_layers, hang_watch, hold_failed_in_tabs,
-    i18n, leaf_session_mut, marks, math_copy_window, math_em_milli, new_tab_tip, nonzero_u32,
-    preview, preview_select, preview_text_command, preview_trace, profiles, quit,
-    rail_overlay_layer, restore, retire_spent_math_copy, search, seats, settings, tooltip,
-    window_layout_key,
+    AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath,
+    FOOT_REVEAL_FEEDBACK, Layered, MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand,
+    Motion, OverlayStack, PasteTarget, Popup, PreviewDocument, PreviewMathArtifact,
+    PreviewMathCache, PreviewMathKey, PreviewMathPicture, PreviewSurface, PreviewTextCommand,
+    Runtime, Settled, ShellAddress, TabState, cardhint, claimed_by, entry_doors, first_run,
+    foreground_program, formula_tools, hang_watch, i18n, marks, math_em_milli, nonzero_u32,
+    preview, preview_select, preview_trace, profiles, quit, restore, search, seats, settings,
+    tooltip, window_layout_key,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
+use bt_math::MathMode;
 use bt_render::{FrameSource, FrameTrigger, MathHit, MathHitTarget, Travel};
-use bt_term::{SessionMathTask, normalized_local_image_path_key};
+use bt_term::{
+    DualPlaneSession, SessionDecorationTask, SessionMathTask, normalized_local_image_path_key,
+};
 use bt_viewport::{MathBlockAnchor, ViewportFrame};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use winit::dpi::PhysicalPosition;
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 impl<B: Backend> Runtime<'_, B> {
     /// What one of those boxes says.
@@ -2696,6 +2699,431 @@ impl<B: Backend> Runtime<'_, B> {
             self.refresh_overlay();
         }
     }
+
+    /// **Hand one band of the overlay to the arrival register** — see
+    /// [`arrival::Passages::stage`].
+    ///
+    /// The one door, so that "how a popup arrives" is a fact about this window
+    /// rather than about each of the thirteen bands: the span, the curve, the
+    /// travel and the reduced-motion branch are all inside, and a call site says
+    /// only which band it is and which way that band grew.
+    pub(crate) fn stage(
+        &mut self,
+        band: Layered,
+        layers: marks::Band,
+        travel: Option<Travel>,
+        now: Instant,
+    ) -> marks::Band {
+        let scale = self.window.renderer.scale_factor() as f32;
+        let motion = self.app.motion;
+        self.window
+            .passages
+            .stage(band, layers, travel, now, motion, scale)
+    }
+
+    /// The same for a surface that fades itself in and only wants the way out.
+    fn stage_departure(&mut self, band: Layered, layers: marks::Band, now: Instant) -> marks::Band {
+        let motion = self.app.motion;
+        self.window
+            .passages
+            .stage_departure(band, layers, now, motion)
+    }
+
+    /// Paint the Cards bubble, and say which way it grew.
+    ///
+    /// The travel rides back with the layers rather than being asked for
+    /// separately, because it is a fact about *this* placement: the bubble that
+    /// bit a card grew away from that card, and the one that fell back to the
+    /// corner grew off the floor. A caller that had to ask twice could pair one
+    /// frame's box with another frame's direction.
+    fn card_hint_layer(&mut self, now: Instant) -> (Vec<marks::OverlayLayer>, Option<Travel>) {
+        if !self.window.card_hint.showing() {
+            return (Vec::new(), None);
+        }
+        let head = self.staged_card_head(now);
+        let scale = self.window.renderer.scale_factor() as f32;
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let layout = cardhint::place(
+            head,
+            (width as f32, height as f32),
+            scale,
+            &mut |run, size| renderer.measure_chrome_text(gpu, run, size),
+        );
+        let palette = bt_render::chrome_palette();
+        let travel = cardhint::travel(&layout);
+        (cardhint::build(&layout, &palette, scale), Some(travel))
+    }
+
+    /// **May this window take that answer out of the application's batch?**
+    /// (F1b — see [`AnswerOwner`].)
+    ///
+    /// The one place the two facts meet, and the reason there is only one: the
+    /// strip is the sole author of "which window this tab is in", so a claim is
+    /// read straight off it rather than off a `WindowId` some request wrote down
+    /// earlier and no longer speaks for.
+    pub(crate) fn owns(&self, owner: AnswerOwner) -> bool {
+        claimed_by(
+            owner,
+            self.window_id(),
+            self.window.tabs.iter().map(|tab| tab.id),
+        )
+    }
+
+    /// **The next frame an animation that is still running is owed**, and
+    /// nothing at all once it has landed.
+    ///
+    /// The one shape every animated clock in this window reports its debt in, so
+    /// that "I am animating" is said in one place and paced in one place rather
+    /// than thirteen times with a constant each. `owes` is the animation's own
+    /// judgement and is all it is asked for; when the loop should next look is
+    /// not a question any single animation is in a position to answer.
+    pub(crate) fn animating_deadline(&self, owes: bool, now: Instant) -> Option<Instant> {
+        let _ = now;
+        owes.then(|| self.next_animation_deadline()).flatten()
+    }
+}
+
+/// **What one of a page's formulas draws, and whether the engine still has to be
+/// asked for it** (§7.1.3u ③).
+///
+/// [`answer_one_picture`]'s twin, and the same sentence about the same mistake:
+/// *a miss reads as never asked*. [`PreviewMathCache`] is bounded in bytes and
+/// evicts by last use, while a page asks for every formula on it — so a document
+/// whose distinct rasters are worth more than the budget evicts one the page is
+/// still drawing on every arrival, and the rebuild that arrival causes asks for
+/// it again.
+///
+/// So the answer a page was already given is part of the question. A page that
+/// has been told what `$E = mc^2$` looks like at this size in this ink keeps
+/// that picture when the cache lets the pixels go, and asks for nothing: the
+/// picture is an `Arc`, so what it draws it holds and nothing is copied.
+///
+/// Out here as a free function for [`answer_one_picture`]'s reason: a `Runtime`
+/// needs a device layer and a window to exist, and what a test has to be able to
+/// put in front of this is the real cache.
+pub(crate) fn answer_one_formula(
+    cache: &mut PreviewMathCache,
+    standing: &DocumentMath,
+    key: &PreviewMathKey,
+    needs_typesetting: &mut bool,
+) -> Option<PreviewMathPicture> {
+    // Cloned out before the arms run: the artifact is a handle to shared pixels,
+    // and holding a borrow of the cache across a call that may add to it is the
+    // one thing this map cannot do.
+    match cache.get(key).cloned() {
+        Some(PreviewMathArtifact::Ready(picture)) => Some(picture),
+        // The engine could not set it, and that is an answer: the source stands.
+        Some(PreviewMathArtifact::Refused) => None,
+        // A question is already out — this page's or another's. What this page
+        // has, it goes on drawing meanwhile.
+        Some(PreviewMathArtifact::Pending) => standing.answer(key).cloned(),
+        None => match standing.answer(key) {
+            // Answered once, and the cache has since let the pixels go.
+            Some(picture) => Some(picture.clone()),
+            None => {
+                *needs_typesetting = true;
+                None
+            }
+        },
+    }
+}
+
+/// Every formula one parsed document holds, in the order the page meets them.
+///
+/// **One walk, read by the one place that asks.** Duplicates are left in: the
+/// cache is keyed by content, so a document that writes `$n$` forty times asks
+/// once and finds it already in flight thirty-nine times, and de-duplicating
+/// here would be a second answer to a question the cache has already answered.
+pub(crate) fn document_formulas(
+    blocks: &[preview::MarkdownBlock],
+    metrics: seats::PreviewMarkdownMetrics,
+) -> Vec<(String, MathMode, f32)> {
+    fn inline(spans: &[preview::Span], em_px: f32, found: &mut Vec<(String, MathMode, f32)>) {
+        found.extend(
+            spans
+                .iter()
+                .filter_map(|span| span.math_source())
+                .map(|source| (source.to_owned(), MathMode::Inline, em_px)),
+        );
+    }
+    let mut found = Vec::new();
+    for block in blocks {
+        match block {
+            preview::MarkdownBlock::Math { source } => {
+                found.push((source.clone(), MathMode::Display, metrics.font_size));
+            }
+            // **A heading's formula is set at the heading's size.** Every letter
+            // beside it is, and one that stayed at body size in a masthead would
+            // read as a footnote that had wandered into it.
+            preview::MarkdownBlock::Heading { level, spans } => {
+                inline(spans, metrics.heading_font(*level), &mut found);
+            }
+            preview::MarkdownBlock::Paragraph(spans) => {
+                inline(spans, metrics.font_size, &mut found);
+            }
+            preview::MarkdownBlock::List { items, .. } => {
+                for spans in items {
+                    inline(spans, metrics.font_size, &mut found);
+                }
+            }
+            preview::MarkdownBlock::Quote(lines) => {
+                for spans in lines {
+                    inline(spans, metrics.font_size, &mut found);
+                }
+            }
+            preview::MarkdownBlock::Table { rows, .. } => {
+                for cell in rows.iter().flatten() {
+                    inline(cell, metrics.font_size, &mut found);
+                }
+            }
+            // A fence's dollars are a fence's, a rule has none, and a picture's
+            // alt text is drawn as the words it is rather than parsed as prose.
+            preview::MarkdownBlock::Code { .. }
+            | preview::MarkdownBlock::Rule
+            | preview::MarkdownBlock::Image(_) => {}
+        }
+    }
+    found
+}
+
+/// **Hold a failed pane task in the pane that asked**, if that pane is still there: its session
+/// holds it until new input that could change its answer. Answers whether a pane took it.
+pub(crate) fn hold_failed_in_tabs(
+    tabs: &mut [TabState],
+    leaf: ShellAddress,
+    task: SessionDecorationTask,
+) -> bool {
+    let Some(index) = tabs.iter().position(|tab| tab.id == leaf.leaf.tab) else {
+        return false;
+    };
+    let Some(session) = leaf_session_mut(tabs, index, leaf.leaf.seat) else {
+        return false;
+    };
+    session.hold_decoration_task_until_new_input(task);
+    true
+}
+
+/// The session filed under one seat of one tab, or nothing if that pane has since closed.
+fn leaf_session_mut(
+    tabs: &mut [TabState],
+    index: usize,
+    seat: SeatId,
+) -> Option<&mut DualPlaneSession> {
+    tabs[index]
+        .sessions
+        .get_mut(&seat)
+        .map(|leaf| &mut leaf.session)
+}
+
+/// **Take one window's answers out of the batch, and leave every other window's
+/// exactly where they were** (user report, 2026-08-23).
+///
+/// The four decoration lanes are the application's (§2.4 rule 1) and each has one
+/// answer channel for the whole process. So the application is what drains a
+/// lane, once, and this is the step each window then performs on what came out —
+/// [`AnswerOwner`] is what "its own" means, and since F1b that is a question
+/// about the tab an answer names rather than about the window it was asked from.
+///
+/// A window that *drained* instead took every pending answer, matched the ones
+/// belonging to another window's `TabId(1)` against its own tab of that number,
+/// and dropped them where they stood. Nothing asks twice — a head read has spent
+/// [`preview::PreviewBuffer::claim_head_read`], a directory is already
+/// `mark_pending` — so in every window but the first, the files column stayed
+/// empty for ever, no printed path was ever verified, and a markdown file opened
+/// into the preview pane drew its head, its foot and the two hairlines between
+/// them and nothing else. Photographed on the machine, two windows of one
+/// process, in the same second.
+///
+/// The order of what is taken is preserved, and so is the order of what is left:
+/// a lane's answers are a sequence and re-ordering them here would be a second
+/// place that decides which of two reads of one directory is the newer.
+pub(crate) fn answers_for<T>(batch: &mut Vec<T>, mine: impl Fn(&T) -> bool) -> Vec<T> {
+    let mut taken = Vec::new();
+    let mut theirs = Vec::with_capacity(batch.len());
+    for answer in batch.drain(..) {
+        if mine(&answer) {
+            taken.push(answer);
+        } else {
+            theirs.push(answer);
+        }
+    }
+    *batch = theirs;
+    taken
+}
+
+/// What every folder trigger's tip says (H108) — `title="Peek files here"` on
+/// the tab's and on the pane head's alike.
+fn float_trigger_tip() -> &'static str {
+    i18n::Text::FloatTriggerTip.text()
+}
+
+/// Which of the three a key is, if it is one.
+///
+/// `Ctrl+C` and `Ctrl+Shift+C` both copy, unlike in the terminal where the
+/// unshifted one has to reach a shell when nothing is selected: there is no
+/// shell under a rendered page, so there is nothing for it to fall through to.
+fn preview_text_command(key: &Key, modifiers: ModifiersState) -> Option<PreviewTextCommand> {
+    if let Key::Named(NamedKey::Escape) = key {
+        return Some(PreviewTextCommand::Clear);
+    }
+    if !modifiers.control_key() || modifiers.alt_key() {
+        return None;
+    }
+    let Key::Character(text) = key else {
+        return None;
+    };
+    match text.as_str() {
+        "c" | "C" => Some(PreviewTextCommand::Copy),
+        "a" | "A" => Some(PreviewTextCommand::SelectAll),
+        _ => None,
+    }
+}
+
+/// The overlay's ground floor, in the order it paints: the arriving panes' veil,
+/// then the dock drawing over it, and everything else stacked on top by
+/// [`Runtime::refresh_overlay`].
+///
+/// The veil has to be *in* the overlay at all because the overlay pass is the
+/// only one that runs over the whole window above seat chrome and above chrome
+/// text — a pane's caption is chrome text, and a fade that did not reach it
+/// would be a title arriving at full strength over a body that is not there yet.
+///
+/// And it has to be at the *bottom* of it. The dock drawing is already the
+/// lowest thing the overlay carries (`#dock-shift` 24 and `#dock-preview` 25
+/// against `.combo-menu`'s 30 and `.tip`'s 60), for the reason
+/// [`Runtime::dock_overlay_layers`] gives: it is a drawing *on* the layout
+/// rather than a surface floating over the window. A veil is a drawing on one
+/// pane, which is a step lower still — a menu, a dialog or a tip that is somehow
+/// up while the layout is changing must cover it, because those surfaces are the
+/// window talking to you and the veil is the window rearranging itself.
+pub(crate) fn ground_overlay_layers(
+    veil: Vec<marks::OverlayLayer>,
+    dock: marks::Band,
+) -> marks::Band {
+    let mut layers = marks::Band::from(veil);
+    layers.append(dock);
+    layers
+}
+
+/// The same probe, for the overlay stack — see [`dump_chrome_frame`].
+///
+/// Both channels, because "which pass painted this" is half of any answer the
+/// dump is asked for: chrome is drawn under the overlays, so a stray box that is
+/// *behind* a pane head's caption came from the first and one in front of it from
+/// the second, and reading one file with both in it settles that without a second
+/// run.
+fn dump_overlay_frame(band: &marks::Band) {
+    let Some(path) = entry_doors::installed().chrome_dump.clone() else {
+        return;
+    };
+    use std::fmt::Write as _;
+    let layers = &band.layers;
+    let mut out = String::new();
+    let ink = |color: [u8; 3]| format!("#{:02x}{:02x}{:02x}", color[0], color[1], color[2]);
+    let _ = writeln!(out, "=== overlay frame: {} layers", layers.len());
+    for group in &band.groups {
+        let _ = writeln!(
+            out,
+            "group  {:?} opacity={:.3} offset={:?}",
+            group.layers, group.opacity, group.offset
+        );
+    }
+    for (index, layer) in layers.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "--- layer {index} opacity={:.3} body={}",
+            layer.opacity,
+            layer.body.is_some()
+        );
+        for quad in &layer.quads {
+            let _ = writeln!(
+                out,
+                "quad   {:?} {} alpha={:.3}",
+                quad.rect,
+                ink(quad.color),
+                quad.alpha
+            );
+        }
+        for sprite in &layer.sprites {
+            let _ = writeln!(
+                out,
+                "sprite {:?} {} opacity={:.3} mark={:?}",
+                sprite.rect,
+                ink(sprite.color),
+                sprite.opacity,
+                sprite.mark
+            );
+        }
+        for label in &layer.labels {
+            let _ = writeln!(
+                out,
+                "label  {:?} {} {:?}",
+                label.rect,
+                ink(label.color),
+                label.text
+            );
+        }
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write as _;
+        let _ = file.write_all(out.as_bytes());
+    }
+}
+
+/// **The copy tick's own clock, read in one place** (audit 2026-09-15, RB-1).
+///
+/// `Some(the one instant the acknowledgement is due to come down)` while it is
+/// still up, and `None` the moment it is spent — which is both *"draw the
+/// sheets again"* and *"ask the loop for nothing"*, because they are one fact
+/// and were two readings of one field before this existed.
+///
+/// A free function and not a method so the arithmetic can be pinned without a
+/// window, which is the arrangement `formula_tools` keeps for the marks
+/// themselves: the defect this closes is a deadline in the past, and a deadline
+/// is a number.
+pub(crate) fn math_copy_window(said_at: Option<&Instant>, now: Instant) -> Option<Instant> {
+    said_at
+        .map(|at| *at + FOOT_REVEAL_FEEDBACK)
+        .filter(|due| now < *due)
+}
+
+/// **Take a spent acknowledgement off the window**, and answer whether *this*
+/// call is the one that took it (RB-1).
+///
+/// The answer is what buys the single overlay rebuild that turns the tick back
+/// into the pair of sheets. It is `true` exactly once per copy: the second call
+/// past the same expiry finds nothing and asks for nothing, which is what keeps
+/// a retired tick from repainting the band on every turn for ever — the shape of
+/// the defect, moved one field over.
+pub(crate) fn retire_spent_math_copy(
+    said: &mut Option<(MathBlockAnchor, Instant)>,
+    now: Instant,
+) -> bool {
+    if said.is_some() && math_copy_window(said.as_ref().map(|(_, at)| at), now).is_none() {
+        *said = None;
+        return true;
+    }
+    false
+}
+
+/// `title="New tab (${defaultProfile().title})"` — mock-up 4367 and 4369.
+///
+/// One function for the two buttons that wear it, because the mock-up writes the
+/// same template literal twice, once for the horizontal strip and once for the
+/// rail, and "two surfaces, one sentence" is `UI-UX.md` §549 principle 7's own
+/// rule about this exact pair. A second spelling here is how the rail's `+` comes
+/// to promise a shell the strip's `+` does not.
+///
+/// The parentheses are the mock-up's and not a stylistic choice: the tip names
+/// the *verb* first and qualifies it, so that a user who reads only the first two
+/// words has still read the truth.
+pub(crate) fn new_tab_tip(profile: &str) -> String {
+    i18n::new_tab_tip(profiles::identity_title(profile))
 }
 
 #[cfg(test)]

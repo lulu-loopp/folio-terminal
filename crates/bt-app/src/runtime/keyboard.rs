@@ -9,11 +9,11 @@ use crate::window_seam::prelude::*;
 use crate::{
     ImeCaretSource, ImeOwner, KeyboardOwner, LeafId, NewWindowPlan, NoticeHost, PreviewSurface,
     RenameClipboard, RenameExit, RenameVerdict, Runtime, Step, UserInputKind, composing_event_of,
-    composition_outlived_its_field, composition_ruling, git_graph, goto_tab_index, hang_watch,
-    ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
-    input, keyboard_owner_is_a_shell, keyhint, marks, menubar, paste_card_key, popup_takes_the_key,
-    preedit_caret_byte, profiles, quit, rename_key, rename_pastes, restore, settings,
-    settings_key_of, shortcuts, terminal_ime_cursor_area, toast, write_pty_input,
+    composition_ruling, git_graph, goto_tab_index, hang_watch, ime_caret_source, ime_commit_bytes,
+    ime_cursor_area_of, ime_outbound, ime_owner, ime_report, input, keyboard_owner_is_a_shell,
+    keyhint, marks, menubar, paste_card_key, popup_takes_the_key, preedit_caret_byte, profiles,
+    quit, rename_key, rename_pastes, restore, settings, settings_key_of, shortcuts,
+    terminal_ime_cursor_area, toast, write_pty_input,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
@@ -2452,6 +2452,30 @@ impl<B: Backend> Runtime<'_, B> {
         };
         self.cancel_composition(started_in, "settle_composition_owner")
     }
+}
+
+/// **Whether a composition has outlived the field it was typed into** (user
+/// report 2026-09-12; `docs/DESIGN.md` §7.1.5a″).
+///
+/// The ruling in one line: **a composition belongs to the field it started in,
+/// and when that field goes away the composition is cancelled — never committed
+/// into whatever is holding the keyboard next.** The reporter typed `gif` into
+/// the command palette with an input method on, picked the file, and the
+/// palette closed with the candidate list still floating over the picture it had
+/// opened, attached to nothing; clicking the page did not put it away, because
+/// nothing in this window had ever ended a composition and Windows only ends one
+/// on a blur.
+///
+/// A function of the two rungs and of nothing else, so that every site the
+/// keyboard can move at is answered by the same sentence rather than by its own
+/// idea of when a field has gone: what makes a composition stale is not which
+/// gesture moved the keyboard, it is that the keyboard is somewhere else.
+#[must_use]
+pub(crate) fn composition_outlived_its_field(
+    composing: Option<ImeOwner>,
+    holds_the_keyboard: ImeOwner,
+) -> bool {
+    composing.is_some_and(|started_in| started_in != holds_the_keyboard)
 }
 
 /// **The window's input-method facts, as the platform reads them now** — through
