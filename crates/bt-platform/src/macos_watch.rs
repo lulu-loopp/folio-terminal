@@ -63,42 +63,53 @@
 //! (`FSEventStreamSetDispatchQueue`). **This arm takes a dedicated thread and
 //! its own run loop**, for three reasons that are all the same reason:
 //!
-//! 1. It is the Windows arm restated. There, one watcher thread per watch owns
-//!    the handle, `start` waits for that thread to say it is listening, and
-//!    `drop` is *signal the thread and join it*. Here, one watcher thread per
-//!    watch owns the stream, `start` waits for it to say the stream is running,
-//!    and `drop` is signal and join. A reader who knows one knows the other.
+//! 1. It is the Windows arm restated. There, one watcher thread per set waits
+//!    on the set's completion port, `start` waits for that thread to say the
+//!    member is listening, and a removal is *post a request and wait for the
+//!    word*. Here, one watcher thread per set owns every member's stream,
+//!    `start` waits for it to say the stream is running, and a removal is
+//!    signal and wait. A reader who knows one knows the other.
 //! 2. **Teardown happens on the thread that scheduled the stream.** That is the
 //!    hazard this ticket names: `FSEventStreamInvalidate` from a thread other
 //!    than the scheduling one races the callback it is trying to stop. With a
 //!    dedicated run loop there is no way to write that bug — the owner cannot
-//!    reach the stream at all, only the run loop, and `Stop` / `Invalidate` /
-//!    `Release` are the last three statements the watcher thread executes before
-//!    it returns and the owner's `join` observes it.
+//!    reach a stream at all, only the run loop, and `Stop` / `Invalidate` /
+//!    `Release` run on the watcher thread between two runs of its loop, where no
+//!    callback is in flight ([`tear_down`]).
 //! 3. A dispatch queue would need the same rendezvous anyway (`SetDispatchQueue`
 //!    with `NULL` before invalidating, and a `dispatch_sync` to know when the
 //!    last callback has finished), spelled with a second concurrency primitive.
 //!
-//! The cost is one thread per watch — which the Windows arm already pays, and
-//! `git_watch` already opens one per repository on the screen.
-//!
-//! # The stop is a run loop source, not a flag
+//! **One thread per set, one stream per member** (T-DIR-WATCH-ONE-THREAD,
+//! 2026-10-26). Until then the cost was one thread per watch, and the PATH ear
+//! alone opened one per `PATH` directory. A [`DirWatchSet`] carries any number of
+//! streams on its one run loop; the watch steward holds one set for the process.
+//! Each member keeps a stream of its own rather than a share of one stream over a
+//! path array, because a stream's paths are fixed when it is created — an
+//! arrival would mean a new stream replaying history from the old one's last
+//! event — and because each member's root, depth filter and `WATCH_ROOT` end are
+//! read against its own stream exactly as before. The cost the ticket was about
+//! is the thread, and that is one.
+
+//! # A request is a run loop source, not a flag
 //!
 //! `CFRunLoopStop` on a loop that has not started yet does nothing, and the
 //! window between "the watcher thread said it is running" and "the watcher
 //! thread is inside `CFRunLoopRun`" is exactly where a caller that drops
-//! immediately would fall. So the owner does not stop the loop; it **signals a
-//! source**, and a signalled source is *pending* whether or not the loop is
-//! running — it fires the moment the loop starts. The source's perform callback
-//! is what calls `CFRunLoopStop`, on the loop's own thread. There is no window
-//! and there is no timer.
+//! immediately would fall. So an owner does not stop the loop; it queues its
+//! request (an arrival, a removal, the stop) and **signals a source**, and a
+//! signalled source is *pending* whether or not the loop is running — it fires
+//! the moment the loop starts. The source's perform callback is what calls
+//! `CFRunLoopStop`, on the loop's own thread, and the thread answers the queue
+//! before it runs again. There is no window and there is no timer.
 
 use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsString, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::admission::WorkerCtx;
 use crate::watch_end::WatchEnd;
@@ -330,9 +341,10 @@ impl DirChange<'_> {
 
 /// **A subscription to a directory's change notifications, over FSEvents.**
 ///
-/// One stream, one thread, one run loop. See the module header for why it is a
-/// run loop rather than a dispatch queue, and why the stop is a run loop source
-/// rather than a flag.
+/// One stream, scheduled on the run loop of the [`DirWatchSet`] it is a member of —
+/// the set it was started on, or for the four `DirWatch::start*` doors a set of one
+/// that it owns. See the module header for why it is a run loop rather than a
+/// dispatch queue, and why every request is a run loop source rather than a flag.
 ///
 /// **It returns already listening.** Not "a thread has been started that will
 /// begin listening": when a constructor hands back a `DirWatch`,
@@ -345,53 +357,57 @@ impl DirChange<'_> {
 /// **Retiring it cancels** ([`DirWatch::retire_within`], on the worker that
 /// holds it), and the cancellation is complete when the door answers `true`:
 /// the watcher thread is signalled, it stops and invalidates and releases the
-/// stream on its own run loop's thread, and the door joins it. After that there
-/// is no callback in flight, because there is no thread. A drop without the door
-/// signals and waits for nothing.
+/// stream on its own run loop's thread, and says the member is gone. After that
+/// there is no callback of this member in flight, because there is no stream. A
+/// drop without the door signals and waits for nothing.
 ///
 /// **It can also end on its own** (T-DIRWATCH-LIFECYCLE): FSEvents saying the
-/// root changed, or that the volume holding it was unmounted, ends the watcher
-/// thread. The error is kept in `crate::watch_end::WatchEnd`,
-/// [`DirWatch::is_armed`] turns false, and `wake` is called once with
-/// [`DirChange::Ended`].
+/// root changed, or that the volume holding it was unmounted, ends the member.
+/// The error is kept in `crate::watch_end::WatchEnd`, [`DirWatch::is_armed`]
+/// turns false, and `wake` is called once with [`DirChange::Ended`]. The set's
+/// other members go on listening.
 pub struct DirWatch {
-    /// The watcher thread's run loop and the source that stops it. Held by the
+    /// What the watcher thread says about this member: its end, and whether its
+    /// stream is gone.
+    member: Arc<WatchMember>,
+    /// The removal of this member, posted to its set's run loop. Held by the
     /// owner so that the door (or a drop) can signal without reaching the stream.
     stopper: Stopper,
-    /// Taken by the door, or by a drop without it.
-    thread: Option<std::thread::JoinHandle<()>>,
-    /// Where the watcher thread leaves the error that ended it.
-    end: Arc<WatchEnd>,
+    /// The set of one the four `DirWatch::start*` doors open, owned by the one
+    /// member it carries and retired with it.
+    own: Option<DirWatchSet>,
+    /// Not yet retired through its door.
+    live: bool,
 }
 
-/// The run loop the stream is scheduled on, and the source whose perform
-/// callback stops it.
-///
-/// # Safety of the `Send`
-///
-/// `CFRunLoopSourceSignal`, `CFRunLoopWakeUp` and `CFRetain`/`CFRelease` are
-/// documented thread-safe, and those are the only calls the owner makes on
-/// either object — `CFRunLoopStop` is called by the perform callback, which runs
-/// on the loop's own thread. The pair is created on the watcher thread and
-/// handed here exactly once, and the watcher thread is joined before the owner's
-/// copies are dropped.
+/// **One member's removal, ready to be posted to its set's run loop.**
 struct Stopper {
-    run_loop: CFRetained<CFRunLoop>,
-    source: CFRetained<CFRunLoopSource>,
+    set: Arc<SetShared>,
+    id: u64,
 }
-
-// SAFETY: see the type's own note.
-unsafe impl Send for Stopper {}
 
 impl Stopper {
-    /// Ask the watcher thread to finish.
+    /// Ask the watcher thread to take this member's stream down.
     ///
-    /// A signalled source is **pending**: if the run loop has not started yet the
-    /// signal is remembered and fires the instant it does, which is what closes
-    /// the window a bare `CFRunLoopStop` would leave open.
+    /// A signalled source is **pending**: if the run loop is not running yet the
+    /// signal is remembered and fires the instant it does.
     fn signal(&self) {
-        self.source.signal();
-        self.run_loop.wake_up();
+        self.set.post(Request::Remove(self.id));
+    }
+}
+
+/// **One member, as its owner and the watcher thread both see it.**
+#[derive(Default)]
+struct WatchMember {
+    /// Its end, if it came to one on its own.
+    end: WatchEnd,
+    /// Its stream is stopped, invalidated and released, and its subscriber freed.
+    gone: AtomicBool,
+}
+
+impl WatchMember {
+    fn is_gone(&self) -> bool {
+        self.gone.load(Ordering::Acquire)
     }
 }
 
@@ -400,42 +416,53 @@ impl DirWatch {
     /// its stream, and stays armed until it ends on its own.
     #[must_use]
     pub fn is_armed(&self) -> bool {
-        self.end.still_armed()
+        self.member.end.still_armed()
     }
 
     /// The error that ended the watcher on its own, handed over once.
     pub fn take_failure(&mut self) -> Option<std::io::Error> {
-        self.end.take_failure()
+        self.member.end.take_failure()
     }
 
     /// **The door: stop the watch, and wait — up to `bound`, on the worker `ctx`
-    /// lends — for its thread to leave.** Answers whether it left in time
+    /// lends — for its stream to be gone.** Answers whether it went in time
     /// (T-DROP-DOORS, D-40): *a directory watch is retired through its bounded
     /// door on the worker that holds it, never by its drop.*
     ///
-    /// The thread tears its own stream down: the stop source is one of the
-    /// things its run loop is waiting on, so signalling it is enough, and an
-    /// `FSEventStreamInvalidate` from here would be a second thread reaching into
-    /// a stream whose callback may be running on the first. A thread still
-    /// standing past `bound` is let go, and finishes on its own.
+    /// The thread tears its own stream down: the removal is posted to the set's
+    /// run loop, and an `FSEventStreamInvalidate` from here would be a second
+    /// thread reaching into a stream whose callback may be running on the first.
+    /// A stream still standing past `bound` is let go, and goes on its own.
+    ///
+    /// A watch opened by one of the four `DirWatch::start*` doors owns the set of
+    /// one it was started on, and the door retires that set too — the join of its
+    /// one thread, within what is left of `bound`.
     pub fn retire_within(
         mut self,
         ctx: &crate::admission::WorkerCtx,
         bound: std::time::Duration,
     ) -> bool {
-        self.stopper.signal();
-        let Some(thread) = self.thread.take() else {
-            return true;
-        };
+        self.live = false;
         let deadline = std::time::Instant::now() + bound;
-        while !thread.is_finished() {
+        if !self.member.is_gone() {
+            self.stopper.signal();
+        }
+        while !self.member.is_gone() {
             if std::time::Instant::now() >= deadline {
+                if let Some(set) = self.own.take() {
+                    set.let_go();
+                }
                 return false;
             }
             crate::wait::sleep_within(ctx, crate::DIR_WATCH_RETIRE_POLL);
         }
-        let _ = thread.join();
-        true
+        match self.own.take() {
+            Some(set) => set.retire_within(
+                ctx,
+                deadline.saturating_duration_since(std::time::Instant::now()),
+            ),
+            None => true,
+        }
     }
 
     /// Start watching `path` and everything under it.
@@ -458,6 +485,10 @@ impl DirWatch {
     /// **Only a worker may start one** (`ctx`, the thread door's capability):
     /// the wait for the stream and the join on refusal happen here, and the
     /// window thread never waits (B5 design note, revision (c)3).
+    ///
+    /// This door opens a [`DirWatchSet`] of one for the watch, which the watch
+    /// owns; a caller with many directories opens one set and starts each on it,
+    /// so that they share its one thread.
     pub fn start(
         ctx: &WorkerCtx,
         path: &Path,
@@ -513,56 +544,165 @@ impl DirWatch {
         Self::start_scoped(ctx, path, WatchDepth::HereOnly, wake)
     }
 
+    /// **A set of one, owned by the watch it carries.** The root is resolved
+    /// first, so a path that cannot be watched is refused before any thread
+    /// exists; a stream that is refused retires the set it opened, so no thread is
+    /// left behind the error.
     fn start_scoped(
-        _ctx: &WorkerCtx,
+        ctx: &WorkerCtx,
         path: &Path,
         depth: WatchDepth,
         wake: impl Fn(DirChange<'_>) + Send + 'static,
     ) -> Result<Self, std::io::Error> {
-        // **The root is resolved before the stream is created, and this is not a
-        // convenience.** FSEvents reports fully resolved paths — `/tmp` is a
-        // symbolic link to `/private/tmp` and the daemon says `/private/tmp` —
-        // so a depth filter written against the caller's spelling of the root
-        // would reject every event it was given. `realpath(3)` on macOS also
-        // answers with the volume's own spelling of each component, which is
-        // what makes the comparison exact on a case-insensitive APFS volume.
-        //
-        // It is also where the refusals come from, and they are the refusals the
-        // caller is already written to survive: a missing directory is
-        // `NotFound`, an unreadable one is `PermissionDenied`, an embedded NUL is
-        // `InvalidInput`. `FSEventStreamCreate` refuses none of these — it
-        // accepts a path that does not exist and simply never speaks — so
-        // without this a caller would be handed a watcher that is not watching.
-        let root = std::fs::canonicalize(path)?;
-        if !std::fs::metadata(&root)?.is_dir() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotADirectory,
-                "a directory watch needs a directory",
-            ));
+        let root = resolve(ctx, path)?;
+        let set = DirWatchSet::open(ctx)?;
+        match set.enlist(ctx, root, depth, wake) {
+            Ok(mut watch) => {
+                watch.own = Some(set);
+                Ok(watch)
+            }
+            Err(error) => {
+                let _ = set.retire_within(ctx, crate::DIR_WATCH_RETIRE_BUDGET);
+                Err(error)
+            }
         }
+    }
+}
 
-        // The word that makes `start` mean what it says: the watcher thread sends
-        // it once, the instant the stream is running — or sends the refusal
-        // instead, which is this function's error and not a thread that dies in
-        // private after the caller has been told it has a watcher.
-        let (armed, listening) = std::sync::mpsc::channel::<Result<Stopper, std::io::Error>>();
-        let end = Arc::new(WatchEnd::default());
-        let ended = Arc::clone(&end);
+impl Drop for DirWatch {
+    /// Waits for nothing. After [`DirWatch::retire_within`] there is nothing
+    /// left; without it, the stream is signalled away and let go of — the
+    /// watcher thread tears its own stream down (a set of one is told to stop) —
+    /// and the drop says so once.
+    fn drop(&mut self) {
+        if !self.live {
+            return;
+        }
+        match self.own.take() {
+            Some(set) => set.let_go(),
+            None => {
+                if !self.member.is_gone() {
+                    self.stopper.signal();
+                }
+            }
+        }
+        crate::door_skipped::say(
+            "a directory watch (`DirWatch`)",
+            "its retire door",
+            "its watcher was told to stop and let go of",
+        );
+    }
+}
+
+/// **Many directory watches on one thread, over FSEvents** (T-DIR-WATCH-ONE-THREAD).
+///
+/// One `bt-dir-watch` thread and its run loop, carrying one `FSEventStream` per
+/// member: each member keeps its own root, its own depth filter, its own names and
+/// its own `WATCH_ROOT` end, exactly as a `DirWatch` with a thread of its own did,
+/// and a stream is created, scheduled, started, stopped, invalidated and released
+/// on this one thread. Every request the owners make — an arrival
+/// ([`DirWatchSet::start`] and its three siblings, which return already listening),
+/// a removal ([`DirWatch::retire_within`]) and the set's stop
+/// ([`DirWatchSet::retire_within`]) — is queued and the run loop's request source
+/// signalled; the source stops the loop, and the thread answers the queue between
+/// two runs, where no FSEvents callback can be in flight.
+///
+/// **Every `wake` runs on the one thread, one after another.** The contract
+/// already asks each to filter, stamp and wake and nothing slower; the daemon
+/// holds a member's events while another member's `wake` runs, and the worst a
+/// long wait costs it is a batch that says it lost track — [`DirChange::Unknown`],
+/// news every caller already takes.
+///
+/// **Retiring it stops every member and joins the thread.** Members still held
+/// after that answer their own door at once: their streams went with the set.
+pub struct DirWatchSet {
+    set: Arc<SetShared>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// What a set's owners and its thread share: the queue of requests, and the run
+/// loop with the source that wakes it for them.
+struct SetShared {
+    requests: Mutex<Requests>,
+    next: AtomicU64,
+    run_loop: CFRetained<CFRunLoop>,
+    source: CFRetained<CFRunLoopSource>,
+}
+
+// SAFETY: the queue is behind its mutex. `CFRunLoopSourceSignal`,
+// `CFRunLoopWakeUp` and `CFRetain`/`CFRelease` are documented thread-safe, and
+// those are the only calls an owner makes on the run loop or the source;
+// `CFRunLoopStop` is called by the source's perform callback, on the loop's own
+// thread. The pair is created on the watcher thread, handed here once, and the
+// thread removes and invalidates the source before it returns.
+unsafe impl Send for SetShared {}
+unsafe impl Sync for SetShared {}
+
+struct Requests {
+    /// Whether the thread still takes requests. Cleared, under this lock, by the
+    /// thread as it leaves, before it drops what is still queued — so an arrival is
+    /// either refused here or answered there, and never left waiting on a thread
+    /// that has gone.
+    open: bool,
+    queue: VecDeque<Request>,
+}
+
+/// What an owner asks of the set's thread.
+enum Request {
+    /// A member's arrival: its stream is to be created, scheduled and started,
+    /// and `armed` told whether it is running.
+    Add {
+        id: u64,
+        root: PathBuf,
+        depth: WatchDepth,
+        wake: Box<dyn Fn(DirChange<'_>) + Send>,
+        member: Arc<WatchMember>,
+        armed: std::sync::mpsc::Sender<Result<(), std::io::Error>>,
+    },
+    /// A member's removal.
+    Remove(u64),
+    /// The set's stop.
+    Stop,
+}
+
+impl SetShared {
+    /// Queue a request and wake the run loop for it. Answers whether it was
+    /// queued: a set whose thread has left takes nothing.
+    fn post(&self, request: Request) -> bool {
+        {
+            let mut requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
+            if !requests.open {
+                return false;
+            }
+            requests.queue.push_back(request);
+        }
+        self.source.signal();
+        self.run_loop.wake_up();
+        true
+    }
+}
+
+impl DirWatchSet {
+    /// **Open a set: its one `bt-dir-watch` thread and run loop**, which says it is
+    /// ready to take members before this returns.
+    ///
+    /// **Only a worker may open one** (`ctx`), as only a worker may start a
+    /// watch.
+    pub fn open(_ctx: &WorkerCtx) -> Result<Self, std::io::Error> {
+        let (ready, opened) = std::sync::mpsc::channel::<Result<Arc<SetShared>, std::io::Error>>();
         let thread =
             crate::spawn_at_priority("bt-dir-watch", crate::ThreadPriority::Normal, move |_ctx| {
-                watch_loop(&root, depth, &armed, &ended, wake)
+                watch_loop(&ready);
             })?;
-
         // A `RecvError` is the thread ending without a word, which is a panic
-        // between the spawn and the start — there is no return path there that
+        // between the spawn and the run loop — there is no return path there that
         // does not send. The watcher is not contained, so under the resident
         // panic hook that panic ends the process before the channel closes: this
         // arm is reached only where no fatal hook is installed.
-        match listening.recv() {
-            Ok(Ok(stopper)) => Ok(Self {
-                stopper,
+        match opened.recv() {
+            Ok(Ok(set)) => Ok(Self {
+                set,
                 thread: Some(thread),
-                end,
             }),
             Ok(Err(error)) => {
                 let _ = thread.join();
@@ -576,18 +716,186 @@ impl DirWatch {
             }
         }
     }
+
+    /// Whether the set's thread has finished, so the set hears nothing more and
+    /// starts nothing.
+    #[must_use]
+    pub fn has_ended(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+
+    /// [`DirWatch::start`]'s contract, as a member of this set.
+    pub fn start(
+        &self,
+        ctx: &WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        self.start_member(ctx, path, WatchDepth::Tree, move |change| {
+            wake(change.nameless())
+        })
+    }
+
+    /// [`DirWatch::start_named`]'s contract, as a member of this set.
+    pub fn start_named(
+        &self,
+        ctx: &WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        self.start_member(ctx, path, WatchDepth::Tree, wake)
+    }
+
+    /// [`DirWatch::start_shallow`]'s contract, as a member of this set.
+    pub fn start_shallow(
+        &self,
+        ctx: &WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        self.start_member(ctx, path, WatchDepth::HereOnly, move |change| {
+            wake(change.nameless())
+        })
+    }
+
+    /// [`DirWatch::start_shallow_named`]'s contract, as a member of this set.
+    pub fn start_shallow_named(
+        &self,
+        ctx: &WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        self.start_member(ctx, path, WatchDepth::HereOnly, wake)
+    }
+
+    /// **The door: stop every member, and wait — up to `bound`, on the worker `ctx`
+    /// lends — for the set's thread to leave.** Answers whether it left in time.
+    /// The thread tears every stream down on its own run loop and returns; a
+    /// thread still standing past `bound` is let go and finishes on its own.
+    pub fn retire_within(mut self, ctx: &WorkerCtx, bound: std::time::Duration) -> bool {
+        self.set.post(Request::Stop);
+        let Some(thread) = self.thread.take() else {
+            return true;
+        };
+        let deadline = std::time::Instant::now() + bound;
+        while !thread.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            crate::wait::sleep_within(ctx, crate::DIR_WATCH_RETIRE_POLL);
+        }
+        let _ = thread.join();
+        true
+    }
+
+    /// Stopped and let go of, waiting for nothing and saying nothing: the set of
+    /// one a watch owned, when the watch itself was let go of.
+    fn let_go(mut self) {
+        self.set.post(Request::Stop);
+        drop(self.thread.take());
+    }
+
+    /// **One member started**: its root resolved here, on the worker, and its
+    /// stream created and started by the set's thread, which says so before this
+    /// returns.
+    fn start_member(
+        &self,
+        ctx: &WorkerCtx,
+        path: &Path,
+        depth: WatchDepth,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        self.enlist(ctx, resolve(ctx, path)?, depth, wake)
+    }
+
+    /// **A resolved root joins the set**: handed to the set's thread, and its
+    /// stream running when this returns.
+    fn enlist(
+        &self,
+        _ctx: &WorkerCtx,
+        root: PathBuf,
+        depth: WatchDepth,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        let id = self.set.next.fetch_add(1, Ordering::Relaxed);
+        let member = Arc::new(WatchMember::default());
+        // The word that makes `start` mean what it says: the watcher thread sends
+        // it once, the instant the stream is running — or sends the refusal
+        // instead, which is this function's error and not a member that ends in
+        // private after the caller has been told it has a watcher.
+        let (armed, listening) = std::sync::mpsc::channel::<Result<(), std::io::Error>>();
+        if !self.set.post(Request::Add {
+            id,
+            root,
+            depth,
+            wake: Box::new(wake),
+            member: Arc::clone(&member),
+            armed,
+        }) {
+            return Err(std::io::Error::other(
+                "the directory watch set takes no more directories",
+            ));
+        }
+        // A `RecvError` is the arrival dropped unanswered, which only the set's
+        // thread leaving does — the set was stopped, or its thread panicked, which
+        // under the resident panic hook ends the process first.
+        match listening.recv() {
+            Ok(Ok(())) => Ok(DirWatch {
+                member,
+                stopper: Stopper {
+                    set: Arc::clone(&self.set),
+                    id,
+                },
+                own: None,
+                live: true,
+            }),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(std::io::Error::other(
+                "the directory watcher ended before it listened",
+            )),
+        }
+    }
 }
 
-impl Drop for DirWatch {
-    /// Waits for nothing. After [`DirWatch::retire_within`] there is nothing
-    /// left; without it, the thread is signalled and let go of — it tears its own
-    /// stream down — and the drop says so once.
+/// **A root resolved for watching**, or the refusal that is its start's error.
+/// It reads the file system, so only a worker resolves one (`ctx`).
+fn resolve(_ctx: &WorkerCtx, path: &Path) -> Result<PathBuf, std::io::Error> {
+    // **The root is resolved before the stream is created, and this is not a
+    // convenience.** FSEvents reports fully resolved paths — `/tmp` is a
+    // symbolic link to `/private/tmp` and the daemon says `/private/tmp` —
+    // so a depth filter written against the caller's spelling of the root
+    // would reject every event it was given. `realpath(3)` on macOS also
+    // answers with the volume's own spelling of each component, which is
+    // what makes the comparison exact on a case-insensitive APFS volume.
+    //
+    // It is also where the refusals come from, and they are the refusals the
+    // caller is already written to survive: a missing directory is
+    // `NotFound`, an unreadable one is `PermissionDenied`, an embedded NUL is
+    // `InvalidInput`. `FSEventStreamCreate` refuses none of these — it
+    // accepts a path that does not exist and simply never speaks — so
+    // without this a caller would be handed a watcher that is not watching.
+    let root = std::fs::canonicalize(path)?;
+    if !std::fs::metadata(&root)?.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "a directory watch needs a directory",
+        ));
+    }
+    Ok(root)
+}
+
+impl Drop for DirWatchSet {
+    /// Waits for nothing. After [`DirWatchSet::retire_within`] there is nothing
+    /// left; without it, the thread is told to stop and let go of — it tears its
+    /// own streams down — and the drop says so once.
     fn drop(&mut self) {
         if let Some(thread) = self.thread.take() {
-            self.stopper.signal();
+            self.set.post(Request::Stop);
             drop(thread);
             crate::door_skipped::say(
-                "a directory watch (`DirWatch`)",
+                "a directory watch set (`DirWatchSet`)",
                 "its retire door",
                 "its watcher was told to stop and let go of",
             );
@@ -597,8 +905,8 @@ impl Drop for DirWatch {
 
 // ── the watcher thread ─────────────────────────────────────────────────────
 
-/// What the watcher thread keeps, and what the FSEvents callback is handed back
-/// through the stream context's `info` pointer.
+/// What the watcher thread keeps for one stream, and what the FSEvents callback
+/// is handed back through the stream context's `info` pointer.
 ///
 /// Every field is touched by one thread only — the watcher's — because the
 /// callback runs on the run loop this same thread is blocked in. The `RefCell`
@@ -610,7 +918,7 @@ struct Subscriber {
     root: PathBuf,
     depth: WatchDepth,
     /// The caller's callback.
-    wake: Box<dyn Fn(DirChange<'_>)>,
+    wake: Box<dyn Fn(DirChange<'_>) + Send>,
     /// Reused across batches so that a busy folder does not allocate per
     /// notification.
     names: RefCell<Vec<OsString>>,
@@ -620,76 +928,212 @@ struct Subscriber {
     run_loop: CFRetained<CFRunLoop>,
 }
 
-/// The watcher thread: create the stream, schedule it on this thread's run loop,
-/// start it, say so, and then be the run loop until somebody signals the stop —
-/// or until the root goes, which ends the watch through `end` and tells `wake`
-/// [`DirChange::Ended`] once (T-DIRWATCH-LIFECYCLE).
-fn watch_loop(
-    root: &Path,
-    depth: WatchDepth,
-    armed: &std::sync::mpsc::Sender<Result<Stopper, std::io::Error>>,
-    end: &WatchEnd,
-    wake: impl Fn(DirChange<'_>) + 'static,
-) {
+/// **One running stream, as the watcher thread holds it.**
+struct Running {
+    stream: NonNull<FsEventStream>,
+    /// The `Box` leaked into the stream's context, freed after the stream is
+    /// released.
+    subscriber: *mut Subscriber,
+    member: Arc<WatchMember>,
+}
+
+impl Running {
+    fn root_gone(&self) -> bool {
+        // SAFETY: the subscriber is the live `Box` leaked when the stream was
+        // created, freed only in `tear_down`, which consumes this.
+        unsafe { &*self.subscriber }
+            .root_gone
+            .load(Ordering::Acquire)
+    }
+
+    /// **The root went, and nobody asked for a stop**: the member has ended on its
+    /// own. Said before the teardown, from this thread, as the last call `wake`
+    /// gets; a removal the owner asked for says nothing.
+    fn end(self) {
+        self.member.end.record(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the watched directory was removed, moved or unmounted",
+        ));
+        // SAFETY: as in `root_gone`.
+        (unsafe { &*self.subscriber }.wake)(DirChange::Ended);
+        self.leave();
+    }
+
+    /// The stream torn down on the thread that scheduled it, and the member told
+    /// last, after the `wake` it carried is gone too.
+    fn leave(self) {
+        tear_down(self.stream, self.subscriber);
+        self.member.gone.store(true, Ordering::Release);
+    }
+}
+
+/// **On the thread that scheduled it**, and in this order: stop delivering,
+/// unschedule, release, and only then free what the callback reads. Anything
+/// else is a callback running against a `Subscriber` that has been freed.
+fn tear_down(stream: NonNull<FsEventStream>, subscriber: *mut Subscriber) {
+    // SAFETY: this is the thread that scheduled the stream, no callback of it is
+    // running (the thread is between two runs of its loop), and nothing holds the
+    // stream afterwards.
+    unsafe {
+        FSEventStreamStop(stream.as_ptr());
+        FSEventStreamInvalidate(stream.as_ptr());
+        FSEventStreamRelease(stream.as_ptr());
+    }
+    // SAFETY: the stream is invalid and released, so the callback that held this
+    // pointer can no longer run. The pointer came from `Box::into_raw` and has not
+    // been freed.
+    drop(unsafe { Box::from_raw(subscriber) });
+}
+
+/// The watcher thread: make the run loop's request source, say the set is ready,
+/// and then be the run loop — answering the queue between two runs, and taking
+/// down every stream whose root went (T-DIRWATCH-LIFECYCLE) — until the stop.
+fn watch_loop(ready: &std::sync::mpsc::Sender<Result<Arc<SetShared>, std::io::Error>>) {
     let run_loop = CFRunLoop::current().expect("every thread has a run loop");
     // SAFETY: `kCFRunLoopDefaultMode` is a Core Foundation constant, initialised
     // before any code of this process runs and never written to.
     let mode = unsafe { kCFRunLoopDefaultMode }
         .expect("the default run loop mode is a Core Foundation constant");
 
-    // The stop, built before anything can need it. `stopped` is what the perform
-    // callback sets and the loop below reads; the `Arc` is the one thing the
-    // callback needs to reach, and it is leaked into the source's context and
-    // reclaimed after the source is invalidated.
-    let stopped = Arc::new(AtomicBool::new(false));
-    let source = match stop_source(&stopped) {
-        Some(source) => source,
-        None => {
-            let _ = armed.send(Err(std::io::Error::other(
-                "a run loop source for the watcher's stop could not be created",
-            )));
-            return;
-        }
+    let Some(source) = request_source() else {
+        let _ = ready.send(Err(std::io::Error::other(
+            "a run loop source for the watcher's requests could not be created",
+        )));
+        return;
     };
     run_loop.add_source(Some(&source), Some(mode));
+    let set = Arc::new(SetShared {
+        requests: Mutex::new(Requests {
+            open: true,
+            queue: VecDeque::new(),
+        }),
+        next: AtomicU64::new(1),
+        run_loop: run_loop.clone(),
+        source: source.clone(),
+    });
+    // `open` gave up on us — there is nobody to watch for — and the loop below
+    // is skipped for the teardown rather than run until nothing ever stops it.
+    let mut stopping = ready.send(Ok(Arc::clone(&set))).is_err();
 
-    let subscriber = Box::new(Subscriber {
-        root: root.to_path_buf(),
+    let mut running: BTreeMap<u64, Running> = BTreeMap::new();
+    while !stopping {
+        // `CFRunLoopRun` returns when the request source's perform callback calls
+        // `CFRunLoopStop`, or when an FSEvents callback does because a root went;
+        // any other return is answered the same way, with whatever is queued.
+        CFRunLoop::run();
+        let queued = std::mem::take(
+            &mut set
+                .requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .queue,
+        );
+        for request in queued {
+            match request {
+                Request::Add {
+                    id,
+                    root,
+                    depth,
+                    wake,
+                    member,
+                    armed,
+                } => {
+                    let started = if stopping {
+                        Err(std::io::Error::other(
+                            "the directory watch set takes no more directories",
+                        ))
+                    } else {
+                        arm(&run_loop, mode, root, depth, wake, member)
+                    };
+                    match started {
+                        Ok(stream) => {
+                            running.insert(id, stream);
+                            let _ = armed.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let _ = armed.send(Err(error));
+                        }
+                    }
+                }
+                Request::Remove(id) => {
+                    if let Some(stream) = running.remove(&id) {
+                        stream.leave();
+                    }
+                }
+                Request::Stop => stopping = true,
+            }
+        }
+        let ended: Vec<u64> = running
+            .iter()
+            .filter(|(_, stream)| stream.root_gone())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ended {
+            if let Some(stream) = running.remove(&id) {
+                stream.end();
+            }
+        }
+    }
+
+    // Leaving: no request is taken from here on, and whatever was queued before
+    // that is dropped — an arrival's dropped answer is its start's error.
+    let left = {
+        let mut requests = set.requests.lock().unwrap_or_else(PoisonError::into_inner);
+        requests.open = false;
+        std::mem::take(&mut requests.queue)
+    };
+    drop(left);
+    for (_, stream) in std::mem::take(&mut running) {
+        stream.leave();
+    }
+    run_loop.remove_source(Some(&source), Some(mode));
+    source.invalidate();
+}
+
+/// **One member's stream**: created, scheduled on this thread's run loop and
+/// started, or the refusal that is its start's error.
+fn arm(
+    run_loop: &CFRetained<CFRunLoop>,
+    mode: &CFRunLoopMode,
+    root: PathBuf,
+    depth: WatchDepth,
+    wake: Box<dyn Fn(DirChange<'_>) + Send>,
+    member: Arc<WatchMember>,
+) -> Result<Running, std::io::Error> {
+    let subscriber = Box::into_raw(Box::new(Subscriber {
+        root,
         depth,
-        wake: Box::new(wake),
+        wake,
         names: RefCell::new(Vec::new()),
         root_gone: AtomicBool::new(false),
         run_loop: run_loop.clone(),
-    });
-    let subscriber = Box::into_raw(subscriber);
-
-    let stream = create_stream(root, subscriber.cast::<c_void>());
+    }));
+    // SAFETY: the pointer is the live `Box` just leaked; its root is read before
+    // any stream holds it.
+    let stream = create_stream(&unsafe { &*subscriber }.root, subscriber.cast::<c_void>());
     let Some(stream) = stream else {
-        run_loop.remove_source(Some(&source), Some(mode));
-        source.invalidate();
         // SAFETY: nothing else ever held this pointer — the stream that would
         // have was never created.
         drop(unsafe { Box::from_raw(subscriber) });
-        let _ = armed.send(Err(std::io::Error::other(
+        return Err(std::io::Error::other(
             "FSEventStreamCreate refused the watched path",
-        )));
-        return;
+        ));
     };
 
     // SAFETY: `stream` was just created and has not been scheduled anywhere;
     // `run_loop` is this thread's own and `mode` is a Core Foundation constant.
-    unsafe { FSEventStreamScheduleWithRunLoop(stream.as_ptr(), &run_loop, mode) };
+    unsafe { FSEventStreamScheduleWithRunLoop(stream.as_ptr(), run_loop, mode) };
 
     #[cfg(test)]
     stream_gate::wait_if_held();
     // SAFETY: the stream is scheduled on a run loop that exists.
-    let running = unsafe { FSEventStreamStart(stream.as_ptr()) } != 0;
+    let started = unsafe { FSEventStreamStart(stream.as_ptr()) } != 0;
     #[cfg(test)]
-    if running {
+    if started {
         stream_gate::note_stream_running();
     }
 
-    if !running {
+    if !started {
         // SAFETY: the stream was scheduled on this thread's run loop and never
         // started, so no callback can be in flight; this is the thread that
         // scheduled it.
@@ -697,69 +1141,17 @@ fn watch_loop(
             FSEventStreamInvalidate(stream.as_ptr());
             FSEventStreamRelease(stream.as_ptr());
         }
-        run_loop.remove_source(Some(&source), Some(mode));
-        source.invalidate();
         // SAFETY: the stream that held this pointer is invalid and released.
         drop(unsafe { Box::from_raw(subscriber) });
-        let _ = armed.send(Err(std::io::Error::other(
+        return Err(std::io::Error::other(
             "FSEventStreamStart could not arm the watch",
-        )));
-        return;
-    }
-
-    if armed
-        .send(Ok(Stopper {
-            run_loop: run_loop.clone(),
-            source: source.clone(),
-        }))
-        .is_err()
-    {
-        // `start` gave up on us — there is nobody to watch for. Fall through to
-        // the teardown rather than into a run loop nothing will ever stop.
-        stopped.store(true, Ordering::Release);
-    }
-
-    // The loop. `CFRunLoopRun` returns when the stop source's perform callback
-    // calls `CFRunLoopStop`, or when the FSEvents callback does because the root
-    // went; re-entering on any other return is right: the only other reasons are
-    // a mode that emptied, which cannot happen while the stop source is attached,
-    // and a stop somebody else's code asked for, which is not this watch's end.
-    //
-    // SAFETY (each read of `subscriber` here): the pointer is the live `Box`
-    // leaked above, freed only after the stream is released below, and the
-    // callback that also reads it runs on this same thread.
-    let root_gone = || unsafe { &*subscriber }.root_gone.load(Ordering::Acquire);
-    while !stopped.load(Ordering::Acquire) && !root_gone() {
-        CFRunLoop::run();
-    }
-    // **The root went, and nobody asked for a stop**: the watch has ended on its
-    // own. Said before the teardown, from this thread, as the last call `wake`
-    // gets; a stop the owner asked for says nothing.
-    if !stopped.load(Ordering::Acquire) {
-        end.record(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "the watched directory was removed, moved or unmounted",
         ));
-        (unsafe { &*subscriber }.wake)(DirChange::Ended);
     }
-
-    // **On the thread that scheduled it**, and in this order: stop delivering,
-    // unschedule, release. Anything else is a callback running against a
-    // `Subscriber` that has been freed.
-    //
-    // SAFETY: this is the thread that scheduled the stream, the run loop it was
-    // scheduled on is no longer running, and nothing holds the stream afterwards.
-    unsafe {
-        FSEventStreamStop(stream.as_ptr());
-        FSEventStreamInvalidate(stream.as_ptr());
-        FSEventStreamRelease(stream.as_ptr());
-    }
-    run_loop.remove_source(Some(&source), Some(mode));
-    source.invalidate();
-    // SAFETY: the stream is invalid and released, so the callback that held this
-    // pointer can no longer run. The pointer came from `Box::into_raw` above and
-    // has not been freed.
-    drop(unsafe { Box::from_raw(subscriber) });
+    Ok(Running {
+        stream,
+        subscriber,
+        member,
+    })
 }
 
 /// `FSEventStreamCreate` over one path, with the four flags this arm depends on.
@@ -799,16 +1191,13 @@ fn create_stream(root: &Path, info: *mut c_void) -> Option<NonNull<FsEventStream
     NonNull::new(stream)
 }
 
-/// The run loop source whose only job is to stop the loop it is attached to.
-fn stop_source(stopped: &Arc<AtomicBool>) -> Option<CFRetained<CFRunLoopSource>> {
+/// The run loop source whose only job is to stop the loop it is attached to, so
+/// that the thread answers the queue.
+fn request_source() -> Option<CFRetained<CFRunLoopSource>> {
     /// The source's perform callback. Runs on the run loop's own thread, which
     /// is the watcher thread, which is why `CFRunLoopStop` here is not the
-    /// cross-thread call the owner would otherwise have had to make.
-    unsafe extern "C-unwind" fn perform(info: *mut c_void) {
-        // SAFETY: `info` is the `Arc` this module leaked into the context below
-        // and is alive until the source is invalidated and the leak reclaimed.
-        let stopped = unsafe { &*info.cast::<AtomicBool>() };
-        stopped.store(true, Ordering::Release);
+    /// cross-thread call an owner would otherwise have had to make.
+    unsafe extern "C-unwind" fn perform(_info: *mut c_void) {
         if let Some(run_loop) = CFRunLoop::current() {
             run_loop.stop();
         }
@@ -816,7 +1205,7 @@ fn stop_source(stopped: &Arc<AtomicBool>) -> Option<CFRetained<CFRunLoopSource>>
 
     let mut context = CFRunLoopSourceContext {
         version: 0,
-        info: Arc::as_ptr(stopped).cast::<c_void>().cast_mut(),
+        info: std::ptr::null_mut(),
         retain: None,
         release: None,
         copyDescription: None,
@@ -827,9 +1216,7 @@ fn stop_source(stopped: &Arc<AtomicBool>) -> Option<CFRetained<CFRunLoopSource>>
         perform: Some(perform),
     };
     // SAFETY: the context is a valid `CFRunLoopSourceContext` for the whole of
-    // the call, and its `info` points at an `AtomicBool` owned by an `Arc` the
-    // watcher thread holds for longer than the source: the source is invalidated
-    // before `watch_loop` returns, and the `Arc` is dropped after that.
+    // the call, and its perform callback reads nothing through `info`.
     unsafe { CFRunLoopSource::new(None, 0, &raw mut context) }
 }
 
@@ -893,10 +1280,12 @@ unsafe extern "C" fn on_events(
     if root_gone {
         // **The answer the Windows arm gives when the root goes**: there is
         // nothing left to watch. There, the next `ReadDirectoryChangesW` fails
-        // and the watcher thread records the end and returns. Here the run loop
-        // is stopped and `watch_loop` does the same after it: it records the end,
-        // says `Ended`, and tears the stream down. The `DirWatch` stays droppable
-        // and drops into a thread that has already finished.
+        // and the watcher thread records that member's end and closes it. Here
+        // the run loop is stopped and `watch_loop` does the same between two
+        // runs: it records the end, says `Ended`, and tears this stream down —
+        // outside its own callback, on the thread that scheduled it. The set's
+        // other streams go on, and the `DirWatch` stays droppable: its door
+        // answers at once.
         subscriber.root_gone.store(true, Ordering::Release);
         subscriber.run_loop.stop();
     }
@@ -1842,5 +2231,498 @@ mod tests {
         let skipped = crate::door_skipped::dropped_alone(watch, "a drop while the watcher is held");
         assert_eq!(skipped, 1, "the drop says its skipped door once");
         drop(release);
+    }
+}
+
+/// **Many directory watches on one thread** (T-DIR-WATCH-ONE-THREAD): the macOS arm of
+/// `DirWatchSet`, the twin of `crate::dir_watch_set_tests` on Windows and read against the same
+/// promises — each member's stream running when its start returns, hearing its own root by its
+/// own contract, leaving alone, ending alone, and every member on the set's one run loop thread.
+#[cfg(test)]
+mod set_tests {
+    use super::{DirChange, DirWatch, DirWatchSet, WorkerCtx, stream_gate};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
+
+    /// **A set is opened, and a member started, where the product does it: on a worker.**
+    fn on_a_worker<T: Send + 'static>(start: impl FnOnce(&WorkerCtx) -> T + Send + 'static) -> T {
+        crate::spawn_at_priority("bt-dir-watch-test", crate::ThreadPriority::Normal, start)
+            .expect("start a worker for the watch")
+            .join()
+            .expect("the worker answered")
+    }
+
+    /// The lone watch's budgets in `tests`, for the same two claims: *eventually* (FSEvents'
+    /// first event is not held), and *nothing at all* (well past the stream's latency).
+    const ARRIVES_WITHIN: Duration = Duration::from_secs(5);
+    const SILENCE_FOR: Duration = Duration::from_millis(1_200);
+
+    /// A scratch directory beside the test binary, as `tests` keeps its own.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let here = std::env::current_exe().expect("a test binary knows where it is");
+            let profile = here
+                .parent()
+                .and_then(Path::parent)
+                .expect("a test binary lives in <target>/<profile>/deps")
+                .to_path_buf();
+            let dir = profile.join(bt_testpath::unique_name(&format!(
+                "bt-dir-watch-set-{name}"
+            )));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("make a scratch directory");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn opened() -> Arc<DirWatchSet> {
+        Arc::new(on_a_worker(DirWatchSet::open).expect("open a directory watch set"))
+    }
+
+    /// Which of the four doors a member is started through.
+    #[derive(Clone, Copy)]
+    enum Door {
+        Tree,
+        TreeNamed,
+        Shallow,
+        ShallowNamed,
+    }
+
+    /// What a member's `wake` heard, as the test reads it.
+    #[derive(Debug, Eq, PartialEq)]
+    enum Word {
+        Named(Vec<String>),
+        Unknown,
+        Ended,
+    }
+
+    /// A member of `set` on `path`, through `door`, telling `tx` every word with its `label`.
+    fn member(
+        set: &Arc<DirWatchSet>,
+        door: Door,
+        path: &Path,
+        label: usize,
+        tx: &mpsc::Sender<(usize, Word)>,
+    ) -> DirWatch {
+        let (set, path, tx) = (Arc::clone(set), path.to_path_buf(), tx.clone());
+        on_a_worker(move |ctx| {
+            let wake = move |change: DirChange<'_>| {
+                let word = match change {
+                    DirChange::Named(names) => Word::Named(
+                        names
+                            .iter()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .collect(),
+                    ),
+                    DirChange::Unknown => Word::Unknown,
+                    DirChange::Ended => Word::Ended,
+                };
+                let _ = tx.send((label, word));
+            };
+            match door {
+                Door::Tree => set.start(ctx, &path, wake),
+                Door::TreeNamed => set.start_named(ctx, &path, wake),
+                Door::Shallow => set.start_shallow(ctx, &path, wake),
+                Door::ShallowNamed => set.start_shallow_named(ctx, &path, wake),
+            }
+        })
+        .expect("watch a directory this process just made")
+    }
+
+    fn retired_within(watch: DirWatch, bound: Duration) -> bool {
+        on_a_worker(move |ctx| watch.retire_within(ctx, bound))
+    }
+
+    fn retired(watch: DirWatch) -> bool {
+        retired_within(watch, crate::DIR_WATCH_RETIRE_BUDGET)
+    }
+
+    fn set_retired(set: Arc<DirWatchSet>) -> bool {
+        let set = Arc::try_unwrap(set).unwrap_or_else(|_| panic!("the test holds the set alone"));
+        on_a_worker(move |ctx| set.retire_within(ctx, crate::DIR_WATCH_RETIRE_BUDGET))
+    }
+
+    /// The next word `label` said within the budget, skipping everyone else's.
+    fn next_from(rx: &mpsc::Receiver<(usize, Word)>, label: usize) -> Option<Word> {
+        let deadline = Instant::now() + ARRIVES_WITHIN;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok((from, word)) if from == label => return Some(word),
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    /// Whether `label` says nothing for [`SILENCE_FOR`], whatever the others say.
+    fn silent(rx: &mpsc::Receiver<(usize, Word)>, label: usize) -> bool {
+        let deadline = Instant::now() + SILENCE_FOR;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok((from, _)) if from == label => return false,
+                Ok(_) => {}
+                Err(_) => return true,
+            }
+        }
+        true
+    }
+
+    /// The first word each of `count` labels said, or `None` if one stayed quiet past the budget.
+    fn first_word_of_each<T>(
+        rx: &mpsc::Receiver<(usize, T)>,
+        count: usize,
+    ) -> Option<std::collections::BTreeMap<usize, T>> {
+        let mut heard = std::collections::BTreeMap::new();
+        let deadline = Instant::now() + ARRIVES_WITHIN;
+        while heard.len() < count {
+            let left = deadline.checked_duration_since(Instant::now())?;
+            let (label, word) = rx.recv_timeout(left).ok()?;
+            heard.entry(label).or_insert(word);
+        }
+        Some(heard)
+    }
+
+    /// Whether `label` names `wanted` within the budget.
+    fn names(rx: &mpsc::Receiver<(usize, Word)>, label: usize, wanted: &str) -> bool {
+        while let Some(word) = next_from(rx, label) {
+            if let Word::Named(names) = &word
+                && names.iter().any(|name| name == wanted)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// RED (T-DIR-WATCH-ONE-THREAD) — **eight directories, through all four doors, are heard on
+    /// one watcher thread.**
+    ///
+    /// Each member's `wake` says which thread it runs on, and every member is made to speak, so
+    /// the one thread is one that listens rather than one that does nothing. The thread's own
+    /// identity is the probe, not a census of the process: a lone watch another test let go of
+    /// may still be leaving while this one runs, and a count would read it.
+    ///
+    /// MUTATION: start every member as a lone `DirWatch` of its own (a thread per directory) —
+    /// the eight members speak on eight threads.
+    #[test]
+    fn a_set_watches_many_directories_on_one_thread() {
+        let _turn = stream_gate::watchers_take_turns();
+        let set = opened();
+        let scratch: Vec<Scratch> = (0..8)
+            .map(|index| Scratch::new(&format!("many-{index}")))
+            .collect();
+        let doors = [
+            Door::Tree,
+            Door::TreeNamed,
+            Door::Shallow,
+            Door::ShallowNamed,
+        ];
+        let (tx, rx) = mpsc::channel::<(usize, (std::thread::ThreadId, Option<String>))>();
+        let watches: Vec<DirWatch> = scratch
+            .iter()
+            .enumerate()
+            .map(|(label, dir)| {
+                let (set, path, tx) = (Arc::clone(&set), dir.0.clone(), tx.clone());
+                let door = doors[label % doors.len()];
+                on_a_worker(move |ctx| {
+                    let wake = move |_: DirChange<'_>| {
+                        let here = std::thread::current();
+                        let _ = tx.send((label, (here.id(), here.name().map(str::to_owned))));
+                    };
+                    match door {
+                        Door::Tree => set.start(ctx, &path, wake),
+                        Door::TreeNamed => set.start_named(ctx, &path, wake),
+                        Door::Shallow => set.start_shallow(ctx, &path, wake),
+                        Door::ShallowNamed => set.start_shallow_named(ctx, &path, wake),
+                    }
+                })
+                .expect("watch a directory this process just made")
+            })
+            .collect();
+        for dir in &scratch {
+            std::fs::write(dir.0.join("appeared.txt"), b"hello").expect("write a file");
+        }
+        let heard = first_word_of_each(&rx, scratch.len())
+            .expect("every member of the set reports its own directory");
+        let threads: std::collections::HashSet<std::thread::ThreadId> =
+            heard.values().map(|(thread, _)| *thread).collect();
+        assert_eq!(
+            threads.len(),
+            1,
+            "eight directories under four contracts are heard on one watcher thread"
+        );
+        assert!(
+            heard
+                .values()
+                .all(|(_, name)| name.as_deref() == Some("bt-dir-watch")),
+            "and that thread is the set's own watcher"
+        );
+        for watch in watches {
+            assert!(retired(watch), "each member left its set within its bound");
+        }
+        assert!(set_retired(set), "the set's thread left within its bound");
+    }
+
+    /// PIN (T-DIR-WATCH-ONE-THREAD) — **two directories of one set both report, each by its own
+    /// contract**: a shallow named member names its own entry, a tree named member names a change
+    /// two levels down relative to its own root, a nameless member hears only that something
+    /// moved.
+    ///
+    /// MUTATION: hand every batch to the first member's `wake` — the others never speak.
+    #[test]
+    fn two_directories_of_one_set_both_report() {
+        let _turn = stream_gate::watchers_take_turns();
+        let set = opened();
+        let (here, tree, plain) = (
+            Scratch::new("both-here"),
+            Scratch::new("both-tree"),
+            Scratch::new("both-plain"),
+        );
+        let (tx, rx) = mpsc::channel();
+        let a = member(&set, Door::ShallowNamed, &here.0, 0, &tx);
+        let b = member(&set, Door::TreeNamed, &tree.0, 1, &tx);
+        let c = member(&set, Door::Tree, &plain.0, 2, &tx);
+
+        std::fs::write(here.0.join("a.txt"), b"a").expect("write into the shallow member");
+        assert!(
+            names(&rx, 0, "a.txt"),
+            "the shallow named member names its own entry"
+        );
+        std::fs::create_dir_all(tree.0.join("sub")).expect("make a subtree");
+        std::fs::write(tree.0.join("sub").join("b.txt"), b"b").expect("write two levels down");
+        assert!(
+            names(&rx, 1, "sub/b.txt"),
+            "the tree named member names the change relative to its own root"
+        );
+        std::fs::write(plain.0.join("c.txt"), b"c").expect("write into the nameless member");
+        assert_eq!(
+            next_from(&rx, 2),
+            Some(Word::Unknown),
+            "the nameless member hears that something moved, and no names"
+        );
+        for watch in [a, b, c] {
+            assert!(retired(watch), "each member left its set within its bound");
+        }
+        assert!(set_retired(set), "the set's thread left within its bound");
+    }
+
+    /// PIN (T-DIR-WATCH-ONE-THREAD) — **removing one member mid-run stops its news and keeps the
+    /// other's.**
+    ///
+    /// MUTATION: make the removal stop the whole set — the kept member goes silent too.
+    #[test]
+    fn removing_one_member_mid_run_silences_it_and_keeps_the_other() {
+        let _turn = stream_gate::watchers_take_turns();
+        let set = opened();
+        let (gone, kept) = (Scratch::new("remove-gone"), Scratch::new("remove-kept"));
+        let (tx, rx) = mpsc::channel();
+        let a = member(&set, Door::Shallow, &gone.0, 0, &tx);
+        let b = member(&set, Door::Shallow, &kept.0, 1, &tx);
+        std::fs::write(gone.0.join("before.txt"), b"x").expect("write before the removal");
+        assert!(
+            next_from(&rx, 0).is_some(),
+            "the member to be removed is awake"
+        );
+        std::fs::write(kept.0.join("before.txt"), b"x").expect("write before the removal");
+        assert!(
+            next_from(&rx, 1).is_some(),
+            "the member to be kept is awake"
+        );
+
+        assert!(
+            retired(a),
+            "the removed member left its set within its bound"
+        );
+        while rx.try_recv().is_ok() {}
+        std::fs::write(gone.0.join("after.txt"), b"x").expect("write after the removal");
+        std::fs::write(kept.0.join("after.txt"), b"x").expect("write after the removal");
+        assert!(
+            next_from(&rx, 1).is_some(),
+            "the kept member still hears its directory"
+        );
+        assert!(
+            silent(&rx, 0),
+            "the removed member hears nothing written afterwards"
+        );
+        assert!(retired(b), "the kept member left its set within its bound");
+        assert!(set_retired(set), "the set's thread left within its bound");
+    }
+
+    /// RED (T-DIR-WATCH-ONE-THREAD) — **retiring the set stops every member and joins its one
+    /// thread**; the members' own doors then answer at once.
+    ///
+    /// MUTATION: let the set's door return without stopping its members (a thread per member
+    /// left behind it) — the members go on hearing their directories.
+    #[test]
+    fn retiring_the_set_stops_every_member_and_joins_its_thread() {
+        let _turn = stream_gate::watchers_take_turns();
+        let set = opened();
+        let (one, two) = (Scratch::new("stop-one"), Scratch::new("stop-two"));
+        let (tx, rx) = mpsc::channel();
+        let a = member(&set, Door::Tree, &one.0, 0, &tx);
+        let b = member(&set, Door::ShallowNamed, &two.0, 1, &tx);
+        std::fs::write(one.0.join("before.txt"), b"x").expect("write before the stop");
+        assert!(next_from(&rx, 0).is_some(), "the first member is awake");
+        std::fs::write(two.0.join("before.txt"), b"x").expect("write before the stop");
+        assert!(next_from(&rx, 1).is_some(), "the second member is awake");
+
+        assert!(set_retired(set), "the set's thread left within its bound");
+        while rx.try_recv().is_ok() {}
+        std::fs::write(one.0.join("after.txt"), b"x").expect("write after the stop");
+        std::fs::write(two.0.join("after.txt"), b"x").expect("write after the stop");
+        assert!(
+            silent(&rx, 0),
+            "the first member hears nothing after the set stopped"
+        );
+        assert!(silent(&rx, 1), "nor does the second");
+        assert!(
+            retired_within(a, Duration::ZERO) && retired_within(b, Duration::ZERO),
+            "a member of a stopped set has nothing left to wait for"
+        );
+    }
+
+    /// PIN (T-DIR-WATCH-ONE-THREAD; T-DIRWATCH-LIFECYCLE) — **a member whose root goes away ends
+    /// alone**: `Ended` once, unarmed, its error kept; the set's other member goes on hearing.
+    ///
+    /// MUTATION: stop the whole run loop for good on one member's root going — the other
+    /// member's write is never heard.
+    #[test]
+    fn a_member_whose_directory_goes_away_ends_alone() {
+        let _turn = stream_gate::watchers_take_turns();
+        let set = opened();
+        let (outer, staying) = (Scratch::new("end-going"), Scratch::new("end-staying"));
+        let going = outer.0.join("watched");
+        std::fs::create_dir_all(&going).expect("make the watched directory");
+        let (tx, rx) = mpsc::channel();
+        let mut a = member(&set, Door::ShallowNamed, &going, 0, &tx);
+        let b = member(&set, Door::Tree, &staying.0, 1, &tx);
+        std::fs::rename(&going, outer.0.join("moved-away")).expect("rename the root away");
+        let mut ended = false;
+        while let Some(word) = next_from(&rx, 0) {
+            if word == Word::Ended {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended, "the member whose root went says `Ended`");
+        assert!(!a.is_armed(), "and is no longer armed");
+        assert!(
+            a.take_failure().is_some(),
+            "and keeps the error that ended it"
+        );
+        std::fs::write(staying.0.join("still.txt"), b"x").expect("write into the other member");
+        assert_eq!(
+            next_from(&rx, 1),
+            Some(Word::Unknown),
+            "the set's other member still hears its directory"
+        );
+        assert!(retired(a), "the ended member's door answers");
+        assert!(retired(b), "the other member left its set within its bound");
+        assert!(set_retired(set), "the set's thread left within its bound");
+    }
+
+    /// PIN (T-DIR-WATCH-ONE-THREAD) — **a member joining a set that is already running is
+    /// listening when its start returns**: `tests::a_watch_is_live_before_start_returns`, against
+    /// a set that already carries a member.
+    ///
+    /// MUTATION: answer the arrival before `FSEventStreamStart` — the flag is false and the write
+    /// made before the gate opens is never heard.
+    #[test]
+    fn a_new_member_is_listening_before_its_start_returns() {
+        let set = opened();
+        let (first, second) = (Scratch::new("join-first"), Scratch::new("join-second"));
+        let (tx, rx) = mpsc::channel();
+        let a = {
+            let _turn = stream_gate::watchers_take_turns();
+            member(&set, Door::Shallow, &first.0, 0, &tx)
+        };
+        let gate = stream_gate::hold();
+        let b = member(&set, Door::Shallow, &second.0, 1, &tx);
+        let running_when_start_returned = gate.the_stream_is_running();
+        std::fs::write(second.0.join("appeared.txt"), b"hello").expect("write a file");
+        gate.release();
+        assert!(
+            next_from(&rx, 1).is_some(),
+            "a change made after the newcomer's start returned reaches it"
+        );
+        assert!(
+            running_when_start_returned,
+            "the newcomer's start returned with its stream not yet running"
+        );
+        assert!(retired(a), "the first member left its set within its bound");
+        assert!(retired(b), "the newcomer left its set within its bound");
+        assert!(set_retired(set), "the set's thread left within its bound");
+        drop(gate);
+    }
+
+    /// PIN (T-DIR-WATCH-ONE-THREAD; T-DROP-DOORS, D-40) — **a member whose `wake` the set's
+    /// thread is standing in is retired within its bound**, and the door answers only after the
+    /// wake returned.
+    ///
+    /// MUTATION: mark the member gone when its removal is posted rather than when its stream is
+    /// released — the first door answers `true`.
+    #[test]
+    fn a_member_held_in_its_wake_is_retired_within_its_bound() {
+        let _turn = stream_gate::watchers_take_turns();
+        let set = opened();
+        let scratch = Scratch::new("held");
+        let held_member = |set: &Arc<DirWatchSet>| {
+            let (entered, inside) = mpsc::channel();
+            let (release, held) = mpsc::channel::<()>();
+            let left = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let leaving = Arc::clone(&left);
+            let (set, path) = (Arc::clone(set), scratch.0.clone());
+            let watch = on_a_worker(move |ctx| {
+                set.start(ctx, &path, move |_| {
+                    let _ = entered.send(());
+                    let _ = held.recv();
+                    leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+            .expect("watch a directory this process just made");
+            std::fs::write(scratch.0.join("hold.txt"), b"x").expect("write into the directory");
+            crate::door_skipped::received(&inside, "the set's thread inside the member's wake");
+            (watch, release, left)
+        };
+
+        let (watch, release, _left) = held_member(&set);
+        assert!(
+            !retired_within(watch, Duration::ZERO),
+            "a member whose wake is running has not left within no time at all"
+        );
+        drop(release);
+
+        let (watch, release, left) = held_member(&set);
+        let (going, on_its_way) = mpsc::channel();
+        let (answered, heard) = mpsc::channel();
+        let leaving = Arc::clone(&left);
+        std::thread::spawn(move || {
+            let _ = going.send(());
+            let left_in_time = retired_within(watch, crate::door_skipped::PATIENCE);
+            let _ = answered.send((
+                left_in_time,
+                leaving.load(std::sync::atomic::Ordering::SeqCst),
+            ));
+        });
+        crate::door_skipped::received(&on_its_way, "the retiring thread");
+        drop(release);
+        let (left_in_time, wake_returned) =
+            crate::door_skipped::received(&heard, "the door, once the wake is let go");
+        assert!(left_in_time, "the member left within the door's bound");
+        assert!(
+            wake_returned,
+            "the door answered before the member's wake returned"
+        );
+        assert!(set_retired(set), "the set's thread left within its bound");
     }
 }
