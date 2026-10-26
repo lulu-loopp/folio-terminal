@@ -3,6 +3,7 @@
 
 use super::pointer::{Ending, Gone, Leaving, OwnerGone};
 use crate::input::Keystroke;
+use crate::runtime::panes::end_leaves_of;
 use crate::window_seam::prelude::*;
 use crate::{
     BlankPage, BlankPageReturn, Drag, DragCarry, DragHandover, DragSource, DropLanding, Fading,
@@ -11,11 +12,11 @@ use crate::{
     RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId, TabMenuState,
     TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
     absorb_tab_into_layout, absorb_tab_into_strip, attention_trace, banner_line, blank_page_return,
-    create_tab_state, diagnostics, end_leaves_of, exit_diagnostics, float, new_tab_leaf_seed,
-    notify, pane_can_become_a_tab, pane_into_tab, pane_strip_landing, presentation_physical_size,
-    profiles, pty_door, recoverable_wheel_scroll_amount, restore, row_strip_landing,
-    scrollback_quota, seats, seed, settling, solve_seats, stepped_tab, strip_insert_slot,
-    tab_close_action, tab_surface, tear_pane_into_tab, two_tabs_mut, webnav,
+    create_tab_state, diagnostics, exit_diagnostics, float, new_tab_leaf_seed, notify,
+    pane_can_become_a_tab, pane_into_tab, pane_strip_landing, presentation_physical_size, profiles,
+    pty_door, recoverable_wheel_scroll_amount, restore, row_strip_landing, scrollback_quota, seats,
+    seed, settling, solve_seats, stepped_tab, strip_insert_slot, tab_close_action, tab_surface,
+    tear_pane_into_tab, two_tabs_mut, webnav,
 };
 use crate::{LeafView, TextScale, webhost};
 use anyhow::Context;

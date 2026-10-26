@@ -35,7 +35,11 @@ mod tabs;
 pub(crate) use tabs::owe_birth_death_fallback_resize;
 pub(crate) use windows::AfterTheWait;
 #[cfg(test)]
-pub(crate) use windows::recent_term_leaf_seed;
+pub(crate) use windows::{
+    answer_an_exit_over, broker_verdict, dwm_dark_mode_owed, focus_leaf_index,
+    persisted_window_bounds, preview_source_of_recent, raise_dirty_gate_over,
+    recent_term_leaf_seed, recorded_window_placement, tear_out_rect, window_minimum_changed,
+};
 // K2 (T-SPLIT-2B): the free functions moved out of `main.rs`, named at the crate root again by
 // its `use runtime::{…}` lines so that no caller changes.
 #[cfg(test)]
@@ -58,7 +62,7 @@ pub(crate) use dpi::{
 };
 #[cfg(test)]
 pub(crate) use files::{
-    column_keyboard, columns_wanting_git, dropped_files_seat_at, files_key_under,
+    column_keyboard, columns_wanting_git, dropped_files_seat_at, files_key_under, files_key_within,
     files_keyboard_seat_of, files_locate, files_open_chain, files_root_of, files_row_activation,
     files_row_counts_clicks, files_row_entry, files_row_menu_subject, folder_foot_notice,
     folder_pick_outcome, press_files_node, reroot_files_state,
@@ -75,6 +79,8 @@ pub(crate) use git::{
 };
 #[cfg(test)]
 pub(crate) use palette::recall_flash;
+#[cfg(test)]
+pub(crate) use panes::end_leaves_of;
 #[cfg(test)]
 pub(crate) use peek::{
     ask_for_peek_pixels, file_peek_promotion, let_go_unnamed_peek_records, peek_body_kind,

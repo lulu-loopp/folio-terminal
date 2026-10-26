@@ -2,13 +2,13 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::{Ending, Gone, Leaving, OwnerGone};
-use crate::runtime::floats::file_menu_powers;
-use crate::runtime::floats::float_dock_label;
+use crate::runtime::floats::{file_menu_powers, float_dock_label};
 use crate::window_seam::prelude::*;
 use crate::{
     BirthAt, BirthDue, LeafSeed, LeafView, SuccessorLanding, TextScale, births_due, born_in_tab,
-    conpty_source_of, decided_birth, deliver_held_input, diagnostics, exit_diagnostics, i18n,
-    land_shell_birth, land_successor, landed_source, resolved_birth_seed, toast,
+    conpty_source_of, decided_birth, deliver_held_input, diagnostics, exit_diagnostics,
+    expire_leaf_attention, i18n, land_shell_birth, land_successor, landed_source,
+    resolved_birth_seed, toast,
 };
 use crate::{
     ColumnNotch, CommandFlash, DividerDrag, DividerGrip, Drag, DragCarry, DragHandover, DragSource,
@@ -19,15 +19,14 @@ use crate::{
     RAIL_TRANSITION, RevealTween, RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed,
     TabId, TabState, TabSurface, TearOut, animated_pane_viewports, attention_trace,
     auto_split_axis, card_trace, clamp_into_body, closing_this_pane_closes_the_tab, cmdrail,
-    column_notch, create_leaf_session, end_leaves_of, files, float, glyph_trace, hang_watch,
-    host_screen_after, leaf_resize_plan, marks, mouse_trace, notice, notify,
-    pages_that_move_with_their_panes, palette, pane_fade_veil_layers, panel_opacity,
-    persisted_pane_count, picture_channel_owner, popup_owner, present_diagnostics,
-    presentation_physical_size, preview, preview_image_placement, preview_trace, profiles,
-    rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer, rail_zone_wants_open,
-    restated_scroll, restore, restore_row_seed, risen_frame, row_verb, schedule_leaf_grid_change,
-    scrollback_quota, seats, size_authority_for_rectangle, solve_seats, solve_tree,
-    trace_unchanged_present, video_seat, webhost,
+    column_notch, create_leaf_session, files, float, glyph_trace, hang_watch, host_screen_after,
+    leaf_resize_plan, marks, mouse_trace, notice, notify, pages_that_move_with_their_panes,
+    palette, pane_fade_veil_layers, panel_opacity, persisted_pane_count, picture_channel_owner,
+    popup_owner, present_diagnostics, presentation_physical_size, preview, preview_image_placement,
+    preview_trace, profiles, rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer,
+    rail_zone_wants_open, restated_scroll, restore, restore_row_seed, risen_frame, row_verb,
+    schedule_leaf_grid_change, scrollback_quota, seats, size_authority_for_rectangle, solve_seats,
+    solve_tree, trace_unchanged_present, video_seat, webhost,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -35,6 +34,7 @@ use bt_layout::{Axis, SeatId, SeatMetrics, SizePolicy};
 use bt_render::{FrameSource, FrameTrigger, GridSize, PresentOutcome, PresentPhase, Travel};
 use bt_viewport::horizontal::ContentColumn;
 use bt_viewport::{ViewSelection, ViewportFrame};
+use bt_workbench::attention;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Instant;
@@ -5715,4 +5715,62 @@ impl<B: Backend> Runtime<'_, B> {
         }
         (seat_ids, seat_frames)
     }
+}
+
+/// **The ending step: every road that ends a pane retires its shell and expires its attention
+/// exactly once.**
+///
+/// Five doors take it, and nothing else ends a pane: a pane closed on its own (`close_pane`, with
+/// `only` naming it), a tab closed (`close_tab`), a window closed or retired by the quit
+/// (`let_go_of_this_window`), a window a refused move had opened
+/// (`abandon_a_window_nothing_arrived_in`), and the launch placeholder taken away once the restored
+/// tabs stand (`answer_restore`). Each leaf of `tabs` — every one, or the one `only` names, a pane
+/// still in birth included — is handed `LeafGone` and then has its shell retired, in that order.
+///
+/// **Exactly once** is two rules, both kept here. A leaf a walk has already ended is not handed
+/// `LeafGone` again ([`LeafSession::attention_ended`]): a window closed and then retired by a quit
+/// before it is reaped is walked twice. And a leaf `moving` names — the cargo of a cross-window
+/// handover from this window that is decided and not yet performed — is not ending, so its place
+/// stays; its `LeafGone` comes from whichever road ends it in the window it lands in. Its shell is
+/// still retired, as it was before this step existed (finding F-2 of
+/// T-ATTENTION-WINDOW-EXPIRY, left to the shell's own lifecycle).
+///
+/// Answers the places it gave up, in walk order.
+pub(crate) fn end_leaves_of<'t>(
+    tabs: impl IntoIterator<Item = (usize, &'t mut TabState)>,
+    only: Option<SeatId>,
+    moving: Option<&DragSource>,
+    reach: impl Fn(usize) -> attention::Reach,
+    next_place: &mut attention::Places,
+    now: Instant,
+    trace: Option<&attention_trace::Trace>,
+) -> Vec<attention::Site> {
+    let mut ended = Vec::new();
+    for (index, tab) in tabs {
+        let id = tab.id;
+        let reach = reach(index);
+        for (seat, leaf) in tab.leaves_mut() {
+            if only.is_some_and(|only| only != *seat) {
+                continue;
+            }
+            let moves = moving.is_some_and(|cargo| match cargo {
+                DragSource::Tab(tab) => *tab == id,
+                DragSource::Pane(pane) => pane.tab == id && pane.seat == *seat,
+                DragSource::Row(_) => false,
+            });
+            if !moves && !leaf.attention_ended {
+                let at = attention::Site {
+                    tab: index,
+                    seat: *seat,
+                };
+                expire_leaf_attention(at, reach, leaf, next_place, now, trace);
+                leaf.attention_ended = true;
+                ended.push(at);
+            }
+            if let Some(pty) = leaf.pty.take() {
+                bt_pty::retire_session(pty);
+            }
+        }
+    }
+    ended
 }

@@ -173,7 +173,7 @@ fn a_window_close_requested_while_the_gate_is_up_neither_closes_the_window_nor_l
     );
     let raise = squeezed(method_body("Runtime", "raise_dirty_gate"));
     assert!(
-        raise.contains("crate::raise_dirty_gate_over("),
+        raise.contains("raise_dirty_gate_over("),
         "the window's gate decides through the function this test runs:\n{raise}"
     );
     let _ = std::fs::remove_dir_all(path.parent().expect("the scratch folder"));

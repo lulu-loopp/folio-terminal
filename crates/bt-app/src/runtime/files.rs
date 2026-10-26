@@ -11,7 +11,7 @@ use crate::{
     TabClick, TabRename, answers_for, files, float, foot_revealed_label, git_panel, hang_watch,
     home_shortened_path, i18n, marks, palette_index, preview, profiles, seats, settings, toast,
 };
-use crate::{FilesRoot, TabState, files_key_within, pane_folder};
+use crate::{FilesRoot, TabState, pane_folder};
 use anyhow::Result;
 use bt_layout::{SeatId, SeatLayout};
 use std::collections::{BTreeMap, BTreeSet};
@@ -3127,6 +3127,32 @@ impl<B: Backend> Runtime<'_, B> {
         });
         dropped_files_seat_at(&self.seat_layout, position, covered)
     }
+}
+
+/// **This folder's node id inside a column rooted at `root`, or `None` when it
+/// is not inside it at all** (user ruling 2026-08-25).
+///
+/// The question 「目标目录在当前树的可见范围内吗」 asked exactly once, and it is
+/// [`files::full_path`] run backwards: that function pushes a key's `/`-separated
+/// segments onto the root one at a time, so this takes the components the folder
+/// has beyond the root and joins them back with [`files::child_key`]. The root
+/// itself answers `Some("")`, which is the tree's own id for it.
+///
+/// **`Path::strip_prefix` and not a string prefix**, because a string prefix is
+/// how `D:\dev` comes to contain `D:\development`. It compares whole components,
+/// which is the same unit the key is built in.
+///
+/// A column with no root (a fresh pane, a session restored onto a missing drive)
+/// contains nothing: there is no tree to be inside of, so the caller falls
+/// through to the verb that makes one.
+pub(crate) fn files_key_within(root: &str, folder: &Path) -> Option<String> {
+    if root.is_empty() {
+        return None;
+    }
+    let tail = folder.strip_prefix(Path::new(root)).ok()?;
+    Some(tail.components().fold(String::new(), |key, component| {
+        files::child_key(&key, &component.as_os_str().to_string_lossy())
+    }))
 }
 
 /// What a press on one node of a files tree does to that column's durable state.

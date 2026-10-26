@@ -318,28 +318,31 @@ use runtime::platform_pointer_of;
 #[cfg(test)]
 use runtime::{
     a_capture_still_holds_its_pointer, a_page_is_off_the_glass, a_page_still_has_a_pane,
-    a_page_was_replaced, a_retirement_happens_on_this_turn, answer_attention_in,
-    apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels, chevron_turn_target,
-    clear_copied_selection, clipboard_focus_of, column_keyboard, columns_wanting_git,
-    drain_may_take_another_slice, dropped_files_seat_at, file_menu_powers, file_peek_promotion,
-    files_float_content_height, files_key_under, files_keyboard_seat_of, files_locate,
-    files_open_chain, files_root_of, files_row_activation, files_row_counts_clicks,
+    a_page_was_replaced, a_retirement_happens_on_this_turn, answer_an_exit_over,
+    answer_attention_in, apply_leaf_metrics, apply_tabs_leaf_metrics, ask_for_peek_pixels,
+    broker_verdict, chevron_turn_target, clear_copied_selection, clipboard_focus_of,
+    column_keyboard, columns_wanting_git, drain_may_take_another_slice, dropped_files_seat_at,
+    dwm_dark_mode_owed, end_leaves_of, file_menu_powers, file_peek_promotion,
+    files_float_content_height, files_key_under, files_key_within, files_keyboard_seat_of,
+    files_locate, files_open_chain, files_root_of, files_row_activation, files_row_counts_clicks,
     files_row_entry, files_row_menu_subject, float_git_page_shown, float_viewport_rect,
-    folder_foot_notice, folder_pick_outcome, git_answer_notice, git_full_path, git_roots_on_glass,
-    git_surfaces_the_kernel_moved, git_surfaces_wanting_reread, glass_allows_a_text_write,
-    graph_key_of, hole_for, in_drain_feed_turn, input_line_needs_a_space_first,
-    let_go_unnamed_peek_records, local_image_activation, merge_notice_card, next_attention_stop,
-    paste_answer_text, paste_body, paste_card_step, paste_offer_is_kept, paste_target_is_live,
-    paste_text, peek_body_kind, peek_cache_key_for_decode, peek_card_opened, peek_files_named,
-    peek_foot_press, peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
-    prepare_clipboard_paste, prepare_dropped_paste, press_files_node, preview_body_bar,
-    profile_menu_anchor, raise_cancelled_quit_card_on, recall_flash, reference_card,
+    focus_leaf_index, folder_foot_notice, folder_pick_outcome, git_answer_notice, git_full_path,
+    git_roots_on_glass, git_surfaces_the_kernel_moved, git_surfaces_wanting_reread,
+    glass_allows_a_text_write, graph_key_of, hole_for, in_drain_feed_turn,
+    input_line_needs_a_space_first, let_go_unnamed_peek_records, local_image_activation,
+    merge_notice_card, next_attention_stop, paste_answer_text, paste_body, paste_card_step,
+    paste_offer_is_kept, paste_target_is_live, paste_text, peek_body_kind,
+    peek_cache_key_for_decode, peek_card_opened, peek_files_named, peek_foot_press,
+    peek_page_texture_key, peek_reads_the_file, peek_scale_task, pending_paste_in,
+    persisted_window_bounds, prepare_clipboard_paste, prepare_dropped_paste, press_files_node,
+    preview_body_bar, preview_source_of_recent, profile_menu_anchor, raise_cancelled_quit_card_on,
+    raise_dirty_gate_over, recall_flash, recorded_window_placement, reference_card,
     reference_run_rect, refused_preview_card, remember_decode, reroot_files_state,
     rescan_leaf_for_search, resize_worth_solving, resolved_theme_change, restart_seed,
     revived_page_of, seat_holds_the_keyboard, selection_to_copy, should_copy_on_select_release,
     stage_paste, step_leaf_text_scale, stepped_command_mark, tab_surface_tip_boxes,
-    take_pending_paste, take_psreadline_resize_reanchor_input, terminal_link_answers_a_press,
-    text_field_holding, tooltip_anchor_for,
+    take_pending_paste, take_psreadline_resize_reanchor_input, tear_out_rect,
+    terminal_link_answers_a_press, text_field_holding, tooltip_anchor_for, window_minimum_changed,
 };
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
 // is what keeps every reader's `crate::attention::…` path, and the next keeps the "what counts as
@@ -10596,32 +10599,6 @@ fn preview_rail_tip_text(
     }
 }
 
-/// **This folder's node id inside a column rooted at `root`, or `None` when it
-/// is not inside it at all** (user ruling 2026-08-25).
-///
-/// The question 「目标目录在当前树的可见范围内吗」 asked exactly once, and it is
-/// [`files::full_path`] run backwards: that function pushes a key's `/`-separated
-/// segments onto the root one at a time, so this takes the components the folder
-/// has beyond the root and joins them back with [`files::child_key`]. The root
-/// itself answers `Some("")`, which is the tree's own id for it.
-///
-/// **`Path::strip_prefix` and not a string prefix**, because a string prefix is
-/// how `D:\dev` comes to contain `D:\development`. It compares whole components,
-/// which is the same unit the key is built in.
-///
-/// A column with no root (a fresh pane, a session restored onto a missing drive)
-/// contains nothing: there is no tree to be inside of, so the caller falls
-/// through to the verb that makes one.
-fn files_key_within(root: &str, folder: &Path) -> Option<String> {
-    if root.is_empty() {
-        return None;
-    }
-    let tail = folder.strip_prefix(Path::new(root)).ok()?;
-    Some(tail.components().fold(String::new(), |key, component| {
-        files::child_key(&key, &component.as_os_str().to_string_lossy())
-    }))
-}
-
 /// **Where a locate lands in the files column** (user ruling 2026-08-25; the
 /// file arm, 2026-09-20).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -18082,14 +18059,6 @@ impl DpiRectangle {
     }
 }
 
-fn window_minimum_changed(applied: &mut Option<(i64, i64)>, next: (i64, i64)) -> bool {
-    if *applied == Some(next) {
-        return false;
-    }
-    *applied = Some(next);
-    true
-}
-
 fn earliest_deadline<const N: usize>(deadlines: [Option<Instant>; N]) -> Option<Instant> {
     deadlines.into_iter().flatten().min()
 }
@@ -18770,32 +18739,6 @@ fn gate_title_over(
     }
 }
 
-/// **Put `request` to a window's gate over that window's tabs** (ticket 58) —
-/// the whole of [`Runtime::raise_dirty_gate`] except the repaint.
-///
-/// What the request would lose is read off the tabs, and the gate answers with
-/// it: [`restore::GateRaise::Busy`] while another question is up or a close
-/// waits (its request kept), [`restore::GateRaise::NothingToAsk`] when nothing
-/// is at risk, [`restore::GateRaise::Waiting`] when the request is a close and
-/// a save of every dirty buffer it would lose is already on its way — the close
-/// waits for their answers instead of asking ([`close_wait_over`], S-6b) — and
-/// otherwise [`restore::GateRaise::Raised`] with the gate now holding this one.
-fn raise_dirty_gate_over(
-    gate: &mut restore::DirtyGate,
-    tabs: &[TabState],
-    active_tab: usize,
-    request: restore::GateRequest,
-) -> restore::GateRaise {
-    let at_risk = dirty_gate_names(tabs, active_tab, &request);
-    if gate.verdict(&at_risk) == restore::GateRaise::Raised
-        && let Some(wait) = close_wait_over(tabs, active_tab, &request, Instant::now())
-    {
-        gate.wait(wait);
-        return restore::GateRaise::Waiting;
-    }
-    gate.raise(request, &at_risk)
-}
-
 /// **The wait a close is held in, when everything it would lose is on its way to
 /// the disk** (S-6b) — `None` when the request is not a close, or one dirty
 /// buffer it would lose has no save of its body on the way
@@ -18824,24 +18767,6 @@ fn close_wait_over(
         until: now + restore::CLOSE_WAITS_FOR_A_SAVE,
         saving: false,
     })
-}
-
-/// **What has become of every buffer a close waits for**, by name, read off the
-/// window's tabs (S-6b): a buffer no pool here holds any more — its tab gone, or
-/// discarded — loses nothing, and is read as saved.
-fn what_a_close_wait_found(
-    tabs: &[TabState],
-    wait: &restore::CloseWait,
-) -> Vec<(String, preview::AtTheClose)> {
-    wait.awaited
-        .iter()
-        .map(|awaited| {
-            where_a_save_stands(tabs, *awaited).map_or_else(
-                || (String::new(), preview::AtTheClose::Saved),
-                |(name, found)| (name.to_owned(), found),
-            )
-        })
-        .collect()
 }
 
 /// **What has become of one buffer a wait for saves is about**, with its name, if one of
@@ -19144,38 +19069,6 @@ fn keep_owed_documents_over(
         say.say(&i18n::stopped_changes_lost(&lost));
     }
     kept
-}
-
-/// **What an answer to one of the two exits comes to over the asking window's
-/// tabs** (B1; T-SUMMON-DIRTY-PREVIEW): the window whose close the loop is asked
-/// to re-run — `closes`, the window itself for a shut and the run's last ordinary
-/// window for [`restore::GateRequest::ShutWithTheRun`] — or `None` when nothing
-/// closes. The whole of [`Runtime::answer_exit`] but the write, which `Save all`
-/// hands to the storage worker and waits for across turns (S-6b): its answer is
-/// spent here once the saves have answered (`Runtime::settle_close_wait`;
-/// `saved_all`: whether all of them landed).
-///
-/// `Cancel` touches nothing and closes nothing. `Save all` closes only when every
-/// write landed ([`quit::Quit::saved`]'s rule one surface down). `Discard` drops
-/// the dirty buffers and only those: the rest of each pool is the list of files
-/// the switcher shows next launch (`TabState::preview_content`), and the gate
-/// raises itself off the dirty ones, so the re-run close finds nothing to ask.
-fn answer_an_exit_over(
-    tabs: &mut [TabState],
-    closes: WindowId,
-    answer: restore::GateAnswer,
-    saved_all: bool,
-) -> Option<WindowId> {
-    match answer {
-        restore::GateAnswer::Cancel => None,
-        restore::GateAnswer::Save => saved_all.then_some(closes),
-        restore::GateAnswer::Discard => {
-            for tab in tabs {
-                tab.preview_pool.discard_dirty();
-            }
-            Some(closes)
-        }
-    }
 }
 
 /// **Which of the tabs whose shells have all exited the loop may close on its
@@ -28640,64 +28533,6 @@ fn expire_leaf_attention(
     emit_attention_lines(trace, lines);
 }
 
-/// **The ending step: every road that ends a pane retires its shell and expires its attention
-/// exactly once.**
-///
-/// Five doors take it, and nothing else ends a pane: a pane closed on its own (`close_pane`, with
-/// `only` naming it), a tab closed (`close_tab`), a window closed or retired by the quit
-/// (`let_go_of_this_window`), a window a refused move had opened
-/// (`abandon_a_window_nothing_arrived_in`), and the launch placeholder taken away once the restored
-/// tabs stand (`answer_restore`). Each leaf of `tabs` — every one, or the one `only` names, a pane
-/// still in birth included — is handed `LeafGone` and then has its shell retired, in that order.
-///
-/// **Exactly once** is two rules, both kept here. A leaf a walk has already ended is not handed
-/// `LeafGone` again ([`LeafSession::attention_ended`]): a window closed and then retired by a quit
-/// before it is reaped is walked twice. And a leaf `moving` names — the cargo of a cross-window
-/// handover from this window that is decided and not yet performed — is not ending, so its place
-/// stays; its `LeafGone` comes from whichever road ends it in the window it lands in. Its shell is
-/// still retired, as it was before this step existed (finding F-2 of
-/// T-ATTENTION-WINDOW-EXPIRY, left to the shell's own lifecycle).
-///
-/// Answers the places it gave up, in walk order.
-fn end_leaves_of<'t>(
-    tabs: impl IntoIterator<Item = (usize, &'t mut TabState)>,
-    only: Option<SeatId>,
-    moving: Option<&DragSource>,
-    reach: impl Fn(usize) -> attention::Reach,
-    next_place: &mut attention::Places,
-    now: Instant,
-    trace: Option<&attention_trace::Trace>,
-) -> Vec<attention::Site> {
-    let mut ended = Vec::new();
-    for (index, tab) in tabs {
-        let id = tab.id;
-        let reach = reach(index);
-        for (seat, leaf) in tab.leaves_mut() {
-            if only.is_some_and(|only| only != *seat) {
-                continue;
-            }
-            let moves = moving.is_some_and(|cargo| match cargo {
-                DragSource::Tab(tab) => *tab == id,
-                DragSource::Pane(pane) => pane.tab == id && pane.seat == *seat,
-                DragSource::Row(_) => false,
-            });
-            if !moves && !leaf.attention_ended {
-                let at = attention::Site {
-                    tab: index,
-                    seat: *seat,
-                };
-                expire_leaf_attention(at, reach, leaf, next_place, now, trace);
-                leaf.attention_ended = true;
-                ended.push(at);
-            }
-            if let Some(pty) = leaf.pty.take() {
-                bt_pty::retire_session(pty);
-            }
-        }
-    }
-    ended
-}
-
 /// The next instant any pane in this window owes the loop a wake-up on the ledger's account.
 ///
 /// `None` for a window with nothing standing, which is every window almost always — so an idle
@@ -34437,48 +34272,6 @@ struct TearGrip {
     size_logical: (f32, f32),
 }
 
-/// **F5 — the rectangle a torn-out window opens in.**
-///
-/// *"屏幕命中与 work-area 一律物理坐标;期望尺寸 = 源窗**逻辑**外框换算到目标显示器
-/// DPI;**保持抓握点相对 tab 的 offset** 再做 work-area clamp;走
-/// `set_window_outer_rect`"*.
-///
-/// The dpi is the **target** monitor's, which is the whole of the mixed-dpi
-/// half: a window torn from a 100% display onto a 200% one has to grow, in
-/// pixels, to stay the same size to the eye, and the grip has to grow with it or
-/// the tab slides out from under the hand at the boundary.
-///
-/// The clamp moves before it resizes, and resizes only for a window that will
-/// not fit the display at all. A window nudged an inch left is still the window
-/// the reader tore off; a window silently shrunk to fit is not.
-fn tear_out_rect(
-    pointer: (i32, i32),
-    grip: TearGrip,
-    dpi: u32,
-    work: bt_platform::WindowRect,
-) -> bt_platform::WindowRect {
-    let physical = |logical: f32| {
-        bt_platform::logical_px_for_dpi(logical.max(0.0).round().max(1.0) as u32, dpi.max(1))
-    };
-    let work_width = work.right.saturating_sub(work.left).max(1);
-    let work_height = work.bottom.saturating_sub(work.top).max(1);
-    let width = physical(grip.size_logical.0).min(work_width);
-    let height = physical(grip.size_logical.1).min(work_height);
-    // The grip is clamped to the window it is inside: a grab point past the
-    // right-hand edge of a window that has just been shrunk to fit the display
-    // would put the whole window off to the left of the pointer.
-    let grab_x = physical(grip.grab_logical.0).min(width);
-    let grab_y = physical(grip.grab_logical.1).min(height);
-    let left = (pointer.0 - grab_x).clamp(work.left, work.right - width);
-    let top = (pointer.1 - grab_y).clamp(work.top, work.bottom - height);
-    bt_platform::WindowRect {
-        left,
-        top,
-        right: left + width,
-        bottom: top + height,
-    }
-}
-
 /// **The one guard behind the three ways a cross-window gesture is taken away**
 /// (multiwindow slice F2/F4; `plan.md` v3 增补 *"broker 撤防清单"*).
 ///
@@ -34583,33 +34376,6 @@ enum BrokerRelease {
     /// J120's clean nothing: the hand was over a window of ours and that window
     /// offered nothing.
     Nothing,
-}
-
-/// The table [`BrokerRelease`] is, stated once and away from every window.
-///
-/// **The cargo is an argument because one cell of the table depends on it**
-/// (§7.1.1, 2026-08-30). F1's 「拖到无窗处=撕成新窗」 is a sentence about a *pane
-/// or a tab* — a thing that is already in this program and is being asked to
-/// live in a window of its own. A row is a path on the disk; there is no window
-/// for it to become, and tearing one off would be inventing a verb the ruling
-/// does not have. So a row let go over the desktop is J120's clean nothing,
-/// which is also what it was before a row could open a broker at all.
-fn broker_verdict(cargo: &DragSource, aim: &BrokerAim) -> BrokerRelease {
-    match aim {
-        BrokerAim::Home => BrokerRelease::Local,
-        BrokerAim::Window {
-            window,
-            landing: Some(landing),
-        } => BrokerRelease::Into {
-            window: *window,
-            landing: *landing,
-        },
-        BrokerAim::Window { landing: None, .. } => BrokerRelease::Nothing,
-        BrokerAim::Away => match cargo {
-            DragSource::Row(_) => BrokerRelease::Nothing,
-            DragSource::Tab(_) | DragSource::Pane(_) => BrokerRelease::NewWindow,
-        },
-    }
 }
 
 /// **The application-level drag broker** (multiwindow slice F2/F4; `plan.md`
@@ -35947,15 +35713,6 @@ impl CursorBlink {
     }
 }
 
-fn focus_leaf_index(seats: &seats::Seats) -> usize {
-    seats
-        .tree()
-        .seats_in_order()
-        .iter()
-        .position(|seat| seat.id == seats.focus())
-        .unwrap_or(0)
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TabCloseAction {
     CloseWindow,
@@ -36572,28 +36329,6 @@ impl PreviewRestore {
     }
 }
 
-/// The files a *saved* tab's preview panes were showing, read straight off the
-/// document — what the restore prompt puts in the vault when you decline it.
-///
-/// Declining is not discarding (see [`Runtime::answer_restore`]), so the entry
-/// it writes has to carry everything the tab would have come back with. This is
-/// [`TabState::preview_pages`]'s opposite number for a tab that was never built.
-fn persisted_preview_pages(tab: &TabV1) -> Vec<bt_persist::RecentPreviewV1> {
-    tab.preview
-        .iter()
-        .flat_map(|content| content.panes.iter())
-        .filter_map(|pane| {
-            let cur = pane.cur.as_ref()?;
-            Some(match pane.cur_source {
-                bt_persist::PreviewSourceV1::File => bt_persist::RecentPreviewV1::File(cur.clone()),
-                bt_persist::PreviewSourceV1::Url => {
-                    bt_persist::RecentPreviewV1::Page { url: cur.clone() }
-                }
-            })
-        })
-        .collect()
-}
-
 /// **One web seat's answer for one frame** — where it is, and whether it is on
 /// the glass.
 ///
@@ -36921,14 +36656,6 @@ fn preview_source_of(target: &str, kind: bt_persist::PreviewSourceV1) -> preview
     match kind {
         bt_persist::PreviewSourceV1::File => preview::PreviewSource::file(target),
         bt_persist::PreviewSourceV1::Url => preview::PreviewSource::Web(target.to_owned()),
-    }
-}
-
-/// The same, for the vault's shaped row.
-fn preview_source_of_recent(row: &bt_persist::RecentPreviewV1) -> preview::PreviewSource {
-    match row {
-        bt_persist::RecentPreviewV1::File(path) => preview::PreviewSource::file(path),
-        bt_persist::RecentPreviewV1::Page { url } => preview::PreviewSource::Web(url.clone()),
     }
 }
 
@@ -50558,84 +50285,6 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     // ── quitting (multiwindow slice E2, `DESIGN.md` §2.9) ───────────────────
-
-    /// **The draft in this window's open editor, when committing it would change
-    /// something that outlives the quit** (v3 复审 ④-a：非文件缓冲).
-    ///
-    /// The two that qualify, and what `Save` means for each:
-    ///
-    /// * [`RenameSubject::Tab`] — the manual name, which is written into
-    ///   `session.json` and comes back next launch. `Save` = Enter.
-    /// * [`RenameSubject::PreviewName`] — a file moving on disk. `Save` = Enter
-    ///   again, and a rename the filesystem refuses raises its own card
-    ///   (`rename_preview_file`) rather than holding the quit up: what is in
-    ///   front of the reader afterwards is the window they still have.
-    ///
-    /// **[`RenameSubject::WebAddress`] is deliberately not one of them.** What
-    /// committing that draft does is *navigate*, and the page it would navigate
-    /// is the page this quit is closing — so there is nothing for it to lose, and
-    /// a card that listed it would be naming a loss that cannot happen. It is
-    /// still settled with the other two when the answer arrives, because a draft
-    /// abandoned by `Discard` must not then be committed at the door.
-    ///
-    /// A draft equal to what is already committed is **not** an edit: the
-    /// commonest way out of this editor is opening it, changing your mind and
-    /// clicking away (`finish_rename`'s own note), and a card raised over that
-    /// would be asking about a keystroke nobody made.
-    fn uncommitted_edit_name(&self) -> Option<String> {
-        let editor = self.window.rename.as_ref()?;
-        match &editor.subject {
-            RenameSubject::Tab(id) => {
-                let was = self
-                    .window
-                    .tabs
-                    .iter()
-                    .find(|tab| tab.id == *id)
-                    .and_then(|tab| tab.manual_name.clone());
-                let draft = editor.committed_name();
-                (draft != was).then(|| draft.unwrap_or_else(|| editor.text().to_owned()))
-            }
-            RenameSubject::PreviewName { source, .. } => {
-                let was = source
-                    .file_path()
-                    .and_then(std::path::Path::file_name)
-                    .map(|name| name.to_string_lossy().into_owned());
-                let draft = editor.text().trim().to_owned();
-                (!draft.is_empty() && Some(&draft) != was.as_ref()).then_some(draft)
-            }
-            // **B5's two new doors, and the crumb is the same loss the head
-            // is.** A draft open on the last segment is the same file, not
-            // committed, so a quit that discarded it would lose exactly what the
-            // head's own draft loses.
-            RenameSubject::PreviewCrumb { source, .. } => {
-                let was = source
-                    .file_path()
-                    .and_then(std::path::Path::file_name)
-                    .map(|name| name.to_string_lossy().into_owned());
-                let draft = editor.text().trim().to_owned();
-                (!draft.is_empty() && Some(&draft) != was.as_ref()).then_some(draft)
-            }
-            // A tree row's draft cannot be compared against a committed name
-            // without walking a live tree, and the card is built where there is
-            // no tree to walk — so it names the draft whenever there is one,
-            // which is the honest over-report: a card that lists a name nobody
-            // changed costs one line, and a card that omits one loses a rename.
-            RenameSubject::FilesRow { .. } => {
-                let draft = editor.text().trim().to_owned();
-                (!draft.is_empty()).then_some(draft)
-            }
-            // **A name for a file that does not exist yet is a loss too** (0.3),
-            // and there is nothing to compare it against at all: no entry on the
-            // disk carries this name, so any draft is uncommitted by
-            // construction. Naming it costs one line on the card; leaving it out
-            // would discard a file the reader had already decided to make.
-            RenameSubject::FilesNew { .. } => {
-                let draft = editor.text().trim().to_owned();
-                (!draft.is_empty()).then_some(draft)
-            }
-            RenameSubject::WebAddress { .. } => None,
-        }
-    }
 
     /// **Throw this window's in-memory modifications away** (slice E2 phase ①).
     ///
@@ -70908,7 +70557,7 @@ mod floated_page_tests {
         );
         let runtime_focus = method_body("Runtime", "give_foreground_with_retry");
         assert!(
-            runtime_focus.contains("crate::take_owned_keyboard_focus(&self.window.window)"),
+            runtime_focus.contains("take_owned_keyboard_focus(&self.window.window)"),
             "the runtime focus helper does not use its owned-window path: {runtime_focus}"
         );
         // That the helper gives the window the foreground through its door is
@@ -72238,25 +71887,6 @@ mod system_preference_wiring_tests {
     }
 }
 
-/// The `DWMWA_USE_IMMERSIVE_DARK_MODE` a painted background asks for, or `None`
-/// when the window has already said it (§7.1.6c-4f amendment).
-///
-/// **Keyed on the painted background's own luma**, at the one threshold the
-/// whole product takes its dark/light decision at
-/// (`bt_render::background_is_light`) — so this cannot become a second opinion
-/// about which canvas is on screen. The scheme's *name* has no vote: a user
-/// whose Dark scheme file names a pale background gets the light plate that
-/// background asks for, which is the same rule `scheme_in_force` follows.
-///
-/// **`None` is not "no", it is "already said".** A window that has never spoken
-/// is told even when the answer is the light one DWM assumes by default: the
-/// default is DWM's assumption, not this window's statement, and the two part
-/// company the moment anything else on the machine changes it.
-fn dwm_dark_mode_owed(said: Option<bool>, background: [u8; 3]) -> Option<bool> {
-    let dark = !bt_render::background_is_light(background);
-    (said != Some(dark)).then_some(dark)
-}
-
 fn render_cursor_style(style: SessionCursorStyleV1) -> CursorStyle {
     match style {
         SessionCursorStyleV1::Bar => CursorStyle::Bar,
@@ -72342,13 +71972,6 @@ fn native_window_of(window: &Window) -> Result<bt_platform::NativeWindow> {
     }
 }
 
-fn take_owned_keyboard_focus(window: &impl WindowHost) -> Result<()> {
-    if window.take_foreground() {
-        Ok(())
-    } else {
-        Err(anyhow!("the window could not take the keyboard"))
-    }
-}
 fn restore_minimized_window(window: &impl WindowHost) -> Result<()> {
     if window.is_minimized() == Some(true) {
         window.set_minimized(false);
@@ -72363,10 +71986,6 @@ fn bring_owned_window_forward(window: &impl WindowHost) -> Result<()> {
     } else {
         Err(anyhow!("the window could not take the keyboard"))
     }
-}
-
-fn request_owned_window_close(window: &impl WindowHost) -> Result<()> {
-    window.request_close().map_err(|error| anyhow!(error))
 }
 
 fn minimize_owned_window(window: &impl WindowHost) -> Result<()> {
@@ -73155,34 +72774,6 @@ enum WindowPosture {
     Minimized,
 }
 
-/// The `(bounds, maximized)` pair a snapshot should record.
-///
-/// Only a normal window's rectangle is the user's. The other two postures keep
-/// what was already recorded, for the same reason stated once and applied
-/// twice: a rectangle nobody chose must never displace the one somebody did.
-///
-/// - **Maximized** — the rectangle is the monitor's. Recording it would leave
-///   the size the user actually chose nowhere to be found, and the next
-///   unmaximize *and* the next start would both adopt a screen-sized "normal".
-/// - **Minimized** — the rectangle is the icon's: parked far off-screen at a
-///   token size. Recording it left `x = -16000, 157x25` in the file, and the
-///   next start could not seat the layout in a window that small and exited.
-///   The `maximized` flag is held too, and that is not incidental: `IsZoomed`
-///   answers false for an iconic window even when it will restore maximized, so
-///   trusting it here would quietly forget a maximized window over a minimize.
-fn recorded_window_placement(
-    posture: WindowPosture,
-    measured: Option<WindowBoundsV1>,
-    saved_bounds: WindowBoundsV1,
-    saved_maximized: bool,
-) -> (WindowBoundsV1, bool) {
-    match posture {
-        WindowPosture::Normal => (measured.unwrap_or(saved_bounds), false),
-        WindowPosture::Maximized => (saved_bounds, true),
-        WindowPosture::Minimized => (saved_bounds, saved_maximized),
-    }
-}
-
 /// One scroll offset, measured at one scale, said again in another's pixels —
 /// see [`Runtime::restate_panel_scroll`] for what it is for and why it is a
 /// ratio.
@@ -73535,25 +73126,6 @@ fn physical_px(logical: f64, scale: f64) -> i32 {
     (logical * scale)
         .round()
         .clamp(-2_147_483_648.0, 2_147_483_647.0) as i32
-}
-
-/// The logical rectangle the session file records, from the physical outer rect
-/// Win32 reports. The inverse of [`startup_window_rect`]'s scaling: for every
-/// scale factor Windows can report (never below 1.0), rounding out to physical
-/// and back in lands on the same logical numbers, so a window nobody touched is
-/// written back byte for byte on every restart.
-fn persisted_window_bounds(rect: bt_platform::WindowRect, scale: f64) -> WindowBoundsV1 {
-    let scale = scale.max(f64::MIN_POSITIVE);
-    WindowBoundsV1 {
-        x: (f64::from(rect.left) / scale).round() as i32,
-        y: (f64::from(rect.top) / scale).round() as i32,
-        width: (f64::from(rect.right.saturating_sub(rect.left)) / scale)
-            .round()
-            .max(1.0) as u32,
-        height: (f64::from(rect.bottom.saturating_sub(rect.top)) / scale)
-            .round()
-            .max(1.0) as u32,
-    }
 }
 
 fn pty_size(grid: GridSize, physical: PhysicalSize<u32>) -> PtySize {

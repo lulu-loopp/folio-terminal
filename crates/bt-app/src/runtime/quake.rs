@@ -2,8 +2,9 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::Ending;
+use crate::runtime::windows::persisted_window_bounds;
 use crate::window_seam::prelude::*;
-use crate::{Runtime, persisted_window_bounds, profiles, quake, shortcuts};
+use crate::{Runtime, profiles, quake, shortcuts};
 use anyhow::Result;
 
 impl<B: Backend> Runtime<'_, B> {
