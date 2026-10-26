@@ -1235,7 +1235,6 @@ crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	collect	2	u
 crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	take	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::clean_title_capped	Ambiguous	trim	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::columns_wanting_git	Ambiguous	is_empty	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::conpty_source_of	Ambiguous	unwrap_or_else	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::conpty_source_of	Path	to_string	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::create_leaf_session	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1293,17 +1292,8 @@ crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	unwrap_
 crates/bt-app/src/main.rs	bt-app crate::exited_tabs_the_loop_may_close	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::exited_tabs_the_loop_may_close	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::files_a_tab_stands_on	Ambiguous	into_path_and_tail	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::files_key_under	Ambiguous	components	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::files_key_under	Ambiguous	ok	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::files_key_under	Ambiguous	to_string_lossy	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::files_open_chain	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::files_open_chain	Ambiguous	is_empty	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::files_open_chain	Ambiguous	push	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::files_program_refused_notice	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::files_program_refused_notice	Path	FilesProgramRefused	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::files_root_of	Ambiguous	display	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::files_root_of	Ambiguous	to_string	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::files_root_of	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::files_row_display_name	Ambiguous	filter	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::files_row_display_name	Ambiguous	into_owned	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::files_row_display_name	Ambiguous	is_empty	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1313,13 +1303,9 @@ crates/bt-app/src/main.rs	bt-app crate::files_row_display_name	Ambiguous	unwrap_
 crates/bt-app/src/main.rs	bt-app crate::finish_leaf_birth	Ambiguous	clone	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::first_term_leaf	Ambiguous	next	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::fleet_claim	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::float_dock_label	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::float_dock_label	Path	FloatDock	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::float_trigger_tip	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::float_trigger_tip	Path	FloatTriggerTip	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::focus_leaf_index	Ambiguous	unwrap_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::folder_foot_notice	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::folder_foot_notice	Path	FilesFolderUnknown	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::foot_revealed_label	Ambiguous	text	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::foot_revealed_label	Path	FilesRevealed	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::head_within_columns	Ambiguous	to_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -1382,7 +1368,6 @@ crates/bt-app/src/main.rs	bt-app crate::page_foot_flash	Ambiguous	to_owned	1	unr
 crates/bt-app/src/main.rs	bt-app crate::page_foot_flash	Dynamic	fresh	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::page_foot_flash	Dynamic	latest	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::page_foot_flash	Path	WebDialogDismissed	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::paste_spelled	Dynamic	write	1	violation	2026-10-24: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste: a file, process or thread call
 crates/bt-app/src/main.rs	bt-app crate::persisted_preview_row	Ambiguous	into_owned	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::place_layer	Ambiguous	as_deref	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::place_preview_math	Ambiguous	get	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -2641,6 +2626,7 @@ crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_l
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_line_needs_a_space_first	Ambiguous	chars	1	unreviewed	2026-10-25: T-SPLIT-2B batch 9; the same site, moved by K2 batch 9 with `input_line_needs_a_space_first` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_line_needs_a_space_first	Ambiguous	is_empty	1	unreviewed	2026-10-25: T-SPLIT-2B batch 9; the same site, moved by K2 batch 9 with `input_line_needs_a_space_first` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::input_line_needs_a_space_first	Ambiguous	is_some_and	1	unreviewed	2026-10-25: T-SPLIT-2B batch 9; the same site, moved by K2 batch 9 with `input_line_needs_a_space_first` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::paste_spelled	Dynamic	write	1	violation	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `paste_spelled` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call; the finding stands: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste: a file, process or thread call
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::prepare_clipboard_paste	Ambiguous	text	1	unreviewed	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `prepare_clipboard_paste` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::prepare_clipboard_paste	Ambiguous	then_some	1	unreviewed	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `prepare_clipboard_paste` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/clipboard.rs	bt-app crate::runtime::clipboard::prepare_clipboard_paste	Ambiguous	to_owned	1	unreviewed	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `prepare_clipboard_paste` from main.rs into runtime/clipboard.rs: K2 moves the item, not the call
@@ -2678,6 +2664,18 @@ crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::Runtime::files_
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::Runtime::palette_files_note	Ambiguous	then_some	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::Runtime::palette_files_note	Path	PaletteFilesTruncated	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::Runtime::palette_files_note	Path	PaletteIndexing	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::columns_wanting_git	Ambiguous	is_empty	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `columns_wanting_git` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_key_under	Ambiguous	components	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_key_under` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_key_under	Ambiguous	ok	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_key_under` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_key_under	Ambiguous	to_string_lossy	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_key_under` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_open_chain	Ambiguous	filter	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_open_chain` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_open_chain	Ambiguous	is_empty	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_open_chain` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_open_chain	Ambiguous	push	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_open_chain` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_root_of	Ambiguous	display	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_root_of` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_root_of	Ambiguous	to_string	2	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_root_of` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::files_root_of	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `files_root_of` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::folder_foot_notice	Ambiguous	text	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `folder_foot_notice` from main.rs into runtime/files.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/files.rs	bt-app crate::runtime::files::folder_foot_notice	Path	FilesFolderUnknown	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `folder_foot_notice` from main.rs into runtime/files.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/first_run.rs	bt-app crate::runtime::first_run::Runtime::first_run_layout	Ambiguous	text	4	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/first_run.rs	bt-app crate::runtime::first_run::Runtime::first_run_layout	Ambiguous	to_owned	4	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/first_run.rs	bt-app crate::runtime::first_run::Runtime::first_run_layout	Dynamic	measure	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -2730,6 +2728,8 @@ crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::dump_chrome_f
 crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::dump_chrome_frame	Effect	std::fs::OpenOptions::create	1	violation	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `dump_chrome_frame` from main.rs into runtime/floats.rs: K2 moves the item, not the call; the finding stands: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
 crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::dump_chrome_frame	Effect	std::fs::OpenOptions::new	1	violation	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `dump_chrome_frame` from main.rs into runtime/floats.rs: K2 moves the item, not the call; the finding stands: (c) the gesture doors answer and draw inline: this site is on the synchronous answer road of Runtime::ask_for_a_paste, Runtime::close_pane, Runtime::hand_off, Runtime::reap_exited_tabs, Runtime::save_clipboard_picture, Runtime::submit_clipboard_write
 crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::dump_chrome_frame	Macro	writeln	4	std	2026-10-25: T-SPLIT-2B batch 10; the same site, moved by K2 batch 10 with `dump_chrome_frame` from main.rs into runtime/floats.rs: K2 moves the item, not the call; the reason stands: formats into a String it owns, no stream (a file write after it is its own key)
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::float_dock_label	Ambiguous	text	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `float_dock_label` from main.rs into runtime/floats.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/floats.rs	bt-app crate::runtime::floats::float_dock_label	Path	FloatDock	1	unreviewed	2026-10-25: T-SPLIT-2B batch 11; the same site, moved by K2 batch 11 with `float_dock_label` from main.rs into runtime/floats.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::finish_present_attempt	Ambiguous	as_micros	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::present_signature	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/frame.rs	bt-app crate::runtime::frame::Runtime::present_signature	Ambiguous	is_some_and	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))

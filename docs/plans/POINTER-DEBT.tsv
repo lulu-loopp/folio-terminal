@@ -79,7 +79,6 @@ crate::button_router_position	N-E	crate
 crate::button_router_position	N-E	crate
 crate::button_router_position	N-E	crate
 crate::contains_point	N-E	crate
-crate::dropped_files_seat_at	N-E	crate
 crate::file_reads::is_user_input	N-W	crate::file_reads
 crate::file_reads::is_user_input	N-W	crate::file_reads
 crate::file_reads::is_user_input	N-W	crate::file_reads
@@ -142,6 +141,7 @@ crate::runtime::files::Runtime::dropped_files_seat	N-E	crate::runtime::files
 crate::runtime::files::Runtime::file_row_under	N-E	crate::runtime::files
 crate::runtime::files::Runtime::files_ground_under	N-E	crate::runtime::files
 crate::runtime::files::Runtime::scroll_files_tree	N-B	crate::runtime::files
+crate::runtime::files::dropped_files_seat_at	N-E	crate::runtime::files
 crate::runtime::floats (outside any item)	N-B	crate::runtime::floats
 crate::runtime::floats (outside any item)	N-E	crate::runtime::floats
 crate::runtime::floats::Runtime::advance_chevrons	N-P	crate::runtime::floats

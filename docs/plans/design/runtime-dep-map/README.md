@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **734 items, 545 free functions and 189 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 10's head; 754, 559 and 195 before it,
+- **unclassified.tsv**: **713 items, 525 free functions and 188 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 11's head; 734, 545 and 189 before it,
+  754, 559 and 195 before batch 10,
   769, 573 and 196 before batch 9,
   783, 587 and 196 before batch 8,
   799, 600 and 199 before batch 7,
@@ -113,7 +114,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 8 | `runtime/peek.rs` | moved by batch 8 (14 items; five callers inside `runtime/peek.rs` dropped their `crate::` prefix, below) | — |
    | 9 | `runtime/clipboard.rs` | moved by batch 9 (13 items; `offer_pty_input`, `Runtime::paste_into_settings_field` and `Runtime::glass_here` held, below), with `unstarted_pixels` and `peek_cache_key_for_decode` as the peek batch's tail | — |
    | 10 | `runtime/floats.rs` | moved by batch 10 (10 items with `files_float_content_height`; `Runtime::settled_card_ink` went to `runtime/frame.rs` by its census owner; `Runtime::sweep_foot_phrases`, `Runtime::open_minted_page_on`, `revealable_preview_file`, `Runtime::open_local_path` and `reveal_ask` held, below), with nine clipboard tails | — |
-   | 11 | `runtime/files.rs` | 19 (17 + 2) | 38 |
+   | 11 | `runtime/files.rs` | moved by batch 11 (16 items; `Runtime::focus_the_pane_a_path_landed_in` and `home_shortened_path` held, below; `float_dock_label` went to `runtime/floats.rs` by the owner column), with `Runtime::reference_cell_index`, `text_field_holding`, `paste_spelled` and `page_keepsake_icon` as tails | — |
    | 12 | `runtime/windows.rs` | 19 (18 + 1) | 42 |
    | 13 | `runtime/frame.rs` | 33 (15 + 18) | 45 |
    | 14 | `runtime/keyboard.rs` | 27 (13 + 14) | 50 |
@@ -189,6 +190,15 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `Runtime::apply_settings_choice_announcing` at the root calls it in the product (the rule above).
    - `reveal_ask` — its `called_from` home is `runtime/floats.rs`, but `Runtime::reveal_in_explorer` at the root
      calls it in the product (the rule above); it stays with `reveal_in_explorer`.
+   - `Runtime::focus_the_pane_a_path_landed_in` — tied `runtime/files.rs` / `runtime/panes.rs`, and it writes facts
+     of two census owners, `WindowRuntime.float` (floats) and `WindowRuntime.search` (search); held for a ruling
+     (the two-owners clause above).
+   - `home_shortened_path` — its `called_from` home is `runtime/files.rs`, but `cwd_whole` at the root calls it in
+     the product (the rule above).
+   - `float_dock_label` (batch 11) — a three-way tie (`runtime/files.rs` / `runtime/panes.rs` /
+     `runtime/preview.rs`) that none of the three owns; it is a float's dock button, and the owner column gives
+     floating windows to `runtime/floats.rs`, so it went there (a ruled owner-column exception), imported by all
+     three.
 
    Batch 2 (`runtime/web.rs`) onward moves rows five shrink-only checks key by module
    or file (`check-census-unknowns.ps1`, `check-pointer-debt.ps1`,
