@@ -3,8 +3,8 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    PreviewSurface, Runtime, WebHeadVerb, git_graph, git_panel, i18n, icons, marks, seats, tooltip,
-    update,
+    PreviewSurface, Runtime, WebHeadVerb, cmdrail, git_graph, git_panel, i18n, icons, marks, seats,
+    tooltip, update,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -705,6 +705,62 @@ impl<B: Backend> Runtime<'_, B> {
         let palette = bt_render::chrome_palette();
         self.window.tooltip_drawn_opacity = Some(opacity);
         tooltip::build(&layout, &palette, scale, opacity, face)
+    }
+
+    /// Everything the hot rail's glance card is: where it stands, what it says,
+    /// what it is, and which face it wears.
+    ///
+    /// **One derivation with two readers.** `rebuild_tooltip_anchors` registers
+    /// it, and [`Self::command_tick_anchor`] hands the same identity to the
+    /// pointer path one line before the anchor list has caught up with the crest.
+    /// They used to build the id twice over, which was survivable while the face
+    /// was only ever consulted by the painter — and is not now that the face is
+    /// what sets the clock, because the second reader would have had to invent a
+    /// muteness that only the ledger can answer.
+    ///
+    /// Answers only while a rail is hot, which is the only time there is anything
+    /// to glance at.
+    pub(crate) fn command_tick_card(
+        &self,
+    ) -> Option<(tooltip::TooltipAnchorId, [f32; 4], String, tooltip::TipFace)> {
+        let (seat, index) = self.window.command_rail_hover?;
+        let cache = self.window.command_rails.get(&seat)?;
+        let tick = cache.rail().ticks.get(index).copied()?;
+        let host = cmdrail::peek_host(cache.rail(), index)?;
+        let leaf = self.sessions.get(&seat)?;
+        // The matched line's own text, for a tick the search put there —
+        // read once, here, because it is the only place a rail ever needs a
+        // line rather than a command.
+        let line = match tick.target {
+            cmdrail::Target::Match(hit) => self.search_hit_line_text(hit),
+            cmdrail::Target::Command(_) => None,
+        };
+        // And the failing command's own last word, read the same way and for
+        // the same reason: it is the one thing a card can add that saves the
+        // reader opening the pane. Asked only of a mark the shell called
+        // failed, so a wall of successful commands walks the transcript
+        // exactly never.
+        let tail = match tick.target {
+            cmdrail::Target::Command(id) => leaf
+                .session
+                .command_mark(id)
+                .is_some_and(bt_term::CommandMark::failed)
+                .then(|| leaf.session.command_output_last_line(id))
+                .flatten(),
+            cmdrail::Target::Match(_) => None,
+        };
+        let (text, muted) = cmdrail::peek_text(
+            &tick,
+            leaf.session.command_marks(),
+            line.as_deref(),
+            tail.as_deref(),
+        );
+        Some((
+            tooltip::TooltipAnchorId::CommandTick(seat, tick.target),
+            host,
+            text,
+            tooltip::TipFace::Peek { muted },
+        ))
     }
 }
 

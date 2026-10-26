@@ -4,7 +4,7 @@
 use crate::window_seam::prelude::*;
 use crate::{
     AppEvent, FOOT_REVEAL_FEEDBACK, LeafId, PageKeepsake, PreviewSurface, RenameExit, Runtime,
-    TabRename, WebHeadVerb, WebPlacement, hang_watch, input, marks, page_destination, preview,
+    TabRename, WebHeadVerb, WebPlacement, hang_watch, input, marks, preview,
     preview_image_placement, restore, seats, shown_address, source_opens_as_a_page, web_thumb,
     web_trace, web_warmup, webhost, webnav, websheet,
 };
@@ -2129,6 +2129,62 @@ impl<B: Backend> Runtime<'_, B> {
         }
         Ok(())
     }
+}
+
+/// **Where a switcher row's target actually goes**, or `None` for one this
+/// window will not go to (`plan.md` §3「钉不是授权」).
+///
+/// The *second* of the pin's two validations, as a function so it can be shot at
+/// without a window. It is `webnav::address_bar` and nothing else: the same door
+/// a typed address goes through, because a row that came out of `pins.json` is a
+/// string somebody may have edited by hand, may have written under an older
+/// policy, or may have pinned before this one tightened.
+///
+/// A search cannot come out of this door either. The row's string was written by
+/// this window as a URL, and one that no longer reads as one is a row that has
+/// been edited into something else — so it is refused rather than searched for.
+pub(crate) fn switcher_row_destination(target: &str) -> Option<String> {
+    match webnav::address_bar(target) {
+        webnav::Decision::Navigate(url) => Some(url),
+        webnav::Decision::Search(_) | webnav::Decision::Refuse(_) => None,
+    }
+}
+
+/// **Whether a switcher row may be written into `pins.json`** — the *first* of
+/// the pin's two validations.
+///
+/// A page is kept only if this window would navigate to it now, so a target the
+/// policy refuses never reaches the file at all. A file is not asked: whether a
+/// path is still there is a filesystem question, and `pins.json`'s own header
+/// records that this store deliberately does not ask it.
+///
+/// **What a stored row navigates to, and the mint it needs to get there**
+/// (W2 slice 5).
+///
+/// [`switcher_row_destination`] is the answer for an address; this is the answer
+/// for *any* stored string, and the difference is one case. A `file:` URL in a
+/// switcher row, a `session.json` or a `pins.json` is a **name for a path**, and
+/// it cannot be a permission for one: `webnav::address_bar` refuses `file:` from
+/// every door and always will, because a string is exactly the thing that could
+/// have been edited. So the string is taken back to the disk - decoded to a
+/// path, canonicalised, and minted again by the same
+/// `Runtime::open_preview_web_file` performs - and what authorises the load is
+/// the mint that came out of that, never the row.
+///
+/// The consequence is worth stating: a page whose file has been moved or deleted
+/// does not come back, and the row that names it does nothing when pressed.
+/// That is the same answer a pin the policy no longer allows already gives
+/// (section 7.9 5), for the same reason - nothing happening is more honest than
+/// a dialog about a file that is not there.
+pub(crate) fn page_destination(target: &str) -> Option<(String, webnav::Mint)> {
+    if let Some(named) = webnav::LocalFileUrl::parse(target) {
+        let (path, tail) = named.into_path_and_tail();
+        let canonical = std::fs::canonicalize(path).ok()?;
+        let mint = webnav::Mint::file(&canonical).ok()?;
+        let url = format!("{}{tail}", mint.target()?);
+        return Some((url, mint));
+    }
+    Some((switcher_row_destination(target)?, webnav::Mint::Nothing))
 }
 
 /// **Whether the content on a web seat has been replaced by something else**

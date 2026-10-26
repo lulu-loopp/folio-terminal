@@ -65,7 +65,7 @@ pub(crate) use files::{
     column_keyboard, columns_wanting_git, dropped_files_seat_at, files_key_under, files_key_within,
     files_keyboard_seat_of, files_locate, files_open_chain, files_root_of, files_row_activation,
     files_row_counts_clicks, files_row_entry, files_row_menu_subject, folder_foot_notice,
-    folder_pick_outcome, press_files_node, reroot_files_state,
+    folder_pick_outcome, press_files_node, reroot_files_state, switcher_pin_is_allowed,
 };
 #[cfg(test)]
 pub(crate) use floats::{
@@ -95,6 +95,17 @@ pub(crate) use keyboard::{
 pub(crate) use math::{
     answer_one_formula, answers_for, claimed_by, document_formulas, ground_overlay_layers,
     hold_failed_in_tabs, math_copy_window, new_tab_tip, retire_spent_math_copy,
+};
+#[cfg(test)]
+pub(crate) use mouse::{
+    a_right_press_is_on_the_pane_menus_head, answered_once, button_router_position,
+    drain_whole_units, float_grasp, glance_may_arm, glass_allows_a_drop, landing_for_aim,
+    link_target_to_ask_about, live_viewport_mouse_hit, over_home_ground, pointer_cursor,
+    press_after_blur, press_belongs_to_the_window, press_pins_a_peek, press_reaches_no_grid,
+    press_spends_itself_closing, pressed_row_identity, recoverable_wheel_scroll_amount,
+    release_verdict, right_press_raises_terminal_menu, route_forwarded_mouse_button,
+    route_forwarded_mouse_motion, upright_wheel, wheel_axis, wheel_points_sideways, wheel_route,
+    wheel_steps_text_size,
 };
 #[cfg(test)]
 pub(crate) use palette::recall_flash;
@@ -132,7 +143,8 @@ pub(crate) use tooltips::{tab_surface_tip_boxes, tooltip_anchor_for};
 #[cfg(test)]
 pub(crate) use web::{
     a_page_is_off_the_glass, a_page_still_has_a_pane, a_page_was_replaced,
-    a_retirement_happens_on_this_turn, hole_for, revived_page_of,
+    a_retirement_happens_on_this_turn, hole_for, page_destination, revived_page_of,
+    switcher_row_destination,
 };
 mod terminal;
 mod tooltips;

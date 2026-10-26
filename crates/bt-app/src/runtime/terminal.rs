@@ -5,19 +5,21 @@ use crate::PtyTarget;
 use crate::runtime::attention::deliver_osc_attention;
 use crate::runtime::clipboard::input_line_needs_a_space_first;
 use crate::runtime::clipboard::paste_text;
+use crate::runtime::mouse::drain_whole_units;
+use crate::runtime::mouse::link_target_to_ask_about;
 use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
     FlashBand, FormulaSwitches, LeafId, LeafSession, LocalImageActivation, MouseRoute, PasteTarget,
     RailJumpLanding, ReferenceCard, RowHost, Runtime, SelectionDrag, SelectionDragMode, Step,
     TerminalReference, UserInputKind, apply_stored_terminal_font, attention_trace, born_in_tab,
-    cmdrail, coalesce, create_leaf_session, cubic_bezier, drain_whole_units, files, hang_watch,
-    input, marks, mouse_trace, presentation_physical_size, scrollback_quota, seats, shell_literal,
-    termscroll, toast, write_pty_input,
+    cmdrail, coalesce, create_leaf_session, cubic_bezier, files, hang_watch, input, marks,
+    mouse_trace, presentation_physical_size, scrollback_quota, seats, shell_literal, termscroll,
+    toast, write_pty_input,
 };
 use crate::{
     ClickIntent, DRAIN_SLICES_PER_TURN, DRAIN_TURN_BUDGET, HyperlinkActivation, LeafSeed, TabState,
-    TextScale, drain_leaf_pty, hyperlink_activation, link_target_to_ask_about, profiles,
+    TextScale, drain_leaf_pty, hyperlink_activation, profiles,
 };
 use crate::{LeafView, TextStep, cell_width_subpixels, pane_cell_metrics};
 use anyhow::Context;
@@ -1824,6 +1826,20 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
             leaf.session.note_user_input();
         }
+    }
+
+    /// The same, followed by the rebuild a moved thumb needs.
+    ///
+    /// The overlay is built on demand rather than every frame, so a scroll that
+    /// only republished the pane would move the text under a thumb that stayed
+    /// where it was. `present_chrome_change` costs nothing when a frame is
+    /// already pending, which is the usual case on the wheel path.
+    pub(crate) fn woke_terminal_thumb(&mut self, seat: SeatId) -> Result<()> {
+        self.wake_terminal_thumb(seat);
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 }
 

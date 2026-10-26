@@ -5,33 +5,35 @@ use crate::PtyTarget;
 use crate::runtime::files::{files_row_activation, press_files_node};
 use crate::window_seam::prelude::*;
 use crate::{
-    ApplicationChange, DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragRelease,
-    DragSource, DropBatch, DropLanding, Fading, FloatDrag, FloatDragKind, FloatHeadPress,
-    HoverFloat, IN_PANE_SURFACES_TOP_FIRST, InPaneSurface, LeafId, MathHoverExit, MouseRoute,
-    OVER_IN_PANE_TOP_FIRST, OverInPane, OverWheel, OwnPress, PanePress, PointerTarget, Popup,
-    PressAfterBlur, PressedCellTarget, PreviewBodyRung, PreviewSurface, RenameExit, RenameSubject,
-    RowActivation, RowHost, RowPayload, RowPayloadKind, RowPress, Runtime, SpringGate, TabClick,
-    TerminalReference, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst, WheelRoute,
-    a_right_press_is_on_the_pane_menus_head, answered_once, button_router_position, crumb_segments,
-    drain_whole_units, files, first_run, float, float_grasp, float_sizing_of, formula_tools,
-    glass_allows_a_drop, hang_watch, image_zoom_notch, input, landing_for_aim,
-    live_viewport_mouse_hit, marks, mouse_trace, over_home_ground, palette, pointer_cursor,
-    press_after_blur, press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing,
-    pressed_row_identity, profiles, protocol_mouse_button, recoverable_wheel_scroll_amount,
-    release_verdict, restore, right_press_raises_terminal_menu, risen_frame,
-    route_forwarded_mouse_button, route_forwarded_mouse_motion, seats, settings, settling, toast,
-    tooltip, update, upright_wheel, web_page_cursor, websheet, wheel_axis, wheel_points_sideways,
-    wheel_route, wheel_zoom_notches, write_pty_input,
+    ApplicationChange, BrokerAim, DividerDrag, DividerGrip, Drag, DragBroker, DragCarry, DragGuard,
+    DragLatch, DragRelease, DragSource, DropBatch, DropLanding, Fading, FilesFocusArrival,
+    FloatDrag, FloatDragKind, FloatGrasp, FloatHeadPress, GlassHere, HoverFloat,
+    IN_PANE_SURFACES_TOP_FIRST, ImageGrasp, InPaneSurface, LeafId, MathHoverExit, MouseRoute,
+    OVER_IN_PANE_TOP_FIRST, OverInPane, OverWheel, OwnPress, OwnTrigger, PanePress, PasteTarget,
+    PointerTarget, PopoverTrigger, Popup, PressAfterBlur, PressedCellTarget, PreviewBodyRung,
+    PreviewSurface, RenameExit, RenameSubject, RowActivation, RowHost, RowPayload, RowPayloadKind,
+    RowPress, Runtime, SpringGate, TabClick, TabId, TearGrip, TerminalColumnDrag,
+    TerminalReference, TerminalThumbDrag, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst,
+    WheelRoute, crumb_segments, files, first_run, float, formula_tools, hang_watch,
+    image_zoom_notch, input, marks, mouse_trace, palette, profiles, restore, risen_frame, seats,
+    settings, settling, toast, tooltip, update, web_page_cursor, websheet, wheel_zoom_notches,
+    write_pty_input,
 };
-use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
+use crate::{TextSizeAim, TextStep};
 use anyhow::Context;
 use anyhow::Result;
-use bt_layout::SeatId;
+use bt_layout::{SeatId, SeatLayout};
 use bt_render::{CursorStyle, FrameSource, FrameTrigger, MathHitTarget, set_cursor_style};
+use bt_term::{MouseTracking, TerminalModes};
+use bt_viewport::ViewportFrame;
+use bt_viewport::horizontal::ContentColumn;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta};
+use winit::keyboard::ModifiersState;
 
 impl<B: Backend> Runtime<'_, B> {
     /// The ghost's own layer, or nothing when nothing is in the hand (J114-J116).
@@ -3512,8 +3514,7 @@ impl<B: Backend> Runtime<'_, B> {
                 position.x,
                 position.y,
             ) {
-                if let Err(reason) = crate::press_owned_title_bar(&self.window.custom_window_frame)
-                {
+                if let Err(reason) = press_owned_title_bar(&self.window.custom_window_frame) {
                     crate::diagnostics::stderr_line(reason);
                 }
                 self.mouse_trace(|| format!("chrome_mouse_input taken=1 at=press-title-bar state={state:?} button={button:?} target={traced_target:?}"));
@@ -4062,7 +4063,7 @@ impl<B: Backend> Runtime<'_, B> {
             }
             seats::ChromeTarget::PanelToggle => self.toggle_rail_collapsed()?,
             seats::ChromeTarget::Minimize => {
-                crate::minimize_owned_window(&self.window.window)?;
+                minimize_owned_window(&self.window.window)?;
             }
             seats::ChromeTarget::Maximize => {
                 self.window
@@ -6322,4 +6323,1506 @@ impl<B: Backend> Runtime<'_, B> {
         // pane's row height would scroll further every time that pane's text grew.
         self.window.renderer.base_metrics().cell_height_subpixels()
     }
+
+    /// The glance card's anchor and face for the tick the crest is on, if a rail
+    /// is hot.
+    fn command_tick_anchor(&self) -> Option<(tooltip::TooltipAnchorId, tooltip::TipFace)> {
+        self.command_tick_card().map(|(id, _, _, face)| (id, face))
+    }
+
+    /// **The row under the pointer, if a glance may arm over it** — the one hover
+    /// intent whose exclusion is asked of the row rather than of the window (user
+    /// ruling 2026-09-07; see [`glance_may_arm`]).
+    ///
+    /// The hit test runs either way, because it is the hit test that says *which*
+    /// row, and which row is the whole of the question. `None` is what
+    /// [`Self::observe_file_peek`] is told when nothing may arm, which is how it
+    /// learns to let go of a card — a call skipped instead would leave one on the
+    /// glass over a row the hand left when the menu came up.
+    fn glancing_row_at(&mut self, position: PhysicalPosition<f64>) -> Option<(RowHost, usize)> {
+        let held = HoverFloat::holding(|who| self.hover_float_is_up(who));
+        let row = self.row_under(position)?;
+        let in_the_flyout =
+            matches!(row.0, RowHost::Float(id) if self.window.float.peek_id() == Some(id));
+        glance_may_arm(held, in_the_flyout).then_some(row)
+    }
+
+    /// D40: pressing anywhere in a pane moves the layout focus there.
+    ///
+    /// Anywhere at all — the head, the terminal's own body, a preview's body —
+    /// which is what `document.querySelectorAll(".pane")` listening for `click`
+    /// means at mock-up 5823-5834. It runs *above* the chrome router and never
+    /// consumes the press: focus is what the press means in addition to whatever
+    /// else it meant, and a press in a terminal still has a selection to start.
+    ///
+    /// This is the second half that comment promised. Layout focus is still the
+    /// solver's input to W2 and to the collapse order, and it still moves for a
+    /// press on any leaf; but a tab now holds a shell per terminal leaf, so a
+    /// press in a terminal pane also moves the *keyboard* there — the caret, the
+    /// selection and the IME follow the hand, because there is now somewhere for
+    /// them to follow it to.
+    ///
+    /// Keyboard focus moves only for a terminal pane. Pressing a files column or
+    /// a preview must not take the keyboard away from the shell you were typing
+    /// in and hand it to a pane that cannot accept a keystroke — so those move
+    /// layout focus alone, exactly as before.
+    ///
+    /// It runs above the router and consumes nothing, which is what makes the
+    /// ordering work: focus lands first, and the same press then starts its
+    /// selection in the pane it just focused, through the ordinary path.
+    pub(crate) fn focus_pane_at(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
+        let Some(seat) = seats::pane_at(&self.seat_layout, position.x, position.y) else {
+            return Ok(());
+        };
+        // Keyboard first, and independently of whether layout focus moved: the
+        // two can already disagree when a pane was focused by other means.
+        self.take_keyboard_into(seat)?;
+        // **D40's rule, now that there is a second kind of thing to focus.**
+        // Pressing a pane is how you say "type here", and a files column is
+        // somewhere you can type — arrows and Enter are its whole vocabulary. So
+        // the press lends it the keyboard, and a press anywhere else takes the
+        // keyboard straight back to the shell that never stopped being
+        // `focused_leaf`. Nothing is consumed: this runs above the router, and
+        // the same press goes on to land on the row it was aimed at.
+        //
+        // **A press, so no ring** (`:focus-visible`, 2026-08-12). This is rule ①
+        // and it is the one that fires most: clicking a row is how a selection is
+        // usually made, and the hand that made it does not need to be told which
+        // list it was in. It reaches here even when the column *already* had the
+        // keyboard — the owner does not move, the ring goes out, and the frame is
+        // owed for that alone.
+        let files = self.window.tabs[self.window.active_tab]
+            .files
+            .contains_key(&seat);
+        if self.set_files_keyboard(files.then_some(seat), FilesFocusArrival::Pointer) {
+            self.refresh_chrome();
+        }
+        // **And a press on a pane takes the keyboard back from every float**
+        // (§7.34, user ruling 2026-08-27: 「点回 pane 键盘必回来」). The line
+        // above is the same sentence for the other surface that borrows the
+        // keyboard, and this one was missing: `float::FloatHost`'s focus bit was
+        // written by three doors and cleared by none, so a single preview float
+        // — a video card dragged out by its head, a page popped out of the
+        // layout — made `preview_keyboard_surface` answer `Some` for ever after,
+        // and `KeyboardOwner::preview` is read off that. Every key in the window
+        // then went to `preview_browse_key` and the shell under the reader's
+        // hand received nothing at all.
+        //
+        // Reached only for a press the floats did not take: `press_float` and
+        // the float's own page arm both return from `mouse_input` above the
+        // chrome router this runs in, so "a press that got here" and "a press
+        // outside every float" are the same press.
+        //
+        // A frame is owed when it changes something, on `raise`'s own terms: the
+        // bit is not drawn (`focus_ring: false`), but the *caret* is — a shell
+        // that has the keyboard back blinks again, which is `keyboard_owner`
+        // reading this same answer one rung further out.
+        if self.window.float.blur() && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        self.settle_focus_on(seat)
+    }
+
+    /// A press on a terminal pane's foot mark.
+    ///
+    /// Returns whether the press was the bar's. **One gesture and not two**: the
+    /// vertical bar's press has a second arm because a click in its reserved lane
+    /// pages the view, and there is no reserved lane here to pay for that. Every
+    /// press this declines goes on to the pane, which is the ruling.
+    fn press_terminal_column_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some((seat, bar)) = self.terminal_column_bar_under(position) else {
+            return Ok(false);
+        };
+        let at = [position.x as f32, position.y as f32];
+        self.terminal_column_hover = Some(seat);
+        self.latch_terminal_column_drag(TerminalColumnDrag {
+            seat,
+            grab: bar.grip(at[0]),
+        });
+        self.wake_terminal_column(seat);
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// The pointer travelling with a foot mark in hand.
+    fn drag_terminal_column_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(drag) = self.held_terminal_column_drag().copied() else {
+            return Ok(false);
+        };
+        // The gesture's own pane, not the one under the pointer, and re-derived
+        // every move: history evicted under the hand shortens the axis, and a
+        // gesture holding the geometry it started with would drift off the text.
+        let Some(bar) = self.terminal_column_bar(drag.seat) else {
+            // The widest line was evicted, or the program went full screen under
+            // the hand. The gesture owns the pointer until the button comes up;
+            // there is simply nothing left for it to move.
+            return Ok(true);
+        };
+        let wanted = ContentColumn(bar.dragged_to(position.x as f32, drag.grab));
+        self.scroll_seat_to_column(drag.seat, wanted)?;
+        Ok(true)
+    }
+
+    /// Note that this pane's bar has a reason to be up **now** — the moment its
+    /// rest is later measured from.
+    ///
+    /// Every gesture that moves the view says so through here: the wheel, the
+    /// keyboard's pages and ends, a jump off the rail, a drag of the thumb
+    /// itself and the pointer merely being in the lane. One door, because the
+    /// one thing that must not happen is a gesture that scrolls the pane and
+    /// leaves its picture of the scroll invisible.
+    pub(crate) fn wake_terminal_thumb(&mut self, seat: SeatId) {
+        let active = self.window.active_tab;
+        if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
+            leaf.thumb_awake = Instant::now();
+        }
+    }
+
+    /// A press in a terminal pane's lane.
+    ///
+    /// Returns whether the press was the bar's. Two gestures, told apart by
+    /// where in the lane the press landed and by nothing else: on the thumb it
+    /// takes hold of it, and anywhere else on the track it pages toward the
+    /// press — the platform's convention, and
+    /// [`termscroll::TerminalScrollBar::paged_from`] owns both halves of it.
+    fn press_terminal_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some((seat, bar)) = self.terminal_bar_under(position) else {
+            return Ok(false);
+        };
+        let at = [position.x as f32, position.y as f32];
+        self.terminal_thumb_hover = Some(seat);
+        if bar.thumb_holds(at) {
+            self.latch_terminal_thumb_drag(TerminalThumbDrag {
+                seat,
+                // Where in the thumb the hand took hold, so the mark stays under
+                // the pointer rather than jumping its top edge there.
+                grab: bar.grip(at[1]),
+            });
+            self.woke_terminal_thumb(seat)?;
+            return Ok(true);
+        }
+        let offset = self
+            .sessions
+            .get(&seat)
+            .map_or(0, |leaf| leaf.projection.scroll_offset_subpixels());
+        self.scroll_seat_to_subpixels(seat, bar.paged_from(offset, at[1]))?;
+        Ok(true)
+    }
+
+    /// The pointer travelling with a terminal thumb in hand.
+    ///
+    /// The bar is re-derived from the current projection on every move — output
+    /// arriving under the hand lengthens the document, and a gesture holding a
+    /// copy of the geometry it started with would drift away from the text it is
+    /// scrolling.
+    fn drag_terminal_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(drag) = self.held_terminal_thumb_drag().copied() else {
+            return Ok(false);
+        };
+        // The gesture's own pane, not the one under the pointer: a hand that has
+        // left the pane it took hold in is still holding that pane's thumb.
+        let Some(bar) = self.terminal_scroll_bar(drag.seat) else {
+            // The scrollback stopped overflowing, or the program went full
+            // screen under the hand. The gesture still owns the pointer until
+            // the button comes up; there is simply nothing left for it to move.
+            return Ok(true);
+        };
+        self.scroll_seat_to_subpixels(drag.seat, bar.dragged_to(position.y as f32, drag.grab))?;
+        Ok(true)
+    }
+
+    /// Light the lane the pointer is in, and put the last one out.
+    pub(crate) fn note_terminal_thumb_hover(
+        &mut self,
+        position: Option<PhysicalPosition<f64>>,
+    ) -> Result<()> {
+        let over = position
+            .and_then(|position| self.terminal_bar_under(position))
+            .map(|(seat, _)| seat);
+        // The clock is bumped whether or not the hover changed: a pointer moving
+        // about inside the lane has a standing reason to keep the mark up, and
+        // the rest it will eventually fade from is measured from the last moment
+        // it was in there.
+        if let Some(seat) = over {
+            self.wake_terminal_thumb(seat);
+        }
+        if over == self.terminal_thumb_hover {
+            return Ok(());
+        }
+        if let Some(seat) = self.terminal_thumb_hover {
+            self.wake_terminal_thumb(seat);
+        }
+        self.terminal_thumb_hover = over;
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The payload one row would travel as, or `None` for a row that is not a
+    /// node (P81, and [`files::TreeRow::is_node`]'s own rule).
+    ///
+    /// A notice row is a *sentence* — "Loading …", "Empty", a permission fault —
+    /// and it has no identity to carry. A cycle row is a directory that refuses
+    /// to open, and it is a real place, so it travels as one.
+    fn row_payload(&mut self, host: RowHost, key: &str) -> Option<RowPayload> {
+        let (root, rows) = self.host_rows(host)?;
+        let row = rows.iter().find(|row| row.key == key)?;
+        let kind = match row.kind {
+            files::RowKind::File => RowPayloadKind::File,
+            files::RowKind::Directory { .. } | files::RowKind::Cycle => RowPayloadKind::Folder,
+            files::RowKind::Notice(_) => return None,
+        };
+        // An unrooted column can draw rows but cannot say where they are, and a
+        // payload without a path is a drag that has nothing to hand over.
+        (!root.is_empty()).then(|| RowPayload {
+            kind,
+            path: files::full_path(&root, key),
+            name: row.name.clone(),
+        })
+    }
+
+    /// The summary card's box this frame, or `None` when no quit is asking.
+    ///
+    /// [`Self::dirty_gate_layout`]'s shape with one difference that matters: the
+    /// names are read off the transaction rather than re-derived from the pools,
+    /// because they span every window and this borrow holds one. See
+    /// [`quit::Quit::names`].
+    pub(crate) fn quit_card_layout(&mut self) -> Option<restore::QuitLayout> {
+        let quit = self.app.quit.as_ref()?;
+        if !quit.is_asking() {
+            return None;
+        }
+        // **One line per file** (B1), through the same maker the gate uses: the
+        // card is about a list, and a list drawn as a wrapped sentence is a list
+        // nobody can count.
+        let lines = restore::unsaved_lines(quit.names());
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = (width as f32, height as f32);
+        let scale = self.window.renderer.scale_factor() as f32;
+        let room = restore::content_width(width, scale);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let message_lines = lines
+            .iter()
+            .flat_map(|line| {
+                restore::wrap(line, room, |run| {
+                    renderer.measure_chrome_text(gpu, run, restore::SUB_FONT_LOGICAL_PX * scale)
+                })
+            })
+            .collect();
+        let content = restore::QuitContent {
+            message_lines,
+            save_text_width: renderer.measure_chrome_text(
+                gpu,
+                restore::quit_save_text(),
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+            cancel_text_width: renderer.measure_chrome_text(
+                gpu,
+                restore::gate_cancel_text(),
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+            discard_text_width: renderer.measure_chrome_text(
+                gpu,
+                restore::gate_discard_all_text(),
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+        };
+        Some(restore::quit_layout(&content, width, height, scale))
+    }
+
+    /// **Which tree row the pointer is on, on whichever host owns it** (P150).
+    ///
+    /// The floats first and topmost first, then the docked columns, which is the
+    /// order every other pointer question in this window is asked in: a window
+    /// is drawn over the panes, so a point inside a floating tree standing
+    /// across a column belongs to the window. That order is
+    /// [`Self::pointer_target_at`]'s since the report of 2026-09-12 and no
+    /// longer this function's own — which is what makes the *other* half of it
+    /// true here too: a point inside a float that is not one of its rows is no
+    /// row at all, rather than the row the window is covering.
+    ///
+    /// [`Self::file_row_under`] answers the *context menu's* question, which is
+    /// a different question and not a narrower one: it wants a whole
+    /// [`FileMenuTarget`] — a path, a door and which verbs the row has — and it
+    /// declines the two kinds of row that lead nowhere. This one answers "which
+    /// row", because the glance card has its own rules about which kinds of row
+    /// it will show and the drag has different ones again.
+    pub(crate) fn row_under(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(RowHost, usize)> {
+        match self.pointer_target_at(position) {
+            Some(PointerTarget::Float(id, float::FloatPart::Row(index))) => {
+                Some((RowHost::Float(id), index))
+            }
+            // **And every other part of that window is no row at all** (user
+            // report 2026-09-12). A float is opaque to the hover exactly as it
+            // is to the press: a hand resting on a preview window's text is not
+            // resting on the docked row behind it, so nothing lights and the
+            // glance clock arms nothing — and a card already up is retired by
+            // this `None`, which is what `observe_file_peek` is told when the
+            // hand leaves a row.
+            Some(PointerTarget::Float(..)) => None,
+            // **And a strip is no row either** (T-STRIP-HOVER-THROUGH,
+            // 2026-10-04): it is drawn over whatever it covers, so a glance
+            // cannot arm from under it.
+            Some(PointerTarget::Notice(..) | PointerTarget::Search(_)) => None,
+            Some(PointerTarget::Chrome(seats::ChromeTarget::FilesRow { seat, index })) => {
+                Some((RowHost::Column(seat), index))
+            }
+            // **A column on its Git page answers the same question** (user
+            // report, 2026-08-17). The verb inside a row counts as the row, the
+            // way a tree row's triangle and its name do: a hand crossing from a
+            // path to the `+` beside it has not left the row, and a glance that
+            // reset there would be a glance that never matured.
+            Some(PointerTarget::Chrome(
+                seats::ChromeTarget::GitRow { seat, index }
+                | seats::ChromeTarget::GitAct { seat, index, .. },
+            )) => Some((RowHost::Git(seat), index)),
+            // **And last, the output itself** (user ruling 2026-08-27, §7.29).
+            // Last because the chrome is drawn over the panes and a point inside
+            // a tree standing across a terminal belongs to the tree, which is
+            // the order the floats above already establish; a cell is what is
+            // left when nothing on the glass has claimed the point.
+            _ => self.terminal_reference_cell(),
+        }
+    }
+
+    /// **Put the target of a link this window has met in front of that pane's worker**
+    /// (audit 3 C-2) — the question whose answer [`Self::seat_path_verdict`] reads.
+    ///
+    /// **The one function every gesture asks through** (closure review B-1). It was called from
+    /// `pointer_moved` alone, which is `CursorMoved` and nothing else — so a link that arrived
+    /// under a *resting* pointer, by a wheel scroll or by a program printing a fresh line, was
+    /// never asked about, and the click on it answered nothing. Clicking again changed nothing
+    /// either, because only motion put the question. A gesture that can meet a reference asks the
+    /// same thing a pointer move asks, through here, so the four doors cannot drift:
+    /// the pointer move, the press going down, the hand-over modifier going down, and the frame
+    /// that redraws under a pointer standing still.
+    ///
+    /// The lexical gate is asked here and not on the worker for the reason it has always been
+    /// asked first: it costs nothing, and a device path, a verbatim path or a stranger's
+    /// distribution share is refused without anybody being queued for it. Everything past it is
+    /// the worker's, including the two questions that used to be this thread's — whose machine the
+    /// volume is, and what the reparse points on the way in lead to.
+    ///
+    /// Idempotent and cheap: an answered name, a queued one and one a worker is holding all cost a
+    /// map lookup ([`bt_term::DualPlaneSession::ask_about_link_target`]), which is what lets every
+    /// door call it unconditionally.
+    fn ask_the_worker_about_a_link_target(&mut self, seat: SeatId, uri: &str) {
+        let namespace = self.seat_path_namespace(seat);
+        let Some(path) =
+            link_target_to_ask_about(uri, bt_transcript::paths::PathNamer::Pane(&namespace))
+        else {
+            return;
+        };
+        if let Some(leaf) = self.sessions.get_mut(&seat) {
+            leaf.session.ask_about_link_target(path);
+        }
+    }
+
+    /// **Who owns the glass under this pointer**, as the window manager sees it
+    /// — all three answers, because this window's two readers want opposite
+    /// things from the third.
+    ///
+    /// The one door onto the question, so that the release asks the very thing
+    /// [`Self::drive_drag`] asks before it surveys, with the same conversion
+    /// into screen pixels, and only the *default* differs between them.
+    ///
+    /// **[`GlassHere::Unknown`] is a real answer and not a failure.** It is what
+    /// a point no window covers gives on Windows, and — the case that matters —
+    /// what a window belonging to **another application** gives on macOS, where
+    /// `windowWithWindowNumber` only knows this process's own windows. So a
+    /// covered pane answers `Theirs` on one platform and `Unknown` on the other,
+    /// and a rule that treated the two differently would be right on one system
+    /// only.
+    pub(crate) fn glass_here(&self, position: PhysicalPosition<f64>) -> GlassHere {
+        let Some((x, y)) = self.to_screen(position) else {
+            return GlassHere::Unknown;
+        };
+        self.window
+            .window
+            .glass_at(x.round() as i32, y.round() as i32)
+    }
+
+    /// **Open the broker for a payload that is allowed to leave this window**
+    /// (multiwindow slice F2).
+    ///
+    /// **All three payloads may, since 2026-08-30.** A row used to be turned away
+    /// here with a standing note — *a row travels as a path, and there is no verb
+    /// in this program for a path let go over another window*. §7.1.1's two
+    /// tab-strip verbs are that verb, and they are the same two on any window's
+    /// tab list: the ruling's own reason is that a file is a **path**, so nothing
+    /// has to be carried across a boundary for the other window to open it. That
+    /// is why this is one line deleted rather than a second broker — the cargo,
+    /// the label, the spring and the deadline are the ones a pane already uses.
+    ///
+    /// F5's two numbers are read here and never again: the grip is where the hand
+    /// closed on the window, and where the hand closed does not move because the
+    /// tab list scrolled underneath it.
+    fn open_broker(&mut self, source: &DragSource, position: PhysicalPosition<f64>) {
+        let scale = self.window.renderer.scale_factor().max(0.01);
+        let size = self.window.window.inner_size();
+        let window = self.window_id();
+        self.app.drag_broker = Some(DragBroker {
+            source: window,
+            cargo: source.clone(),
+            face: None,
+            cargo_tree: None,
+            cargo_pane: None,
+            guest_mini: None,
+            pointer: self.to_screen(position).unwrap_or((position.x, position.y)),
+            grip: TearGrip {
+                grab_logical: ((position.x / scale) as f32, (position.y / scale) as f32),
+                size_logical: (
+                    (f64::from(size.width) / scale) as f32,
+                    (f64::from(size.height) / scale) as f32,
+                ),
+            },
+            aim: BrokerAim::Home,
+            spring: SpringGate::default(),
+            guard: DragGuard::sample(),
+        });
+    }
+}
+
+/// **Where a button event is answered from** (user report, 2026-09-10).
+///
+/// `live` is [`WindowRuntime::pointer_position`] — where the hand *is* — and it
+/// is `None` the moment winit says `CursorLeft`. `last_seen` is
+/// [`WindowRuntime::pointer_last_seen`], the same value kept after the hand has
+/// gone.
+///
+/// **A button coming up is answered from the remembered place when the live one
+/// has gone; a button going down is not.** Every gesture this window holds is
+/// ended inside `chrome_mouse_input`, and every one of them is held on purpose
+/// while the hand works *outside* its own box — a picture panned past its pane,
+/// a divider dragged past the window's edge, a selection drawn off the end of a
+/// document. A release that cannot reach that router ends nothing, so the hand
+/// stays closed and the next gesture starts from the one that never finished. A
+/// press has no such thing to finish, and a window the pointer has left has no
+/// honest answer to "what is under it", so a press asks only the live pointer.
+pub(crate) fn button_router_position(
+    state: ElementState,
+    live: Option<PhysicalPosition<f64>>,
+    last_seen: Option<PhysicalPosition<f64>>,
+) -> Option<PhysicalPosition<f64>> {
+    match state {
+        ElementState::Released => live.or(last_seen),
+        ElementState::Pressed => live,
+    }
+}
+
+/// The **grid** cell a drawn cell stands on, for the protocol to report to the child.
+///
+/// Both numbers come out of `ViewportFrame::live_point_at`, which is the one place the two axes are
+/// converted and the only place that knows where this pane's horizontal window sits
+/// (`docs/plans/horizontal-scroll/plan.md` §5.5). Reporting `hit.column` unchanged — which is what
+/// this did until the axis existed — would tell a mouse-tracking program the column the pointer was
+/// *painted* in, and every program that draws by coordinate would answer somewhere else.
+pub(crate) fn live_viewport_mouse_hit(
+    frame: &ViewportFrame,
+    hit: bt_render::GridHit,
+) -> bt_render::GridHit {
+    // The mapping belongs to the actual presented frame. Frozen/staging pixels above the
+    // mutable viewport retain Windows Terminal's clamp-to-live-row-zero behaviour, and a pointer
+    // past the grid's last column clamps to it exactly as one past the right-hand edge always has.
+    let point = frame.live_point_at(hit.row, hit.column);
+    bt_render::GridHit {
+        row: point.map_or(0, |point| point.row),
+        column: point.map_or_else(
+            || {
+                frame
+                    .horizontal
+                    .to_content(bt_viewport::horizontal::ViewportColumn(hit.column))
+                    .0
+                    .min(frame.columns.get().saturating_sub(1))
+            },
+            |point| point.column,
+        ),
+    }
+}
+
+/// Whether a press in a mouse-tracking pane is the window's rather than the
+/// program's (user ruling, 2026-08-16 — ticket #59; gate ③ repealed by the user
+/// on 2026-08-20, see §7.1.5f).
+///
+/// **The underline is a promise.** Claude Code turns on 1000/1002/1003/1006 and
+/// then keeps printing paths and links; a file path it printed wears our solid
+/// underline the moment the pointer crosses it, hover-peeks a picture, and —
+/// until this ruling — swallowed the click that underline just promised, because
+/// the pane reported tracking and every left press went to the child. A mark that
+/// answers a hover and not a click is the window lying about what it can do, so
+/// the mark decides: where there is a verified target of ours, the press and its
+/// release are ours; everywhere else the program keeps the whole mouse.
+///
+/// **Two guards, and each of them is the ruling's own wording.**
+///
+/// * *A verified target of ours.* Not "the text looks like a path" — the same
+///   `verified` bit the underline is painted from, so the promise and the verb
+///   are one fact rather than two agreeing lists.
+/// * *Left only.* Right and middle carry no local verb, so taking them would be
+///   a hole in the program's mouse bought for nothing.
+///
+/// **Which screen is up is not one of them, and the screen is not a parameter.**
+/// The 2026-08-16 ruling had a third guard, *primary screen only*, resting on
+/// the fact that nothing scanned an alternate screen and so there was no promise
+/// there to keep. It wrote itself down rather than falling out of that absence
+/// precisely because "there is nothing there" is not a decision and the slice
+/// that taught the scanner about alt screens would repeal it silently. That
+/// slice arrived: OSC 8 spans and bare URLs are found on the alternate screen
+/// and underlined there, Claude Code prints them there, and the user repealed
+/// gate ③ on 2026-08-20 on the ruling's own argument. The price is written down
+/// with it — a full-screen program never sees the press that landed on a link,
+/// and `Shift` cannot hand that one back the other way.
+///
+/// Shift is untouched above all of this: it has always meant "this press is the
+/// window's", and it still does on every cell and on both screens.
+pub(crate) fn press_belongs_to_the_window(
+    button: input::MouseProtocolButton,
+    target: PressedCellTarget,
+) -> bool {
+    button == input::MouseProtocolButton::Left && target == PressedCellTarget::Ours
+}
+
+/// Whether a right press inside a pane raises this window's own menu, or belongs
+/// to the program running in it (ticket #62, item 2).
+///
+/// **When nothing is tracking the mouse, a right press is ours.** That is the
+/// ordinary case and the one the menu exists for: the pane is showing a shell's
+/// output, nobody has asked for mouse reports, and right-click means what it
+/// means everywhere else on the platform.
+///
+/// **When something *is* tracking, the press is the program's, and the menu
+/// moves to `Shift`+right.** vim's own right-click menus, lazygit's panels and
+/// mc's drag selection are verbs a program wrote and asked for, and a terminal
+/// that swallowed them to show its own list would be a terminal you cannot run
+/// those programs in. Windows Terminal and VS Code both settle it this way, and
+/// `Shift` is already this window's word for "this press is mine" — it is the
+/// same modifier that hands a selection drag back from a tracking program
+/// ([`route_forwarded_mouse_button`]), so nothing new has to be learned.
+///
+/// **The alternate screen needs no line of its own here** — as, since the
+/// 2026-08-20 repeal, it needs none in [`press_belongs_to_the_window`] either: a
+/// full-screen program that wants the mouse turns tracking on, and one that has
+/// not is a program with no use for a press this window could give it. The rule
+/// is about who asked for the mouse, not about which screen is up.
+///
+/// This is deliberately the exact complement of the forward test above for the
+/// right button, so the two can never both claim one press: `forward` is
+/// `!shift && tracking`, and this is `!tracking || shift`.
+pub(crate) fn right_press_raises_terminal_menu(
+    modes: TerminalModes,
+    modifiers: ModifiersState,
+) -> bool {
+    modes.mouse_tracking == MouseTracking::Off || modifiers.shift_key()
+}
+
+/// **One button event of a gesture handed to the program**, and what it does
+/// to the route that holds the gesture.
+///
+/// **One gesture, one button** (T-STRIP-HOVER-THROUGH, final review
+/// 2026-10-04). A press is forwarded only when no forwarded gesture is already
+/// latched, and only the release of the button that latched it ends it. While
+/// it is held, another button's press and release are not forwarded under it
+/// and do not touch it: they go on down the window's ordinary road as events of
+/// their own, where an overlay, a menu or the window's own surfaces can take
+/// them — and a child holding the left button is never told the left button
+/// came up because the right one did.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one button event and the six facts it is judged on; the owner is the press's address"
+)]
+pub(crate) fn route_forwarded_mouse_button(
+    route: &mut Option<MouseRoute>,
+    state: ElementState,
+    button: input::MouseProtocolButton,
+    hit: bt_render::GridHit,
+    modes: TerminalModes,
+    modifiers: ModifiersState,
+    target: PressedCellTarget,
+    owner: PasteTarget,
+) -> Option<Vec<u8>> {
+    let forward = !modifiers.shift_key()
+        && modes.mouse_tracking != MouseTracking::Off
+        && !press_belongs_to_the_window(button, target);
+    match state {
+        ElementState::Pressed if forward && route.is_none() => {
+            *route = Some(MouseRoute::Forward {
+                button,
+                sgr: modes.sgr_mouse,
+                owner,
+            });
+            Some(input::mouse_bytes(
+                modes.sgr_mouse,
+                button,
+                input::MouseProtocolEvent::Press,
+                hit.row,
+                hit.column,
+                modifiers,
+            ))
+        }
+        // The release is owed to the press that was forwarded, so it is spelled
+        // the way that press was spelled: the latch carries the encoding, and the
+        // modes are not asked again. A prompt landing between the two halves of a
+        // click retires `1006` (§7.1.5i); reading it here would split one click
+        // across two protocols.
+        ElementState::Released => {
+            let Some(MouseRoute::Forward {
+                sgr,
+                button: latched,
+                ..
+            }) = route
+            else {
+                return None;
+            };
+            if *latched != button {
+                return None;
+            }
+            let sgr = *sgr;
+            *route = None;
+            Some(input::mouse_bytes(
+                sgr,
+                button,
+                input::MouseProtocolEvent::Release,
+                hit.row,
+                hit.column,
+                modifiers,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The encoding and the button a pointer move is reported in, or `None` when
+/// this move is not the program's to hear.
+///
+/// **A move made with a button down is part of that button's gesture, so it is
+/// spelled the way that button's press was spelled** (DESIGN §7.1.5i) — the
+/// same latch the release arm of [`route_forwarded_mouse_button`] answers from,
+/// for the same reason. `\e[?1006l` is a mode of its own: a program can drop the
+/// encoding while keeping its tracking level, and motion that re-read
+/// `modes.sgr_mouse` would hand the child an SGR press, a run of X10 moves and
+/// an SGR release — one drag in two protocols, with the moves the half it cannot
+/// pair to the button it is holding. The prompt-start retirement is the case
+/// this used to be argued from and the only one it covered: it takes tracking
+/// with it, so the guard below returns before any encoding question is asked.
+///
+/// **With no press in flight the modes are read as they are**, because there is
+/// no press to owe anything to — a mode change is a fact about the next gesture,
+/// and the press that begins it latches whatever the modes say then.
+pub(crate) fn route_forwarded_mouse_motion(
+    route: Option<&MouseRoute>,
+    modes: TerminalModes,
+    modifiers: ModifiersState,
+) -> Option<(bool, input::MouseProtocolButton)> {
+    if modifiers.shift_key() || modes.mouse_tracking == MouseTracking::Off {
+        return None;
+    }
+    match route {
+        Some(MouseRoute::Forward { button, sgr, .. })
+            if modes.mouse_tracking != MouseTracking::Click =>
+        {
+            Some((*sgr, *button))
+        }
+        None if modes.mouse_tracking == MouseTracking::Motion => {
+            Some((modes.sgr_mouse, input::MouseProtocolButton::None))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a press that hit no chrome target reaches no terminal grid, and so is
+/// the seat's to keep rather than the selection machinery's to act on.
+///
+/// A press belongs to **the seat it lands in**. It reaches a grid exactly when
+/// that seat is a terminal leaf this tab holds a shell for — `seat_holds_a_shell`
+/// asks the same `sessions` map [`Runtime::pane_hit_context`] reads, so the press
+/// and the hover agree about what is a terminal by construction. A files column,
+/// a preview body and a placeholder are all seats without shells, and the surface
+/// between panes is no seat at all; none of them has cells for a press to select.
+///
+/// This used to ask [`seats::terminal_contains`] of `seats.identity()` — the tab's
+/// *primary* seat, a stored field naming one fixed leaf that moves only when the
+/// leaf it names is closed, and never with focus. In a lone-terminal tab that is
+/// the pane you are pressing in and the mistake was invisible. Split the tab and
+/// every press outside the primary pane answered "consumed by chrome", so
+/// `mouse_input` returned before [`Runtime::begin_local_selection`] and only one
+/// pane in the whole window could be dragged over. The pane still *looked* alive
+/// under the press, because D40's `focus_pane_at` runs above this router and had
+/// already moved the focus there — which is precisely why the symptom read as
+/// "selection is broken in this pane" rather than "the press never arrived".
+pub(crate) fn press_reaches_no_grid(
+    layout: &SeatLayout,
+    x: f64,
+    y: f64,
+    seat_holds_a_shell: impl Fn(SeatId) -> bool,
+) -> bool {
+    match seats::pane_at(layout, x, y) {
+        Some(seat) => !seat_holds_a_shell(seat),
+        None => true,
+    }
+}
+
+/// **The identity a pressed target names**, resolved against the very rows the
+/// press was measured against.
+///
+/// A files row is the one chrome target keyed by a *position in a list*, and the
+/// list is the one thing closing a name editor changes: the pending row is in it
+/// while the box is open and gone the moment the box closes. So this is where an
+/// index stops being the answer and the row's stable key starts.
+pub(crate) fn pressed_row_identity(
+    target: Option<seats::ChromeTarget>,
+    measured: &BTreeMap<SeatId, seats::FilesTreeContent>,
+) -> Option<(SeatId, String)> {
+    let seats::ChromeTarget::FilesRow { seat, index } = target? else {
+        return None;
+    };
+    let row = measured.get(&seat)?.rows.get(index)?;
+    Some((seat, row.key.clone()))
+}
+
+/// Where that identity is in the rebuilt list — or that it is not in it.
+///
+/// The index is re-derived and the choice is not, which is the whole of the
+/// rule: a row that moved up because the box above it closed is still the row
+/// the reader pressed, and a row that *was* the box is a row nobody pressed
+/// twice.
+pub(crate) fn press_after_blur(
+    pressed: Option<(SeatId, String)>,
+    rebuilt: &BTreeMap<SeatId, seats::FilesTreeContent>,
+) -> PressAfterBlur {
+    let Some((seat, key)) = pressed else {
+        return PressAfterBlur::AskAgain;
+    };
+    rebuilt
+        .get(&seat)
+        .and_then(|tree| tree.rows.iter().position(|row| row.key == key))
+        .map_or(PressAfterBlur::Gone, |index| {
+            PressAfterBlur::Row(seat, index)
+        })
+}
+
+/// **Which axis the platform put this report on**, which is a fact about the
+/// report and not about whatever surface it lands on.
+///
+/// A tilt wheel and a touchpad's second finger arrive as a number on `x`. There
+/// is no modifier to read and no phase to read — the component has travelled
+/// this window's whole wheel path since the window was written and been dropped
+/// at the far end by every consumer that only ever looked at `y`.
+///
+/// **The larger component is the gesture and the smaller one is the hand not
+/// being straight.** That sentence was already written down inside
+/// [`Runtime::wheel_columns`], where it governed the pixel arm alone; a
+/// [`WheelBurst`] merges consecutive reports, so a run that is mostly down and a
+/// little sideways reaches a consumer as *one* `LineDelta` carrying both, and the
+/// line arm needs the same rule. Ties go to the vertical: it is the axis every
+/// surface in this window has, and a hand that is not tilting means it.
+///
+/// One function, so the terminal and the preview cannot come to different
+/// conclusions about the same report.
+pub(crate) fn wheel_points_sideways(delta: MouseScrollDelta) -> bool {
+    let (x, y) = match delta {
+        MouseScrollDelta::LineDelta(x, y) => (x, y),
+        MouseScrollDelta::PixelDelta(position) => (position.x as f32, position.y as f32),
+    };
+    x != 0.0 && x.abs() > y.abs()
+}
+
+/// **`Shift`+wheel arrives lying on its side on macOS, and this is where it is
+/// stood back up** (owner report, Mac mini, 0.4.1).
+///
+/// A formula had pushed twenty-one rows above the pane of an alternate-screen
+/// program, the chip said `21 rows above · Shift+wheel`, and the gesture the
+/// chip names did nothing at all. Nothing in this window was wrong about it:
+/// [`wheel_route`] read the `Shift` and ruled [`WheelRoute::Local`] exactly as it
+/// does on Windows. What was wrong was the number. **macOS rewrites `Shift` plus
+/// a vertical wheel into a horizontal scroll event before any application sees
+/// it** — AppKit swaps the axes, so `scrollingDeltaX` carries the turn and
+/// `scrollingDeltaY` is zero — and winit's macOS backend passes both components
+/// through as they stand (`platform_impl/macos/view.rs`, `scrollWheel:`). A local
+/// row scroll asked that report how far down to go, read `y`, and got zero.
+///
+/// **The sign is a copy and not a negation.** winit's own contract is that a
+/// positive component means "the content should move right and down", i.e. reveal
+/// what is left and above, on *both* axes — so "back" is positive either way and
+/// the swap AppKit performs is sign-preserving. A turn away from the hand that
+/// would have been `LineDelta(0, 3)` on Windows reaches us as `LineDelta(3, 0)`
+/// on a Mac, and putting the `3` back on `y` makes the two platforms deliver the
+/// same queued report for the same hand movement — which is the property the
+/// tests pin, and which also fixes the direction of `Shift`+wheel over a long
+/// line on a Mac, where `wheel_columns` was taking a sideways `x` as it stood
+/// while Windows was negating a `y`.
+///
+/// **It is macOS's rewrite, so it is asked of macOS and of nowhere else**
+/// (0.4.2 release review, X-5). The first landing applied the rule on every
+/// platform, on the reasoning that a genuine sideways gesture comes without
+/// `Shift` — and that is a guess about how a hand is held, not a fact about a
+/// desktop. **A tilt wheel and a trackpad's second finger exist on Windows and
+/// on Linux too**, and there a hand holding `Shift` over one of them is making a
+/// sideways gesture and means it: nothing rewrote it on the way in, and turning
+/// it into a vertical one would move the document under a reader who asked for
+/// the line. So the third fact is the platform, and only the desktop that
+/// actually performs the swap is allowed to have it undone.
+///
+/// `platform_swaps_shift_wheel` is that fact as a **value**, which is §4.3's
+/// rule for every platform decision in this window (`crumb_segments_on`,
+/// `input::effective_modifiers`): a `cfg!` asked inside the function would make
+/// the rule unreadable — and untestable — from any machine but the one it is
+/// about, and the interesting half of this rule is what it does *not* do
+/// elsewhere. The call site asks `bt_platform::host_platform()`, which is where
+/// this process reads a `cfg` once.
+///
+/// Applied where the platform's report becomes this window's — before
+/// [`WheelBurst`] merges anything — so that every station downstream of the queue
+/// reads one upright currency and none of them has to know which desktop it is
+/// running on.
+pub(crate) fn upright_wheel(
+    delta: MouseScrollDelta,
+    shift: bool,
+    platform_swaps_shift_wheel: bool,
+) -> MouseScrollDelta {
+    if !shift || !platform_swaps_shift_wheel {
+        return delta;
+    }
+    match delta {
+        MouseScrollDelta::LineDelta(x, y) if y == 0.0 && x != 0.0 => {
+            MouseScrollDelta::LineDelta(0.0, x)
+        }
+        MouseScrollDelta::PixelDelta(at) if at.y == 0.0 && at.x != 0.0 => {
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, at.x))
+        }
+        upright => upright,
+    }
+}
+
+/// **One answer per subject, for however many readers ask** — the memo behind
+/// [`Runtime::pointer_reference_at`] (audit 3 C-2).
+///
+/// A free function over the cell it is holding, so the property that matters can be stated as a
+/// value: three questions about one subject run `resolve` **once**, and a question about another
+/// subject runs it again. A memo that answered the second from the first would be the defect this
+/// one repairs, upside down.
+pub(crate) fn answered_once<Subject: Eq + Copy, Answer: Clone>(
+    memo: &RefCell<Option<(Subject, Answer)>>,
+    subject: Subject,
+    resolve: impl FnOnce() -> Answer,
+) -> Answer {
+    if let Some((held, answer)) = memo.borrow().as_ref()
+        && *held == subject
+    {
+        return answer.clone();
+    }
+    let answer = resolve();
+    *memo.borrow_mut() = Some((subject, answer.clone()));
+    answer
+}
+
+/// **The name a gesture puts in front of a pane's worker for a link target** — or nothing, which
+/// is the answer for everything this window may not read unasked (audit 3 C-2; ticket 14).
+///
+/// The one lexical gate every door that asks goes through — the pointer move, the press, the
+/// modifier going down and the frame under a still pointer — so that "a share is never asked
+/// about" is one function's answer and not four callers' agreement. It costs no syscall: a
+/// `file:` URI decoded, and [`bt_transcript::paths::may_read_unasked`] asked of the spelling.
+/// Since `Ctrl` hands a share over (owner ruling 2026-09-21), this is the sentence that keeps the
+/// other half of that ruling true: 「悬停不碰 UNC」.
+pub(crate) fn link_target_to_ask_about(
+    uri: &str,
+    namer: bt_transcript::paths::PathNamer<'_>,
+) -> Option<PathBuf> {
+    let path = bt_platform::file_uri_to_path(uri)?;
+    bt_transcript::paths::may_read_unasked(&path, namer).then_some(path)
+}
+
+/// Where a float actually stands this frame — its box displaced by however much
+/// of `flyIn`'s `translateY(-5px)` it has left to travel.
+///
+/// One displacement of one frame rather than of each box inside it, which is how
+/// a rising window stays internally consistent by construction. It is a free
+/// function because the hit test and the paint must agree on it exactly: a window
+/// hit-tested where it will be and drawn where it is would swallow clicks along a
+/// five-pixel seam for the whole of its entrance.
+/// Which dimension set this window is held to, chosen by **who is inside it**.
+///
+/// A free function beside [`risen_frame`] rather than a method, for the same
+/// reason [`float::FloatSizing`] is a struct: "which tenant is this" is one
+/// question with one answer, and the placement, the grip and the re-clamp all
+/// have to be reading the same one.
+fn float_sizing_of(win: &float::FloatWin) -> float::FloatSizing {
+    if win.preview().is_some() {
+        float::FloatSizing::preview()
+    } else {
+        float::FloatSizing::files()
+    }
+}
+
+/// `pinned` gates **the grip and nothing else**, and it is a fact about the
+/// window under the pointer rather than about the window at large — with several
+/// floats on screen (2026-08-12) a peek standing over a pinned one would
+/// otherwise wear its neighbour's shape. A peek is drawn without a grip, so the
+/// gate is belt and braces there; a *pinned* window with no grip cannot exist,
+/// so it is the only thing the flag has left to say.
+///
+/// **改判 2026-08-27 — a head is a handle whether or not the window is kept**
+/// (user ruling; §7.29). This used to begin `if !pinned { return None }`, on the
+/// reading that a peek's header is not a handle: *"A peek is not a window you
+/// were told you had: its header is not a handle"*. That was true for exactly
+/// as long as it was — 2026-08-12 gave the peek's header the six pixels that
+/// keep it, and from that day the shape and the gesture disagreed: the one
+/// header in the product that turns a passing glimpse into a window you own was
+/// also the one header that advertised nothing at all. A gesture nobody can see
+/// is a gesture nobody uses, which is the whole of what §7.21 was written about.
+/// So the hand is offered wherever the carry can begin, and the sentence that
+/// used to stand here is kept above as the record of the day it stopped being
+/// true.
+pub(crate) fn float_grasp(
+    drag: Option<FloatDragKind>,
+    hover: Option<float::FloatPart>,
+    pinned: bool,
+) -> Option<FloatGrasp> {
+    if let Some(drag) = drag {
+        return Some(match drag {
+            FloatDragKind::Resize => FloatGrasp::Grip,
+            FloatDragKind::Move { .. } => FloatGrasp::Carrying,
+        });
+    }
+    match hover {
+        Some(float::FloatPart::Grip) if pinned => Some(FloatGrasp::Grip),
+        Some(float::FloatPart::Head) => Some(FloatGrasp::Head),
+        _ => None,
+    }
+}
+
+/// The shape the pointer wears — K113 included.
+///
+/// "You grabbed this with the pointing finger, and the cursor changing shape
+/// mid-drag would say something happened when nothing did" (mock-up 1710-1711).
+/// The mock-up pins the shape to `pointer` because in a browser an un-pinned
+/// cursor flickers through three shapes on the way to the drop; here the shape a
+/// tab press starts with is the ordinary arrow, so pinning it means keeping
+/// *that* — the point is that it does not change, not which one it is.
+///
+/// The float is asked before the divider for the reason it is a separate gesture
+/// at all: it is a *window over* the layout, so what it covers is not being
+/// aimed at — the same order `cursor_moved` already gives the two drags.
+pub(crate) fn pointer_cursor(
+    dragging_tab: bool,
+    float: Option<FloatGrasp>,
+    divider_axis: Option<bt_layout::Axis>,
+    over_link: bool,
+    over_command_tick: bool,
+    image: Option<ImageGrasp>,
+) -> winit::window::CursorIcon {
+    use winit::window::CursorIcon;
+    if dragging_tab {
+        return CursorIcon::Default;
+    }
+    // A picture larger than the body it is seen through can be carried, and the
+    // hand says so with the same two shapes the float's header already uses
+    // (ticket #60). Under the float's grasps for the link's reason below, and
+    // above the link because a body showing a picture has no prose to hold one.
+    if float.is_none()
+        && let Some(grasp) = image
+    {
+        return match grasp {
+            ImageGrasp::Open => CursorIcon::Grab,
+            ImageGrasp::Closed => CursorIcon::Grabbing,
+        };
+    }
+    // A markdown link is the one thing in the preview's body that answers a
+    // press, and the pointing finger is how every reader on the desk says so.
+    // Under the float's grasps, because a window standing over the document
+    // covers what the pointer would otherwise be aiming at.
+    if float.is_none() && over_link {
+        return CursorIcon::Pointer;
+    }
+    // `.cmdtick { cursor: pointer }` — a tick answers a press, and the same
+    // finger says so. Beside the link and under the float for the link's reason:
+    // a window standing over a pane covers the rail on its edge.
+    if float.is_none() && over_command_tick {
+        return CursorIcon::Pointer;
+    }
+    match float {
+        Some(FloatGrasp::Grip) => return CursorIcon::NwseResize,
+        Some(FloatGrasp::Head) => return CursorIcon::Grab,
+        Some(FloatGrasp::Carrying) => return CursorIcon::Grabbing,
+        None => {}
+    }
+    match divider_axis {
+        Some(bt_layout::Axis::Row) => CursorIcon::EwResize,
+        Some(bt_layout::Axis::Col) => CursorIcon::NsResize,
+        None => CursorIcon::Default,
+    }
+}
+
+/// **A drag that moves panes goes on unless the glass is certainly somebody
+/// else's** (multiwindow F2).
+///
+/// The unknown answer stays home, and that is the conservative direction here:
+/// the cost of being wrong is that a pane lands in the window holding the
+/// gesture instead of the one under the hand, which the reader can see happen
+/// and undo by dragging it again.
+pub(crate) const fn glass_allows_a_drop(glass: GlassHere) -> bool {
+    !matches!(glass, GlassHere::Theirs)
+}
+
+/// The leaf a row payload arrives as when it splits a pane open.
+///
+/// The identity is a placeholder and deliberately so: [`seats::Seats::plan_drop`]
+/// renumbers every arriving seat out of its own counters and reports the pairs
+/// in [`seats::DropPlan::arrived`], which is where the commit reads the id that
+/// actually landed. Minting a "real" id here would be spending a name the plan
+/// may never adopt — a drag surveys on every pointer move.
+///
+/// No `fixed_extent` on the folder's seat: a column arriving fresh has no width
+/// to bring, and F75's rule is that the kind's opening width applies. It is
+/// [`seats::Seats::add_files_pane`]'s `None` arm, said the same way.
+/// **P86 — is the hand back where it started?**
+///
+/// A free function for [`landing_for_aim`]'s reason: it is the sentence "this is
+/// a retraction", and separating it from "what is under the pointer" is what
+/// lets each be tested against its own inputs. Inclusive on all four edges,
+/// because the ground a thing was picked up from includes its own border — a
+/// gesture that ended one pixel inside the row it began in is the same gesture
+/// that ended in the middle of it.
+pub(crate) fn over_home_ground(home: Option<[f32; 4]>, position: PhysicalPosition<f64>) -> bool {
+    home.is_some_and(|rect| {
+        let (x, y) = (position.x as f32, position.y as f32);
+        x >= rect[0] && x <= rect[2] && y >= rect[1] && y <= rect[3]
+    })
+}
+
+/// J120, stated once.
+///
+/// **Ruling, recorded 2026-08-08.** The mock-up leaves a drag that landed
+/// nowhere exactly where the live reorder last put it (`!d.target` falls into
+/// the same arm as `d.target.reordered` and returns, 7202-7208). The native
+/// build slides it home instead, and the argument is the mock-up's own: a
+/// reorder performed on the way to a drop is part of that drop's gesture, so a
+/// release that commits nothing must not keep half of what it did on the way.
+///
+/// It is deliberately **not** the same verdict as a cancel even though the two
+/// share the motion. A cancel is the user retracting the gesture; this is the
+/// gesture finishing and finding nowhere to be. Nothing downstream distinguishes
+/// them *today* — both go home and neither writes the session — and that is a
+/// fact about this slice rather than a claim about the ruling: the moment a
+/// landing exists that a release can commit and an Esc must not, the two callers
+/// are already separate.
+/// What an aim means once you know what is in the hand — K135, stated once.
+///
+/// **Never onto yourself.** A pane held over its own rectangle has no landing in
+/// any zone: `if (drag.kind === "pane" && drag.leafId === leafId) { hidePreview();
+/// return; }` (7101). Splitting a pane against itself and swapping it with
+/// itself are both the identity, and the honest report of a gesture that would
+/// do nothing is that there is nothing there.
+///
+/// The rim is exempt and could not be otherwise. It docks against the *whole*
+/// layout (G82/G83), so it has no target seat that could be yours — the pane in
+/// your hand is part of the whole rather than the thing being aimed at, and
+/// dragging your own pane out to the rim is exactly how you move it beside
+/// everything else.
+///
+/// A free function rather than a method because it needs nothing from the
+/// window: it is the sentence "who may land on what", and separating it from
+/// "what is under the pointer" is what lets each be tested against its own
+/// inputs.
+/// The `showing` argument is what §7.1.6k added and it is K135 read exactly:
+/// the identity being compared is a *pane*, and a pane is a tab and a seat. A
+/// spring-loaded drag can put the pointer over another tab's layout while the
+/// hand still holds a pane of the tab it set out from, and comparing seat
+/// numbers alone would answer "that is the one in your hand" about a pane in
+/// another room that merely shares its number.
+pub(crate) fn landing_for_aim(
+    source: &DragSource,
+    showing: TabId,
+    aim: seats::LayoutAim,
+) -> Option<DropLanding> {
+    let (target, landing) = match aim {
+        seats::LayoutAim::Rim(edge) => return Some(DropLanding::RootRim { edge }),
+        seats::LayoutAim::SeatEdge(target, edge) => {
+            (target, DropLanding::SeatEdge { target, edge })
+        }
+        seats::LayoutAim::SeatCentre(target) => (target, DropLanding::SeatCentre { target }),
+    };
+    (source.pane_here(showing) != Some(target)).then_some(landing)
+}
+
+/// The mock-up's commit table (7202-7231), as one function.
+///
+/// **Four answers for five landings, and the grouping is the table's own.** A
+/// strip reorder has already happened and is kept; the three landings inside the
+/// layout are performed now against the tree the plan built; a tear-out is
+/// performed now against the *strip*; an empty hand is the only "nowhere to be".
+///
+/// **[`DropLanding::StripExtract`] used to sit with `None`, and the whole of
+/// U12 stage C is that it no longer does.** The argument for sending a tear-out
+/// home was that a tab in this build was a tree plus exactly one shell —
+/// `TabState` held one `PtySession`, [`seats::Seats`] named one `terminal` seat —
+/// so a pane leaving one produced either a tab with no shell or a tab with two,
+/// and I106 is the crash report for the first. Both halves of that argument are
+/// now false. Phase A gave every Terminal leaf its own [`LeafSession`], so the
+/// tab a pane leaves keeps a shell per leaf that stayed and the tab it becomes
+/// gets the one that travelled with it. Nothing is spawned and nothing is killed:
+/// the ConPTY, the screen and the scrollback are the same objects on both sides
+/// of the gesture, which is the only reading of "tear this pane out" that does
+/// not lose the user's work.
+///
+/// What remains of the old caution is [`pane_can_become_a_tab`], one step
+/// upstream: a files column or a preview still cannot be a strip entry, and
+/// [`Runtime::survey_strip`] declines to offer the landing at all rather than
+/// letting the release find that out. M147 rules a refusal must be visible, and a
+/// strip preview has no dashed form to wear — so the honest way for the strip to
+/// say "not this one" is the mock-up's own, which is to draw nothing (6789's
+/// `paneCount > 1` guard is the same sentence about a different limit).
+///
+/// The verdict is still a fact about the landing rather than about which
+/// landings are reachable, which is why it is decided here and not inside
+/// [`Runtime::release_drag`]'s match.
+pub(crate) fn release_verdict(landing: Option<DropLanding>) -> DragRelease {
+    match landing {
+        Some(DropLanding::StripReorder { .. }) => DragRelease::Commit,
+        Some(
+            DropLanding::RootRim { .. }
+            | DropLanding::SeatEdge { .. }
+            | DropLanding::SeatCentre { .. },
+        ) => DragRelease::Land,
+        Some(DropLanding::StripExtract { slot }) => DragRelease::Extract { slot },
+        Some(DropLanding::StripAdopt { tab }) => DragRelease::Adopt { tab },
+        None => DragRelease::Home,
+    }
+}
+
+/// **Closed by its own trigger** (owner's report 2026-09-13) — the rule itself,
+/// with no window around it.
+///
+/// `raised` is what the open popup hangs from and `pressed` is what the press
+/// landed on. When they are the same control the press has already done its work
+/// by putting the popup away, and it must go no further: letting it travel on is
+/// the second handler that re-opens what the first one just shut.
+///
+/// **A popup with no trigger is never spent this way.** A context menu is raised
+/// by a gesture and not by a button, so there is no press that can be "its own"
+/// — every press outside it dismisses it and then goes on being the press it
+/// was. That is the whole content of the `None` arm, and it is why the argument
+/// is an `Option` rather than a caller-side `if`.
+pub(crate) fn press_spends_itself_closing(
+    raised: Option<OwnTrigger>,
+    pressed: Option<PopoverTrigger>,
+) -> OwnPress {
+    let Some(raised) = raised else {
+        return OwnPress::Elsewhere;
+    };
+    if Some(raised.control) != pressed {
+        return OwnPress::Elsewhere;
+    }
+    if raised.keeps_the_press {
+        OwnPress::Handed
+    } else {
+        OwnPress::Spent
+    }
+}
+
+/// **A second press on a `⌄` pins a peek and closes only a pinned menu** (owner
+/// ruling 2026-09-23: 「窥视中点按钮=钉住」「"再点即收"只在钉住态成立」) — the
+/// rule, with no window around it.
+///
+/// `verdict` is [`press_spends_itself_closing`]'s answer and `gate` is the gate
+/// of the menu that is up when a `⌄` governs it
+/// ([`Runtime::chevron_menu_up`]). A press that would be spent closing its own
+/// popover pins it instead when that popover is a peek; a press on a pinned
+/// menu's button is spent closing it, as before; and every other verdict —
+/// a press elsewhere, a trigger that keeps its press, a popover no `⌄` governs
+/// — passes through untouched.
+/// **Whether a right press lands on the head that raised the pane menu that is
+/// up** (owner follow-up 2026-09-23: a right click is a click).
+///
+/// The head's whole bar — its body, its `×`, its folder, its `⌄` — raises the
+/// pane menu on a right press, so each of them is that menu's button for a
+/// right press: the second one pins a peek or closes a pinned menu. A right
+/// press on *another* head is a click elsewhere and moves the menu there.
+pub(crate) fn a_right_press_is_on_the_pane_menus_head(
+    menu: Option<SeatId>,
+    target: Option<seats::ChromeTarget>,
+) -> bool {
+    let Some(menu) = menu else {
+        return false;
+    };
+    matches!(
+        target,
+        Some(
+            seats::ChromeTarget::PaneHeader(seat)
+                | seats::ChromeTarget::PaneClose(seat)
+                | seats::ChromeTarget::PaneFiles(seat)
+                | seats::ChromeTarget::PaneMenu(seat),
+        ) if seat == menu
+    )
+}
+
+pub(crate) fn press_pins_a_peek(
+    verdict: OwnPress,
+    gate: Option<&mut profiles::ChevronGate>,
+) -> OwnPress {
+    match gate {
+        Some(gate) if verdict == OwnPress::Spent && !gate.is_pinned() => {
+            gate.pin();
+            OwnPress::Pinned
+        }
+        _ => verdict,
+    }
+}
+
+/// **Whether a glance may arm over a row, given who holds the glass and whether
+/// that row is drawn inside the flyout itself** (user ruling 2026-09-07,
+/// `docs/DESIGN.md` §7.58).
+///
+/// [`HoverFloat::free`] asked of a *row* instead of of the window, and the one
+/// exception the ruling adds to the list above. The list is about panels that
+/// half-cover each other, and it earns that by being a rule about **independent**
+/// clocks: two surfaces that know nothing of one another, arriving over the same
+/// pixels. A glance raised by a row of the flyout is not independent of it — it is
+/// placed against the flyout's own frame, it holds the flyout open while the hand
+/// is in it ([`Runtime::drive_float_hover`]), and it dies with it
+/// ([`Runtime::forget_dead_float_gestures`]). The pair is one region with two
+/// rectangles in it, which is exactly what [`file_peek::corridor`] already says
+/// about a card and its row.
+///
+/// **`Menu` still outranks both**, and that is not an oversight: a press outranks
+/// every hover on this list, and a flyout row under an open menu is a row under a
+/// menu. So the exception is spent on the one arm it is about and the other three
+/// answers are [`HoverFloat::free`]'s, unchanged.
+///
+/// A free function of the two facts for [`HoverFloat::holding`]'s reason: the
+/// thing that goes wrong here is a *policy*, and a policy that needs a live
+/// window, a pointer and a clock to exercise is a policy nobody exercises.
+pub(crate) fn glance_may_arm(held: Option<HoverFloat>, row_is_in_the_flyout: bool) -> bool {
+    match held {
+        Some(HoverFloat::Flyout) => row_is_in_the_flyout,
+        held => held.is_none_or(|who| who == HoverFloat::Glance),
+    }
+}
+
+/// **"A wheel notch belongs to the pane it is over"** (user ruling, 2026-08-15)
+/// — the wheel ruling, as a function of the three facts it turns on.
+///
+/// A function rather than a run of `if`s inside the event handler, because the
+/// ruling is a claim about a decision and a decision that cannot be named cannot
+/// be pinned. Everything the handler needs the window for — the accumulators,
+/// the PTY, the projection — happens *after* this returns, so the part that is a
+/// policy is testable and the part that is plumbing is not asked to be.
+///
+/// **Focus is not one of the facts, and its absence from the signature is the
+/// ruling.** One law for both screens: the pointer names the pane, and what that
+/// pane is *doing* — a shell with scrollback, or a program that has taken the
+/// whole screen — decides only whether the notch scrolls our own buffer or is
+/// spoken to that pane's child. Which pane holds the keyboard decides neither.
+///
+/// The bug this replaces (user report, 2026-08-15): the two forwarding routes
+/// each required the target to be focused, on the reasoning that a mouse
+/// report's row and column mean something only to the shell that measured them.
+/// They do — and they are measured in *the pane the pointer is in*, which is the
+/// pane being addressed, so the coordinates were never the problem. What the
+/// focus gate actually produced was an unfocused alternate-screen pane falling
+/// through to [`WheelRoute::Local`], where "local" means scrolling an alternate
+/// screen's scrollback, which by definition is empty: the wheel over an
+/// unfocused TUI moved nothing and said nothing. Hovering a pane running Claude
+/// Code and turning the wheel did *nothing at all* until you clicked it first.
+///
+/// The child's own wishes are still respected exactly as before, and that is the
+/// half that was never about focus: mouse tracking on, and the notch is an SGR
+/// report; tracking off but alternate scroll on, and it is the arrow-key
+/// emulation; neither, and [`WheelRoute::Nothing`] — a program that owns its
+/// screen and asked for no wheel keeps it, whether or not you are typing in it.
+///
+/// Two overrides stand above all of that, and both are about *our* view rather
+/// than the child's: Shift is the explicit local override, and an
+/// alternate-screen pane already displaced into local review stays there until
+/// it is scrolled back to rest.
+/// **Whether this notch over a terminal is a text-size step** (ticket 37) — the rung
+/// `Runtime::mouse_wheel` asks after it has chosen the terminal and before the math-block pan
+/// and [`wheel_route`] are asked anything.
+///
+/// Yes exactly when the gesture's own modifier is held and nothing else
+/// ([`input::text_size_wheel_held_on`]) and the notch has a vertical component: a report that is
+/// sideways only falls through to the routes it had, which is `scroll_web_page`'s own `y != 0`
+/// rule. Nothing about the pane is asked — which screen it is on, whether its program reads the
+/// mouse, whether its view is scrolled — because the size is the pane's on every one of them.
+pub(crate) fn wheel_steps_text_size(
+    modifiers: ModifiersState,
+    platform: bt_platform::HostPlatform,
+    delta: MouseScrollDelta,
+) -> bool {
+    input::text_size_wheel_held_on(modifiers, platform) && wheel_zoom_notches(delta) != 0.0
+}
+
+pub(crate) fn wheel_route(
+    shift: bool,
+    modes: bt_term::TerminalModes,
+    target_is_scrolled: bool,
+) -> WheelRoute {
+    // Sticky local review: while the alternate-screen viewport is displaced into
+    // the projection-local overflow (Shift+wheel entered it), the user is looking
+    // at displaced pixels, not the application's live pane — forwarding bytes
+    // there would scroll a surface the user cannot see. Plain wheel therefore
+    // stays local in both directions; scrolling back to the resting bottom
+    // (offset 0) exits and restores forwarding.
+    if modes.alternate_screen && target_is_scrolled {
+        return WheelRoute::Local;
+    }
+    if !shift && modes.mouse_tracking != MouseTracking::Off {
+        return WheelRoute::MouseReport;
+    }
+    if modes.alternate_screen {
+        // Shift is the explicit local override for reviewing projection-only
+        // rows displaced above this screen.
+        if shift {
+            return WheelRoute::Local;
+        }
+        if modes.alternate_scroll {
+            return WheelRoute::ArrowKeys;
+        }
+        // A program that owns the screen and asked for neither protocol has
+        // declined the wheel. Scrolling its empty alternate scrollback instead
+        // would be motion nobody asked for and nobody would see.
+        return WheelRoute::Nothing;
+    }
+    WheelRoute::Local
+}
+
+/// **`Shift` names the axis, and it is not a third meaning for the key** — the
+/// horizontal-scroll plan's §1c entry gesture, decided as a function of the three
+/// facts it turns on.
+///
+/// A function beside [`wheel_route`] and for its stated reason: this is a claim
+/// about a decision, and a decision that cannot be named cannot be pinned.
+///
+/// # Why `Shift`, given §7.1.6b′ says it is spent twice already
+///
+/// That paragraph's survey is right and its conclusion is about the **card
+/// column**, which is chrome. On a *pane* the other two keys are not free at all,
+/// and it is the same paragraph that says so:
+///
+/// * `Alt` is the one modifier that reaches the child — it is a bit in the SGR
+///   mouse report. Taking `Alt`+wheel here would take a gesture out of `tmux`'s
+///   and `vim`'s hands, and this window does not do that.
+/// * `Ctrl` is the chord every desktop reserves for scale. §7.1.6b′ spends it on
+///   nothing precisely so that door stays shut, and the web preview has since
+///   opened it as a *zoom* — the meaning it was being kept for.
+/// * `Shift` is already the key that means **"this notch is this window's view
+///   and not the program's"** (§7.1.5f on the wheel), which is what
+///   [`wheel_route`] above has just finished deciding. It is also already the key
+///   that means "the other axis" on the one surface in this window that has two
+///   (`scroll_preview_body`). Here those are the same sentence: the notch is this
+///   window's view, and the view is being moved along the axis it has.
+///
+/// So `Shift`+wheel over a terminal pane still never sends a byte, exactly as
+/// before. The only thing that changes is *which way the view moves*, and it
+/// changes only where there is a second way for it to move.
+///
+/// # What decides that there is one
+///
+/// `has_column_axis` is `max_x_origin > 0` — the very predicate the foot bar is
+/// drawn by. **One predicate, so the gesture and the picture can never disagree**:
+/// if `Shift`+wheel moves this pane sideways then this pane has a bar to show for
+/// it, and if it does not then there is nothing down there either.
+///
+/// Read the other way round, which is how it should be explained: with wrapping
+/// on — the default, and every pane this product has ever drawn — a pane's
+/// content is exactly as wide as the pane, so there is no second axis and nothing
+/// about the wheel changes at all.
+///
+/// # And a wheel that already points sideways
+///
+/// A tilt wheel and a trackpad's second axis have been reported to this window
+/// all along and dropped on the floor by every terminal path. They need no
+/// modifier: a report on the x axis is a reader saying "sideways" in the
+/// platform's own words, and the only reason to ask for `Shift` as well would be
+/// that we had not listened.
+///
+/// # And a pane with rows this gesture is the only way to reach
+///
+/// **The rule, in one sentence: `Shift`+wheel scrolls the axis the pane has to
+/// offer — the rows a formula displaced above the pane when there are any, and
+/// otherwise the columns of a line longer than the pane.**
+///
+/// `shift_only_rows` is the first half of that, and it is asked of the
+/// pane rather than of the key. On the **alternate screen** the plain wheel
+/// belongs to the program ([`wheel_route`]), so the rows a typeset formula pushed
+/// above the pane have exactly one gesture that reaches them — the one the chip
+/// names, `N rows above · Shift+wheel` — and a pane that also happened to have a
+/// second axis would otherwise answer that chip by moving sideways. On the
+/// **primary screen** every one of those rows is a plain notch away, so the key
+/// is free to mean the other axis, and the promise the settings line makes about
+/// a long line ("Scroll sideways with Shift+wheel") is kept word for word.
+///
+/// A sideways report without `Shift` is unchanged by any of this: it still says
+/// "sideways" in the platform's own words and is still taken at its word.
+pub(crate) fn wheel_axis(
+    shift: bool,
+    sideways: bool,
+    shift_only_rows: bool,
+    has_column_axis: bool,
+) -> WheelAxis {
+    if !has_column_axis {
+        // A pane with one axis has one answer, and it is the one it has always
+        // given. This arm is what keeps `Shift`'s old meaning intact everywhere
+        // it used to matter — including the alternate screen, whose flattened
+        // domain is empty, so a full-screen program's local review is reached by
+        // exactly the gesture that reached it before.
+        return WheelAxis::Rows;
+    }
+    if shift && shift_only_rows {
+        // Displaced rows first: the key is being spent on the one axis of this
+        // pane nothing else can move.
+        return WheelAxis::Rows;
+    }
+    if shift || sideways {
+        return WheelAxis::Columns;
+    }
+    WheelAxis::Rows
+}
+
+pub(crate) fn recoverable_wheel_scroll_amount(
+    result: std::result::Result<bt_platform::WheelScrollAmount, String>,
+) -> bt_platform::WheelScrollAmount {
+    match result {
+        Ok(amount) => amount,
+        Err(error) => {
+            const FALLBACK_WHEEL_LINES: u32 = 3;
+            crate::diagnostics::stderr_line(format!(
+                "system wheel scroll setting unavailable; using {FALLBACK_WHEEL_LINES} lines: {error}"
+            ));
+            bt_platform::WheelScrollAmount::Lines(FALLBACK_WHEEL_LINES)
+        }
+    }
+}
+
+/// Takes as many whole `unit`s as the accumulated remainder holds and returns the signed count,
+/// leaving the sub-unit residue in place. Truncation is symmetric around zero, so reversing the
+/// wheel never manufactures motion from residue of the opposite sign.
+pub(crate) fn drain_whole_units(remainder: &mut f64, unit: f64) -> i64 {
+    let units = (*remainder / unit).trunc() as i64;
+    *remainder -= units as f64 * unit;
+    units
+}
+
+fn protocol_mouse_button(button: MouseButton) -> Option<input::MouseProtocolButton> {
+    match button {
+        MouseButton::Left => Some(input::MouseProtocolButton::Left),
+        MouseButton::Middle => Some(input::MouseProtocolButton::Middle),
+        MouseButton::Right => Some(input::MouseProtocolButton::Right),
+        MouseButton::Back | MouseButton::Forward | MouseButton::Other(_) => None,
+    }
+}
+
+fn minimize_owned_window(window: &impl WindowHost) -> Result<()> {
+    window.set_minimized(true);
+    Ok(())
+}
+
+fn press_owned_title_bar(frame: &impl FrameDoor) -> Result<(), String> {
+    frame.press_title_bar()
 }

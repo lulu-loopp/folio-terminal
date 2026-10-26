@@ -6,10 +6,11 @@
 //! cell route's own release, the chrome router's release ladder, the floating window's carry, the
 //! glance card's two and the settings sheet's — each of which a layer above it could pre-empt.
 
+use crate::runtime::mouse::{button_router_position, route_forwarded_mouse_button};
 use crate::window_seam::prelude::*;
 use crate::{
     FolioApp, MouseRoute, PressedCellTarget, Runtime, TabClick, UserInputKind, input, mouse_trace,
-    route_forwarded_mouse_button, seats, settings,
+    seats, settings,
 };
 use anyhow::Result;
 use std::time::Instant;
@@ -167,7 +168,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// using the owner's window geometry rather than the window in which the
     /// platform reported the button-up.
     pub(crate) fn release_capture_from_application(&mut self, button: MouseButton) -> Result<bool> {
-        let position = crate::button_router_position(
+        let position = button_router_position(
             ElementState::Released,
             self.window.pointer_position,
             self.window.pointer_last_seen,

@@ -3,6 +3,7 @@
 
 use super::pointer::{Ending, Gone, Leaving, OwnerGone};
 use crate::input::Keystroke;
+use crate::runtime::mouse::recoverable_wheel_scroll_amount;
 use crate::runtime::panes::end_leaves_of;
 use crate::runtime::panes::tear_pane_into_tab;
 use crate::window_seam::prelude::*;
@@ -14,9 +15,9 @@ use crate::{
     TabMenuState, TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
     absorb_tab_sessions, attention_trace, banner_line, create_tab_state, diagnostics,
     dirty_gate_names, exit_diagnostics, float, notify, pane_can_become_a_tab, pane_into_new_tab,
-    pane_into_tab, presentation_physical_size, preview, profiles, pty_door,
-    recoverable_wheel_scroll_amount, restore, scrollback_quota, seats, seed, settle_pin_partition,
-    settling, solve_seats, strip_insert_slot, webnav,
+    pane_into_tab, partition_clamped, presentation_physical_size, preview, profiles, pty_door,
+    restore, scrollback_quota, seats, seed, settle_pin_partition, settling, solve_seats,
+    strip_insert_slot, webnav,
 };
 use crate::{LeafView, TextScale, webhost};
 use anyhow::Context;
@@ -3968,6 +3969,47 @@ impl<B: Backend> Runtime<'_, B> {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Put the carried thing back in the slot the drag began in — the FLIP home
+    /// J119 and J120 share.
+    ///
+    /// A pane has no slot to return to and no offset to run down: it never left.
+    /// The tree was untouched for the whole gesture (see
+    /// [`Runtime::begin_pane_drag`]), so "back where it started" is where it
+    /// already is, and the honest implementation of going home is to do nothing.
+    /// That is not a gap — it is the reason a pane drag is safe to abandon at any
+    /// moment.
+    pub(crate) fn settle_home(&mut self, drag: &Drag) {
+        let (Some(tab), Some(carry)) = (drag.tab(), drag.tab_carry()) else {
+            return;
+        };
+        let Some(index) = self
+            .window
+            .tabs
+            .iter()
+            .position(|candidate| candidate.id == tab)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        let motion = self.app.motion;
+        // Hand the settle the offset first, so the slide home starts where the
+        // hand left the tab and the slot change below composes onto it.
+        self.window.tabs[index]
+            .flip
+            .displace(carry.offset, now, motion);
+        let pinned = self
+            .window
+            .tabs
+            .iter()
+            .map(|tab| tab.pinned)
+            .collect::<Vec<_>>();
+        // F57 again, and it has to be re-applied rather than trusted: between the
+        // drag starting and it ending, a pinned tab may have been reaped, which
+        // shifts every index after it by one.
+        let to = partition_clamped(&pinned, index, carry.origin.min(pinned.len() - 1));
+        self.move_tab_with_flip(index, to, now, None);
     }
 }
 

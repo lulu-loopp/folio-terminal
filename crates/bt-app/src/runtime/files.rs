@@ -4,13 +4,15 @@
 use crate::input::Keystroke;
 use crate::runtime::floats::float_dock_label;
 use crate::runtime::math::answers_for;
+use crate::runtime::web::page_destination;
 use crate::window_seam::prelude::*;
 use crate::{
     ColumnKeyboard, FOOT_REVEAL_FEEDBACK, FileMenuTarget, FileMenuTreeRow, FilesEditPlace,
     FilesEditRow, FilesFocusArrival, FilesLocate, FolderPick, FootSaying, LeafId, PointerTarget,
     ReferenceCard, RenameSubject, RevealedFoot, RowActivation, RowHost, Runtime, SplitSeed,
     TabClick, TabRename, files, float, foot_revealed_label, git_panel, hang_watch,
-    home_shortened_path, i18n, marks, palette_index, preview, profiles, seats, settings, toast,
+    home_shortened_path, i18n, marks, palette_index, path_opens_as_a_page, preview, profiles,
+    seats, settings, toast, webnav,
 };
 use crate::{FilesRoot, TabState, pane_folder};
 use anyhow::Result;
@@ -3128,6 +3130,142 @@ impl<B: Backend> Runtime<'_, B> {
         });
         dropped_files_seat_at(&self.seat_layout, position, covered)
     }
+
+    /// `Browse…` — ask the system for a folder the quick list could not name
+    /// (E55).
+    ///
+    /// **The chooser only gets queued here.** It is a modal dialog with a
+    /// message loop of its own, and starting one from inside this callback would
+    /// re-enter the application's event handling underneath the very borrow that
+    /// began it — see [`bt_platform::FolderPicker`], which is built on the same
+    /// deferral the formula menu already needed for a far shorter-lived pump.
+    /// The answer arrives in [`Runtime::apply_folder_pick_result`].
+    ///
+    /// **A chooser that cannot be shown leaves the column where it was.** The
+    /// row is a way of reaching a folder, not a promise about Windows: if the
+    /// dialog does not come up, the honest outcome is the root you already had,
+    /// and the reason is written to the log the other recoverable failures use
+    /// rather than turned into a banner about COM apartments.
+    pub(crate) fn browse_for_root(&mut self, seat: SeatId) {
+        let start = self.window.tabs[self.window.active_tab]
+            .files_state(seat)
+            .root;
+        let start = (!start.is_empty()).then(|| PathBuf::from(start));
+        match self.window.folder_picker.request(start.as_deref()) {
+            Ok(true) => self.window.folder_pick = Some(FolderPick::Reroot(seat)),
+            // Already queued or already open: a second `Browse…` while one is up
+            // is one dialog, not two, and whoever asked first keeps the answer.
+            Ok(false) => {}
+            Err(error) => crate::diagnostics::stderr_line(format!(
+                "recoverable folder chooser failure: {error}"
+            )),
+        }
+    }
+
+    /// **Keep this switcher row, or stop keeping it** —
+    /// [`Self::toggle_folder_pin`]'s twin, told the row's own category (W2 slice
+    /// ③).
+    ///
+    /// It replaced a `toggle_file_pin` that hard-coded `PinKind::File`, which was
+    /// right for as long as the switcher held only files: one list holding two
+    /// categories cannot have one category written into it.
+    ///
+    /// Named for the *switcher* and not for the preview, because this window
+    /// used to have two "pins" two hundred pixels apart meaning different
+    /// things. **That naming ticket — W1's fifth open question — is closed**
+    /// (§7.7 ⑧, 2026-08-23): the pane's control is a **lock** now, with its own
+    /// word, its own glyph and its own tip
+    /// ([`Self::toggle_preview_lock`]), and what is left called a pin in this
+    /// window is this row and a tab, which mean one thing between them — "this
+    /// one stays in the list". This function's name was already the half of the
+    /// fix a slice could make on its own: two verbs that cannot be confused at a
+    /// call site.
+    ///
+    /// **The first of the pin's two validations** (`plan.md` §3「钉不是授权」): a
+    /// page is written into `pins.json` only if this window would navigate to it
+    /// *now*, so a target the policy refuses never reaches the file at all. The
+    /// second is at the moment of pressing that row —
+    /// [`Self::navigate_preview_page`] — and it exists because passing this check
+    /// today is not passing it forever: policies tighten, builds change, and the
+    /// file is one somebody may edit.
+    ///
+    /// An unpin is never gated. Taking a row *out* of that file is allowed
+    /// whatever the row says, and a build that could not remove a target it
+    /// refuses to load would be a build with rows nobody can delete.
+    ///
+    /// **A refusal is drawn** (user ruling 2026-08-24). It used to be an
+    /// `eprintln!` and nothing else, and that is how a pin that refused every
+    /// local page in the switcher shipped: the press did nothing, and nothing is
+    /// what a broken control does too. §7.7 ③'s "什么都没发生比一个确认框更诚实"
+    /// governs *going* somewhere — a seat that did not move is visibly a seat
+    /// that did not move — and a control whose whole effect is a line in a file
+    /// has no such evidence to offer. The card is anchored on the seat whose
+    /// switcher is open, which is [`Self::toast`]'s own rule: a notice appears
+    /// where the attention already is.
+    pub(crate) fn toggle_switcher_pin(
+        &mut self,
+        seat: SeatId,
+        keep: &profiles::PreviewMenuTarget,
+    ) -> Result<()> {
+        let already = self
+            .app
+            .pins_store
+            .rows_of(&[keep.kind])
+            .iter()
+            .any(|(_, target)| *target == keep.target);
+        if !already && !switcher_pin_is_allowed(keep.kind, &keep.target) {
+            return self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::PreviewSeat(self.leaf_here(seat)),
+                None,
+                i18n::switcher_pin_refused(&keep.target),
+            );
+        }
+        self.app.pins_store.toggle(keep.kind, &keep.target);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+}
+
+/// **Whether a switcher row may be written into `pins.json`** — the *first* of
+/// the pin's two validations.
+///
+/// A page is kept only if this window would navigate to it now, so a target the
+/// policy refuses never reaches the file at all. A file is not asked: whether a
+/// path is still there is a filesystem question, and `pins.json`'s own header
+/// records that this store deliberately does not ask it.
+///
+/// **An unpin is never gated**, which is why this is asked only of a row that is
+/// not already kept: taking a row *out* of that file must be allowed whatever the
+/// row says, or a tightened policy leaves rows nobody can delete.
+///
+/// **The door is [`page_destination`] and not [`switcher_row_destination`]**,
+/// which is the whole of the 2026-08-24 fix. "Would navigate to it now" is a
+/// question only the door the press actually goes through can answer, and since
+/// W2 slice ⑤ that door has been `page_destination`: a `file:` row is a *name
+/// for a path*, taken back to the disk and minted again, because
+/// `webnav::address_bar` refuses `file:` from every door and always will. Asking
+/// the address door here made the pin refuse every local page in the switcher —
+/// the row was drawn, the pin was drawn, and pressing it wrote nothing.
+///
+/// The one clause `page_destination` does not carry is the page class, and it is
+/// here rather than there because the two callers want different halves: the
+/// press is asked of a row that already exists, and this is asked of a row about
+/// to be *made*. A local page row can only have come from
+/// [`path_opens_as_a_page`] — that predicate is what put the seat on the engine
+/// lane, and `Mint::admits` keeps it there, so no `file:` row this window wrote
+/// names anything else. Asking it again is that same claim said at the moment
+/// the string is about to outlive the window, which is what keeps a hand-written
+/// `file:///C:/Windows/System32/drivers/etc/hosts` out of the kept list.
+pub(crate) fn switcher_pin_is_allowed(kind: bt_persist::PinKind, target: &str) -> bool {
+    if kind != bt_persist::PinKind::Url {
+        return true;
+    }
+    page_destination(target).is_some()
+        && webnav::LocalFileUrl::parse(target)
+            .is_none_or(|named| path_opens_as_a_page(named.path()))
 }
 
 /// **This folder's node id inside a column rooted at `root`, or `None` when it
