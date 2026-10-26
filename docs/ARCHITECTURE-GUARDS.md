@@ -493,7 +493,7 @@ inner `#![…]` one opens — is refused by what is called, line and owner. That
 covers a pinned writer's call, an `enter_callback` entry, a remover helper's call
 (`deferred_removal::copy_new`, `failure_without_plan`), a pinned door's call
 (below), and a landmark of `LANDMARKS`. A gated landmark is refused through the
-one placement engine, so both tables report it once. A refused call's pin, entry
+one placement engine, so each table reports it once. A refused call's pin, entry
 or helper is not also called missing or miscounted. The predicate is not
 evaluated: a pin has no platform or feature column, so a call that is in one
 shipped build and not another can be neither counted nor dropped. A pinned call
@@ -550,11 +550,11 @@ statement's `#[cfg…]` or `#[cfg_attr(…)]` (the statement or block an outer o
 governs, or the block an inner `#![…]` one opens) is refused: the index reads a
 file's, an item's and a module's `cfg` but never a statement's, so a gated call
 would meet its pin on a build it is not in — the same reader, and the same
-refusal, as the writer table's and the landmarks' (above). Not read: closures and run-time-dead branches — a call in a closure's
-body, or in a branch that never runs (`if cfg!(…)`, `if false`), is placed where
-it is written, as a landmark is, and is still in the build, so a closure written
-after `run_app` that is never called, or a settle under `if false`, would meet
-the tail's pin. An
+refusal, as the writer table's and the landmarks' (above). Not read: closures
+and run-time-dead branches — a call in a closure's body, or in a branch that
+never runs (`if cfg!(…)`, `if false`), is placed where it is written, as a
+landmark is, and is still in the build, so a closure written after `run_app`
+that is never called, or a settle under `if false`, would meet the tail's pin. An
 unreadable admission is refused wherever it is (it may be a pinned door's), and
 its owner's pins are not also called "not there" (`deleting_the_tail_settle_is_red`,
 `a_second_settle_in_another_branch_is_a_surplus`,

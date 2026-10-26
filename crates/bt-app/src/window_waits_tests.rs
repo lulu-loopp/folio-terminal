@@ -5023,7 +5023,9 @@ fn the_role_and_phase_writers_are_called_only_where_they_are_pinned(world: &Worl
 /// [`the_role_and_phase_writers_are_called_only_where_they_are_pinned`] over `world`, with its
 /// pins, its owners' landmarks, its pinned callback entries and the dependency crates of each
 /// package with landmarks ([`dependency_crates`]) as arguments — the product's, or a planted
-/// crate's.
+/// crate's. A pinned writer's call or `enter_callback` entry under a statement's `#[cfg…]`
+/// ([`under_statement_cfg`]) is refused ([`gated`]); its pin or entry is not also missing or
+/// miscounted.
 fn pinned_writer_failures(
     world: &World,
     pins: &[Pin],
@@ -13502,6 +13504,12 @@ fn planted_door_failures(tag: &str, uses: &str, tail: &str, more: &str) -> Vec<S
     let main = PLANTED_DOOR_MAIN
         .replace("{tail}", tail)
         .replace("{more}", more);
+    planted_door_main_failures(tag, uses, &main)
+}
+
+/// [`pinned_door_failures`] over the planted crate whose `main` is `main` as written, after
+/// [`PLANTED_LANDMARK_ITEMS`], [`PLANTED_DOOR_ITEMS`] and `uses`, with the planted door pins.
+fn planted_door_main_failures(tag: &str, uses: &str, main: &str) -> Vec<String> {
     let world = planted_world(
         tag,
         &format!("{PLANTED_LANDMARK_ITEMS}{PLANTED_DOOR_ITEMS}{uses}{main}"),
@@ -13950,7 +13958,10 @@ fn a_callback_entry_under_a_statement_cfg_is_refused() {
 /// once and its owner's pins are not also "not there".
 ///
 /// MUTATION: drop the [`under_statement_cfg`] arm of [`landmarks_in`] — the gated `run_app` is
-/// read (`Ok(Some("run_app"))`) and the two tables place their calls after it.
+/// read (`Ok(Some("run_app"))`) and the two tables place their calls after it: the writer table's
+/// `enter_window_thread` meets its pin after `run_app` (`[]`), and the door table's build-error
+/// settle and flush, written after the gated `run_app`, are placed after it instead of after
+/// `build` (their `build` pins "not there", their `run_app` pins called 2×).
 #[test]
 fn a_landmark_under_a_statement_cfg_is_refused() {
     let main = |gate: &str| {
@@ -13990,12 +14001,16 @@ fn a_landmark_under_a_statement_cfg_is_refused() {
         failures.len() == 1 && failures[0].starts_with(refusal),
         "the writer table: refused, once: {failures:?}"
     );
-    let failures = planted_door_failures(
-        "ww-landmark-cfg-doors",
-        "",
-        PLANTED_TAIL_SETTLE,
-        "#[cfg(test)] { event_loop.run_app(); }",
-    );
+    // The gated `run_app` before the build-error arm: read, it would place that arm's settle and
+    // flush after `run_app` instead of after `build`.
+    let door_main = PLANTED_DOOR_MAIN
+        .replace(
+            "if fail {",
+            "#[cfg(test)] { let event_loop = EventLoop; event_loop.run_app(); }\nif fail {",
+        )
+        .replace("{tail}", PLANTED_TAIL_SETTLE)
+        .replace("{more}", "");
+    let failures = planted_door_main_failures("ww-landmark-cfg-doors", "", &door_main);
     assert!(
         failures.len() == 1 && failures[0].starts_with(refusal),
         "the door table: refused, once: {failures:?}"
