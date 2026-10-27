@@ -26,6 +26,7 @@ bt-app	-	crate::attention_ownership::other_live	std::fs::metadata	1
 bt-app	-	crate::attention_wire::payload_on_stdin	std::sync::mpsc::Receiver::recv_timeout	1
 bt-app	-	crate::clipboard_picture::names_in	std::fs::read_dir	1
 bt-app	-	crate::clipboard_picture::save	std::fs::create_dir_all	1
+bt-app	-	crate::computation_lane::raster_peek_page	std::fs::metadata	1
 bt-app	-	crate::diagnostics::last_written	std::fs::metadata	1
 bt-app	-	crate::diagnostics::newest_crash_report	std::fs::read_dir	1
 bt-app	-	crate::diagnostics::open_run_log	std::fs::create_dir_all	1
@@ -55,8 +56,6 @@ bt-app	-	crate::preview::read_size	std::fs::metadata	1
 bt-app	-	crate::preview::run_preview_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::preview_watch::Stamp::of	std::fs::metadata	1
 bt-app	-	crate::psreadline::installed_disk::<System as Disk>::entries	std::fs::read_dir	1
-bt-app	-	crate::raster_peek_page	std::fs::metadata	1
-bt-app	-	crate::rebuild_every_native_surface	pollster::block_on	1
 bt-app	-	crate::release_trial_writer	std::fs::create_dir_all	1
 bt-app	-	crate::runtime::peek::facts_of_a_file_the_user_chose	std::fs::metadata	1
 bt-app	-	crate::runtime::preview::Runtime::open_preview_web_file_on	std::fs::canonicalize	1
@@ -92,6 +91,7 @@ bt-app	-	crate::update::Claim::take	std::io::Write::write_fmt	2
 bt-app	-	crate::update_trial::take_the_claim_within	std::thread::sleep	1
 bt-app	-	crate::update_trial::watch	std::thread::sleep	1
 bt-app	-	crate::webhost::commit_local	std::fs::canonicalize	1
+bt-app	-	crate::window_seam::rebuild_every_native_surface	pollster::block_on	1
 bt-app	[debug_assertions]	crate::hang_watch::run_selftest_if_due	std::thread::sleep	1
 bt-persist	-	crate::atomic::commit_rename	std::fs::rename	1
 bt-persist	-	crate::atomic::write_temp	std::fs::File::sync_all	1
@@ -172,7 +172,6 @@ bt-platform	[windows]	crate::video::engine::Engine::wait_for_metadata	std::threa
 bt-platform	[windows]	crate::video::engine::Pump::run	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[windows]	crate::video::engine::can_play_types	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::video::within_budget	std::sync::mpsc::Receiver::recv_timeout	1
-bt-platform	[windows]	crate::windows_impl::<DirWatch as Drop>::drop	windows::Win32::System::Threading::SetEvent	1
 bt-platform	[windows]	crate::windows_impl::close	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::windows_impl::directory_folds_case	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::windows_impl::write_to_console	windows::Win32::Foundation::CloseHandle	1

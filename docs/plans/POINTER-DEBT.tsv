@@ -24,8 +24,6 @@ crate::ForeignDrag::pointer	N-E	crate
 crate::PeekCandidate::pointer	N-E	crate
 crate::PeekHover::observe	N-E	crate
 crate::PeekThumbnail::overlay	N-E	crate
-crate::Runtime::aim_focus_card_window	N-B	crate
-crate::Runtime::aim_focus_card_window	N-P	crate
 crate::Runtime::drag_settings_menu_bar	N-E	crate
 crate::Runtime::scroll_settings	N-B	crate
 crate::Runtime::scroll_settings	N-P	crate
@@ -397,6 +395,8 @@ crate::runtime::palette::Runtime::scroll_palette_list	N-P	crate::runtime::palett
 crate::runtime::panes (outside any item)	N-B	crate::runtime::panes
 crate::runtime::panes (outside any item)	N-E	crate::runtime::panes
 crate::runtime::panes::Runtime::advance_pane_menu	N-P	crate::runtime::panes
+crate::runtime::panes::Runtime::aim_focus_card_window	N-B	crate::runtime::panes
+crate::runtime::panes::Runtime::aim_focus_card_window	N-P	crate::runtime::panes
 crate::runtime::panes::Runtime::begin_pane_drag	N-E	crate::runtime::panes
 crate::runtime::panes::Runtime::cancel_divider_drag	N-P	crate::runtime::panes
 crate::runtime::panes::Runtime::close_pane	N-P	crate::runtime::panes

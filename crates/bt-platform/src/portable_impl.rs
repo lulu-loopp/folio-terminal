@@ -927,6 +927,85 @@ impl DirWatch {
     }
 }
 
+/// **Many directory watches on one thread, before FSEvents** (T-DIR-WATCH-ONE-THREAD).
+///
+/// The same four contracts as [`DirWatch`], as members of one set. Refused at the opening, as
+/// every `DirWatch` door is, so no member is ever started here.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub struct DirWatchSet {
+    /// Never constructed: the opening refuses.
+    _never: std::convert::Infallible,
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+impl DirWatchSet {
+    /// Open a set. Refused.
+    pub fn open(ctx: &crate::admission::WorkerCtx) -> Result<Self, std::io::Error> {
+        let _ = ctx;
+        Err(unwatched())
+    }
+
+    /// Whether the set has ended. Unreachable.
+    #[must_use]
+    pub fn has_ended(&self) -> bool {
+        match self._never {}
+    }
+
+    /// The tree contract, as a member. Unreachable.
+    pub fn start(
+        &self,
+        ctx: &crate::admission::WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        let _ = (ctx, path, wake);
+        match self._never {}
+    }
+
+    /// The named tree contract, as a member. Unreachable.
+    pub fn start_named(
+        &self,
+        ctx: &crate::admission::WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        let _ = (ctx, path, wake);
+        match self._never {}
+    }
+
+    /// The here-only contract, as a member. Unreachable.
+    pub fn start_shallow(
+        &self,
+        ctx: &crate::admission::WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        let _ = (ctx, path, wake);
+        match self._never {}
+    }
+
+    /// The named here-only contract, as a member. Unreachable.
+    pub fn start_shallow_named(
+        &self,
+        ctx: &crate::admission::WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        let _ = (ctx, path, wake);
+        match self._never {}
+    }
+
+    /// The door the real arms retire a set through. Unreachable.
+    pub fn retire_within(
+        self,
+        ctx: &crate::admission::WorkerCtx,
+        bound: std::time::Duration,
+    ) -> bool {
+        let _ = (ctx, bound);
+        match self._never {}
+    }
+}
+
 /// The one error every [`DirWatch`] door answers with.
 #[cfg(not(any(windows, target_os = "macos")))]
 fn unwatched() -> std::io::Error {
@@ -1837,15 +1916,20 @@ pub fn leave_process(code: i32) -> ! {
 /// it is on the main thread and an application exists, and says exactly this
 /// when it is not, because a panic hook runs on whichever thread panicked and a
 /// refused launch runs before there is any application at all. A controlled
-/// stop's lost configuration change (T-QUIT-DOCUMENTS) is said here too.
+/// stop's lost configuration change (T-QUIT-DOCUMENTS) is not said here: it asks
+/// [`a_box_would_be_seen`] first, which answers no on this arm, and says its
+/// notice on `bt-app`'s queued `stderr` road (T-STOP-NOTICE-BOX-QUERY-MACOS).
 #[cfg(not(any(windows, target_os = "macos")))]
 #[expect(
     clippy::print_stderr,
-    reason = "the last-resort fault report, written where it is said: a panic's box comes after the \
-              panic road's fence, where a queued line would leave with the process; for the other \
-              caller that reaches it in a resident run, bt-app's SystemBox::say (the stop's lost \
-              configuration change), the synchronous write is a known limit, to be routed through \
-              stderr_line by plan row 66 (T-STOP-NOTICE-BOX-QUERY-MACOS)"
+    reason = "the last-resort fault report, written where it is said, for its two callers: \
+              bt-app's announce_panic (the panic hook, after the panic road's fence, where a \
+              queued line would leave with the process; and FolioApp::fail's frame-shape stop on \
+              the window thread, where the synchronous write beside the queue is a known limit, \
+              T-STOP-NOTICE-BOX-QUERY-MACOS report D8) and say_at_the_front_door, before the \
+              resident run has a queue; the stop's lost configuration change asks \
+              a_box_would_be_seen first and says the unseen case through stderr_line \
+              (T-STOP-NOTICE-BOX-QUERY-MACOS)"
 )]
 pub fn message_box(title: &str, text: &str) {
     eprintln!("{title}");
@@ -1858,6 +1942,27 @@ pub fn message_box(title: &str, text: &str) {
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn standalone_alert(title: &str, text: &str) {
     message_box(title, text);
+}
+
+/// **The box a reader would see** (T-STOP-NOTICE-BOX-QUERY-MACOS) — none on this arm, which
+/// has no box to raise: the type has no value, so [`a_box_would_be_seen`] can only answer no.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub enum SeenBox {}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+impl SeenBox {
+    /// Never runs: there is no `SeenBox` to call it on.
+    pub fn say(self, _title: &str, _text: &str) {
+        match self {}
+    }
+}
+
+/// **Would a box raised now be seen?** No: this arm has no box, only [`message_box`]'s two
+/// synchronous lines, so a caller that can say its text on a queued road says it there.
+#[cfg(not(any(windows, target_os = "macos")))]
+#[must_use]
+pub fn a_box_would_be_seen() -> Option<SeenBox> {
+    None
 }
 
 /// **The same claim, made by calling the doors** — the behavioural twin of

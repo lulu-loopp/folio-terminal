@@ -1,14 +1,14 @@
 //! CPU-only bookkeeping for the picture actually committed to one window.
 
 use bt_render::{RendererPresentState, SeatViewport};
+use bt_viewport::ViewportFrame;
 
 pub(crate) fn pictures_match(
     previous: &bt_viewport::ViewportFrame,
     next: &bt_viewport::ViewportFrame,
 ) -> bool {
     std::ptr::eq(previous, next)
-        || (crate::presentation_equivalent(previous, next)
-            && previous.math_failures == next.math_failures)
+        || (presentation_equivalent(previous, next) && previous.math_failures == next.math_failures)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +100,35 @@ impl PresentGate {
     pub fn invalidate(&mut self) {
         self.last = None;
     }
+}
+
+pub(crate) fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bool {
+    previous.columns == next.columns
+        && previous.grid_rows == next.grid_rows
+        && previous.rows == next.rows
+        && previous.presentation_offset_subpixels == next.presentation_offset_subpixels
+        && previous.cells == next.cells
+        && previous.cursor == next.cursor
+        && previous.cell_anchors == next.cell_anchors
+        && previous.row_map == next.row_map
+        && previous.selection_spans == next.selection_spans
+        // Without these two, a query typed at a still shell would find its
+        // matches and paint none of them: the cells did not change, and the skip
+        // this feeds would drop the very frame carrying the answer.
+        && previous.search_spans == next.search_spans
+        && previous.current_search_spans == next.current_search_spans
+        && previous.math_blocks == next.math_blocks
+        && previous.status_text == next.status_text
+        && previous.viewport_origin == next.viewport_origin
+        && previous.scroll_offset_rows == next.scroll_offset_rows
+        && previous.layout_key == next.layout_key
+        // Without this, a window slid sideways over a run of blanks is dropped as
+        // "the same picture" — and it *is* the same picture, which is exactly the
+        // trap. The frame is also the answer to every question about where a
+        // pointer is: `live_point_at`, the selection, the links and the caret all
+        // read `horizontal` off it. Keeping the old frame keeps the old origin,
+        // and the next click lands on the column the reader has already left.
+        && previous.horizontal == next.horizontal
 }
 
 #[cfg(test)]

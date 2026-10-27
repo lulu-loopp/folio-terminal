@@ -99,13 +99,19 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fmt;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Instant, SystemTime};
 
+use bt_math::{MathEngine, MathRenderError};
 use bt_platform::admission::WorkerCtx;
+use bt_term::InlineImageDecoder;
 
 use crate::lane::{self, Executor, Ledger, Owed, Queue, Refused, Relation, Saying, Terminal};
 use crate::{
-    AnswerOwner, Asked, MathWorkerRequest, MathWorkerResult, PathWorkerRequest, ScaleWorkerRequest,
+    AnswerOwner, Asked, DecorationWorkerCompletion, MathWorkerRequest, MathWorkerResult,
+    PathWorkerRequest, PeekPageOutcome, ScaleWorkerRequest, VIDEO_FRAME_FIT_PX, VideoGlance,
+    animation, entry_doors, pdf, preview,
 };
 
 /// **How many requests the formula and decode share owes at once** — a sizing choice: what one
@@ -413,7 +419,7 @@ impl ComputationLane {
         &self,
         request: MathWorkerRequest,
     ) -> Result<ComputationId, (Refused, MathWorkerRequest)> {
-        self.decorate_through(request, crate::run_decoration_worker)
+        self.decorate_through(request, run_decoration_worker)
     }
 
     /// [`Self::decorate`], the formula share's worker — when this request is the one that starts
@@ -461,7 +467,7 @@ impl ComputationLane {
         &self,
         request: ScaleWorkerRequest,
     ) -> Result<ComputationId, (Refused, ScaleWorkerRequest)> {
-        self.scale_through(request, crate::scale_door)
+        self.scale_through(request, scale_door)
     }
 
     /// [`Self::scale`], the resample share's worker — when this request is the one that starts
@@ -508,7 +514,7 @@ impl ComputationLane {
         &self,
         request: PathWorkerRequest,
     ) -> Result<ComputationId, (Refused, PathWorkerRequest)> {
-        self.verify_through(request, crate::path_door)
+        self.verify_through(request, path_door)
     }
 
     /// [`Self::verify`], the path share's worker — when this request is the one that starts it —
@@ -575,6 +581,274 @@ impl Drop for ComputationLane {
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// [`PeekPageOutcome`] for one page of one file, on the worker's own thread.
+pub(crate) fn raster_peek_page(
+    path: &Path,
+    page: u32,
+    fit: (u32, u32),
+    known: Option<SystemTime>,
+) -> PeekPageOutcome {
+    let mtime = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok();
+    // Both halves have to be known for "unchanged" to mean anything: a filesystem that does not
+    // report a modification time answers `None` every time, and a cache keyed on that would hold a
+    // stale page for ever. Such a file is simply drawn again.
+    if known.is_some() && known == mtime {
+        return PeekPageOutcome::Unchanged;
+    }
+    PeekPageOutcome::Drawn {
+        mtime,
+        raster: pdf::page_raster(path, page, fit.0, fit.1),
+    }
+}
+
+/// [`VideoGlance`] for one file, on the worker's own thread.
+///
+/// The `metadata` call comes first and stands whatever the decoder does: a file this platform has
+/// no source for still has a size, and the card that says only its size is the honest one rather
+/// than the refusal it replaced.
+pub(crate) fn read_video_glance(
+    worker: &bt_platform::admission::WorkerCtx,
+    path: &Path,
+) -> VideoGlance {
+    // **Media Foundation opens what it is given** (route A of the untrusted-path audit,
+    // 2026-09-08). `first_frame` hands the path to `IMFSourceReader`, which is a full container
+    // parse of a file this window never checked was one of its own; a `.mp4` on a share was
+    // therefore fetched over SMB by a resting pointer, and the `metadata` on the line below dialled
+    // the same server first. The disk's half of the question is asked too, because this runs on the
+    // worker and the bytes are about to be read.
+    if !bt_transcript::paths::may_read_unasked_through_links(
+        path,
+        bt_transcript::paths::PathNamer::ThisWindow,
+    ) {
+        return VideoGlance {
+            frame: None,
+            facts: preview::VideoFacts::default(),
+            mtime: None,
+        };
+    }
+    let metadata = std::fs::metadata(path).ok();
+    let bytes = metadata.as_ref().map(std::fs::Metadata::len);
+    let mtime = metadata.and_then(|meta| meta.modified().ok());
+    let frame = {
+        let _ = worker;
+        bt_platform::video::first_frame(path, VIDEO_FRAME_FIT_PX.0, VIDEO_FRAME_FIT_PX.1)
+    };
+    VideoGlance {
+        facts: preview::VideoFacts {
+            duration_ms: frame.as_ref().and_then(|frame| frame.duration_ms),
+            native: frame
+                .as_ref()
+                .map(|frame| (frame.native_width, frame.native_height)),
+            bytes,
+        },
+        frame,
+        mtime,
+    }
+}
+
+/// **One file's native pixels, down whichever decoder can read that file** (user
+/// report 2026-09-12).
+///
+/// The fork is one line and it is not a fallback: a `.gif`'s picture is its
+/// first frame, and the lane that can pull one frame out of a long file without
+/// reading the whole of it is [`animation::first_frame`]. The picture decoder
+/// reads a file whole behind `bt_term::MAX_INLINE_IMAGE_BYTES` — eight
+/// megabytes, the allowance for a picture a shell pastes into a scrollback — so
+/// an ordinary 11.7 MB screen recording came back "inline image exceeds its
+/// decode limit" and the pane drew nothing at all, under a foot line saying the
+/// animation had been declined too. One file, two refusals, and neither of them
+/// about anything the reader had done.
+///
+/// `None` from the animation lane is "not this lane's file" — a name that is not
+/// `.gif`, a path this window does not read unasked, a container that turns out
+/// to be a JPEG, a frame past the ceiling — and the picture decoder answers
+/// those, which is the whole of why the name alone cannot decide it.
+pub(crate) fn peek_pixels(
+    decoder: &mut InlineImageDecoder,
+    path: &Path,
+) -> std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError> {
+    if let Some(still) = animation::first_frame(path) {
+        return Ok(bt_term::DecodedInlineImage {
+            // The peek's own numbering, and the only one there is: this lane is
+            // asked for a file and not for an occurrence in a stream.
+            occurrence_id: 0,
+            key: still.key,
+            rgba: still.rgba,
+            width_px: still.width_px,
+            height_px: still.height_px,
+            // The animation lane hands back the frame the file declares and
+            // reduces nothing (`animation.rs` keeps its own caps), so these
+            // pixels are the file's own.
+            native_size: None,
+            // It is a GIF, which this window has always reported as animated
+            // whether or not it plays it.
+            animated: true,
+        });
+    }
+    decoder.decode_in_lane(
+        bt_term::InlineImageTask {
+            occurrence_id: 0,
+            source: bt_term::InlineImageSource::LocalPath(path.to_owned()),
+        },
+        bt_platform::file_reads::Lane::Peek,
+    )
+}
+
+/// **The resample share's door** (`computation_lane`, `bt-image-scale-worker`): one Lanczos3 pass
+/// per request. A newer size for the same picture on the same pane and surface replaces one still
+/// waiting at the lane's door (`ComputationLane::scale`), so a divider drag runs the size it ends
+/// at, not every size it passed through.
+pub(crate) fn scale_door(_ctx: &bt_platform::admission::WorkerCtx) -> Door<ScaleWorkerRequest> {
+    // The entry's answer, taken here rather than handed down: the lane is made before there is a
+    // `Runtime` to own the flag, and this is the answer [`Runtime::trace_perf`] holds.
+    let trace_perf = entry_doors::installed().perf;
+    Box::new(
+        move |_ctx: &bt_platform::admission::WorkerCtx, request: ScaleWorkerRequest| {
+            // **What a Lanczos3 pass actually costs on this machine**, beside the size that provoked
+            // it. The lane is the one suspect in a sticky zoom that the event thread cannot time for
+            // itself, because it runs on another thread and answers whenever it answers.
+            let started = trace_perf.then(Instant::now);
+            let purpose = request.purpose();
+            let (width, height) = request.size();
+            let (leaf, completion) = request.completion();
+            if let Some(started) = started {
+                crate::diagnostics::stderr_line(format!(
+                    "BT_PERF_TRACE image_scale purpose={purpose:?} size={width}x{height} lanczos_us={}",
+                    started.elapsed().as_micros(),
+                ));
+            }
+            MathWorkerResult { leaf, completion }
+        },
+    )
+}
+
+/// **The path-verification share's door** (audit 3 C-2; `computation_lane`,
+/// `bt-path-verify-worker`).
+///
+/// One question, one call, one answer, and nothing else runs on its thread — which is the whole
+/// of the design: a `verify_path` that blocks inside the SMB redirector holds up nothing but the
+/// next path question, and the window thread was never waiting on either.
+pub(crate) fn path_door(_ctx: &bt_platform::admission::WorkerCtx) -> Door<PathWorkerRequest> {
+    Box::new(run_path_verify_worker)
+}
+
+/// One path question, answered.
+pub(crate) fn run_path_verify_worker(
+    _ctx: &bt_platform::admission::WorkerCtx,
+    PathWorkerRequest { leaf, path }: PathWorkerRequest,
+) -> MathWorkerResult {
+    let verdict = bt_term::verify_path(&path, &bt_platform::resolved_for_a_door);
+    MathWorkerResult {
+        leaf,
+        completion: DecorationWorkerCompletion::VerifiedPath { path, verdict },
+    }
+}
+
+/// **The formula and picture worker** (`computation_lane`, `bt-math-worker`): the engine and the
+/// decoder are made once, on the worker, and the door it returns answers each request — the
+/// production decoration work, also exercised without a window by regression tests.
+pub(crate) fn run_decoration_worker(
+    worker: &bt_platform::admission::WorkerCtx,
+) -> Door<MathWorkerRequest> {
+    // The door is made on the worker; each request is handed the same capability again.
+    let _ = worker;
+    let engine = MathEngine::new();
+    let mut image_decoder = InlineImageDecoder::default();
+    Box::new(
+        move |worker: &bt_platform::admission::WorkerCtx, work: MathWorkerRequest| {
+            let (leaf, completion) = match work {
+                MathWorkerRequest::Math {
+                    leaf,
+                    mut task,
+                    foreground_rgb,
+                } => {
+                    let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
+                    (leaf, DecorationWorkerCompletion::Math { task, result })
+                }
+                MathWorkerRequest::InlineImage { leaf, task } => {
+                    let result = image_decoder.decode(task.clone());
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::InlineImage { task, result },
+                    )
+                }
+                MathWorkerRequest::PreviewMath { leaf, key } => {
+                    let result = bt_math::key_for_em_px(
+                        key.em_milli_px as f32 / 1000.0,
+                        key.foreground_rgb,
+                        key.mode,
+                    )
+                    .ok_or(MathRenderError::InvalidDimensions)
+                    .and_then(|render_key| engine.render(&key.source, render_key));
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PreviewMath { key, result },
+                    )
+                }
+                MathWorkerRequest::PeekImage { leaf, path } => {
+                    let result = peek_pixels(&mut image_decoder, &path);
+                    (leaf, DecorationWorkerCompletion::PeekImage { path, result })
+                }
+                MathWorkerRequest::PeekVideoFrame { leaf, path } => {
+                    let glance = read_video_glance(worker, &path);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekVideoFrame { path, glance },
+                    )
+                }
+                MathWorkerRequest::PeekAnimation { leaf, path } => {
+                    let frames = animation::decode(&path);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekAnimation { path, frames },
+                    )
+                }
+                // **This is the thread `AnimationCursor::next_frames` exists for.** Composing a frame is
+                // the whole logical screen, and the window has one thread that must not spend that.
+                MathWorkerRequest::AnimationFill {
+                    leaf,
+                    path,
+                    serial,
+                    mut cursor,
+                    want,
+                } => {
+                    let frames = cursor.next_frames(want);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::AnimationFill {
+                            path,
+                            serial,
+                            cursor,
+                            frames,
+                        },
+                    )
+                }
+                MathWorkerRequest::PeekPage {
+                    leaf,
+                    path,
+                    page,
+                    fit,
+                    known,
+                } => {
+                    let outcome = raster_peek_page(&path, page, fit, known);
+                    (
+                        leaf,
+                        DecorationWorkerCompletion::PeekPage {
+                            path,
+                            page,
+                            fit,
+                            outcome,
+                        },
+                    )
+                }
+            };
+            MathWorkerResult { leaf, completion }
+        },
+    )
 }
 
 /// **A lane under a test's eye** — the lane, its wakes, the lines its ledgers said, what its sink
@@ -698,7 +972,7 @@ pub(crate) mod fixtures {
         heard: mpsc::Sender<crate::ShellAddress>,
     ) -> impl FnOnce(&WorkerCtx) -> Door<MathWorkerRequest> + Send + 'static {
         move |ctx| {
-            let mut real = crate::run_decoration_worker(ctx);
+            let mut real = run_decoration_worker(ctx);
             Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
                 let leaf = match &request {
                     MathWorkerRequest::Math { leaf, .. }
@@ -890,7 +1164,7 @@ pub(crate) mod contract_adapter {
                         },
                     };
                     let door = move |ctx: &WorkerCtx| -> Door<MathWorkerRequest> {
-                        let mut real = crate::run_decoration_worker(ctx);
+                        let mut real = run_decoration_worker(ctx);
                         Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
                             // The suite's file, held while the real work runs.
                             let held = match &request {
@@ -915,7 +1189,7 @@ pub(crate) mod contract_adapter {
                         task: crate::test_support::scale_task(&content_of(question), 8),
                     };
                     let door = move |ctx: &WorkerCtx| -> Door<ScaleWorkerRequest> {
-                        let mut real = crate::scale_door(ctx);
+                        let mut real = scale_door(ctx);
                         Box::new(move |ctx: &WorkerCtx, request: ScaleWorkerRequest| {
                             // The suite's file, held while the real work runs.
                             let held = match &request {
@@ -940,7 +1214,7 @@ pub(crate) mod contract_adapter {
                         path: path_of(question),
                     };
                     let door = move |ctx: &WorkerCtx| -> Door<PathWorkerRequest> {
-                        let mut real = crate::path_door(ctx);
+                        let mut real = path_door(ctx);
                         Box::new(move |ctx: &WorkerCtx, request: PathWorkerRequest| {
                             // The suite's file, held while the real work runs.
                             let held = question_of_path(&request.path)
@@ -1445,7 +1719,7 @@ mod tests {
 
     /// A formula door — the product's — whose first terminal formula's work panics.
     fn formula_fails_once(ctx: &WorkerCtx) -> Door<MathWorkerRequest> {
-        let mut real = crate::run_decoration_worker(ctx);
+        let mut real = run_decoration_worker(ctx);
         let mut failed = false;
         Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
             if !failed && matches!(request, MathWorkerRequest::Math { .. }) {
@@ -1458,7 +1732,7 @@ mod tests {
 
     /// A path door — the product's — whose first question about a `笔记-notes.md` panics.
     fn path_fails_once(ctx: &WorkerCtx) -> Door<PathWorkerRequest> {
-        let mut real = crate::path_door(ctx);
+        let mut real = path_door(ctx);
         let mut failed = false;
         Box::new(move |ctx: &WorkerCtx, request: PathWorkerRequest| {
             if !failed && request.path.ends_with("笔记-notes.md") {

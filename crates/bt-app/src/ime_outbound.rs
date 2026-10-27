@@ -17,12 +17,12 @@ pub fn install() {
 
 #[derive(Default)]
 pub struct State {
-    owner: Cell<Option<(ImeOwner, &'static str)>>,
-    draw: Cell<Option<&'static str>>,
+    pub(super) owner: Cell<Option<(ImeOwner, &'static str)>>,
+    pub(super) draw: Cell<Option<&'static str>>,
 }
 
 /// A quiet answer emits nothing. None resets the next composition's first answer.
-fn changed<T: Copy + PartialEq>(last: &Cell<Option<T>>, next: Option<T>) -> bool {
+pub(super) fn changed<T: Copy + PartialEq>(last: &Cell<Option<T>>, next: Option<T>) -> bool {
     last.replace(next) != next && next.is_some()
 }
 
@@ -48,11 +48,15 @@ pub fn area_line(area: ImeCursorArea, action: &'static str) -> String {
     )
 }
 
-fn cancel_line(owner: ImeOwner, reason: &'static str, result: Option<bool>) -> String {
+pub(super) fn cancel_line(owner: ImeOwner, reason: &'static str, result: Option<bool>) -> String {
     format!("IME_OUT_CANCEL owner={owner:?} reason={reason} result={result:?}")
 }
 
-fn owner_line(old: Option<(ImeOwner, &'static str)>, new: ImeOwner, cause: &'static str) -> String {
+pub(super) fn owner_line(
+    old: Option<(ImeOwner, &'static str)>,
+    new: ImeOwner,
+    cause: &'static str,
+) -> String {
     format!(
         "IME_OWNER old={:?} new={new:?} previous_cause={} cause={cause}",
         old.map(|v| v.0),
@@ -74,7 +78,7 @@ fn origin_kind(origin: &CompositionOrigin) -> ImeOwner {
     }
 }
 
-fn ruling_line(
+pub(super) fn ruling_line(
     event: &Ime,
     state: &Composing,
     here: &CompositionOrigin,
@@ -104,7 +108,12 @@ fn ruling_line(
 /// never a veto: the compositor can and does draw in a TUI's alternate screen.
 /// `in_view` is the frame's `cursor_in_view`: a cursor the program hid is still where a
 /// composition is drawn, so only a cursor whose cell the frame does not draw stops it.
-fn draw_reason(owner_matches: bool, in_view: bool, nonzero: bool, written: bool) -> &'static str {
+pub(super) fn draw_reason(
+    owner_matches: bool,
+    in_view: bool,
+    nonzero: bool,
+    written: bool,
+) -> &'static str {
     if !owner_matches {
         "owner_mismatch"
     } else if !in_view {
@@ -119,16 +128,16 @@ fn draw_reason(owner_matches: bool, in_view: bool, nonzero: bool, written: bool)
 }
 
 #[derive(Clone, Copy)]
-struct DrawFacts {
-    bytes: usize,
-    visible: bool,
-    row: u32,
-    column: u32,
-    alt: bool,
-    area: ImeCursorArea,
+pub(super) struct DrawFacts {
+    pub(super) bytes: usize,
+    pub(super) visible: bool,
+    pub(super) row: u32,
+    pub(super) column: u32,
+    pub(super) alt: bool,
+    pub(super) area: ImeCursorArea,
 }
 
-fn draw_line(reason: &'static str, facts: DrawFacts) -> String {
+pub(super) fn draw_line(reason: &'static str, facts: DrawFacts) -> String {
     let DrawFacts {
         bytes,
         visible,
@@ -153,141 +162,6 @@ pub fn caret_line(
     position: Option<(i32, i32)>,
 ) -> String {
     format!("IME_OUT_CARET action={action} reason={reason} position={position:?}")
-}
-
-impl<B: Backend> Runtime<'_, B> {
-    pub(super) fn trace_ime_owner(&self, keyboard: KeyboardOwner) {
-        if !enabled() {
-            return;
-        }
-        let owner = ime_owner(keyboard);
-        let cause = match owner {
-            ImeOwner::Modal if self.app.quit.as_ref().is_some_and(quit::Quit::is_asking) => {
-                "quit_dialog"
-            }
-            ImeOwner::Modal if self.window.dirty_gate.is_open() => "dirty_gate",
-            ImeOwner::Modal if self.window.first_run.is_open() => "first_run",
-            ImeOwner::Modal if self.paste_card_seat().is_some() => "paste_card",
-            ImeOwner::Modal if self.update_card_is_up() => "update_card",
-            ImeOwner::Modal if self.window.settings.is_open() => "settings",
-            ImeOwner::Modal => match popup_takes_the_key(self.popups_up()) {
-                Some(Popup::Profile) => "profile_popup",
-                Some(Popup::Root) => "root_popup",
-                Some(Popup::File) => "file_popup",
-                Some(Popup::Pane) => "pane_popup",
-                Some(Popup::GraphFilter) => "graph_filter_popup",
-                Some(Popup::Preview) => "preview_popup",
-                Some(Popup::GitMenu) => "git_popup",
-                Some(Popup::TermMenu) => "terminal_popup",
-                Some(Popup::Tab) => "tab_popup",
-                Some(Popup::Palette) => "palette_popup",
-                // Under every popup, as its rung is (0.4.5 ticket 57).
-                None if self.restore_card_is_up() => "restore_card",
-                None => "modal",
-            },
-            ImeOwner::Rename => "rename",
-            ImeOwner::GraphSearch => "graph_search",
-            ImeOwner::GitPrompt => "git_prompt",
-            ImeOwner::Preview => "preview",
-            ImeOwner::Search => "search",
-            ImeOwner::Palette => "palette",
-            ImeOwner::FilesTree => "files_tree",
-            ImeOwner::Shell => "shell",
-        };
-        let last = self.window.ime_outbound.owner.replace(Some((owner, cause)));
-        if last.map(|v| v.0) != Some(owner) {
-            self.trace_ime_line(|| owner_line(last, owner, cause));
-        }
-    }
-
-    pub(super) fn trace_ime_line(&self, message: impl FnOnce() -> String) {
-        line(|| {
-            format!(
-                "window={} {}",
-                u64::from(self.window.window.id()),
-                message()
-            )
-        });
-    }
-
-    pub(super) fn trace_ime_input(&self, event: &Ime) {
-        if !enabled() {
-            return;
-        }
-        if matches!(event, Ime::Commit(_) | Ime::Disabled)
-            || matches!(event, Ime::Preedit(text, _) if text.is_empty())
-        {
-            self.window.ime_outbound.draw.set(None);
-        }
-        self.trace_ime_line(|| input_line(event));
-    }
-
-    pub(super) fn trace_ime_ruling(
-        &self,
-        event: &Ime,
-        here: &CompositionOrigin,
-        ruling: CompositionRuling,
-    ) {
-        self.trace_ime_line(|| ruling_line(event, &self.window.composing_in, here, ruling));
-    }
-
-    pub(super) fn trace_ime_cancel(
-        &self,
-        owner: ImeOwner,
-        reason: &'static str,
-        result: Option<bool>,
-    ) {
-        if !enabled() {
-            return;
-        }
-        if result.is_none() {
-            self.window.ime_outbound.draw.set(None);
-        }
-        self.trace_ime_line(|| cancel_line(owner, reason, result));
-    }
-
-    pub(super) fn trace_ime_area(&self, area: ImeCursorArea, action: &'static str) {
-        self.trace_ime_line(|| area_line(area, action));
-    }
-
-    pub(super) fn trace_ime_frame(&self, frame: &ViewportFrame, written: bool) {
-        // Called only on the enabled path, before the unchanged-frame early return.
-        let Some(preedit) = self.window.preedit.as_ref().filter(|p| !p.text.is_empty()) else {
-            self.window.ime_outbound.draw.set(None);
-            return;
-        };
-        // The focused pane's frame, at that pane's own metrics (ticket 37).
-        let Some(metrics) = self.focused().map(|leaf| leaf.metrics) else {
-            return;
-        };
-        let area = terminal_ime_cursor_area(&self.window.renderer, metrics, frame);
-        let reason = draw_reason(
-            ime_owner(self.keyboard_owner()) == ImeOwner::Shell,
-            frame.cursor_in_view,
-            area.width != 0 && area.height != 0,
-            written,
-        );
-        if changed(&self.window.ime_outbound.draw, Some(reason)) {
-            self.trace_ime_line(|| {
-                draw_line(
-                    reason,
-                    DrawFacts {
-                        bytes: preedit.text.len(),
-                        visible: frame.cursor.visible,
-                        row: frame.cursor.row,
-                        column: frame.cursor.column,
-                        alt: frame_is_alternate_screen(frame),
-                        area,
-                    },
-                )
-            });
-        }
-    }
-
-    pub(super) fn destroy_ime_caret(&mut self, reason: &'static str) {
-        self.trace_ime_line(|| caret_line("destroy", reason, None));
-        self.window.ime_system_caret.destroy();
-    }
 }
 
 #[cfg(test)]

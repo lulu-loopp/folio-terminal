@@ -129,7 +129,7 @@ fn look(worker: &WorkerCtx, folder: &Path, record: &Path) -> Result<Option<Annou
 fn copies_in(_worker: &WorkerCtx, folder: &Path) -> io::Result<BTreeSet<String>> {
     let mut names = BTreeSet::new();
     for entry in std::fs::read_dir(folder)? {
-        let entry = entry?;
+        let entry: std::fs::DirEntry = entry?;
         if !entry.file_type()?.is_dir() {
             names.insert(entry.file_name().to_string_lossy().into_owned());
         }

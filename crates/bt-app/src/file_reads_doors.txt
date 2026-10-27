@@ -64,6 +64,9 @@ Runtime::open_search: .open
 Runtime::open_web_page_on: webhost::WebSeat::open
 # The spare web controller's seat (ticket 60): the pane's own WebSeat::open, a domain verb, no file read.
 WebSeat::open_parked: Self::open
+# The platform's watch door opens the process's one directory watch set (T-DIR-WATCH-ONE-THREAD):
+# `DirWatchSet::open`, a domain verb (a completion port or a run loop and its thread), no file read.
+<Kernel as Door>::start: bt_platform::DirWatchSet::open
 Runtime::place_float: .open
 Runtime::play_video_file_on: .open
 Runtime::pop_out_preview: .open

@@ -61,6 +61,7 @@ use anyhow::{Context, Result};
 use bt_platform::admission::WorkerCtx;
 use bt_platform::{HandOffRefusal, Handoff, NativeWindow};
 
+use crate::i18n;
 use crate::lane::{self, Executor, Ledger, Owed, Refused, Saying, Terminal};
 
 /// How many hand-offs may wait behind the one running.
@@ -566,9 +567,25 @@ impl Refusal {
                 .stderr
                 .map(|(lead, context)| format!("{lead}: {context}: {reason}")),
             notice: (self.program_notice && reason.contains(bt_platform::PROGRAM_REFUSED))
-                .then(crate::files_program_refused_notice),
+                .then(files_program_refused_notice),
         }
     }
+}
+
+/// What the tree says when a row it will not open is activated.
+///
+/// **Short on purpose.** The status overlay is right-aligned into the pane's own
+/// width and keeps the *tail* of anything longer, so a sentence that does not
+/// fit loses its beginning — and the beginning is the half that says what
+/// happened. Measured against a files column beside one terminal in a 1030pt
+/// window, which leaves the shell about 37 columns: this is 36, and what a
+/// narrower pane drops (`The files tree`) still leaves a clause that reads.
+///
+/// The advice it might have added — that this is a terminal, and typing the
+/// name is how you run one — is left out for the same reason. It doubled the
+/// length to say something the prompt underneath is already saying.
+pub(crate) fn files_program_refused_notice() -> &'static str {
+    i18n::Text::FilesProgramRefused.text()
 }
 
 #[cfg(test)]
@@ -1437,7 +1454,7 @@ mod tests {
                 line: Some(format!("recoverable reference open failure: {text}")),
                 notice: text
                     .contains(bt_platform::PROGRAM_REFUSED)
-                    .then(crate::files_program_refused_notice),
+                    .then(files_program_refused_notice),
             }
         };
         let doors = bt_platform::spawn_at_priority(
@@ -1465,7 +1482,7 @@ mod tests {
         if bt_platform::host_platform() != bt_platform::HostPlatform::OtherUnix {
             assert_eq!(
                 refusal.words(&reasons[0]).notice,
-                Some(crate::files_program_refused_notice()),
+                Some(files_program_refused_notice()),
                 "a program is refused in the reader's words"
             );
         }

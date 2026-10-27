@@ -4,6 +4,7 @@
 use crate::PtyTarget;
 use crate::runtime::files::{files_row_activation, press_files_node};
 use crate::runtime::panes::risen_frame;
+use crate::runtime::preview::crumb_segments;
 use crate::runtime::preview::image_zoom_notch;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -16,9 +17,9 @@ use crate::{
     PreviewSurface, RenameExit, RenameSubject, RowActivation, RowHost, RowPayload, RowPayloadKind,
     RowPress, Runtime, SpringGate, TabClick, TabId, TearGrip, TerminalColumnDrag,
     TerminalReference, TerminalThumbDrag, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst,
-    WheelRoute, crumb_segments, files, first_run, float, formula_tools, hang_watch, input, marks,
-    mouse_trace, palette, profiles, restore, seats, settings, settling, toast, tooltip, update,
-    web_page_cursor, websheet, wheel_zoom_notches, write_pty_input,
+    WheelRoute, files, first_run, float, formula_tools, hang_watch, input, marks, mouse_trace,
+    palette, profiles, restore, seats, settings, settling, toast, tooltip, update, websheet,
+    wheel_zoom_notches, write_pty_input,
 };
 use crate::{TextSizeAim, TextStep};
 use anyhow::Context;
@@ -6770,6 +6771,136 @@ impl<B: Backend> Runtime<'_, B> {
             guard: DragGuard::sample(),
         });
     }
+
+    /// **Put the keyboard in one named pane of the active tab**, however it was
+    /// named.
+    ///
+    /// [`Runtime::focus_pane_at`] without the pointer: the press resolves a
+    /// position to a seat and then does exactly this, and the attention queue's
+    /// jump names its seat outright. Two doors, one room — a second spelling of
+    /// "focus this pane" is a second place for the frame slot to be forgotten.
+    /// **The keyboard door, so a formula's hover ends here too** (audit
+    /// 2026-09-15, RB-3).
+    ///
+    /// Here and deliberately **not** in [`Self::settle_focus_on`], which the two
+    /// doors share. The other one is [`Self::focus_pane_at`], and that is a
+    /// *press*: the press that focuses an unfocused pane is very often the press
+    /// that operates the mark in it, and a clear on that road would take the
+    /// marks off the glass — and the shell's own `toolbar_visible` with them —
+    /// between the pointer landing and `math_hit` being asked. This door is the
+    /// one nothing about the pointer reaches: a pane chord, or the attention
+    /// queue jumping to a seat.
+    pub(crate) fn focus_seat(&mut self, seat: SeatId) -> Result<()> {
+        self.leave_hovered_math(Instant::now(), MathHoverExit::BandLeftTheScreen)?;
+        self.take_keyboard_into(seat)?;
+        self.settle_focus_on(seat)
+    }
+
+    /// **A path that landed in a terminal takes the keyboard with it**
+    /// (owner's ruling 2026-09-17, `T-FOCUS-FOLLOWS-DROPPED-PATH`).
+    ///
+    /// The ruling's own reason, met on the machine: what a reader types after
+    /// dropping a file is `Enter`, or the rest of the argument. With the
+    /// keyboard left where it was, that keystroke goes into a different shell —
+    /// which is the wrong-pane hazard the drop's three review rounds closed for
+    /// the path, reopened for the key after it.
+    ///
+    /// **[`Self::focus_seat`] with one line in front of it**, and the line is
+    /// [`Self::insert_path_into_terminal`]'s own (K144): the column very likely
+    /// holds the keyboard, because the press that picked the row up is
+    /// [`Self::focus_pane_at`]'s files arm, and a path that arrives in a shell
+    /// the arrow keys do not reach is a path you cannot edit. The external drop
+    /// road takes the same line for the same reason — the column may have been
+    /// clicked at any point before the hand went to another application.
+    ///
+    /// [`FilesFocusArrival::Pointer`] because a drop is a pointer gesture: it
+    /// said where it was going, so nothing is lit.
+    ///
+    /// **Called only after bytes have actually been written**, never on a
+    /// refusal. See [`Self::paste_paths_into`], which answers that question, and
+    /// [`Self::paste_offer_kept`], which is not consulted here at all — where
+    /// the bytes go is settled before this runs and this cannot reach it.
+    pub(crate) fn focus_the_pane_a_path_landed_in(&mut self, seat: SeatId) -> Result<()> {
+        // **Every surface that could be holding the keyboard instead has to
+        // give it up, not just the column** (review 2026-09-17 P1-a). Moving
+        // the tree's focus resolves exactly one of the four rungs
+        // ([`Self::keyboard_owner`]) — the *focused preview seat*, which stops
+        // being a preview the moment a terminal is focused. The other three
+        // survive it, and each is a measured way for the next `Enter` to go
+        // somewhere other than the shell the path just landed in:
+        //
+        // * a **torn-off preview float** the reader clicked into, which
+        //   `focused_preview_float` goes on finding;
+        // * a **live preview editor**, which `preview_edit_focus` goes on
+        //   naming even after the pane behind it loses the layout's focus;
+        // * the **search capsule's field**, which owns the keys while the caret
+        //   is in it.
+        //
+        // Each is released through the door the pointer road already uses —
+        // `float.blur()` from [`Self::focus_pane_at`], `leave_preview_page` from
+        // the click-away roads, `search.blur()` from the button router — because
+        // a second spelling of "give the keyboard back" is a second place for
+        // one of these to be forgotten, which is how this one was missed.
+        //
+        // The modal owners are **not** on this list and must never be: a quit
+        // card, a settings page, a gate, a menu, the palette and the rename box
+        // are answered rather than dismissed, and a drop does not reach this
+        // function while one of them is up — [`Self::a_modal_holds_the_window`]
+        // refuses the whole gesture before anything is written.
+        if self.set_files_keyboard(None, FilesFocusArrival::Pointer) {
+            self.refresh_chrome();
+        }
+        if let Some(surface) = self.preview_edit_focus() {
+            self.leave_preview_page(surface);
+        }
+        if self.window.search.is_focused() {
+            self.window.search.blur();
+            self.after_search_change()?;
+        }
+        if self.window.float.blur() && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        self.focus_seat(seat)
+    }
+
+    /// The layout half: the tree's own focus, and everything that hangs off it.
+    pub(crate) fn settle_focus_on(&mut self, seat: SeatId) -> Result<()> {
+        if !self.seats.set_focus(seat) {
+            return Ok(());
+        }
+        // Focus is W2's input, so the window's own minimum can move with it —
+        // the focus seat is the last one the concession ladder folds.
+        self.apply_window_min_inner_size()?;
+        self.commit_seat_geometry()?;
+        self.mark_session_dirty(Instant::now());
+        Ok(())
+    }
+}
+
+/// The cursor a hosted page asked for, in winit's vocabulary.
+///
+/// The numbers are Win32 `IDC_*` values, which is what `CursorChanged` reports
+/// and the only form the engine offers. The five below are the five gate 3
+/// measured a page asking for; anything else falls back to nothing — **not** to
+/// an arrow, because "the page said something this window cannot draw" and "the
+/// page asked for the default" are different, and only the second of them means
+/// the arrow.
+pub(crate) fn web_page_cursor(system_cursor_id: u32) -> Option<winit::window::CursorIcon> {
+    use winit::window::CursorIcon;
+    Some(match system_cursor_id {
+        32512 => CursorIcon::Default,
+        32513 => CursorIcon::Text,
+        32649 => CursorIcon::Pointer,
+        32514 => CursorIcon::Wait,
+        32515 => CursorIcon::Crosshair,
+        32642 => CursorIcon::NwseResize,
+        32643 => CursorIcon::NeswResize,
+        32644 => CursorIcon::EwResize,
+        32645 => CursorIcon::NsResize,
+        32646 => CursorIcon::Move,
+        32648 => CursorIcon::NotAllowed,
+        _ => return None,
+    })
 }
 
 /// **Where a button event is answered from** (user report, 2026-09-10).

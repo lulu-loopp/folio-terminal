@@ -785,7 +785,7 @@ fn track_formula_menu(
 // does not document an extern block and says so.
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {
-    static NSApp: *mut AnyObject;
+    pub(crate) static NSApp: *mut AnyObject;
 }
 
 /// **Say one thing in a box, with no window behind it** (M2-3).
@@ -794,12 +794,15 @@ unsafe extern "C" {
 /// arm's reason: everything Folio says once it has a window it says on a card
 /// anchored at the surface the news is about, and a program that has drawn
 /// nothing — or whose windows are being taken down — has nothing to put a card
-/// on. Its three callers are `bt_app::announce_panic` — the panic hook, when the
-/// resident run has no console to write to — `say_at_the_front_door`, which is a
-/// launch that is about to exit, and `SystemBox::say`, a controlled stop saying,
-/// before its windows close, the configuration changes it could keep nowhere
-/// (T-QUIT-DOCUMENTS). That third one runs on the window thread, which on macOS
-/// is the main thread, with the application running and its windows still up.
+/// on. Its two callers are `bt_app::announce_panic` — the panic hook, when the
+/// resident run has no console to write to, and `FolioApp::fail`'s frame-shape
+/// stop on the window thread — and `say_at_the_front_door`, which
+/// is a launch that is about to exit. A controlled stop saying, before its
+/// windows close, the configuration changes it could keep nowhere
+/// (T-QUIT-DOCUMENTS; `bt_app`'s `SystemBox::say`) does not come here: it asks
+/// [`crate::a_box_would_be_seen`] first and raises the box through the
+/// [`crate::SeenBox`] it answers, so a stop nobody would see a box for says its
+/// notice on the run's `stderr` road and not here (T-STOP-NOTICE-BOX-QUERY-MACOS).
 ///
 /// **Two conditions, and the fallback below them is not a degradation.**
 /// `-[NSAlert runModal]` may only be called on the main thread, and it needs a
@@ -817,7 +820,8 @@ unsafe extern "C" {
 /// so a second modal started from inside one can wait forever. It cannot happen
 /// from here. The completion block [`sheet`] installs contains exactly two
 /// statements — park the answer, mark the view dirty — and calls nothing in
-/// `bt-app`; none of this function's three callers is reachable from it. The
+/// `bt-app`; none of this function's two callers, nor the stop's `SeenBox::say`,
+/// is reachable from it. The
 /// only path that could is a Rust panic *inside* the block reaching the hook,
 /// and a panic there unwinds into Objective-C and ends the process before any
 /// hook of ours is consulted (X-2 measured exactly that). The sheet is also not
@@ -862,6 +866,14 @@ pub fn message_box(title: &str, text: &str) {
     if !an_alert_would_be_seen(mtm) {
         return say_to_stderr(title, text);
     }
+    raise_alert(mtm, title, text);
+}
+
+/// **The alert itself, raised once its three questions have been answered yes** — by
+/// [`message_box`] above, or by the [`crate::SeenBox`] that `crate::a_box_would_be_seen`
+/// answers after asking the same three (T-STOP-NOTICE-BOX-QUERY-MACOS). It has no fallback: a
+/// caller reaches it only with a reader there.
+pub(crate) fn raise_alert(mtm: MainThreadMarker, title: &str, text: &str) {
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&NSString::from_str(title));
     alert.setInformativeText(&NSString::from_str(text));
@@ -886,7 +898,7 @@ pub fn message_box(title: &str, text: &str) {
 /// `-[NSApplication hide:]` (`app_delegate::AppDelegateEventKind::Reopen`), and
 /// neither of those is a window a reader can see. A window's own `isVisible` is
 /// NO for both, which is the reading this rule wants.
-fn an_alert_would_be_seen(mtm: MainThreadMarker) -> bool {
+pub(crate) fn an_alert_would_be_seen(mtm: MainThreadMarker) -> bool {
     let application = NSApplication::sharedApplication(mtm);
     application.isActive()
         || application
@@ -900,11 +912,14 @@ fn an_alert_would_be_seen(mtm: MainThreadMarker) -> bool {
 /// (T-TRACE-SINK-OFF-THE-CALLING-THREAD keeps it off the `stderr` road for that reason).
 #[expect(
     clippy::print_stderr,
-    reason = "the last-resort fault report, written where it is said: a panic's box comes after the \
-              panic road's fence, where a queued line would leave with the process; for the other \
-              caller that reaches it in a resident run, bt-app's SystemBox::say (the stop's lost \
-              configuration change), the synchronous write is a known limit, to be routed through \
-              stderr_line by plan row 66 (T-STOP-NOTICE-BOX-QUERY-MACOS)"
+    reason = "the last-resort fault report, written where it is said, for its two callers: \
+              bt-app's announce_panic (the panic hook, after the panic road's fence, where a \
+              queued line would leave with the process; and FolioApp::fail's frame-shape stop on \
+              the window thread, where the synchronous write beside the queue is a known limit, \
+              T-STOP-NOTICE-BOX-QUERY-MACOS report D8) and say_at_the_front_door, before the \
+              resident run has a queue; the stop's lost configuration change asks \
+              a_box_would_be_seen first and says the unseen case through stderr_line \
+              (T-STOP-NOTICE-BOX-QUERY-MACOS)"
 )]
 fn say_to_stderr(title: &str, text: &str) {
     eprintln!("{title}");

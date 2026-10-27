@@ -1114,7 +1114,7 @@ fn run_probe(ctx: &bt_platform::admission::WorkerCtx) -> Option<Version> {
         Path::new("copilot"),
         &directories,
         &pathext,
-        &|candidate| candidate.is_file(),
+        &|candidate: &Path| candidate.is_file(),
     )?;
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time somebody opens the settings dialog.
