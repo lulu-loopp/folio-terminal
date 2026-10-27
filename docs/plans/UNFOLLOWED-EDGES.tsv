@@ -6391,10 +6391,6 @@ crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::apply_
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::apply_electing	Dynamic	elect	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::exit_places	Ambiguous	unwrap_or	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::launch_agents	Ambiguous	map	1	
-crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::now_ms	Ambiguous	as_millis	1	
-crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::now_ms	Ambiguous	duration_since	1	
-crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::now_ms	Ambiguous	map_or	1	
-crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::now_ms	Ambiguous	unwrap_or	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::open_bundle	Ambiguous	args	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::open_bundle	Ambiguous	map	1	
 crates/bt-app/src/update_apply_macos.rs	bt-app crate::update_apply_macos::open_trial	Ambiguous	args	1	
