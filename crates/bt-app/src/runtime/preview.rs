@@ -200,11 +200,6 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     fn preview_neighbour_buttons(&self, surface: PreviewSurface) -> [Option<[f32; 4]>; 2] {
-        use crate::preview_neighbours::Direction::{Next, Previous};
-        let scale = self.window.renderer.scale_factor() as f32;
-        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
-            return [None, None];
-        };
         let hovered = match surface {
             PreviewSurface::Seat(leaf) => self.window.seat_pointer.pane_hover == Some(leaf.seat),
             _ => self
@@ -212,6 +207,24 @@ impl<B: Backend> Runtime<'_, B> {
                 .pointer_position
                 .and_then(|at| self.preview_surface_at(at))
                 .is_some_and(|(here, _)| here == surface),
+        };
+        self.preview_neighbour_buttons_while(surface, hovered)
+    }
+
+    /// The two buttons as [`crate::preview_neighbours::buttons`] lays them out, with the
+    /// surface's hover handed in rather than read: the paint reads it
+    /// ([`Self::preview_neighbour_buttons`]), and the hit test, which already
+    /// knows the point is on this uncovered surface, hands in `true` — the
+    /// pane's own hover is written later in the same move (review N1).
+    fn preview_neighbour_buttons_while(
+        &self,
+        surface: PreviewSurface,
+        hovered: bool,
+    ) -> [Option<[f32; 4]>; 2] {
+        use crate::preview_neighbours::Direction::{Next, Previous};
+        let scale = self.window.renderer.scale_factor() as f32;
+        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
+            return [None, None];
         };
         crate::preview_neighbours::buttons(
             body,
@@ -331,10 +344,17 @@ impl<B: Backend> Runtime<'_, B> {
         {
             return None;
         }
-        for (button, direction) in self.preview_neighbour_buttons(surface).into_iter().zip([
-            crate::preview_neighbours::Direction::Previous,
-            crate::preview_neighbours::Direction::Next,
-        ]) {
+        // The point is on this surface and nothing covers it there, so the
+        // surface is hovered whatever the pane's hover fact says yet: a move
+        // straight onto a button of an unfocused pane is answered on that move.
+        for (button, direction) in self
+            .preview_neighbour_buttons_while(surface, true)
+            .into_iter()
+            .zip([
+                crate::preview_neighbours::Direction::Previous,
+                crate::preview_neighbours::Direction::Next,
+            ])
+        {
             if button.is_some_and(|rect| {
                 file_peek::contains(rect, [position.x as f32, position.y as f32])
             }) {

@@ -3185,7 +3185,18 @@ fn a_picture_with_neighbours(
     before: usize,
     after: usize,
 ) -> (HeadlessFolio, PreviewSurface, Vec<std::path::PathBuf>) {
-    let (mut folio, surface) = a_large_picture_beside_a_shell(tag, "邻居 neighbours", true);
+    a_picture_with_neighbours_held(tag, before, after, true)
+}
+
+/// [`a_picture_with_neighbours`], with the keyboard on the picture's pane or on the shell beside
+/// it: an unfocused pane shows its side buttons only while the pane is hovered.
+fn a_picture_with_neighbours_held(
+    tag: &str,
+    before: usize,
+    after: usize,
+    focused: bool,
+) -> (HeadlessFolio, PreviewSurface, Vec<std::path::PathBuf>) {
+    let (mut folio, surface) = a_large_picture_beside_a_shell(tag, "邻居 neighbours", focused);
     let file = picture_path(&mut folio, surface);
     let folder = file.parent().expect("a scratch folder").to_path_buf();
     let ahead = (0..before).map(|index| folder.join(format!("{index} 前 before.png")));
@@ -3396,7 +3407,8 @@ fn the_neighbour_hover_goes_out_and_asks_one_frame_per_change() {
 }
 
 /// PIN (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER) — **a hand over the pane but off the buttons lights
-/// neither**: the buttons are on the glass because the pane is hovered, and both stand at rest.
+/// neither**: the buttons are on the glass because the fixture's pane holds the keyboard, and
+/// both stand at rest.
 ///
 /// MUTATION: have `Runtime::pointer_moved` note the surface's `Previous` whenever
 /// `preview_neighbour_buttons` has one — the `<` lights with the hand nowhere near it.
@@ -3515,5 +3527,51 @@ fn the_finger_wins_over_the_grab_on_a_neighbour_button() {
         last_cursor(&folio),
         Some(CursorIcon::Pointer.into()),
         "over the `<` the finger says what a press will do"
+    );
+}
+
+/// RED (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER review N1) — **one move straight onto a button of an
+/// unfocused pane lights it and wears the finger on that move**: the pane's own hover, which
+/// decides whether its buttons are drawn, is written later in the same move than the side
+/// button's hit test, so the hit test asks for the buttons as the hovered pane has them.
+///
+/// MUTATION: have `Runtime::preview_neighbour_at` ask `preview_neighbour_buttons` (the paint's
+/// reading of the pane's hover) — the move is answered one move late and the first assertion
+/// goes red.
+#[test]
+fn a_single_move_onto_an_unfocused_panes_button_lights_it() {
+    use winit::window::CursorIcon;
+    let (mut folio, surface, _) =
+        a_picture_with_neighbours_held("neighbour-unfocused", 1, 1, false);
+    folio.move_to(PhysicalPosition::new(2.0, 2.0));
+    assert_eq!(
+        folio.runtime().preview_neighbour_buttons(surface),
+        [None, None],
+        "the fixture's own precondition: off the unfocused pane its buttons are not on the glass"
+    );
+    let previous = folio
+        .runtime()
+        .preview_neighbour_buttons_while(surface, true)[0]
+        .expect("the hovered pane has a `<`");
+    folio.ledger.take();
+    folio.move_to(centre_of(previous));
+    let cursor = folio
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            WindowEffect::Cursor(cursor) => Some(cursor),
+            _ => None,
+        })
+        .last();
+    assert_eq!(
+        neighbour_inks(&mut folio, surface)[0],
+        Some(lit_neighbour()),
+        "the `<` the one move landed on is lit"
+    );
+    assert_eq!(
+        cursor,
+        Some(CursorIcon::Pointer.into()),
+        "and the finger is on it on that same move"
     );
 }
