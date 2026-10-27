@@ -765,6 +765,7 @@ fn a_turn_ending_reaches_as_far_as_the_reader_is_away_and_the_row_shuts_the_lane
         .sessions
         .get_mut(&seat)
         .expect("the fixture's seat")
+        .attention
         .bell_reported = false;
     assert_eq!(
         one_turn_reaching(&mut tabs, 0, false, true, true, &mut next).len(),

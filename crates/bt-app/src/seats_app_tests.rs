@@ -747,7 +747,7 @@ fn a_waiting_tabs_pulse_is_one_reading_of_one_clock() {
 }
 
 fn ticket_at(tab: &TabState, seat: SeatId) -> Option<u64> {
-    tab.sessions[&seat].attention.ticket()
+    tab.sessions[&seat].attention.ledger.ticket()
 }
 
 /// PIN (`attention` plan §4 B2, user ruling 2026-08-25) — **a bell takes no place, anywhere.**

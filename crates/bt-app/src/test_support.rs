@@ -2680,13 +2680,15 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
             born_named: false,
         },
         session,
-        attention: attention::AttentionLedger::default(),
+        attention: crate::AttentionAccount {
+            ledger: attention::AttentionLedger::default(),
+            bell_reported: false,
+            clock: attention_wire::WaitClock::default(),
+            // A fixture has no shell, so nothing was ever told a capability — and an empty
+            // string is one no arriving message can match, which is the honest shape of that.
+            capability: String::new(),
+        },
         attention_ended: false,
-        bell_reported: false,
-        attention_clock: attention_wire::WaitClock::default(),
-        // A fixture has no shell, so nothing was ever told a capability — and an empty string
-        // is one no arriving message can match, which is the honest shape of that.
-        attention_capability: String::new(),
         view: TermView {
             projection,
             // A fixture is a new view, so it is at 100 % (ticket 37), at the default face measured

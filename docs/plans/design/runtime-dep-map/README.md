@@ -566,11 +566,15 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      stays (the same rule); `path_opens_as_a_page`, whose root callers are it and `preview_page_hand_off`, waits with
      it. Batch 21 moved `source_opens_as_a_page` and `preview_page_hand_off` and left both held; the moved
      `preview_page_hand_off` imports `path_opens_as_a_page` from the root.
-   - `settle_attention` (held at batch 19's judgement, and still at batch 21) — its `called_from` home is
-     `runtime/preview.rs`, but it writes `LeafSession.attention_clock`, whose other writer, `deliver_attention`,
-     stays at the root (the census rule above); `LeafSession.attention`, owner attention, is also written at the root
-     by `deliver_attention` and `FolioApp::transfer_tab`. `tab_queue_leader`, whose root callers are all in
-     `settle_attention`, waits with it.
+   - `settle_attention` (held at batch 19's judgement, and still at batch 21; re-cited at O-4a, 2026-10-27) — its
+     `called_from` home is `runtime/preview.rs`. It was held because it wrote `LeafSession.attention_clock`, whose
+     other writer, `deliver_attention`, stays at the root (the census rule above). O-4a nested the clock, the bell's
+     edge and the capability with the ledger in `LeafSession.attention: AttentionAccount`, so what it writes is that
+     one fact (owner attention, written at the root and in `runtime/attention.rs`) and `LeafSession.session`
+     (`clear_attention`; ten writer modules). Ruled 2026-10-27 (the O-4 judgement's D15): it is released under batch
+     23's shared-fact rule, to `runtime/attention.rs` by clause (a), the page that writes the account, which makes
+     `runtime/attention.rs` the session's eleventh writer module; the release line is written when O-4b lands.
+     `tab_queue_leader`, whose root callers are all in `settle_attention`, waits with it.
    - `animated_pane_viewports` (held at batch 18, behind `preview_image_placement`) — tied `runtime/panes.rs` /
      `runtime/preview.rs` once its root caller moved; it is the pane-motion viewports, and the owner column gives
      the move of panes to `runtime/panes.rs` (clause (b)); batch 20 moved it there, imported by `runtime/preview.rs`.

@@ -1100,6 +1100,7 @@ impl<B: Backend> Runtime<'_, B> {
             };
             let lines = leaf
                 .attention
+                .ledger
                 .apply(
                     at,
                     reach,
@@ -1145,6 +1146,7 @@ impl<B: Backend> Runtime<'_, B> {
             .flat_map(|(index, tab)| {
                 tab.sessions.iter().filter_map(move |(seat, leaf)| {
                     leaf.attention
+                        .ledger
                         .ticket()
                         .map(|ticket| ((index, *seat), ticket))
                 })
@@ -1154,7 +1156,7 @@ impl<B: Backend> Runtime<'_, B> {
         let standing_on = self.window.tabs[active]
             .sessions
             .get(&self.focused_leaf)
-            .and_then(|leaf| leaf.attention.ticket());
+            .and_then(|leaf| leaf.attention.ledger.ticket());
         let waiting = queue.len();
         let Some((tab, seat)) = next_attention_stop(&queue, standing_on) else {
             attention_trace::line(|| format!("jump queue={waiting} from=none to=none"));
@@ -1199,6 +1201,7 @@ pub(crate) fn expire_leaf_attention(
 ) {
     let lines = leaf
         .attention
+        .ledger
         .apply(at, reach, attention::Event::LeafGone, next_place, now)
         .lines;
     emit_attention_lines(trace, lines);
@@ -1264,6 +1267,7 @@ pub(crate) fn deliver_osc_attention(
         for (seat, leaf) in tab.leaves_mut() {
             let Some(event) = leaf
                 .attention
+                .ledger
                 .weak_edge(leaf.session.status().attention_request)
             else {
                 continue;
@@ -1272,7 +1276,10 @@ pub(crate) fn deliver_osc_attention(
                 tab: index,
                 seat: *seat,
             };
-            let outcome = leaf.attention.apply(at, reach, event, next_place, now);
+            let outcome = leaf
+                .attention
+                .ledger
+                .apply(at, reach, event, next_place, now);
             emit_attention_lines(trace, outcome.lines);
             allowed.extend(outcome.raised.map(|one| (*seat, None, one)));
         }
@@ -1290,10 +1297,10 @@ pub(crate) fn deliver_osc_attention(
                 continue;
             };
             let words = attention_map::announced_words(notification);
-            if leaf.attention.announce(words) {
+            if leaf.attention.ledger.announce(words) {
                 continue;
             }
-            let outcome = leaf.attention.announce_turn_end(
+            let outcome = leaf.attention.ledger.announce_turn_end(
                 attention::Site {
                     tab: index,
                     seat: *seat,
@@ -1374,7 +1381,7 @@ pub(crate) fn merge_notice_card(
 /// * **先到先服务** — the queue is ordered by the serial each place was handed
 ///   when it was taken, so the stop is the one that has been waiting longest.
 ///   `min_by_key` over a serial and never over a clock: see
-///   [`LeafSession::attention`].
+///   [`crate::AttentionAccount::ledger`].
 /// * **已在队列中再按 = 走到下一个** — `standing_on` is the serial of the seat
 ///   the keyboard is already in, if that seat is itself in the queue. When it is,
 ///   the answer is the next one *after* it rather than the oldest, so a second
@@ -1433,6 +1440,7 @@ pub(crate) fn answer_attention_in(
     };
     let lines = leaf
         .attention
+        .ledger
         .apply(
             attention::Site { tab: index, seat },
             reach,

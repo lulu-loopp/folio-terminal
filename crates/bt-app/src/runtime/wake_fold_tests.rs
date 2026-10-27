@@ -240,7 +240,7 @@ fn a_due_credential_behind_the_strips_gate_is_booked_for_the_turn_the_gate_admit
             .values_mut()
             .next()
             .expect("the one pane");
-        leaf.attention_clock.arm(
+        leaf.attention.clock.arm(
             &bt_workbench::attention::WaitSlot::Level(bt_workbench::attention::WaitKind::Agent),
             armed,
         );

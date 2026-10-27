@@ -996,6 +996,66 @@ fn the_launch_facts_are_launch_facts() {
     }
 }
 
+/// RED (O-4a) — **a pane's attention account is one fact, `LeafSession.attention`,
+/// written by the attention roads that wrote its four parts.**
+///
+/// The ownership contract's M7 (§3.3) nests the ledger, the bell's edge, the
+/// credentials' clock and the capability as `LeafSession.attention:
+/// AttentionAccount`. The account is not one of the census's structs: the nest
+/// is the fact (the contract counts "4 rows → 1"), so a write of any part is a
+/// row of `LeafSession.attention`. The three facts that merged into it had
+/// writers that were all already its writers, so its writer set is the one it
+/// had: seven items in the root and `runtime::attention`. Whether a road that
+/// ends the pane has given its place up, `attention_ended`, stays on the leaf;
+/// its writer, `end_leaves_of` in `runtime::panes`, is not one of these.
+///
+/// MUTATION: leave `bell_reported` on `LeafSession`, and the first assertion
+/// names it; reset `leaf.attention.bell_reported` in `end_leaves_of` (a new
+/// writer module), or drop `transfer_tab`'s re-point of the ledger, and the
+/// writer set differs.
+#[test]
+fn the_attention_account_is_one_fact() {
+    let census = the_census();
+    let facts: BTreeSet<&str> = census
+        .facts()
+        .iter()
+        .map(|fact| fact.fact.as_str())
+        .collect();
+    for gone in ["bell_reported", "attention_clock", "attention_capability"] {
+        assert!(
+            !facts.contains(format!("LeafSession.{gone}").as_str()),
+            "`{gone}` is a part of the account, not a field of the leaf"
+        );
+    }
+    let account: Vec<&str> = census
+        .facts()
+        .iter()
+        .filter(|fact| {
+            fact.fact.starts_with("LeafSession.") && fact.declared.contains("AttentionAccount")
+        })
+        .map(|fact| fact.fact.as_str())
+        .collect();
+    assert_eq!(account, ["LeafSession.attention"], "one account");
+    let writers: BTreeSet<(&'static str, &str)> = census
+        .rows()
+        .iter()
+        .filter(|row| row.fact == "LeafSession.attention")
+        .map(|row| (row.column.name(), row.function.as_str()))
+        .collect();
+    assert_eq!(
+        writers,
+        BTreeSet::from([
+            ("write", "FolioApp::transfer_tab"),
+            ("write", "Runtime::mark_attention_seen"),
+            ("write", "answer_attention_in"),
+            ("write", "deliver_attention"),
+            ("write", "deliver_osc_attention"),
+            ("write", "expire_leaf_attention"),
+            ("write", "settle_attention"),
+        ])
+    );
+}
+
 /// RED (O-2; the ownership contract's (b)1 and (c)1) — **the drain takes the
 /// keyboard's focus as a report and touches no field of the view.**
 ///

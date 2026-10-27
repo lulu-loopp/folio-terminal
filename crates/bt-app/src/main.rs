@@ -7576,29 +7576,12 @@ struct LeafSession {
     /// Spent once, by [`drain_leaf_pty`]: a second write would be a second copy of the command.
     pending_typing: Option<(String, bool)>,
     session: DualPlaneSession,
-    /// **This pane's attention account, and with it the place it holds in this window's queue**
-    /// (`attention` plan §11.1; §7.1.5b P1-8).
-    ///
-    /// The ledger is where both producers' credentials land, it is the one thing that can tell a
-    /// restatement from a genuinely new request, and — since A2 — it is the only source the orange
-    /// dot is drawn from. What it hands out is a **monotonic serial and not a clock**, which is the
-    /// ruling's own wording (时间戳用单调序号, mock 可确定重放): the queue is walked oldest-first,
-    /// so ordering by a counter makes the walk a function of the order things happened rather than
-    /// of what the clock read while they happened. Two panes that ask in the same millisecond still
-    /// have an order, and a replay of the same events gives the same one.
-    ///
-    /// **On the leaf, so it dies with the leaf.** A queue kept as a table beside the tabs would
-    /// need pruning every time a pane closed or moved, and the way to get that wrong is to forget
-    /// once; here a tear-out carries the account with the shell ([`LaunchFacts::profile`]'s own
-    /// argument) and a close takes it away with no bookkeeping at all.
-    ///
-    /// **What puts a place here and what takes it away are different events**, which is the whole
-    /// of 看一眼阻塞的 agent 不解除阻塞. [`attention::Event::Settle`] hands one out, and only three
-    /// things give it back: a user action **in this very seat**
-    /// ([`Runtime::answer_attention`]), the program withdrawing what it asked, or the pane going
-    /// away. Looking at the tab is not one of them —
-    /// [`attention::Event::MarkSeen`] is the arrival with nothing to say.
-    attention: attention::AttentionLedger,
+    /// **This pane's attention account** — the ownership contract's M7
+    /// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3; ticket O-4a): the ledger, the
+    /// bell's edge, the credentials' clock and the capability, nested so they have the leaf's
+    /// own lifetime and travel with it exactly as the fields did when they stood here. See
+    /// [`AttentionAccount`].
+    attention: AttentionAccount,
     /// **Whether a road that ends this pane has already given its place up**
     /// ([`runtime::panes::end_leaves_of`]).
     ///
@@ -7607,27 +7590,6 @@ struct LeafSession {
     /// [`attention::Event::LeafGone`] silently, so only this tells the second walk that the pane
     /// has already ended.
     attention_ended: bool,
-    /// **Whether the bell this pane currently has latched has already been announced** (`attention`
-    /// plan §11.7's fourth source).
-    ///
-    /// A bare `BEL` is an *event*, and the ledger's turn-end door takes events rather than levels
-    /// — while `bt-term`'s `bell_latched` is a level that stays up until somebody looks. This is
-    /// the edge between the two, and it is a field rather than a comparison against last frame's
-    /// status because the level it mirrors is retired by a different mechanism (a look) than the
-    /// one that raises it.
-    ///
-    /// It goes back down whenever the latch does, so a pane that rings, is read, and rings again
-    /// announces twice. That is the correct number: two turns ended.
-    bell_reported: bool,
-    /// When each of this pane's standing credentials runs out.
-    attention_clock: attention_wire::WaitClock,
-    /// **The name this pane answers to on the process's endpoint** — 128 bits, minted at birth.
-    ///
-    /// Held here rather than in a table beside the window, for the reason the ticket above is:
-    /// a leaf that is torn out carries it, a leaf that closes takes it away, and there is no
-    /// bookkeeping anywhere that could be forgotten. A capability that is gone is a capability
-    /// nothing can present.
-    attention_capability: String,
     /// **This pane's view of its shell**: the facts of the ownership contract's view owner (M1–M4,
     /// tickets O-2 and O-3). Nested, so it has the leaf's own lifetime and travels with it exactly
     /// as the fields did when they stood here.
@@ -7977,6 +7939,62 @@ struct LaunchFacts {
     /// Runtime only, like [`Self::spawn_place`]: the session document has no field for it, so a
     /// restored pane's folder is carried and follows its profile's starting place.
     born_named: bool,
+}
+
+/// **A terminal pane's attention account** — the ownership contract's M7
+/// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3), nested in [`LeafSession`] as
+/// [`LeafSession::attention`] with the leaf's own lifetime (ticket O-4a).
+///
+/// One fact in the census, written by the attention roads that wrote its four parts on the
+/// leaf; each road goes on calling the ledger's and the clock's own methods, which are their
+/// doors. Plain data: the type has no methods. Whether a road that ends the pane has already
+/// given its place up stays on the leaf ([`LeafSession::attention_ended`]): the road that sets
+/// it is not one of the account's writers.
+struct AttentionAccount {
+    /// **This pane's attention ledger, and with it the place it holds in this window's queue**
+    /// (`attention` plan §11.1; §7.1.5b P1-8).
+    ///
+    /// The ledger is where both producers' credentials land, it is the one thing that can tell a
+    /// restatement from a genuinely new request, and — since A2 — it is the only source the orange
+    /// dot is drawn from. What it hands out is a **monotonic serial and not a clock**, which is the
+    /// ruling's own wording (时间戳用单调序号, mock 可确定重放): the queue is walked oldest-first,
+    /// so ordering by a counter makes the walk a function of the order things happened rather than
+    /// of what the clock read while they happened. Two panes that ask in the same millisecond still
+    /// have an order, and a replay of the same events gives the same one.
+    ///
+    /// **On the leaf, so it dies with the leaf.** A queue kept as a table beside the tabs would
+    /// need pruning every time a pane closed or moved, and the way to get that wrong is to forget
+    /// once; here a tear-out carries the account with the shell ([`LaunchFacts::profile`]'s own
+    /// argument) and a close takes it away with no bookkeeping at all.
+    ///
+    /// **What puts a place here and what takes it away are different events**, which is the whole
+    /// of 看一眼阻塞的 agent 不解除阻塞. [`attention::Event::Settle`] hands one out, and only three
+    /// things give it back: a user action **in this very seat**
+    /// ([`Runtime::answer_attention`]), the program withdrawing what it asked, or the pane going
+    /// away. Looking at the tab is not one of them —
+    /// [`attention::Event::MarkSeen`] is the arrival with nothing to say.
+    ledger: attention::AttentionLedger,
+    /// **Whether the bell this pane currently has latched has already been announced** (`attention`
+    /// plan §11.7's fourth source).
+    ///
+    /// A bare `BEL` is an *event*, and the ledger's turn-end door takes events rather than levels
+    /// — while `bt-term`'s `bell_latched` is a level that stays up until somebody looks. This is
+    /// the edge between the two, and it is a field rather than a comparison against last frame's
+    /// status because the level it mirrors is retired by a different mechanism (a look) than the
+    /// one that raises it.
+    ///
+    /// It goes back down whenever the latch does, so a pane that rings, is read, and rings again
+    /// announces twice. That is the correct number: two turns ended.
+    bell_reported: bool,
+    /// When each of this pane's standing credentials runs out.
+    clock: attention_wire::WaitClock,
+    /// **The name this pane answers to on the process's endpoint** — 128 bits, minted at birth.
+    ///
+    /// Held here rather than in a table beside the window, for [`Self::ledger`]'s reason: a
+    /// leaf that is torn out carries it, a leaf that closes takes it away, and there is no
+    /// bookkeeping anywhere that could be forgotten. A capability that is gone is a capability
+    /// nothing can present.
+    capability: String,
 }
 
 /// **What a pane in birth holds until its shell exists** — one road with two triggers: the walk
@@ -11158,7 +11176,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// attention in *this* window, and two windows sharing one counter would make
     /// "who has been waiting longest" a question about a program rather than
     /// about a screen. Never reset, never reused — see
-    /// [`LeafSession::attention`] for why it is a serial and not a clock.
+    /// [`AttentionAccount::ledger`] for why it is a serial and not a clock.
     ///
     /// **One counter, since A2.** A3 ran a second one beside it while the ledger and the bell-fed
     /// queue were both alive, precisely so that neither could renumber the other; taking the bell
@@ -16059,7 +16077,7 @@ impl LeafSession {
             output_revision: self.output_revision,
             last_seen_revision: self.last_seen_revision,
             tab_is_active,
-            awaiting: self.attention.ticket().is_some(),
+            awaiting: self.attention.ledger.ticket().is_some(),
         }
     }
 }
@@ -22179,7 +22197,7 @@ struct TabTriggerHand {
 fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {
     tab.sessions
         .iter()
-        .filter_map(|(seat, leaf)| leaf.attention.ticket().map(|ticket| (ticket, *seat)))
+        .filter_map(|(seat, leaf)| leaf.attention.ledger.ticket().map(|ticket| (ticket, *seat)))
         .min_by_key(|(ticket, _)| *ticket)
         .map(|(_, seat)| seat)
 }
@@ -22259,8 +22277,11 @@ fn settle_attention(
                 tab: index,
                 seat: *seat,
             };
-            for expired in leaf.attention_clock.due(now) {
-                let outcome = leaf.attention.apply(at, reach, expired, next_place, now);
+            for expired in leaf.attention.clock.due(now) {
+                let outcome = leaf
+                    .attention
+                    .ledger
+                    .apply(at, reach, expired, next_place, now);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (*seat, one)));
             }
@@ -22274,13 +22295,16 @@ fn settle_attention(
             // the session, and asking twice would let two decisions in one turn be taken from two
             // readings of one shell.
             let reported = leaf.session.status();
-            if let Some(edge) = leaf.attention.weak_edge(reported.attention_request) {
-                let outcome = leaf.attention.apply(at, reach, edge, next_place, now);
+            if let Some(edge) = leaf.attention.ledger.weak_edge(reported.attention_request) {
+                let outcome = leaf
+                    .attention
+                    .ledger
+                    .apply(at, reach, edge, next_place, now);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (*seat, one)));
             }
-            if let Some(rang) = reported.bell.filter(|_| !leaf.bell_reported) {
-                leaf.bell_reported = true;
+            if let Some(rang) = reported.bell.filter(|_| !leaf.attention.bell_reported) {
+                leaf.attention.bell_reported = true;
                 // **Neither ringer carries a sentence**, which is the whole of what is wrong with
                 // reading a bell as "it is waiting for you" — so the interruption this raises is
                 // worded from the i18n table rather than quoted from anybody. What the two *do*
@@ -22292,6 +22316,7 @@ fn settle_attention(
                 let (source, via) = attention_map::bell_provenance(rang);
                 let outcome = leaf
                     .attention
+                    .ledger
                     .announce_turn_end(at, reach, switches, source, via, None);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (*seat, one)));
@@ -22300,7 +22325,10 @@ fn settle_attention(
                 active: tab_is_active,
                 focused: place.focused,
             };
-            let outcome = leaf.attention.apply(at, reach, settle, next_place, now);
+            let outcome = leaf
+                .attention
+                .ledger
+                .apply(at, reach, settle, next_place, now);
             emit_attention_lines(trace, outcome.lines);
             allowed.extend(outcome.raised.map(|one| (*seat, one)));
             if consumed {
@@ -22308,7 +22336,7 @@ fn settle_attention(
             }
             // Whatever spent the latch — this look, or `mark_seen` on the way in — re-arms the
             // edge, so the next turn that ends is announced instead of being read as this one.
-            leaf.bell_reported = leaf.session.status().bell_latched();
+            leaf.attention.bell_reported = leaf.session.status().bell_latched();
         }
         for (seat, one) in allowed {
             raised.push(attention_delivery(tab, tab_id, seat, None, one));
@@ -22327,7 +22355,7 @@ fn settle_attention(
                 let episode = leader
                     .and_then(|seat| tab.sessions.get(&seat))
                     .and_then(|leaf| {
-                        leaf.attention.claim_episode(
+                        leaf.attention.ledger.claim_episode(
                             was == StatusClaim::Awaiting,
                             now_claim == StatusClaim::Awaiting,
                         )
@@ -22421,7 +22449,7 @@ fn deliver_attention(
             let tab_id = tab.id;
             let mut allowed: Vec<(SeatId, attention::Raised)> = Vec::new();
             let Some((seat, leaf)) = tab.leaves_mut().find(|(_, leaf)| {
-                attention_wire::names_this_pane(&message.capability, &leaf.attention_capability)
+                attention_wire::names_this_pane(&message.capability, &leaf.attention.capability)
             }) else {
                 continue;
             };
@@ -22434,7 +22462,7 @@ fn deliver_attention(
             // matched a leaf's own on the line above — so it is where the bound that has a name in
             // it belongs. `break` and not `continue`: the message named this pane and no other, so
             // the walk over the remaining tabs has nothing left to find.
-            if !leaf.attention.admits_a_frame(now) {
+            if !leaf.attention.ledger.admits_a_frame(now) {
                 emit_attention_lines(
                     trace,
                     vec![format!(
@@ -22449,13 +22477,16 @@ fn deliver_attention(
                 // an event the ledger treats as a restatement changes nothing, and re-arming its
                 // ten minutes is exactly right — the producer has just said it is still waiting.
                 match &event {
-                    attention::Event::StrongWait(slot) => leaf.attention_clock.arm(slot, now),
+                    attention::Event::StrongWait(slot) => leaf.attention.clock.arm(slot, now),
                     attention::Event::StrongClear { selector, .. } => {
-                        leaf.attention_clock.forget(selector);
+                        leaf.attention.clock.forget(selector);
                     }
                     _ => {}
                 }
-                let outcome = leaf.attention.apply(at, reach, event, next_place, now);
+                let outcome = leaf
+                    .attention
+                    .ledger
+                    .apply(at, reach, event, next_place, now);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (seat, one)));
             }
@@ -22466,7 +22497,7 @@ fn deliver_attention(
                 // declared, already cleaned and bounded. `None` is the ordinary answer and the one
                 // every row had until this slice: the toast then says it in its own voice, out of
                 // the i18n table, exactly as before.
-                let outcome = leaf.attention.announce_turn_end(
+                let outcome = leaf.attention.ledger.announce_turn_end(
                     at,
                     reach,
                     switches,
@@ -28298,7 +28329,7 @@ impl TabState {
     fn fleet_awaiting(&self) -> bool {
         self.sessions
             .values()
-            .any(|leaf| leaf.attention.ticket().is_some())
+            .any(|leaf| leaf.attention.ledger.ticket().is_some())
     }
 
     /// Whether anything in this tab's mark slot is moving under its own steam,
@@ -32044,7 +32075,7 @@ mod shell_birth_tests {
                     leaf.view.metrics,
                     leaf.view.card_skip,
                     &leaf.pending_typing,
-                    &leaf.attention_capability,
+                    &leaf.attention.capability,
                     leaf.has_rail,
                 ),
                 (
@@ -32721,12 +32752,14 @@ fn bare_leaf(
         // product except a pinned tab of a restored summoned terminal — see `LeafSeed::prefill`.
         pending_typing: seed.prefill.clone().map(|command| (command, false)),
         session,
-        // Nobody has asked for anything yet.
-        attention: attention::AttentionLedger::default(),
+        attention: AttentionAccount {
+            // Nobody has asked for anything yet.
+            ledger: attention::AttentionLedger::default(),
+            bell_reported: false,
+            clock: attention_wire::WaitClock::default(),
+            capability,
+        },
         attention_ended: false,
-        bell_reported: false,
-        attention_clock: attention_wire::WaitClock::default(),
-        attention_capability: capability,
         view: TermView {
             projection,
             text_scale,
@@ -47391,6 +47424,7 @@ impl<B: Backend> FolioApp<B> {
             // from the serial of the window it arrived in.
             let lines = leaf
                 .attention
+                .ledger
                 .surrender_place(attention::Site {
                     tab: index,
                     seat: *_seat,

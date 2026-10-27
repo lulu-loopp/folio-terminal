@@ -620,7 +620,7 @@ impl<B: Backend> Runtime<'_, B> {
                     label,
                     hint,
                     mark: Some(profiles::identity_mark(&tab.leaf_profile(*seat))),
-                    awaiting: leaf.attention.ticket().is_some(),
+                    awaiting: leaf.attention.ledger.ticket().is_some(),
                     verb: palette::Verb::Go {
                         tab: tab.id,
                         seat: *seat,
