@@ -4085,7 +4085,7 @@ crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::mouse_
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::mouse_wheel	Ambiguous	unwrap_or	1	
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::note_terminal_column_hover	Ambiguous	map	1	
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::note_terminal_thumb_hover	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 17; the same site, moved by K2 batch 17 with `note_terminal_thumb_hover` from main.rs into runtime/mouse.rs: K2 moves the item, not the call
-crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::pointer_moved	Ambiguous	flatten	3	
+crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::pointer_moved	Ambiguous	flatten	3	2026-10-27: grown 2 -> 3 by T-PREVIEW-NEIGHBOUR-BUTTON-HOVER: Option::flatten of the side-button hit test's answer under the hover gate, a standard-library method that reaches no door
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::pointer_moved	Ambiguous	is_some	1	
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::pointer_moved	Ambiguous	then_some	1	
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::pointer_target_at	Ambiguous	is_some	1	
@@ -4413,7 +4413,7 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::pr
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_neighbour_at	Ambiguous	is_some_and	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_neighbour_at	Ambiguous	zip	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_neighbour_buttons	Ambiguous	is_some_and	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_neighbour_layer	Ambiguous	zip	2	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_neighbour_layer	Ambiguous	zip	2	2026-10-27: grown 1 -> 2 by T-PREVIEW-NEIGHBOUR-BUTTON-HOVER: Iterator::zip of the two side buttons with their turns and their directions (arrays of rects, degrees and Direction), a standard-library iterator that reaches no door
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_offset_at	Ambiguous	map_or	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_preedit	Ambiguous	flatten	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_prose_geometry	Ambiguous	collect	2	
@@ -10947,7 +10947,7 @@ crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dy
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	border	4	
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	border_soft	5	
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	hover	7	
-crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ink	25	
+crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ink	25	2026-10-27: grown 24 -> 25 by T-PREVIEW-NEIGHBOUR-BUTTON-HOVER: the derivation's local closure ink (ink_over of a ground, the scheme's ink source and its alpha), colour arithmetic that reaches no door, called once more for preview_nav_glyph_on_pill
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ink2	19	
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ink3	25	
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ring	5	
