@@ -463,6 +463,8 @@ impl ChromePalette {
             formula_tool_pill: row_hover,
             formula_tool_pill_pressed: row_selected,
             formula_tool_glyph_on_pill: ink(row_hover),
+            preview_nav_pill: row_hover,
+            preview_nav_glyph_on_pill: ink(row_hover),
             termhost: panel,
             pane_head_edge: border_soft(termbg),
             pane_title: ink3(termbg),

@@ -143,7 +143,6 @@ crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_prob
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	find	1	
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	into_owned	1	
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	is_absolute	1	
-crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	is_file	1	
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	iter	3	
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	map	3	
 crates/bt-app/src/attention_copilot.rs	bt-app crate::attention_copilot::run_probe	Ambiguous	map_or_else	1	
@@ -182,7 +181,7 @@ crates/bt-app/src/attention_hooks.rs	bt-app crate::attention_hooks::declared_eve
 crates/bt-app/src/attention_hooks.rs	bt-app crate::attention_hooks::declared_events	Ambiguous	is_empty	1	
 crates/bt-app/src/attention_hooks.rs	bt-app crate::attention_hooks::editable_target	Ambiguous	and_then	2	
 crates/bt-app/src/attention_hooks.rs	bt-app crate::attention_hooks::editable_target	Ambiguous	as_deref	3	
-crates/bt-app/src/attention_hooks.rs	bt-app crate::attention_hooks::editable_target	Ambiguous	is_file	1	
+crates/bt-app/src/attention_hooks.rs	bt-app crate::attention_hooks::editable_target	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/attention_hooks.rs	bt-app crate::attention_hooks::editable_target	Ambiguous	is_some_and	1	
 crates/bt-app/src/attention_hooks.rs	bt-app crate::attention_hooks::editable_target	Ambiguous	ok	3	
 crates/bt-app/src/attention_hooks.rs	bt-app crate::attention_hooks::group_is_ours	Ambiguous	and_then	1	
@@ -267,7 +266,7 @@ crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::lega
 crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::literal_absolute_path	Ambiguous	contains	2	
 crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::literal_absolute_path	Ambiguous	ok_or	1	
 crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::literal_absolute_path	Ambiguous	text	3	
-crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::other_live	Ambiguous	is_file	1	
+crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::other_live	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value std::fs::metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::other_live	Ambiguous	kind	1	
 crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::other_live	Ambiguous	text	1	
 crates/bt-app/src/attention_ownership.rs	bt-app crate::attention_ownership::record	Ambiguous	any	1	
@@ -834,12 +833,9 @@ crates/bt-app/src/files.rs	bt-app crate::files::names_are_one	Ambiguous	flat_map
 crates/bt-app/src/files.rs	bt-app crate::files::notice_row	Ambiguous	text	3	
 crates/bt-app/src/files.rs	bt-app crate::files::notice_row	Ambiguous	to_owned	3	
 crates/bt-app/src/files.rs	bt-app crate::files::parent_key	Ambiguous	to_owned	1	
-crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	file_name	1	
-crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	file_type	1	
 crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	is_ok_and	1	
-crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	is_symlink	1	
+crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	is_symlink	1	2026-10-26: FileType::is_symlink, an accessor of the value DirEntry::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	map	1	
-crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	path	2	
 crates/bt-app/src/files.rs	bt-app crate::files::read_directory	Ambiguous	to_str	1	
 crates/bt-app/src/files.rs	bt-app crate::files::root_is_addressable	Ambiguous	is_empty	1	
 crates/bt-app/src/files.rs	bt-app crate::files::run_dir_worker	Dynamic	execute	1	
@@ -1874,7 +1870,7 @@ crates/bt-app/src/main.rs	bt-app crate::<FolioApp as ApplicationHandler<AppEvent
 crates/bt-app/src/main.rs	bt-app crate::<SourceBlocks as From<Option<Box<MarkdownCaretBlock>>>>::from	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/main.rs	bt-app crate::AnimationCache::ask_for_showing	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::AnimationCache::ask_for_showing	Dynamic	ask	1	
-crates/bt-app/src/main.rs	bt-app crate::AnimationCache::forget_surfaces_gone	Dynamic	exists	1	
+crates/bt-app/src/main.rs	bt-app crate::AnimationCache::forget_surfaces_gone	Dynamic	exists	1	2026-10-26: a call of the `exists` parameter, an impl Fn(PreviewSurface) -> bool over the preview surfaces this window holds: no file (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/main.rs	bt-app crate::AnimationCache::send_fill	Dynamic	send	1	
 crates/bt-app/src/main.rs	bt-app crate::App::with_documents	Dynamic	ask	1	
 crates/bt-app/src/main.rs	bt-app crate::ApplicationChange::merged_with	Ambiguous	flatten	1	
@@ -2463,10 +2459,10 @@ crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::canonical	Ambigu
 crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	collect	1	
 crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	extend	1	
 crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	file_name	1	
-crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	file_type	1	
+crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	file_type	1	2026-10-26: DirEntry::file_type on the item of `for entry in reader.flatten()`: a `for` binding takes no written type, and typing it needs a new statement; DirEntry::file_type is a std::fs call, the engine reads no foreign iterator's item (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	flatten	1	
 crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	is_ok_and	1	
-crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	is_symlink	1	
+crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	is_symlink	1	2026-10-26: FileType::is_symlink, an accessor of the value DirEntry::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	map	1	
 crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	path	1	
 crates/bt-app/src/palette_index.rs	bt-app crate::palette_index::walk_bounded	Ambiguous	to_str	1	
@@ -3465,8 +3461,6 @@ crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::documents_directory	Am
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::documents_for_module_root	Ambiguous	find	1	
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::documents_for_module_root	Ambiguous	to_owned	1	
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::installed_build	Ambiguous	then_some	1	
-crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::installed_disk::<System as Disk>::entries	Ambiguous	file_name	1	
-crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::installed_disk::<System as Disk>::entries	Ambiguous	file_type	1	
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::installed_disk::with	Dynamic	f	1	
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::legacy_roots	Ambiguous	collect	1	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row
 crates/bt-app/src/psreadline.rs	bt-app crate::psreadline::module_rows	Ambiguous	expect	2	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row
@@ -3491,7 +3485,7 @@ crates/bt-app/src/pty_door.rs	bt-app crate::pty_door::births	Ambiguous	unwrap_or
 crates/bt-app/src/pty_door.rs	bt-app crate::pty_door::carried_environment_refusal	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/pty_door.rs	bt-app crate::pty_door::environment_refresh	Dynamic	diagnostic	1	
 crates/bt-app/src/pty_door.rs	bt-app crate::pty_door::environment_refresh	Dynamic	fresh	1	
-crates/bt-app/src/pty_door.rs	bt-app crate::pty_door::gone_place	Dynamic	is_dir	1	
+crates/bt-app/src/pty_door.rs	bt-app crate::pty_door::gone_place	Dynamic	is_dir	1	2026-10-26: a call of the `&dyn Fn(&Path) -> bool` parameter, no receiver to type; the callers hand `&Path::is_dir` as a value (a typed std::path::Path::is_dir edge where it is named) or a closure walked where it is written (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/pty_door.rs	bt-app crate::pty_door::panic_message	Ambiguous	map	1	
 crates/bt-app/src/pty_door.rs	bt-app crate::pty_door::panic_message	Ambiguous	or_else	1	
 crates/bt-app/src/pty_door.rs	bt-app crate::pty_door::panic_message	Ambiguous	unwrap_or	1	
@@ -3526,12 +3520,10 @@ crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders:
 crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders::record	Ambiguous	is_empty	1	
 crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders::record	Ambiguous	is_none_or	1	
 crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders::record	Ambiguous	to_owned	1	
-crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders::refresh	Dynamic	exists	1	
+crates/bt-app/src/recent_folders.rs	bt-app crate::recent_folders::RecentFolders::refresh	Dynamic	exists	1	2026-10-26: a call of the `&dyn Fn(&Path) -> bool` parameter, no receiver to type; the product caller's closure (runtime/profiles.rs, std::fs::metadata) is walked where it is written (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::Announcement::sentence	Ambiguous	to_string	1	
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::ask	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::ask	Dynamic	wake	1	
-crates/bt-app/src/recovered.rs	bt-app crate::recovered::copies_in	Ambiguous	file_name	1	
-crates/bt-app/src/recovered.rs	bt-app crate::recovered::copies_in	Ambiguous	file_type	1	
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::copies_in	Ambiguous	into_owned	1	
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::copies_in	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/recovered.rs	bt-app crate::recovered::look	Ambiguous	count	1	
@@ -4074,7 +4066,7 @@ crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::mouse_
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::mouse_wheel	Ambiguous	unwrap_or	1	
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::note_terminal_column_hover	Ambiguous	map	1	
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::note_terminal_thumb_hover	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 17; the same site, moved by K2 batch 17 with `note_terminal_thumb_hover` from main.rs into runtime/mouse.rs: K2 moves the item, not the call
-crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::pointer_moved	Ambiguous	flatten	2	
+crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::pointer_moved	Ambiguous	flatten	3	2026-10-27: grown 2 -> 3 by T-PREVIEW-NEIGHBOUR-BUTTON-HOVER: Option::flatten of the side-button hit test's answer under the hover gate, a standard-library method that reaches no door
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::pointer_moved	Ambiguous	is_some	1	
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::pointer_moved	Ambiguous	then_some	1	
 crates/bt-app/src/runtime/mouse.rs	bt-app crate::runtime::mouse::Runtime::pointer_target_at	Ambiguous	is_some	1	
@@ -4402,7 +4394,7 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::pr
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_neighbour_at	Ambiguous	is_some_and	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_neighbour_at	Ambiguous	zip	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_neighbour_buttons	Ambiguous	is_some_and	1	
-crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_neighbour_layer	Ambiguous	zip	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_neighbour_layer	Ambiguous	zip	2	2026-10-27: grown 1 -> 2 by T-PREVIEW-NEIGHBOUR-BUTTON-HOVER: Iterator::zip of the two side buttons with their turns and their directions (arrays of rects, degrees and Direction), a standard-library iterator that reaches no door
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_offset_at	Ambiguous	map_or	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_preedit	Ambiguous	flatten	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_prose_geometry	Ambiguous	collect	2	
@@ -5359,9 +5351,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::row_menu_items	Ambiguous	t
 crates/bt-app/src/settings.rs	bt-app crate::settings::run_font_lane	Dynamic	(value)	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::scheme_index	Ambiguous	or_else	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::scheme_index	Ambiguous	unwrap_or	1	
-crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	file_name	1	
-crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	is_file	2	
-crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	join	3	
+crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	join	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::shipped_notices_near	Ambiguous	then_some	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::shortcut_undelivered_note	Ambiguous	text	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::sidebar_label	Ambiguous	text	2	
@@ -5440,7 +5430,6 @@ crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnv
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnvironment::program	Ambiguous	collect	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnvironment::program	Ambiguous	into_owned	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnvironment::program	Ambiguous	is_absolute	1	
-crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnvironment::program	Ambiguous	is_file	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProbeEnvironment::program	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProfileRevision::read	Ambiguous	kind	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::ProfileRevision::read	Ambiguous	to_string	1	
@@ -5510,7 +5499,6 @@ crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_module_path	Ambiguous	trim_end_matches	2	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_module_path	Dynamic	expand	4	2026-10-20: T-INTEGRATION-INJECT-2-BUILD: a handed-in closure or function value; its doors are reached at the definer (closure bodies walked with the definer; a value named is an edge)
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_module_path	Dynamic	same	2	2026-10-20: T-INTEGRATION-INJECT-2-BUILD: a handed-in closure or function value; its doors are reached at the definer (closure bodies walked with the definer; a value named is an edge)
-crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_with_prepared_and_retry	Ambiguous	is_file	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_with_prepared_and_retry	Dynamic	prepare	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::compose_with_prepared_and_retry	Dynamic	retry	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::composed_powershell_arguments	Ambiguous	push	4	
@@ -5634,7 +5622,6 @@ crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershe
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershell_profile_seen	Ambiguous	lock	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershell_profile_seen	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershell_script_for_birth	Ambiguous	clone	2	
-crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershell_script_for_birth	Ambiguous	is_file	2	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::powershell_single_quoted	Ambiguous	chars	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::probe_profile_observation	Ambiguous	ok	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::probe_profile_observation_unless	Dynamic	ask	1	
@@ -5646,9 +5633,9 @@ crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_key	Ambiguous	to_lowercase	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_key	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_path_reason	Ambiguous	file_attributes	1	
-crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_path_reason	Ambiguous	file_type	1	
-crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_path_reason	Ambiguous	is_file	1	
-crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_path_reason	Ambiguous	is_symlink	1	
+crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_path_reason	Ambiguous	file_type	1	2026-10-26: Metadata::file_type, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
+crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_path_reason	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
+crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_path_reason	Ambiguous	is_symlink	1	2026-10-26: FileType::is_symlink, an accessor of the value Metadata::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_path_reason	Ambiguous	kind	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_path_reason	Ambiguous	permissions	1	
 crates/bt-app/src/shell_integration.rs	bt-app crate::shell_integration::profile_path_reason	Ambiguous	readonly	1	
@@ -6012,7 +5999,7 @@ crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::NameSource::label	Ambiguous	
 crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::TooltipAnchors::push_faced	Ambiguous	is_empty	1	
 crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::TooltipAnchors::push_faced	Dynamic	into	1	
 crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::TooltipHost::observe	Ambiguous	is_some	1	
-crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::TooltipHost::retain	Dynamic	exists	2	
+crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::TooltipHost::retain	Dynamic	exists	2	2026-10-26: a call of the `exists` parameter, an impl Fn(TooltipAnchorId) -> bool over the tooltip anchors this window holds: no file (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::break_word	Ambiguous	count	1	
 crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::break_word	Ambiguous	len_utf8	1	
 crates/bt-app/src/tooltip.rs	bt-app crate::tooltip::break_word	Ambiguous	to_owned	1	
@@ -6135,7 +6122,7 @@ crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::program_plan	Ambiguous	a
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::program_plan	Ambiguous	clone	3	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::program_plan	Ambiguous	display	3	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::program_plan	Ambiguous	file_name	1	
-crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::program_plan	Ambiguous	is_file	2	
+crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::program_plan	Ambiguous	is_file	2	2026-10-26: Metadata::is_file, an accessor of the value fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::program_plan	Ambiguous	is_some	2	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::program_plan	Ambiguous	join	4	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::program_plan	Ambiguous	kind	3	
@@ -6175,7 +6162,7 @@ crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::tree_items	Ambiguous	cmp
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::tree_items	Ambiguous	components	2	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::tree_items	Ambiguous	count	2	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::tree_items	Ambiguous	display	2	
-crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::tree_items	Ambiguous	is_file	1	
+crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::tree_items	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::tree_items	Ambiguous	map	1	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::tree_items	Ambiguous	map_err	3	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::tree_items	Ambiguous	path	1	
@@ -6453,7 +6440,7 @@ crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Tx
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::held_past	Ambiguous	or_else	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a standard-library method (Option, Iterator, String, Duration, Vec) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::move_back	Ambiguous	activate_back	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::of	Ambiguous	to_string	1	
-crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::ready_to_move	Ambiguous	is_file	1	
+crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::ready_to_move	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::ready_to_move	Ambiguous	is_ok	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::retire_committed_steps	Ambiguous	to_string	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::Txn::settle	Ambiguous	and_then	2	
@@ -6463,12 +6450,12 @@ crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::ap
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::apply_electing	Dynamic	elect	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::apply_under_the_lock_with	Ambiguous	to_string	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::apply_under_the_lock_with	Dynamic	hold	1	
-crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::digest_at	Ambiguous	is_file	1	
+crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::digest_at	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::digest_at	Ambiguous	ok	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::held_move	Ambiguous	move_held	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a World method called through the RefCell that lends the applier's world to the held rounds' two seams; its product bodies are Machine's and LoggedWindows' (the line appended to the log; move_held a no-op)
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::held_move	Ambiguous	say	1	2026-10-21: T-UPDATE-MOVE-HELD-RETRY; a World method called through the RefCell that lends the applier's world to the held rounds' two seams; its product bodies are Machine's and LoggedWindows' (the line appended to the log; move_held a no-op)
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::live_set	Dynamic	at	3	
-crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::read_digest_at	Ambiguous	is_file	1	
+crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::read_digest_at	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::read_digest_at	Ambiguous	to_string	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::recover	Ambiguous	rolled_back	1	
 crates/bt-app/src/update_apply_windows.rs	bt-app crate::update_apply_windows::run_here	Ambiguous	code	1	
@@ -6574,9 +6561,9 @@ crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::perform_counte
 crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::perform_counted	Ambiguous	to_string	2	
 crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::perform_counted	Dynamic	say	2	
 crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::record_the_applier	Ambiguous	take	1	
-crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::refused_line	Ambiguous	file_type	1	
-crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::refused_line	Ambiguous	is_file	1	
-crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::refused_line	Ambiguous	is_symlink	1	
+crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::refused_line	Ambiguous	file_type	1	2026-10-26: Metadata::file_type, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
+crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::refused_line	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
+crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::refused_line	Ambiguous	is_symlink	1	2026-10-26: FileType::is_symlink, an accessor of the value Metadata::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::refused_line	Ambiguous	len	1	
 crates/bt-app/src/update_handoff.rs	bt-app crate::update_handoff::refused_line	Ambiguous	map_or_else	1	
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::<FeedBytes as Read>::read	Dynamic	(value)	1	
@@ -6705,7 +6692,7 @@ crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	root	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	to_owned	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::prepare_on	Ambiguous	to_str	1	
-crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::present	Ambiguous	is_file	1	
+crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::present	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::resume	Ambiguous	and_then	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::resume	Ambiguous	map	1	
 crates/bt-app/src/update_prepare_windows.rs	bt-app crate::update_prepare_windows::running	Ambiguous	extend	1	
@@ -7731,8 +7718,8 @@ crates/bt-persist/src/scheme.rs	bt-persist crate::scheme::required_string	Ambigu
 crates/bt-persist/src/scheme.rs	bt-persist crate::scheme::required_string	Ambiguous	ok_or	2	
 crates/bt-persist/src/scheme.rs	bt-persist crate::scheme::write_scheme	Ambiguous	zip	2	
 crates/bt-persist/src/sentinel.rs	bt-persist crate::sentinel::create_sentinel	Ambiguous	create_new	1	
-crates/bt-persist/src/sentinel.rs	bt-persist crate::sentinel::create_sentinel	Ambiguous	file_type	1	
-crates/bt-persist/src/sentinel.rs	bt-persist crate::sentinel::create_sentinel	Ambiguous	is_symlink	1	
+crates/bt-persist/src/sentinel.rs	bt-persist crate::sentinel::create_sentinel	Ambiguous	file_type	1	2026-10-26: Metadata::file_type, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
+crates/bt-persist/src/sentinel.rs	bt-persist crate::sentinel::create_sentinel	Ambiguous	is_symlink	1	2026-10-26: FileType::is_symlink, an accessor of the value Metadata::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-persist/src/sentinel.rs	bt-persist crate::sentinel::create_sentinel	Ambiguous	kind	2	
 crates/bt-persist/src/sentinel.rs	bt-persist crate::sentinel::create_sentinel	Ambiguous	open	1	
 crates/bt-persist/src/sentinel.rs	bt-persist crate::sentinel::remove_sentinel	Ambiguous	kind	1	
@@ -7817,9 +7804,9 @@ crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe:
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::send_line	Ambiguous	shutdown	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::send_line	Ambiguous	write_all	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::unguessable_bits	Ambiguous	finish	2	
-crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::vetted_endpoint	Ambiguous	file_type	2	
+crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::vetted_endpoint	Ambiguous	file_type	2	2026-10-26: Metadata::file_type, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::vetted_endpoint	Ambiguous	is_socket	1	
-crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::vetted_endpoint	Ambiguous	is_symlink	1	
+crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::vetted_endpoint	Ambiguous	is_symlink	1	2026-10-26: FileType::is_symlink, an accessor of the value Metadata::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::vetted_endpoint	Ambiguous	permissions	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::vetted_endpoint	Ambiguous	uid	1	
 crates/bt-platform/src/attention_pipe_unix.rs	bt-platform crate::attention_pipe::vetted_endpoint	Dynamic	refuse	3	
@@ -7827,7 +7814,7 @@ crates/bt-platform/src/cjk.rs	bt-platform crate::cjk::CjkFamily::display_name	Am
 crates/bt-platform/src/cjk.rs	bt-platform crate::cjk::order_for_language	Ambiguous	next	1	
 crates/bt-platform/src/cjk.rs	bt-platform crate::cjk::order_for_language	Ambiguous	unwrap_or	1	
 crates/bt-platform/src/cjk.rs	bt-platform crate::cjk::order_for_language	Dynamic	preferred	2	
-crates/bt-platform/src/cleanup.rs	bt-platform crate::cleanup::is_link	Ambiguous	is_symlink	2	
+crates/bt-platform/src/cleanup.rs	bt-platform crate::cleanup::is_link	Ambiguous	is_symlink	2	2026-10-26: FileType::is_symlink, an accessor of the value Metadata::file_type (the parameter is a typed &fs::Metadata; what file_type returns is unread) returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/cleanup.rs	bt-platform crate::cleanup::probe_file	Ambiguous	map	1	
 crates/bt-platform/src/cleanup.rs	bt-platform crate::cleanup::probe_file	Ambiguous	open	1	
 crates/bt-platform/src/cleanup.rs	bt-platform crate::cleanup::probe_file	Ambiguous	share_mode	1	
@@ -7872,7 +7859,7 @@ crates/bt-platform/src/contained_panic.rs	bt-platform crate::contained_panic::co
 crates/bt-platform/src/contained_panic.rs	bt-platform crate::contained_panic::contain	Ambiguous	set	1	
 crates/bt-platform/src/contained_panic.rs	bt-platform crate::contained_panic::contain	Dynamic	work	1	
 crates/bt-platform/src/contained_panic.rs	bt-platform crate::contained_panic::is_contained	Ambiguous	get	1	
-crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::FileIdentity::of	Ambiguous	is_file	1	
+crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::FileIdentity::of	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value file.metadata() returned: no disk question itself; the question, file.metadata() on the File that File::open returned, is not typed either (the engine reads no foreign function's return type) and is followed by the one-candidate rule into bt-effects' Reader::metadata rather than classified - plan row 68 (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::FileIdentity::of	Ambiguous	len	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::copy_new	Ambiguous	create_new	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::copy_new	Ambiguous	open	1	
@@ -7905,12 +7892,12 @@ crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::removal_from_environment	Ambiguous	to_str	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_empty_folder	Ambiguous	kind	2	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_verified_file	Ambiguous	file_attributes	2	
-crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_verified_file	Ambiguous	is_file	1	
+crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_verified_file	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_verified_file	Ambiguous	kind	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_verified_file	Ambiguous	len	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_verified_file	Ambiguous	map	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_with	Ambiguous	path	3	
-crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_with	Dynamic	exists	2	
+crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_with	Dynamic	exists	2	2026-10-26: a call of the `exists: impl FnMut(&Path) -> io::Result<bool>` parameter, no receiver to type; the product caller hands `|path| fs::exists(path)`, a typed std::fs::exists where it is written (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_with	Dynamic	remove	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::remove_with	Dynamic	remove_folder	1	
 crates/bt-platform/src/deferred_removal.rs	bt-platform crate::deferred_removal::required	Ambiguous	ok_or_else	1	
@@ -8014,7 +8001,7 @@ crates/bt-platform/src/environment.rs	bt-platform crate::environment::platform::
 crates/bt-platform/src/exchange.rs	bt-platform crate::exchange::exchange_on	Ambiguous	kind	1	
 crates/bt-platform/src/exchange.rs	bt-platform crate::exchange::exchange_on	Ambiguous	raw_os_error	1	
 crates/bt-platform/src/exchange.rs	bt-platform crate::exchange::flush_directory	Ambiguous	sync_all	1	
-crates/bt-platform/src/exchange.rs	bt-platform crate::exchange::refuse_a_link	Ambiguous	is_symlink	1	
+crates/bt-platform/src/exchange.rs	bt-platform crate::exchange::refuse_a_link	Ambiguous	is_symlink	1	2026-10-26: Metadata::is_symlink, an accessor of the value fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/exchange.rs	bt-platform crate::exchange::refuse_a_link	Ambiguous	map_err	2	
 crates/bt-platform/src/exchange.rs	bt-platform crate::exchange::replace_keeping_displaced	Ambiguous	map_err	2	
 crates/bt-platform/src/exchange.rs	bt-platform crate::exchange::replace_keeping_displaced	Ambiguous	sync_all	1	
@@ -8152,7 +8139,6 @@ crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::han
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over	Ambiguous	openURL	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over_through	Ambiguous	and_then	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over_through	Ambiguous	to_string	1	
-crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over_through	Ambiguous	try_exists	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over_through	Dynamic	claimed	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::hand_over_through	Dynamic	open	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::macos_handoff::open_folder_in_finder	Ambiguous	URLForApplicationWithBundleIdentifier	1	
@@ -8194,7 +8180,7 @@ crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::program_in_directo
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::program_in_directories	Ambiguous	to_string	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::program_in_directories	Ambiguous	to_string_lossy	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::program_in_directories	Ambiguous	unwrap_or	1	
-crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::program_in_directories	Dynamic	is_file	1	
+crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::program_in_directories	Dynamic	is_file	1	2026-10-26: a call of the `is_file: &dyn Fn(&Path) -> bool` parameter, no receiver to type; the three product closures handed to it are typed `&Path` at their callers (attention_copilot::run_probe, shell_integration::ProbeEnvironment::program, windows_handoff::program_on_path), where std::path::Path::is_file is an Effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::resolved_for_a_door	Ambiguous	ok	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::reveal_argument_form	Ambiguous	any	2	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::reveal_argument_form	Ambiguous	as_os_str	1	
@@ -8234,7 +8220,6 @@ crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::p
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::program_on_path	Ambiguous	extend	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::program_on_path	Ambiguous	is_absolute	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::program_on_path	Ambiguous	is_empty	2	
-crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::program_on_path	Ambiguous	is_file	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::program_on_path	Ambiguous	unwrap_or_default	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::read_directory	Dynamic	call	1	
 crates/bt-platform/src/handoff.rs	bt-platform crate::handoff::windows_handoff::shell_execute_w	Ambiguous	as_mut	1	
@@ -8482,8 +8467,8 @@ crates/bt-platform/src/instance.rs	bt-platform crate::instance::per_user_tempora
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::per_user_temporary_directory	Ambiguous	len	1	
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::per_user_temporary_directory	Ambiguous	truncate	1	
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::prepare_private_directory	Ambiguous	create	1	
-crates/bt-platform/src/instance.rs	bt-platform crate::instance::prepare_private_directory	Ambiguous	file_type	1	
-crates/bt-platform/src/instance.rs	bt-platform crate::instance::prepare_private_directory	Ambiguous	is_symlink	1	
+crates/bt-platform/src/instance.rs	bt-platform crate::instance::prepare_private_directory	Ambiguous	file_type	1	2026-10-26: Metadata::file_type, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
+crates/bt-platform/src/instance.rs	bt-platform crate::instance::prepare_private_directory	Ambiguous	is_symlink	1	2026-10-26: FileType::is_symlink, an accessor of the value Metadata::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::prepare_private_directory	Ambiguous	kind	1	
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::prepare_private_directory	Ambiguous	permissions	1	
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::prepare_private_directory	Ambiguous	uid	1	
@@ -8494,9 +8479,9 @@ crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_guard	Ambi
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_stale_claims_in	Ambiguous	and_then	1	
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_stale_claims_in	Ambiguous	custom_flags	1	
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_stale_claims_in	Ambiguous	extension	1	
-crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_stale_claims_in	Ambiguous	file_type	1	
+crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_stale_claims_in	Ambiguous	file_type	1	2026-10-26: Metadata::file_type, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_stale_claims_in	Ambiguous	flatten	1	
-crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_stale_claims_in	Ambiguous	is_file	1	
+crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_stale_claims_in	Ambiguous	is_file	1	2026-10-26: FileType::is_file, an accessor of the value Metadata::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_stale_claims_in	Ambiguous	is_ok	1	
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_stale_claims_in	Ambiguous	is_some_and	1	
 crates/bt-platform/src/instance.rs	bt-platform crate::instance::sweep_stale_claims_in	Ambiguous	len	1	
@@ -8529,13 +8514,10 @@ crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::plist_st
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::plist_string	Ambiguous	ok_or_else	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::plist_string	Dynamic	unwritable	2	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	collect	1	
-crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	file_name	1	
-crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	file_type	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	is_ok_and	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	kind	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map	1	
 crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	map_err	1	
-crates/bt-platform/src/launch_agent.rs	bt-platform crate::launch_agent::sweep	Ambiguous	path	1	
 crates/bt-platform/src/launch_conversation.rs	bt-platform crate::launch_conversation::hand_over_on	Dynamic	on_reply	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::<Client as crate::launch_conversation::Connection>::hear	Ambiguous	truncate	1	
 crates/bt-platform/src/launch_pipe.rs	bt-platform crate::launch_pipe::Instance::open	Ambiguous	unwrap_or	2	
@@ -8576,9 +8558,9 @@ crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::peer_
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::serve	Ambiguous	is_err	2	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vet_executable	Ambiguous	map	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vet_executable	Dynamic	named	2	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vetted_endpoint	Ambiguous	file_type	2	
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vetted_endpoint	Ambiguous	file_type	2	2026-10-26: Metadata::file_type, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vetted_endpoint	Ambiguous	is_socket	1	
-crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vetted_endpoint	Ambiguous	is_symlink	1	
+crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vetted_endpoint	Ambiguous	is_symlink	1	2026-10-26: FileType::is_symlink, an accessor of the value Metadata::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vetted_endpoint	Ambiguous	permissions	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vetted_endpoint	Ambiguous	uid	1	
 crates/bt-platform/src/launch_pipe_unix.rs	bt-platform crate::launch_pipe::vetted_endpoint	Dynamic	refuse	3	
@@ -9231,6 +9213,7 @@ crates/bt-platform/src/logon_hook.rs	bt-platform crate::logon_hook::string_text	
 crates/bt-platform/src/logon_hook.rs	bt-platform crate::logon_hook::string_text	Ambiguous	take_while	1	
 crates/bt-platform/src/logon_hook.rs	bt-platform crate::logon_hook::units	Ambiguous	collect	2	
 crates/bt-platform/src/logon_hook.rs	bt-platform crate::logon_hook::units	Ambiguous	encode_utf16	1	
+crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::a_box_would_be_seen	Ambiguous	is_null	1	2026-10-27: `unsafe { NSApp }.is_null()` is on AppKit's `*mut AnyObject` global, the same read macos_dialogs::message_box makes, asked again by the query that cannot call it (T-STOP-NOTICE-BOX-QUERY-MACOS)
 crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::add_the_delegate_selectors	Ambiguous	as_bool	1	
 crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::add_the_delegate_selectors	Ambiguous	cast_mut	1	
 crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::add_the_delegate_selectors	Ambiguous	is_null	1	
@@ -9607,9 +9590,9 @@ crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::detach_p
 crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::detach_point	Ambiguous	success	1	
 crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::detach_point	Dynamic	detach	2	
 crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::flush_tree_with	Ambiguous	clone	3	
-crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::flush_tree_with	Ambiguous	file_type	1	
-crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::flush_tree_with	Ambiguous	is_file	1	
-crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::flush_tree_with	Ambiguous	is_symlink	1	
+crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::flush_tree_with	Ambiguous	file_type	1	2026-10-26: Metadata::file_type, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
+crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::flush_tree_with	Ambiguous	is_file	1	2026-10-26: FileType::is_file, an accessor of the value Metadata::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
+crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::flush_tree_with	Ambiguous	is_symlink	1	2026-10-26: FileType::is_symlink, an accessor of the value Metadata::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::flush_tree_with	Ambiguous	map_err	2	
 crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::flush_tree_with	Ambiguous	path	1	
 crates/bt-platform/src/macos_update.rs	bt-platform crate::macos_update::flush_tree_with	Ambiguous	push	2	
@@ -10537,7 +10520,7 @@ crates/bt-pty/src/lib.rs	bt-pty crate::unix_millis	Ambiguous	unwrap_or_default	1
 crates/bt-pty/src/lib.rs	bt-pty crate::windows_command_line_len	Ambiguous	checked_sub	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::windows_command_line_len	Ambiguous	len	1	
 crates/bt-pty/src/lib.rs	bt-pty crate::windows_command_line_len	Ambiguous	ok	1	
-crates/bt-pty/src/shell.rs	bt-pty crate::shell::<SystemShellEnvironment as ShellEnvironment>::is_file	Ambiguous	is_file	1	
+crates/bt-pty/src/shell.rs	bt-pty crate::shell::<SystemShellEnvironment as ShellEnvironment>::is_file	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value std::fs::metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-pty/src/shell.rs	bt-pty crate::shell::<SystemShellEnvironment as ShellEnvironment>::is_file	Ambiguous	is_ok_and	1	
 crates/bt-pty/src/shell.rs	bt-pty crate::shell::<SystemShellEnvironment as ShellEnvironment>::is_file	Ambiguous	permissions	1	
 crates/bt-pty/src/shell.rs	bt-pty crate::shell::search_path_for	Ambiguous	find	1	
@@ -10964,7 +10947,7 @@ crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dy
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	border	4	
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	border_soft	5	
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	hover	7	
-crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ink	24	
+crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ink	25	2026-10-27: grown 24 -> 25 by T-PREVIEW-NEIGHBOUR-BUTTON-HOVER: the derivation's local closure ink (ink_over of a ground, the scheme's ink source and its alpha), colour arithmetic that reaches no door, called once more for preview_nav_glyph_on_pill
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ink2	19	
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ink3	25	
 crates/bt-render/src/scheme.rs	bt-render crate::scheme::ChromePalette::derive	Dynamic	ring	5	
@@ -11114,7 +11097,7 @@ crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::build_resample_p
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::build_resample_pool	Ambiguous	start_handler	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::build_resample_pool	Dynamic	start	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	by_ref	1	
-crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	is_file	1	
+crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value file.metadata() returned: no disk question itself; the question is not typed (file is the read ledger's Reader, untyped after map_err) and is reached only by the one-candidate rule's follow into bt-effects' Reader::metadata, not classified at this site - plan row 68 (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	len	6	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	map_err	3	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::decode_background_image	Ambiguous	take	1	
@@ -11169,7 +11152,7 @@ crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::normalized_local
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::normalized_local_path_key	Ambiguous	to_ascii_lowercase	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::normalized_local_path_key	Ambiguous	to_string_lossy	1	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	by_ref	1	
-crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	is_file	1	
+crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	is_file	1	2026-10-26: Metadata::is_file, an accessor of the value file.metadata() returned: no disk question itself; the question is not typed (file is the read ledger's Reader, untyped after map_err) and is reached only by the one-candidate rule's follow into bt-effects' Reader::metadata, not classified at this site - plan row 68 (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	len	5	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	map_err	3	
 crates/bt-term/src/inline_image.rs	bt-term crate::inline_image::read_and_decode_local_image	Ambiguous	take	1	
@@ -11867,10 +11850,10 @@ crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::may_read_unasked	A
 crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::may_read_unasked	Ambiguous	kind	1	
 crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::may_read_unasked	Ambiguous	next	2	
 crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::may_read_unasked	Ambiguous	to_string_lossy	1	
-crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::may_read_unasked_through_links	Ambiguous	file_type	2	
+crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::may_read_unasked_through_links	Ambiguous	file_type	2	2026-10-26: Metadata::file_type, an accessor of the value std::fs::symlink_metadata returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::may_read_unasked_through_links	Ambiguous	is_absolute	1	
 crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::may_read_unasked_through_links	Ambiguous	is_ok_and	1	
-crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::may_read_unasked_through_links	Ambiguous	is_symlink	2	
+crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::may_read_unasked_through_links	Ambiguous	is_symlink	2	2026-10-26: FileType::is_symlink, an accessor of the value Metadata::file_type returned: no disk question (that call is the question, typed: an Effect where a door reaches it); the engine reads no foreign function's return type, and a method of a file-system value is no effect (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE)
 crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::may_read_unasked_through_links	Ambiguous	join	1	
 crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::names_a_dos_device	Ambiguous	as_bytes	3	
 crates/bt-transcript/src/paths.rs	bt-transcript crate::paths::names_a_dos_device	Ambiguous	eq_ignore_ascii_case	2	

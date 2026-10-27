@@ -1332,6 +1332,69 @@ fn the_unfollowed_edges_are_the_committed_list() {
     );
 }
 
+/// The method names a `Path` answers by asking the disk (the request-door guard's
+/// `EFFECT_FUNCTIONS`' `Path` names) and `DirEntry`'s `file_type`: on a receiver the rules do not
+/// type, the request-door guard cannot tell such a question from a first-party method of the name
+/// (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE).
+const FILE_SYSTEM_SHAPED: &[&str] = &[
+    "exists",
+    "try_exists",
+    "is_file",
+    "is_dir",
+    "is_symlink",
+    "metadata",
+    "symlink_metadata",
+    "read_dir",
+    "read_link",
+    "canonicalize",
+    "file_type",
+];
+
+/// Whether `reason` is `YYYY-MM-DD: <why>`, the why not blank.
+fn is_dated(reason: &str) -> bool {
+    let bytes = reason.as_bytes();
+    bytes.len() > 12
+        && bytes[..10].iter().enumerate().all(|(at, byte)| {
+            if at == 4 || at == 7 {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_digit()
+            }
+        })
+        && bytes[10] == b':'
+        && bytes[11] == b' '
+        && !bytes[12].is_ascii_whitespace()
+}
+
+/// RED (T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE) — **no file-system-shaped call on an untyped receiver
+/// is unfollowed without a dated reason**: every row of `docs/plans/UNFOLLOWED-EDGES.tsv` (which
+/// [`the_unfollowed_edges_are_the_committed_list`] holds equal to the tree) whose name is one of
+/// [`FILE_SYSTEM_SHAPED`] says why the guard may go blind there — an accessor of a value a typed
+/// question returned, a call of an `Fn` parameter whose closures are walked where they are
+/// written — or its receiver is typed and the row is gone. A new untyped `x.is_file()` in the
+/// product brings its row in blank, and this names it.
+///
+/// MUTATION: blank the reason of one such row — the test names it.
+#[test]
+fn every_file_system_shaped_unfollowed_edge_carries_a_dated_reason() {
+    let text = std::fs::read_to_string(unfollowed_list()).expect("UNFOLLOWED-EDGES.tsv is read");
+    let undated: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("file\t"))
+        .filter(|line| {
+            let cells: Vec<&str> = line.split('\t').collect();
+            cells.len() == 6 && FILE_SYSTEM_SHAPED.contains(&cells[3]) && !is_dated(cells[5])
+        })
+        .collect();
+    assert!(
+        undated.is_empty(),
+        "{} file-system-shaped unfollowed edges carry no dated reason: type the receiver (the \
+         request-door guard then classifies the call), or write `YYYY-MM-DD: <why>`:\n  {}",
+        undated.len(),
+        undated.join("\n  ")
+    );
+}
+
 // ── round 4 ───────────────────────────────────────────────────────────────
 
 /// RED (round 4) — **a function-pointer value whose initializer names the value again is read

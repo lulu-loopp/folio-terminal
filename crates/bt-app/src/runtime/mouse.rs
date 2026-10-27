@@ -1484,6 +1484,10 @@ impl<B: Backend> Runtime<'_, B> {
         self.drive_search_hover(None)?;
         // And the strip's, for the identical reason.
         self.drive_notice_hover(None)?;
+        // And a picture's side button: a focused pane keeps its two buttons
+        // after the hand has gone, and neither may stay lit for a hand that is
+        // not there.
+        self.note_preview_neighbour_hover(None)?;
         // Deliberately *not* a drag cancel, and the reason is measurable rather
         // than stylistic: winit takes the Win32 mouse capture on button-down
         // (`capture_mouse`, its `WM_LBUTTONDOWN` arm), so a held drag keeps
@@ -1716,8 +1720,23 @@ impl<B: Backend> Runtime<'_, B> {
         // has claimed the point, so a preview window standing over a pane no
         // longer leaves that pane's scrollbar, its link underline or its hex
         // column lit under a hand that is on the window.
-        let free = !self.a_modal_covers_the_window() && self.pointer_target_at(position).is_none();
+        let target = self.pointer_target_at(position);
+        let free = !self.a_modal_covers_the_window() && target.is_none();
         self.note_preview_body_hover(free.then_some(position))?;
+        // A picture's side buttons light on the same terms, with one difference:
+        // they stand on a floating window's picture as well as a docked one's,
+        // so a float under the hand is no cover by itself — `preview_neighbour_at`
+        // answers only for the float that is on top there, or for a docked pane
+        // no float covers. Hover is asked of the move's own position under this
+        // gate, like the hovers beside it; moving it behind the router is
+        // T-POINTER-CAPTURE cut 8d's.
+        let on_a_float =
+            !self.a_modal_covers_the_window() && matches!(target, Some(PointerTarget::Float(..)));
+        self.note_preview_neighbour_hover(
+            (free || on_a_float)
+                .then(|| self.preview_neighbour_at(position))
+                .flatten(),
+        )?;
         // The lane the pointer is in — the fact that lights one pane's mark and
         // holds it on the glass. Answered `None` behind an overlay for the
         // reason the bars above it are: a scrim never leaves a bar lit under it.
@@ -2697,12 +2716,16 @@ impl<B: Backend> Runtime<'_, B> {
             self.preview_link_grasp()
                 || self.terminal_link_grasp()
                 || self.file_peek_foot_grasp()
-                || self
-                    .window
-                    .pointer_position
-                    .is_some_and(|at| self.preview_neighbour_at(at).is_some()),
+                || self.preview_neighbour_hover.is_some(),
             self.window.command_rail_hover.is_some(),
-            self.image_grasp(),
+            // **A side button outranks the open hand of the picture it stands
+            // on** (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER): a press there steps the
+            // folder rather than taking hold of the picture — `press_video_at`
+            // asks the button first — so the finger says what the press will
+            // do. A pan already held keeps its closed hand.
+            self.image_grasp().filter(|grasp| {
+                matches!(grasp, ImageGrasp::Closed) || self.preview_neighbour_hover.is_none()
+            }),
         );
         // The same door, the other branch.
         let _ = bt_platform::admission::admitted::<bt_platform::admission::doors::SetCursor, _>(

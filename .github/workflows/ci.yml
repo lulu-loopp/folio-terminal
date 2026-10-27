@@ -1181,7 +1181,11 @@ jobs:
       # the host names (CC-4) or of the SVG codec (CC-7) before the host installed it panics in
       # release too: this binary is a process of its own with nothing installed, and a
       # `debug_assert!` in place of the panic is green in the step above and red here. Release artefacts are a second build of
-      # bt-term's graph (fat LTO) and go into the same cache.
+      # bt-term's graph, optimised, and go into the same cache. That second build is the cost:
+      # 570 units, typst and wgpu among them through bt-term's dev-dependencies; fat LTO is only
+      # the test binary's own link, 13 s of a 237 s cold build on the development machine
+      # (T-CI-LOGIC-TEST-COMPILE, 2026-10-26). A profile inheriting `release` without LTO built in
+      # 255 s and saved nothing cold, so the proof stays in the profile people download.
       - name: the host-installed facts hold in release
         run: cargo test --release --locked -p bt-term --test host_capabilities
 

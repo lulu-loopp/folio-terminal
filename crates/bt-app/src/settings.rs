@@ -5819,7 +5819,7 @@ fn notices_beside_the_executable() -> Option<std::path::PathBuf> {
 /// `cargo run` puts the executable in `target/debug`, where no release script
 /// has ever been.
 fn shipped_notices_near(executable: &std::path::Path) -> Option<std::path::PathBuf> {
-    let beside = executable.parent()?;
+    let beside: &std::path::Path = executable.parent()?;
     let shipped = beside.join(NOTICES_FILE);
     if shipped.is_file() {
         return Some(shipped);
@@ -5827,7 +5827,7 @@ fn shipped_notices_near(executable: &std::path::Path) -> Option<std::path::PathB
     if beside.file_name()? != "MacOS" {
         return None;
     }
-    let in_resources = beside.parent()?.join("Resources").join(NOTICES_FILE);
+    let in_resources: std::path::PathBuf = beside.parent()?.join("Resources").join(NOTICES_FILE);
     in_resources.is_file().then_some(in_resources)
 }
 

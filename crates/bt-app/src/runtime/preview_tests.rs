@@ -3174,3 +3174,404 @@ fn a_digit_typed_into_the_shell_never_reaches_the_picture_beside_it() {
         "and the picture stayed as it was"
     );
 }
+
+// ── T-PREVIEW-NEIGHBOUR-BUTTON-HOVER: a picture's `<` / `>` answer the hand ────────────────────
+
+/// A focused docked picture whose folder holds `before` pictures ahead of it and `after` behind
+/// it, so its side buttons are on the glass. The neighbours are names only: a step opens them as
+/// the arrow road does, and nothing here reads them from the disk.
+fn a_picture_with_neighbours(
+    tag: &str,
+    before: usize,
+    after: usize,
+) -> (HeadlessFolio, PreviewSurface, Vec<std::path::PathBuf>) {
+    a_picture_with_neighbours_held(tag, before, after, true)
+}
+
+/// [`a_picture_with_neighbours`], with the keyboard on the picture's pane or on the shell beside
+/// it: an unfocused pane shows its side buttons only while the pane is hovered.
+fn a_picture_with_neighbours_held(
+    tag: &str,
+    before: usize,
+    after: usize,
+    focused: bool,
+) -> (HeadlessFolio, PreviewSurface, Vec<std::path::PathBuf>) {
+    let (mut folio, surface) = a_large_picture_beside_a_shell(tag, "邻居 neighbours", focused);
+    let file = picture_path(&mut folio, surface);
+    let folder = file.parent().expect("a scratch folder").to_path_buf();
+    let ahead = (0..before).map(|index| folder.join(format!("{index} 前 before.png")));
+    let behind = (0..after).map(|index| folder.join(format!("zz{index} 后 after.png")));
+    let paths: Vec<std::path::PathBuf> = ahead.chain(std::iter::once(file)).chain(behind).collect();
+    let listing = crate::files::DirListing {
+        entries: paths
+            .iter()
+            .map(|path| crate::files::DirEntry {
+                name: path
+                    .file_name()
+                    .expect("a file name")
+                    .to_string_lossy()
+                    .into_owned(),
+                is_dir: false,
+                is_symlink: false,
+            })
+            .collect(),
+        ..crate::files::DirListing::default()
+    };
+    folio.window.tabs[0]
+        .preview_panes
+        .entry(surface)
+        .hold_neighbours(crate::preview_neighbours::Folder {
+            path: folder,
+            listing: Some(listing),
+            asked_by: surface,
+        });
+    folio.draw();
+    (folio, surface, paths)
+}
+
+fn neighbour_button(
+    folio: &mut HeadlessFolio,
+    surface: PreviewSurface,
+    direction: crate::preview_neighbours::Direction,
+) -> [f32; 4] {
+    let index = match direction {
+        crate::preview_neighbours::Direction::Previous => 0,
+        crate::preview_neighbours::Direction::Next => 1,
+    };
+    folio.runtime().preview_neighbour_buttons(surface)[index]
+        .expect("the fixture's own precondition: the button is on the glass")
+}
+
+fn centre_of(rect: [f32; 4]) -> PhysicalPosition<f64> {
+    PhysicalPosition::new(
+        f64::from((rect[0] + rect[2]) / 2.0),
+        f64::from((rect[1] + rect[3]) / 2.0),
+    )
+}
+
+/// The inks the two buttons are drawn in this frame, `<` first: `(pill, chevron)` each, or
+/// `None` for a button that is not on the glass.
+fn neighbour_inks(
+    folio: &mut HeadlessFolio,
+    surface: PreviewSurface,
+) -> [Option<([u8; 3], [u8; 3])>; 2] {
+    let buttons = folio.runtime().preview_neighbour_buttons(surface);
+    let sprites = folio
+        .runtime()
+        .preview_neighbour_layer(surface)
+        .map(|layer| layer.sprites)
+        .unwrap_or_default();
+    let mut drawn = sprites.chunks(2).map(|pair| (pair[0].color, pair[1].color));
+    buttons.map(|button| button.and_then(|_| drawn.next()))
+}
+
+/// A button at rest: the pill in the head's own ground and the chevron in the bar's ink.
+fn plain_neighbour() -> ([u8; 3], [u8; 3]) {
+    let palette = bt_render::chrome_palette();
+    (palette.pane_head, palette.title_text)
+}
+
+/// A button under the hand: `.pv-nav:hover`'s wash and ink.
+fn lit_neighbour() -> ([u8; 3], [u8; 3]) {
+    let palette = bt_render::chrome_palette();
+    (palette.preview_nav_pill, palette.preview_nav_glyph_on_pill)
+}
+
+/// How many frames the window was asked for since the last take.
+fn redraws(folio: &HeadlessFolio) -> usize {
+    folio
+        .ledger
+        .take()
+        .into_iter()
+        .filter(|effect| *effect == WindowEffect::Redraw)
+        .count()
+}
+
+/// RED (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER, owner report 2026-10-27) — **the side button under the
+/// hand lights**: the pill takes the mock-up's `--hover` wash and the chevron `--ink`
+/// (`.pv-nav:hover`), and only the button under the hand does.
+///
+/// MUTATION: drop the write in `Runtime::note_preview_neighbour_hover` — the button keeps its
+/// resting inks under the hand and the first assertion goes red.
+#[test]
+fn a_picture_neighbour_button_lights_under_the_hand() {
+    use crate::preview_neighbours::Direction::{Next, Previous};
+    let (mut folio, surface, _) = a_picture_with_neighbours("neighbour-lights", 1, 1);
+    let previous = neighbour_button(&mut folio, surface, Previous);
+    folio.move_to(centre_of(previous));
+    assert_eq!(
+        neighbour_inks(&mut folio, surface),
+        [Some(lit_neighbour()), Some(plain_neighbour())],
+        "the `<` under the hand lights and the `>` stays at rest"
+    );
+    let next = neighbour_button(&mut folio, surface, Next);
+    folio.move_to(centre_of(next));
+    assert_eq!(
+        neighbour_inks(&mut folio, surface),
+        [Some(plain_neighbour()), Some(lit_neighbour())],
+        "and the hand crossing to the `>` takes the light with it"
+    );
+}
+
+/// RED (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER) — **a floating window's picture lights its buttons
+/// too**: the float under the hand is the button's own, so it is no cover for it.
+///
+/// MUTATION: gate the note on `free` alone in `Runtime::pointer_moved` — a float is never free,
+/// and its `<` stays at rest under the hand.
+#[test]
+fn a_floating_pictures_neighbour_button_lights_under_the_hand() {
+    use crate::preview_neighbours::Direction::Previous;
+    let (mut folio, surface, _) = a_picture_with_neighbours("neighbour-float", 1, 1);
+    let PreviewSurface::Seat(leaf) = surface else {
+        unreachable!("a docked pane")
+    };
+    folio
+        .runtime()
+        .pop_out_preview(leaf.seat)
+        .expect("the picture is torn off");
+    folio.draw();
+    let id = folio
+        .window
+        .float
+        .live_windows()
+        .next()
+        .expect("a window holds the picture")
+        .id();
+    let float = PreviewSurface::Float(id);
+    let body = picture_body(&mut folio, float);
+    // Onto the window's body first: a float shows its buttons while its body is hovered.
+    folio.move_to(PhysicalPosition::new(
+        f64::from((body[0] + body[2]) / 2.0),
+        f64::from((body[1] + body[3]) / 2.0),
+    ));
+    folio.draw();
+    let previous = neighbour_button(&mut folio, float, Previous);
+    folio.move_to(centre_of(previous));
+    assert_eq!(
+        neighbour_inks(&mut folio, float)[0],
+        Some(lit_neighbour()),
+        "the float's `<` under the hand lights"
+    );
+}
+
+/// RED (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER) — **the light goes out with the hand, and each change
+/// asks for exactly one frame**: a move over the body that changes nothing asks for none.
+///
+/// MUTATION: drop the `over == self.preview_neighbour_hover` return in
+/// `Runtime::note_preview_neighbour_hover` — a move along the lit button asks a frame of its own
+/// and the count after it goes red.
+#[test]
+fn the_neighbour_hover_goes_out_and_asks_one_frame_per_change() {
+    use crate::preview_neighbours::Direction::Previous;
+    let (mut folio, surface, _) = a_picture_with_neighbours("neighbour-frames", 1, 1);
+    let body = picture_body(&mut folio, surface);
+    let previous = neighbour_button(&mut folio, surface, Previous);
+    let middle = |dy: f32| {
+        PhysicalPosition::new(
+            f64::from((body[0] + body[2]) / 2.0),
+            f64::from((body[1] + body[3]) / 2.0 + dy),
+        )
+    };
+    folio.move_to(middle(0.0));
+    folio.ledger.take();
+    folio.move_to(middle(12.0));
+    assert_eq!(
+        redraws(&folio),
+        0,
+        "a move over the body that lights nothing"
+    );
+    folio.move_to(centre_of(previous));
+    assert_eq!(redraws(&folio), 1, "onto the `<`: one frame");
+    assert_eq!(
+        neighbour_inks(&mut folio, surface)[0],
+        Some(lit_neighbour())
+    );
+    let on = centre_of(previous);
+    folio.move_to(PhysicalPosition::new(on.x + 2.0, on.y + 2.0));
+    assert_eq!(
+        redraws(&folio),
+        0,
+        "a move along the lit button changes nothing"
+    );
+    folio.move_to(middle(12.0));
+    assert_eq!(
+        redraws(&folio),
+        1,
+        "off the `<`, still in the pane: one frame"
+    );
+    assert_eq!(
+        neighbour_inks(&mut folio, surface)[0],
+        Some(plain_neighbour()),
+        "and it is at rest again"
+    );
+}
+
+/// PIN (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER) — **a hand over the pane but off the buttons lights
+/// neither**: the buttons are on the glass because the fixture's pane holds the keyboard, and
+/// both stand at rest.
+///
+/// MUTATION: have `Runtime::pointer_moved` note the surface's `Previous` whenever
+/// `preview_neighbour_buttons` has one — the `<` lights with the hand nowhere near it.
+#[test]
+fn over_the_pane_but_not_the_button_is_plain() {
+    let (mut folio, surface, _) = a_picture_with_neighbours("neighbour-plain", 1, 1);
+    let body = picture_body(&mut folio, surface);
+    folio.move_to(PhysicalPosition::new(
+        f64::from((body[0] + body[2]) / 2.0),
+        f64::from(body[1] + 6.0),
+    ));
+    assert_eq!(
+        neighbour_inks(&mut folio, surface),
+        [Some(plain_neighbour()), Some(plain_neighbour())],
+        "both buttons at rest"
+    );
+}
+
+/// RED (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER) — **the hover ends with the document it was on, and
+/// with the hand leaving the window**:
+/// - a step by the arrow key lets go of it (the button relights at the next move, ruling D5);
+/// - a click on the button steps, and the button the hand is still on answers it again;
+/// - a pointer leaving the window puts it out, though a focused pane keeps its buttons.
+///
+/// MUTATION: drop the neighbour arm from `Runtime::let_go_of_preview_hovers_on` — the `>` stays
+/// lit on the next picture after the key step and the second assertion goes red.
+#[test]
+fn the_neighbour_hover_ends_with_the_document() {
+    use crate::preview_neighbours::Direction::{Next, Previous};
+    let (mut folio, surface, paths) = a_picture_with_neighbours("neighbour-let-go", 1, 3);
+    let next = neighbour_button(&mut folio, surface, Next);
+    folio.move_to(centre_of(next));
+    assert_eq!(
+        neighbour_inks(&mut folio, surface)[1],
+        Some(lit_neighbour())
+    );
+    arrow(&mut folio, NamedKey::ArrowRight, KeyCode::ArrowRight);
+    assert_eq!(
+        picture_path(&mut folio, surface),
+        paths[2],
+        "the key stepped"
+    );
+    assert_eq!(
+        neighbour_inks(&mut folio, surface)[1],
+        Some(plain_neighbour()),
+        "the key's step let go of the hover: the `>` stands at rest until the hand moves"
+    );
+
+    click(&mut folio, centre_of(next));
+    assert_eq!(
+        picture_path(&mut folio, surface),
+        paths[3],
+        "the click stepped"
+    );
+    assert_eq!(
+        neighbour_inks(&mut folio, surface)[1],
+        Some(lit_neighbour()),
+        "the hand is still on the `>`, so the next picture's `>` answers it"
+    );
+
+    let previous = neighbour_button(&mut folio, surface, Previous);
+    folio.move_to(centre_of(previous));
+    assert_eq!(
+        neighbour_inks(&mut folio, surface)[0],
+        Some(lit_neighbour())
+    );
+    folio.runtime().pointer_left().expect("the hand leaves");
+    assert_eq!(
+        neighbour_inks(&mut folio, surface)[0],
+        Some(plain_neighbour()),
+        "the focused pane keeps its `<`, at rest"
+    );
+}
+
+/// RED (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER, ruling D3) — **the finger beats the open hand over a
+/// side button**: on a picture zoomed past its body the body wears the open hand, but a press on
+/// the button steps the folder, so the button wears the finger.
+///
+/// MUTATION: hand `pointer_cursor` the unfiltered `image_grasp()` in
+/// `Runtime::apply_pointer_cursor` — the open hand wins over the button.
+#[test]
+fn the_finger_wins_over_the_grab_on_a_neighbour_button() {
+    use crate::preview_neighbours::Direction::Previous;
+    use winit::window::CursorIcon;
+    let (mut folio, surface, _) = a_picture_with_neighbours("neighbour-finger", 1, 1);
+    folio
+        .runtime()
+        .set_preview_image_zoom(surface, crate::ImageZoom::scaled(3.0))
+        .expect("the zoom lands");
+    folio.draw();
+    let last_cursor = |folio: &HeadlessFolio| {
+        folio
+            .ledger
+            .take()
+            .into_iter()
+            .filter_map(|effect| match effect {
+                WindowEffect::Cursor(cursor) => Some(cursor),
+                _ => None,
+            })
+            .last()
+    };
+    let body = picture_body(&mut folio, surface);
+    folio.move_to(PhysicalPosition::new(
+        f64::from((body[0] + body[2]) / 2.0),
+        f64::from((body[1] + body[3]) / 2.0),
+    ));
+    folio.runtime().apply_pointer_cursor();
+    assert_eq!(
+        last_cursor(&folio),
+        Some(CursorIcon::Grab.into()),
+        "the fixture's own precondition: the zoomed picture wears the open hand"
+    );
+    let previous = neighbour_button(&mut folio, surface, Previous);
+    folio.move_to(centre_of(previous));
+    assert_eq!(
+        last_cursor(&folio),
+        Some(CursorIcon::Pointer.into()),
+        "over the `<` the finger says what a press will do"
+    );
+}
+
+/// RED (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER review N1) — **one move straight onto a button of an
+/// unfocused pane lights it and wears the finger on that move**: the pane's own hover, which
+/// decides whether its buttons are drawn, is written later in the same move than the side
+/// button's hit test, so the hit test asks for the buttons as the hovered pane has them.
+///
+/// MUTATION: have `Runtime::preview_neighbour_at` ask `preview_neighbour_buttons` (the paint's
+/// reading of the pane's hover) — the move is answered one move late and the first assertion
+/// goes red.
+#[test]
+fn a_single_move_onto_an_unfocused_panes_button_lights_it() {
+    use winit::window::CursorIcon;
+    let (mut folio, surface, _) =
+        a_picture_with_neighbours_held("neighbour-unfocused", 1, 1, false);
+    folio.move_to(PhysicalPosition::new(2.0, 2.0));
+    assert_eq!(
+        folio.runtime().preview_neighbour_buttons(surface),
+        [None, None],
+        "the fixture's own precondition: off the unfocused pane its buttons are not on the glass"
+    );
+    let previous = folio
+        .runtime()
+        .preview_neighbour_buttons_while(surface, true)[0]
+        .expect("the hovered pane has a `<`");
+    folio.ledger.take();
+    folio.move_to(centre_of(previous));
+    let cursor = folio
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            WindowEffect::Cursor(cursor) => Some(cursor),
+            _ => None,
+        })
+        .last();
+    assert_eq!(
+        neighbour_inks(&mut folio, surface)[0],
+        Some(lit_neighbour()),
+        "the `<` the one move landed on is lit"
+    );
+    assert_eq!(
+        cursor,
+        Some(CursorIcon::Pointer.into()),
+        "and the finger is on it on that same move"
+    );
+}
