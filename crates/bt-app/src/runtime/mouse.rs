@@ -1720,9 +1720,8 @@ impl<B: Backend> Runtime<'_, B> {
         // has claimed the point, so a preview window standing over a pane no
         // longer leaves that pane's scrollbar, its link underline or its hex
         // column lit under a hand that is on the window.
-        let modal = self.a_modal_covers_the_window();
         let target = self.pointer_target_at(position);
-        let free = !modal && target.is_none();
+        let free = !self.a_modal_covers_the_window() && target.is_none();
         self.note_preview_body_hover(free.then_some(position))?;
         // A picture's side buttons light on the same terms, with one difference:
         // they stand on a floating window's picture as well as a docked one's,
@@ -1731,9 +1730,10 @@ impl<B: Backend> Runtime<'_, B> {
         // no float covers. Hover is asked of the move's own position under this
         // gate, like the hovers beside it; moving it behind the router is
         // T-POINTER-CAPTURE cut 8d's.
-        let on_a_float = matches!(target, Some(PointerTarget::Float(..)));
+        let on_a_float =
+            !self.a_modal_covers_the_window() && matches!(target, Some(PointerTarget::Float(..)));
         self.note_preview_neighbour_hover(
-            (!modal && (free || on_a_float))
+            (free || on_a_float)
                 .then(|| self.preview_neighbour_at(position))
                 .flatten(),
         )?;
