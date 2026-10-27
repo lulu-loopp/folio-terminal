@@ -509,7 +509,9 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `pane_can_become_a_tab` with it, as a tail, to `runtime/tabs.rs` (above).
    - `land_birth_death_fallback_shell` (batch 16) — its `called_from` home is `runtime/tabs.rs`, but it writes
      `LeafSession.spawn_fallback`, whose census owner is the root's leaf-birth road (`finish_leaf_birth`), and
-     `runtime/tabs.rs` would be a new writer; by clause (a) it stays with its owner.
+     `runtime/tabs.rs` would be a new writer; by clause (a) it stays with its owner. O-4b (2026-10-27) folded
+     `spawn_fallback` into `LeafSession.life`, which `runtime/tabs.rs` already writes (the reaper and the
+     fallback's landing), so that reason closes: released for the K2 tail (ruling D15).
    - `pane_into_tab`, `absorb_tab_sessions` and `pane_into_new_tab` (batch 16) — their `called_from` home is
      `runtime/tabs.rs` (the last two are tails of this batch's moves), but each writes facts of more than one census
      owner and would make `runtime/tabs.rs` a new writer of some: `pane_into_tab` of panes' (`focused_leaf`,
@@ -543,7 +545,10 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `LeafSession.birth`, whose other writers are at the root. `deliver_held_input` waits with `land_shell_birth`,
      its root caller. O-3 (2026-10-27) closes the first half: `schedule_leaf_grid_change` became
      `LeafSession::propose_size`, the session's own method beside its struct in `main.rs`, which is no free item
-     for a batch to move. `land_shell_birth` and `deliver_held_input` stay held.
+     for a batch to move. `land_shell_birth` and `deliver_held_input` stay held. O-4b (2026-10-27) closes the
+     second half: `birth` is now `LeafSession.life`, which `runtime/panes.rs` already writes (`end_leaves_of`,
+     `land_own_shell`, `land_restart`), so both are released for the K2 tail (ruling D15), with
+     `apply_owed_shell_resize`, whose `pty` lend is now `life`'s too.
    - `Runtime::aim_focus_card_window` (batch 18) — its `called_from` home is `runtime/panes.rs`, but it writes
      `WindowRuntime.focus_thumbs`, whose other writer, `Runtime::refresh_focus_thumbnails`, stayed at the root.
      Batch 22 moved both to `runtime/panes.rs` (the focus cards, by clause (a)); the fact, which has no owner, went
@@ -575,7 +580,10 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      ruling. That ruling is D15 (2026-10-27, the O-4 judgement): it is released under batch 23's shared-fact rule,
      to `runtime/attention.rs` by clause (a), the page that writes the account, which makes `runtime/attention.rs`
      the session's eleventh writer module; the release line is written when O-4b lands.
-     `tab_queue_leader`, whose root callers are all in `settle_attention`, waits with it.
+     `tab_queue_leader`, whose root callers are all in `settle_attention`, waits with it. **Released**
+     2026-10-27 with O-4b: `settle_attention` and `tab_queue_leader` go to `runtime/attention.rs` in the K2
+     tail, and `LeafSession.session`'s writer modules go from ten to eleven, admitted by batch 23's shared-fact
+     rule (attention is the page's owner).
    - `animated_pane_viewports` (held at batch 18, behind `preview_image_placement`) — tied `runtime/panes.rs` /
      `runtime/preview.rs` once its root caller moved; it is the pane-motion viewports, and the owner column gives
      the move of panes to `runtime/panes.rs` (clause (b)); batch 20 moved it there, imported by `runtime/preview.rs`.
@@ -812,9 +820,23 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
     removes the `?.attention_clock` unknown and its unfollowed `deadline` edge.
     `LeafSession` goes from 37 to 28 fields; the unattributed-read header stays
     at 182. M6 is O-4b.
+  - **Done** 2026-10-27 (O-4b, M6): the seven fields above but `successor`, and `pty`
+    with them (moved from O-5, ruling D4: the contract's (c)2 puts the pseudoconsole inside
+    the phases), are `LeafSession.life: ShellLife { phase, spawn_fallback }`, one fact of
+    nine phases written only by its transitions; `shell_exit_said` folded into the phase
+    (D5). Its writer functions go from the eight facts' 20 to 16 in the same five
+    modules: D10 folded `owe_birth_death_fallback_resize` into `ShellLife::owe_landing_size`,
+    and the successor's three (`land_pane_birth`, `land_successor`, `restart_shell`) write
+    `LeafSession.successor` through the record's own methods (`await_successor`,
+    `successor_mut`, `take_successor`), which stays its own fact beside the life (E5).
+    The census annotations `LeafSession.pty` (panes) and `.spawn_fallback` (main) go
+    for one `LeafSession.life` row (main). The K2 rows `land_shell_birth`,
+    `deliver_held_input`, `land_birth_death_fallback_shell` and `apply_owed_shell_resize`
+    are released, and `settle_attention` / `tab_queue_leader` with them (D15, above).
 - **O-5 (M8).** What remains goes into `ShellSession`: `session` (177 sites),
-  `pty` (20), `grid` (17), `conpty_grid` (10), the revisions, the owed input, `wake`
-  and `incarnation`.
+  `grid` (17), `conpty_grid` (10), the revisions, the owed input, `wake`
+  and `incarnation`. `pty` (20) moved at O-4b instead, into `ShellLife`'s phases
+  (2026-10-27, ruling D4: the contract's (c)2 gives each phase its pseudoconsole).
   - Doors present:
     - `drain_leaf_pty` (`pending_typing`, `last_finished_command`,
       `output_revision`)

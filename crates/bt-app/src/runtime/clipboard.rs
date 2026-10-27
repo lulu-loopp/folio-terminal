@@ -1027,8 +1027,7 @@ impl<B: Backend> Runtime<'_, B> {
         };
         let seat = target.seat;
         let Some(LeafSession {
-            pty,
-            birth,
+            life,
             session,
             view: crate::TermView { projection, .. },
             paste_hold,
@@ -1048,7 +1047,7 @@ impl<B: Backend> Runtime<'_, B> {
         // offered after it — a drop, a picture's path — waits here (`clipboard_lane`).
         let target = match paste_hold {
             Some(hold) => PtyTarget::BehindAPaste(hold),
-            None => PtyTarget::of(pty.as_ref(), birth.as_ref()),
+            None => PtyTarget::of(life.pty(), life.birth()),
         };
         let landed = paste_body(session, projection, body, |bytes| {
             offer_pty_input(target, bytes, context)

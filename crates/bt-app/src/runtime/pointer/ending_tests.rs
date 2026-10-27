@@ -790,7 +790,7 @@ fn a_new_parse_lets_go_of_the_block_thumb_and_keeps_the_selection() {
 /// A shell still being born, which keeps what it is sent (`PaneBirth::typed`).
 fn a_shell_being_born() -> LeafSession {
     let mut leaf = crate::test_support::leaf_saying("SHELL");
-    leaf.birth = Some(crate::PaneBirth {
+    leaf.life.begin_birth(crate::PaneBirth {
         seed: crate::LeafSeed {
             profile: crate::profiles::DEFAULT_IDENTITY.to_owned(),
             ..crate::LeafSeed::default()
@@ -851,15 +851,8 @@ fn a_forwarded_press_is_told_its_button_came_up_from_its_last_report() {
             .values()
             .next()
             .expect("the shell");
-        let typed = String::from_utf8(
-            leaf.birth
-                .as_ref()
-                .expect("in birth")
-                .typed
-                .borrow()
-                .clone(),
-        )
-        .expect("UTF-8 was sent");
+        let typed = String::from_utf8(leaf.life.birth().expect("in birth").typed.borrow().clone())
+            .expect("UTF-8 was sent");
         assert_eq!(
             typed, "\x1b[<0;3;2m",
             "{door}: the program hears its button come up"

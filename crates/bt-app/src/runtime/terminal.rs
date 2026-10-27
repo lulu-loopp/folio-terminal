@@ -684,7 +684,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = self.sessions.get(&seat) else {
             return Ok(());
         };
-        if leaf.successor.is_some() {
+        if leaf.restart_in_flight() {
             return Ok(());
         }
         // **A Restart shell is born in its tab** (coordinator's ruling 2026-10-09): what a launch
@@ -731,9 +731,9 @@ impl<B: Backend> Runtime<'_, B> {
         // the old shell goes on being the one typed into until the new one lands
         // (`Runtime::land_births`), and a birth that fails leaves it as it was. A replacement
         // with no shell to wait for replaces it now.
-        if spawned.birth.is_some() {
+        if spawned.life.birth().is_some() {
             if let Some(leaf) = self.sessions.get_mut(&seat) {
-                leaf.successor = Some(Box::new(spawned));
+                leaf.await_successor(Box::new(spawned));
             }
             self.refresh_chrome();
             return Ok(());
@@ -856,8 +856,7 @@ impl<B: Backend> Runtime<'_, B> {
         }
 
         let LeafSession {
-            pty,
-            birth,
+            life,
             session,
             view: crate::TermView { projection, .. },
             paste_hold,
@@ -867,7 +866,7 @@ impl<B: Backend> Runtime<'_, B> {
         // (`clipboard_lane`), as a keystroke does.
         let target = match paste_hold {
             Some(hold) => PtyTarget::BehindAPaste(hold),
-            None => PtyTarget::of(pty.as_ref(), birth.as_ref()),
+            None => PtyTarget::of(life.pty(), life.birth()),
         };
         paste_text(session, projection, &text, |bytes| {
             write_pty_input(target, bytes, "write an inserted files row path to PTY")
