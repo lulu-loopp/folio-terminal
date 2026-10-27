@@ -566,6 +566,14 @@ crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::n
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::new	Dynamic	wake	1	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::ShareOf::serve	Dynamic	door	1	
 crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::locked	Ambiguous	unwrap_or_else	1	
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::raster_peek_page	Ambiguous	and_then	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `raster_peek_page` from main.rs into computation_lane.rs: K2 moves the item, not the call
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::raster_peek_page	Ambiguous	ok	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `raster_peek_page` from main.rs into computation_lane.rs: K2 moves the item, not the call
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::read_video_glance	Ambiguous	and_then	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `read_video_glance` from main.rs into computation_lane.rs: K2 moves the item, not the call
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::read_video_glance	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `read_video_glance` from main.rs into computation_lane.rs: K2 moves the item, not the call
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::read_video_glance	Ambiguous	ok	2	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `read_video_glance` from main.rs into computation_lane.rs: K2 moves the item, not the call
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::run_decoration_worker	Ambiguous	and_then	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `run_decoration_worker` from main.rs into computation_lane.rs: K2 moves the item, not the call
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::scale_door	Ambiguous	as_micros	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `scale_door` from main.rs into computation_lane.rs: K2 moves the item, not the call
+crates/bt-app/src/computation_lane.rs	bt-app crate::computation_lane::scale_door	Ambiguous	elapsed	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `scale_door` from main.rs into computation_lane.rs: K2 moves the item, not the call
 crates/bt-app/src/context_menu.rs	bt-app crate::context_menu::apply	Ambiguous	text	1	
 crates/bt-app/src/context_menu.rs	bt-app crate::context_menu::apply	Ambiguous	to_owned	1	
 crates/bt-app/src/context_menu.rs	bt-app crate::context_menu::apply	Ambiguous	transpose	1	
@@ -789,6 +797,9 @@ crates/bt-app/src/file_peek.rs	bt-app crate::file_peek::build	Dynamic	px	20
 crates/bt-app/src/file_peek.rs	bt-app crate::file_peek::fitted_ground	Dynamic	px	4	
 crates/bt-app/src/file_peek.rs	bt-app crate::file_peek::foot_height	Dynamic	px	2	
 crates/bt-app/src/file_peek.rs	bt-app crate::file_peek::head_height	Dynamic	px	4	
+crates/bt-app/src/file_peek.rs	bt-app crate::file_peek::home_shortened_path_on	Ambiguous	as_os_str	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `home_shortened_path_on` from main.rs into file_peek.rs: K2 moves the item, not the call
+crates/bt-app/src/file_peek.rs	bt-app crate::file_peek::home_shortened_path_on	Ambiguous	len	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `home_shortened_path_on` from main.rs into file_peek.rs: K2 moves the item, not the call
+crates/bt-app/src/file_peek.rs	bt-app crate::file_peek::home_shortened_path_on	Ambiguous	map_or	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `home_shortened_path_on` from main.rs into file_peek.rs: K2 moves the item, not the call
 crates/bt-app/src/file_peek.rs	bt-app crate::file_peek::layout	Ambiguous	clamp	1	
 crates/bt-app/src/file_peek.rs	bt-app crate::file_peek::layout	Ambiguous	round	4	
 crates/bt-app/src/file_peek.rs	bt-app crate::file_peek::layout	Ambiguous	then	1	
@@ -1305,6 +1316,7 @@ crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::HandoffLane::submi
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::Pending::answered	Ambiguous	collect	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::Pending::answered	Ambiguous	filter_map	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::abandoned	Dynamic	say	1	
+crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::files_program_refused_notice	Ambiguous	text	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `files_program_refused_notice` from main.rs into handoff_lane.rs: K2 moves the item, not the call
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::in_press_order	Ambiguous	collect	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::in_press_order	Ambiguous	flat_map	1	
 crates/bt-app/src/handoff_lane.rs	bt-app crate::handoff_lane::in_press_order	Ambiguous	into_iter	1	
@@ -1546,9 +1558,6 @@ crates/bt-app/src/i18n.rs	bt-app crate::i18n::version_settings_tip_in	Ambiguous	
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::version_settings_tip_in	Ambiguous	to_owned	1	
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::version_verifying_in	Ambiguous	in_lang	1	
 crates/bt-app/src/i18n.rs	bt-app crate::i18n::version_verifying_in	Ambiguous	replace	1	
-crates/bt-app/src/ime_outbound.rs	bt-app crate::ime_outbound::Runtime::trace_ime_input	Ambiguous	is_empty	1	
-crates/bt-app/src/ime_outbound.rs	bt-app crate::ime_outbound::Runtime::trace_ime_line	Dynamic	message	1	
-crates/bt-app/src/ime_outbound.rs	bt-app crate::ime_outbound::Runtime::trace_ime_owner	Ambiguous	map	1	
 crates/bt-app/src/ime_outbound.rs	bt-app crate::ime_outbound::input_line	Ambiguous	len	2	
 crates/bt-app/src/ime_report.rs	bt-app crate::ime_report::Report::line	Dynamic	stamp	7	
 crates/bt-app/src/ime_report.rs	bt-app crate::ime_report::Report::pairing	Ambiguous	then_some	1	
@@ -2060,8 +2069,6 @@ crates/bt-app/src/main.rs	bt-app crate::RevealTween::sample	Ambiguous	as_secs_f3
 crates/bt-app/src/main.rs	bt-app crate::Runtime::add_scheme	Ambiguous	text	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::add_scheme	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::add_scheme	Ambiguous	to_string	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::aim_focus_card_window	Ambiguous	find	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::aim_focus_card_window	Dynamic	aim_line	3	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::announce_persistence_faults	Ambiguous	flatten	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::apply_editor_choice	Ambiguous	and_then	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::apply_editor_choice	Ambiguous	get	1	
@@ -2119,11 +2126,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::honour_command_line	Ambiguous	n
 crates/bt-app/src/main.rs	bt-app crate::Runtime::open_scheme_for_editing	Ambiguous	into_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::open_scheme_for_editing	Ambiguous	map_or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::open_scheme_for_editing	Ambiguous	to_string_lossy	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::refresh_focus_thumbnails	Ambiguous	collect	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::refresh_focus_thumbnails	Ambiguous	filter_map	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::refresh_focus_thumbnails	Ambiguous	is_some	2	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::refresh_focus_thumbnails	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::refresh_focus_thumbnails	Ambiguous	round	2	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::refresh_scheme_sources	Ambiguous	enumerate	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::report_skipped_schemes	Ambiguous	text	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::report_skipped_schemes	Ambiguous	to_owned	1	
@@ -2234,9 +2236,6 @@ crates/bt-app/src/main.rs	bt-app crate::cwd_leaf	Ambiguous	trim_end_matches	1
 crates/bt-app/src/main.rs	bt-app crate::cwd_leaf	Ambiguous	unwrap_or	1	
 crates/bt-app/src/main.rs	bt-app crate::cwd_whole	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::deliver_held_input	Dynamic	note	1	
-crates/bt-app/src/main.rs	bt-app crate::display_frame_rate_millihertz	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::display_frame_rate_millihertz	Ambiguous	or_else	1	
-crates/bt-app/src/main.rs	bt-app crate::display_frame_rate_millihertz	Ambiguous	refresh_rate_millihertz	1	
 crates/bt-app/src/main.rs	bt-app crate::display_scale_factor	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::display_scale_factor	Ambiguous	trim_end_matches	2	
 crates/bt-app/src/main.rs	bt-app crate::drain_leaf_pty	Ambiguous	collect	2	
@@ -2244,12 +2243,10 @@ crates/bt-app/src/main.rs	bt-app crate::drain_leaf_pty	Ambiguous	into_iter	1
 crates/bt-app/src/main.rs	bt-app crate::drain_leaf_pty	Ambiguous	is_empty	1	
 crates/bt-app/src/main.rs	bt-app crate::drain_leaf_pty	Ambiguous	len	3	
 crates/bt-app/src/main.rs	bt-app crate::drain_leaf_pty	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::dump_focus_thumb_frame	Ambiguous	as_deref	1	2026-10-20: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/main.rs	bt-app crate::earliest_deadline	Ambiguous	flatten	1	
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	into_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	to_string_lossy	1	
 crates/bt-app/src/main.rs	bt-app crate::executable_banner_name	Ambiguous	unwrap_or	1	
-crates/bt-app/src/main.rs	bt-app crate::files_program_refused_notice	Ambiguous	text	1	
 crates/bt-app/src/main.rs	bt-app crate::files_row_display_name	Ambiguous	into_owned	2	
 crates/bt-app/src/main.rs	bt-app crate::files_row_display_name	Ambiguous	is_empty	1	
 crates/bt-app/src/main.rs	bt-app crate::files_row_display_name	Ambiguous	map	1	
@@ -2260,9 +2257,6 @@ crates/bt-app/src/main.rs	bt-app crate::first_term_leaf	Ambiguous	next	1
 crates/bt-app/src/main.rs	bt-app crate::fleet_claim	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::head_within_columns	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::home_crumb_for	Ambiguous	next	1	
-crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	as_os_str	1	
-crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	len	1	
-crates/bt-app/src/main.rs	bt-app crate::home_shortened_path_on	Ambiguous	map_or	1	
 crates/bt-app/src/main.rs	bt-app crate::install_panic_log_hook_at	Ambiguous	as_millis	1	
 crates/bt-app/src/main.rs	bt-app crate::install_panic_log_hook_at	Ambiguous	duration_since	1	
 crates/bt-app/src/main.rs	bt-app crate::install_panic_log_hook_at	Ambiguous	name	1	
@@ -2290,11 +2284,6 @@ crates/bt-app/src/main.rs	bt-app crate::main	Ambiguous	with_default_menu	1
 crates/bt-app/src/main.rs	bt-app crate::main	Ambiguous	with_msg_hook	1	
 crates/bt-app/src/main.rs	bt-app crate::main	Dynamic	hand_over	1	
 crates/bt-app/src/main.rs	bt-app crate::markdown_chip_tip	Ambiguous	text	1	
-crates/bt-app/src/main.rs	bt-app crate::markdown_fence_highlight	Ambiguous	collect	1	
-crates/bt-app/src/main.rs	bt-app crate::markdown_fence_highlight	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::markdown_fence_width	Ambiguous	fold	1	
-crates/bt-app/src/main.rs	bt-app crate::markdown_fence_width	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::markdown_fence_width	Dynamic	measure	1	
 crates/bt-app/src/main.rs	bt-app crate::markdown_image_card	Ambiguous	is_empty	1	
 crates/bt-app/src/main.rs	bt-app crate::markdown_image_card	Ambiguous	text	2	
 crates/bt-app/src/main.rs	bt-app crate::markdown_image_card	Ambiguous	to_owned	1	
@@ -2306,10 +2295,6 @@ crates/bt-app/src/main.rs	bt-app crate::markdown_table_columns	Ambiguous	map	1
 crates/bt-app/src/main.rs	bt-app crate::markdown_table_columns	Dynamic	measure	1	
 crates/bt-app/src/main.rs	bt-app crate::measure_markdown_block	Ambiguous	count	1	
 crates/bt-app/src/main.rs	bt-app crate::measure_markdown_block	Dynamic	measure	6	
-crates/bt-app/src/main.rs	bt-app crate::measure_markdown_intrinsics	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::measure_markdown_intrinsics	Ambiguous	clone	1	
-crates/bt-app/src/main.rs	bt-app crate::measure_markdown_intrinsics	Ambiguous	count	1	
-crates/bt-app/src/main.rs	bt-app crate::measure_markdown_intrinsics	Dynamic	measure	2	
 crates/bt-app/src/main.rs	bt-app crate::measure_markdown_local	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::measure_markdown_local	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::measure_markdown_local	Dynamic	measure	1	
@@ -2345,16 +2330,6 @@ crates/bt-app/src/main.rs	bt-app crate::profile_banner_name	Ambiguous	unwrap_or_
 crates/bt-app/src/main.rs	bt-app crate::prose_source_lines	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::prose_source_lines	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::push_markdown_table	Ambiguous	as_deref_mut	1	
-crates/bt-app/src/main.rs	bt-app crate::raster_peek_page	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::raster_peek_page	Ambiguous	ok	1	
-crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::read_video_glance	Ambiguous	ok	2	
-crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	collect	1	
-crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	let_go_of_the_picture	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `Compositor::let_go_of_the_picture` (bt-platform) on a window's compositor, called inside the `CompositorCommit` admission this site takes; it clears the visual's content and commits, and reaches no other door
-crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	map_err	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
-crates/bt-app/src/main.rs	bt-app crate::rebuild_every_native_surface	Ambiguous	to_string	1	2026-10-25: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/main.rs	bt-app crate::report_frame_shape_stop	Dynamic	announce	1	
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	map_or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	or_else	1	
@@ -2374,9 +2349,6 @@ crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	is_empty	2
 crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	iter	1	
 crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	map	2	
 crates/bt-app/src/main.rs	bt-app crate::revive_plan	Ambiguous	zip	2	
-crates/bt-app/src/main.rs	bt-app crate::run_decoration_worker	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::scale_door	Ambiguous	as_micros	1	
-crates/bt-app/src/main.rs	bt-app crate::scale_door	Ambiguous	elapsed	1	
 crates/bt-app/src/main.rs	bt-app crate::session_title	Ambiguous	or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::sessions_match_terminals	Ambiguous	sort_unstable	2	
 crates/bt-app/src/main.rs	bt-app crate::settle_attention	Ambiguous	and_then	1	
@@ -2408,7 +2380,6 @@ crates/bt-app/src/main.rs	bt-app crate::web_address_activation	Ambiguous	is_some
 crates/bt-app/src/main.rs	bt-app crate::web_address_activation	Ambiguous	is_whitespace	1	
 crates/bt-app/src/main.rs	bt-app crate::web_address_activation	Ambiguous	len	1	
 crates/bt-app/src/main.rs	bt-app crate::web_address_activation	Ambiguous	starts_with	1	
-crates/bt-app/src/main.rs	bt-app crate::winit_outer_rect	Ambiguous	saturating_add	2	
 crates/bt-app/src/marks.rs	bt-app crate::marks::Backdrop::luminance_under	Dynamic	covers	2	
 crates/bt-app/src/marks.rs	bt-app crate::marks::Backdrop::luminance_under	Dynamic	over	2	
 crates/bt-app/src/marks.rs	bt-app crate::marks::Band::append	Ambiguous	map	1	
@@ -2998,18 +2969,6 @@ crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Realize::e
 crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Realize::ensure	Ambiguous	restore	1	
 crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Realize::ensure	Ambiguous	rows	1	
 crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Realize::ensure	Ambiguous	wrap	1	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::ensure_markdown_viewport	Ambiguous	unwrap_or_default	1	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::rebuild_markdown_geometry	Ambiguous	elapsed	2	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::rebuild_markdown_geometry	Ambiguous	map	3	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::rebuild_markdown_geometry	Ambiguous	unwrap_or_default	2	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::update_markdown_picture_reach	Ambiguous	collect	1	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::update_markdown_picture_reach	Ambiguous	insert	1	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::update_markdown_picture_reach	Ambiguous	iter	2	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::update_markdown_picture_reach	Ambiguous	map	1	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::update_markdown_picture_reach	Ambiguous	map_or	1	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::update_markdown_picture_reach	Ambiguous	saturating_sub	2	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::update_markdown_picture_reach	Ambiguous	skip	2	
-crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::Runtime::update_markdown_picture_reach	Ambiguous	take	2	
 crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::State::offsets	Ambiguous	unwrap_or	1	
 crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::State::pending	Ambiguous	is_some	1	
 crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::State::pending	Ambiguous	next	1	
@@ -3035,6 +2994,15 @@ crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::fixed_text
 crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::fixed_text_y	Ambiguous	count	1	
 crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::fixed_text_y	Ambiguous	saturating_sub	2	
 crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::fixed_text_y	Ambiguous	unwrap_or	1	
+crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::markdown_fence_highlight	Ambiguous	collect	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `markdown_fence_highlight` from main.rs into preview_viewport.rs: K2 moves the item, not the call
+crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::markdown_fence_highlight	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `markdown_fence_highlight` from main.rs into preview_viewport.rs: K2 moves the item, not the call
+crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::markdown_fence_width	Ambiguous	fold	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `markdown_fence_width` from main.rs into preview_viewport.rs: K2 moves the item, not the call
+crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::markdown_fence_width	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `markdown_fence_width` from main.rs into preview_viewport.rs: K2 moves the item, not the call
+crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::markdown_fence_width	Dynamic	measure	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `markdown_fence_width` from main.rs into preview_viewport.rs: K2 moves the item, not the call
+crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::measure_markdown_intrinsics	Ambiguous	and_then	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `measure_markdown_intrinsics` from main.rs into preview_viewport.rs: K2 moves the item, not the call
+crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::measure_markdown_intrinsics	Ambiguous	clone	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `measure_markdown_intrinsics` from main.rs into preview_viewport.rs: K2 moves the item, not the call
+crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::measure_markdown_intrinsics	Ambiguous	count	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `measure_markdown_intrinsics` from main.rs into preview_viewport.rs: K2 moves the item, not the call
+crates/bt-app/src/preview_viewport.rs	bt-app crate::preview_viewport::measure_markdown_intrinsics	Dynamic	measure	2	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `measure_markdown_intrinsics` from main.rs into preview_viewport.rs: K2 moves the item, not the call
 crates/bt-app/src/preview_watch.rs	bt-app crate::preview_watch::PreviewWatch::ask_the_unwatched_with	Ambiguous	and_then	1	
 crates/bt-app/src/preview_watch.rs	bt-app crate::preview_watch::PreviewWatch::ask_the_unwatched_with	Ambiguous	is_some	1	
 crates/bt-app/src/preview_watch.rs	bt-app crate::preview_watch::PreviewWatch::ask_the_unwatched_with	Ambiguous	is_some_and	1	
@@ -4053,6 +4021,9 @@ crates/bt-app/src/runtime/keyboard.rs	bt-app crate::runtime::keyboard::Runtime::
 crates/bt-app/src/runtime/keyboard.rs	bt-app crate::runtime::keyboard::Runtime::store_keybindings	Ambiguous	collect	1	
 crates/bt-app/src/runtime/keyboard.rs	bt-app crate::runtime::keyboard::Runtime::store_keybindings	Ambiguous	map	1	
 crates/bt-app/src/runtime/keyboard.rs	bt-app crate::runtime::keyboard::Runtime::term_menu_key	Ambiguous	has_submenu	2	
+crates/bt-app/src/runtime/keyboard.rs	bt-app crate::runtime::keyboard::Runtime::trace_ime_input	Ambiguous	is_empty	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `trace_ime_input` from ime_outbound.rs into runtime/keyboard.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/keyboard.rs	bt-app crate::runtime::keyboard::Runtime::trace_ime_line	Dynamic	message	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `trace_ime_line` from ime_outbound.rs into runtime/keyboard.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/keyboard.rs	bt-app crate::runtime::keyboard::Runtime::trace_ime_owner	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `trace_ime_owner` from ime_outbound.rs into runtime/keyboard.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/keyboard.rs	bt-app crate::runtime::keyboard::composing_event_of	Ambiguous	is_empty	1	2026-10-26: T-SPLIT-2B batch 15; the same site, moved by K2 batch 15 with `composing_event_of` from main.rs into runtime/keyboard.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/keyboard.rs	bt-app crate::runtime::keyboard::ime_commit_bytes	Ambiguous	to_vec	1	2026-10-26: T-SPLIT-2B batch 15; the same site, moved by K2 batch 15 with `ime_commit_bytes` from main.rs into runtime/keyboard.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/keyboard.rs	bt-app crate::runtime::keyboard::rename_key	Ambiguous	eq_ignore_ascii_case	3	2026-10-26: T-SPLIT-2B batch 15; the same site, moved by K2 batch 15 with `rename_key` from main.rs into runtime/keyboard.rs: K2 moves the item, not the call
@@ -4153,6 +4124,8 @@ crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::pu
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::push_place_candidates	Ambiguous	to_string_lossy	1	2026-10-25: T-SPLIT-2B batch 5; the same site, moved with `Runtime::push_place_candidates` from main.rs into runtime/palette.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::run_palette_row	Ambiguous	clone	2	
 crates/bt-app/src/runtime/palette.rs	bt-app crate::runtime::palette::Runtime::run_palette_row	Ambiguous	map	1	
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::aim_focus_card_window	Ambiguous	find	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `aim_focus_card_window` from main.rs into runtime/panes.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::aim_focus_card_window	Dynamic	aim_line	3	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `aim_focus_card_window` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::aimed_seat_kind	Ambiguous	map	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::browse_for_split_root	Ambiguous	as_deref	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::carry_the_pages_of_moved_panes	Ambiguous	collect	1	
@@ -4212,6 +4185,11 @@ crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::rail_c
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::rail_grew_a_popup	Ambiguous	any	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::rail_grew_a_popup	Ambiguous	into_iter	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::rail_page	Ambiguous	then_some	1	
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::refresh_focus_thumbnails	Ambiguous	collect	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `refresh_focus_thumbnails` from main.rs into runtime/panes.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::refresh_focus_thumbnails	Ambiguous	filter_map	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `refresh_focus_thumbnails` from main.rs into runtime/panes.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::refresh_focus_thumbnails	Ambiguous	is_some	2	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `refresh_focus_thumbnails` from main.rs into runtime/panes.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::refresh_focus_thumbnails	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `refresh_focus_thumbnails` from main.rs into runtime/panes.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::refresh_focus_thumbnails	Ambiguous	round	2	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `refresh_focus_thumbnails` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::resize_hidden_leaves_to_layout	Ambiguous	collect	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::resize_hidden_leaves_to_layout	Ambiguous	filter_map	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::restore_layout	Dynamic	measure	6	
@@ -4232,6 +4210,7 @@ crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::birth_due	Dynam
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::births_due	Ambiguous	collect	1	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `births_due` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::births_due	Ambiguous	filter_map	1	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `births_due` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::births_due	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `births_due` from main.rs into runtime/panes.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::dump_focus_thumb_frame	Ambiguous	as_deref	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `dump_focus_thumb_frame` from main.rs into runtime/panes.rs: K2 moves the item, not the call; the finding stands: T-DIAGNOSTIC-DOORS-AT-THE-ENTRY; a standard-library method (Option, Iterator, OsStr, Path) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::end_leaves_of	Dynamic	reach	1	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `end_leaves_of` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::leaf_resize_plan	Ambiguous	collect	1	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `leaf_resize_plan` from main.rs into runtime/panes.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::leaf_resize_plan	Ambiguous	filter_map	1	2026-10-26: T-SPLIT-2B batch 18; the same site, moved by K2 batch 18 with `leaf_resize_plan` from main.rs into runtime/panes.rs: K2 moves the item, not the call
@@ -4370,6 +4349,7 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::dr
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::dress_preview_rail	Ambiguous	text	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::dress_preview_rail	Dynamic	measure	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::edit_preview	Dynamic	edit	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::ensure_markdown_viewport	Ambiguous	unwrap_or_default	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `ensure_markdown_viewport` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::focused_preview_seat	Ambiguous	then_some	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::hear_preview_saves	Ambiguous	refusal	1	2026-10-21: T-ENDSESSION-SAVES review; `preview::SaveOutcome::refusal`, a match over a save's answer that answers its sentence, which calls no door
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::keep_what_the_systems_end_did_not_save	Ambiguous	extend_from_slice	1	2026-10-21: T-ENDSESSION-SAVES review; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
@@ -4467,6 +4447,9 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::pr
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::preview_tab_index	Ambiguous	unwrap_or	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::push_float_refusal_card	Ambiguous	then_some	1	2026-10-26: T-SPLIT-2B batch 21; the same site, moved by K2 batch 21 with `push_float_refusal_card` from main.rs into runtime/preview.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::push_float_refusal_card	Ambiguous	unwrap_or_default	1	2026-10-26: T-SPLIT-2B batch 21; the same site, moved by K2 batch 21 with `push_float_refusal_card` from main.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::rebuild_markdown_geometry	Ambiguous	elapsed	2	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `rebuild_markdown_geometry` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::rebuild_markdown_geometry	Ambiguous	map	3	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `rebuild_markdown_geometry` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::rebuild_markdown_geometry	Ambiguous	unwrap_or_default	2	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `rebuild_markdown_geometry` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::rebuild_preview_document	Ambiguous	and_then	2	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::rebuild_preview_document	Ambiguous	as_deref	5	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::rebuild_preview_document	Ambiguous	as_mut	1	
@@ -4544,6 +4527,14 @@ crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::se
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::strip_animation_work	Ambiguous	flatten	6	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::strip_animation_work	Ambiguous	map	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::strip_animation_work	Ambiguous	then_some	1	
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::update_markdown_picture_reach	Ambiguous	collect	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `update_markdown_picture_reach` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::update_markdown_picture_reach	Ambiguous	insert	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `update_markdown_picture_reach` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::update_markdown_picture_reach	Ambiguous	iter	2	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `update_markdown_picture_reach` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::update_markdown_picture_reach	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `update_markdown_picture_reach` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::update_markdown_picture_reach	Ambiguous	map_or	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `update_markdown_picture_reach` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::update_markdown_picture_reach	Ambiguous	saturating_sub	2	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `update_markdown_picture_reach` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::update_markdown_picture_reach	Ambiguous	skip	2	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `update_markdown_picture_reach` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::update_markdown_picture_reach	Ambiguous	take	2	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `update_markdown_picture_reach` from preview_viewport.rs into runtime/preview.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::video_bar_layer	Ambiguous	then_some	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::video_meta_sentence	Ambiguous	and_then	1	
 crates/bt-app/src/runtime/preview.rs	bt-app crate::runtime::preview::Runtime::video_meta_sentence	Ambiguous	collect	1	
@@ -7100,6 +7091,15 @@ crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>:
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::watch_system_settings	Ambiguous	ok	1	
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::work_area	Ambiguous	and_then	1	
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::LoopProxy::send_event	Dynamic	(value)	1	
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::display_frame_rate_millihertz	Ambiguous	and_then	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `display_frame_rate_millihertz` from main.rs into window_seam.rs: K2 moves the item, not the call
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::display_frame_rate_millihertz	Ambiguous	or_else	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `display_frame_rate_millihertz` from main.rs into window_seam.rs: K2 moves the item, not the call
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::display_frame_rate_millihertz	Ambiguous	refresh_rate_millihertz	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `display_frame_rate_millihertz` from main.rs into window_seam.rs: K2 moves the item, not the call
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::rebuild_every_native_surface	Ambiguous	collect	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `rebuild_every_native_surface` from main.rs into window_seam.rs: K2 moves the item, not the call
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::rebuild_every_native_surface	Ambiguous	let_go_of_the_picture	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `rebuild_every_native_surface` from main.rs into window_seam.rs: K2 moves the item, not the call; the finding stands: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; `Compositor::let_go_of_the_picture` (bt-platform) on a window's compositor, called inside the `CompositorCommit` admission this site takes; it clears the visual's content and commits, and reaches no other door
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::rebuild_every_native_surface	Ambiguous	map	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `rebuild_every_native_surface` from main.rs into window_seam.rs: K2 moves the item, not the call
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::rebuild_every_native_surface	Ambiguous	map_err	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `rebuild_every_native_surface` from main.rs into window_seam.rs: K2 moves the item, not the call; the finding stands: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::rebuild_every_native_surface	Ambiguous	to_string	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `rebuild_every_native_surface` from main.rs into window_seam.rs: K2 moves the item, not the call; the finding stands: T-WEBVIEW-WARMUP-DROPS-THE-DEVICE; a standard-library method (Result, Option, Iterator, String) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::winit_outer_rect	Ambiguous	saturating_add	2	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `winit_outer_rect` from main.rs into window_seam.rs: K2 moves the item, not the call
 crates/bt-app/src/wsl.rs	bt-app crate::wsl::adopt	Ambiguous	replace	1	
 crates/bt-app/src/wsl.rs	bt-app crate::wsl::adopt	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/wsl.rs	bt-app crate::wsl::adopt	Ambiguous	unwrap_or_else	1	

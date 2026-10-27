@@ -12,6 +12,5 @@ kind	owner	name	reason
 method	Runtime	create	builds the GPU device, the winit window, the renderer and the compositor the backend parameter is instantiated with; the steps it hands startup::resume run in that function's order, which is not native
 method	Runtime	open_window	asks winit for a further window and builds its renderer and compositor
 trait	FolioApp	ApplicationHandler	the winit adapter: hands each event to the generic doors (FolioApp::on_window_event, settle_quit) with the ActiveEventLoop as the loop door
-function	crate	rebuild_every_native_surface	the native backend's Backend::rebuild_every_surface: rebuilds each native window's swapchain on the native device after a device loss
 const	main.rs	_	a compile-time check that Runtime is the two layers and nothing else; which backend it is written for does not change the fields
 function	crate	main	the process entry: builds the native FolioApp the winit event loop runs (run_app); which application a process runs is the native one by what a process is

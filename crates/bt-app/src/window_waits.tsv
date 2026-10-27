@@ -224,7 +224,7 @@ bt-app	-	crate::layout_tables::build_on_system	bt_platform::keyboard_layout_shif
 bt-app	-	crate::layout_tables::WorkerRoad::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::packaged_turns::PackagedTurns::birth_turn	std::sync::Condvar::wait 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::packaged_turns::PackagedTurns::check_turn	std::sync::Condvar::wait 1	worker-door-body	WorkerCtx	
-bt-app	-	crate::read_video_glance	std::fs::metadata 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::computation_lane::read_video_glance	std::fs::metadata 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::persist::SessionWriter::close	std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
 bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
 bt-app	-	crate::pty_door::bear	bt_pty::PtySession::spawn_refreshed 1, bt_pty::PtySession::spawn_shell_in 1	worker-door-body	WorkerCtx	
