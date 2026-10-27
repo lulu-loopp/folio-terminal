@@ -8239,6 +8239,11 @@ struct TabState {
     /// Which bar the pointer is on — the surface *and* the axis, because a
     /// surface can wear two and only the one under the hand lights.
     preview_body_hover: Option<(PreviewSurface, preview::ScrollAxis)>,
+    /// Which of a picture's two side buttons the pointer is on — the surface
+    /// and the side, because a body wears two and only the one under the hand
+    /// lights. Lit only by `note_preview_neighbour_hover`; put out by it, by
+    /// the let-go of a surface's document and by the sweep of a dead surface.
+    preview_neighbour_hover: Option<(PreviewSurface, preview_neighbours::Direction)>,
     /// Which pane's lane the pointer is in, which is what lights that pane's
     /// mark and what holds it on the glass while a hand is near.
     terminal_thumb_hover: Option<SeatId>,
@@ -33349,6 +33354,7 @@ fn assemble_tab_state(
         preview_text_clicks: PreviewTextClicks::default(),
         preview_block_hover: None,
         preview_body_hover: None,
+        preview_neighbour_hover: None,
         terminal_thumb_hover: None,
         terminal_thumb_owed_frame: false,
         terminal_column_hover: None,

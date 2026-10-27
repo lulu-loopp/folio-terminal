@@ -903,6 +903,22 @@ pub struct ChromePalette {
     /// number, which is the opposite of the reason the four grounds of the
     /// tab's `×` are four fields.
     pub formula_tool_glyph_on_pill: [u8; 3],
+
+    // ── a picture preview's two side buttons, under the pointer ─────────────
+    //
+    // `.pv-nav:hover { background: var(--hover); color: var(--ink) }` (the
+    // 2026-09-20 mock-up, `ui-mockup.html` 884): the `<` / `>` pills standing at
+    // a picture's two edges. They stand on the preview body, which is
+    // `--termbg`, so they are the formula band's wash and ink over the same
+    // ground, numerically. Named apart on [`Self::pane_close_glyph`]'s own
+    // precedent: two declarations, either of which could be re-struck without
+    // the other. At rest the pair keeps [`Self::pane_head`] and
+    // [`Self::title_text`].
+    /// `.pv-nav:hover { background: var(--hover) }` over `--termbg`.
+    pub preview_nav_pill: [u8; 3],
+    /// `.pv-nav:hover { color: var(--ink) }`, standing on
+    /// [`Self::preview_nav_pill`].
+    pub preview_nav_glyph_on_pill: [u8; 3],
     /// `.termhost { background: var(--panel) }` (mock-up 1022-1023).
     ///
     /// The one surface in the seat layer that is *chrome* rather than terminal,
@@ -1706,6 +1722,9 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     formula_tool_pill: [0x28, 0x28, 0x28],
     formula_tool_pill_pressed: [0x30, 0x30, 0x30],
     formula_tool_glyph_on_pill: [0xe3, 0xe3, 0xe3],
+    // The side buttons' hover: the formula band's wash and ink, on the same ground.
+    preview_nav_pill: [0x28, 0x28, 0x28],
+    preview_nav_glyph_on_pill: [0xe3, 0xe3, 0xe3],
     termhost: [0x25, 0x25, 0x25],
     pane_head_edge: [0x29, 0x29, 0x29],
     // `--ink3` over `--termbg #1B1B1B`, not over `--win #202020`: the pane head
@@ -1984,6 +2003,8 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     formula_tool_pill: [0xf4, 0xf4, 0xf4],
     formula_tool_pill_pressed: [0xed, 0xed, 0xec],
     formula_tool_glyph_on_pill: [0x37, 0x35, 0x2f],
+    preview_nav_pill: [0xf4, 0xf4, 0xf4],
+    preview_nav_glyph_on_pill: [0x37, 0x35, 0x2f],
     termhost: [0xf7, 0xf7, 0xf5],
     pane_head_edge: [0xf1, 0xf1, 0xf1],
     pane_title: [0xa5, 0xa4, 0xa1],
@@ -4651,6 +4672,34 @@ mod tests {
             // hover says nothing.
             assert_ne!(palette.pane_close_glyph, palette.pane_close_glyph_on_pill);
             assert_ne!(palette.pane_close_pill, palette.pane_head);
+        }
+    }
+
+    /// PIN (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER): a picture's `<` / `>` light with
+    /// the mock-up's `.pv-nav:hover` pair — `--hover` over `--termbg` and `--ink`
+    /// over that wash — which is the formula band's pair over the same ground.
+    ///
+    /// MUTATION: strike `preview_nav_pill` as `--active` (the pane `×`'s pill) —
+    /// the reuse assertion fails on both canvases.
+    #[test]
+    fn the_preview_side_buttons_light_with_the_hover_wash_and_the_ink() {
+        assert_eq!(DARK_CHROME.preview_nav_pill, [0x28, 0x28, 0x28]);
+        assert_eq!(LIGHT_CHROME.preview_nav_pill, [0xf4, 0xf4, 0xf4]);
+        assert_eq!(DARK_CHROME.preview_nav_glyph_on_pill, [0xe3, 0xe3, 0xe3]);
+        assert_eq!(LIGHT_CHROME.preview_nav_glyph_on_pill, [0x37, 0x35, 0x2f]);
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            assert_eq!(
+                palette.preview_nav_pill, palette.formula_tool_pill,
+                "the same `--hover` over the same `--termbg`"
+            );
+            assert_eq!(
+                palette.preview_nav_glyph_on_pill, palette.formula_tool_glyph_on_pill,
+                "and the same `--ink` standing on it"
+            );
+            // A lit button has to differ from the one at rest, or the hover
+            // says nothing.
+            assert_ne!(palette.preview_nav_pill, palette.pane_head);
+            assert_ne!(palette.preview_nav_glyph_on_pill, palette.title_text);
         }
     }
 

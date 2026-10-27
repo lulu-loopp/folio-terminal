@@ -233,14 +233,25 @@ impl<B: Backend> Runtime<'_, B> {
         let palette = bt_render::chrome_palette();
         let scale = self.window.renderer.scale_factor() as f32;
         let mut layer = marks::OverlayLayer::default();
-        for (button, degrees) in buttons.into_iter().zip([90, 270]) {
+        for ((button, degrees), direction) in buttons.into_iter().zip([90, 270]).zip([
+            crate::preview_neighbours::Direction::Previous,
+            crate::preview_neighbours::Direction::Next,
+        ]) {
             let Some(rect) = button else { continue };
+            // `.pv-nav:hover { background: var(--hover); color: var(--ink) }`:
+            // the button under the hand answers it, the other stays at rest. A
+            // hover is only ever drawn on a button this frame still has.
+            let hovered = self.preview_neighbour_hover == Some((surface, direction));
             layer.sprites.push(marks::ChromeSprite::new(
                 marks::ChromeMark::ControlPill {
                     radius_px: (16.0 * scale).round() as u32,
                 },
                 rect,
-                palette.pane_head,
+                if hovered {
+                    palette.preview_nav_pill
+                } else {
+                    palette.pane_head
+                },
             ));
             let inset = 9.0 * scale;
             // The existing disclosure chevron from icons.rs, turned to the two
@@ -255,7 +266,11 @@ impl<B: Backend> Runtime<'_, B> {
                     rect[2] - inset,
                     rect[3] - inset,
                 ],
-                palette.title_text,
+                if hovered {
+                    palette.preview_nav_glyph_on_pill
+                } else {
+                    palette.title_text
+                },
             ));
         }
         Some(layer)
@@ -269,7 +284,33 @@ impl<B: Backend> Runtime<'_, B> {
             self.focus_pane_at(position)?;
         }
         self.step_preview_neighbour(surface, direction)?;
+        // The step let go of the hovers on the document it left; the hand is
+        // still where it pressed, so the button it is on — if the next picture
+        // still has one there — answers it again without waiting for a move.
+        self.note_preview_neighbour_hover(self.preview_neighbour_at(position))?;
         Ok(true)
+    }
+
+    /// **Light the side button under the pointer, or put the last one out**
+    /// (T-PREVIEW-NEIGHBOUR-BUTTON-HOVER).
+    ///
+    /// Handed the hit test's answer, not a position: the callers are the pointer
+    /// roads that already hold one (a move under the `free` gate, the press, the
+    /// pointer leaving), so this reads no pointer data of its own. A frame is
+    /// asked only when the answer changed, and only the chrome pass: the buttons
+    /// are overlay, rebuilt by `refresh_chrome`, and the document's body is not
+    /// touched.
+    pub(in crate::runtime) fn note_preview_neighbour_hover(
+        &mut self,
+        over: Option<(PreviewSurface, crate::preview_neighbours::Direction)>,
+    ) -> Result<()> {
+        if over == self.preview_neighbour_hover {
+            return Ok(());
+        }
+        self.preview_neighbour_hover = over;
+        self.apply_pointer_cursor();
+        self.refresh_chrome();
+        self.present_chrome_change()
     }
 
     pub(in crate::runtime) fn preview_neighbour_at(
@@ -2377,6 +2418,12 @@ impl<B: Backend> Runtime<'_, B> {
             self.preview_body_hover = None;
         }
         if self
+            .preview_neighbour_hover
+            .is_some_and(|(surface, _)| !alive.contains(&surface))
+        {
+            self.preview_neighbour_hover = None;
+        }
+        if self
             .preview_link_hover
             .as_ref()
             .is_some_and(|(surface, _)| !alive.contains(surface))
@@ -3163,6 +3210,12 @@ impl<B: Backend> Runtime<'_, B> {
             .is_some_and(|(hovered, _)| hovered == surface)
         {
             self.preview_body_hover = None;
+        }
+        if self
+            .preview_neighbour_hover
+            .is_some_and(|(hovered, _)| hovered == surface)
+        {
+            self.preview_neighbour_hover = None;
         }
         if self
             .preview_link_hover
