@@ -891,6 +891,16 @@ call (`while Instant::now() < deadline_in(..)`), and an instant handed under any
 name but `now` (`deadline: Instant` rightly meets a fresh reading); a widening
 line counts only in a change that also changes the scan.
 
+2026-10-27 (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK): the trial's deadline on an update lock
+holder's road is read on the road's own clock, `update_apply::TrialClock` (`Road::trial_clock`
+on both platforms) — the trial's `began_ms`, each turn of `watch_trial`, `decide`'s `now_ms`
+— and the watch pauses through it; the product's is `WallClock` (the wall clock and the
+worker's wait door). It is a per-instance seam like the save budget above: a test that
+proves the watch ended at the trial's end, not at its deadline, hands its road a
+`CountedClock`, which moves only by the pauses it is asked for, ends the trial inside the
+pause the test chooses, and is asked how many pauses the watch took. Elapsed real time over
+the whole road is never that verdict.
+
 ## Test order and shared fixtures
 
 The rule: a test's verdict does not hang on a file another build step made, on the
