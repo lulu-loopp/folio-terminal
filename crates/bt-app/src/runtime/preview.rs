@@ -13954,7 +13954,7 @@ impl<B: Backend> Runtime<'_, B> {
             // what the pane has always printed for a video that would not
             // decode — and it prints nothing at all for one, by the paragraph
             // above. Filed only while some surface names the file
-            // ([`crate::file_peek_answer`]).
+            // ([`file_peek_answer`]).
             None => Err(bt_term::InlineImageDecodeError::Decode(
                 "no decoder for this container".to_owned(),
             )),
@@ -17843,6 +17843,15 @@ fn visible_range(
     let below = (((clip[3] - first_top) / height).ceil().max(0.0) as usize + 1).min(count);
     above.min(count)..below
 }
+
+// ── the read-only view family, built from a parsed document ─────────────────
+//
+// Four free functions rather than four methods, and the reason is the borrow
+// checker telling the truth about the design: none of them needs the runtime.
+// A body is a pure function of a parsed document, a geometry and a palette, and
+// keeping it that way is what makes each one answerable in a test without a
+// window (`build_preview_diff_body` in particular, which is P108's whole
+// argument in one rectangle).
 
 /// `.pv-edit`'s body: plain monospace lines, no wrapping.
 ///

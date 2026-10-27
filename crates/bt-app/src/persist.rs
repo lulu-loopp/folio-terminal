@@ -5777,7 +5777,7 @@ pub(crate) mod tests {
     /// process alive while the menu it drew starts Folio and ten seconds after,
     /// so the Folio it started found the claim held by a process with no launch
     /// endpoint and ran as a window that saves nothing. The lookup is the one
-    /// `explorer_menu::serve` makes (`crate::door_language`), over a data
+    /// `explorer_menu::serve` makes (`crate::explorer_menu::door_language`), over a data
     /// directory of the test's own; a damaged file beside it is answered with
     /// the default and left exactly where it was, not kept aside.
     ///

@@ -975,7 +975,7 @@ pub fn apply_tree_command(
         // The two rows that lead nowhere still answer with silence, and it is
         // the same silence they give the second press: a cycle would open onto
         // the place you are already standing, and a notice names no folder at
-        // all. `crate::files_row_menu_subject` is where that judgement lives.
+        // all. `crate::runtime::files::files_row_menu_subject` is where that judgement lives.
         TreeCommand::ContextMenu => match row.kind {
             RowKind::File | RowKind::Directory { .. } => TreeAction::ContextMenu(key),
             RowKind::Cycle | RowKind::Notice(_) => TreeAction::None,

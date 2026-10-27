@@ -14968,7 +14968,7 @@ pub fn build(
 /// (§7.1.6c-5, moved off the content box by the ruling of 2026-08-30).
 ///
 /// The house's one scrollbar, wearing the house's own three inks — the same
-/// pair of quads `main.rs`'s `scroll_bar_layer` paints, because it is the same
+/// pair of quads `runtime/peek.rs`'s `scroll_bar_layer` paints, because it is the same
 /// control on a smaller surface. At rest only: a popup is up for a second or two
 /// and a hover state inside one would be a third thing lighting under a pointer
 /// that is already lighting an item.

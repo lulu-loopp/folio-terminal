@@ -788,7 +788,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// Where a files pane opened right now would be rooted (H115).
     ///
     /// The folder the focused shell is standing in, because that is the place the
-    /// user is standing when they ask for the tree — `crate::files_root_of`, the
+    /// user is standing when they ask for the tree — `files_root_of`, the
     /// one reader the folder button's card shares. Read through `sessions` by id
     /// rather than through the `Deref`, so this is answerable on a tab whose
     /// keyboard is somewhere unexpected.
@@ -2310,7 +2310,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // A folder is not a buffer: there is no head read to be
                 // truncated and no save to refuse. The one standing fact a tree
                 // can have is that its root is the home folder standing in for a
-                // folder nobody could say (`crate::folder_foot_notice`).
+                // folder nobody could say (`folder_foot_notice`).
                 notice: &words.notice,
                 notice_width: words.notice_width,
                 dock_label: float_dock_label(),

@@ -330,6 +330,13 @@ impl<B: Backend> Runtime<'_, B> {
         ])
     }
 
+    // ─────────────────── the terminal pane's own scroll bar ───────────────────
+    //
+    // P2-9 slice 1. Everything below reads [`termscroll`] and adds nothing to
+    // it: the geometry, the visibility rule and both maps a hand can run
+    // backwards live there, where they can be asked the questions a hand asks
+    // without a window, a shell or a GPU.
+
     /// One pane's bar, from that pane's own projection.
     ///
     /// The three numbers are read off [`bt_viewport::ViewportProjection`] and

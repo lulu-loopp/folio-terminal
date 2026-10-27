@@ -5069,15 +5069,6 @@ impl PreviewViewStore {
     }
 }
 
-// ── the read-only view family, built from a parsed document ─────────────────
-//
-// Four free functions rather than four methods, and the reason is the borrow
-// checker telling the truth about the design: none of them needs the runtime.
-// A body is a pure function of a parsed document, a geometry and a palette, and
-// keeping it that way is what makes each one answerable in a test without a
-// window (`build_preview_diff_body` in particular, which is P108's whole
-// argument in one rectangle).
-
 // `.pv-meta` and the gap above it (mock-up 605-607) are gone with the line they
 // measured: a picture's sentence is at the right end of the path row since the
 // owner's ruling of 2026-09-12 (`Runtime::preview_meta_sentence`), in that row's
@@ -36577,10 +36568,6 @@ impl<B: Backend> Runtime<'_, B> {
         self.present_chrome_change()
     }
 
-    // ────────────────────────── the command marks rail ──────────────────────────
-
-    // ────────────────────────── in-pane search (§7.1.5d) ──────────────────────────
-
     // -- the PowerShell integration notice (7.1.6j) -------------------------
 
     /// The settings dialog's placement in the window as it is now, or `None`
@@ -37705,12 +37692,6 @@ impl<B: Backend> Runtime<'_, B> {
         );
     }
 
-    // ── the plural content plane (slice 5) ──────────────────────────────────
-
-    // ── the head's furniture (P11-P31) ──────────────────────────────────────
-
-    // ── the foot (P32-P35) ──────────────────────────────────────────────────
-
     // `current_preview_buffer` stood here — the buffer "the" preview seat was
     // showing, `preview_buffer_on` asked about `seats::Seats::preview`. Its last
     // caller was the card button's verb, and the owner's ruling of 2026-09-12
@@ -37724,15 +37705,6 @@ impl<B: Backend> Runtime<'_, B> {
     // plural in slice 7 (see `preview_messages_owned`), so the question it
     // answered no longer has anybody asking it: every remaining reader of a
     // picture already knows which surface it means.
-
-    // ── the body's own bar (user ruling, 2026-08-14) ────────────────────────
-
-    // ─────────────────── the terminal pane's own scroll bar ───────────────────
-    //
-    // P2-9 slice 1. Everything below reads [`termscroll`] and adds nothing to
-    // it: the geometry, the visibility rule and both maps a hand can run
-    // backwards live there, where they can be asked the questions a hand asks
-    // without a window, a shell or a GPU.
 
     // ── the quick edit (mock-up 4980-4983, 7858-7886) ───────────────────────
     //
@@ -38135,12 +38107,6 @@ fn measure_markdown_block(
 }
 
 impl<B: Backend> Runtime<'_, B> {
-    // ── P81: a tree row is a drag source ────────────────────────────────────
-
-    // ── P143-P150: the glance card ──────────────────────────────────────────
-
-    // ── the three dirty gates (P123-P125, `DESIGN.md` §7.1.3) ───────────────
-
     // ── quitting (multiwindow slice E2, `DESIGN.md` §2.9) ───────────────────
 
     /// **Throw this window's in-memory modifications away** (slice E2 phase ①).
@@ -38190,20 +38156,6 @@ impl<B: Backend> Runtime<'_, B> {
             .filter_map(webhost::WebSeat::next_deadline)
             .min())
     }
-
-    // ── the preview's filename switcher (P130-P137) ─────────────────────────
-
-    // ── the file row's context menu (K143-K146) ─────────────────────────────
-
-    // ── the git context menus (v2 ④) ─────────────────────────────────────────
-
-    // ── the terminal's own context menu (`#term-menu`, ticket #62) ──────────
-
-    // ── a tab's own context menu (丙2, the gesture audit of 2026-08-26) ─────
-
-    // ── the pane head's own menu (user rulings, 2026-08-15, 2026-08-16) ─────
-
-    // ── the commit graph's toolbar (T1/T2/T3/T4/T5, v2 ③) ──────────────────
 
     // ── the floating window (§7.1.2) ────────────────────────────────────────
 
@@ -38489,8 +38441,6 @@ impl<B: Backend> Runtime<'_, B> {
         }
         Ok(())
     }
-
-    // ── The web preview (slice 1) ──────────────────────────────────────────
 
     // ── The page's own chrome (slice ④) ────────────────────────────────────
 

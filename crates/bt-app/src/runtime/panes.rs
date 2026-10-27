@@ -7419,38 +7419,6 @@ pub(crate) fn rail_change_strands_its_popups(from: seats::RailState, to: seats::
     (from.layout, from.mode) != (to.layout, to.mode) || (to.collapsed && !from.collapsed)
 }
 
-/// The rail's own level of the overlay stack — [`seats::WindowChrome::rail`]
-/// lifted into the overlay's vocabulary, or nothing when there is no rail.
-///
-/// **The lift keeps the surface class, and that is the whole of §7.1.6c-4f's
-/// second amendment.** The rail is not drawn in the chrome pass at all — R1 puts
-/// it on a floating level, because an open icon rail overlaps the terminal for
-/// 174 of its 220 pixels and a rail drawn under the panes would simply vanish
-/// the moment it opened. So `ChromeSurface` never reached the pipeline that
-/// reads it: every rail quad came out of here as an `OverlayQuad { alpha: 1.0 }`,
-/// and the one-translucency ruling of 2026-08-18 landed on every band in the
-/// window except the one this function carries. Measured at 30% over a bright
-/// desktop, the tab strip let it through and the rail did not — a dark column
-/// down the left edge of a window you could see the desk through.
-///
-/// A ground therefore travels the ground channel and everything else stays a
-/// quad. The comment this replaces was right about the ink and wrong about only
-/// one thing: "chrome fills are opaque by construction" is true of a hairline,
-/// a hover pill and a landing wash, and false of the panel they are struck on.
-///
-/// **The surface's opacity is still the fold** — `.rail { transition: …
-/// opacity .18s ease }` with `.window.rail-collapsed .rail { opacity: 0 }`
-/// (mock-up 814/823). CSS `opacity` on the element the layer *is*, so the panel
-/// and everything standing in it leave together rather than the ground going
-/// while the icons stay — and since ticket 46 literally together: the band is
-/// one [`bt_render::OverlayGroup`], drawn whole and put back once. Its ground
-/// is put back by cross-fade rather than over — see [`bt_render::OverlayGroup`]
-/// — which is what lets a *fading* panel still be glass instead of going opaque
-/// on its way out.
-///
-/// Red gate: send the grounds through the quad channel as this used to and the
-/// pin below finds the rail's panel among the fills; drop the fold and a
-/// collapsing rail pops instead of fading.
 /// **How opaque the panel on the left is drawn** — the fold's own number, and a
 /// flat `1.0` while the card column is up (§7.1.6b′).
 ///
@@ -7568,6 +7536,38 @@ pub(crate) fn tear_pane_into_tab(
     Some(torn)
 }
 
+/// The rail's own level of the overlay stack — [`seats::WindowChrome::rail`]
+/// lifted into the overlay's vocabulary, or nothing when there is no rail.
+///
+/// **The lift keeps the surface class, and that is the whole of §7.1.6c-4f's
+/// second amendment.** The rail is not drawn in the chrome pass at all — R1 puts
+/// it on a floating level, because an open icon rail overlaps the terminal for
+/// 174 of its 220 pixels and a rail drawn under the panes would simply vanish
+/// the moment it opened. So `ChromeSurface` never reached the pipeline that
+/// reads it: every rail quad came out of here as an `OverlayQuad { alpha: 1.0 }`,
+/// and the one-translucency ruling of 2026-08-18 landed on every band in the
+/// window except the one this function carries. Measured at 30% over a bright
+/// desktop, the tab strip let it through and the rail did not — a dark column
+/// down the left edge of a window you could see the desk through.
+///
+/// A ground therefore travels the ground channel and everything else stays a
+/// quad. The comment this replaces was right about the ink and wrong about only
+/// one thing: "chrome fills are opaque by construction" is true of a hairline,
+/// a hover pill and a landing wash, and false of the panel they are struck on.
+///
+/// **The surface's opacity is still the fold** — `.rail { transition: …
+/// opacity .18s ease }` with `.window.rail-collapsed .rail { opacity: 0 }`
+/// (mock-up 814/823). CSS `opacity` on the element the layer *is*, so the panel
+/// and everything standing in it leave together rather than the ground going
+/// while the icons stay — and since ticket 46 literally together: the band is
+/// one [`bt_render::OverlayGroup`], drawn whole and put back once. Its ground
+/// is put back by cross-fade rather than over — see [`bt_render::OverlayGroup`]
+/// — which is what lets a *fading* panel still be glass instead of going opaque
+/// on its way out.
+///
+/// Red gate: send the grounds through the quad channel as this used to and the
+/// pin below finds the rail's panel among the fills; drop the fold and a
+/// collapsing rail pops instead of fading.
 pub(crate) fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> marks::Band {
     if rail.quads.is_empty()
         && rail.labels.is_empty()

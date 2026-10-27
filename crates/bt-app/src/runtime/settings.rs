@@ -1045,9 +1045,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// profile at it.
     ///
     /// The same door the background picture's `Choose…` goes through
-    /// (`bt_platform::pick_file`), and it may come back with nothing — in which
-    /// case nothing is written, because a chooser that was cancelled has not
-    /// said anything.
+    /// (the window's `image_picker`, asked here for `FilePickKind::Program`), and it may come back
+    /// with nothing — in which case nothing is written, because a chooser that was cancelled has
+    /// not said anything.
     fn browse_for_program(&mut self) {
         let start = self
             .window

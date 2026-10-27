@@ -12237,8 +12237,9 @@ mod tests {
     /// Issue #28 through a real shell: a profile row whose starting folder is a fixed folder
     /// (`profiles::place_for`, as `create_leaf_session` asks it), the shell started there by
     /// `start`, its bytes read by a real session told its spawn directory as a pane is, and the
-    /// files card's folder (`crate::files_root_of`, the folder button's and `Ctrl+Shift+B`'s one
-    /// reader) asked at birth, at the first prompt and after `cd` into a subfolder.
+    /// files card's folder (`crate::runtime::files::files_root_of`, the folder button's and
+    /// `Ctrl+Shift+B`'s one reader) asked at birth, at the first prompt and after `cd` into a
+    /// subfolder.
     ///
     /// **What the card is compared with is what the product holds.** The pane keeps every folder
     /// in the spelling it was given — the profile's folder as the profile names it, a report as

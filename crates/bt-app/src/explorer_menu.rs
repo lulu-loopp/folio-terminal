@@ -370,7 +370,7 @@ pub fn verb_icon(exe: &Path) -> String {
 /// of its own, and the menu must be in the language the user chose for
 /// everything Folio says.
 ///
-/// **Read, never opened** (B-EXPLORER-CLAIM): `crate::door_language` reads the
+/// **Read, never opened** (B-EXPLORER-CLAIM): `door_language` reads the
 /// file and asks nobody who writes the data directory. Explorer keeps this
 /// process alive while the menu it drew starts Folio, so a claim taken here
 /// would be held against that Folio, which would then save nothing all run.

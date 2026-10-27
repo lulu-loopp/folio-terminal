@@ -1672,7 +1672,7 @@ impl FloatHost {
     /// a question about the peek's trigger and not about its existence; asked as
     /// a bare "is a peek up" it made the folder button on every terminal pane's
     /// head a second, invisible rail trigger. That question lives with the rail
-    /// now — see `rail_zone_wants_open` in `main.rs`, which reads [`Self::peek`]
+    /// now — see `rail_zone_wants_open` in `runtime/panes.rs`, which reads [`Self::peek`]
     /// and asks its [`FloatWin::origin`].
     #[must_use]
     pub fn peek_is_open(&self) -> bool {
@@ -4422,7 +4422,7 @@ mod tests {
     ///
     /// The rail's half of G102 is **not** here, and deliberately so since
     /// 2026-08-15: which peeks hold the rail open is a question about the peek's
-    /// trigger, and it is asked in `main.rs`'s `rail_zone_wants_open`. See
+    /// trigger, and it is asked in `runtime/panes.rs`'s `rail_zone_wants_open`. See
     /// [`FloatHost::peek_is_open`].
     #[test]
     fn promotion_empties_the_peek_slot() {

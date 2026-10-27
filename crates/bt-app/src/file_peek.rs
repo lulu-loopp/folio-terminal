@@ -507,7 +507,7 @@ pub fn press_at(
 // pane and the preview float grew the same bar. It was `preview::scroll_bar`
 // stood on its end with the card's body filled in — and once three surfaces
 // wore it, "the card's bar" stopped being a thing there could be one of: the
-// arithmetic moved to `crate::preview_body_bar`, which every one of the three
+// arithmetic moved to `crate::runtime::peek::preview_body_bar`, which every one of the three
 // goes through, and the card hands it the box its own layout produced exactly as
 // a pane hands it the box the tree gave. A wrapper here would have been the
 // second door the block bar's history warns about.

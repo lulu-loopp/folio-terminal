@@ -17467,8 +17467,9 @@ pub struct FilesTreeContent {
     /// painter that can disagree with the words it was handed.
     pub foot_dissolved: f32,
     /// The standing fact on the foot's right hand — "Folder unknown" for a root that is the home
-    /// folder standing in for a folder nobody could say (`crate::folder_foot_notice`), or empty —
-    /// with the width it draws, measured beside the renderer ([`dress_foot`]).
+    /// folder standing in for a folder nobody could say
+    /// (`crate::runtime::files::folder_foot_notice`), or empty — with the width it draws, measured
+    /// beside the renderer ([`dress_foot`]).
     pub foot_notice: String,
     pub foot_notice_width: f32,
 }
@@ -22554,8 +22555,9 @@ pub struct FilesLeafState {
     pub git_remotes_open: bool,
     /// **Whether this root is the account's home standing in for a folder nobody could say**
     /// (T-CWD-FROM-PROCESS): the pane it was opened from had reported no folder and its shell's
-    /// process could not be read (`crate::files_root_of`). The foot says "Folder unknown" while
-    /// it holds; choosing a root clears it (`crate::reroot_files_state`).
+    /// process could not be read (`crate::runtime::files::files_root_of`). The foot says "Folder
+    /// unknown" while it holds; choosing a root clears it
+    /// (`crate::runtime::files::reroot_files_state`).
     ///
     /// Not on [`bt_persist::FilesLeafV1`]: it is a fact about how this root was arrived at in
     /// this run, and a restored column's root is the root it was left on.
@@ -50836,7 +50838,7 @@ mod tests {
     /// have taken go back to the tree. The other two — the chord does nothing,
     /// and no `git` process is started — are pinned by
     /// `hit_files_seg_answers_nothing_for_a_column_with_no_switch` below and by
-    /// `main`'s `columns_wanting_git`.
+    /// `runtime/files.rs`'s `columns_wanting_git`.
     #[test]
     fn the_switch_takes_no_room_at_all_while_the_git_panel_is_off() {
         let rect = [0.0, 0.0, 240.0, 600.0];

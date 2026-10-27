@@ -998,7 +998,7 @@ impl<B: Backend> Runtime<'_, B> {
         // pictures alone goes with it, and a failure another surface still shows stays
         // ([`Self::let_go_unnamed_peek_records`], below, once the card names nothing) — before a
         // next card is matured in the same turn, with no walk between. The next card over the
-        // file asks again on opening ([`crate::peek_card_opened`]). A page it asked about is asked
+        // file asks again on opening ([`peek_card_opened`]). A page it asked about is asked
         // again too (below).
         self.window.peek_card_pending = None;
         self.window.file_peek = None;
