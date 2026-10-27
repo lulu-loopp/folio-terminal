@@ -1,6 +1,7 @@
 //! `math` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::TermViewPorts;
 use crate::input::Keystroke;
 use crate::runtime::frame::dispatch_tab_decoration_tasks;
 use crate::runtime::panes::rail_overlay_layer;
@@ -996,7 +997,7 @@ impl<B: Backend> Runtime<'_, B> {
                                 .and_then(|index| self.window.tabs[index].sessions.get(&leaf.seat))
                                 .map_or_else(
                                     || self.window.renderer.base_metrics().font_size_px,
-                                    |asking| asking.metrics.font_size_px,
+                                    |asking| asking.view.metrics.font_size_px,
                                 );
                             self.table_raster(&task.span.render_source, font_size_px)
                         } else {
@@ -1017,7 +1018,7 @@ impl<B: Backend> Runtime<'_, B> {
                                 .and_then(|index| self.window.tabs[index].sessions.get(&leaf.seat))
                                 .map_or_else(
                                     || self.window.renderer.base_metrics().font_size_px,
-                                    |asking| asking.metrics.font_size_px,
+                                    |asking| asking.view.metrics.font_size_px,
                                 );
                             self.table_raster(&task.span.render_source, font_size_px)
                         } else {
@@ -1361,7 +1362,7 @@ impl<B: Backend> Runtime<'_, B> {
         };
         if let Some(leaf) = self.window.tabs[index].sessions.get_mut(&target.seat) {
             leaf.session
-                .set_math_toggle_presentation(Some(presentation));
+                .port_math_toggle_presentation(Some(presentation));
         }
     }
 
@@ -1405,7 +1406,7 @@ impl<B: Backend> Runtime<'_, B> {
         }
         let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
         let leaf = self.sessions.get(&seat)?;
-        let frame = leaf.last_presented_frame.as_ref()?;
+        let frame = leaf.view.last_presented_frame.as_ref()?;
         // The pane's *body*, not its seat: a pane with a head draws its grid
         // below that head, and a pointer measured from the seat's corner would
         // be off by the head's height on every pane that wears one.
@@ -1992,7 +1993,7 @@ impl<B: Backend> Runtime<'_, B> {
         let mut changed = false;
         for (seat, leaf) in self.window.tabs[active].leaves_mut() {
             let wanted = anchor.as_ref().filter(|_| hovered == Some(*seat));
-            changed |= leaf.session.set_math_hover(wanted);
+            changed |= leaf.session.port_math_hover(wanted);
         }
         changed
     }
@@ -2160,7 +2161,8 @@ impl<B: Backend> Runtime<'_, B> {
     ) -> Option<bt_term::MathToggleFaces> {
         let index = self.live_paste_target(target)?;
         let leaf = self.window.tabs[index].sessions.get(&target.seat)?;
-        leaf.session.math_toggle_faces(&leaf.projection, anchor)
+        leaf.session
+            .math_toggle_faces(&leaf.view.projection, anchor)
     }
 
     /// **[`Self::math_toggle_faces`] without the other face's rows** — the pane
@@ -2179,7 +2181,8 @@ impl<B: Backend> Runtime<'_, B> {
     ) -> Option<[i64; 2]> {
         let index = self.live_paste_target(target)?;
         let leaf = self.window.tabs[index].sessions.get(&target.seat)?;
-        leaf.session.math_toggle_heights(&leaf.projection, anchor)
+        leaf.session
+            .math_toggle_heights(&leaf.view.projection, anchor)
     }
 
     /// **The `‹›` mark was pressed** — see [`formula_tools::FormulaToggleMotion`] for what the
@@ -2269,7 +2272,7 @@ impl<B: Backend> Runtime<'_, B> {
             let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) else {
                 return Ok(());
             };
-            if !leaf.session.toggle_math_source(anchor) {
+            if !leaf.session.port_toggle_math_source(anchor) {
                 return Ok(());
             }
         }
@@ -2302,7 +2305,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) else {
             return Ok(());
         };
-        if leaf.session.toggle_math_source(anchor) {
+        if leaf.session.port_toggle_math_source(anchor) {
             self.clear_selection();
             self.publish_interaction_frame()?;
         }
@@ -2344,7 +2347,7 @@ impl<B: Backend> Runtime<'_, B> {
         if leaf.session.math_toggle_presentation() == presentation.as_ref() {
             return Ok(());
         }
-        leaf.session.set_math_toggle_presentation(presentation);
+        leaf.session.port_math_toggle_presentation(presentation);
         self.repaint_pane_change(seat)?;
         // The other face is an overlay layer. `redraw` rebuilds it only after it
         // has projected this presentation, from the same frame it then presents.
@@ -2378,15 +2381,15 @@ impl<B: Backend> Runtime<'_, B> {
             // The owner still exists but its block vanished or changed. Release only that
             // owner's presentation; equal anchors in other panes do not belong to this flight.
             if let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) {
-                leaf.session.set_math_toggle_presentation(None);
+                leaf.session.port_math_toggle_presentation(None);
             }
             return Ok(());
         }
         let switched = flight.switch_owed();
         if let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) {
-            leaf.session.set_math_toggle_presentation(None);
+            leaf.session.port_math_toggle_presentation(None);
             if switched {
-                leaf.session.toggle_math_source(flight.anchor());
+                leaf.session.port_toggle_math_source(flight.anchor());
             }
         }
         if switched {
@@ -2617,12 +2620,12 @@ impl<B: Backend> Runtime<'_, B> {
         let line_wrapping = self.app.settings_store.loaded().line_wrapping;
         for tab in self.window.tabs.iter_mut() {
             for (_, leaf) in tab.leaves_mut() {
-                leaf.session.set_layout_key(window_layout_key(
+                leaf.propose_layout(window_layout_key(
                     nonzero_u32(leaf.grid.columns.get()),
                     dpi_milli,
                     // **The size is each pane's own too** (ticket 37): the face this leaf was
                     // last applied at, so a pane at 150 % keys its bands at its own em.
-                    leaf.metrics.font_size_subpixels(),
+                    leaf.view.metrics.font_size_subpixels(),
                     font_rev,
                     line_wrapping,
                 ));

@@ -1219,7 +1219,7 @@ pub(crate) struct TwoPaneHarness {
     /// `WindowRuntime::last_presented_frame` — the focused leaf's copy, and what
     /// the unchanged-frame gate compares against.
     focused_on_glass: Option<ViewportFrame>,
-    /// `LeafSession::last_presented_frame` for the pane beside it: what the
+    /// `TermView::last_presented_frame` for the pane beside it: what the
     /// user can actually read in that half of the window.
     sibling_on_glass: Option<ViewportFrame>,
     /// [`WindowRuntime::unpainted_pane_output`].
@@ -2546,18 +2546,17 @@ pub(crate) fn card_restore_first(leaf: &LeafSession) -> String {
 }
 
 pub(crate) fn card_restore_widen(leaf: &mut LeafSession) {
-    schedule_leaf_grid_change(
-        leaf,
-        GridSize {
+    leaf.propose_size(GridChange {
+        next: GridSize {
             columns: std::num::NonZeroU16::new(40).unwrap(),
             rows: std::num::NonZeroU16::new(40).unwrap(),
         },
-        PhysicalSize::new(400, 400),
-        Instant::now(),
-        LeafOnStage::Shown,
-        "resize card skip fixture",
-        card_trace::Pane::untraced(),
-    )
+        physical: PhysicalSize::new(400, 400),
+        observed_at: Instant::now(),
+        on_stage: LeafOnStage::Shown,
+        context: "resize card skip fixture",
+        pane: card_trace::Pane::untraced(),
+    })
     .unwrap();
     assert_eq!(
         focus_thumb::transcript_tail(&leaf.session, 40, 200, 0)
@@ -2577,15 +2576,14 @@ pub(crate) fn card_restore_resize(
         columns: std::num::NonZeroU16::new(columns).unwrap(),
         rows: std::num::NonZeroU16::new(rows).unwrap(),
     };
-    schedule_leaf_grid_change(
-        leaf,
+    leaf.propose_size(GridChange {
         next,
-        PhysicalSize::new(400, 400),
-        Instant::now(),
-        stage,
-        "card skip resize",
-        card_trace::Pane::untraced(),
-    )
+        physical: PhysicalSize::new(400, 400),
+        observed_at: Instant::now(),
+        on_stage: stage,
+        context: "card skip resize",
+        pane: card_trace::Pane::untraced(),
+    })
     .unwrap();
     if stage == LeafOnStage::Behind {
         let mut pending = false;
@@ -2687,13 +2685,14 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // A fixture has no shell, so nothing was ever told a capability — and an empty string
         // is one no arriving message can match, which is the honest shape of that.
         attention_capability: String::new(),
-        projection,
-        // A fixture is a new view, so it is at 100 % (ticket 37), at the default face measured
-        // by the production service. Its session keeps the fixture's own 22-pixel rows; a test
-        // that needs the two to agree applies these through `apply_leaf_metrics`.
-        text_scale: TextScale::ACTUAL,
-        metrics: fixture_cell_metrics(1.0, 16.0),
         view: TermView {
+            projection,
+            // A fixture is a new view, so it is at 100 % (ticket 37), at the default face measured
+            // by the production service. Its session keeps the fixture's own 22-pixel rows; a
+            // test that needs the two to agree applies these through `apply_leaf_metrics`.
+            text_scale: TextScale::ACTUAL,
+            metrics: fixture_cell_metrics(1.0, 16.0),
+            last_presented_frame: None,
             thumb_awake: Instant::now(),
             column_awake: Instant::now(),
             // Aimed at the tail, like every shell that has not been aimed.
@@ -2711,7 +2710,6 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         pending_psreadline_resize_reanchor: false,
         output_revision: 0,
         last_seen_revision: 0,
-        last_presented_frame: None,
         // Nothing has been pasted into a fixture.
         pending_paste: None,
         paste_hold: None,
@@ -3300,7 +3298,7 @@ pub(crate) fn rail_test_body(logical: u32, scale: f64) -> SeatViewport {
 // `Runtime::redraw` cannot be built without a window, so the gate it asks is a method of the tab
 // (`TabState::admit_resize_present`), and these tests run it on a real tab holding a real leaf:
 // the real `hear_first_mark` the drain asks, the real `LeafSession::grid_for` every solve asks and
-// the real `schedule_leaf_grid_change` every solve goes through, and frames the leaf's own
+// the real `LeafSession::propose_size` every solve goes through, and frames the leaf's own
 // session composes.
 
 /// Re-solve the tab's focused pane into `body`, as every road that re-solves the panes does.
@@ -3313,24 +3311,23 @@ pub(crate) fn resolve_focused_pane(
     // The pane at these metrics (ticket 37: a pane's grid is solved at its own metrics).
     apply_leaf_metrics(leaf, *metrics);
     let next = leaf.grid_for(body);
-    schedule_leaf_grid_change(
-        leaf,
+    leaf.propose_size(GridChange {
         next,
-        PhysicalSize::new(body.width, body.height),
-        Instant::now(),
-        LeafOnStage::Shown,
-        "ticket 47",
-        card_trace::Pane::untraced(),
-    )
+        physical: PhysicalSize::new(body.width, body.height),
+        observed_at: Instant::now(),
+        on_stage: LeafOnStage::Shown,
+        context: "ticket 47",
+        pane: card_trace::Pane::untraced(),
+    })
     .expect("carry the solved grid to the pane");
 }
 
 /// The frame the tab's focused pane composes now.
 pub(crate) fn focused_frame(tab: &mut TabState) -> ViewportFrame {
     let leaf = tab.focused_mut().expect("the tab holds a shell");
-    leaf.session.refresh_projection(&mut leaf.projection);
+    leaf.session.refresh_projection(&mut leaf.view.projection);
     leaf.session
-        .viewport_frame(&mut leaf.projection)
+        .viewport_frame(&mut leaf.view.projection)
         .expect("compose the pane's frame")
 }
 
@@ -3427,10 +3424,15 @@ pub(crate) fn staged_bytes_sent(
     };
     let leaf = tab.sessions.get_mut(&seat).expect("the seat has a shell");
     let mut sent = Vec::new();
-    paste_body(&mut leaf.session, &mut leaf.projection, body, |bytes| {
-        sent.push(bytes.to_vec());
-        Ok(())
-    })
+    paste_body(
+        &mut leaf.session,
+        &mut leaf.view.projection,
+        body,
+        |bytes| {
+            sent.push(bytes.to_vec());
+            Ok(())
+        },
+    )
     .expect("a capture cannot fail");
     assert_eq!(sent.len(), 1, "a paste is one write");
     sent.pop()

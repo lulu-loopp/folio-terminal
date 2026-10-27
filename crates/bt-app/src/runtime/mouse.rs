@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::PtyTarget;
+use crate::TermViewPorts;
 use crate::runtime::files::{files_row_activation, press_files_node};
 use crate::runtime::panes::risen_frame;
 use crate::runtime::preview::crumb_segments;
@@ -5949,7 +5950,7 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         };
         let (cell_subpixels, target_rows) = (
-            target_leaf.projection.cell_height_subpixels().get() as f64,
+            target_leaf.view.projection.cell_height_subpixels().get() as f64,
             target_leaf.grid.rows.get() as f64,
         );
         // Scrolling moves the content the flyout was anchored to; the transient peek dissolves.
@@ -5967,7 +5968,7 @@ impl<B: Backend> Runtime<'_, B> {
                 tab: self.window.tabs[self.window.active_tab].id,
                 seat: target_seat,
             };
-            let rung = self.leaf(target_seat).text_scale;
+            let rung = self.leaf(target_seat).view.text_scale;
             let (step, count) = TextSizeAim::notch(
                 text_size_carry,
                 &mut self.window.text_size_aim,
@@ -6046,7 +6047,7 @@ impl<B: Backend> Runtime<'_, B> {
                 .get_mut(&target_seat)
                 .is_some_and(|leaf| {
                     leaf.session
-                        .scroll_math_block(&math_hit.anchor, horizontal, vertical)
+                        .port_scroll_math_block(&math_hit.anchor, horizontal, vertical)
                 })
             {
                 self.window.local_wheel_subpixel_remainder = tentative;
@@ -6060,7 +6061,7 @@ impl<B: Backend> Runtime<'_, B> {
             }
         }
         let modes = self.leaf_terminal_modes(target_seat);
-        let target_is_scrolled = self.leaf(target_seat).projection.is_scrolled();
+        let target_is_scrolled = self.leaf(target_seat).view.projection.is_scrolled();
         let route = wheel_route(self.window.modifiers.shift_key(), modes, target_is_scrolled);
         // **The last word on this notch** (`BT_MOUSE_TRACE`, §7.60), written
         // above the four arms rather than inside them: what a reader is asking
@@ -6176,7 +6177,7 @@ impl<B: Backend> Runtime<'_, B> {
                 self.window.pixel_wheel_remainder += position.y;
                 // The addressed pane's own row (ticket 37): a pane at 150 % owes a line of
                 // arrows for every 150 %-tall row of travel, not for every window-sized one.
-                let cell_px = self.leaf(seat).metrics.cell_height_px as f64;
+                let cell_px = self.leaf(seat).view.metrics.cell_height_px as f64;
                 drain_whole_units(&mut self.window.pixel_wheel_remainder, cell_px) as i32
             }
         }
@@ -6214,7 +6215,7 @@ impl<B: Backend> Runtime<'_, B> {
             }
             MouseScrollDelta::PixelDelta(position) => {
                 self.window.pixel_wheel_remainder += position.y;
-                let cell_px = self.leaf(seat).metrics.cell_height_px as f64;
+                let cell_px = self.leaf(seat).view.metrics.cell_height_px as f64;
                 drain_whole_units(&mut self.window.pixel_wheel_remainder, cell_px) as i32
             }
         }
@@ -6243,7 +6244,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// small reports, and rounding each of them alone throws the whole detent
     /// away a sixth at a time.
     fn wheel_columns(&mut self, seat: SeatId, delta: MouseScrollDelta) -> Option<i32> {
-        let axis = self.leaf(seat).projection.horizontal();
+        let axis = self.leaf(seat).view.projection.horizontal();
         // A report the platform put on the x axis says what it means, and
         // [`wheel_points_sideways`] is where this window decides that — the
         // sentence about a hand not being straight now governs both arms of the
@@ -6255,7 +6256,7 @@ impl<B: Backend> Runtime<'_, B> {
         // to `Shift` and to nothing else; on the primary screen they are a plain
         // notch away and the key is free to name the other axis.
         let shift_only_rows = self.leaf_terminal_modes(seat).alternate_screen
-            && self.leaf(seat).projection.has_displaced_rows();
+            && self.leaf(seat).view.projection.has_displaced_rows();
         if wheel_axis(
             self.window.modifiers.shift_key(),
             sideways,
@@ -6266,7 +6267,7 @@ impl<B: Backend> Runtime<'_, B> {
             return None;
         }
         // The pane's own cell (ticket 37): a column is as wide as this pane draws it.
-        let metrics = self.leaf(seat).metrics;
+        let metrics = self.leaf(seat).view.metrics;
         let cell_width = f64::from(metrics.cell_width_px).max(1.0);
         let travel = match delta {
             MouseScrollDelta::LineDelta(x, y) => {
@@ -6516,7 +6517,7 @@ impl<B: Backend> Runtime<'_, B> {
         let offset = self
             .sessions
             .get(&seat)
-            .map_or(0, |leaf| leaf.projection.scroll_offset_subpixels());
+            .map_or(0, |leaf| leaf.view.projection.scroll_offset_subpixels());
         self.scroll_seat_to_subpixels(seat, bar.paged_from(offset, at[1]))?;
         Ok(true)
     }

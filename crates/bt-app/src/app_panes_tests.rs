@@ -413,8 +413,8 @@ fn wheel_flush_runtime_skips_unchanged_panes_but_keeps_thumb_frames() {
     assert!(repaint.contains("||seat==self.focused_leaf||wheel_view_moved==Some(false)"));
     assert!(repaint.contains("self.represent_on_screen_frame(trigger)"));
     let scroll = squeezed_body("Runtime", "scroll_view_exact_in");
-    assert!(scroll.contains("letbefore=leaf.projection.scroll_offset_subpixels();"));
-    assert!(scroll.contains("letmoved=leaf.projection.scroll_offset_subpixels()!=before;"));
+    assert!(scroll.contains("letbefore=leaf.view.projection.scroll_offset_subpixels();"));
+    assert!(scroll.contains("letmoved=leaf.view.projection.scroll_offset_subpixels()!=before;"));
     let publish = scroll
         .find("self.repaint_pane_change_inner(seat,Some(moved))?")
         .unwrap();
@@ -1010,15 +1010,14 @@ fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
     let _ = leaf.session.take_pty_writes();
     let physical = PhysicalSize::new(400, 96);
     let step = |leaf: &mut LeafSession, grid, at| {
-        schedule_leaf_grid_change(
-            leaf,
-            grid,
+        leaf.propose_size(GridChange {
+            next: grid,
             physical,
-            at,
-            LeafOnStage::Shown,
-            "drag",
-            card_trace::Pane::untraced(),
-        )
+            observed_at: at,
+            on_stage: LeafOnStage::Shown,
+            context: "drag",
+            pane: card_trace::Pane::untraced(),
+        })
         .unwrap()
     };
 
@@ -1122,15 +1121,14 @@ fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
     assert!(leaf.session.shell_input_region_open());
     let physical = PhysicalSize::new(400, 96);
     let step = |leaf: &mut LeafSession, grid, at| {
-        schedule_leaf_grid_change(
-            leaf,
-            grid,
+        leaf.propose_size(GridChange {
+            next: grid,
             physical,
-            at,
-            LeafOnStage::Shown,
-            "drag",
-            card_trace::Pane::untraced(),
-        )
+            observed_at: at,
+            on_stage: LeafOnStage::Shown,
+            context: "drag",
+            pane: card_trace::Pane::untraced(),
+        })
         .unwrap()
     };
 
@@ -1194,7 +1192,7 @@ fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
 
 /// RED — **one shape, many entrances** (independent review 2026-09-17).
 ///
-/// The leak is never about window edges. It is `schedule_leaf_grid_change` reflowing a shown
+/// The leak is never about window edges. It is `LeafSession::propose_size` reflowing a shown
 /// pane — `next_grid != local_grid`, so `resize_at` opens a transaction — on a solve that
 /// answers the grid the child already holds, so the release used to be cancelled and nothing
 /// was left that could close it. Every way a pane's grid is solved reaches that one shape:
@@ -1256,15 +1254,14 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
             let _ = leaf.session.take_pty_writes();
 
             // The pane and its child both start settled at the same grid.
-            schedule_leaf_grid_change(
-                &mut leaf,
-                child,
-                child_physical,
-                start,
-                LeafOnStage::Shown,
-                "settle",
-                card_trace::Pane::untraced(),
-            )
+            leaf.propose_size(GridChange {
+                next: child,
+                physical: child_physical,
+                observed_at: start,
+                on_stage: LeafOnStage::Shown,
+                context: "settle",
+                pane: card_trace::Pane::untraced(),
+            })
             .unwrap();
             let at = start + WINDOW_RESIZE_QUIET;
             release_due_leaf_resize(&mut leaf, at, false)
@@ -1285,15 +1282,14 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
             // Out, and back to the grid the child already holds.
             let mut at = deadline + Duration::from_millis(100);
             for (grid, physical) in [(*away, *away_physical), (child, child_physical)] {
-                schedule_leaf_grid_change(
-                    &mut leaf,
-                    grid,
+                leaf.propose_size(GridChange {
+                    next: grid,
                     physical,
-                    at,
-                    stage,
-                    "wobble",
-                    card_trace::Pane::untraced(),
-                )
+                    observed_at: at,
+                    on_stage: stage,
+                    context: "wobble",
+                    pane: card_trace::Pane::untraced(),
+                })
                 .unwrap();
                 at += Duration::from_millis(17);
             }
@@ -1373,7 +1369,7 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
 /// glass follows the hand) and **the child is** (`conpty_grid` does not move until the
 /// gesture has been quiet).
 ///
-/// Red gate: make `schedule_leaf_grid_change` commit instead of coalescing — which is what
+/// Red gate: make `LeafSession::propose_size` commit instead of coalescing — which is what
 /// the unfocused path did — and `conpty_grid` moves inside the loop, sixty times, and the
 /// release at the end has nothing left to carry.
 #[test]
@@ -1393,15 +1389,14 @@ fn a_pane_without_the_keyboard_coalesces_a_drag_into_one_conpty_notification() {
         let next = grid_of(41 + u16::try_from(step).unwrap(), 4);
         let physical = PhysicalSize::new(u32::from(next.columns.get()) * 8, 88);
         assert!(
-            schedule_leaf_grid_change(
-                &mut leaf,
+            leaf.propose_size(GridChange {
                 next,
                 physical,
-                at,
-                LeafOnStage::Shown,
-                "drag",
-                card_trace::Pane::untraced()
-            )
+                observed_at: at,
+                on_stage: LeafOnStage::Shown,
+                context: "drag",
+                pane: card_trace::Pane::untraced(),
+            })
             .unwrap(),
             "every one of these rectangles is a new one, so every one is a reflow"
         );
@@ -1494,16 +1489,16 @@ fn a_drag_rewraps_the_pane_on_the_glass_and_reflows_a_hidden_pane_once() {
         let physical = PhysicalSize::new(u32::from(next.columns.get()) * 8, 88);
 
         assert!(
-            schedule_leaf_grid_change(
-                &mut shown,
-                next,
-                physical,
-                at,
-                LeafOnStage::Shown,
-                "drag",
-                card_trace::Pane::untraced()
-            )
-            .unwrap(),
+            shown
+                .propose_size(GridChange {
+                    next,
+                    physical,
+                    observed_at: at,
+                    on_stage: LeafOnStage::Shown,
+                    context: "drag",
+                    pane: card_trace::Pane::untraced(),
+                })
+                .unwrap(),
             "every one of these rectangles is a new one, so every one is a reflow"
         );
         // The two lines the window runs between the solve and the frame:
@@ -1512,10 +1507,10 @@ fn a_drag_rewraps_the_pane_on_the_glass_and_reflows_a_hidden_pane_once() {
         let mut key = shown.session.layout_key();
         key.width_cells = nonzero_u32(next.columns.get());
         shown.session.set_layout_key(key);
-        shown.projection = shown.session.new_projection(key);
+        shown.view.projection = shown.session.new_projection(key);
         let frame = shown
             .session
-            .viewport_frame(&mut shown.projection)
+            .viewport_frame(&mut shown.view.projection)
             .expect("project the pane on the glass between two steps of the drag");
         assert_eq!(
             frame.columns.get(),
@@ -1525,16 +1520,16 @@ fn a_drag_rewraps_the_pane_on_the_glass_and_reflows_a_hidden_pane_once() {
         );
 
         assert!(
-            !schedule_leaf_grid_change(
-                &mut behind,
-                next,
-                physical,
-                at,
-                LeafOnStage::Behind,
-                "drag",
-                card_trace::Pane::untraced()
-            )
-            .unwrap(),
+            !behind
+                .propose_size(GridChange {
+                    next,
+                    physical,
+                    observed_at: at,
+                    on_stage: LeafOnStage::Behind,
+                    context: "drag",
+                    pane: card_trace::Pane::untraced(),
+                })
+                .unwrap(),
             "a pane behind another tab reports no reflow, because it did none"
         );
         assert_eq!(

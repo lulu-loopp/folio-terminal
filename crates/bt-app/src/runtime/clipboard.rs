@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::PtyTarget;
+use crate::TermViewPorts;
 use crate::clipboard_lane::{
     Ask, ClipboardRequest, ClipboardTerminal, Declined, Held, OwedCopy, OwedPaste, PASTES_OWED,
     PasteHold, PasteInto, Reply,
@@ -174,7 +175,7 @@ impl<B: Backend> Runtime<'_, B> {
                 let Some(leaf) = self.window.tabs[index].sessions.get_mut(&target.seat) else {
                     return Ok(());
                 };
-                if !clear_copied_selection(&mut leaf.session, &mut leaf.projection, &copied) {
+                if !clear_copied_selection(&mut leaf.session, &mut leaf.view.projection, &copied) {
                     return Ok(());
                 }
                 self.publish_interaction_frame()
@@ -1029,7 +1030,7 @@ impl<B: Backend> Runtime<'_, B> {
             pty,
             birth,
             session,
-            projection,
+            view: crate::TermView { projection, .. },
             paste_hold,
             ..
         }) = self.window.tabs[active].sessions.get_mut(&seat)
@@ -1278,7 +1279,7 @@ fn paste_spelled<T>(
     bytes: &[u8],
     write: impl FnOnce(&[u8]) -> Result<T>,
 ) -> Result<T> {
-    session.set_view_selection(None);
+    session.port_clear_selection();
     projection.set_selection(None);
     projection.scroll_to_bottom();
     write(bytes)
@@ -1664,7 +1665,7 @@ pub(crate) fn clear_copied_selection(
     if session.selection_text().as_deref() != Some(copied) {
         return false;
     }
-    session.set_view_selection(None);
+    session.port_clear_selection();
     projection.set_selection(None);
     true
 }

@@ -1,7 +1,7 @@
 //! **One terminal pane's text size** (ticket 37; `docs/plans/design/pane-text-size-2026-09-23.md`).
 //!
 //! The fact this module names is the pane's **requested rung** on a fixed ladder, and nothing
-//! else. Its only home is the terminal view of one leaf (`LeafSession::text_scale`); it is never
+//! else. Its only home is the terminal view of one leaf (`TermView::text_scale`); it is never
 //! a map on the window, the tab, the renderer or anything written to disk, and it is never a
 //! product of sizes. Every size that depends on it is derived by [`TextScale::effective_logical_px`]
 //! from the rung and the Settings size, and measured at the window's display scale by the one

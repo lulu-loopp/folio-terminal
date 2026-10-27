@@ -748,7 +748,7 @@ pub(crate) fn apply_tabs_leaf_metrics(
 ) -> Result<()> {
     for tab in tabs {
         for (_, leaf) in tab.leaves_mut() {
-            let metrics = derive(leaf.text_scale)?;
+            let metrics = derive(leaf.view.text_scale)?;
             apply_leaf_metrics(leaf, metrics);
         }
     }

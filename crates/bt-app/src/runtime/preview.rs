@@ -698,7 +698,7 @@ impl<B: Backend> Runtime<'_, B> {
                     line_wrapping: wrapping,
                     ..leaf.session.layout_key()
                 };
-                leaf.session.set_layout_key(amended);
+                leaf.propose_layout(amended);
             }
         }
         self.publish_frame(FrameTrigger {
@@ -11423,7 +11423,7 @@ impl<B: Backend> Runtime<'_, B> {
             // tick reuse the picture, which is the only kind of frame it has.
             presentation_hold: self
                 .focused()
-                .is_some_and(|leaf| leaf.projection.presentation_hold()),
+                .is_some_and(|leaf| leaf.view.projection.presentation_hold()),
             content_revision: self.window.terminal_content_revision,
             presented_revision: self.window.presented_picture_revision,
         }
@@ -14360,6 +14360,7 @@ impl<B: Backend> Runtime<'_, B> {
                         self.window.tabs[active]
                             .sessions
                             .get(&seat)?
+                            .view
                             .last_presented_frame
                             .as_ref()?
                     };
@@ -14402,7 +14403,7 @@ impl<B: Backend> Runtime<'_, B> {
                     .zip(focused_presented)
                     .chain(tab.sessions.values().filter_map(|leaf| {
                         Some((
-                            leaf.last_presented_frame.as_ref()?,
+                            leaf.view.last_presented_frame.as_ref()?,
                             leaf.view.presented_metrics,
                         ))
                     })),

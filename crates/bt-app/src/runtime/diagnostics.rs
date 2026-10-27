@@ -3,8 +3,8 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    ApplicationChange, LeafOnStage, Runtime, card_trace, coalesce, resolve_theme_mode,
-    schedule_leaf_grid_change, system_os_theme,
+    ApplicationChange, GridChange, LeafOnStage, Runtime, card_trace, coalesce, resolve_theme_mode,
+    system_os_theme,
 };
 use anyhow::Result;
 use bt_persist::ThemeModeV1;
@@ -149,15 +149,14 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = self.window.tabs[active].focused_mut() else {
             return Ok(());
         };
-        schedule_leaf_grid_change(
-            leaf,
-            next_grid,
+        leaf.propose_size(GridChange {
+            next: next_grid,
             physical,
             observed_at,
-            LeafOnStage::Shown,
+            on_stage: LeafOnStage::Shown,
             context,
             pane,
-        )?;
+        })?;
         Ok(())
     }
 }

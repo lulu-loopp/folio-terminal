@@ -231,8 +231,8 @@ impl<B: Backend> Runtime<'_, B> {
                     i18n::text_size_tip(
                         i18n::Text::ShortcutTextActualSize.text(),
                         base,
-                        leaf.text_scale.percent(),
-                        leaf.text_scale.effective_logical_px(base),
+                        leaf.view.text_scale.percent(),
+                        leaf.view.text_scale.effective_logical_px(base),
                     ),
                 );
             }

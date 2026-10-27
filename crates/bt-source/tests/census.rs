@@ -23,8 +23,11 @@
 //! this tree, and `scripts/generate-runtime-dep-map.ps1` copies its renderings
 //! from `target/depmap/`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+
+use bt_source::call_graph::{Arms, Resolver, Target, Unresolved};
 
 use bt_source::{
     Column, Committed, CommittedFile, DependencyMap, Difference, DiskScope, FieldCensus, Index,
@@ -67,6 +70,15 @@ const TERM_VIEW_M1: [&str; 5] = [
     "card_skip",
     "presented_metrics",
     "frame_image_references",
+];
+
+/// The fields M2–M4 moved from `LeafSession` into `TermView` (the ownership
+/// contract's §3.3; ticket O-3).
+const TERM_VIEW_M2_M4: [&str; 4] = [
+    "text_scale",
+    "metrics",
+    "last_presented_frame",
+    "projection",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -769,36 +781,40 @@ fn every_field_of_the_declared_structs_has_an_inventory_row() {
     assert_eq!(facts, declared);
 }
 
-/// RED (O-2) — **the five view fields M1 moved are `TermView`'s, nested in
-/// `LeafSession` with its lifetime, and their writers are the ones they had.**
+/// RED (O-2, O-3) — **the nine view fields M1–M4 moved are `TermView`'s, nested
+/// in `LeafSession` with its lifetime, and their writers are the ones they had.**
 ///
 /// The ownership contract's M1 (§3.3) moves `thumb_awake`, `column_awake`,
 /// `card_skip`, `presented_metrics` and `frame_image_references` under
-/// `LeafSession.view: TermView` and changes no writer (§3.4: the rows'
-/// functions stay equal, only the fact column moves). So each is a fact of
-/// `TermView` and none of `LeafSession`; `LeafSession.view` is the one field of
-/// the leaf whose type is `TermView`, and it is written nowhere after
-/// construction; and each moved field's proven writes and lends are exactly
-/// the items that wrote and lent it on the leaf, by item and whatever module
-/// K2 puts the item in. Its reads are not pinned: they move with K2's batches
-/// and are held by the runtime dependency map's guard.
+/// `LeafSession.view: TermView`, and M2–M4 move `text_scale`, `metrics`,
+/// `last_presented_frame` and `projection` after them; no writer changes module
+/// (§3.4: the rows' functions stay equal, only the fact column moves). So each is
+/// a fact of `TermView` and none of `LeafSession`; `LeafSession.view` is the one
+/// field of the leaf whose type is `TermView`, and it is written nowhere after
+/// construction (two destructures lend it, to reach the projection); and each moved field's proven writes and lends are exactly the
+/// items that wrote and lent it on the leaf, by item and whatever module K2 puts
+/// the item in. Its reads are not pinned: they move with K2's batches and are
+/// held by the runtime dependency map's guard.
 ///
-/// The writer table below is the writers as of M1 (2026-10-27). O-3 edits a
-/// row when its writer becomes a `TermView` door, for example M3's
-/// `commit_presented` for `presented_metrics`.
+/// The writer table below is the writers as of M4 (2026-10-27). One row changed
+/// function in O-3, as the contract's M3 asks: the presented pair is written by
+/// the view's own `TermView::commit_presented` (in `runtime::frame`, the module
+/// `Runtime::redraw` wrote it from), which `redraw` calls.
 ///
-/// MUTATION: leave `card_skip` on `LeafSession`, and the first assertion
-/// names it; drop `wake_terminal_column`'s write, or write `leaf.view` whole,
-/// and the writer sets differ.
+/// MUTATION: leave `card_skip` or `projection` on `LeafSession`, and the first
+/// assertion names it; drop `wake_terminal_column`'s write, write `leaf.view`
+/// whole, write `leaf.view.last_presented_frame` in `redraw` beside the commit,
+/// or give `runtime::clipboard` a write of `projection` (pass the view to
+/// `paste_spelled`), and the writer sets differ.
 #[test]
-fn the_five_view_fields_are_term_views() {
+fn the_view_fields_are_term_views() {
     let census = the_census();
     let facts: std::collections::BTreeSet<&str> = census
         .facts()
         .iter()
         .map(|fact| fact.fact.as_str())
         .collect();
-    for field in TERM_VIEW_M1 {
+    for field in TERM_VIEW_M1.iter().chain(TERM_VIEW_M2_M4.iter()) {
         assert!(
             facts.contains(format!("TermView.{field}").as_str())
                 && !facts.contains(format!("LeafSession.{field}").as_str()),
@@ -828,7 +844,18 @@ fn the_five_view_fields_are_term_views() {
             .map(|(column, function)| (*column, (*function).to_owned()))
             .collect()
     };
-    assert_eq!(writers("LeafSession.view"), expected(&[]), "the nest");
+    // The nest is written nowhere after construction. It is lent only where a
+    // destructure of the leaf takes the projection through it
+    // (`view: TermView { projection, .. }`): the census counts every step of a
+    // struct pattern, so those two lend the nest as well as `TermView.projection`.
+    assert_eq!(
+        writers("LeafSession.view"),
+        expected(&[
+            ("access", "Runtime::insert_path_into_terminal"),
+            ("access", "Runtime::send_paste"),
+        ]),
+        "the nest"
+    );
     assert_eq!(
         writers("TermView.thumb_awake"),
         expected(&[("write", "Runtime::wake_terminal_thumb")])
@@ -843,7 +870,43 @@ fn the_five_view_fields_are_term_views() {
     );
     assert_eq!(
         writers("TermView.presented_metrics"),
-        expected(&[("write", "Runtime::redraw")])
+        expected(&[("write", "TermView::commit_presented")])
+    );
+    assert_eq!(
+        writers("TermView.last_presented_frame"),
+        expected(&[("write", "TermView::commit_presented")])
+    );
+    assert_eq!(
+        writers("TermView.text_scale"),
+        expected(&[("write", "step_leaf_text_scale")])
+    );
+    assert_eq!(
+        writers("TermView.metrics"),
+        expected(&[("write", "apply_leaf_metrics")])
+    );
+    assert_eq!(
+        writers("TermView.projection"),
+        expected(&[
+            ("access", "Runtime::apply_clipboard_write_effect"),
+            ("access", "Runtime::insert_path_into_terminal"),
+            ("access", "Runtime::publish_frame_inner"),
+            ("access", "Runtime::redraw"),
+            ("access", "Runtime::send_paste"),
+            ("access", "apply_leaf_metrics"),
+            ("write", "Runtime::clear_search_highlights"),
+            ("write", "Runtime::install_search_highlights"),
+            ("write", "Runtime::jump_to_command_mark"),
+            ("write", "Runtime::keyboard_input"),
+            ("write", "Runtime::return_to_live_for_input"),
+            ("write", "Runtime::reveal_current_search_hit"),
+            ("write", "Runtime::scroll_seat_by_columns"),
+            ("write", "Runtime::scroll_seat_to_column"),
+            ("write", "Runtime::scroll_seat_to_subpixels"),
+            ("write", "Runtime::scroll_view"),
+            ("write", "Runtime::scroll_view_exact_in"),
+            ("write", "TabState::clear_leaf_selection"),
+            ("write", "finish_leaf_birth"),
+        ])
     );
     assert_eq!(
         writers("TermView.frame_image_references"),
@@ -889,6 +952,363 @@ fn the_drain_reads_no_view_field() {
     assert!(
         touched.is_empty(),
         "the drain touches the view: {touched:?}"
+    );
+}
+
+// ── the doors between a view and its session (O-3) ─────────────────────────
+
+/// **Who calls what in `bt-app`'s product**, through `bt_source::call_graph`
+/// over the workspace's packages: for every call edge out of a product callable
+/// of `bt-app` that resolves to an item, the callee's key and the caller's
+/// (`Resolver::key`: `package module::Owner::name`). Calls written inside a
+/// closure of an item are the item's. An edge the rules cannot follow is kept
+/// with its candidates, so a guard can refuse one that could reach what it pins
+/// instead of passing it in silence.
+struct Callers {
+    by_callee: BTreeMap<String, BTreeSet<String>>,
+    unfollowed: Vec<(String, String, Vec<String>)>,
+}
+
+impl Callers {
+    /// The callers of `callee`, sorted; empty when nothing calls it.
+    fn of(&self, callee: &str) -> Vec<String> {
+        self.by_callee
+            .get(callee)
+            .map(|callers| callers.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Every unfollowed edge one of whose candidates is one of `callees`.
+    fn unfollowed_into(&self, callees: &[&str]) -> Vec<String> {
+        self.unfollowed
+            .iter()
+            .filter(|(_, _, candidates)| {
+                candidates
+                    .iter()
+                    .any(|candidate| callees.contains(&candidate.as_str()))
+            })
+            .map(|(caller, what, _)| format!("{caller} -> `{what}` (unfollowed)"))
+            .collect()
+    }
+}
+
+/// The callers as the tree holds them now, built by each test that asks: the
+/// test's own value, not a process-global its tests share (docs/plans/TEST-GLOBALS.tsv).
+fn bt_app_callers() -> Callers {
+    let workspace = Workspace::read(&workspace_root()).expect("this workspace");
+    let held: Vec<(String, Arc<Index>)> = workspace
+        .packages()
+        .iter()
+        .filter(|package| package.name() != "bt-source")
+        .map(|package| {
+            let vendor = if is_vendored(package.directory()) {
+                Vendor::Included
+            } else {
+                Vendor::Excluded
+            };
+            let universe = universes::crate_sources(package, vendor)
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+            let index = Index::shared(&universe)
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+            (package.name().to_owned(), index)
+        })
+        .collect();
+    let packages: Vec<(&str, &Index)> = held
+        .iter()
+        .map(|(name, index)| (name.as_str(), &**index))
+        .collect();
+    let resolver =
+        Resolver::new(&packages, Arms::product()).unwrap_or_else(|refusals| panic!("{refusals:?}"));
+    let mut by_callee: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut unfollowed = Vec::new();
+    for caller in resolver.callables("bt-app") {
+        if !resolver.admitted(caller) {
+            continue;
+        }
+        let from = resolver.key(caller);
+        for edge in resolver.resolve_callees(caller) {
+            let (what, candidates) = match &edge.to {
+                Target::Item(callee) => {
+                    by_callee
+                        .entry(resolver.key(*callee))
+                        .or_default()
+                        .insert(from.clone());
+                    continue;
+                }
+                Target::Unresolved(Unresolved::Ambiguous { method, candidates }) => {
+                    (method.clone(), candidates)
+                }
+                Target::Unresolved(Unresolved::Dynamic { what, candidates }) => {
+                    (what.clone(), candidates)
+                }
+                Target::Unresolved(Unresolved::OtherArm { candidates }) => {
+                    (edge.site.name.clone(), candidates)
+                }
+                _ => continue,
+            };
+            unfollowed.push((
+                from.clone(),
+                what,
+                candidates.iter().map(|id| resolver.key(*id)).collect(),
+            ));
+        }
+    }
+    Callers {
+        by_callee,
+        unfollowed,
+    }
+}
+
+/// `bt-term`'s session item `name`, keyed as the call graph keys it.
+fn term(name: &str) -> String {
+    format!("bt-term crate::session::DualPlaneSession::{name}")
+}
+
+/// `bt-app`'s item `path` (under `crate::`), keyed as the call graph keys it.
+fn app(path: &str) -> String {
+    format!("bt-app crate::{path}")
+}
+
+/// RED (O-3; the ownership contract's (b)1) — **every sizing write is a size
+/// proposal**: the session's size changes after its birth only through the
+/// three stages of its one door, `LeafSession::propose_cell` (the cell size),
+/// `propose_layout` (the layout key) and `propose_size` (the grid).
+///
+/// Two halves, because each sees what the other cannot.
+/// - **The census**: every proven write of `LeafSession.session` that calls one
+///   of the session's sizing setters is in a stage, and `LeafSession.grid`'s
+///   writers (and `pending_pty_resize`'s lenders) are the grid stage and the
+///   session's own release, `release_due_leaf_resize`.
+/// - **The call graph**, which also sees a call on a `&mut DualPlaneSession`
+///   handed to a helper (no field site at all): in `bt-app`'s product the
+///   setters' callers are the stages and the constructor, `bare_leaf`, which
+///   sets them on a session before there is a leaf; `resize_at`'s are the grid
+///   stage and `commit_leaf_resize`, the release's local reflow. An edge the
+///   graph cannot follow to one of them is refused, never passed.
+///
+/// MUTATION: have `apply_line_wrapping` call `leaf.session.set_layout_key`
+/// again, or `apply_leaf_metrics` call `set_font_size_subpixels`; have a
+/// panes walk write `leaf.grid`; or call `set_layout_key` from a helper that is
+/// handed `&mut leaf.session` — each is named.
+#[test]
+fn every_sizing_write_is_a_size_proposal() {
+    const SETTERS: [&str; 6] = [
+        "set_cell_height_subpixels",
+        "set_cell_width_subpixels",
+        "set_ascii_baseline_subpixels",
+        "set_font_size_subpixels",
+        "set_layout_key",
+        "resize_at",
+    ];
+    const STAGES: [&str; 3] = [
+        "LeafSession::propose_cell",
+        "LeafSession::propose_layout",
+        "LeafSession::propose_size",
+    ];
+    let census = the_census();
+    let bypassing: Vec<String> = census
+        .rows()
+        .iter()
+        .filter(|row| row.fact == "LeafSession.session" && row.column.name() == "write")
+        .filter(|row| {
+            row.kinds.iter().any(|kind| {
+                kind.strip_prefix("call:")
+                    .is_some_and(|name| SETTERS.contains(&name))
+            })
+        })
+        .filter(|row| !STAGES.contains(&row.function.as_str()))
+        .map(|row| format!("{}::{} {:?}", row.module, row.function, row.kinds))
+        .collect();
+    assert!(
+        bypassing.is_empty(),
+        "a sizing write that is not a size proposal: {bypassing:?}"
+    );
+    let functions = |fact: &str, column: &str| -> Vec<String> {
+        let mut out: Vec<String> = census
+            .rows()
+            .iter()
+            .filter(|row| row.fact == fact && row.column.name() == column)
+            .map(|row| row.function.clone())
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(
+        functions("LeafSession.grid", "write"),
+        ["LeafSession::propose_size", "release_due_leaf_resize"],
+        "the grid moves by the grid stage and the session's release"
+    );
+    assert_eq!(
+        functions("LeafSession.pending_pty_resize", "access"),
+        ["LeafSession::propose_size", "release_due_leaf_resize"],
+        "and so does the resize it owes the child"
+    );
+
+    let callers = bt_app_callers();
+    let pinned: Vec<String> = SETTERS.iter().map(|name| term(name)).collect();
+    let pinned: Vec<&str> = pinned.iter().map(String::as_str).collect();
+    let unfollowed = callers.unfollowed_into(&pinned);
+    assert!(
+        unfollowed.is_empty(),
+        "a call the graph cannot follow may reach a sizing setter: {unfollowed:?}"
+    );
+    let cell = app("LeafSession::propose_cell");
+    let birth = app("bare_leaf");
+    for (setter, expected) in [
+        ("set_cell_height_subpixels", vec![cell.clone()]),
+        (
+            "set_cell_width_subpixels",
+            vec![cell.clone(), birth.clone()],
+        ),
+        (
+            "set_ascii_baseline_subpixels",
+            vec![cell.clone(), birth.clone()],
+        ),
+        ("set_font_size_subpixels", vec![cell.clone(), birth.clone()]),
+        (
+            "set_layout_key",
+            vec![app("LeafSession::propose_layout"), birth.clone()],
+        ),
+        (
+            "resize_at",
+            vec![app("LeafSession::propose_size"), app("commit_leaf_resize")],
+        ),
+    ] {
+        let mut expected = expected;
+        expected.sort();
+        assert_eq!(
+            callers.of(&term(setter)),
+            expected,
+            "`{setter}` is reached only by a size proposal"
+        );
+    }
+}
+
+/// RED (O-3; the ownership contract's (b)1, group 3) — **each `bt-term`
+/// view-state setter is reached only through its port**, and each port's
+/// callers are these.
+///
+/// The selection, the math hover, a toggle's presentation and source, a math
+/// block's own scroll and the presentation hold are a view's state that lives in
+/// `DualPlaneSession` until a `bt-term` note splits it out. `TermViewPorts`
+/// names the road, so the road can be counted: in `bt-app`'s product each
+/// setter's only caller is its port, and each port's callers are the list
+/// below, which a new caller or a lost one changes. An edge the graph cannot
+/// follow to a setter or a port is refused.
+///
+/// MUTATION: have `Runtime::set_hovered_math` call `set_math_hover` directly,
+/// or call `port_clear_selection` from a new item — each is named.
+#[test]
+fn each_view_state_port_is_the_only_road_to_its_setter() {
+    let port = |name: &str| app(&format!("<DualPlaneSession as TermViewPorts>::{name}"));
+    let callers = bt_app_callers();
+    let table: [(&str, &[&str]); 6] = [
+        (
+            "set_view_selection",
+            &["port_clear_selection", "port_set_selection"],
+        ),
+        ("set_math_hover", &["port_math_hover"]),
+        (
+            "set_math_toggle_presentation",
+            &["port_math_toggle_presentation"],
+        ),
+        ("toggle_math_source", &["port_toggle_math_source"]),
+        ("scroll_math_block", &["port_scroll_math_block"]),
+        (
+            "release_presentation_hold_for_user_input",
+            &["port_release_presentation_hold"],
+        ),
+    ];
+    let mut every: Vec<String> = Vec::new();
+    for (setter, ports) in table {
+        every.push(term(setter));
+        let mut expected: Vec<String> = ports.iter().map(|name| port(name)).collect();
+        expected.sort();
+        assert_eq!(
+            callers.of(&term(setter)),
+            expected,
+            "`{setter}` is reached only through its port"
+        );
+    }
+    let port_callers: [(&str, &[&str]); 7] = [
+        ("port_set_selection", &["TabState::set_leaf_selection"]),
+        (
+            "port_clear_selection",
+            &[
+                "TabState::clear_leaf_selection",
+                "runtime::clipboard::clear_copied_selection",
+                "runtime::clipboard::paste_spelled",
+            ],
+        ),
+        (
+            "port_math_hover",
+            &["runtime::math::Runtime::set_hovered_math"],
+        ),
+        (
+            "port_math_toggle_presentation",
+            &[
+                "runtime::math::Runtime::present_math_toggle",
+                "runtime::math::Runtime::sample_math_toggle",
+                "runtime::math::Runtime::settle_math_toggle",
+            ],
+        ),
+        (
+            "port_toggle_math_source",
+            &[
+                "runtime::math::Runtime::press_math_toggle",
+                "runtime::math::Runtime::settle_math_toggle",
+                "runtime::math::Runtime::switch_math_source_now",
+            ],
+        ),
+        (
+            "port_scroll_math_block",
+            &["runtime::mouse::Runtime::mouse_wheel"],
+        ),
+        (
+            "port_release_presentation_hold",
+            &[
+                "Runtime::return_to_live_for_input",
+                "runtime::frame::Runtime::publish_frame_inner",
+            ],
+        ),
+    ];
+    for (name, expected) in port_callers {
+        every.push(port(name));
+        let mut expected: Vec<String> = expected.iter().map(|path| app(path)).collect();
+        expected.sort();
+        assert_eq!(callers.of(&port(name)), expected, "`{name}`'s callers");
+    }
+    let every: Vec<&str> = every.iter().map(String::as_str).collect();
+    let unfollowed = callers.unfollowed_into(&every);
+    assert!(
+        unfollowed.is_empty(),
+        "a call the graph cannot follow may reach a view-state setter or its port: {unfollowed:?}"
+    );
+}
+
+/// RED (O-3; the ownership contract's (b)1 and (c)1) — **the session hears where
+/// the keyboard is through one door, `LeafSession::report_keyboard_focus`, and
+/// only the drain reports it.**
+///
+/// The window and the view compute the truth and the session consumes it
+/// (`DualPlaneSession::set_keyboard_focus` keeps the DEC 1004 state and queues
+/// the child's reports). So in `bt-app`'s product the setter's one caller is the
+/// door, and the door's one caller is `drain_leaf_pty`, which asks it after the
+/// child's bytes are fed.
+///
+/// MUTATION: have the drain call `leaf.session.set_keyboard_focus` directly,
+/// or report from a second item — each is named.
+#[test]
+fn the_keyboard_focus_is_one_report() {
+    let callers = bt_app_callers();
+    let setter = term("set_keyboard_focus");
+    let door = app("LeafSession::report_keyboard_focus");
+    assert_eq!(callers.of(&setter), std::slice::from_ref(&door), "one door");
+    assert_eq!(callers.of(&door), [app("drain_leaf_pty")], "one reporter");
+    let unfollowed = callers.unfollowed_into(&[setter.as_str(), door.as_str()]);
+    assert!(
+        unfollowed.is_empty(),
+        "a call the graph cannot follow may reach the focus report: {unfollowed:?}"
     );
 }
 

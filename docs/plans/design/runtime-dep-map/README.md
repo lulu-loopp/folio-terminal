@@ -498,7 +498,9 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `Runtime::send_user_input`, held above, so it waited for it. Batch 24 (2026-10-27) moved `send_user_input` and
      left it held: it writes `LeafSession.projection` (owner frame) and `LeafSession.session` (owner terminal), and two
      modules already write both (`runtime/panes.rs` and `runtime/terminal.rs`), so the multi-owner rule finds no one
-     home; it is also O-3's own item (contract M4, one view door that calls one session door).
+     home; it is also O-3's own item (contract M4, one view door that calls one session door). O-3 (2026-10-27)
+     re-keys the first fact `TermView.projection` and gives the second its port, `port_release_presentation_hold`;
+     both facts keep their writers in `runtime/panes.rs` and `runtime/terminal.rs`, so it stays held.
      `runtime/mouse.rs`'s `send_user_input` calls it at the root, a private method its descendant can call.
    - `strip_insert_slot`, `solve_seats`, `presentation_physical_size` and `pane_can_become_a_tab` (batch 16) — their
      `called_from` home is `runtime/tabs.rs` (tied with `main.rs` for the last), but `cli_tab_slot`,
@@ -539,7 +541,9 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `schedule_leaf_grid_change` is `LeafSession.grid`'s single-writer road, which stays with that fact, as
      `release_due_leaf_resize` does, and it also writes terminal's `LeafSession.session`; `land_shell_birth` writes
      `LeafSession.birth`, whose other writers are at the root. `deliver_held_input` waits with `land_shell_birth`,
-     its root caller.
+     its root caller. O-3 (2026-10-27) closes the first half: `schedule_leaf_grid_change` became
+     `LeafSession::propose_size`, the session's own method beside its struct in `main.rs`, which is no free item
+     for a batch to move. `land_shell_birth` and `deliver_held_input` stay held.
    - `Runtime::aim_focus_card_window` (batch 18) — its `called_from` home is `runtime/panes.rs`, but it writes
      `WindowRuntime.focus_thumbs`, whose other writer, `Runtime::refresh_focus_thumbnails`, stayed at the root.
      Batch 22 moved both to `runtime/panes.rs` (the focus cards, by clause (a)); the fact, which has no owner, went
@@ -776,8 +780,8 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
       `output_revision`)
     - `mark_leaf_seen` / `mark_leaf_painted` (`last_seen_revision`)
     - `stage_paste` / `take_pending_paste` (`pending_paste`)
-    - `release_due_leaf_resize` / `schedule_leaf_grid_change` (`grid`; `conpty_grid`
-      alone)
+    - `release_due_leaf_resize` / `LeafSession::propose_size` (`grid`; `conpty_grid`
+      alone; the second was `schedule_leaf_grid_change` until O-3)
     - `finish_leaf_birth` / `keep_birth_death_face` (`wake`)
   - `TabState.sessions` changes membership in eight items:
     - `move_seat_content`, `pane_into_new_tab`

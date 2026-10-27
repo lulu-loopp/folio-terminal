@@ -221,11 +221,11 @@ fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
         let mut printed = b"\r\n$$a^2$$\r\n".to_vec();
         printed.extend(b"\r\n".repeat(64));
         pane.session.feed(&printed).expect("the formula is printed");
-        pane.session.refresh_projection(&mut pane.projection);
+        pane.session.refresh_projection(&mut pane.view.projection);
         pane.session
-            .viewport_frame(&mut pane.projection)
+            .viewport_frame(&mut pane.view.projection)
             .expect("the pane projects");
-        pane.projection.scroll_to_top();
+        pane.view.projection.scroll_to_top();
     }
     let before = asked(&watched);
     folio.draw();
@@ -283,7 +283,7 @@ fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() 
         ))
     })
     .expect("the pane steps up");
-    let rung = runtime.sessions[&seat].text_scale;
+    let rung = runtime.sessions[&seat].view.text_scale;
     let old = runtime.sessions[&seat].incarnation;
     assert!(
         !rung.is_actual(),
@@ -302,7 +302,7 @@ fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() 
         .as_ref()
         .expect("its replacement waits beside it while it is born");
     assert_eq!(
-        successor.text_scale, rung,
+        successor.view.text_scale, rung,
         "and is born at the pane's own rung"
     );
 
@@ -321,7 +321,7 @@ fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() 
         pane.incarnation, born,
         "the replacement is the pane once it has landed, and the old shell is gone"
     );
-    assert_eq!(pane.text_scale, rung, "at the pane's own rung");
+    assert_eq!(pane.view.text_scale, rung, "at the pane's own rung");
 }
 
 /// RED (T-CWD-FROM-PROCESS, round 2) — **the window draws "Folder unknown" on the foot of a

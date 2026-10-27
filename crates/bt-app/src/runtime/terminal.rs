@@ -21,7 +21,7 @@ use crate::{
     ClickIntent, DRAIN_SLICES_PER_TURN, DRAIN_TURN_BUDGET, HyperlinkActivation, LeafSeed, TabState,
     TextScale, drain_leaf_pty, hyperlink_activation, profiles,
 };
-use crate::{LeafView, TextStep, cell_width_subpixels, pane_cell_metrics};
+use crate::{LeafView, TextStep, pane_cell_metrics};
 use anyhow::Context;
 use anyhow::Result;
 use bt_doc::Bias;
@@ -76,7 +76,8 @@ impl<B: Backend> Runtime<'_, B> {
         let local_offset =
             -((cmdrail::JUMP_TOP_INSET_LOGICAL_PX * scale * bt_viewport::SUBPIXELS_PER_PX as f32)
                 .round() as i64);
-        leaf.projection
+        leaf.view
+            .projection
             .set_scroll_anchor(Some(bt_viewport::ScrollAnchor {
                 source: anchor.clone(),
                 local_offset,
@@ -87,8 +88,9 @@ impl<B: Backend> Runtime<'_, B> {
         // unless the document moves under it first — and it is computed by the
         // clamp the landing itself uses rather than a second opinion about it.
         let landing = mouse_trace::is_on().then(|| {
-            let extent_subpixels = leaf.projection.scroll_extent_subpixels();
+            let extent_subpixels = leaf.view.projection.scroll_extent_subpixels();
             let unclamped = leaf
+                .view
                 .projection
                 .scroll_y(leaf.session.document())
                 .ok()
@@ -98,7 +100,7 @@ impl<B: Backend> Runtime<'_, B> {
                 local_offset_subpixels: local_offset,
                 window_top_subpixels: unclamped.map(|top| top.clamp(0, extent_subpixels)),
                 extent_subpixels,
-                relief_subpixels: leaf.projection.bottom_relief_subpixels(),
+                relief_subpixels: leaf.view.projection.bottom_relief_subpixels(),
             }
         });
         self.window.command_flash = Some(CommandFlash {
@@ -147,6 +149,7 @@ impl<B: Backend> Runtime<'_, B> {
         // own `ScrollAnchor.source` when it has been scrolled, and the newest mark
         // of all when it is resting at the live bottom.
         let here = leaf
+            .view
             .projection
             .scroll_anchor()
             .map(|anchor| anchor.source.clone());
@@ -352,9 +355,9 @@ impl<B: Backend> Runtime<'_, B> {
         let scale = self.window.renderer.scale_factor() as f32;
         termscroll::bar(
             body,
-            leaf.projection.scroll_extent_subpixels(),
-            leaf.projection.viewport_height_subpixels(),
-            leaf.projection.scroll_offset_subpixels(),
+            leaf.view.projection.scroll_extent_subpixels(),
+            leaf.view.projection.viewport_height_subpixels(),
+            leaf.view.projection.scroll_offset_subpixels(),
             scale,
         )
     }
@@ -375,7 +378,7 @@ impl<B: Backend> Runtime<'_, B> {
     ) -> Option<termscroll::TerminalColumnBar> {
         let body = self.terminal_scroll_body(seat)?;
         let leaf = self.sessions.get(&seat)?;
-        let axis = leaf.projection.horizontal();
+        let axis = leaf.view.projection.horizontal();
         let scale = self.window.renderer.scale_factor() as f32;
         termscroll::column_bar(
             body,
@@ -443,9 +446,9 @@ impl<B: Backend> Runtime<'_, B> {
             .iter()
             .filter_map(|(seat, leaf)| {
                 let situation = termscroll::ThumbSituation {
-                    has_history: leaf.projection.scroll_extent_subpixels() > 0,
+                    has_history: leaf.view.projection.scroll_extent_subpixels() > 0,
                     alternate_screen: leaf.session.terminal_modes().alternate_screen,
-                    scrolled: leaf.projection.is_scrolled(),
+                    scrolled: leaf.view.projection.is_scrolled(),
                     near: self.terminal_thumb_hover == Some(*seat),
                     held: self
                         .held_terminal_thumb_drag()
@@ -697,7 +700,7 @@ impl<B: Backend> Runtime<'_, B> {
         // than the new leaf being repaired to it afterwards. Nothing else of the old view is
         // carried — its selection, its frames and its resize debt belong to a transcript that
         // is about to end. A spawn that fails leaves the old leaf exactly as it was.
-        let text_scale = leaf.text_scale;
+        let text_scale = leaf.view.text_scale;
         let scale = self.window.renderer.scale_factor() as f32;
         let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
         else {
@@ -856,7 +859,7 @@ impl<B: Backend> Runtime<'_, B> {
             pty,
             birth,
             session,
-            projection,
+            view: crate::TermView { projection, .. },
             paste_hold,
             ..
         } = self.window.tabs[active].shell_mut();
@@ -1338,8 +1341,8 @@ impl<B: Backend> Runtime<'_, B> {
         self.settle_math_toggle()?;
         let leaf = self.shell_mut();
         let subpixels =
-            i64::from(rows).saturating_mul(leaf.projection.cell_height_subpixels().get());
-        leaf.projection.scroll_by_subpixels(subpixels);
+            i64::from(rows).saturating_mul(leaf.view.projection.cell_height_subpixels().get());
+        leaf.view.projection.scroll_by_subpixels(subpixels);
         // `Shift`+`PageUp`/`PageDown` is a scroll like any other, so it lights
         // the bar like any other (P2-9 slice 1).
         self.woke_terminal_thumb(self.focused_leaf)?;
@@ -1713,9 +1716,9 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return Ok(false);
         };
-        let before = leaf.projection.scroll_offset_subpixels();
-        leaf.projection.scroll_by_subpixels(take);
-        let moved = leaf.projection.scroll_offset_subpixels() != before;
+        let before = leaf.view.projection.scroll_offset_subpixels();
+        leaf.view.projection.scroll_by_subpixels(take);
+        let moved = leaf.view.projection.scroll_offset_subpixels() != before;
         self.repaint_pane_change_inner(seat, Some(moved))?;
         // A notch is a reason for the bar to be up, and a moved view is a moved
         // thumb: the overlay is built on demand, so a wheel that only
@@ -1741,9 +1744,9 @@ impl<B: Backend> Runtime<'_, B> {
             // "Has a horizontal axis" is what `has_history` means down here: a
             // pane whose widest line fits across it has nothing to be a picture
             // of, exactly as a pane with no scrollback has nothing above it.
-            has_history: leaf.projection.horizontal().max_x_origin().0 > 0,
+            has_history: leaf.view.projection.horizontal().max_x_origin().0 > 0,
             alternate_screen: leaf.session.terminal_modes().alternate_screen,
-            scrolled: leaf.projection.horizontal().is_scrolled(),
+            scrolled: leaf.view.projection.horizontal().is_scrolled(),
             near: self.terminal_column_hover == Some(seat),
             held: self
                 .held_terminal_column_drag()
@@ -1912,13 +1915,14 @@ pub(crate) fn seat_holds_the_keyboard(
 ///
 /// Every road that changes what a pane is drawn at comes through here — a size step, a Settings
 /// change, a display change and a transfer to another window — so the things that carry the
-/// metrics move together: the leaf's own record ([`LeafSession::metrics`]), the session's cell
-/// height, width and baseline, its face size (which re-keys its math through `set_layout_key`),
+/// metrics move together: the view's own record ([`crate::TermView::metrics`]), the session's cell
+/// height, width and baseline and its face size (the session's cell-size stage,
+/// [`crate::LeafSession::propose_cell`], which re-keys its math through `set_layout_key`),
 /// and the projection, refreshed so a wheel or a scroll read after this sees the new rows. All of
 /// it happens **even when the integer grid is unchanged**: a larger face on the same grid is a new
 /// picture, and the frame it projects carries the new face size in its `layout_key`. The grid
 /// itself is the caller's to re-derive afterwards, through the existing resize transaction
-/// (`schedule_leaf_grid_change` → `release_due_leaf_resize` → `commit_leaf_resize`).
+/// (`LeafSession::propose_size` → `release_due_leaf_resize` → `commit_leaf_resize`).
 ///
 /// Answers whether anything moved. When the metrics are the ones the leaf already has — a step
 /// the clamp swallowed — it touches nothing and answers `false`, so no reflow, no PTY and no
@@ -1928,19 +1932,12 @@ pub(crate) fn seat_holds_the_keyboard(
 /// [`pane_cell_metrics`] and the pane head's indicator. Clearers: none — a view that ends takes
 /// its rung with it.
 pub(crate) fn apply_leaf_metrics(leaf: &mut LeafSession, metrics: bt_render::CellMetrics) -> bool {
-    if leaf.metrics == metrics {
+    if leaf.view.metrics == metrics {
         return false;
     }
-    leaf.metrics = metrics;
-    leaf.session
-        .set_cell_height_subpixels(metrics.cell_height_subpixels());
-    leaf.session
-        .set_cell_width_subpixels(cell_width_subpixels(metrics));
-    leaf.session
-        .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
-    leaf.session
-        .set_font_size_subpixels(metrics.font_size_subpixels());
-    leaf.session.refresh_projection(&mut leaf.projection);
+    leaf.view.metrics = metrics;
+    leaf.propose_cell(metrics);
+    leaf.session.refresh_projection(&mut leaf.view.projection);
     true
 }
 
@@ -2204,9 +2201,9 @@ pub(crate) fn step_leaf_text_scale(
     count: u32,
     derive: impl FnOnce(TextScale) -> Result<bt_render::CellMetrics>,
 ) -> Result<bool> {
-    let requested = (0..count).fold(leaf.text_scale, |scale, _| scale.stepped(step));
+    let requested = (0..count).fold(leaf.view.text_scale, |scale, _| scale.stepped(step));
     let metrics = derive(requested)?;
-    leaf.text_scale = requested;
+    leaf.view.text_scale = requested;
     Ok(apply_leaf_metrics(leaf, metrics))
 }
 

@@ -20,7 +20,7 @@ use crate::{
 use crate::{
     CardAim, ColumnNotch, CommandFlash, DividerDrag, DividerGrip, Drag, DragCarry, DragHandover,
     DragSource, DropLanding, FilesFocusArrival, FlashBand, FolderPick, FormulaSwitches,
-    FrameImageReferences, FrameTraces, HandoverInto, LeafId, LeafOnStage, LeafSession,
+    FrameImageReferences, FrameTraces, GridChange, HandoverInto, LeafId, LeafOnStage, LeafSession,
     MathHoverExit, MenuPaint, Motion, NewWindowPlan, NoticeHost, PaneDraw, PaneMenuState,
     PaneTransform, PeekCache, PeekCacheEntry, PopoverTrigger, Popup, PopupOwner, PresentIntent,
     PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY, RAIL_TRANSITION, RevealTween,
@@ -28,9 +28,8 @@ use crate::{
     TearOut, attention_trace, auto_split_axis, card_trace, closing_this_pane_closes_the_tab,
     cmdrail, create_leaf_session, files, float, focus_thumb, glyph_trace, hang_watch, marks,
     mouse_trace, notice, notify, palette, present_diagnostics, presentation_physical_size, preview,
-    preview_trace, profiles, restore, restore_row_seed, row_verb, schedule_leaf_grid_change,
-    scrollback_quota, seats, solve_seats, solve_tree, trace, video_seat, web_thumb, webhost,
-    wheel_zoom_notches,
+    preview_trace, profiles, restore, restore_row_seed, row_verb, scrollback_quota, seats,
+    solve_seats, solve_tree, trace, video_seat, web_thumb, webhost, wheel_zoom_notches,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -242,12 +241,12 @@ impl<B: Backend> Runtime<'_, B> {
         let held_seed = birth.seed.clone();
         let probe_input = birth.probe_input.clone();
         let text_scale = match at {
-            BirthAt::Pane => leaf.text_scale,
+            BirthAt::Pane => leaf.view.text_scale,
             BirthAt::Successor => leaf
                 .successor
                 .as_deref()
-                .map_or(leaf.text_scale, |successor: &LeafSession| {
-                    successor.text_scale
+                .map_or(leaf.view.text_scale, |successor: &LeafSession| {
+                    successor.view.text_scale
                 }),
         };
         let Ok((identity, _)) = decided_birth(&held_seed, stored, &self.app.profile_programs)
@@ -1840,10 +1839,10 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return Ok(());
         };
-        if leaf.projection.horizontal().x_origin() == wanted {
+        if leaf.view.projection.horizontal().x_origin() == wanted {
             return Ok(());
         }
-        leaf.projection.set_horizontal_origin(wanted);
+        leaf.view.projection.set_horizontal_origin(wanted);
         self.wake_terminal_column(seat);
         if self.refresh_overlay() {
             self.present_chrome_change()?;
@@ -1861,8 +1860,8 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return Ok(());
         };
-        let before = leaf.projection.horizontal().x_origin();
-        leaf.projection.scroll_horizontal_by(columns);
+        let before = leaf.view.projection.horizontal().x_origin();
+        leaf.view.projection.scroll_horizontal_by(columns);
         // The wake is unconditional even when the window was already against the
         // end: a reader flicking at a hard stop is still reading sideways, and a
         // mark that went out under their hand would say they had stopped.
@@ -1870,7 +1869,7 @@ impl<B: Backend> Runtime<'_, B> {
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
-        if self.leaf(seat).projection.horizontal().x_origin() == before {
+        if self.leaf(seat).view.projection.horizontal().x_origin() == before {
             return Ok(());
         }
         self.repaint_pane_change(seat)
@@ -1889,11 +1888,11 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return Ok(());
         };
-        let current = leaf.projection.scroll_offset_subpixels();
+        let current = leaf.view.projection.scroll_offset_subpixels();
         if current == wanted {
             return Ok(());
         }
-        leaf.projection.scroll_by_subpixels(wanted - current);
+        leaf.view.projection.scroll_by_subpixels(wanted - current);
         self.woke_terminal_thumb(seat)?;
         self.repaint_pane_change(seat)
     }
@@ -3397,7 +3396,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// **The geometry is the same sentence for all of them**: a leaf's grid is
     /// [`seats::pane_body_viewport`] of *that leaf's* seat, and of nothing else.
     /// **So is the timing.** Every leaf goes through
-    /// [`schedule_leaf_grid_change`]: its actor reflows in this turn, and its
+    /// [`crate::LeafSession::propose_size`]: its actor reflows in this turn, and its
     /// child hears the last word of the gesture at the shared 200 ms quiet
     /// boundary. The siblings used to be told at once instead — "they have no
     /// drag to coalesce" was never true of them, only unnoticed, because the
@@ -3468,19 +3467,18 @@ impl<B: Backend> Runtime<'_, B> {
             };
             // This leaf's own metrics (ticket 37), through `LeafSession::grid_for`.
             let next_grid = leaf.grid_for(body);
-            schedule_leaf_grid_change(
-                leaf,
-                next_grid,
+            leaf.propose_size(GridChange {
+                next: next_grid,
                 physical,
                 observed_at,
-                LeafOnStage::Shown,
+                on_stage: LeafOnStage::Shown,
                 context,
-                card_trace::Pane {
+                pane: card_trace::Pane {
                     window,
                     tab: tab_id,
                     seat,
                 },
-            )?;
+            })?;
         }
         // And the tabs nobody is looking at, before the focused pane for the
         // reason its siblings go before it.
@@ -3545,7 +3543,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// **And one reflow per pane per gesture, which is the half this arrived
     /// without** (user report 2026-09-09). A tree walk is pure and cheap; the
-    /// `resize_at` at the end of [`schedule_leaf_grid_change`] is a full vendor
+    /// `resize_at` at the end of [`crate::LeafSession::propose_size`] is a full vendor
     /// reflow of that pane's grid on the window thread, and taking it per hidden
     /// pane per OS event put the frame the visible pane owes the glass behind
     /// eleven of them on a twelve-tab window. So every leaf here is `Behind`:
@@ -3592,19 +3590,18 @@ impl<B: Backend> Runtime<'_, B> {
                 let Some(leaf) = tab.sessions.get_mut(&seat) else {
                     continue;
                 };
-                schedule_leaf_grid_change(
-                    leaf,
-                    next_grid,
+                leaf.propose_size(GridChange {
+                    next: next_grid,
                     physical,
                     observed_at,
-                    LeafOnStage::Behind,
+                    on_stage: LeafOnStage::Behind,
                     context,
-                    card_trace::Pane {
+                    pane: card_trace::Pane {
                         window,
                         tab: tab_id,
                         seat,
                     },
-                )?;
+                })?;
             }
         }
         Ok(())
@@ -3651,7 +3648,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// drawn yet, which is the same "there are no cells here" [`Self::pane_hit_context`] already
     /// answers, and the callers already do nothing about.
     pub(crate) fn pane_frame(&self, seat: SeatId) -> Option<&ViewportFrame> {
-        self.sessions.get(&seat)?.last_presented_frame.as_ref()
+        self.sessions.get(&seat)?.view.last_presented_frame.as_ref()
     }
 
     /// **The terminal panes of the tab on screen that are not at 100 %, with the percentage
@@ -3660,8 +3657,8 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn pane_text_sizes(&self) -> std::collections::BTreeMap<SeatId, u16> {
         self.sessions
             .iter()
-            .filter(|(_, leaf)| !leaf.text_scale.is_actual())
-            .map(|(seat, leaf)| (*seat, leaf.text_scale.percent()))
+            .filter(|(_, leaf)| !leaf.view.text_scale.is_actual())
+            .map(|(seat, leaf)| (*seat, leaf.view.text_scale.percent()))
             .collect()
     }
 
@@ -3669,7 +3666,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// every pointer question about `seat` measures cells with.
     ///
     /// The presented picture's, never the pane's newest: a size step whose picture has not yet
-    /// reached the glass has changed [`LeafSession::metrics`] and not the rows under the
+    /// reached the glass has changed [`crate::TermView::metrics`] and not the rows under the
     /// pointer, and a hit that paired the old row map with the new cell width would name a cell
     /// nobody can see.
     pub(crate) fn pane_frame_metrics(&self, seat: SeatId) -> Option<bt_render::CellMetrics> {
@@ -3822,7 +3819,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
             return;
         };
-        let Some(frame) = leaf.last_presented_frame.as_ref() else {
+        let Some(frame) = leaf.view.last_presented_frame.as_ref() else {
             leaf.view.frame_image_references = FrameImageReferences::default();
             return;
         };
@@ -5710,7 +5707,7 @@ impl<B: Backend> Runtime<'_, B> {
             let Some(leaf) = tab.sessions.get(&pane.seat) else {
                 continue;
             };
-            let Some(projected) = leaf.last_presented_frame.as_ref() else {
+            let Some(projected) = leaf.view.last_presented_frame.as_ref() else {
                 continue;
             };
             seat_ids.push(pane.seat);

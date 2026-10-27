@@ -5,7 +5,7 @@
 //! and real tabs — the real `step_leaf_text_scale` (the one mutation door's core), the real
 //! `apply_leaf_metrics`, the real `pane_cell_metrics`-shaped derivation through the production
 //! measuring service (`bt_render::CellMetrics::measure_at` behind `bt_render::CellMetricsMemo`),
-//! the real `schedule_leaf_grid_change` / `release_due_leaf_resize` transaction, and frames the
+//! the real `LeafSession::propose_size` / `release_due_leaf_resize` transaction, and frames the
 //! leaves' own sessions compose. Where the claim is about the window's own wiring — which rung
 //! the wheel reaches first, which metrics a hit test reads, who may write the rung — it is
 //! pinned on the item bodies through `bt_source`.
@@ -48,12 +48,12 @@ fn physical() -> PhysicalSize<u32> {
 /// which is the one writer of the session's cell geometry.
 fn pane_at_rest(text: &str) -> LeafSession {
     let mut leaf = leaf_saying(text);
-    leaf.metrics = fixture_cell_metrics(2.0, BASE);
+    leaf.view.metrics = fixture_cell_metrics(2.0, BASE);
     assert!(apply_leaf_metrics(
         &mut leaf,
         fixture_cell_metrics(1.0, BASE)
     ));
-    leaf.view.presented_metrics = leaf.metrics;
+    leaf.view.presented_metrics = leaf.view.metrics;
     resolve(&mut leaf, Instant::now());
     settle(&mut leaf, Instant::now() + Duration::from_secs(1));
     leaf
@@ -62,15 +62,14 @@ fn pane_at_rest(text: &str) -> LeafSession {
 /// Re-solve a leaf into [`body`], as every road that re-solves the panes does.
 fn resolve(leaf: &mut LeafSession, at: Instant) -> bool {
     let next = leaf.grid_for(body());
-    schedule_leaf_grid_change(
-        leaf,
+    leaf.propose_size(GridChange {
         next,
-        physical(),
-        at,
-        LeafOnStage::Shown,
-        "ticket 37",
-        card_trace::Pane::untraced(),
-    )
+        physical: physical(),
+        observed_at: at,
+        on_stage: LeafOnStage::Shown,
+        context: "ticket 37",
+        pane: card_trace::Pane::untraced(),
+    })
     .expect("a shell-less leaf reflows")
 }
 
@@ -86,14 +85,14 @@ fn snapshot(leaf: &LeafSession) -> String {
     format!(
         "{:?}",
         (
-            leaf.text_scale,
-            leaf.metrics,
+            leaf.view.text_scale,
+            leaf.view.metrics,
             leaf.view.presented_metrics,
             leaf.grid,
             leaf.conpty_grid,
             leaf.pending_pty_resize.map(|pending| pending.grid),
             leaf.session.layout_key(),
-            leaf.projection.cell_height_subpixels(),
+            leaf.view.projection.cell_height_subpixels(),
         )
     )
 }
@@ -108,7 +107,7 @@ fn snapshot(leaf: &LeafSession) -> String {
 /// every pane — is asserted to have moved in none, with nothing owed to its child.
 ///
 /// MUTATION: make `step_leaf_text_scale` apply the derived metrics without moving the rung (drop
-/// `leaf.text_scale = requested`) — the target's rung reads 100 and the percent assertion goes
+/// `leaf.view.text_scale = requested`) — the target's rung reads 100 and the percent assertion goes
 /// red; make `LeafSession::grid_for` read the window's base metrics — the target's grid does not
 /// shrink.
 #[test]
@@ -116,10 +115,10 @@ fn stepping_one_pane_changes_its_metrics_and_leaves_its_neighbour_byte_identical
     let mut target = pane_at_rest("left");
     let mut sibling = pane_at_rest("right");
     let target_before = (
-        target.metrics,
+        target.view.metrics,
         target.grid,
         target.session.layout_key(),
-        target.projection.cell_height_subpixels(),
+        target.view.projection.cell_height_subpixels(),
     );
     let sibling_before = snapshot(&sibling);
 
@@ -130,17 +129,20 @@ fn stepping_one_pane_changes_its_metrics_and_leaves_its_neighbour_byte_identical
     assert!(resolve(&mut target, now), "the stepped pane reflows");
     assert!(!resolve(&mut sibling, now), "its neighbour does not");
 
-    assert_eq!(target.text_scale.percent(), 150);
-    assert_eq!(target.metrics, fixture_cell_metrics(1.0, 24.0));
-    assert_ne!(target.metrics, target_before.0);
+    assert_eq!(target.view.text_scale.percent(), 150);
+    assert_eq!(target.view.metrics, fixture_cell_metrics(1.0, 24.0));
+    assert_ne!(target.view.metrics, target_before.0);
     assert!(target.grid.columns < target_before.1.columns);
     assert!(target.grid.rows < target_before.1.rows);
     assert_ne!(target.session.layout_key(), target_before.2);
     assert_eq!(
         target.session.layout_key().font_size_subpixels,
-        target.metrics.font_size_subpixels().get()
+        target.view.metrics.font_size_subpixels().get()
     );
-    assert_ne!(target.projection.cell_height_subpixels(), target_before.3);
+    assert_ne!(
+        target.view.projection.cell_height_subpixels(),
+        target_before.3
+    );
     assert_eq!(
         target.pending_pty_resize.map(|pending| pending.grid),
         Some(target.grid),
@@ -158,7 +160,7 @@ fn stepping_one_pane_changes_its_metrics_and_leaves_its_neighbour_byte_identical
 ///
 /// Driven the way the wheel drives it: reports turned into rungs by the rung's own carry
 /// ([`TextSizeAim::notch`]), each spend applied through the door's core and re-solved through
-/// `schedule_leaf_grid_change`, and the child released by `release_due_leaf_resize` exactly as
+/// `LeafSession::propose_size`, and the child released by `release_due_leaf_resize` exactly as
 /// the loop releases it. `told_the_child` is the commit's own record of whether
 /// `PtySession::resize` — `ResizePseudoConsole` — is called; the fixture has no ConPTY, so this
 /// counts the decision and not the syscall.
@@ -174,7 +176,7 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
     let started = Instant::now();
     let turn = |leaf: &mut LeafSession, slot: &mut Option<TextSizeAim>, delta, when| {
         let carry = slot.take();
-        let (step, count) = TextSizeAim::notch(carry, slot, at, delta, leaf.text_scale);
+        let (step, count) = TextSizeAim::notch(carry, slot, at, delta, leaf.view.text_scale);
         if count != 0
             && step_leaf_text_scale(leaf, step, count, derive_at(1.0, BASE)).expect("measures")
         {
@@ -195,7 +197,7 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
         );
     }
     assert_eq!(
-        leaf.text_scale.percent(),
+        leaf.view.text_scale.percent(),
         110,
         "six 20-pixel reports are one rung"
     );
@@ -207,7 +209,7 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
             started + Duration::from_millis(10 + index),
         );
     }
-    assert_eq!(leaf.text_scale.percent(), 175);
+    assert_eq!(leaf.view.text_scale.percent(), 175);
     assert_eq!(
         leaf.conpty_grid, told_before,
         "nothing told inside the window"
@@ -258,7 +260,7 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
         MouseScrollDelta::LineDelta(0.0, -1.0),
         started + Duration::from_millis(5),
     );
-    assert!(round.text_scale.is_actual());
+    assert!(round.view.text_scale.is_actual());
     let commit = settle(&mut round, started + Duration::from_secs(2));
     assert!(
         commit.is_none_or(|commit| !commit.told_the_child),
@@ -275,7 +277,7 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
 /// and the scale), the effective-size derivation and the apply operation, in both orders — and
 /// then through `apply_tabs_leaf_metrics`, the walk a transfer to another window takes.
 ///
-/// MUTATION: store the product — derive from `leaf.metrics.font_size_px` scaled instead of from
+/// MUTATION: store the product — derive from `leaf.view.metrics.font_size_px` scaled instead of from
 /// the rung — and the two orders part; key the memo by size alone — and the move to 2.0 keeps
 /// the 1.5 cell.
 #[test]
@@ -293,13 +295,13 @@ fn settings_then_dpi_equals_dpi_then_settings_equals_a_direct_measure() {
     };
     // Settings (a new font environment, 14 → 18) first, then the display (1.0 → 1.5).
     let mut first = pane_at_rest("first");
-    first.text_scale = rung;
+    first.view.text_scale = rung;
     apply_leaf_metrics(&mut first, measure(1, 1.0, 14.0));
     apply_leaf_metrics(&mut first, measure(2, 1.0, 18.0));
     apply_leaf_metrics(&mut first, measure(2, 1.5, 18.0));
     // The display first, then Settings.
     let mut second = pane_at_rest("second");
-    second.text_scale = rung;
+    second.view.text_scale = rung;
     apply_leaf_metrics(&mut second, measure(1, 1.0, 14.0));
     apply_leaf_metrics(&mut second, measure(1, 1.5, 14.0));
     apply_leaf_metrics(&mut second, measure(2, 1.5, 18.0));
@@ -309,20 +311,20 @@ fn settings_then_dpi_equals_dpi_then_settings_equals_a_direct_measure() {
         27.0,
     )
     .expect("measures");
-    assert_eq!(first.metrics, direct);
-    assert_eq!(second.metrics, direct);
+    assert_eq!(first.view.metrics, direct);
+    assert_eq!(second.view.metrics, direct);
     assert_eq!(first.session.layout_key(), second.session.layout_key());
-    assert_eq!(first.text_scale, rung, "neither change moved the rung");
+    assert_eq!(first.view.text_scale, rung, "neither change moved the rung");
 
     // Carried to a window at 2.0: the same rung, measured there.
     let mut tabs = vec![tab_holding(first)];
     apply_tabs_leaf_metrics(&mut tabs, derive_at(2.0, 18.0)).expect("measures");
     let moved = tabs[0].focused().expect("the tab holds its shell");
-    assert_eq!(moved.text_scale, rung);
-    assert_eq!(moved.metrics, fixture_cell_metrics(2.0, 27.0));
+    assert_eq!(moved.view.text_scale, rung);
+    assert_eq!(moved.view.metrics, fixture_cell_metrics(2.0, 27.0));
     assert_eq!(
         moved.session.layout_key().font_size_subpixels,
-        moved.metrics.font_size_subpixels().get()
+        moved.view.metrics.font_size_subpixels().get()
     );
 }
 
@@ -343,11 +345,11 @@ fn a_tab_moved_to_a_window_at_another_scale_is_measured_there() {
     let mut tabs = vec![tab_holding(leaf)];
     apply_tabs_leaf_metrics(&mut tabs, derive_at(2.0, BASE)).unwrap();
     let there = tabs[0].focused().unwrap();
-    assert_eq!(there.text_scale.percent(), 125);
-    assert_eq!(there.metrics, fixture_cell_metrics(2.0, 20.0));
+    assert_eq!(there.view.text_scale.percent(), 125);
+    assert_eq!(there.view.metrics, fixture_cell_metrics(2.0, 20.0));
     assert_eq!(
-        there.projection.cell_height_subpixels(),
-        there.metrics.cell_height_subpixels()
+        there.view.projection.cell_height_subpixels(),
+        there.view.metrics.cell_height_subpixels()
     );
 
     let transfer = method_body("FolioApp", "transfer_tab");
@@ -390,13 +392,17 @@ fn split_and_duplicate_start_at_100_and_tear_out_and_merge_keep_the_rung() {
     )
     .expect("a terminal pane may become a tab");
     let carried = torn.focused().expect("the torn tab holds the shell");
-    assert_eq!(carried.text_scale.percent(), 125, "tear-out keeps the rung");
-    assert_eq!(carried.metrics, fixture_cell_metrics(1.0, 20.0));
+    assert_eq!(
+        carried.view.text_scale.percent(),
+        125,
+        "tear-out keeps the rung"
+    );
+    assert_eq!(carried.view.metrics, fixture_cell_metrics(1.0, 20.0));
     assert!(
         staying
             .sessions
             .values()
-            .all(|leaf| leaf.text_scale.is_actual()),
+            .all(|leaf| leaf.view.text_scale.is_actual()),
         "and the pane that stayed is at its own size"
     );
 
@@ -425,7 +431,13 @@ fn split_and_duplicate_start_at_100_and_tear_out_and_merge_keep_the_rung() {
     );
     assert_ne!(renamed, SeatId(2), "the merge renumbered it");
     assert_eq!(
-        target.sessions.get(&renamed).unwrap().text_scale.percent(),
+        target
+            .sessions
+            .get(&renamed)
+            .unwrap()
+            .view
+            .text_scale
+            .percent(),
         90,
         "merge keeps the rung under its new number"
     );
@@ -485,7 +497,7 @@ fn the_rung_is_never_written_and_every_rebuilt_view_starts_at_100() {
     let before = persisted(&tab);
     let leaf = tab.focused_mut().unwrap();
     step_leaf_text_scale(leaf, TextStep::Larger, 4, derive_at(1.0, BASE)).unwrap();
-    assert_eq!(tab.focused().unwrap().text_scale.percent(), 175);
+    assert_eq!(tab.focused().unwrap().view.text_scale.percent(), 175);
     let after = persisted(&tab);
     assert_eq!(before, after, "a size step writes nothing");
     assert!(!after.contains("text") && !after.contains("175"), "{after}");
@@ -508,7 +520,7 @@ fn the_rung_is_never_written_and_every_rebuilt_view_starts_at_100() {
 /// GUARD (37) — **the rung has one owner, and no pane is sized from the window's metrics.**
 ///
 /// The rule, in prose (also `docs/DESIGN.md`, 2026-09-24): *a pane's requested text size lives in
-/// `LeafSession::text_scale` and nowhere else; it is written by `step_leaf_text_scale` (the one
+/// `TermView::text_scale` and nowhere else; it is written by `step_leaf_text_scale` (the one
 /// door's core) and by construction; a size is derived from it by `pane_cell_metrics` and put on
 /// the leaf by `apply_leaf_metrics`; and the window's base metrics are read only through
 /// `WindowRenderer::base_metrics`, by chrome that follows the Settings size at window scale.*
@@ -525,8 +537,8 @@ fn the_rung_is_never_written_and_every_rebuilt_view_starts_at_100() {
 /// Red on base as a structural guard: base had no rung and eighty-odd readers of the window's
 /// single `metrics()`.
 ///
-/// MUTATION: add `let size = leaf.text_scale;` to any other method (an alias read) — reading 2
-/// names it; add `leaf.text_scale = TextScale::ACTUAL;` in `Runtime::activate_tab` (an extra
+/// MUTATION: add `let size = leaf.view.text_scale;` to any other method (an alias read) — reading 2
+/// names it; add `leaf.view.text_scale = TextScale::ACTUAL;` in `Runtime::activate_tab` (an extra
 /// writer) — readings 1 and 2; call `self.window.renderer.base_metrics().cell_width_px` from a
 /// hit test — reading 4.
 #[test]
@@ -552,7 +564,7 @@ fn the_rung_has_one_owner() {
     let allowed = [
         // the module that names the fact, and its owner's field
         "text_scale",
-        "LeafSession::text_scale",
+        "TermView::text_scale",
         // the view a constructor is handed, and the constructor
         "LeafView::text_scale",
         "LeafView::at",
@@ -684,7 +696,7 @@ fn the_rung_has_one_owner() {
 /// own wiring — every hit site reading `pane_frame_metrics`, the IME caret reading the focused
 /// pane's metrics — is pinned on the bodies.
 ///
-/// MUTATION: make `Runtime::pane_frame_metrics` answer `leaf.metrics` — the stationary-pointer
+/// MUTATION: make `Runtime::pane_frame_metrics` answer `leaf.view.metrics` — the stationary-pointer
 /// half goes red; make any hit site read the window's base metrics — the pin names it.
 #[test]
 fn two_panes_at_two_sizes_each_map_the_pointer_with_their_own_cells() {
@@ -695,8 +707,8 @@ fn two_panes_at_two_sizes_each_map_the_pointer_with_their_own_cells() {
     resolve(leaf, Instant::now());
     let small_frame = focused_frame(&mut small);
     let large_frame = focused_frame(&mut large);
-    let small_metrics = small.focused().unwrap().metrics;
-    let large_metrics = large.focused().unwrap().metrics;
+    let small_metrics = small.focused().unwrap().view.metrics;
+    let large_metrics = large.focused().unwrap().view.metrics;
     let (x, y) = (220.0, 90.0);
     let small_hit = small_metrics.hit_test_frame(&small_frame, x, y).unwrap();
     let large_hit = large_metrics.hit_test_frame(&large_frame, x, y).unwrap();
@@ -751,19 +763,19 @@ fn two_panes_at_two_sizes_each_map_the_pointer_with_their_own_cells() {
     assert!(method_body("Runtime", "pane_frame_metrics").contains("presented_metrics"));
     assert!(
         method_body("Runtime", "offer_ime_caret")
-            .contains("self.focused().map(|leaf| leaf.metrics)"),
+            .contains("self.focused().map(|leaf| leaf.view.metrics)"),
         "the IME caret is measured in the focused pane's cells"
     );
     for (method, needle) in [
         (
             "take_forward_wheel_lines",
-            "self.leaf(seat).metrics.cell_height_px",
+            "self.leaf(seat).view.metrics.cell_height_px",
         ),
         (
             "take_forward_wheel_notches",
-            "self.leaf(seat).metrics.cell_height_px",
+            "self.leaf(seat).view.metrics.cell_height_px",
         ),
-        ("wheel_columns", "self.leaf(seat).metrics"),
+        ("wheel_columns", "self.leaf(seat).view.metrics"),
     ] {
         assert!(
             method_body("Runtime", method).contains(needle),
@@ -786,7 +798,7 @@ fn two_panes_at_two_sizes_each_map_the_pointer_with_their_own_cells() {
 fn a_size_change_with_an_unchanged_grid_still_presents_and_input_uses_the_displayed_picture() {
     let mut tab = tab_holding(pane_at_rest("same grid"));
     let before = focused_frame(&mut tab);
-    let old_metrics = tab.focused().unwrap().metrics;
+    let old_metrics = tab.focused().unwrap().view.metrics;
     let signature = |metrics| present_gate::SeatSignature {
         owner: (1, 1),
         picture_revision: 1,
@@ -815,7 +827,7 @@ fn a_size_change_with_an_unchanged_grid_still_presents_and_input_uses_the_displa
     );
     assert_ne!(
         signature(old_metrics),
-        signature(tab.focused().unwrap().metrics),
+        signature(tab.focused().unwrap().view.metrics),
         "the seat's signature carries its metrics"
     );
     assert_eq!(
@@ -920,11 +932,11 @@ fn the_text_size_derivation_holds_at_its_edges() {
     );
     // Back to 100.
     let mut leaf = pane_at_rest("return");
-    let home = leaf.metrics;
+    let home = leaf.view.metrics;
     step_leaf_text_scale(&mut leaf, TextStep::Larger, 5, derive_at(1.0, BASE)).unwrap();
     step_leaf_text_scale(&mut leaf, TextStep::Actual, 1, derive_at(1.0, BASE)).unwrap();
-    assert!(leaf.text_scale.is_actual());
-    assert_eq!(leaf.metrics, home);
+    assert!(leaf.view.text_scale.is_actual());
+    assert_eq!(leaf.view.metrics, home);
     // Behind another tab: given the grid, reflowed at release.
     let mut behind = pane_at_rest("behind");
     let grid = behind.grid;
@@ -932,16 +944,16 @@ fn the_text_size_derivation_holds_at_its_edges() {
     let next = behind.grid_for(body());
     let now = Instant::now();
     assert!(
-        !schedule_leaf_grid_change(
-            &mut behind,
-            next,
-            physical(),
-            now,
-            LeafOnStage::Behind,
-            "ticket 37",
-            card_trace::Pane::untraced(),
-        )
-        .unwrap(),
+        !behind
+            .propose_size(GridChange {
+                next,
+                physical: physical(),
+                observed_at: now,
+                on_stage: LeafOnStage::Behind,
+                context: "ticket 37",
+                pane: card_trace::Pane::untraced(),
+            })
+            .unwrap(),
         "a hidden pane does not reflow now"
     );
     assert_eq!(behind.grid, grid);

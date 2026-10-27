@@ -52,7 +52,7 @@ fn leaf_selection(tab: &mut TabState, seat: SeatId, columns: u32) -> ViewSelecti
         .expect("the seat under test holds a session");
     let frame = leaf
         .session
-        .viewport_frame(&mut leaf.projection)
+        .viewport_frame(&mut leaf.view.projection)
         .expect("a live leaf has a viewport frame");
     ViewSelection {
         start: frame
@@ -173,8 +173,8 @@ fn a_new_selection_leaves_no_other_pane_of_the_tab_wearing_one() {
         "one new selection ends every older claim, not merely the last"
     );
     assert!(
-        tab.sessions[&left].projection.selection().is_none()
-            && tab.sessions[&right].projection.selection().is_none(),
+        tab.sessions[&left].view.projection.selection().is_none()
+            && tab.sessions[&right].view.projection.selection().is_none(),
         "and the projections agree, so nothing stays painted with nothing behind it"
     );
 }

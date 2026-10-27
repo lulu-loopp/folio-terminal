@@ -17,6 +17,7 @@ use crate::{
     present_diagnostics, present_gate, preview, seats, settings, settling, taskbar_lane,
     termscroll, toast, update, webhost,
 };
+use crate::{TermView, TermViewPorts};
 use anyhow::Context;
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -185,9 +186,7 @@ impl<B: Backend> Runtime<'_, B> {
             // the presented frame does not change. Zero cost when the variable is unset.
             self.shell_mut().session.trace_decorations();
             if matches!(trigger.source, FrameSource::Keyboard) {
-                self.shell_mut()
-                    .session
-                    .release_presentation_hold_for_user_input();
+                self.shell_mut().session.port_release_presentation_hold();
             }
             // **The search re-asks itself here, before anything is projected** — so
             // a line that has just frozen, or a character the shell has just echoed,
@@ -223,14 +222,14 @@ impl<B: Backend> Runtime<'_, B> {
             // `lines_measured` is exactly that number. Off unless the switch is set,
             // and the reading costs one `u64` load when it is not.
             let trace_perf = self.app.trace_perf;
-            let measurements_before = self.shell().projection.line_text_measurements();
+            let measurements_before = self.shell().view.projection.line_text_measurements();
             // **Which road the projection took**, beside how many lines it measured
             // (T-MATH-MARKS-IN-SOURCE-FACE). A frame of a change of face measures no
             // lines at all either way — the cache answers for every one of them — so
             // `lines_measured` alone cannot tell a band moved where it stands from a
             // band that made the whole document be pushed through two trees again.
-            let rebuilds_before = self.shell().projection.rebuilds();
-            let bands_moved_before = self.shell().projection.bands_moved();
+            let rebuilds_before = self.shell().view.projection.rebuilds();
+            let bands_moved_before = self.shell().view.projection.bands_moved();
             let projected = {
                 // Bound once, to the focused leaf: `session` and `projection` are
                 // two fields of one shell, and reaching each through its own deref
@@ -245,7 +244,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // nothing: the hold below decides first.
                 let projected = bt_compose::project(bt_compose::Pane {
                     session: &mut leaf.session,
-                    view: &mut leaf.projection,
+                    view: &mut leaf.view.projection,
                 })
                 .context("project terminal grid into viewport frame")?;
                 let project_us =
@@ -260,17 +259,22 @@ impl<B: Backend> Runtime<'_, B> {
                     crate::diagnostics::stderr_line(format!(
                         "BT_PERF_TRACE projection source={:?} project_us={project_us} lines_measured={} projected_lines={} rebuilt={} band_moved={} scroll_offset_subpixels={} scroll_extent_subpixels={} bottom_relief_subpixels={}",
                         trigger.source,
-                        leaf.projection
+                        leaf.view
+                            .projection
                             .line_text_measurements()
                             .saturating_sub(measurements_before),
-                        leaf.projection.projected_line_count(),
-                        leaf.projection.rebuilds().saturating_sub(rebuilds_before),
-                        leaf.projection
+                        leaf.view.projection.projected_line_count(),
+                        leaf.view
+                            .projection
+                            .rebuilds()
+                            .saturating_sub(rebuilds_before),
+                        leaf.view
+                            .projection
                             .bands_moved()
                             .saturating_sub(bands_moved_before),
-                        leaf.projection.scroll_offset_subpixels(),
-                        leaf.projection.scroll_extent_subpixels(),
-                        leaf.projection.bottom_relief_subpixels(),
+                        leaf.view.projection.scroll_offset_subpixels(),
+                        leaf.view.projection.scroll_extent_subpixels(),
+                        leaf.view.projection.bottom_relief_subpixels(),
                     ));
                 }
                 projected
@@ -290,8 +294,8 @@ impl<B: Backend> Runtime<'_, B> {
                     crate::diagnostics::stderr_line(format!(
                         "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
                         trigger.source,
-                        u8::from(self.shell().projection.review_hold()),
-                        u8::from(self.shell().projection.exact_source_reprint_hold()),
+                        u8::from(self.shell().view.projection.review_hold()),
+                        u8::from(self.shell().view.projection.exact_source_reprint_hold()),
                     ));
                 }
                 return Ok(false);
@@ -1129,7 +1133,7 @@ impl<B: Backend> Runtime<'_, B> {
                 let same_picture = tab
                     .sessions
                     .get(id)
-                    .and_then(|leaf| leaf.last_presented_frame.as_ref())
+                    .and_then(|leaf| leaf.view.last_presented_frame.as_ref())
                     .is_some_and(|previous| present_gate::pictures_match(previous, seat.frame));
                 present_gate::SeatSignature {
                     owner,
@@ -1248,7 +1252,7 @@ impl<B: Backend> Runtime<'_, B> {
                     ..
                 } = bt_compose::project(bt_compose::Pane {
                     session: &mut leaf.session,
-                    view: &mut leaf.projection,
+                    view: &mut leaf.view.projection,
                 })
                 .context("project an unfocused pane's grid into a viewport frame")?;
                 // A pane nobody has the keyboard in still draws paths, and still owes them an answer.
@@ -1308,7 +1312,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // Each frame with the metrics it was just projected at (ticket 37).
                 let tab = &self.window.tabs[active];
                 let frame_for = |seat| {
-                    let metrics = tab.sessions.get(&seat)?.metrics;
+                    let metrics = tab.sessions.get(&seat)?.view.metrics;
                     if seat == focused_leaf {
                         return Some((focused_body.viewport, &frame, metrics));
                     }
@@ -1334,19 +1338,21 @@ impl<B: Backend> Runtime<'_, B> {
             }
             // **Both construction paths carry the seat's own metrics** (ticket 37): every frame
             // here was projected this pass from its leaf's session, which was last applied at
-            // `LeafSession::metrics`, so that is what the picture is drawn at — and what the
+            // `TermView::metrics`, so that is what the picture is drawn at — and what the
             // commit below records beside it as `presented_metrics`. One list, read once, so
             // the tables, the seat frames and the commit are handed the same pairs.
             let frame_metrics: Vec<bt_render::CellMetrics> = {
                 let sessions = &self.window.tabs[active].sessions;
-                let focused_metrics = sessions
-                    .get(&focused_leaf)
-                    .map_or_else(|| self.window.renderer.base_metrics(), |leaf| leaf.metrics);
+                let focused_metrics = sessions.get(&focused_leaf).map_or_else(
+                    || self.window.renderer.base_metrics(),
+                    |leaf| leaf.view.metrics,
+                );
                 std::iter::once(focused_metrics)
                     .chain(unfocused_frames.iter().map(|(pane, _)| {
                         sessions
                             .get(&pane.seat)
                             .expect("an unfocused frame was projected from a leaf of this tab")
+                            .view
                             .metrics
                     }))
                     .collect()
@@ -1498,14 +1504,12 @@ impl<B: Backend> Runtime<'_, B> {
                         .zip(frame_metrics.iter().skip(1))
                     {
                         if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) {
-                            leaf.last_presented_frame = Some(projected);
-                            leaf.view.presented_metrics = *metrics;
+                            leaf.view.commit_presented(projected, *metrics);
                             mark_leaf_painted(leaf);
                         }
                     }
                     if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&focused_leaf) {
-                        leaf.last_presented_frame = Some(frame.clone());
-                        leaf.view.presented_metrics = frame_metrics[0];
+                        leaf.view.commit_presented(frame.clone(), frame_metrics[0]);
                         mark_leaf_painted(leaf);
                     }
                     self.window.last_presented_frame = Some(frame);
@@ -2726,9 +2730,9 @@ impl<B: Backend> Runtime<'_, B> {
             .sessions
             .iter()
             .filter(|(seat, leaf)| {
-                leaf.projection.scroll_extent_subpixels() > 0
+                leaf.view.projection.scroll_extent_subpixels() > 0
                     && !leaf.session.terminal_modes().alternate_screen
-                    && !leaf.projection.is_scrolled()
+                    && !leaf.view.projection.is_scrolled()
                     && self.terminal_thumb_hover != Some(**seat)
                     && self
                         .held_terminal_thumb_drag()
@@ -2745,9 +2749,9 @@ impl<B: Backend> Runtime<'_, B> {
                 self.sessions
                     .iter()
                     .filter(|(seat, leaf)| {
-                        leaf.projection.horizontal().max_x_origin().0 > 0
+                        leaf.view.projection.horizontal().max_x_origin().0 > 0
                             && !leaf.session.terminal_modes().alternate_screen
-                            && !leaf.projection.horizontal().is_scrolled()
+                            && !leaf.view.projection.horizontal().is_scrolled()
                             && self
                                 .held_terminal_column_drag()
                                 .copied()
@@ -3552,6 +3556,25 @@ pub(crate) fn chrome_tick_reuses_picture(picture: PictureOnGlass) -> bool {
     // A held picture is the picture, by decision. Composing under a hold builds
     // a frame the hold discards a few lines later.
     picture.presentation_hold || picture.presented_revision == picture.content_revision
+}
+
+impl TermView {
+    /// **A pane's presented frame and the metrics it was drawn at, recorded together** — at the
+    /// present, by `Runtime::redraw`'s commit, and nowhere else (the ownership contract's
+    /// `commit_presented`, M3, ticket O-3).
+    ///
+    /// The pair is what every pointer question about the pane reads (ticket 37), so the two are
+    /// one write: a frame recorded beside another frame's metrics would put the pointer in a cell
+    /// nobody can see. The image references the frame draws are not part of it; they are scanned
+    /// when the frame is published, which is a different moment.
+    pub(crate) fn commit_presented(
+        &mut self,
+        frame: ViewportFrame,
+        metrics: bt_render::CellMetrics,
+    ) {
+        self.last_presented_frame = Some(frame);
+        self.presented_metrics = metrics;
+    }
 }
 
 #[cfg(test)]

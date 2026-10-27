@@ -56,7 +56,6 @@ App.tab_ids	-	LIFE	tabs	the 2026-09-25 table
 App.web_spare	-	LIFE	web	proposed by census-1
 App.web_warmup	-	LIFE	web	proposed by census-1
 LeafSession.attention	-	LIFE	attention (→ bt-workbench)	the 2026-09-25 table
-LeafSession.projection	-	PROJ	frame	the 2026-09-25 table
 LeafSession.pty	-	LIFE	panes	the 2026-09-25 table
 LeafSession.session	-	HUB	terminal	the 2026-09-25 table
 LeafSession.spawn_fallback	-	LIFE	main (the leaf-birth road, finish_leaf_birth)	T-SHELL-BIRTH-DEATH (2026-10-10): a hand-off, not a shared state: the birth road stores bt-pty's fallback record when it seats a shell, and runtime::panes takes it once, at the landing, because only the runtime knows the pane's seat that the diagnostics line names
@@ -80,6 +79,7 @@ TabState.seat_layout	-	VIEW	panes	the 2026-09-25 table
 TabState.seat_overflow	-	PROJ	panes	the 2026-09-25 table
 TabState.seats	-	HUB	panes	the 2026-09-25 table
 TermView.frame_image_references	-	PROJ	frame	the 2026-09-25 table
+TermView.projection	-	PROJ	frame	the 2026-09-25 table
 WindowRuntime.active_tab	-	HUB	tabs	the 2026-09-25 table
 WindowRuntime.advanced_reveal_sample	-	PROJ	settings	the 2026-09-25 table; renamed from main[settings] when K2 batch 23 opened runtime/settings.rs (2026-10-27)
 WindowRuntime.animations	-	PROJ	preview	the 2026-09-25 table

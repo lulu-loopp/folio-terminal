@@ -78,7 +78,7 @@ represents, and a ticket that moves a hop keeps it:
    debounce (`Runtime::resize`; red line L10).
 2. **The picture follows the hand; the shell hears once per gesture** (owner's
    ruling 2026-08-06). A shown pane's actor reflows in the solve's own turn
-   (`schedule_leaf_grid_change`); what waits is only the notification to the
+   (`LeafSession::propose_size`); what waits is only the notification to the
    pseudoconsole, until the pane's 200 ms quiet window has passed *and* no hand is
    on the geometry (a held divider, the OS's size-move loop): one gesture, one
    `ResizePseudoConsole`. A pane behind another tab defers its reflow to the same

@@ -112,7 +112,7 @@ fn page_heard_a_wheel(runtime: &Runtime<'_, Headless>) -> bool {
 
 /// Whether the second shell's view has left its live end.
 fn scrolled(runtime: &Runtime<'_, Headless>, seat: SeatId) -> bool {
-    runtime.leaf(seat).projection.is_scrolled()
+    runtime.leaf(seat).view.projection.is_scrolled()
 }
 
 /// RED (T-POINTER-CAPTURE cut 6, R-10) — **no page hears the wheel under a held gesture, and

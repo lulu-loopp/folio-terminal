@@ -49,11 +49,11 @@ fn a_typeset_formula(tag: &str) -> (HeadlessFolio, PasteTarget, MathBlockAnchor)
         let mut printed = b"\r\n$$x^2+y^2=z^2$$\r\n".to_vec();
         printed.extend(b"\r\n".repeat(64));
         pane.session.feed(&printed).expect("the formula is printed");
-        pane.session.refresh_projection(&mut pane.projection);
+        pane.session.refresh_projection(&mut pane.view.projection);
         pane.session
-            .viewport_frame(&mut pane.projection)
+            .viewport_frame(&mut pane.view.projection)
             .expect("the pane projects");
-        pane.projection.scroll_to_top();
+        pane.view.projection.scroll_to_top();
     }
     folio.draw();
     let (_, _, terminal, _) = watched.next_ended(
@@ -81,6 +81,7 @@ fn a_typeset_formula(tag: &str) -> (HeadlessFolio, PasteTarget, MathBlockAnchor)
     folio.draw();
     let runtime = folio.runtime();
     let anchor = runtime.sessions[&seat]
+        .view
         .last_presented_frame
         .as_ref()
         .expect("the pane has drawn")
@@ -122,6 +123,7 @@ fn a_flight(
 /// The band height `anchor` stands at on the pane's last presented frame.
 fn presented_band(folio: &mut HeadlessFolio, target: PasteTarget, anchor: &MathBlockAnchor) -> i64 {
     folio.runtime().sessions[&target.seat]
+        .view
         .last_presented_frame
         .as_ref()
         .expect("the pane has drawn")

@@ -2087,7 +2087,7 @@ fn the_foot_is_one_writing_for_rows_and_references() {
 /// never turns back: a leaf fed its first `OSC 133` schedules exactly one grid
 /// change, and entering and leaving the alternate screen afterwards schedule
 /// none. Driven through the real session, the real `hear_first_mark` the drain
-/// asks and the real `schedule_leaf_grid_change` every solve goes through.
+/// asks and the real `LeafSession::propose_size` every solve goes through.
 ///
 /// MUTATION: make `LeafSession::grid_for` pass
 /// `self.has_rail && !self.session.terminal_modes().alternate_screen` — red at
@@ -2111,15 +2111,14 @@ fn the_first_mark_reserves_the_room_once_and_the_alternate_screen_keeps_it() {
             heard += 1;
         }
         let next = leaf.grid_for(body);
-        schedule_leaf_grid_change(
-            leaf,
+        leaf.propose_size(GridChange {
             next,
             physical,
-            Instant::now(),
-            LeafOnStage::Shown,
-            "ticket 32",
-            card_trace::Pane::untraced(),
-        )
+            observed_at: Instant::now(),
+            on_stage: LeafOnStage::Shown,
+            context: "ticket 32",
+            pane: card_trace::Pane::untraced(),
+        })
         .unwrap()
     };
     // Born into the pane at the grid it has always had.

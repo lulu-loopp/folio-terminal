@@ -2633,6 +2633,7 @@ impl<B: Backend> Runtime<'_, B> {
             return None;
         }
         let anchor = leaf
+            .view
             .last_presented_frame
             .as_ref()?
             .anchor_at(hit.row, hit.column, Bias::Before)

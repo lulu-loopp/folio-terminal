@@ -130,7 +130,7 @@ fn the_edit_menus_clipboard_verbs_land_where_the_keystrokes_do() {
         let leaf = runtime.focused_mut().expect("the shell");
         let frame = leaf
             .session
-            .viewport_frame(&mut leaf.projection)
+            .viewport_frame(&mut leaf.view.projection)
             .expect("a frame");
         let selection = bt_viewport::ViewSelection {
             start: frame
@@ -140,7 +140,7 @@ fn the_edit_menus_clipboard_verbs_land_where_the_keystrokes_do() {
             end: frame.anchor_at(0, 6, bt_doc::Bias::After).unwrap().unwrap(),
         };
         leaf.session.set_view_selection(Some(selection.clone()));
-        leaf.projection.set_selection(Some(selection));
+        leaf.view.projection.set_selection(Some(selection));
     };
     select(&mut folio);
     chord(&mut folio, "c", KeyCode::KeyC);
@@ -1077,7 +1077,7 @@ fn the_copy_writes_refusal_is_said_once() {
         let leaf = runtime.focused_mut().expect("the shell");
         let frame = leaf
             .session
-            .viewport_frame(&mut leaf.projection)
+            .viewport_frame(&mut leaf.view.projection)
             .expect("a frame");
         let selection = bt_viewport::ViewSelection {
             start: frame
@@ -1087,7 +1087,7 @@ fn the_copy_writes_refusal_is_said_once() {
             end: frame.anchor_at(0, 6, bt_doc::Bias::After).unwrap().unwrap(),
         };
         leaf.session.set_view_selection(Some(selection.clone()));
-        leaf.projection.set_selection(Some(selection));
+        leaf.view.projection.set_selection(Some(selection));
     }
     folio.window.window.clipboard.refuse_opens(5);
     chord(&mut folio, "c", KeyCode::KeyC);

@@ -7715,29 +7715,9 @@ struct LeafSession {
     /// bookkeeping anywhere that could be forgotten. A capability that is gone is a capability
     /// nothing can present.
     attention_capability: String,
-    projection: ViewportProjection,
-    /// **This pane's requested text size** — the rung on [`text_scale::LADDER`] (ticket 37).
-    ///
-    /// The fact itself, and its only home: the terminal view of this leaf, beside the projection
-    /// it sizes. Never a map on the window or the tab, never on the renderer, never in
-    /// `TermLeafV1`, `TabV1`, `SessionV1`, a seed or `settings.json` — a relaunch, a startup
-    /// restore and *Reopen closed* bring every pane back at 100 %. Written by one mutation door,
-    /// `Runtime::step_pane_text_scale`; handed to construction by `create_leaf_session`'s
-    /// caller; carried by the move of this `LeafSession` (tear-out, merge, a transfer to another
-    /// window). Read by the derivation ([`pane_cell_metrics`]) and by the pane head's indicator.
-    text_scale: TextScale,
-    /// **The metrics this pane's session and projection were last applied at** — derived from
-    /// [`Self::text_scale`], the Settings size and the window's display scale by
-    /// [`pane_cell_metrics`], and written only by [`runtime::terminal::apply_leaf_metrics`] and the
-    /// constructor.
-    ///
-    /// A derived value, not a second owner of the size: every writer re-derives it from the rung.
-    /// It is what the pane's grid is solved from ([`Self::grid_for`]) and what its next picture is
-    /// drawn at ([`bt_render::SeatFrame::metrics`]).
-    metrics: bt_render::CellMetrics,
-    /// **This pane's view of its shell**: the facts of the ownership contract's view owner that
-    /// have moved so far (M1, ticket O-2). Nested, so it has the leaf's own lifetime and travels
-    /// with it exactly as the fields did when they stood here.
+    /// **This pane's view of its shell**: the facts of the ownership contract's view owner (M1–M4,
+    /// tickets O-2 and O-3). Nested, so it has the leaf's own lifetime and travels with it exactly
+    /// as the fields did when they stood here.
     view: TermView,
     grid: GridSize,
     conpty_grid: GridSize,
@@ -7805,15 +7785,6 @@ struct LeafSession {
     /// tab's badge is the aggregate of these (D34: the tab takes its loudest
     /// member's claim), not a separate tally.
     last_seen_revision: u64,
-    /// The frame this leaf last put on the glass.
-    ///
-    /// Every pointer question is asked of a *frame* — which cell is under the
-    /// pointer, does that cell wear a hyperlink, is there a math block there —
-    /// and with several panes on screen the honest answer depends on which pane
-    /// the pointer is in. Keeping each leaf's own frame is what lets a hover
-    /// over the right-hand pane be answered by the right-hand pane's cells
-    /// instead of by whichever pane happens to hold the keyboard.
-    last_presented_frame: Option<ViewportFrame>,
     /// **A multi-line paste aimed at this shell, waiting for the card's answer** (0.4.4 ticket
     /// 02) — `None` on every pane but the one the card is asking about.
     ///
@@ -7829,14 +7800,91 @@ struct LeafSession {
     paste_hold: Option<clipboard_lane::PasteHold>,
 }
 
+/// **The transitional ports into `bt-term`'s view state** (the ownership contract's revision (b)1,
+/// group 3; ticket O-3).
+///
+/// A selection, a math hover, a toggle's presentation, a block's own scroll and the
+/// presentation hold are a *view's* state, but they live inside `DualPlaneSession` until a
+/// `bt-term` ownership note splits them out. Until then bt-app reaches each setter only through
+/// its port here, so they can be counted, and each port's callers are listed by
+/// `each_view_state_port_is_the_only_road_to_its_setter`. A trait on the session because two
+/// of the callers hold the session apart from the rest of the leaf. Each forwards and does
+/// nothing else.
+trait TermViewPorts {
+    /// [`DualPlaneSession::set_view_selection`] with the selection asked for, or none.
+    fn port_set_selection(&mut self, selection: Option<ViewSelection>);
+    /// [`DualPlaneSession::set_view_selection`] with none.
+    fn port_clear_selection(&mut self);
+    /// [`DualPlaneSession::set_math_hover`].
+    fn port_math_hover(&mut self, anchor: Option<&MathBlockAnchor>) -> bool;
+    /// [`DualPlaneSession::set_math_toggle_presentation`].
+    fn port_math_toggle_presentation(
+        &mut self,
+        presentation: Option<bt_term::MathTogglePresentation>,
+    );
+    /// [`DualPlaneSession::toggle_math_source`].
+    fn port_toggle_math_source(&mut self, anchor: &MathBlockAnchor) -> bool;
+    /// [`DualPlaneSession::scroll_math_block`].
+    fn port_scroll_math_block(
+        &mut self,
+        anchor: &MathBlockAnchor,
+        horizontal: i32,
+        vertical: i32,
+    ) -> bool;
+    /// [`DualPlaneSession::release_presentation_hold_for_user_input`].
+    fn port_release_presentation_hold(&mut self) -> bool;
+}
+
+impl TermViewPorts for DualPlaneSession {
+    fn port_set_selection(&mut self, selection: Option<ViewSelection>) {
+        self.set_view_selection(selection);
+    }
+
+    fn port_clear_selection(&mut self) {
+        self.set_view_selection(None);
+    }
+
+    fn port_math_hover(&mut self, anchor: Option<&MathBlockAnchor>) -> bool {
+        self.set_math_hover(anchor)
+    }
+
+    fn port_math_toggle_presentation(
+        &mut self,
+        presentation: Option<bt_term::MathTogglePresentation>,
+    ) {
+        self.set_math_toggle_presentation(presentation);
+    }
+
+    fn port_toggle_math_source(&mut self, anchor: &MathBlockAnchor) -> bool {
+        self.toggle_math_source(anchor)
+    }
+
+    fn port_scroll_math_block(
+        &mut self,
+        anchor: &MathBlockAnchor,
+        horizontal: i32,
+        vertical: i32,
+    ) -> bool {
+        self.scroll_math_block(anchor, horizontal, vertical)
+    }
+
+    fn port_release_presentation_hold(&mut self) -> bool {
+        self.release_presentation_hold_for_user_input()
+    }
+}
+
 /// **A terminal pane's view of its shell** — the ownership contract's view owner
 /// (`docs/plans/design/ownership-contract-2026-10-11.md` §2.1), nested in [`LeafSession`] as
 /// [`LeafSession::view`] with the leaf's own lifetime.
 ///
-/// M1 (ticket O-2) moved these five fields here and nothing else: their writers and readers
-/// are the ones they had on the leaf, so the census's only change is their key. The rest of the
-/// view — text size, metrics, the last presented frame and the projection — follows in O-3,
-/// with the doors between a view and its session.
+/// M1 (ticket O-2) moved the fade clocks, the card skip, the presented metrics and the image
+/// references here; M2–M4 (ticket O-3) moved the text size, the metrics, the last presented
+/// frame and the projection. Their writers are the ones they had on the leaf, so the census's
+/// change is their key; the one write that changed function is the presented pair's, which
+/// [`Self::commit_presented`] now records. A view reaches its session only through the
+/// session's doors: the size proposals ([`LeafSession::propose_cell`],
+/// [`LeafSession::propose_layout`], [`LeafSession::propose_size`]) and the bt-term view-state
+/// ports ([`TermViewPorts`]).
 struct TermView {
     /// **The last moment this pane's scroll bar had a reason to be up** — a
     /// wheel, a keyboard page, a jump, or a pointer in its lane (P2-9 slice 1).
@@ -7864,16 +7912,16 @@ struct TermView {
     /// Rows skipped above the card tail, carried with this leaf on tear-out
     /// and persisted in session.json. Drawing and whole wheel notches clamp it.
     card_skip: usize,
-    /// **The metrics [`LeafSession::last_presented_frame`] was drawn at** — an observation,
-    /// paired with that frame and written in the same breath as it (`Runtime::redraw`'s commit).
+    /// **The metrics [`Self::last_presented_frame`] was drawn at** — an observation, paired
+    /// with that frame and written in the same breath as it ([`Self::commit_presented`]).
     ///
-    /// Every pointer question about this pane reads these and never [`LeafSession::metrics`]:
+    /// Every pointer question about this pane reads these and never [`Self::metrics`]:
     /// after a size change whose picture has not reached the glass yet — a skipped or failed
     /// present — the rows the pointer is over are the last presented frame's, and combining that
     /// frame's row map with a newly requested cell width would put the pointer in a cell nobody
     /// can see.
     presented_metrics: bt_render::CellMetrics,
-    /// Every image reference [`LeafSession::last_presented_frame`] draws, as the cells that draw
+    /// Every image reference [`Self::last_presented_frame`] draws, as the cells that draw
     /// it.
     ///
     /// Beside the frame it was scanned from, and per leaf for the same reason the frame is: the
@@ -7883,6 +7931,35 @@ struct TermView {
     /// could only ever be one pane's, which is how a hover over the pane you are not typing in
     /// came to be answered from the cells of the pane you are.
     frame_image_references: FrameImageReferences,
+    projection: ViewportProjection,
+    /// **This pane's requested text size** — the rung on [`text_scale::LADDER`] (ticket 37).
+    ///
+    /// The fact itself, and its only home: the terminal view of this leaf, beside the projection
+    /// it sizes. Never a map on the window or the tab, never on the renderer, never in
+    /// `TermLeafV1`, `TabV1`, `SessionV1`, a seed or `settings.json` — a relaunch, a startup
+    /// restore and *Reopen closed* bring every pane back at 100 %. Written by one mutation door,
+    /// `Runtime::step_pane_text_scale`; handed to construction by `create_leaf_session`'s
+    /// caller; carried by the move of this `LeafSession` (tear-out, merge, a transfer to another
+    /// window). Read by the derivation ([`pane_cell_metrics`]) and by the pane head's indicator.
+    text_scale: TextScale,
+    /// **The metrics this pane's session and projection were last applied at** — derived from
+    /// [`Self::text_scale`], the Settings size and the window's display scale by
+    /// [`pane_cell_metrics`], and written only by [`runtime::terminal::apply_leaf_metrics`] and the
+    /// constructor.
+    ///
+    /// A derived value, not a second owner of the size: every writer re-derives it from the rung.
+    /// It is what the pane's grid is solved from ([`LeafSession::grid_for`]) and what its next picture is
+    /// drawn at ([`bt_render::SeatFrame::metrics`]).
+    metrics: bt_render::CellMetrics,
+    /// The frame this leaf last put on the glass.
+    ///
+    /// Every pointer question is asked of a *frame* — which cell is under the
+    /// pointer, does that cell wear a hyperlink, is there a math block there —
+    /// and with several panes on screen the honest answer depends on which pane
+    /// the pointer is in. Keeping each leaf's own frame is what lets a hover
+    /// over the right-hand pane be answered by the right-hand pane's cells
+    /// instead of by whichever pane happens to hold the keyboard.
+    last_presented_frame: Option<ViewportFrame>,
 }
 
 /// **What a pane in birth holds until its shell exists** — one road with two triggers: the walk
@@ -15625,7 +15702,7 @@ impl TabState {
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return;
         };
-        leaf.session.set_view_selection(selection);
+        leaf.session.port_set_selection(selection);
     }
 
     /// Drop one leaf's selection, in both places a selection is remembered.
@@ -15638,8 +15715,8 @@ impl TabState {
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return;
         };
-        leaf.session.set_view_selection(None);
-        leaf.projection.set_selection(None);
+        leaf.session.port_clear_selection();
+        leaf.view.projection.set_selection(None);
     }
 
     /// What one Terminal seat's own shell is called (C28, per leaf).
@@ -15809,11 +15886,11 @@ impl LeafSession {
     /// and whether this pane has a rail, through the one function that turns a
     /// seat into a grid ([`cmdrail::terminal_grid_for`]).
     ///
-    /// **At this pane's own metrics** (ticket 37) — [`Self::metrics`], derived from its rung —
+    /// **At this pane's own metrics** (ticket 37) — [`TermView::metrics`], derived from its rung —
     /// and never the window's: two panes of one window at two sizes are two grids for two equal
     /// rectangles.
     fn grid_for(&self, body: SeatViewport) -> GridSize {
-        cmdrail::terminal_grid_for(&self.metrics, body, self.has_rail)
+        cmdrail::terminal_grid_for(&self.view.metrics, body, self.has_rail)
     }
 
     /// The title this pane's program **announced**, as opposed to one it merely
@@ -17251,7 +17328,7 @@ fn commit_leaf_resize(
 /// tab has no picture in this frame and none in any frame until somebody looks at it, so reflowing
 /// its actor inside the `Resized` buys nothing anyone can see and costs a full vendor reflow of
 /// that pane's grid on the window thread, per hidden pane, per OS event. See
-/// [`Runtime::resize_hidden_leaves_to_layout`], and [`schedule_leaf_grid_change`] for what
+/// [`Runtime::resize_hidden_leaves_to_layout`], and [`LeafSession::propose_size`] for what
 /// `Behind` defers and what it does not.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LeafOnStage {
@@ -17262,107 +17339,176 @@ enum LeafOnStage {
     Behind,
 }
 
-/// **One pane hears one solved rectangle** — its own actor at once if it is on the glass, its
-/// child at the quiet boundary.
-///
-/// The single door every geometry solve takes on its way to a leaf, focused or not. Splitting the
-/// timing in two is the whole point and is the user's 2026-08-06 ruling written down: the
-/// *picture* follows the hand in real time, so the actor reflows in this very turn, and the thing
-/// that is debounced is only the **notification to ConPTY** — a `ResizePseudoConsole` call that
-/// re-enters conhost, reflows the child's screen buffer and invalidates PSReadLine's anchor, which
-/// is not a thing to do sixty times a second on every pane of a split.
-///
-/// Before this, only the pane holding the keyboard had a coalescer. Its siblings were told
-/// unconditionally on every `Resized`, so widening a window with four panes open made three
-/// unbounded ConPTY round trips per OS event on the window thread, and paid three PSReadLine
-/// anchor repairs per event on top. The pane with the keyboard is not the pane that can afford
-/// this; it is only the pane whose defect was noticed first.
-///
-/// **And a pane behind another tab defers its own reflow too** (user report 2026-09-09). The walk
-/// that carries a solve to every tab is right and stays: the rectangle this window has is a fact
-/// about the window, and a tab that answered it only when somebody looked at it is a tab whose
-/// shell believes whatever was true last time it was on stage. What was wrong is the *timing* it
-/// borrowed. `resize_at` is a full vendor reflow of that pane's grid, on the window thread; six
-/// tabs made five of them per `Resized` and twelve made eleven, and measured on the reporter's
-/// machine that is what stopped the pane the hand was actually dragging from keeping up — the
-/// frame this window owes the glass was queued behind reflows of panes nobody could see. The
-/// ruling those reflows were paying is a ruling about the picture, and a hidden pane has none.
-///
-/// So `Behind` schedules and does not reflow, and [`commit_leaf_resize`] does the reflow at the
-/// quiet boundary in the same breath as the ConPTY notification — the deferred-local-reflow path
-/// that release already documents and already runs whenever our own actor is behind the released
-/// rectangle. A hidden pane therefore still follows every resize; it arrives once per gesture
-/// rather than once per event, exactly like its child. [`Runtime::activate_tab`] re-solves and
-/// reflows the tab it puts on stage, so a tab brought forward mid-gesture is on the glass at the
-/// width it is being shown at.
-///
-/// Answers whether our own grid moved, so a caller that keeps a shadow of it can follow.
-fn schedule_leaf_grid_change(
-    leaf: &mut LeafSession,
-    next_grid: GridSize,
-    physical: PhysicalSize<u32>,
-    observed_at: Instant,
-    on_stage: LeafOnStage,
-    context: &'static str,
-    pane: card_trace::Pane,
-) -> Result<bool> {
-    let Some(reflow) = plan_grid_change(
-        &mut leaf.pending_pty_resize,
-        next_grid,
-        leaf.conpty_grid,
-        leaf.grid,
-        physical,
-        observed_at,
-    ) else {
-        return Ok(false);
-    };
-    // **`card pane resized`** (`BT_CARD_TRACE`, T-CARD-TRACE). A grid change is
-    // not a view: it re-wraps the live screen and freezes whatever it pushes off
-    // the top at the width it pushed it off at, so it is the one event that can
-    // move a card's content out from under a number nobody touched. The line is
-    // written here, above the `Behind` return, because a pane whose own reflow
-    // is deferred has still been *given* the size — that is what the `commit=`
-    // word is for. A plan that came back `None` changed nothing and writes
-    // nothing, which is what keeps a divider drag from filling the file.
-    let (stage, commit) = match on_stage {
-        LeafOnStage::Shown => ("shown", "local"),
-        LeafOnStage::Behind => ("behind", "queued"),
-    };
-    let before = (
-        u32::from(leaf.grid.columns.get()),
-        u32::from(leaf.grid.rows.get()),
-    );
-    let after = (
-        u32::from(reflow.columns.get()),
-        u32::from(reflow.rows.get()),
-    );
-    card_trace::line(|| {
-        card_trace::PaneResized {
-            pane,
-            stage,
-            commit,
-            before,
-            after,
-        }
-        .line()
-    });
-    if on_stage == LeafOnStage::Behind {
-        return Ok(false);
+impl LeafSession {
+    /// **The session hears where the keyboard is, as a report** (the ownership contract's
+    /// `report_keyboard_focus`, revision (c)1, ticket O-3).
+    ///
+    /// The window and the view compute the truth — window focus, the active tab, the focused
+    /// seat ([`runtime::seat_holds_the_keyboard`]) — and the session consumes it: bt-term keeps
+    /// the DEC 1004 focus-reporting state and queues the `CSI I` / `CSI O` the child is owed.
+    /// Asked once per drain, by [`drain_leaf_pty`] alone, after the child's bytes are fed (they
+    /// may be what switched the reports on) and before the replies are collected.
+    fn report_keyboard_focus(&mut self, holds: bool) {
+        self.session.set_keyboard_focus(holds);
     }
-    leaf.session
-        .resize_at(
-            nonzero_u32(reflow.columns.get()),
-            nonzero_u32(reflow.rows.get()),
+}
+
+/// **What a view proposes when its rectangle is solved again** — the grid stage of
+/// [`LeafSession::propose_size`].
+///
+/// The grid is the caller's derivation, through the leaf's own [`LeafSession::grid_for`], and
+/// not the rectangle: a diagnostics or test caller hands an exact grid, and the derivation is
+/// the session's already.
+struct GridChange {
+    /// The grid the rectangle now holds at this pane's metrics.
+    next: GridSize,
+    /// The rectangle itself, in pixels — what the child is told beside the grid.
+    physical: PhysicalSize<u32>,
+    /// When the solve that produced it was observed: the quiet window counts from here.
+    observed_at: Instant,
+    /// Whether the pane is on the glass now, which decides whether its actor reflows now.
+    on_stage: LeafOnStage,
+    /// What a failed local reflow is reported as.
+    context: &'static str,
+    /// Who the `card pane resized` trace line names.
+    pane: card_trace::Pane,
+}
+
+/// **The one way a session's size changes after its birth** (the ownership contract's
+/// `propose_size`, revision (b)1, ticket O-3), in its three stages.
+///
+/// A view, or the window acting for it, proposes; the session applies. Each stage applies
+/// exactly what it names and nothing else, at the moment its caller always applied it — the
+/// cell size when a pane's metrics are re-derived, the grid when its rectangle is solved, the
+/// layout key when a window-wide fact the key carries moves — because merging them into one
+/// proposal would reorder writes that happen at different moments. No other code calls the
+/// session's cell-size setters, its `set_layout_key` or the local `resize_at` of a solve
+/// (`every_sizing_write_is_a_size_proposal`); the session's own release of a resize
+/// ([`release_due_leaf_resize`]) is the session's, not a proposal.
+impl LeafSession {
+    /// **The cell-size stage**: the session's cell height, width, ASCII baseline and face size
+    /// for freshly derived metrics. Infallible, and applied even when the integer grid is
+    /// unchanged: a larger face on the same grid is a new picture.
+    fn propose_cell(&mut self, metrics: bt_render::CellMetrics) {
+        self.session
+            .set_cell_height_subpixels(metrics.cell_height_subpixels());
+        self.session
+            .set_cell_width_subpixels(cell_width_subpixels(metrics));
+        self.session
+            .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+        self.session
+            .set_font_size_subpixels(metrics.font_size_subpixels());
+    }
+
+    /// **The layout-key stage**: the key this session's math, tables and wrapping are laid out
+    /// at. Infallible; `DualPlaneSession::set_layout_key` compares and invalidates only where
+    /// the key differs.
+    fn propose_layout(&mut self, key: bt_doc::LayoutKey) {
+        self.session.set_layout_key(key);
+    }
+
+    /// **One pane hears one solved rectangle** — its own actor at once if it is on the glass, its
+    /// child at the quiet boundary.
+    ///
+    /// The grid stage of the session's one sizing door, and the single road every geometry solve
+    /// takes on its way to a leaf, focused or not. Splitting the timing in two is the whole point
+    /// and is the user's 2026-08-06 ruling written down: the *picture* follows the hand in real
+    /// time, so the actor reflows in this very turn, and the thing that is debounced is only the **notification to ConPTY** — a `ResizePseudoConsole` call that
+    /// re-enters conhost, reflows the child's screen buffer and invalidates PSReadLine's anchor, which
+    /// is not a thing to do sixty times a second on every pane of a split.
+    ///
+    /// Before this, only the pane holding the keyboard had a coalescer. Its siblings were told
+    /// unconditionally on every `Resized`, so widening a window with four panes open made three
+    /// unbounded ConPTY round trips per OS event on the window thread, and paid three PSReadLine
+    /// anchor repairs per event on top. The pane with the keyboard is not the pane that can afford
+    /// this; it is only the pane whose defect was noticed first.
+    ///
+    /// **And a pane behind another tab defers its own reflow too** (user report 2026-09-09). The walk
+    /// that carries a solve to every tab is right and stays: the rectangle this window has is a fact
+    /// about the window, and a tab that answered it only when somebody looked at it is a tab whose
+    /// shell believes whatever was true last time it was on stage. What was wrong is the *timing* it
+    /// borrowed. `resize_at` is a full vendor reflow of that pane's grid, on the window thread; six
+    /// tabs made five of them per `Resized` and twelve made eleven, and measured on the reporter's
+    /// machine that is what stopped the pane the hand was actually dragging from keeping up — the
+    /// frame this window owes the glass was queued behind reflows of panes nobody could see. The
+    /// ruling those reflows were paying is a ruling about the picture, and a hidden pane has none.
+    ///
+    /// So `Behind` schedules and does not reflow, and [`commit_leaf_resize`] does the reflow at the
+    /// quiet boundary in the same breath as the ConPTY notification — the deferred-local-reflow path
+    /// that release already documents and already runs whenever our own actor is behind the released
+    /// rectangle. A hidden pane therefore still follows every resize; it arrives once per gesture
+    /// rather than once per event, exactly like its child. [`Runtime::activate_tab`] re-solves and
+    /// reflows the tab it puts on stage, so a tab brought forward mid-gesture is on the glass at the
+    /// width it is being shown at.
+    ///
+    /// Answers whether our own grid moved, so a caller that keeps a shadow of it can follow.
+    fn propose_size(&mut self, change: GridChange) -> Result<bool> {
+        let GridChange {
+            next: next_grid,
+            physical,
             observed_at,
-        )
-        .context(context)?;
-    leaf.grid = reflow;
-    Ok(true)
+            on_stage,
+            context,
+            pane,
+        } = change;
+        let Some(reflow) = plan_grid_change(
+            &mut self.pending_pty_resize,
+            next_grid,
+            self.conpty_grid,
+            self.grid,
+            physical,
+            observed_at,
+        ) else {
+            return Ok(false);
+        };
+        // **`card pane resized`** (`BT_CARD_TRACE`, T-CARD-TRACE). A grid change is
+        // not a view: it re-wraps the live screen and freezes whatever it pushes off
+        // the top at the width it pushed it off at, so it is the one event that can
+        // move a card's content out from under a number nobody touched. The line is
+        // written here, above the `Behind` return, because a pane whose own reflow
+        // is deferred has still been *given* the size — that is what the `commit=`
+        // word is for. A plan that came back `None` changed nothing and writes
+        // nothing, which is what keeps a divider drag from filling the file.
+        let (stage, commit) = match on_stage {
+            LeafOnStage::Shown => ("shown", "local"),
+            LeafOnStage::Behind => ("behind", "queued"),
+        };
+        let before = (
+            u32::from(self.grid.columns.get()),
+            u32::from(self.grid.rows.get()),
+        );
+        let after = (
+            u32::from(reflow.columns.get()),
+            u32::from(reflow.rows.get()),
+        );
+        card_trace::line(|| {
+            card_trace::PaneResized {
+                pane,
+                stage,
+                commit,
+                before,
+                after,
+            }
+            .line()
+        });
+        if on_stage == LeafOnStage::Behind {
+            return Ok(false);
+        }
+        self.session
+            .resize_at(
+                nonzero_u32(reflow.columns.get()),
+                nonzero_u32(reflow.rows.get()),
+                observed_at,
+            )
+            .context(context)?;
+        self.grid = reflow;
+        Ok(true)
+    }
 }
 
 /// Release whatever this one pane's quiet window has made due, and say when it could next be due.
 ///
-/// The counterpart of [`schedule_leaf_grid_change`], and the only place `conpty_grid` moves: what
+/// The counterpart of [`LeafSession::propose_size`], and the only place `conpty_grid` moves: what
 /// the child was *told* is written exactly where it is told, so a drag that wanders out and comes
 /// back cancels its own request instead of replaying an intermediate size.
 fn release_due_leaf_resize(
@@ -31639,7 +31785,7 @@ mod shell_birth_tests {
         assert_eq!(leaf.spawn_place.as_ref(), Some(&share));
         let frame = leaf
             .session
-            .viewport_frame(&mut leaf.projection)
+            .viewport_frame(&mut leaf.view.projection)
             .expect("the pane draws while its folder is asked about");
         assert!(frame_matches_grid(&frame, leaf.grid));
         assert_eq!(
@@ -31716,7 +31862,7 @@ mod shell_birth_tests {
         );
         let frame = leaf
             .session
-            .viewport_frame(&mut leaf.projection)
+            .viewport_frame(&mut leaf.view.projection)
             .expect("a pane in birth projects a frame");
         assert!(frame_matches_grid(&frame, leaf.grid), "of its own grid");
         for line in ["echo 第一-first\r", "echo 第二-second\r"] {
@@ -31877,8 +32023,8 @@ mod shell_birth_tests {
                 (
                     leaf.grid,
                     leaf.conpty_grid,
-                    leaf.text_scale,
-                    leaf.metrics,
+                    leaf.view.text_scale,
+                    leaf.view.metrics,
                     leaf.view.card_skip,
                     &leaf.pending_typing,
                     &leaf.attention_capability,
@@ -32056,7 +32202,7 @@ mod shell_birth_tests {
         });
         let frame = leaf
             .session
-            .viewport_frame(&mut leaf.projection)
+            .viewport_frame(&mut leaf.view.projection)
             .expect("a pane in birth projects a frame");
         assert!(frame_matches_grid(&frame, leaf.grid), "of its own grid");
         for line in ["echo 区域-region\r", "ls 目录\r"] {
@@ -32562,10 +32708,11 @@ fn bare_leaf(
         bell_reported: false,
         attention_clock: attention_wire::WaitClock::default(),
         attention_capability: capability,
-        projection,
-        text_scale,
-        metrics,
         view: TermView {
+            projection,
+            text_scale,
+            metrics,
+            last_presented_frame: None,
             thumb_awake: Instant::now(),
             column_awake: Instant::now(),
             // Aimed at the tail, which is where a card looks until somebody turns a
@@ -32584,7 +32731,6 @@ fn bare_leaf(
         has_rail: false,
         output_revision: 0,
         last_seen_revision: 0,
-        last_presented_frame: None,
         // Nothing has been pasted into a shell that has just started.
         pending_paste: None,
         paste_hold: None,
@@ -32751,7 +32897,7 @@ fn finish_leaf_birth(
             bt_pty::ConPtyKind::NotConPty => bt_term::PtyTransport::Unix,
         },
     );
-    leaf.projection = leaf.session.new_projection(leaf.session.layout_key());
+    leaf.view.projection = leaf.session.new_projection(leaf.session.layout_key());
     // A wake-up is the other end of a reader thread, and there is no thread
     // when there is no ConPTY — see the field.
     if pty.is_none() {
@@ -32965,7 +33111,7 @@ enum SuccessorLanding {
 /// **A terminal pane's metrics for a test**, measured once per (scale, size) per process by the
 /// production measuring service ([`bt_render::CellMetrics::measure_at`]) against the preview
 /// font system every headless test already measures with. Fixtures that need a leaf's
-/// [`LeafSession::metrics`] take them from here rather than inventing numbers.
+/// [`TermView::metrics`] take them from here rather than inventing numbers.
 #[cfg(test)]
 fn fixture_cell_metrics(scale_factor: f64, font_size_logical_px: f32) -> bt_render::CellMetrics {
     type Measured = Vec<((u64, u32), bt_render::CellMetrics)>;
@@ -34513,7 +34659,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
     // reconciliation that ran before the feed would owe that pane its opening
     // report until something else happened to wake the loop.
     hang_watch::during(hang_watch::Station::DrainKeyboardFocus, || {
-        leaf.session.set_keyboard_focus(holds_the_keyboard)
+        leaf.report_keyboard_focus(holds_the_keyboard)
     });
     // A canvas notification, a focus report, and any colour answer queued behind
     // them, are owed to a child that has said nothing — so the reply channel is
@@ -37590,10 +37736,10 @@ impl<B: Backend> Runtime<'_, B> {
         }
         let leaf = self.shell_mut();
         let changed = leaf.session.view_selection().is_some()
-            || leaf.projection.is_scrolled()
-            || leaf.session.release_presentation_hold_for_user_input();
+            || leaf.view.projection.is_scrolled()
+            || leaf.session.port_release_presentation_hold();
         self.clear_selection();
-        self.shell_mut().projection.scroll_to_bottom();
+        self.shell_mut().view.projection.scroll_to_bottom();
         changed
     }
 
@@ -41808,7 +41954,7 @@ mod formula_tool_seat_tests {
 
         let sweep = method_body("Runtime", "set_hovered_math");
         assert!(
-            sweep.contains("changed |= leaf.session.set_math_hover(wanted);"),
+            sweep.contains("changed |= leaf.session.port_math_hover(wanted);"),
             "and the sweep answers whether anything actually moved:\n{sweep}"
         );
 
@@ -45774,7 +45920,7 @@ mod pty_drain_budget_tests {
             .find("feed_at(")
             .expect("`drain_leaf_pty` feeds what the child said");
         let told = drain
-            .find("set_keyboard_focus(")
+            .find("report_keyboard_focus(")
             .expect("`drain_leaf_pty` tells its pane where the keyboard is");
         let collected = drain
             .rfind("take_pty_writes()")
@@ -45902,7 +46048,7 @@ mod pty_drain_budget_tests {
              is the defect this pin exists for"
         );
         assert_eq!(
-            solve.matches("schedule_leaf_grid_change(").count(),
+            solve.matches("propose_size(GridChange {").count(),
             1,
             "every unfocused leaf goes through the one scheduler, and the focused leaf reaches \
              the same one through `schedule_grid_change`"
@@ -45941,7 +46087,7 @@ mod pty_drain_budget_tests {
              derived a second time from the same inputs"
         );
         assert_eq!(
-            hidden.matches("schedule_leaf_grid_change(").count(),
+            hidden.matches("propose_size(GridChange {").count(),
             1,
             "one scheduler, the same one every leaf on the stage goes through"
         );

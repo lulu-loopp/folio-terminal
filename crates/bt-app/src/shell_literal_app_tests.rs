@@ -101,10 +101,15 @@ fn an_inserted_path_is_always_quoted_and_spaced_on_both_sides() {
 fn paste_bytes_sent(tab: &mut TabState, seat: SeatId, text: &str) -> Vec<u8> {
     let leaf = tab.sessions.get_mut(&seat).expect("the seat has a shell");
     let mut sent = Vec::new();
-    paste_text(&mut leaf.session, &mut leaf.projection, text, |bytes| {
-        sent.extend_from_slice(bytes);
-        Ok(())
-    })
+    paste_text(
+        &mut leaf.session,
+        &mut leaf.view.projection,
+        text,
+        |bytes| {
+            sent.extend_from_slice(bytes);
+            Ok(())
+        },
+    )
     .expect("a capture cannot fail");
     sent
 }

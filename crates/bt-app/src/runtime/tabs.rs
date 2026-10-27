@@ -4568,15 +4568,14 @@ mod birth_death_tests {
     ) {
         let started = Instant::now();
         assert!(
-            crate::schedule_leaf_grid_change(
-                leaf,
+            leaf.propose_size(crate::GridChange {
                 next,
                 physical,
-                started,
-                crate::LeafOnStage::Shown,
-                "pending shell resize",
-                crate::card_trace::Pane::untraced(),
-            )
+                observed_at: started,
+                on_stage: crate::LeafOnStage::Shown,
+                context: "pending shell resize",
+                pane: crate::card_trace::Pane::untraced(),
+            })
             .expect("the pane reflows")
         );
         let commit =

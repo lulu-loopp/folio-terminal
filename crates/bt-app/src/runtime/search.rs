@@ -191,7 +191,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// Take the highlights off one pane and repaint it.
     pub(in crate::runtime) fn clear_search_highlights(&mut self, seat: SeatId) {
         if let Some(leaf) = self.sessions.get_mut(&seat) {
-            leaf.projection.set_search_highlights(None);
+            leaf.view.projection.set_search_highlights(None);
         }
     }
 
@@ -382,6 +382,7 @@ impl<B: Backend> Runtime<'_, B> {
         // when it is riding the live bottom — where "the first match at or below the top" is the
         // first match of all.
         let from = leaf
+            .view
             .projection
             .scroll_anchor()
             .map(|anchor| anchor.source.clone());
@@ -449,7 +450,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn install_search_highlights(&mut self, seat: SeatId) {
         let highlights = Arc::clone(self.window.search.highlights());
         if let Some(leaf) = self.sessions.get_mut(&seat) {
-            leaf.projection.set_search_highlights(Some(highlights));
+            leaf.view.projection.set_search_highlights(Some(highlights));
         }
     }
 
@@ -530,7 +531,8 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return Ok(());
         };
-        leaf.projection
+        leaf.view
+            .projection
             .set_scroll_anchor(Some(bt_viewport::ScrollAnchor {
                 source: anchor,
                 local_offset: search::landing_offset_subpixels(pane_height),
