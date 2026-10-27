@@ -795,7 +795,8 @@ unsafe extern "C" {
 /// anchored at the surface the news is about, and a program that has drawn
 /// nothing — or whose windows are being taken down — has nothing to put a card
 /// on. Its two callers are `bt_app::announce_panic` — the panic hook, when the
-/// resident run has no console to write to — and `say_at_the_front_door`, which
+/// resident run has no console to write to, and `FolioApp::fail`'s frame-shape
+/// stop on the window thread — and `say_at_the_front_door`, which
 /// is a launch that is about to exit. A controlled stop saying, before its
 /// windows close, the configuration changes it could keep nowhere
 /// (T-QUIT-DOCUMENTS; `bt_app`'s `SystemBox::say`) does not come here: it asks
@@ -912,8 +913,10 @@ pub(crate) fn an_alert_would_be_seen(mtm: MainThreadMarker) -> bool {
 #[expect(
     clippy::print_stderr,
     reason = "the last-resort fault report, written where it is said, for its two callers: \
-              bt-app's announce_panic, whose box comes after the panic road's fence, where a \
-              queued line would leave with the process, and say_at_the_front_door, before the \
+              bt-app's announce_panic (the panic hook, after the panic road's fence, where a \
+              queued line would leave with the process; and FolioApp::fail's frame-shape stop on \
+              the window thread, where the synchronous write beside the queue is a known limit, \
+              T-STOP-NOTICE-BOX-QUERY-MACOS report D8) and say_at_the_front_door, before the \
               resident run has a queue; the stop's lost configuration change asks \
               a_box_would_be_seen first and says the unseen case through stderr_line \
               (T-STOP-NOTICE-BOX-QUERY-MACOS)"

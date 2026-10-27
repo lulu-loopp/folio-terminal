@@ -1923,8 +1923,10 @@ pub fn leave_process(code: i32) -> ! {
 #[expect(
     clippy::print_stderr,
     reason = "the last-resort fault report, written where it is said, for its two callers: \
-              bt-app's announce_panic, whose box comes after the panic road's fence, where a \
-              queued line would leave with the process, and say_at_the_front_door, before the \
+              bt-app's announce_panic (the panic hook, after the panic road's fence, where a \
+              queued line would leave with the process; and FolioApp::fail's frame-shape stop on \
+              the window thread, where the synchronous write beside the queue is a known limit, \
+              T-STOP-NOTICE-BOX-QUERY-MACOS report D8) and say_at_the_front_door, before the \
               resident run has a queue; the stop's lost configuration change asks \
               a_box_would_be_seen first and says the unseen case through stderr_line \
               (T-STOP-NOTICE-BOX-QUERY-MACOS)"
