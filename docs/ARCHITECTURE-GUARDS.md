@@ -1247,9 +1247,14 @@ module-level `use`, the `use`'s own `cfg` (`UseRecord::variant`), so a
 `#[cfg(test)] use` at the root is out of the product by its own gate (plan row 77's
 blind spot is not inherited). Refused by their line, never passed: a `use` that names
 `runtime` under another name or opens it by a glob, a group, glob or rename after
-`runtime::` inside a body, a path whose head is not `crate`, `self` or `super`, and a
-path under a `#[cfg]` on a statement or a match arm inside an item (no grain reads that
-gate). There is no allow list. Its fixture (`tests/fixtures/root_topic_paths/`) plants
+`runtime::` inside a body, a path into a topic whose head is not `crate`, `self` or
+`super` (in a path, a module-level `use` and a body group alike), a comment inside a
+path into a topic (the search compares the path's bytes), and a path under a `#[cfg]` on
+a statement or a match arm inside an item (no grain reads that gate; a field's gate is
+the field item's own and is read). The road itself is read too: a `use` in
+`runtime/mod.rs` that re-exports a module (`pub(crate) use pointer::touch;`), or any glob
+there, would open a module under a new name and is refused by its line; an item
+re-export is the road (ruled 2026-10-27, the row's review, F4). There is no allow list. Its fixture (`tests/fixtures/root_topic_paths/`) plants
 each shape (`every_path_into_a_runtime_topic_from_outside_is_named`,
 `a_test_gated_use_is_out_of_the_product_by_its_own_gate`). When red, add the name to a
 re-export in `runtime/mod.rs` and spell the path `runtime::name`; gate a test-only

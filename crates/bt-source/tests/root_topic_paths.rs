@@ -19,8 +19,10 @@
 //! | # | Shape | Read by |
 //! |---|---|---|
 //! | G1 | A path in an expression, a type, a pattern, an `impl` header, a generic argument or after a `<` (`<runtime::x::T as Tr>::m`), its head spelled `runtime`, `crate::runtime`, `self::runtime` or `super::…::runtime` | `Pattern::path("runtime::<topic>")` over [`View::Identifiers`]; the tokens before the match are read, and a head other than `crate`, `self` or `super` is refused by its line |
-//! | G2 | A module-level `use` in any tree shape: `pub use`, a nested group, `self`, a rename, a glob | [`Index::uses`]: each name and glob with the path it was written as. A path into a topic is a finding; a `use` that names `runtime` itself under another name, or opens its names by a glob, is refused by its line — the paths written through the name it gives are paths G1 cannot see |
-//! | G3 | A `use` inside a body (not an [`Index::uses`] record) | G1 finds `use runtime::x::y;`; a group or a glob after `runtime::`, and `runtime as …`, are refused by kind, naming the line |
+//! | G2 | A module-level `use` in any tree shape: `pub use`, a nested group, `self`, a rename, a glob | [`Index::uses`]: each name and glob with the path it was written as. A path into a topic is a finding; a `use` that names `runtime` itself under another name, or opens its names by a glob, is refused by its line — the paths written through the name it gives are paths G1 cannot see — and so is a `runtime` segment followed by a topic (or ending a glob or a rename) behind a head other than `crate`, `self` or `super` (`use c::runtime::pointer::X;` after `use crate as c;`) |
+//! | G3 | A `use` inside a body (not an [`Index::uses`] record) | G1 finds `use runtime::x::y;`; a group or a glob after `runtime::`, and `runtime as …`, are refused by kind, naming the line, whatever the head |
+//! | — | A comment inside a path (`runtime::/* … */pointer::X`) | G1's search compares the bytes between tokens and does not match it; the `runtime` token followed by `::` and a topic with anything else between is refused by its line |
+//! | — | `runtime/mod.rs`'s own `use` items | the road itself: an item re-export is accepted; one whose path names a module in the index (`pub(crate) use pointer::touch;`), and any glob, re-exports a module under a new name and is refused by its line |
 //! | G4 | A macro's arguments | G1's search, [`Certainty::Candidate`]: counted as a finding, its certainty printed |
 //! | G5 | Doc comments and string literals | not code, not read: the identifier view masks them |
 //!
@@ -243,6 +245,27 @@ fn under_a_statement_gate(
     false
 }
 
+/// The module path a `use` path written in `runtime/mod.rs` names: from the crate with `crate`,
+/// from `runtime` with `self`, a bare name, or one `super` per step out.
+fn from_runtime(path: &[String]) -> String {
+    let mut resolved = vec!["crate".to_owned(), "runtime".to_owned()];
+    let mut rest = path;
+    match path.first().map(String::as_str) {
+        Some("crate") => {
+            resolved.truncate(1);
+            rest = &path[1..];
+        }
+        Some("self") => rest = &path[1..],
+        _ => {}
+    }
+    while rest.first().is_some_and(|segment| segment == "super") {
+        resolved.pop();
+        rest = &rest[1..];
+    }
+    resolved.extend(rest.iter().cloned());
+    resolved.join("::")
+}
+
 /// Whether `span` stands in a module-level `use` item.
 fn in_a_use(index: &Index, span: Span) -> bool {
     index
@@ -254,6 +277,12 @@ fn in_a_use(index: &Index, span: Span) -> bool {
 /// **The reading of one package.**
 fn read(index: &Index, gate: UseGate) -> Reading {
     let topics = topics(index);
+    let modules: BTreeSet<String> = index
+        .modules()
+        .iter()
+        .flat_map(|module| module.module_paths())
+        .map(ToString::to_string)
+        .collect();
     let masks = masks(index);
     let tokens = index.tokens();
     let mut reading = Reading::default();
@@ -304,33 +333,58 @@ fn read(index: &Index, gate: UseGate) -> Reading {
             ));
         }
     }
-    // G3: `runtime::{…}`, `runtime::*` and `runtime as …` outside a module-level `use`.
+    // G3: `runtime::{…}`, `runtime::*` and `runtime as …` outside a module-level `use`, under
+    // any head (a foreign one is refused here as G1 refuses it), and a comment inside a path into
+    // a topic, which G1's search compares byte for byte and so does not match.
     for occurrence in search(Pattern::identifier("runtime")).occurrences() {
         let start = occurrence.span.start();
         if !outside_runtime(index, start) || in_a_use(index, occurrence.span) {
             continue;
         }
         let at = token_at(tokens, start);
-        if !our_head(&head_before(index, &masks, tokens, at)) {
+        let head = head_before(index, &masks, tokens, at)
+            .iter()
+            .map(|segment| format!("{segment}::"))
+            .collect::<String>();
+        let next = tokens
+            .get(at + 1)
+            .filter(|next| index.file_at(next.span().start()) == index.file_at(start));
+        let (after, raw) = next.map_or_else(Default::default, |next| {
+            (
+                between(index, &masks, occurrence.span.end(), next.span().start()),
+                between(index, &[], occurrence.span.end(), next.span().start()),
+            )
+        });
+        let joined = after.trim_start().strip_prefix("::").map(str::trim_start);
+        let shape = match joined {
+            Some(rest) if rest.starts_with('{') => Some("::{…}"),
+            Some(rest) if rest.starts_with('*') => Some("::*"),
+            _ if after.trim().is_empty()
+                && next.is_some_and(|next| index.text(next.name_span()) == "as") =>
+            {
+                Some(" as …")
+            }
+            _ => None,
+        };
+        if let Some(shape) = shape {
+            reading.refused.push(format!(
+                "{}: `{head}runtime{shape}` in a body — `runtime` opened by a group, a glob or a \
+                 rename, and a path written through it is one the guard cannot see; spell each \
+                 path whole from `crate`, `self` or `super`",
+                where_is(index, start)
+            ));
             continue;
         }
-        let after = match tokens.get(at + 1) {
-            Some(next) if index.file_at(next.span().start()) == index.file_at(start) => {
-                between(index, &masks, occurrence.span.end(), next.span().start())
-            }
-            _ => String::new(),
-        };
-        let joined = after.trim_start().strip_prefix("::").map(str::trim_start);
-        let opens = joined.is_some_and(|rest| rest.starts_with('{') || rest.starts_with('*'));
-        let renamed = after.trim().is_empty()
-            && tokens
-                .get(at + 1)
-                .is_some_and(|next| index.text(next.name_span()) == "as");
-        if opens || renamed {
+        let into_a_topic = next.filter(|next| topics.contains(index.text(next.name_span())));
+        if let Some(topic) = into_a_topic
+            && joined.is_some_and(str::is_empty)
+            && raw.trim() != "::"
+        {
             reading.refused.push(format!(
-                "{}: `runtime` opened by a group, a glob or a rename in a body — a path written \
-                 through it is one the guard cannot see; spell each path whole",
-                where_is(index, start)
+                "{}: `{head}runtime::{}` with a comment inside the path, which the guard's path \
+                 search does not read; write the path without it",
+                where_is(index, start),
+                index.text(topic.name_span())
             ));
         }
     }
@@ -342,23 +396,69 @@ fn read(index: &Index, gate: UseGate) -> Reading {
         }
         .in_the_product(index)
             && (gate == UseGate::Blind || record.variant().permits_product());
-        if !product
-            || record
-                .module_paths()
-                .iter()
-                .all(|module| inside_runtime(module))
-        {
+        if !product {
             continue;
         }
         let place = where_is(index, record.whole().start());
+        // F4: `runtime/mod.rs`'s own `use` items are the road; one that re-exports a module, or
+        // a glob (which re-exports the modules it reaches), opens a module under a new name.
+        if record.module_paths().contains(&RUNTIME) {
+            for (name, path) in record.names() {
+                let target = from_runtime(path);
+                if modules.contains(&target) {
+                    reading.refused.push(format!(
+                        "{place}: `use {}` (as `{name}`) re-exports the module `{target}` — a \
+                         path written through `runtime::{name}::` is one into a module the guard \
+                         does not count as a topic; re-export the items, not the module",
+                        path.join("::")
+                    ));
+                }
+            }
+            for path in record.globs() {
+                reading.refused.push(format!(
+                    "{place}: `use {}::*` in `runtime/mod.rs` — a glob re-exports whatever it \
+                     reaches, modules included, which the guard does not resolve; re-export the \
+                     items by name",
+                    path.join("::")
+                ));
+            }
+            continue;
+        }
+        if record
+            .module_paths()
+            .iter()
+            .all(|module| inside_runtime(module))
+        {
+            continue;
+        }
         let past_head = |path: &[String]| -> Option<Vec<String>> {
             let k = path
                 .iter()
                 .position(|segment| !matches!(segment.as_str(), "crate" | "self" | "super"))?;
             (path[k] == "runtime").then(|| path[k + 1..].to_vec())
         };
+        // F1: a `runtime` segment behind a head the guard does not resolve, followed by a topic
+        // (or ending the path, for a glob or a rename): refused, as G1 refuses the same head.
+        let foreign = |path: &[String], ending: bool| -> bool {
+            path.iter().enumerate().any(|(k, segment)| {
+                segment == "runtime"
+                    && !our_head(&path[..k])
+                    && path.get(k + 1).map_or(ending, |next| topics.contains(next))
+            })
+        };
+        let refuse_foreign = |shown: String| {
+            format!(
+                "{place}: `use {shown}` — a path into `runtime` behind a head the guard does not \
+                 resolve; spell the crate's path from `crate`, `self` or `super`"
+            )
+        };
         for (name, path) in record.names() {
             let Some(rest) = past_head(path) else {
+                let renames_runtime =
+                    path.last().is_some_and(|last| last == "runtime") && name != "runtime";
+                if foreign(path, renames_runtime) {
+                    reading.refused.push(refuse_foreign(path.join("::")));
+                }
                 continue;
             };
             match rest.first() {
@@ -376,6 +476,11 @@ fn read(index: &Index, gate: UseGate) -> Reading {
         }
         for path in record.globs() {
             let Some(rest) = past_head(path) else {
+                if foreign(path, true) {
+                    reading
+                        .refused
+                        .push(refuse_foreign(format!("{}::*", path.join("::"))));
+                }
                 continue;
             };
             match rest.first() {
@@ -425,90 +530,130 @@ fn named(lines: &[String], needle: &str) -> usize {
     lines.iter().filter(|line| line.contains(needle)).count()
 }
 
-/// RED (planted, T1–T12) — **every path into a topic module written outside `runtime/` in a
-/// product build is a finding, each shape the guard cannot read is refused by its line, and
-/// nothing else is named.**
+/// RED (planted, T1–T12, the review's F1–F4) — **every path into a topic module written outside
+/// `runtime/` in a product build is a finding, each shape the guard cannot read is refused by its
+/// line, and nothing else is named.**
 ///
 /// The fixture plants a module-level `use` (T1), a full path with no `use` (T2, and the same into
 /// a private topic), one arm of a group (T5), a field type, an `impl` header and UFCS in another
-/// module (T6), and a path among a macro's arguments (T9); it plants a rename of `runtime` and a
-/// glob over it (T7) and a path under a statement's own gate (T8), each refused. A test-gated
-/// `use` (T3), the re-export road as a `use` and as a path (T4), a doc link and a string (T10),
-/// a sibling's path inside `runtime/` (T11), a file reached by `#[cfg(test)] mod t;` (T12), a
-/// field gated to tests and a test module pass.
+/// module (T6), a path among a macro's arguments (T9), a glob into a topic and a nested module's
+/// `use super::runtime::…` (F2); it plants a rename of `runtime` and a glob over it (T7), a path
+/// under a statement's own gate (T8), a group, a glob and a rename in a body (F2), a foreign head
+/// in a module-level `use`, a body group and a path (F1), a comment inside a path (F3) and a
+/// module re-exported by `runtime/mod.rs` (F4), each refused. A test-gated `use` (T3), the
+/// re-export road as a `use` and as a path (T4, and `runtime/mod.rs`'s item re-export), a doc
+/// link and a string (T10), a sibling's path inside `runtime/` (T11), a file reached by
+/// `#[cfg(test)] mod t;` (T12), a field gated to tests and a test module pass.
+///
+/// Every row is checked before the test fails, so a red run names each plant it misses.
 #[test]
 fn every_path_into_a_runtime_topic_from_outside_is_named() {
     let index = fixture();
     let reading = read(&index, UseGate::Read);
-    let findings = &reading.findings;
-    let refused = &reading.refused;
-    assert_eq!(
-        named(findings, "lib.rs:20:1: `use runtime::clipboard::copy`"),
-        1,
-        "T1, the `use`: {findings:#?}"
-    );
-    assert_eq!(
-        named(findings, "lib.rs:39:17: `runtime::clipboard`"),
-        1,
-        "T2, the full path: {findings:#?}"
-    );
-    assert_eq!(
-        named(findings, "`use runtime::pointer::Press`"),
-        1,
-        "T5, the group's arm into a topic: {findings:#?}"
-    );
-    assert_eq!(
-        named(findings, "other.rs:"),
-        3,
-        "T6, the field type, the `impl` header and UFCS: {findings:#?}"
-    );
-    assert_eq!(
-        named(findings, "`super::runtime::pointer`"),
-        1,
-        "T6's `impl` header, its head read: {findings:#?}"
-    );
-    assert_eq!(
-        named(findings, "(in a macro's arguments)"),
-        1,
-        "T9: {findings:#?}"
-    );
-    assert_eq!(
-        named(findings, "`runtime::quiet`"),
-        1,
-        "a private topic is a topic: {findings:#?}"
-    );
-    assert_eq!(
-        findings.len(),
-        8,
-        "nothing else is a finding: {findings:#?}"
-    );
-    assert_eq!(
-        named(refused, "`use … runtime as rt`"),
-        1,
-        "T7, the rename: {refused:#?}"
-    );
-    assert_eq!(
-        named(refused, "`use crate::runtime::*`"),
-        1,
-        "T7, the glob: {refused:#?}"
-    );
-    assert_eq!(
-        named(refused, "under a statement's own `#[cfg]`"),
-        1,
-        "T8: {refused:#?}"
-    );
-    assert_eq!(refused.len(), 3, "nothing else is refused: {refused:#?}");
-    assert!(
-        !findings
-            .iter()
-            .chain(refused)
-            .any(|line| line.contains("t.rs:")
-                || line.contains("clipboard.rs:")
-                || line.contains("pointer.rs:")
-                || line.contains("paste")
-                || line.contains("exported")),
-        "T3, T4, T11 and T12 pass: {reading:#?}"
-    );
+    let findings: &[(&str, usize, &str)] = &[
+        (
+            "lib.rs:23:1: `use runtime::clipboard::copy`",
+            1,
+            "T1, the `use`",
+        ),
+        ("lib.rs:42:17: `runtime::clipboard`", 1, "T2, the full path"),
+        (
+            "`use runtime::pointer::Press`",
+            1,
+            "T5, the group's arm into a topic",
+        ),
+        (
+            "other.rs:",
+            3,
+            "T6, the field type, the `impl` header and UFCS",
+        ),
+        (
+            "`super::runtime::pointer`",
+            1,
+            "T6's `impl` header, its head read",
+        ),
+        ("(in a macro's arguments)", 1, "T9"),
+        ("`runtime::quiet`", 1, "a private topic is a topic"),
+        (
+            "`use runtime::pointer::*`",
+            1,
+            "F2, a module-level glob into a topic",
+        ),
+        (
+            "`use super::runtime::pointer::Press`",
+            1,
+            "F2, a nested module's `use`",
+        ),
+    ];
+    let refused: &[(&str, usize, &str)] = &[
+        ("`use … runtime as rt`", 1, "T7, the rename"),
+        ("`use crate::runtime::*`", 1, "T7, the glob"),
+        ("under a statement's own `#[cfg]`", 1, "T8"),
+        ("`runtime::{…}` in a body", 1, "F2, a group in a body"),
+        ("`runtime::*` in a body", 1, "F2, a glob in a body"),
+        (
+            "`crate::runtime as …` in a body",
+            1,
+            "F2, a rename in a body",
+        ),
+        (
+            "`use c::runtime::pointer::Press`",
+            1,
+            "F1, a foreign head in a module-level `use`",
+        ),
+        (
+            "`c::runtime::{…}` in a body",
+            1,
+            "F1, a foreign head in a body group",
+        ),
+        (
+            "`c::runtime::pointer` — a path whose head",
+            1,
+            "F1, a foreign head in a path (G1)",
+        ),
+        (
+            "`runtime::pointer` with a comment inside",
+            1,
+            "F3, a comment inside a path",
+        ),
+        (
+            "re-exports the module `crate::runtime::pointer::inner`",
+            1,
+            "F4, a module re-export",
+        ),
+    ];
+    let mut missed = Vec::new();
+    for (kind, lines, rows) in [
+        ("finding", &reading.findings, findings),
+        ("refusal", &reading.refused, refused),
+    ] {
+        for (needle, expected, what) in rows {
+            let got = named(lines, needle);
+            if got != *expected {
+                missed.push(format!(
+                    "{what}: {got} {kind}(s) naming {needle:?}, not {expected}"
+                ));
+            }
+        }
+    }
+    for (kind, lines, expected) in [
+        ("finding", &reading.findings, 10),
+        ("refusal", &reading.refused, 11),
+    ] {
+        if lines.len() != expected {
+            missed.push(format!("{} {kind}s, not {expected}", lines.len()));
+        }
+    }
+    if reading.findings.iter().chain(&reading.refused).any(|line| {
+        line.contains("t.rs:")
+            || line.contains("clipboard.rs:")
+            || line.contains("pointer.rs:")
+            || line.contains("paste")
+            || line.contains("exported")
+    }) {
+        missed.push("T3, T4, T11 and T12 are named, and pass".to_owned());
+    }
+    assert!(missed.is_empty(), "{}\n{reading:#?}", missed.join("\n"));
 }
 
 /// RED (planted, T3) — **the test-gated `use` is out of the product only because the guard reads
