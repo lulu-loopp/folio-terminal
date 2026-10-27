@@ -53,7 +53,7 @@ fn pane_at_rest(text: &str) -> LeafSession {
         &mut leaf,
         fixture_cell_metrics(1.0, BASE)
     ));
-    leaf.presented_metrics = leaf.metrics;
+    leaf.view.presented_metrics = leaf.metrics;
     resolve(&mut leaf, Instant::now());
     settle(&mut leaf, Instant::now() + Duration::from_secs(1));
     leaf
@@ -88,7 +88,7 @@ fn snapshot(leaf: &LeafSession) -> String {
         (
             leaf.text_scale,
             leaf.metrics,
-            leaf.presented_metrics,
+            leaf.view.presented_metrics,
             leaf.grid,
             leaf.conpty_grid,
             leaf.pending_pty_resize.map(|pending| pending.grid),
@@ -680,7 +680,7 @@ fn the_rung_has_one_owner() {
 /// own frame and metrics give — row from the frame's row map, column from its cell width — so the
 /// SGR report sent to each program names that program's cell. The size is then stepped under a
 /// stationary pointer: until the new picture is presented, the pointer is measured with the
-/// metrics the picture on the glass was drawn at (`LeafSession::presented_metrics`). The window's
+/// metrics the picture on the glass was drawn at (`TermView::presented_metrics`). The window's
 /// own wiring — every hit site reading `pane_frame_metrics`, the IME caret reading the focused
 /// pane's metrics — is pinned on the bodies.
 ///
@@ -724,11 +724,11 @@ fn two_panes_at_two_sizes_each_map_the_pointer_with_their_own_cells() {
     );
 
     // A stationary pointer while the size changes: the glass still shows the old picture.
-    let presented = large.focused().unwrap().presented_metrics;
+    let presented = large.focused().unwrap().view.presented_metrics;
     let leaf = large.focused_mut().unwrap();
     step_leaf_text_scale(leaf, TextStep::Larger, 1, derive_at(1.0, BASE)).unwrap();
     assert_eq!(
-        large.focused().unwrap().presented_metrics,
+        large.focused().unwrap().view.presented_metrics,
         presented,
         "a step is not a presentation"
     );
@@ -819,7 +819,7 @@ fn a_size_change_with_an_unchanged_grid_still_presents_and_input_uses_the_displa
         "the seat's signature carries its metrics"
     );
     assert_eq!(
-        tab.focused().unwrap().presented_metrics,
+        tab.focused().unwrap().view.presented_metrics,
         old_metrics,
         "input is measured on the picture on the glass until the new one is presented"
     );

@@ -7735,32 +7735,10 @@ struct LeafSession {
     /// It is what the pane's grid is solved from ([`Self::grid_for`]) and what its next picture is
     /// drawn at ([`bt_render::SeatFrame::metrics`]).
     metrics: bt_render::CellMetrics,
-    /// **The last moment this pane's scroll bar had a reason to be up** — a
-    /// wheel, a keyboard page, a jump, or a pointer in its lane (P2-9 slice 1).
-    ///
-    /// On the leaf and not on the window, because the reason belongs to the
-    /// pane: two panes can be at two different points of their own fades, and a
-    /// single window-level clock would put out a bar the other pane's gesture
-    /// had just lit. It travels with the leaf through a tear-out for the same
-    /// reason [`Self::profile`] does — the pane that was scrolled is still the
-    /// pane that was scrolled after it lands in another tab.
-    ///
-    /// Set to the leaf's own birth, which costs nothing: a pane with no
-    /// scrollback yet draws no bar whatever this says.
-    thumb_awake: Instant,
-    /// **The same, for the mark along this pane's foot** (horizontal scroll,
-    /// level three).
-    ///
-    /// A second clock and not a shared one, and that is the whole of the bottom
-    /// row's ruling in one field: a vertical wheel is not a reason for the
-    /// horizontal bar to appear. Sharing [`Self::thumb_awake`] would put a
-    /// grabbable mark across the reader's prompt every time they scrolled back
-    /// through their build log, which is the exact thing `column_visibility`
-    /// declines to do on the hover path.
-    column_awake: Instant,
-    /// Rows skipped above the card tail, carried with this leaf on tear-out
-    /// and persisted in session.json. Drawing and whole wheel notches clamp it.
-    card_skip: usize,
+    /// **This pane's view of its shell**: the facts of the ownership contract's view owner that
+    /// have moved so far (M1, ticket O-2). Nested, so it has the leaf's own lifetime and travels
+    /// with it exactly as the fields did when they stood here.
+    view: TermView,
     grid: GridSize,
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
@@ -7836,15 +7814,67 @@ struct LeafSession {
     /// over the right-hand pane be answered by the right-hand pane's cells
     /// instead of by whichever pane happens to hold the keyboard.
     last_presented_frame: Option<ViewportFrame>,
-    /// **The metrics [`Self::last_presented_frame`] was drawn at** — an observation, paired with
-    /// that frame and written in the same breath as it (`Runtime::redraw`'s commit).
+    /// **A multi-line paste aimed at this shell, waiting for the card's answer** (0.4.4 ticket
+    /// 02) — `None` on every pane but the one the card is asking about.
     ///
-    /// Every pointer question about this pane reads these and never [`Self::metrics`]: after a
-    /// size change whose picture has not reached the glass yet — a skipped or failed present —
-    /// the rows the pointer is over are the last presented frame's, and combining that frame's
-    /// row map with a newly requested cell width would put the pointer in a cell nobody can see.
+    /// Here and not on the window because it is text promised to *this process*, so it dies
+    /// with it. A restarted shell is a new `LeafSession`, a closed pane or tab drops this one,
+    /// and either way the question is gone with the shell it was about. Written by
+    /// `stage_paste`; read by the card's layout, draw and hit; taken by the card's answer.
+    pending_paste: Option<PendingPaste>,
+    /// **The person's input to this pane, held behind a paste it is owed** (`clipboard_lane`):
+    /// `Some` from the paste's press until its answer is spent — or, when the answer raised the
+    /// paste card, until the card is answered — and released to the shell then, in its order.
+    /// On the leaf for [`Self::pending_paste`]'s reason: a closed pane takes it with it.
+    paste_hold: Option<clipboard_lane::PasteHold>,
+}
+
+/// **A terminal pane's view of its shell** — the ownership contract's view owner
+/// (`docs/plans/design/ownership-contract-2026-10-11.md` §2.1), nested in [`LeafSession`] as
+/// [`LeafSession::view`] with the leaf's own lifetime.
+///
+/// M1 (ticket O-2) moved these five fields here and nothing else: their writers and readers
+/// are the ones they had on the leaf, so the census's only change is their key. The rest of the
+/// view — text size, metrics, the last presented frame and the projection — follows in O-3,
+/// with the doors between a view and its session.
+struct TermView {
+    /// **The last moment this pane's scroll bar had a reason to be up** — a
+    /// wheel, a keyboard page, a jump, or a pointer in its lane (P2-9 slice 1).
+    ///
+    /// On the leaf and not on the window, because the reason belongs to the
+    /// pane: two panes can be at two different points of their own fades, and a
+    /// single window-level clock would put out a bar the other pane's gesture
+    /// had just lit. It travels with the leaf through a tear-out for the same
+    /// reason [`LeafSession::profile`] does — the pane that was scrolled is still
+    /// the pane that was scrolled after it lands in another tab.
+    ///
+    /// Set to the leaf's own birth, which costs nothing: a pane with no
+    /// scrollback yet draws no bar whatever this says.
+    thumb_awake: Instant,
+    /// **The same, for the mark along this pane's foot** (horizontal scroll,
+    /// level three).
+    ///
+    /// A second clock and not a shared one, and that is the whole of the bottom
+    /// row's ruling in one field: a vertical wheel is not a reason for the
+    /// horizontal bar to appear. Sharing [`Self::thumb_awake`] would put a
+    /// grabbable mark across the reader's prompt every time they scrolled back
+    /// through their build log, which is the exact thing `column_visibility`
+    /// declines to do on the hover path.
+    column_awake: Instant,
+    /// Rows skipped above the card tail, carried with this leaf on tear-out
+    /// and persisted in session.json. Drawing and whole wheel notches clamp it.
+    card_skip: usize,
+    /// **The metrics [`LeafSession::last_presented_frame`] was drawn at** — an observation,
+    /// paired with that frame and written in the same breath as it (`Runtime::redraw`'s commit).
+    ///
+    /// Every pointer question about this pane reads these and never [`LeafSession::metrics`]:
+    /// after a size change whose picture has not reached the glass yet — a skipped or failed
+    /// present — the rows the pointer is over are the last presented frame's, and combining that
+    /// frame's row map with a newly requested cell width would put the pointer in a cell nobody
+    /// can see.
     presented_metrics: bt_render::CellMetrics,
-    /// Every image reference [`Self::last_presented_frame`] draws, as the cells that draw it.
+    /// Every image reference [`LeafSession::last_presented_frame`] draws, as the cells that draw
+    /// it.
     ///
     /// Beside the frame it was scanned from, and per leaf for the same reason the frame is: the
     /// four pointer verbs — the solid underline, the peek, Ctrl+click, and the tip that reads the
@@ -7853,34 +7883,6 @@ struct LeafSession {
     /// could only ever be one pane's, which is how a hover over the pane you are not typing in
     /// came to be answered from the cells of the pane you are.
     frame_image_references: FrameImageReferences,
-    /// **What this pane owes the reader about its shell integration**
-    /// (§7.1.6j) — `None` until the machine has been asked.
-    ///
-    /// Here rather than beside the tab for [`Self::profile`]'s reason exactly:
-    /// it is an answer about *this process* — which PowerShell it is and what
-    /// its own startup file says — so a tear-out carries it with the shell
-    /// rather than re-deriving it from whichever tab the pane landed in.
-    ///
-    /// **Decided late and once.** The `$PROFILE` path comes from the shell
-    /// itself, on a thread, so it is not available at the moment this struct is
-    /// built; `Runtime::settle_pane_notices` fills it the first turn the answer
-    /// exists. Filling it at spawn would have meant either blocking the spawn on
-    /// a second PowerShell starting, or composing the path — and composing it is
-    /// the bug this whole slice was opened by.
-    /// **A multi-line paste aimed at this shell, waiting for the card's answer** (0.4.4 ticket
-    /// 02) — `None` on every pane but the one the card is asking about.
-    ///
-    /// Here and not on the window for [`Self::integration_offer`]'s reason said about a paste:
-    /// it is text promised to *this process*, so it dies with it. A restarted shell is a new
-    /// `LeafSession`, a closed pane or tab drops this one, and either way the question is gone
-    /// with the shell it was about. Written by `stage_paste`; read by the card's layout, draw and
-    /// hit; taken by the card's answer.
-    pending_paste: Option<PendingPaste>,
-    /// **The person's input to this pane, held behind a paste it is owed** (`clipboard_lane`):
-    /// `Some` from the paste's press until its answer is spent — or, when the answer raised the
-    /// paste card, until the card is answered — and released to the shell then, in its order.
-    /// On the leaf for [`Self::pending_paste`]'s reason: a closed pane takes it with it.
-    paste_hold: Option<clipboard_lane::PasteHold>,
 }
 
 /// **What a pane in birth holds until its shell exists** — one road with two triggers: the walk
@@ -14137,10 +14139,9 @@ impl TabState {
             // **Read off the pane, like the two above it** (§7.1.6b′, user
             // ruling 2026-08-21): the aim belongs to the shell that was standing
             // in this seat, so a two-pane tab writes two aims and not one twice.
-            card_skip: self
-                .sessions
-                .get(&seat)
-                .map_or(0, |leaf| u32::try_from(leaf.card_skip).unwrap_or(u32::MAX)),
+            card_skip: self.sessions.get(&seat).map_or(0, |leaf| {
+                u32::try_from(leaf.view.card_skip).unwrap_or(u32::MAX)
+            }),
             // **The line this pane's shell was last told to run**, or nothing at all
             // (§7.54e ④). Read off the command marks, so a shell with no integration
             // writes an empty string — which is the honest answer rather than a guess
@@ -15442,7 +15443,7 @@ impl TabState {
                 Some(focus_thumb::SeatSource::Terminal {
                     session: &leaf.session,
                     // Numeric distance above the tail; the draw walk clamps it.
-                    skip: leaf.card_skip,
+                    skip: leaf.view.card_skip,
                 })
             }
             SeatKind::Files => Some(focus_thumb::SeatSource::Files {
@@ -31878,7 +31879,7 @@ mod shell_birth_tests {
                     leaf.conpty_grid,
                     leaf.text_scale,
                     leaf.metrics,
-                    leaf.card_skip,
+                    leaf.view.card_skip,
                     &leaf.pending_typing,
                     &leaf.attention_capability,
                     leaf.has_rail,
@@ -32561,15 +32562,19 @@ fn bare_leaf(
         bell_reported: false,
         attention_clock: attention_wire::WaitClock::default(),
         attention_capability: capability,
-        // Aimed at the tail, which is where a card looks until somebody turns a
-        // wheel over it — a shell that has just started has no furniture on its
-        // floor to be aimed past.
-        card_skip: seed.card_skip,
         projection,
         text_scale,
         metrics,
-        thumb_awake: Instant::now(),
-        column_awake: Instant::now(),
+        view: TermView {
+            thumb_awake: Instant::now(),
+            column_awake: Instant::now(),
+            // Aimed at the tail, which is where a card looks until somebody turns a
+            // wheel over it — a shell that has just started has no furniture on its
+            // floor to be aimed past.
+            card_skip: seed.card_skip,
+            presented_metrics: metrics,
+            frame_image_references: FrameImageReferences::default(),
+        },
         grid,
         conpty_grid: grid,
         pending_pty_resize: None,
@@ -32580,8 +32585,6 @@ fn bare_leaf(
         output_revision: 0,
         last_seen_revision: 0,
         last_presented_frame: None,
-        presented_metrics: metrics,
-        frame_image_references: FrameImageReferences::default(),
         // Nothing has been pasted into a shell that has just started.
         pending_paste: None,
         paste_hold: None,

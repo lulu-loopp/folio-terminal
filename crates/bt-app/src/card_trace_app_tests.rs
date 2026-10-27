@@ -15,12 +15,12 @@ fn card_restore_keeps_stored_skip_across_reflow() {
     card_restore_widen(&mut leaf);
     assert_eq!(card_restore_first(&leaf), "H001");
     assert_eq!(
-        leaf.card_skip, 130,
+        leaf.view.card_skip, 130,
         "the reflow drew the card, not the leaf"
     );
     // And the hand still has no debt to pay off: the notch clamps on the way
     // in, so the first reverse from the visible 116 moves one row.
     aim_card_window(&mut leaf, 4, -1, card_trace::Card::untraced());
-    assert_eq!(leaf.card_skip, 115);
+    assert_eq!(leaf.view.card_skip, 115);
     assert_eq!(card_restore_first(&leaf), "H002");
 }

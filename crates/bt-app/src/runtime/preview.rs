@@ -13729,7 +13729,7 @@ impl<B: Backend> Runtime<'_, B> {
         hit: bt_render::GridHit,
     ) -> Option<PathBuf> {
         let (_, leaf, _) = self.hovered_leaf()?;
-        let reference = leaf.frame_image_references.at(hit)?;
+        let reference = leaf.view.frame_image_references.at(hit)?;
         (reference.verified
             || matches!(
                 self.window
@@ -13752,7 +13752,8 @@ impl<B: Backend> Runtime<'_, B> {
         &self,
     ) -> Option<(SeatId, bt_term::FrameImageReference)> {
         let (seat, leaf, hit) = self.hovered_leaf()?;
-        leaf.frame_image_references
+        leaf.view
+            .frame_image_references
             .at(hit)
             .filter(|reference| reference.verified)
             .cloned()
@@ -14366,6 +14367,7 @@ impl<B: Backend> Runtime<'_, B> {
                     let metrics = self.window.tabs[active]
                         .sessions
                         .get(&seat)?
+                        .view
                         .presented_metrics;
                     Some((body, frame, metrics))
                 };
@@ -14392,14 +14394,17 @@ impl<B: Backend> Runtime<'_, B> {
             let focused_presented = tab
                 .sessions
                 .get(&tab.focused_leaf)
-                .map(|leaf| leaf.presented_metrics);
+                .map(|leaf| leaf.view.presented_metrics);
             let table_sources = Self::table_sources(
                 self.window
                     .last_presented_frame
                     .iter()
                     .zip(focused_presented)
                     .chain(tab.sessions.values().filter_map(|leaf| {
-                        Some((leaf.last_presented_frame.as_ref()?, leaf.presented_metrics))
+                        Some((
+                            leaf.last_presented_frame.as_ref()?,
+                            leaf.view.presented_metrics,
+                        ))
                     })),
                 self.app.gpu.font_environment_epoch(),
             );

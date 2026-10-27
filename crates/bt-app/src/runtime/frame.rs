@@ -322,7 +322,7 @@ impl<B: Backend> Runtime<'_, B> {
                 columns: terminal_frame.columns.get(),
                 references: self.shell().session.frame_image_references(&terminal_frame),
             };
-            self.shell_mut().frame_image_references = scan;
+            self.shell_mut().view.frame_image_references = scan;
             // The pointer's marks, but only if the pointer is standing in *this* pane. The link's
             // underline and the verified reference's solid underline both follow the pointer
             // immediately; only what a hover *reveals* — a tooltip there, a thumbnail here — waits out
@@ -1499,13 +1499,13 @@ impl<B: Backend> Runtime<'_, B> {
                     {
                         if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) {
                             leaf.last_presented_frame = Some(projected);
-                            leaf.presented_metrics = *metrics;
+                            leaf.view.presented_metrics = *metrics;
                             mark_leaf_painted(leaf);
                         }
                     }
                     if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&focused_leaf) {
                         leaf.last_presented_frame = Some(frame.clone());
-                        leaf.presented_metrics = frame_metrics[0];
+                        leaf.view.presented_metrics = frame_metrics[0];
                         mark_leaf_painted(leaf);
                     }
                     self.window.last_presented_frame = Some(frame);
@@ -2735,7 +2735,7 @@ impl<B: Backend> Runtime<'_, B> {
                         .copied()
                         .is_none_or(|drag| drag.seat != **seat)
             })
-            .map(|(_, leaf)| leaf.thumb_awake)
+            .map(|(_, leaf)| leaf.view.thumb_awake)
             .chain(
                 // The foot's marks, on the same clock and through the same
                 // latch. Their standing reasons are their own — a hover is not
@@ -2753,7 +2753,7 @@ impl<B: Backend> Runtime<'_, B> {
                                 .copied()
                                 .is_none_or(|drag| drag.seat != **seat)
                     })
-                    .map(|(_, leaf)| leaf.column_awake),
+                    .map(|(_, leaf)| leaf.view.column_awake),
             );
         let mut work = AnimationWork::default();
         for rest in rests {

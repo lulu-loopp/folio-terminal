@@ -456,18 +456,18 @@ fn card_restore_reverse_detent_moves_toward_tail() {
 fn card_restore_deferred_resize_keeps_numeric_persistence() {
     let mut leaf = card_restore_fixture();
     card_restore_resize(&mut leaf, 40, 40, LeafOnStage::Behind);
-    assert_eq!(leaf.card_skip, 130);
+    assert_eq!(leaf.view.card_skip, 130);
     card_restore_settle(&mut leaf);
     assert_eq!(card_restore_first(&leaf), "H001");
     // The session file carries the raw number, saturating at `u32`, and a
     // restart hands back what it carried.
-    let saved = u32::try_from(leaf.card_skip).unwrap_or(u32::MAX);
-    leaf.card_skip = saved as usize;
+    let saved = u32::try_from(leaf.view.card_skip).unwrap_or(u32::MAX);
+    leaf.view.card_skip = saved as usize;
     assert_eq!(card_restore_first(&leaf), "H001");
-    assert_eq!(leaf.card_skip, 130);
+    assert_eq!(leaf.view.card_skip, 130);
     // The reflow left nothing for the hand to pay off either.
     aim_card_window(&mut leaf, 4, -1, card_trace::Card::untraced());
-    assert_eq!(leaf.card_skip, 115);
+    assert_eq!(leaf.view.card_skip, 115);
     assert_eq!(card_restore_first(&leaf), "H002");
 }
 

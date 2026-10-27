@@ -414,7 +414,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn wake_terminal_column(&mut self, seat: SeatId) {
         let active = self.window.active_tab;
         if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
-            leaf.column_awake = Instant::now();
+            leaf.view.column_awake = Instant::now();
         }
     }
 
@@ -451,7 +451,7 @@ impl<B: Backend> Runtime<'_, B> {
                         .held_terminal_thumb_drag()
                         .copied()
                         .is_some_and(|drag| drag.seat == *seat),
-                    since_rest: now.saturating_duration_since(leaf.thumb_awake),
+                    since_rest: now.saturating_duration_since(leaf.view.thumb_awake),
                 };
                 let thumb = termscroll::visibility(situation, motion, |x| cubic_bezier(x, EASE));
                 let bar = self.terminal_scroll_bar(*seat)?;
@@ -1749,7 +1749,7 @@ impl<B: Backend> Runtime<'_, B> {
                 .held_terminal_column_drag()
                 .copied()
                 .is_some_and(|drag| drag.seat == seat),
-            since_rest: now.saturating_duration_since(leaf.column_awake),
+            since_rest: now.saturating_duration_since(leaf.view.column_awake),
         };
         termscroll::column_visibility(situation, self.app.motion, |x| cubic_bezier(x, EASE))
     }
@@ -1860,7 +1860,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn wake_terminal_thumb(&mut self, seat: SeatId) {
         let active = self.window.active_tab;
         if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) {
-            leaf.thumb_awake = Instant::now();
+            leaf.view.thumb_awake = Instant::now();
         }
     }
 }

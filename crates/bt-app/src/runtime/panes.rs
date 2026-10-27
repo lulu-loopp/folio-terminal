@@ -3673,7 +3673,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// pointer, and a hit that paired the old row map with the new cell width would name a cell
     /// nobody can see.
     pub(crate) fn pane_frame_metrics(&self, seat: SeatId) -> Option<bt_render::CellMetrics> {
-        Some(self.sessions.get(&seat)?.presented_metrics)
+        Some(self.sessions.get(&seat)?.view.presented_metrics)
     }
 
     /// **Which spelling of an absolute path the shell in `seat` prints** — the pane's namespace,
@@ -3823,10 +3823,10 @@ impl<B: Backend> Runtime<'_, B> {
             return;
         };
         let Some(frame) = leaf.last_presented_frame.as_ref() else {
-            leaf.frame_image_references = FrameImageReferences::default();
+            leaf.view.frame_image_references = FrameImageReferences::default();
             return;
         };
-        leaf.frame_image_references = FrameImageReferences {
+        leaf.view.frame_image_references = FrameImageReferences {
             columns: frame.columns.get(),
             references: leaf.session.frame_image_references(frame),
         };
@@ -5693,7 +5693,7 @@ impl<B: Backend> Runtime<'_, B> {
                 seat: focused_body.viewport,
                 clip: focused_body.clip,
                 frame,
-                metrics: leaf.presented_metrics,
+                metrics: leaf.view.presented_metrics,
                 focused,
             });
         }
@@ -5718,7 +5718,7 @@ impl<B: Backend> Runtime<'_, B> {
                 seat: pane.viewport,
                 clip: pane.clip,
                 frame: projected,
-                metrics: leaf.presented_metrics,
+                metrics: leaf.view.presented_metrics,
                 focused: false,
             });
         }
@@ -6264,7 +6264,7 @@ impl<B: Backend> Runtime<'_, B> {
                         rows,
                         source: focus_thumb::SeatSource::Terminal {
                             session: &leaf.session,
-                            skip: leaf.card_skip,
+                            skip: leaf.view.card_skip,
                         },
                     };
                     // **`card walk`'s one product call site** (T-CARD-TRACE,
@@ -6280,7 +6280,7 @@ impl<B: Backend> Runtime<'_, B> {
                     self.window.focus_thumbs.trace_card_walk(
                         tab.id,
                         &demand,
-                        leaf.card_skip,
+                        leaf.view.card_skip,
                         now,
                         card_trace::Card {
                             window,
@@ -6653,7 +6653,7 @@ impl<B: Backend> Runtime<'_, B> {
         // exactly what tells a notch that was carried from one that was aimed at
         // a target the window had stopped recognising.
         let carried_before = self.window.card_aim;
-        let skip_before = leaf.card_skip;
+        let skip_before = leaf.view.card_skip;
         // Whole detents, once whatever this seat is already holding is added in.
         // A report that does not complete one is **spent here anyway** — it is
         // being carried, and handing it on to the column as well would scroll
@@ -6701,11 +6701,11 @@ impl<B: Backend> Runtime<'_, B> {
         };
         // The wheel trace records the clamped numeric skip on either exit.
         if !aim_card_window(leaf, rows, steps, card) {
-            let unchanged = leaf.card_skip;
+            let unchanged = leaf.view.card_skip;
             mouse_trace::window_line(window, || aim_line(unchanged));
             return Ok(true);
         }
-        let aimed = leaf.card_skip;
+        let aimed = leaf.view.card_skip;
         mouse_trace::window_line(window, || aim_line(aimed));
         // **The gesture channel** (`focus_thumb`, 2026-08-21): the hand moved
         // this seat's window, so this seat re-projects on the pass below
@@ -6737,7 +6737,7 @@ pub(crate) fn aim_card_window(
     steps: i32,
     site: card_trace::Card,
 ) -> bool {
-    focus_thumb::aim_card_skip(&leaf.session, &mut leaf.card_skip, rows, steps, site)
+    focus_thumb::aim_card_skip(&leaf.session, &mut leaf.view.card_skip, rows, steps, site)
 }
 
 /// **The F2 budget's own probe** — see [`super::floats::dump_chrome_frame`], which it copies

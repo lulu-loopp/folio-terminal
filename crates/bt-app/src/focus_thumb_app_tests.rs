@@ -25,7 +25,7 @@ fn card_restore_alternate_screen_excludes_primary_history() {
     // the clamp that meets the alternate screen is the next notch's, on the
     // way in.
     assert_eq!(card_restore_first(&leaf), "");
-    assert_eq!(leaf.card_skip, 130);
+    assert_eq!(leaf.view.card_skip, 130);
     aim_card_window(&mut leaf, 4, i32::MIN, card_trace::Card::untraced());
     assert_eq!(card_restore_first(&leaf), "A017");
     aim_card_window(&mut leaf, 4, 10, card_trace::Card::untraced());

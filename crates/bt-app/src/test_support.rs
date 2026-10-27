@@ -2516,7 +2516,7 @@ pub(crate) fn card_restore_fixture() -> LeafSession {
         .join("\r\n");
     assert!(live.split("\r\n").all(|line| line.len() == 16));
     leaf.session.feed(live.as_bytes()).unwrap();
-    leaf.card_skip = 130;
+    leaf.view.card_skip = 130;
     assert_eq!(leaf.session.document().entries().len(), 100);
     assert_eq!(
         (0..40)
@@ -2542,7 +2542,7 @@ pub(crate) fn card_restore_fixture() -> LeafSession {
 /// leaf's number: the draw's own clamp lives in `transcript_tail` and writes
 /// nothing back, so looking at a card is not a way to move it.
 pub(crate) fn card_restore_first(leaf: &LeafSession) -> String {
-    focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.card_skip).0[0].clone()
+    focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.view.card_skip).0[0].clone()
 }
 
 pub(crate) fn card_restore_widen(leaf: &mut LeafSession) {
@@ -2659,8 +2659,6 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         process_folder: crate::pane_folder::ProcessFolderMemo::default(),
         // No ConPTY, so no reader thread, so nothing to wake — see the field.
         wake: None,
-        // Aimed at the tail, like every shell that has not been aimed.
-        card_skip: 0,
         // A shell-less fixture is not a shell of some other kind: these
         // panes exist to carry scrollback, and the default profile is what
         // the pane they stand in for would have been started as.
@@ -2695,9 +2693,14 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // that needs the two to agree applies these through `apply_leaf_metrics`.
         text_scale: TextScale::ACTUAL,
         metrics: fixture_cell_metrics(1.0, 16.0),
-        presented_metrics: fixture_cell_metrics(1.0, 16.0),
-        thumb_awake: Instant::now(),
-        column_awake: Instant::now(),
+        view: TermView {
+            thumb_awake: Instant::now(),
+            column_awake: Instant::now(),
+            // Aimed at the tail, like every shell that has not been aimed.
+            card_skip: 0,
+            presented_metrics: fixture_cell_metrics(1.0, 16.0),
+            frame_image_references: FrameImageReferences::default(),
+        },
         grid,
         conpty_grid: grid,
         last_finished_command: None,
@@ -2709,9 +2712,6 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         output_revision: 0,
         last_seen_revision: 0,
         last_presented_frame: None,
-        frame_image_references: FrameImageReferences::default(),
-        // Nothing was started, so there is no `$PROFILE` this fixture could
-        // be owed an answer about.
         // Nothing has been pasted into a fixture.
         pending_paste: None,
         paste_hold: None,

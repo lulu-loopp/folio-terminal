@@ -42,16 +42,31 @@ const FIXTURE_STRUCTS: [&str; 4] = ["App", "WindowRuntime", "TabState", "LeafSes
 /// invariant 1), so a write into a document is a row of its own and not only
 /// a lend of `TabState.preview_pool` — the view being `PreviewPane` and the two
 /// contents that hold its state, a view of a pool buffer and a picture (ticket
-/// O-8, invariant 2).
-const STRUCTS: [&str; 8] = [
+/// O-8, invariant 2) — and a terminal pane's view, `TermView`, nested in
+/// `LeafSession` (ticket O-2, the contract's M0 and M1). The contract's M0 also
+/// names `ShellSession`; it is declared here only when M8's rename gives it a
+/// declaration, because the census refuses a struct the package does not
+/// declare (`CensusFailure::NoSuchStruct`).
+const STRUCTS: [&str; 9] = [
     "App",
     "WindowRuntime",
     "TabState",
     "LeafSession",
+    "TermView",
     "PreviewBuffer",
     "PreviewPane",
     "DocumentView",
     "PictureView",
+];
+
+/// The fields M1 moved from `LeafSession` into `TermView` (the ownership
+/// contract's §3.3).
+const TERM_VIEW_M1: [&str; 5] = [
+    "thumb_awake",
+    "column_awake",
+    "card_skip",
+    "presented_metrics",
+    "frame_image_references",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -194,6 +209,95 @@ fn a_writer_moved_into_a_new_module_changes_only_the_module_column() {
         before.render_inventory(),
         after.render_inventory(),
         "the inventory does not move"
+    );
+}
+
+/// RED (O-2) — **a field moved into a nested struct changes only its fact key.**
+///
+/// The ownership contract's M1 moves five fields of `LeafSession` under
+/// `LeafSession.view: TermView`, and its proof is the census: the moved
+/// facts' rows, writes and reads, are the rows they had, with `Leaf.x`
+/// spelled `View.x`. The field the nest adds is reached only on the way to
+/// the fields under it, so it is read wherever one of them is read and is
+/// written nowhere — a write or a lend under it is the inner field's, not
+/// the nest's.
+///
+/// MUTATION: in the walk, visit the base of an attributed field with the
+/// pending use instead of `Pending::Attributed`, and `Leaf.view` gains a
+/// membership and an access row (it is a hub: its type is one of the facts'
+/// structs) — the first assertion names them.
+#[test]
+fn a_field_moved_into_a_nested_struct_changes_only_its_fact_key() {
+    let take = |name: &str, structs: &[&str]| {
+        let index = fixture(name);
+        let census = FieldCensus::take(&index, structs, &[&index]).expect("the fixture's structs");
+        assert!(census.unparsed().is_empty(), "{:?}", census.unparsed());
+        census
+    };
+    let before = take("nested_before", &["Leaf"]);
+    let after = take("nested_after", &["Leaf", "View"]);
+    let spelled = |rows: &[SiteRow], rename: bool| -> Vec<String> {
+        let mut out: Vec<String> = rows
+            .iter()
+            .filter(|row| row.fact != "Leaf.view")
+            .map(|row| {
+                let fact = if rename {
+                    row.fact
+                        .replace("Leaf.clock", "View.clock")
+                        .replace("Leaf.skip", "View.skip")
+                } else {
+                    row.fact.clone()
+                };
+                format!(
+                    "{fact}\t{}\t{}\t{}\t{}\t{}",
+                    row.column.name(),
+                    row.module,
+                    row.function,
+                    row.kinds.join(","),
+                    row.sites
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    assert!(
+        after.rows().iter().all(|row| row.fact != "Leaf.view"),
+        "the nest is written nowhere: {:?}",
+        after
+            .rows()
+            .iter()
+            .filter(|row| row.fact == "Leaf.view")
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        spelled(before.rows(), true),
+        spelled(after.rows(), false),
+        "the same write, access, membership and inner rows, keyed by the view"
+    );
+    assert_eq!(
+        spelled(before.reads(), true),
+        spelled(after.reads(), false),
+        "the same reads, keyed by the view"
+    );
+    let mut nest_reads: Vec<&str> = after
+        .reads()
+        .iter()
+        .filter(|row| row.fact == "Leaf.view")
+        .map(|row| row.function.as_str())
+        .collect();
+    nest_reads.sort_unstable();
+    assert_eq!(
+        nest_reads,
+        ["glance", "note"],
+        "the nest is read exactly where a view field is read"
+    );
+    assert!(
+        after
+            .facts()
+            .iter()
+            .any(|fact| fact.fact == "Leaf.view" && fact.hub),
+        "the nest is a fact of its own, and a hub"
     );
 }
 
@@ -641,7 +745,7 @@ fn the_committed_census_has_annotations_and_no_new_unknowns() {
 /// MUTATION: skip a struct's `cfg`-gated fields when the query reads the
 /// declarations, and the two lists differ by those fields.
 #[test]
-fn every_field_of_the_four_structs_has_an_inventory_row() {
+fn every_field_of_the_declared_structs_has_an_inventory_row() {
     let census = the_census();
     let index = Index::of_package("bt-app");
     let mut declared: Vec<String> = index
@@ -663,6 +767,120 @@ fn every_field_of_the_four_structs_has_an_inventory_row() {
         .collect();
     facts.sort();
     assert_eq!(facts, declared);
+}
+
+/// RED (O-2) — **the five view fields M1 moved are `TermView`'s, nested in
+/// `LeafSession` with its lifetime, and their writers are the ones they had.**
+///
+/// The ownership contract's M1 (§3.3) moves `thumb_awake`, `column_awake`,
+/// `card_skip`, `presented_metrics` and `frame_image_references` under
+/// `LeafSession.view: TermView` and changes no writer (§3.4: the rows'
+/// functions stay equal, only the fact column moves). So each is a fact of
+/// `TermView` and none of `LeafSession`; `LeafSession.view` is the one field of
+/// the leaf whose type is `TermView`, and it is written nowhere after
+/// construction; and each moved field's proven writes and lends are exactly
+/// the items that wrote and lent it on the leaf, by item and whatever module
+/// K2 puts the item in. Its reads are not pinned: they move with K2's batches
+/// and are held by the runtime dependency map's guard.
+///
+/// MUTATION: leave `card_skip` on `LeafSession`, and the first assertion
+/// names it; drop `wake_terminal_column`'s write, or write `leaf.view` whole,
+/// and the writer sets differ.
+#[test]
+fn the_five_view_fields_are_term_views() {
+    let census = the_census();
+    let facts: std::collections::BTreeSet<&str> = census
+        .facts()
+        .iter()
+        .map(|fact| fact.fact.as_str())
+        .collect();
+    for field in TERM_VIEW_M1 {
+        assert!(
+            facts.contains(format!("TermView.{field}").as_str())
+                && !facts.contains(format!("LeafSession.{field}").as_str()),
+            "`{field}` is `TermView`'s and not `LeafSession`'s"
+        );
+    }
+    let nests: Vec<&str> = census
+        .facts()
+        .iter()
+        .filter(|fact| fact.fact.starts_with("LeafSession.") && fact.declared.contains("TermView"))
+        .map(|fact| fact.fact.as_str())
+        .collect();
+    assert_eq!(nests, ["LeafSession.view"], "one nest");
+    let writers = |fact: &str| -> Vec<(&'static str, String)> {
+        let mut out: Vec<(&'static str, String)> = census
+            .rows()
+            .iter()
+            .filter(|row| row.fact == fact)
+            .map(|row| (row.column.name(), row.function.clone()))
+            .collect();
+        out.sort();
+        out
+    };
+    let expected = |pairs: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+        pairs
+            .iter()
+            .map(|(column, function)| (*column, (*function).to_owned()))
+            .collect()
+    };
+    assert_eq!(writers("LeafSession.view"), expected(&[]), "the nest");
+    assert_eq!(
+        writers("TermView.thumb_awake"),
+        expected(&[("write", "Runtime::wake_terminal_thumb")])
+    );
+    assert_eq!(
+        writers("TermView.column_awake"),
+        expected(&[("write", "Runtime::wake_terminal_column")])
+    );
+    assert_eq!(
+        writers("TermView.card_skip"),
+        expected(&[("access", "aim_card_window")])
+    );
+    assert_eq!(
+        writers("TermView.presented_metrics"),
+        expected(&[("write", "Runtime::redraw")])
+    );
+    assert_eq!(
+        writers("TermView.frame_image_references"),
+        expected(&[
+            ("write", "Runtime::publish_frame_inner"),
+            ("write", "Runtime::rescan_pane_references"),
+        ])
+    );
+}
+
+/// RED (O-2; the ownership contract's (b)1 and (c)1) — **the drain takes the
+/// keyboard's focus as a report and touches no field of the view.**
+///
+/// `drain_leaf_pty` is the session's turn: it hears the shell's bytes and
+/// answers for them. Its one view-derived input is its `holds_the_keyboard`
+/// parameter, computed by the caller (the future `report_keyboard_focus`
+/// door), so the census has no row of any column — read, write, access,
+/// membership or inner — of any `TermView` fact whose function is the drain.
+/// The assertion grows with `TermView`: every field O-3 moves under it is
+/// covered without an edit here. The drain's own rows are asserted present,
+/// so a renamed drain cannot pass by matching nothing.
+///
+/// MUTATION: have `drain_leaf_pty` read `leaf.view.card_skip`, and its read
+/// row is named.
+#[test]
+fn the_drain_reads_no_view_field() {
+    let census = the_census();
+    let is_drain = |function: &str| function.split(' ').next() == Some("drain_leaf_pty");
+    let all = || census.rows().iter().chain(census.reads());
+    assert!(
+        all().any(|row| is_drain(&row.function) && row.fact.starts_with("LeafSession.")),
+        "the drain is found by its name"
+    );
+    let touched: Vec<String> = all()
+        .filter(|row| is_drain(&row.function) && row.fact.starts_with("TermView."))
+        .map(|row| format!("{} {}", row.fact, row.column.name()))
+        .collect();
+    assert!(
+        touched.is_empty(),
+        "the drain touches the view: {touched:?}"
+    );
 }
 
 // ── the runtime dependency map (J3) ───────────────────────────────────────

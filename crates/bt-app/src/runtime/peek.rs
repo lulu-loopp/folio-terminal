@@ -2640,7 +2640,8 @@ impl<B: Backend> Runtime<'_, B> {
         if !leaf.session.peek_admits_at(&anchor) {
             return None;
         }
-        leaf.frame_image_references
+        leaf.view
+            .frame_image_references
             .at(hit)
             .map(|reference| PeekSubject::from_path(reference.path.clone()))
             .or_else(|| {
