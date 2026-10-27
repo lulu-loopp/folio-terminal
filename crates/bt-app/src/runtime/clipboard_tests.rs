@@ -250,7 +250,7 @@ fn paste_into(field: crate::TextFieldSeat, road: PasteRoad) -> (String, bool) {
                     },
                 );
                 assert_eq!(
-                    crate::ime_owner(runtime.keyboard_owner()),
+                    crate::runtime::keyboard::ime_owner(runtime.keyboard_owner()),
                     crate::ImeOwner::GraphSearch,
                     "the fixture's own precondition: the graph's search holds the keyboard"
                 );

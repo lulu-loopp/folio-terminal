@@ -7,6 +7,7 @@ use crate::clipboard_lane::{
     PasteHold, PasteInto, Reply,
 };
 use crate::lane::Terminal;
+use crate::runtime::keyboard::ime_owner;
 use crate::window_seam::prelude::*;
 use crate::{
     ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
@@ -15,8 +16,8 @@ use crate::{
     seats, text_field, toast,
 };
 use crate::{
-    GlassHere, ImeOwner, PasteFacts, PasteRoad, PendingPaste, TabId, TabState, ime_owner, input,
-    quit, shell_literal,
+    GlassHere, ImeOwner, PasteFacts, PasteRoad, PendingPaste, TabId, TabState, input, quit,
+    shell_literal,
 };
 use anyhow::Result;
 use bt_layout::SeatId;

@@ -38,7 +38,8 @@ pub(crate) use windows::AfterTheWait;
 pub(crate) use windows::{
     answer_an_exit_over, broker_verdict, dirty_gate_names, dwm_dark_mode_owed, focus_leaf_index,
     lines_phrase, persisted_window_bounds, preview_source_of_recent, raise_dirty_gate_over,
-    recent_term_leaf_seed, recorded_window_placement, tear_out_rect, window_minimum_changed,
+    recent_term_leaf_seed, recorded_window_placement, seeded_tab, tear_out_rect,
+    window_minimum_changed,
 };
 // K2 (T-SPLIT-2B): the free functions moved out of `main.rs`, named at the crate root again by
 // its `use runtime::{…}` lines so that no caller changes.
@@ -88,8 +89,9 @@ pub(crate) use git::{
 #[cfg(test)]
 pub(crate) use keyboard::{
     composing_event_of, composition_outlived_its_field, composition_ruling, goto_tab_index,
-    ime_caret_source, ime_commit_bytes, ime_cursor_area_of, keyboard_owner_is_a_shell,
-    paste_card_key, preedit_caret_byte, rename_key,
+    ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_owner, keyboard_owner_is_a_shell,
+    paste_card_key, popup_takes_the_key, preedit_caret_byte, rename_key, terminal_ime_cursor_area,
+    window_ime_cursor_area,
 };
 #[cfg(test)]
 pub(crate) use math::{
@@ -111,12 +113,12 @@ pub(crate) use mouse::{
 pub(crate) use palette::recall_flash;
 #[cfg(test)]
 pub(crate) use panes::{
-    animated_pane_viewports, births_due, clamp_into_body, column_notch, end_leaves_of,
-    frame_row_of_anchor, gate_title_over, host_screen_after, land_successor, landed_source,
-    leaf_resize_plan, pages_that_move_with_their_panes, pane_fade_veil_layers, panel_opacity,
-    popup_owner, rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer,
-    rail_zone_wants_open, restated_scroll, row_arrival_seat, size_authority_for_rectangle,
-    tear_pane_into_tab,
+    aim_card_window, animated_pane_viewports, births_due, card_picture_in, clamp_into_body,
+    column_notch, end_leaves_of, frame_row_of_anchor, gate_title_over, host_screen_after,
+    land_successor, landed_source, leaf_resize_plan, pages_that_move_with_their_panes,
+    pane_fade_veil_layers, panel_opacity, popup_owner, rail_change_strands_its_popups,
+    rail_is_searching, rail_overlay_layer, rail_zone_wants_open, restated_scroll, row_arrival_seat,
+    size_authority_for_rectangle, tear_pane_into_tab,
 };
 #[cfg(test)]
 pub(crate) use peek::{
@@ -132,20 +134,21 @@ pub(crate) use preview::{
     animation_layer_key, animation_refusal_notice, animation_surface_exists, answer_one_picture,
     ask_to_open, build_preview_diff_body, build_preview_markdown_body, build_preview_table_body,
     build_preview_text_body, crumb_segments, crumb_segments_on, deliver_clipboard_picture,
-    documents_held_in, documents_held_mut_in, file_peek_answer, folded_levels, foot_revealed_label,
-    forget_a_picture, forget_standing_answers, image_clamped_pan, image_destination,
-    image_is_pannable, image_meta_sentence, image_pan_key, image_raster_cap, image_zoom_caption,
-    image_zoom_key, image_zoom_notch, image_zoom_settles, image_zoom_toggled, markdown_chip_ground,
-    markdown_empty_page_offset, markdown_prose_paragraphs, markdown_source_cell,
-    markdown_source_offset_at, owe_sharpened_rasters, page_address_hand_off, page_foot_flash,
-    page_foot_lead, page_source_file, peek_awaits, picture_errand, picture_files_of,
-    pictures_awaited_by, pictures_need_handing_over, preview_block_bar_at, preview_block_wheel,
-    preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
+    documents_held_in, documents_held_mut_in, file_peek_answer, files_a_tab_stands_on,
+    folded_levels, foot_revealed_label, forget_a_picture, forget_standing_answers,
+    image_clamped_pan, image_destination, image_is_pannable, image_meta_sentence, image_pan_key,
+    image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_notch, image_zoom_settles,
+    image_zoom_toggled, markdown_chip_ground, markdown_empty_page_offset,
+    markdown_prose_paragraphs, markdown_source_cell, markdown_source_offset_at,
+    owe_sharpened_rasters, page_address_hand_off, page_foot_flash, page_foot_lead,
+    page_source_file, peek_awaits, picture_errand, picture_files_of, pictures_awaited_by,
+    pictures_need_handing_over, preview_block_bar_at, preview_block_wheel, preview_caret_row,
+    preview_copies_on_select, preview_document_height, preview_document_key,
     preview_document_max_scroll, preview_edit_bands, preview_image_placement,
     preview_link_activation, preview_link_answers_a_press, preview_opened_label,
     preview_page_browser_hand_off, preview_page_hand_off, preview_press_opens_its_link,
     preview_rail_tip_text, preview_selection_bands, preview_tab_index_among, preview_text_box_at,
-    preview_wrap_columns, push_markdown_source_block, resolve_document_pictures,
+    preview_wrap_columns, push_markdown_source_block, resolve_document_pictures, scale_ppm,
     source_opens_as_a_page, step_preview_caret_by_row, strip_animation_tick_is_due, surface_pixels,
     surface_subject_of, surface_takes_image_zoom, surfaces_reading, switcher_rows,
     tab_trailing_targets, tick_owes_a_present, unverified_reference_handoff,

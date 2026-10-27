@@ -126,6 +126,7 @@ use bt_platform::msix::{self, PACKAGE_FILE_NAME};
 
 use crate::i18n::Text;
 use crate::startup::{Settled, SettledOnce};
+use crate::{i18n, persist, resolved_language};
 
 /// What this user's deployment database says about Folio's package.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -374,9 +375,7 @@ pub fn verb_icon(exe: &Path) -> String {
 /// process alive while the menu it drew starts Folio, so a claim taken here
 /// would be held against that Folio, which would then save nothing all run.
 pub fn serve() -> i32 {
-    crate::i18n::install(crate::door_language(
-        &crate::persist::storage_dir_as_it_stands(),
-    ));
+    crate::i18n::install(door_language(&crate::persist::storage_dir_as_it_stands()));
     let Ok(exe) = bt_platform::running_image().map(|image| image.path.clone()) else {
         // Without this there is no icon to name and no program to start. There
         // is also nowhere to report it: this process has no console and no
@@ -2155,6 +2154,19 @@ pub fn description_for(
         return Text::DescExplorerFirstPageAwaitingShell;
     }
     Text::DescExplorerMenu
+}
+
+/// **The language a process with no window speaks in, read from the settings
+/// in `home` and from nothing else** (B-EXPLORER-CLAIM, 0.4.6) — the one lookup
+/// [`say_at_the_front_door`] and `explorer_menu::serve` share.
+///
+/// Through [`persist::SettingsStore::peek_language`] and never through a store:
+/// opening one asks who writes the data directory, and the answer — the claim,
+/// or a refusal — is kept for the life of the process. Neither of these
+/// processes ever becomes the resident Folio, and the Folio launched beside or
+/// after them must find the claim free.
+pub(crate) fn door_language(home: &Path) -> i18n::Lang {
+    resolved_language(persist::SettingsStore::peek_language(home))
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 
 use crate::input::Keystroke;
 use crate::runtime::floats::float_dock_label;
+use crate::runtime::handoff::reveal_ask;
 use crate::runtime::math::answers_for;
 use crate::runtime::preview::foot_revealed_label;
 use crate::runtime::web::page_destination;
@@ -2111,7 +2112,7 @@ impl<B: Backend> Runtime<'_, B> {
         // level too far out. A failure to reach Explorer withholds the
         // confirmation rather than claiming one, which is the honest report —
         // so the confirmation waits for the lane to say Explorer took it.
-        self.hand_off(crate::reveal_ask(Path::new(&root)).when_handed_over(
+        self.hand_off(reveal_ask(Path::new(&root)).when_handed_over(
             crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Column(seat)),
         ))
     }

@@ -4,9 +4,13 @@
 use super::pointer::{Gone, OwnerGone};
 use crate::computation_lane::{Asking, ComputationId};
 use crate::input::Keystroke;
+use crate::preview_viewport::{
+    Build, GeometryCost, Layout, Realize, Reconcile, RuntimeMeasure, State, View, capture,
+};
 use crate::runtime::floats::float_dock_label;
 use crate::runtime::git::graph_key_of;
-use crate::runtime::keyboard::preedit_caret_byte;
+use crate::runtime::handoff::reveal_ask;
+use crate::runtime::keyboard::{ime_owner, preedit_caret_byte};
 use crate::runtime::math::answers_for;
 use crate::runtime::mouse::wheel_points_sideways;
 use crate::runtime::panes::animated_pane_viewports;
@@ -21,11 +25,11 @@ use crate::{
     FileMenuTarget, FilePick, FillSent, FoldedLevel, FootSaying, ForeignPane, FormulaSwitches,
     FrameTraces, HyperlinkActivation, IMAGE_PAN_KEY_SHIFT_STEP, IMAGE_PAN_KEY_STEP, IMAGE_ZOOM_MAX,
     IMAGE_ZOOM_MIN, IMAGE_ZOOM_STEP, ImageDrag, ImageGrasp, ImageZoom, ImageZoomMode, ImeOwner,
-    LeafId, LeafSeed, LinkRefusal, LocalKnown, MARKDOWN_CHIP_INSET_LOGICAL_PX,
-    MARKDOWN_CHIP_PADDING_LOGICAL_PX, MARKDOWN_CHIP_RADIUS_LOGICAL_PX, MarkdownBlockLayout,
-    MarkdownCaretBlock, MarkdownCaretPaint, MarkdownCaretSeat, MarkdownLive, MarkdownPage,
-    MarkdownPicture, MarkdownPictures, MarkdownPreedit, MarkdownProseBlock, MarkdownRaster,
-    MarkdownRasterKey, MarkdownRasterRequest, MarkdownSink, MarkdownSourceBlock,
+    IntrinsicPass, LeafId, LeafSeed, LinkRefusal, LocalKnown, MARKDOWN_CHIP_INSET_LOGICAL_PX,
+    MARKDOWN_CHIP_PADDING_LOGICAL_PX, MARKDOWN_CHIP_RADIUS_LOGICAL_PX, MarkdownBlockIntrinsic,
+    MarkdownBlockLayout, MarkdownCaretBlock, MarkdownCaretPaint, MarkdownCaretSeat, MarkdownLive,
+    MarkdownPage, MarkdownPicture, MarkdownPictures, MarkdownPreedit, MarkdownProseBlock,
+    MarkdownRaster, MarkdownRasterKey, MarkdownRasterRequest, MarkdownSink, MarkdownSourceBlock,
     MarkdownSourceBytes, MarkdownStyle, MathWorkerRequest, Motion, NO_HIGHLIGHTING, NoticeHost,
     OpenAsked, PAGE_ADDRESS_REFUSAL, PREVIEW_IMAGE_FIT_HEIGHT_FRACTION,
     PREVIEW_IMAGE_FIT_WIDTH_FRACTION, PREVIEW_IMAGE_TEXTURE_SHARE, PREVIEW_IMAGE_TEXTURE_SLACK,
@@ -43,17 +47,16 @@ use crate::{
     TabId, TabRename, TabState, TabTriggerHand, UNVERIFIED_REFERENCE_REFUSAL, VideoGlance,
     VideoPictureClick, VideoPicturePress, VideoShape, WINDOW_RESIZE_QUIET, WebHeadVerb,
     WindowRuntime, animation, attention_trace, clipboard_picture, computation_lane,
-    create_leaf_session, diagnostics, earliest_deadline, file_peek, files, files_a_tab_stands_on,
-    files_row_display_name, float, git_panel, handoff_lane, hang_watch, hex_peek, highlight,
-    home_crumb_for, i18n, ime_owner, input, lane, markdown_image_card, markdown_image_extent,
-    markdown_item_runs, markdown_prose_runs, markdown_runs, marks, note_link_sites,
-    note_math_sites, note_text_site, notice, open_local_path_ask, pane_content,
-    path_opens_as_a_page, persisted_preview_row, pins, present_diagnostics, preview,
-    preview_caret_prose, preview_edit, preview_live, preview_open_lane, preview_press,
+    create_leaf_session, diagnostics, earliest_deadline, file_peek, files, files_row_display_name,
+    float, git_panel, handoff_lane, hang_watch, hex_peek, highlight, home_crumb_for, i18n, input,
+    lane, markdown_image_card, markdown_image_extent, markdown_item_runs, markdown_prose_runs,
+    markdown_runs, marks, note_link_sites, note_math_sites, note_text_site, notice,
+    open_local_path_ask, pane_content, path_opens_as_a_page, persisted_preview_row, pins,
+    present_diagnostics, preview, preview_edit, preview_live, preview_open_lane, preview_press,
     preview_provenance, preview_select, preview_text, preview_trace, preview_viewport,
     preview_watch, preview_wrap, printable_address, profiles, push_markdown_table,
-    reference_activation, scale_ppm, scrollback_quota, seats, settings, settle_attention,
-    tab_owes_frame, table_block, text_field, toast, tooltip, video_seat, webhost, webnav,
+    reference_activation, scrollback_quota, seats, settings, settle_attention, tab_owes_frame,
+    table_block, text_field, toast, tooltip, video_seat, webhost, webnav,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
@@ -4373,7 +4376,7 @@ impl<B: Backend> Runtime<'_, B> {
         // something rather than to open it, so the foot can finally name what
         // it prints: in a folder of two hundred rows, "the directory it is in"
         // is not an answer to "where is this file".
-        self.hand_off(crate::reveal_ask(&path).when_handed_over(
+        self.hand_off(reveal_ask(&path).when_handed_over(
             crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Preview(seat)),
         ))
     }
@@ -14958,6 +14961,425 @@ impl<B: Backend> Runtime<'_, B> {
         let width = self.rail_posture().width_logical_px() * scale;
         (width * (1.0 - reveal.clamp(0.0, 1.0))).round() as i32
     }
+
+    /// Moving between image bands is also viewport work. Keep the parse, height
+    /// index and prose records; resolve only the indexed image occurrences in
+    /// reach. Retiring/entering images become estimates until visible again.
+    pub(super) fn update_markdown_picture_reach(
+        &mut self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+        document: Option<&Path>,
+        reach: PictureReach,
+    ) {
+        let previous = self
+            .preview_pane(surface)
+            .and_then(|p| p.doc_key())
+            .map_or(PictureReach::from_the_top(), |k| k.art.picture_reach);
+        let doc = self.preview_pane_mut(surface).take_document();
+        let PreviewDocument::Markdown {
+            blocks,
+            ranges,
+            maps,
+            source,
+            layout,
+            intrinsic,
+            pictures,
+            math,
+            mut wrap,
+        } = doc
+        else {
+            self.preview_pane_mut(surface).reflow_document(doc);
+            return;
+        };
+        let state = &mut Arc::make_mut(&mut wrap).viewport;
+        let selected: Vec<_> = state
+            .images
+            .iter()
+            .skip(reach.first)
+            .take(reach.last.saturating_sub(reach.first) + 1)
+            .map(|&i| blocks[i].clone())
+            .collect();
+        for band in [previous, reach] {
+            for &index in state
+                .images
+                .iter()
+                .skip(band.first)
+                .take(band.last.saturating_sub(band.first) + 1)
+            {
+                state.records[index].exact = false;
+                state.unknown.insert(index);
+            }
+        }
+        let width = wrap.frame.expect("Markdown frame").width();
+        let pictures = self.resolve_document_pictures(
+            &selected,
+            document,
+            width,
+            PictureReach {
+                first: 0,
+                last: selected.len().saturating_sub(1),
+            },
+            &pictures,
+        );
+        self.preview_pane_mut(surface)
+            .reflow_document(PreviewDocument::Markdown {
+                blocks,
+                ranges,
+                maps,
+                source,
+                layout,
+                intrinsic,
+                pictures,
+                math,
+                wrap,
+            });
+        self.ensure_markdown_viewport(surface, body, scale);
+    }
+
+    /// A caret navigation target is made visible before asking its text rows.
+    /// In particular Ctrl+End cannot be clamped to an unrealized paragraph's
+    /// estimated height. The normal body rebuild then consumes this same parse.
+    pub(super) fn prepare_markdown_caret_view(
+        &mut self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+    ) {
+        let old_key = self
+            .preview_pane(surface)
+            .and_then(|p| p.doc_key().cloned());
+        let old_scroll = self.preview_pane(surface).map_or(0.0, |p| p.scroll()[1]);
+        self.rebuild_preview_document(surface, body, scale);
+        // **The caret's own block**, which is one of the source blocks and not
+        // necessarily the first of them (2026-09-23).
+        let seat = self.preview_caret_seat_block(surface);
+        let target = self.preview_pane(surface).and_then(|pane| {
+            let PreviewDocument::Markdown {
+                source,
+                layout,
+                wrap,
+                ..
+            } = pane.doc()
+            else {
+                return None;
+            };
+            let index = source.get(seat?)?.index();
+            let placed = layout.get(index)?;
+            let padding = seats::preview_markdown_metrics(scale).padding_y;
+            let top = padding + placed.top;
+            (!wrap.viewport.records.get(index)?.exact
+                || top + placed.height <= pane.scroll()[1]
+                || top >= pane.scroll()[1] + body[3] - body[1])
+                .then_some(top)
+        });
+        if let Some(top) = target {
+            self.preview_pane_mut(surface).scroll_top_to(top);
+            self.ensure_markdown_viewport(surface, body, scale);
+        }
+        let changed = self.preview_pane(surface).is_some_and(|p| {
+            p.doc_key() != old_key.as_ref() || p.scroll()[1] != old_scroll || p.md_prose().is_none()
+        });
+        if changed {
+            let blocks = self.preview_prose_geometry(surface, scale, None);
+            let prose = preview_caret_prose(&blocks, self.preview_caret_seat_block(surface));
+            self.preview_pane_mut(surface).keep_prose(prose, blocks);
+        }
+    }
+
+    pub(super) fn rebuild_markdown_geometry(
+        &mut self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+        old: &PreviewDocument,
+        build: Build<'_>,
+    ) -> (
+        Layout,
+        Vec<MarkdownBlockIntrinsic>,
+        Arc<preview_wrap::Document>,
+        GeometryCost,
+    ) {
+        // The clock runs only when the trace is open, `DocumentBuild`'s rule.
+        let clock = preview_trace::global().map(|_| Instant::now());
+        let metrics = seats::preview_markdown_metrics(scale);
+        let (left, right) = preview::markdown_measure_box(body, metrics);
+        let frame =
+            preview_wrap::Frame::new(right - left, scale, self.app.gpu.font_environment_epoch());
+        let scroll = self.preview_pane(surface).map_or(0.0, |p| p.scroll()[1]);
+        let mut view = View {
+            scroll,
+            height: body[3] - body[1],
+            padding: metrics.padding_y,
+            end: false,
+        };
+        let mut old_view = view;
+        if let PreviewDocument::Markdown { layout, wrap, .. } = old {
+            old_view.padding = wrap
+                .frame
+                .map_or(metrics.padding_y, |f| f.metrics().padding_y);
+            if wrap.viewport.height > 0.0 {
+                old_view.height = wrap.viewport.height;
+            }
+            view.end = scroll > 0.0
+                && scroll >= layout.extent() + 2.0 * old_view.padding - old_view.height - 0.5;
+        }
+        let mut measure = RuntimeMeasure {
+            gpu: &mut self.app.gpu,
+            renderer: &mut self.window.renderer,
+        };
+        let mut anchor = build
+            .edits
+            .and_then(|_| capture(old, old_view, &mut measure));
+        let mut pass = self
+            .window
+            .markdown_wraps
+            .prepare(old, build.edits.is_some(), frame);
+        let (mut state, mut layout, mut intrinsic) = State::reconcile(Reconcile {
+            old,
+            blocks: build.blocks,
+            ranges: build.bytes.ranges,
+            content: build.bytes.content,
+            source: build.source,
+            frame,
+            edits: build.edits,
+            art_changed: build.art_changed,
+        });
+        let reconciled = clock.map(|clock| clock.elapsed());
+        let clock = clock.map(|_| Instant::now());
+        if let Some(anchor) = &mut anchor
+            && let PreviewDocument::Markdown { ranges, .. } = old
+        {
+            state.remap_anchor(
+                anchor,
+                ranges,
+                build.bytes.ranges,
+                build.edits.unwrap_or_default(),
+            );
+            anchor.remap_text(
+                build.source,
+                build.blocks,
+                build.bytes.ranges,
+                build.maps,
+                build.edits.unwrap_or_default(),
+            );
+        }
+        let palette = bt_render::chrome_palette();
+        let realized = Realize {
+            blocks: build.blocks,
+            source: build.source,
+            art: build.art,
+            layout: &mut layout,
+            intrinsic: &mut intrinsic,
+            state: &mut state,
+            pass: &mut pass,
+            bytes: build.bytes,
+            intrinsic_pass: IntrinsicPass {
+                metrics,
+                math: build.art.math,
+                palette: &palette,
+                scale_ppm: scale_ppm(scale),
+                math_generation: self.window.preview_math.generation,
+            },
+            cache: &mut self.window.markdown_intrinsics,
+        }
+        .ensure(&mut view, anchor, &mut measure);
+        let cost = GeometryCost {
+            realized,
+            reconcile: reconciled.unwrap_or_default(),
+            realize: clock.map(|clock| clock.elapsed()).unwrap_or_default(),
+        };
+        let pane = self.preview_pane_mut(surface);
+        pane.scroll_top_to(view.scroll);
+        let mut wrap = pass.document();
+        Arc::make_mut(&mut wrap).viewport = state;
+        (layout, intrinsic, wrap, cost)
+    }
+
+    /// Called even on parse-key equality: scroll and viewport-height changes do
+    /// not change a Markdown parse key. This path never visits the full parse.
+    pub(super) fn ensure_markdown_viewport(
+        &mut self,
+        surface: PreviewSurface,
+        body: [f32; 4],
+        scale: f32,
+    ) {
+        let metrics = seats::preview_markdown_metrics(scale);
+        let (mut view, pending) = {
+            let Some(pane) = self.preview_pane(surface) else {
+                return;
+            };
+            let PreviewDocument::Markdown { layout, wrap, .. } = pane.doc() else {
+                return;
+            };
+            let view = View {
+                scroll: pane.scroll()[1],
+                height: body[3] - body[1],
+                padding: metrics.padding_y,
+                end: pane.scroll()[1] > 0.0
+                    && pane.scroll()[1]
+                        >= layout.extent() + 2.0 * metrics.padding_y - (body[3] - body[1]) - 0.5,
+            };
+            (view, wrap.viewport.pending(layout, view))
+        };
+        if !pending {
+            self.preview_pane_mut(surface)
+                .fit_viewport_height(view.height);
+            return;
+        }
+        let old = self.preview_pane_mut(surface).take_document();
+        let PreviewDocument::Markdown {
+            blocks,
+            ranges,
+            maps,
+            source,
+            mut layout,
+            mut intrinsic,
+            math,
+            pictures,
+            mut wrap,
+        } = old
+        else {
+            unreachable!();
+        };
+        let content = self
+            .preview_buffer_on(surface)
+            .and_then(|b| b.content().cloned())
+            .unwrap_or_default();
+        let mut pass = self.window.markdown_wraps.resume(&wrap);
+        let palette = bt_render::chrome_palette();
+        let state = &mut Arc::make_mut(&mut wrap).viewport;
+        Realize {
+            blocks: &blocks,
+            source: &source,
+            art: PageArt {
+                math: &math,
+                pictures: &pictures,
+                theme: bt_render::current_theme(),
+            },
+            layout: &mut layout,
+            intrinsic: &mut intrinsic,
+            state,
+            pass: &mut pass,
+            bytes: MarkdownSourceBytes {
+                content: &content,
+                ranges: &ranges,
+            },
+            intrinsic_pass: IntrinsicPass {
+                metrics,
+                math: &math,
+                palette: &palette,
+                scale_ppm: scale_ppm(scale),
+                math_generation: self.window.preview_math.generation,
+            },
+            cache: &mut self.window.markdown_intrinsics,
+        }
+        .ensure(
+            &mut view,
+            None,
+            &mut RuntimeMeasure {
+                gpu: &mut self.app.gpu,
+                renderer: &mut self.window.renderer,
+            },
+        );
+        let pane = self.preview_pane_mut(surface);
+        pane.scroll_top_to(view.scroll);
+        pane.reflow_document(PreviewDocument::Markdown {
+            blocks,
+            ranges,
+            maps,
+            source,
+            layout,
+            intrinsic,
+            math,
+            pictures,
+            wrap,
+        });
+    }
+}
+
+/// A scale factor as something a key can be compared by.
+///
+/// **One definition**, for [`math_em_milli`]'s reason: the scale arrives as a
+/// float, two roundings of one float are two different keys, and a `HashMap`
+/// cannot be asked about a float at all.
+pub(crate) fn scale_ppm(scale: f32) -> u32 {
+    (scale * 1_000_000.0).round().max(0.0) as u32
+}
+
+/// **The caret's own prose rows, out of every prose source block's**
+/// (2026-09-23) — the one [`preview_live::ProseRows`] the caret, the
+/// composition, the IME's candidate box and the arrow keys read.
+///
+/// `seat` is the block the caret stands in (`None` for a gap or no caret):
+/// the rows of that block when it is drawn as prose, or the gap's composition
+/// line — measured only while a composition stands in a gap — when it is
+/// `None`. Nothing for a caret in a monospace block, which has no rows here.
+pub(crate) fn preview_caret_prose(
+    blocks: &[preview_live::ProseRows],
+    seat: Option<usize>,
+) -> Option<preview_live::ProseRows> {
+    blocks.iter().find(|rows| rows.index == seat).cloned()
+}
+
+/// **Every file one tab's preview surfaces stand on** (user ruling 2026-08-29).
+///
+/// [`Runtime::watched_preview_files`] is the fold of this over the window's
+/// tabs, and the split is not tidiness: what a tab stands on is answerable from
+/// a tab, and a free function is the only shape of that answer a test can put a
+/// real pool and a real pane in front of without a GPU. The reported defect was
+/// a claim about exactly this set — that a pooled document no pane was on was
+/// missing from it — so the set is the thing that has to be checkable.
+///
+/// Three kinds of thing answer, and they answer with the same thing, a path:
+///
+/// * **the pool**, which is the superset of what the panes show and is the half
+///   the ruling added. §7.1.3's buffers belong to the tab and are not re-read
+///   when a pane comes back to one, which is what makes an unsaved edit survive
+///   a switch — and is also why a buffer that was not watched while it was off
+///   the glass would never learn its file had moved;
+/// * **a page's file**, which the pool cannot answer for: a page's buffer is
+///   keyed by its URL, so the pane is the only thing that knows which file the
+///   engine is standing on;
+/// * **the pictures inside a markdown page** (§7.1.3k ④), which belong to the
+///   document rather than to a pane and are therefore read off the parsed page;
+/// * **the picture a pane is itself showing** (user report 2026-08-31). A
+///   picture is not a pool buffer — it does not come through the head worker, it
+///   comes down the decode lane, and `create_tab_state` says so in one line —
+///   so the pool arm above cannot answer for it and this set used to leave it
+///   out. That omission *was* the report: a PNG open in a preview pane,
+///   replaced on disk by a `mv` in another shell, went on showing the old
+///   picture and the old meta line, because no folder was ever subscribed to on
+///   its behalf. A picture is a file a seat is standing on exactly as a document
+///   is, and this arm says nothing about pictures in particular: it is
+///   [`PreviewPane::image`], which is the picture lane whatever the extension —
+///   a `.png` and a `.webm` arrive on it on identical terms.
+///
+/// A git-backed document and a page on a *server* have no file behind them and
+/// contribute nothing.
+pub(crate) fn files_a_tab_stands_on(tab: &TabState) -> BTreeSet<PathBuf> {
+    let mut wanted = BTreeSet::new();
+    for buffer in tab.preview_pool.buffers() {
+        if let Some(path) = buffer.source().file_path() {
+            wanted.insert(path.to_path_buf());
+        }
+    }
+    for (_, pane) in tab.preview_panes.iter() {
+        if let PreviewDocument::Markdown { pictures, .. } = pane.doc() {
+            wanted.extend(pictures.files.iter().cloned());
+        }
+        if let Some(picture) = pane.image() {
+            wanted.insert(picture.path.clone());
+        }
+        let Some(source) = pane.source() else {
+            continue;
+        };
+        if let Some(named) = source.web_url().and_then(webnav::LocalFileUrl::parse) {
+            wanted.insert(named.into_path_and_tail().0);
+        }
+    }
+    wanted
 }
 
 /// **Where in the strip the tab a preview surface belongs to is standing** —

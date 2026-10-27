@@ -3,20 +3,26 @@
 
 use crate::PtyTarget;
 use crate::TextStep;
+use crate::ime_outbound::{
+    DrawFacts, area_line, cancel_line, caret_line, changed, draw_line, draw_reason, enabled,
+    input_line, line, owner_line, ruling_line,
+};
 use crate::input::Keystroke;
 use crate::runtime::floats::file_menu_powers;
 use crate::window_seam::prelude::*;
 use crate::{
     Composing, ComposingAfter, ComposingEvent, CompositionOrigin, CompositionRuling,
     ImeCaretSource, ImeOwner, KeyboardOwner, LeafId, NewWindowPlan, NoticeHost, PasteAnswer,
-    PasteCardKey, PreviewSurface, RenameClipboard, RenameExit, RenameVerdict, Runtime, Step,
-    TabRename, TextFieldSeat, UserInputKind, git_graph, hang_watch, ime_outbound, ime_owner,
-    ime_report, input, keyhint, marks, menubar, popup_takes_the_key, profiles, quit, restore,
-    settings, shortcuts, terminal_ime_cursor_area, text_field, toast, write_pty_input,
+    PasteCardKey, Popup, PopupsUp, PreviewSurface, RenameClipboard, RenameExit, RenameVerdict,
+    Runtime, Step, TabRename, TextFieldSeat, UserInputKind, git_graph, hang_watch, ime_outbound,
+    ime_report, input, keyhint, marks, menubar, profiles, quit, restore, settings, shortcuts,
+    text_field, toast, write_pty_input,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
-use bt_render::{FrameSource, FrameTrigger, ImeCursorArea, Preedit};
+use bt_render::{
+    FrameSource, FrameTrigger, ImeCursorArea, Preedit, SeatViewport, frame_is_alternate_screen,
+};
 use bt_viewport::ViewportFrame;
 use std::time::Instant;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -2756,6 +2762,194 @@ impl<B: Backend> Runtime<'_, B> {
             None => self.mint_a_blank_page_and_open_its_address(),
         }
     }
+
+    pub(super) fn trace_ime_owner(&self, keyboard: KeyboardOwner) {
+        if !enabled() {
+            return;
+        }
+        let owner = ime_owner(keyboard);
+        let cause = match owner {
+            ImeOwner::Modal if self.app.quit.as_ref().is_some_and(quit::Quit::is_asking) => {
+                "quit_dialog"
+            }
+            ImeOwner::Modal if self.window.dirty_gate.is_open() => "dirty_gate",
+            ImeOwner::Modal if self.window.first_run.is_open() => "first_run",
+            ImeOwner::Modal if self.paste_card_seat().is_some() => "paste_card",
+            ImeOwner::Modal if self.update_card_is_up() => "update_card",
+            ImeOwner::Modal if self.window.settings.is_open() => "settings",
+            ImeOwner::Modal => match popup_takes_the_key(self.popups_up()) {
+                Some(Popup::Profile) => "profile_popup",
+                Some(Popup::Root) => "root_popup",
+                Some(Popup::File) => "file_popup",
+                Some(Popup::Pane) => "pane_popup",
+                Some(Popup::GraphFilter) => "graph_filter_popup",
+                Some(Popup::Preview) => "preview_popup",
+                Some(Popup::GitMenu) => "git_popup",
+                Some(Popup::TermMenu) => "terminal_popup",
+                Some(Popup::Tab) => "tab_popup",
+                Some(Popup::Palette) => "palette_popup",
+                // Under every popup, as its rung is (0.4.5 ticket 57).
+                None if self.restore_card_is_up() => "restore_card",
+                None => "modal",
+            },
+            ImeOwner::Rename => "rename",
+            ImeOwner::GraphSearch => "graph_search",
+            ImeOwner::GitPrompt => "git_prompt",
+            ImeOwner::Preview => "preview",
+            ImeOwner::Search => "search",
+            ImeOwner::Palette => "palette",
+            ImeOwner::FilesTree => "files_tree",
+            ImeOwner::Shell => "shell",
+        };
+        let last = self.window.ime_outbound.owner.replace(Some((owner, cause)));
+        if last.map(|v| v.0) != Some(owner) {
+            self.trace_ime_line(|| owner_line(last, owner, cause));
+        }
+    }
+
+    pub(super) fn trace_ime_line(&self, message: impl FnOnce() -> String) {
+        line(|| {
+            format!(
+                "window={} {}",
+                u64::from(self.window.window.id()),
+                message()
+            )
+        });
+    }
+
+    pub(super) fn trace_ime_input(&self, event: &Ime) {
+        if !enabled() {
+            return;
+        }
+        if matches!(event, Ime::Commit(_) | Ime::Disabled)
+            || matches!(event, Ime::Preedit(text, _) if text.is_empty())
+        {
+            self.window.ime_outbound.draw.set(None);
+        }
+        self.trace_ime_line(|| input_line(event));
+    }
+
+    pub(super) fn trace_ime_ruling(
+        &self,
+        event: &Ime,
+        here: &CompositionOrigin,
+        ruling: CompositionRuling,
+    ) {
+        self.trace_ime_line(|| ruling_line(event, &self.window.composing_in, here, ruling));
+    }
+
+    pub(crate) fn trace_ime_cancel(
+        &self,
+        owner: ImeOwner,
+        reason: &'static str,
+        result: Option<bool>,
+    ) {
+        if !enabled() {
+            return;
+        }
+        if result.is_none() {
+            self.window.ime_outbound.draw.set(None);
+        }
+        self.trace_ime_line(|| cancel_line(owner, reason, result));
+    }
+
+    pub(super) fn trace_ime_area(&self, area: ImeCursorArea, action: &'static str) {
+        self.trace_ime_line(|| area_line(area, action));
+    }
+
+    pub(super) fn trace_ime_frame(&self, frame: &ViewportFrame, written: bool) {
+        // Called only on the enabled path, before the unchanged-frame early return.
+        let Some(preedit) = self.window.preedit.as_ref().filter(|p| !p.text.is_empty()) else {
+            self.window.ime_outbound.draw.set(None);
+            return;
+        };
+        // The focused pane's frame, at that pane's own metrics (ticket 37).
+        let Some(metrics) = self.focused().map(|leaf| leaf.metrics) else {
+            return;
+        };
+        let area = terminal_ime_cursor_area(&self.window.renderer, metrics, frame);
+        let reason = draw_reason(
+            ime_owner(self.keyboard_owner()) == ImeOwner::Shell,
+            frame.cursor_in_view,
+            area.width != 0 && area.height != 0,
+            written,
+        );
+        if changed(&self.window.ime_outbound.draw, Some(reason)) {
+            self.trace_ime_line(|| {
+                draw_line(
+                    reason,
+                    DrawFacts {
+                        bytes: preedit.text.len(),
+                        visible: frame.cursor.visible,
+                        row: frame.cursor.row,
+                        column: frame.cursor.column,
+                        alt: frame_is_alternate_screen(frame),
+                        area,
+                    },
+                )
+            });
+        }
+    }
+
+    pub(crate) fn destroy_ime_caret(&mut self, reason: &'static str) {
+        self.trace_ime_line(|| caret_line("destroy", reason, None));
+        self.window.ime_system_caret.destroy();
+    }
+}
+
+/// The ladder, as a function of who holds the keyboard.
+#[must_use]
+pub(crate) fn ime_owner(owner: KeyboardOwner) -> ImeOwner {
+    if owner.rename {
+        ImeOwner::Rename
+    } else if owner.git_prompt {
+        ImeOwner::GitPrompt
+    } else if owner.palette {
+        ImeOwner::Palette
+    } else if owner.menu_or_dialog {
+        ImeOwner::Modal
+    } else if owner.files_tree {
+        ImeOwner::FilesTree
+    } else if owner.graph_search {
+        ImeOwner::GraphSearch
+    } else if owner.preview {
+        ImeOwner::Preview
+    } else if owner.search {
+        ImeOwner::Search
+    } else {
+        ImeOwner::Shell
+    }
+}
+
+/// **The popup a keystroke belongs to instead of the shell**, if one is up.
+///
+/// The key ladder's question and [`KeyboardOwner::menu_or_dialog`]'s question
+/// are the same question, so they are one function — the shape
+/// [`keyboard_owner_is_a_shell`] and [`ime_owner`] already share, for the same
+/// stated reason: the day the two disagree is the day a caret blinks in a shell
+/// that is not receiving the characters, or stands frozen over one that is.
+pub(crate) fn popup_takes_the_key(popups: PopupsUp) -> Option<Popup> {
+    popups.any()
+}
+
+pub(crate) fn window_ime_cursor_area(seat: SeatViewport, area: ImeCursorArea) -> ImeCursorArea {
+    ImeCursorArea {
+        x: area.x.saturating_add_unsigned(seat.x),
+        y: area.y.saturating_add_unsigned(seat.y),
+        ..area
+    }
+}
+
+/// The terminal caret the input method is told, in the window's pixels: the composed frame's cursor
+/// cell measured by the glass at the focused pane's own `metrics` (ticket 37), carried from the
+/// glass's seat to the window's axis. The one measurement both the IME offer and its `IME_DRAW`
+/// trace make.
+pub(crate) fn terminal_ime_cursor_area<G: Glass>(
+    glass: &G,
+    metrics: bt_render::CellMetrics,
+    frame: &ViewportFrame,
+) -> ImeCursorArea {
+    window_ime_cursor_area(glass.seat_viewport(), glass.ime_cursor_area(metrics, frame))
 }
 
 /// **The only keys the card answers** — a standard two-button dialog (owner's ruling

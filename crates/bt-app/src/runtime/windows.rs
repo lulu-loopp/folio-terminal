@@ -17,16 +17,17 @@ use crate::{
     install_theme_class_background, marks, mouse_trace, new_window_runtime, notify,
     opening_window_attributes, plan_launch, presentation_physical_size, preview, profiles, quit,
     rail_state_for, render_sidebar_mode, render_tab_layout, restore, restore_row_seed,
-    restore_window_placement, revive_plan, scrollback_quota, seats, seed, seeded_tab,
-    session_sidebar_mode, session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at,
-    startup_window_rect, tabs_a_close_loses, toast, where_a_save_stands, window_surface_target,
+    restore_window_placement, revive_plan, scrollback_quota, seats, seed, session_sidebar_mode,
+    session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
+    tabs_a_close_loses, toast, webnav, where_a_save_stands, window_surface_target,
 };
 use crate::{LeafView, TextScale, owner_door, revived_profile};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{SeatId, SizePolicy, WorkAreaHint};
 use bt_persist::{
-    SessionSidebarModeV1, SessionTabLayoutV1, SessionWindowV1, TabV1, WindowBoundsV1, WindowStateV1,
+    LayoutNodeV1, LeafNodeV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionWindowV1, TabV1,
+    TermLeafV1, WindowBoundsV1, WindowStateV1,
 };
 use bt_platform::admission::{admitted, doors};
 use bt_render::{FrameSource, FrameTrigger, WindowRenderer};
@@ -2532,6 +2533,99 @@ impl<B: Backend> Runtime<'_, B> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+}
+
+/// **[`restore_row_seed`] run backwards: the tab one vault seed reopens as**
+/// (multiwindow slice D).
+///
+/// A window drawn out of Recent has to become a *window full of tabs*, and the
+/// only door that builds a window's tabs is the one the session file goes
+/// through — `revive_plan`, which every other route into a revived tab already
+/// shares by this module's own rule ("if this had its own revive path the three
+/// would drift, and the one that drifts is always the one you use least"). So
+/// rather than teaching that door a second vocabulary, a seed is written out in
+/// the vocabulary it already reads.
+///
+/// **Not pinned, and standing on nothing it was not given.** A reopened tab is
+/// coming back because you asked for it now, which is not the same as promising
+/// to bring it back forever — [`Runtime::reopen_recent`]'s own ruling, kept here
+/// because this is the same gesture. A files column is born at the width a fresh
+/// column gets and with nothing expanded, for that function's reason: the vault
+/// stores a place and not a layout.
+pub(crate) fn seeded_tab(seed: &seed::Seed) -> TabV1 {
+    let (root, preview) = match seed {
+        seed::Seed::Term {
+            profile_id,
+            cwd,
+            manual_name,
+        } => (
+            LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                profile_id: profile_id.clone(),
+                cwd: cwd.clone(),
+                manual_name: manual_name.clone(),
+                card_skip: 0,
+                last_command: String::new(),
+            })),
+            None,
+        ),
+        seed::Seed::Files { root } => (
+            LayoutNodeV1::Leaf(LeafNodeV1::Files(bt_persist::FilesLeafV1 {
+                root: root.clone(),
+                open: Vec::new(),
+                sel: None,
+                width: bt_layout::FILES_W.floor_px().max(0) as u32,
+                view: bt_persist::FilesViewV1::Files,
+                remotes_open: false,
+            })),
+            None,
+        ),
+        seed::Seed::Preview { path, source } => (
+            LayoutNodeV1::Leaf(LeafNodeV1::Preview(bt_persist::PreviewLeafV1 {
+                pinned: false,
+            })),
+            Some(bt_persist::TabPreviewV1 {
+                panes: vec![bt_persist::PreviewPaneV1 {
+                    leaf: "leaf-0".to_owned(),
+                    cur: Some(path.clone()),
+                    cur_source: *source,
+                    graph: None,
+                }],
+                pool: vec![bt_persist::PreviewPoolEntryV1 {
+                    path: path.clone(),
+                    name: match source {
+                        // A file is listed by its last segment, as it always was.
+                        // A page has no title here — the vault stores a place and
+                        // never a name — so it is listed by its site, through the
+                        // one splitter every page row asks (§7.7 ③).
+                        bt_persist::PreviewSourceV1::File => profiles::cwd_leaf(path).to_owned(),
+                        bt_persist::PreviewSourceV1::Url => webnav::site_label(path),
+                    },
+                    source: *source,
+                }],
+            }),
+        ),
+        // **A window inside a window is a shape nothing constructs** — the vault
+        // records a window's *tabs*, and a tab is never a window. It is written
+        // as the tab its first child is rather than refused, so that a document
+        // that somehow held one is legible instead of losing a tab silently.
+        seed::Seed::Window { .. } => {
+            return seed.first_tab().map_or_else(
+                || TabV1 {
+                    root: LayoutNodeV1::Leaf(LeafNodeV1::Unknown),
+                    pinned: false,
+                    focused_leaf: "leaf-0".to_owned(),
+                    preview: None,
+                },
+                seeded_tab,
+            );
+        }
+    };
+    TabV1 {
+        root,
+        pinned: false,
+        focused_leaf: "leaf-0".to_owned(),
+        preview,
     }
 }
 
