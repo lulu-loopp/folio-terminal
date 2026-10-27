@@ -547,9 +547,15 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    `UNFOLLOWED-EDGES.tsv` and the census annotations.
    **Two hand-kept tables name items by path and are read too** (added at batch 22, after it found both):
    `crates/bt-app/src/window_waits.tsv` (its `# effects` rows, whose keys bt-source's request-door walk looks items
-   up by; a row whose key matches no item is dropped without a word, so a moved `worker-door-body` loses its stop
-   and the walk enters the worker's body) and `docs/plans/window-thread-bare-sites.tsv`. The judgement greps both
-   for every moved item's root path, and the generated commit re-keys the rows it finds.
+   up by) and `docs/plans/window-thread-bare-sites.tsv`. bt-source's loader (`read_registry` in
+   `crates/bt-source/tests/request_doors.rs`) refuses nothing in `# effects`: a row whose key matches no item is
+   skipped there without a word, though its `# vocabulary` and `# entrances` sections refuse an unknown key, so a
+   moved `worker-door-body` loses its stop and the walk enters the worker's body. bt-app's own `window_waits`
+   tests do go red on such a row (an `# effects` row for a function that holds no listed effect, and the moved
+   body's effects observed with no row), but in the other crate's gate, after the generators have run; plan row
+   76 makes the loader refuse too. The judgement greps both tables for every moved item's root path. **The
+   `window_waits.tsv` re-key goes in the move commit** (ruled 2026-10-26, at batch 22's review), as the §7
+   re-paths do, so every commit is green; the generated commit re-keys the bare-sites rows it finds.
 
 2. **The 395 items whose callers are mostly other `main.rs` items follow their
    callers.** Regenerate the map after each batch. An item whose callers have moved

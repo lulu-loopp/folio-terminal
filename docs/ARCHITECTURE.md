@@ -844,10 +844,12 @@ and the headless one alike.
   only shrinks): `Runtime::create` (the device, the first window, its renderer and compositor) and
   `Runtime::open_window` (a further window), which build what the parameter is then instantiated
   with; the `winit` adapter (`impl ApplicationHandler<AppEvent> for FolioApp`), which hands each
-  event to the generic doors (`FolioApp::on_window_event`, `settle_quit` with the loop door);
-  `rebuild_every_native_surface`, the native backend's `Backend::rebuild_every_surface`; the
+  event to the generic doors (`FolioApp::on_window_event`, `settle_quit` with the loop door); the
   compile-time check that `Runtime` is its two layers; and `main`, the process entry, which builds
   the native `FolioApp` the event loop runs (listed since the guard reads expression position).
+  `rebuild_every_native_surface`, the native backend's `Backend::rebuild_every_surface`, is written
+  for `Native` too, but since K2 batch 22 (T-SPLIT-2B) it lives in `window_seam.rs`, beside the
+  backend it serves, and its row left the list: the guard skips the seam module.
 * **The startup order is not native; it is `crate::startup`'s** (T-STARTUP-ORDER-SHARED,
   2026-10-17). The steps a launch takes before its first window has a tab are written once, in two
   generic functions every start goes through: `startup::begin`, which `main` calls before there is
