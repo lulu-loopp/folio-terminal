@@ -275,6 +275,23 @@ web-time = "=1.1.0"
 wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12", "wgsl", "noop"] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
+# **Tests are optimised once, and measured to need it** (T-CI-LOGIC-TEST-COMPILE, 2026-10-26,
+# the CI `logic` job's test command, cold, `-j 4`, on the development machine; the report is
+# `tickets-049/reports/T-CI-LOGIC-TEST-COMPILE.md` in the trace folder). At `1`: 777 s to
+# compile, of which 394 s are the workspace's own crates, and 417 s to run, all green.
+#
+# * `opt-level = 0` everywhere compiles in 314 s and runs in 1434 s, and two tests go red:
+#   the whole `bt-math` test binary dies of a stack overflow (`STATUS_STACK_OVERFLOW`), and
+#   `lifecycle_matrix`'s settle over a formula history takes 98.9 ms against its 50 ms
+#   ceiling (11.9 ms here).
+# * `opt-level = 0` for the workspace with `[profile.test.package."*"] opt-level = 1` for
+#   dependencies compiles in 469 s (122 s of it ours) and runs in 745 s; bt-math survives,
+#   the settle still takes 91.7 ms, and the lane contract's clipboard order breaks in four
+#   runs of six (it holds at `1` in twenty of twenty: a claim kept by speed, a defect of its
+#   own).
+#
+# So the compile the lower setting saves is spent again, and more, running the tests, and
+# the budgets it turns red are not ours to loosen. Re-measure before changing this line.
 [profile.test]
 opt-level = 1
 

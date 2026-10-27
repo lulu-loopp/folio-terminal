@@ -1181,7 +1181,7 @@ mod macos_handoff {
         claimed: &dyn Fn(&NSURL) -> bool,
         open: &dyn Fn(&NSURL) -> bool,
     ) -> Result<(), HandOffRefusal> {
-        let file = url
+        let file: Option<std::path::PathBuf> = url
             .absoluteString()
             .and_then(|spelling| crate::path_from_file_url(&spelling.to_string()).ok());
         if let Some(file) = file {
@@ -2372,7 +2372,7 @@ mod windows_handoff {
         } else {
             pathext
         };
-        program_in_directories(name, &directories, &pathext, &|candidate| {
+        program_in_directories(name, &directories, &pathext, &|candidate: &Path| {
             candidate.is_file()
         })
     }

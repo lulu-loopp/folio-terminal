@@ -438,7 +438,7 @@ mod installed_disk {
         fn entries(&self, directory: &Path) -> std::io::Result<Vec<(OsString, bool)>> {
             let mut entries = Vec::new();
             for entry in std::fs::read_dir(directory)? {
-                let entry = entry?;
+                let entry: std::fs::DirEntry = entry?;
                 let is_directory = entry.file_type()?.is_dir();
                 entries.push((entry.file_name(), is_directory));
             }

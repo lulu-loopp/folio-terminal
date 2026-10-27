@@ -1916,15 +1916,20 @@ pub fn leave_process(code: i32) -> ! {
 /// it is on the main thread and an application exists, and says exactly this
 /// when it is not, because a panic hook runs on whichever thread panicked and a
 /// refused launch runs before there is any application at all. A controlled
-/// stop's lost configuration change (T-QUIT-DOCUMENTS) is said here too.
+/// stop's lost configuration change (T-QUIT-DOCUMENTS) is not said here: it asks
+/// [`a_box_would_be_seen`] first, which answers no on this arm, and says its
+/// notice on `bt-app`'s queued `stderr` road (T-STOP-NOTICE-BOX-QUERY-MACOS).
 #[cfg(not(any(windows, target_os = "macos")))]
 #[expect(
     clippy::print_stderr,
-    reason = "the last-resort fault report, written where it is said: a panic's box comes after the \
-              panic road's fence, where a queued line would leave with the process; for the other \
-              caller that reaches it in a resident run, bt-app's SystemBox::say (the stop's lost \
-              configuration change), the synchronous write is a known limit, to be routed through \
-              stderr_line by plan row 66 (T-STOP-NOTICE-BOX-QUERY-MACOS)"
+    reason = "the last-resort fault report, written where it is said, for its two callers: \
+              bt-app's announce_panic (the panic hook, after the panic road's fence, where a \
+              queued line would leave with the process; and FolioApp::fail's frame-shape stop on \
+              the window thread, where the synchronous write beside the queue is a known limit, \
+              T-STOP-NOTICE-BOX-QUERY-MACOS report D8) and say_at_the_front_door, before the \
+              resident run has a queue; the stop's lost configuration change asks \
+              a_box_would_be_seen first and says the unseen case through stderr_line \
+              (T-STOP-NOTICE-BOX-QUERY-MACOS)"
 )]
 pub fn message_box(title: &str, text: &str) {
     eprintln!("{title}");
@@ -1937,6 +1942,27 @@ pub fn message_box(title: &str, text: &str) {
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn standalone_alert(title: &str, text: &str) {
     message_box(title, text);
+}
+
+/// **The box a reader would see** (T-STOP-NOTICE-BOX-QUERY-MACOS) — none on this arm, which
+/// has no box to raise: the type has no value, so [`a_box_would_be_seen`] can only answer no.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub enum SeenBox {}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+impl SeenBox {
+    /// Never runs: there is no `SeenBox` to call it on.
+    pub fn say(self, _title: &str, _text: &str) {
+        match self {}
+    }
+}
+
+/// **Would a box raised now be seen?** No: this arm has no box, only [`message_box`]'s two
+/// synchronous lines, so a caller that can say its text on a queued road says it there.
+#[cfg(not(any(windows, target_os = "macos")))]
+#[must_use]
+pub fn a_box_would_be_seen() -> Option<SeenBox> {
+    None
 }
 
 /// **The same claim, made by calling the doors** — the behavioural twin of

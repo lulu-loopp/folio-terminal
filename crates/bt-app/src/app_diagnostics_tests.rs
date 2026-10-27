@@ -212,6 +212,69 @@ impl NativeSay for HeardNatively {
     }
 }
 
+/// The system's box, as a test is the platform: it answers whether a box would be seen as it
+/// was told to, and keeps every box raised and every `stderr` line handed over. No box opens.
+struct ToldBoxes {
+    seen: bool,
+    raised: Vec<String>,
+    lines: Vec<String>,
+}
+
+impl ToldBoxes {
+    fn answering(seen: bool) -> Self {
+        Self {
+            seen,
+            raised: Vec::new(),
+            lines: Vec::new(),
+        }
+    }
+}
+
+impl SystemBoxes for ToldBoxes {
+    type Seen = ();
+
+    fn would_be_seen(&mut self) -> Option<()> {
+        self.seen.then_some(())
+    }
+
+    fn raise(&mut self, (): (), text: &str) {
+        self.raised.push(text.to_owned());
+    }
+
+    fn line(&mut self, text: String) {
+        self.lines.push(text);
+    }
+}
+
+/// RED (T-STOP-NOTICE-BOX-QUERY-MACOS, 0.4.9 plan row 66) — **a stop's lost-change notice that
+/// no box would show is one queued `stderr` line, and no box is called**: the two lines the
+/// box's synchronous fallback wrote (the name, the notice), handed to the run's `stderr` road
+/// as one entry.
+///
+/// MUTATION: the unseen arm drops the line (`None => {}`) — no line is handed over. (Raising
+/// the box on `None` cannot be written: there is no `Seen` value to raise it with.)
+#[test]
+fn a_stop_notice_no_box_would_show_is_a_queued_stderr_line() {
+    let notice = i18n::stopped_changes_lost(&[persist::SETTINGS_FILE_NAME]);
+    let mut boxes = ToldBoxes::answering(false);
+    say_in_a_box_or_on_stderr(&mut boxes, &notice);
+    assert_eq!(boxes.raised, Vec::<String>::new(), "no box is called");
+    assert_eq!(boxes.lines, [format!("{APP_NAME}\n{notice}")]);
+}
+
+/// RED (T-STOP-NOTICE-BOX-QUERY-MACOS) — **a stop's notice a box would show is raised in the box,
+/// and nothing goes to `stderr`.**
+///
+/// MUTATION: hand the notice to the `stderr` road whatever the answer — no box is raised.
+#[test]
+fn a_stop_notice_a_box_would_show_is_raised_and_not_queued() {
+    let notice = i18n::stopped_changes_lost(&[persist::SETTINGS_FILE_NAME]);
+    let mut boxes = ToldBoxes::answering(true);
+    say_in_a_box_or_on_stderr(&mut boxes, &notice);
+    assert_eq!(boxes.raised, [notice]);
+    assert_eq!(boxes.lines, Vec::<String>::new(), "nothing is queued");
+}
+
 /// A folder for one test, and a settings store in it owing a change of the terminal face
 /// whose write is on a worker that never answers — the stop comes before it does.
 fn a_stop_with_an_owed_settings_change(

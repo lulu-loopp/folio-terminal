@@ -1547,7 +1547,7 @@ fn compose_with_prepared_and_retry(
         }
         return ComposedBirth::as_written(arguments);
     }
-    let Some(script) = prepare().filter(|path| path.is_file()) else {
+    let Some(script) = prepare().filter(|path: &PathBuf| path.is_file()) else {
         return ComposedBirth::as_written(arguments);
     };
     match composed_powershell_arguments(program, arguments, &script, parse_answer) {
@@ -4143,9 +4143,12 @@ impl ProbeEnvironment {
                 let pathext = self
                     .var_os("PATHEXT")
                     .map_or_else(String::new, |value| value.to_string_lossy().into_owned());
-                bt_platform::program_in_directories(name, &directories, &pathext, &|candidate| {
-                    candidate.is_file()
-                })
+                bt_platform::program_in_directories(
+                    name,
+                    &directories,
+                    &pathext,
+                    &|candidate: &Path| candidate.is_file(),
+                )
             }
             Self::Inherited if cfg!(windows) => bt_platform::program_on_path(name),
             Self::Inherited => Some(name.to_path_buf()),
@@ -4709,7 +4712,10 @@ pub fn integration_line() -> String {
 pub fn powershell_script_for_birth() -> Option<PathBuf> {
     let durable = persist::storage_dir().join(SCRIPT_DIRECTORY);
     if crate::update_trial::defer(crate::update_trial::Writer::PowerShellScript) {
-        if let Some(path) = TRIAL_POWERSHELL_SCRIPT.get().filter(|path| path.is_file()) {
+        if let Some(path) = TRIAL_POWERSHELL_SCRIPT
+            .get()
+            .filter(|path: &&PathBuf| path.is_file())
+        {
             return Some(path.clone());
         }
         let prepared = POWERSHELL_SCRIPT_NOTICE.said(
@@ -4725,7 +4731,7 @@ pub fn powershell_script_for_birth() -> Option<PathBuf> {
     }
     if let Some(path) = DURABLE_POWERSHELL_SCRIPT
         .get()
-        .filter(|path| path.is_file())
+        .filter(|path: &&PathBuf| path.is_file())
     {
         return Some(path.clone());
     }
