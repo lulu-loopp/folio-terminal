@@ -225,8 +225,12 @@ const TRANSITIONS: [(&str, Drive); 11] = [
     ("retire", |life| life.retire().is_some()),
 ];
 
-/// The listed edges: (transition, from, to, answered). Every other pair leaves the phase as it was
-/// and answers nothing.
+/// The transitions that bring a payload into the pane. From a phase with a shell, a debug build
+/// refuses them rather than drop the payload; a release build leaves the phase as it was.
+const ENTRIES: [&str; 4] = ["begin_birth", "land a shell", "land none", "fall_back"];
+
+/// The listed edges: (transition, from, to, answered). Every other pair but the refused
+/// [`ENTRIES`] leaves the phase as it was and answers nothing.
 const EDGES: [(&str, Name, Name, bool); 20] = [
     ("begin_birth", Name::Shellless, Name::Deciding, false),
     ("begin_birth", Name::Released, Name::Deciding, false),
@@ -281,8 +285,9 @@ fn expected_reads(name: Name) -> [bool; 6] {
 }
 
 /// RED (O-4b; the contract's (c)2) — **every life transition is one method and no other**: over
-/// the nine phases, each transition takes exactly its listed edges and leaves every other phase as
-/// it was, answering nothing; each phase answers its reads; the owed size of a resize lands on the
+/// the nine phases, each transition takes exactly its listed edges, an entry transition is refused
+/// (a debug build's panic) from a phase with a shell, and every other pair leaves the phase as it
+/// was, answering nothing; each phase answers its reads; the owed size of a resize lands on the
 /// pending landing of Bearing or FallingBack and nowhere else. Then the reaper, over a background
 /// tab: an exit after the grace is Exited with its shell kept; a birth death whose reader still
 /// holds bytes is ExitDraining and keeps its tab, and once drained (it had output) is Kept; a pane
@@ -291,7 +296,8 @@ fn expected_reads(name: Name) -> [bool; 6] {
 /// MUTATION: let `keep_birth_death` enter Kept from any phase — the table names it from Live;
 /// skip the reaper's drained hold (drop `if !pty.output_is_drained() { .. }`) — the draining pane
 /// is Kept on the first pass; drop `Phase::Kept` from `holds_its_tab` — the Kept row's reads
-/// differ.
+/// differ; drop the `debug_assert!` from `begin_birth`, `land` or `fall_back` — its call from
+/// Live is not refused.
 #[test]
 fn every_life_transition_is_one_method_and_no_other() {
     test_support::on_the_window_thread();
@@ -303,6 +309,12 @@ fn every_life_transition_is_one_method_and_no_other() {
         );
         for (transition, drive) in TRANSITIONS {
             let mut life = life_in(from);
+            if ENTRIES.contains(&transition) && !matches!(from, Name::Shellless | Name::Released) {
+                let refused =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drive(&mut life)));
+                assert!(refused.is_err(), "`{transition}` from {from:?} is refused");
+                continue;
+            }
             let answer = drive(&mut life);
             let (to, answers) = EDGES
                 .iter()

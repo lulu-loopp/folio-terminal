@@ -1833,7 +1833,12 @@ fn a_life_transition_performs_no_effect() {
         .iter()
         .filter(|edge| pure(&edge.caller))
         // `matches!` is the standard library's, and expands to a `match` with no call in it.
-        .filter(|edge| !(edge.candidates.is_empty() && edge.what == "matches"))
+        // `debug_assert!` is the standard library's too: the entry transitions' refusal of a wrong
+        // phase (review F2), a panic in a debug build only and compiled out of a release one.
+        .filter(|edge| {
+            !(edge.candidates.is_empty()
+                && matches!(edge.what.as_str(), "matches" | "debug_assert"))
+        })
         .map(|edge| format!("{} -> `{}`", edge.caller, edge.what))
         .collect();
     assert!(

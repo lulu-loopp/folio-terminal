@@ -8095,9 +8095,12 @@ impl ShellLife {
         )
     }
 
-    /// **Shellless → InBirth**: the pane is to be born ([`create_leaf_session`], [`await_shell`]),
-    /// or a birth whose shell has not answered goes back to it ([`land_shell_birth`]).
+    /// **Shellless or Released → InBirth**: the pane is to be born ([`create_leaf_session`],
+    /// [`await_shell`]), or a birth whose shell has not answered goes back to it
+    /// ([`land_shell_birth`]). A debug build refuses any other phase, whose caller would drop the
+    /// birth.
     fn begin_birth(&mut self, birth: PaneBirth) {
+        debug_assert!(self.has_no_shell());
         if self.has_no_shell() {
             self.phase = Phase::InBirth(birth);
         }
@@ -8125,8 +8128,10 @@ impl ShellLife {
     }
 
     /// **Shellless or Released → Live**: a shell was born and lands ([`finish_leaf_birth`]). With
-    /// none, the phase stays.
+    /// none, the phase stays. A debug build refuses any other phase, whose caller would drop the
+    /// shell unretired.
     fn land(&mut self, pty: Option<PtySession>) {
+        debug_assert!(self.has_no_shell());
         if let Some(pty) = pty
             && self.has_no_shell()
         {
@@ -8185,8 +8190,10 @@ impl ShellLife {
     }
 
     /// **Shellless or Released → FallingBack**: a last-resort shell was asked for in place of a
-    /// silent birth death, or one that has not answered goes back.
+    /// silent birth death, or one that has not answered goes back. A debug build refuses any other
+    /// phase, whose caller would drop the last-resort birth.
     fn fall_back(&mut self, fallback: BirthDeathFallback) {
+        debug_assert!(self.has_no_shell());
         if self.has_no_shell() {
             self.phase = Phase::FallingBack(fallback);
         }
