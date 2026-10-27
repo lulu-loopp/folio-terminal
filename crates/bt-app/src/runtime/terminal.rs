@@ -690,7 +690,7 @@ impl<B: Backend> Runtime<'_, B> {
         // **A Restart shell is born in its tab** (coordinator's ruling 2026-10-09): what a launch
         // carried into the tab, it is born with again.
         let seed = born_in_tab(
-            restart_seed(&leaf.profile, leaf.seed_place_for_a_new_shell()),
+            restart_seed(&leaf.launch.profile, leaf.seed_place_for_a_new_shell()),
             self.window.tabs[self.window.active_tab]
                 .carried_environment
                 .as_ref(),
@@ -823,7 +823,7 @@ impl<B: Backend> Runtime<'_, B> {
         let seat = self.window.tabs[active].focused_leaf;
         let insertion = shell_literal::paths_text(
             &[path.to_path_buf()],
-            &leaf.paste_recipient,
+            &leaf.launch.paste_recipient,
             input_line_needs_a_space_first(&leaf.session),
         );
         if let Some(notice) = shell_literal::refusal_notice(&insertion.refused) {

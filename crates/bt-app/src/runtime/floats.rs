@@ -1709,7 +1709,7 @@ impl<B: Backend> Runtime<'_, B> {
         let current = self
             .sessions
             .get(&seat)
-            .and_then(|leaf| profiles::position_of(&leaf.profile));
+            .and_then(|leaf| profiles::position_of(&leaf.launch.profile));
         let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);

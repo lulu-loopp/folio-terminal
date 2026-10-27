@@ -272,6 +272,7 @@ fn a_second_multi_line_paste_replaces_the_pending_one() {
         tab.sessions
             .get_mut(seat)
             .unwrap()
+            .launch
             .paste_recipient
             .encoder
             .grammar = shell_literal::ShellGrammar::Cmd;

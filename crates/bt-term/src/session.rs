@@ -12368,7 +12368,7 @@ impl DualPlaneSession {
     /// Tell this session where its shell was *put down* — the second rung of §7.1.4's ladder,
     /// which only the spawn knows (`profiles::spawn_place`, HOME already folded into it).
     ///
-    /// The app pushes it once, at spawn, for the same reason `LeafSession::spawn_place` exists at
+    /// The app pushes it once, at spawn, for the same reason `LaunchFacts::spawn_place` exists at
     /// all: it is an answer nobody downstream can re-derive, and copying the ladder into a second
     /// reader is how a tab comes to have two opinions about where its own shell is standing.
     /// Tell this session which spelling of an absolute path its shell prints — T-3

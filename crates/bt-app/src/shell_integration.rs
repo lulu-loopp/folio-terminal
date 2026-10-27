@@ -12493,7 +12493,7 @@ mod tests {
         let (pty, hygiene) = shell.into_session();
         let mut leaf = crate::test_support::leaf_saying("");
         leaf.session.set_spawn_directory(Some(start.clone()));
-        leaf.spawn_place = Some(start.clone());
+        leaf.launch.spawn_place = Some(start.clone());
         leaf.pty = Some(pty);
         let door = crate::pane_folder::SystemProcessFolders;
 

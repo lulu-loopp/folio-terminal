@@ -2657,34 +2657,38 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         process_folder: crate::pane_folder::ProcessFolderMemo::default(),
         // No ConPTY, so no reader thread, so nothing to wake — see the field.
         wake: None,
-        // A shell-less fixture is not a shell of some other kind: these
-        // panes exist to carry scrollback, and the default profile is what
-        // the pane they stand in for would have been started as.
-        profile: profiles::fallback_profile_id().to_owned(),
-        paste_recipient: profiles::paste_recipient(
-            profiles::fallback_profile(),
-            &profiles::ShellProgram::Native,
-            &bt_pty::SystemShellEnvironment,
-        ),
-        // And the door that profile is served through, which is the one the
-        // spawn would have read for it.
-        integration: profiles::row_of(profiles::fallback_profile_id())
-            .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
-        // And no program either, which is the honest shape of the same
-        // fact: nothing was started, so nothing can have announced itself.
-        program: None,
-        program_kind: profiles::ShellProgram::Native,
-        // Nor a place: a fixture was never put down anywhere.
-        spawn_place: None,
-        born_named: false,
+        launch: crate::LaunchFacts {
+            // A shell-less fixture is not a shell of some other kind: these
+            // panes exist to carry scrollback, and the default profile is what
+            // the pane they stand in for would have been started as.
+            profile: profiles::fallback_profile_id().to_owned(),
+            paste_recipient: profiles::paste_recipient(
+                profiles::fallback_profile(),
+                &profiles::ShellProgram::Native,
+                &bt_pty::SystemShellEnvironment,
+            ),
+            // And the door that profile is served through, which is the one the
+            // spawn would have read for it.
+            integration: profiles::row_of(profiles::fallback_profile_id())
+                .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
+            // And no program either, which is the honest shape of the same
+            // fact: nothing was started, so nothing can have announced itself.
+            program: None,
+            program_kind: profiles::ShellProgram::Native,
+            // Nor a place: a fixture was never put down anywhere.
+            spawn_place: None,
+            born_named: false,
+        },
         session,
-        attention: attention::AttentionLedger::default(),
+        attention: crate::AttentionAccount {
+            ledger: attention::AttentionLedger::default(),
+            bell_reported: false,
+            clock: attention_wire::WaitClock::default(),
+            // A fixture has no shell, so nothing was ever told a capability — and an empty
+            // string is one no arriving message can match, which is the honest shape of that.
+            capability: String::new(),
+        },
         attention_ended: false,
-        bell_reported: false,
-        attention_clock: attention_wire::WaitClock::default(),
-        // A fixture has no shell, so nothing was ever told a capability — and an empty string
-        // is one no arriving message can match, which is the honest shape of that.
-        attention_capability: String::new(),
         view: TermView {
             projection,
             // A fixture is a new view, so it is at 100 % (ticket 37), at the default face measured
@@ -3343,7 +3347,7 @@ pub(crate) fn focused_frame(tab: &mut TabState) -> ViewportFrame {
 /// A shell-less leaf whose paste grammar is `grammar`, after the program printed `printed`.
 pub(crate) fn paste_leaf(grammar: shell_literal::ShellGrammar, printed: &[u8]) -> LeafSession {
     let mut leaf = leaf_saying("");
-    leaf.paste_recipient.encoder.grammar = grammar;
+    leaf.launch.paste_recipient.encoder.grammar = grammar;
     leaf.session
         .feed(printed)
         .expect("feed the program's own bytes");
@@ -3381,7 +3385,7 @@ pub(crate) fn paste_text_into_on(
     ask: bool,
     host: bt_platform::HostPlatform,
 ) -> StagedPaste {
-    let recipient = tab.sessions[&target.seat].paste_recipient.clone();
+    let recipient = tab.sessions[&target.seat].launch.paste_recipient.clone();
     let prepared = prepare_clipboard_paste(
         bt_platform::ClipboardPayload::Text(text.to_owned()),
         &recipient,

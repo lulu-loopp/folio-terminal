@@ -51,8 +51,8 @@ use crate::attention_map::{self, TURN_END};
 
 /// **The clock beside the ledger, and its ten minutes, are the ledger's** (`bt-workbench`, D-57).
 ///
-/// Re-imported here so the pane's `attention_clock` keeps its one name: this module arms nothing
-/// and spends nothing itself — `deliver_attention` and `settle_attention` do.
+/// Re-imported here so the pane's clock (`AttentionAccount::clock`) keeps its one name: this module
+/// arms nothing and spends nothing itself — `deliver_attention` and `settle_attention` do.
 pub(crate) use crate::attention::expiry::WaitClock;
 
 /// **Diagnostic only.** `<window>.<tab>.<seat>`, so a person in a pane can see which one they are

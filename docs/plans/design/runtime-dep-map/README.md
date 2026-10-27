@@ -566,11 +566,16 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      stays (the same rule); `path_opens_as_a_page`, whose root callers are it and `preview_page_hand_off`, waits with
      it. Batch 21 moved `source_opens_as_a_page` and `preview_page_hand_off` and left both held; the moved
      `preview_page_hand_off` imports `path_opens_as_a_page` from the root.
-   - `settle_attention` (held at batch 19's judgement, and still at batch 21) — its `called_from` home is
-     `runtime/preview.rs`, but it writes `LeafSession.attention_clock`, whose other writer, `deliver_attention`,
-     stays at the root (the census rule above); `LeafSession.attention`, owner attention, is also written at the root
-     by `deliver_attention` and `FolioApp::transfer_tab`. `tab_queue_leader`, whose root callers are all in
-     `settle_attention`, waits with it.
+   - `settle_attention` (held at batch 19's judgement, and still at batch 21; re-cited at O-4a, 2026-10-27) — its
+     `called_from` home is `runtime/preview.rs`. It was held because it wrote `LeafSession.attention_clock`, whose
+     other writer, `deliver_attention`, stays at the root (the census rule above). O-4a nested the clock, the bell's
+     edge and the capability with the ledger in `LeafSession.attention: AttentionAccount`, so what it writes is that
+     one fact (owner attention, written at the root and in `runtime/attention.rs`) and `LeafSession.session`
+     (`clear_attention`; ten writer modules) — two census owners, which the owner-column rule above holds for a
+     ruling. That ruling is D15 (2026-10-27, the O-4 judgement): it is released under batch 23's shared-fact rule,
+     to `runtime/attention.rs` by clause (a), the page that writes the account, which makes `runtime/attention.rs`
+     the session's eleventh writer module; the release line is written when O-4b lands.
+     `tab_queue_leader`, whose root callers are all in `settle_attention`, waits with it.
    - `animated_pane_viewports` (held at batch 18, behind `preview_image_placement`) — tied `runtime/panes.rs` /
      `runtime/preview.rs` once its root caller moved; it is the pane-motion viewports, and the owner column gives
      the move of panes to `runtime/panes.rs` (clause (b)); batch 20 moved it there, imported by `runtime/preview.rs`.
@@ -796,6 +801,17 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
     | `attention` | 22 | none: 14 write sites in 7 items |
 
     Files opened: `main.rs` and `runtime/attention.rs`.
+  - **Done** 2026-10-27 (O-4a, M5 `532293578` and M7 `b0728e128`): M5's seven launch
+    facts (the six above and `program_kind`) are `LaunchFacts`', nested as
+    `LeafSession.launch` and declared in the census (ten structs), with their rows
+    re-keyed and their one writer each unchanged. M7's ledger, bell edge, clock and
+    capability are `LeafSession.attention: AttentionAccount`, one fact whose
+    writers are the seven items its four parts had (`attention_ended` stays on
+    the leaf); `attention_clock`'s pair and `bell_reported`'s row leave
+    `doors.tsv` with their facts. Typing `attention_ledger_deadline`'s closure
+    removes the `?.attention_clock` unknown and its unfollowed `deadline` edge.
+    `LeafSession` goes from 37 to 28 fields; the unattributed-read header stays
+    at 182. M6 is O-4b.
 - **O-5 (M8).** What remains goes into `ShellSession`: `session` (177 sites),
   `pty` (20), `grid` (17), `conpty_grid` (10), the revisions, the owed input, `wake`
   and `incarnation`.

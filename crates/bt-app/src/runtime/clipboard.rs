@@ -827,7 +827,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = self.window.tabs[active].sessions.get(&target.seat) else {
             return Ok(());
         };
-        let recipient = leaf.paste_recipient.clone();
+        let recipient = leaf.launch.paste_recipient.clone();
         let leading_space = input_line_needs_a_space_first(&leaf.session);
         let mut prepared = prepare_clipboard_paste(payload, &recipient, leading_space);
         // **The picture cannot travel down [`Self::deliver_paste`], because there is
@@ -896,7 +896,7 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(false);
         };
         let leaf = &self.window.tabs[index].sessions[&target.seat];
-        let recipient = leaf.paste_recipient.clone();
+        let recipient = leaf.launch.paste_recipient.clone();
         let leading_space = input_line_needs_a_space_first(&leaf.session);
         let prepared = prepare_dropped_paste(paths, &recipient, leading_space);
         self.deliver_paste(target, prepared, context)
@@ -1172,7 +1172,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn paste_card_layout(&mut self) -> Option<restore::PasteCardLayout> {
         let tab = self.window.tabs.get(self.window.active_tab)?;
         let (seat, pending) = pending_paste_in(tab)?;
-        let shell = profile_banner_name(&tab.sessions.get(&seat)?.profile);
+        let shell = profile_banner_name(&tab.sessions.get(&seat)?.launch.profile);
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.scale_factor() as f32;
@@ -1523,7 +1523,7 @@ pub(crate) fn stage_paste(
     let Some(leaf) = tab.sessions.get(&target.seat) else {
         return StagedPaste::Send(text);
     };
-    let mark = line_continuation_mark(leaf.paste_recipient.encoder.grammar);
+    let mark = line_continuation_mark(leaf.launch.paste_recipient.encoder.grammar);
     match paste_road(&text, PasteFacts::of(leaf, clipboard_text, ask, host)) {
         PasteRoad::AsTyped => StagedPaste::Send(text),
         PasteRoad::InputLine => StagedPaste::InputLine(powershell_input_line(&text)),

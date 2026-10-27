@@ -1668,7 +1668,7 @@ fn a_reopened_recent_row_stands_in_its_folder(profile_id: &str) {
         "{profile_id}: the program is started in the entry's folder"
     );
     assert_eq!(
-        leaf.spawn_place.as_deref(),
+        leaf.launch.spawn_place.as_deref(),
         Some(folder.as_path()),
         "{profile_id}: the pane records the folder it was started in"
     );

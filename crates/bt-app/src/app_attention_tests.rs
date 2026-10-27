@@ -78,7 +78,8 @@ fn a_waits_ten_minutes_are_armed_on_arrival_forgotten_on_its_clear_and_spent_whe
         .sessions
         .get_mut(&seat)
         .expect("the fixture's seat holds a shell")
-        .attention_capability
+        .attention
+        .capability
         .clone_from(&capability);
     let installed =
         attention_map::installed_rows(attention_map::ROWS, attention_map::CLAUDE_CODE, |_| true);
@@ -138,7 +139,7 @@ fn a_waits_ten_minutes_are_armed_on_arrival_forgotten_on_its_clear_and_spent_whe
         start + WAIT_TTL - Duration::from_secs(1),
     );
     assert_ne!(
-        tabs[0].sessions[&seat].attention.state(),
+        tabs[0].sessions[&seat].attention.ledger.state(),
         attention::State::Idle,
         "a second before the ten minutes are up, the pane is still asking"
     );
@@ -149,7 +150,7 @@ fn a_waits_ten_minutes_are_armed_on_arrival_forgotten_on_its_clear_and_spent_whe
         "a clock that ran out is spent, not repeated"
     );
     assert_eq!(
-        tabs[0].sessions[&seat].attention.state(),
+        tabs[0].sessions[&seat].attention.ledger.state(),
         attention::State::Idle,
         "and the wait it stood for is over"
     );
@@ -179,7 +180,7 @@ fn a_window_of_two_asking_panes() -> (Vec<TabState>, attention::Places) {
     for tab in &tabs {
         for (seat, leaf) in tab.leaves() {
             assert_ne!(
-                leaf.attention.state(),
+                leaf.attention.ledger.state(),
                 attention::State::Idle,
                 "the fixture's own precondition: {seat:?} holds a request"
             );
@@ -271,7 +272,7 @@ fn every_road_that_ends_a_pane_emits_leaf_gone_once() {
         "(iii) the tab in flight is not ending"
     );
     assert_ne!(
-        tabs[1].sessions[&moved].attention.state(),
+        tabs[1].sessions[&moved].attention.ledger.state(),
         attention::State::Idle,
         "(iii) and still holds its request"
     );

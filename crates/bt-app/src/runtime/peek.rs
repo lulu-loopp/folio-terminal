@@ -269,7 +269,7 @@ impl<B: Backend> Runtime<'_, B> {
                     // This leaf's own shell, off the session that is running in
                     // it — the same map every other per-seat fact in this frame
                     // comes from.
-                    profile_mark: session.map(|leaf| profiles::identity_mark(&leaf.profile)),
+                    profile_mark: session.map(|leaf| profiles::identity_mark(&leaf.launch.profile)),
                     // The short name, and C28's own two lengths are why. A pane
                     // head has a whole bar and answers "where is this" with the
                     // place entire; this popup is a 210px thumbnail whose names
