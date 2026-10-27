@@ -306,9 +306,9 @@ pub(crate) struct Road {
     /// no home folder to find it from.
     pub(crate) agents: Option<PathBuf>,
     pub(crate) limits: Limits,
-    /// **The clock the trial's deadline is read on** — its `began_ms`, the
-    /// watch's turns and pauses, `decide`'s `now_ms` — [`WallClock`] in the
-    /// product.
+    /// **The clock the trial's deadline is read on** — every `began_ms`
+    /// (a launch's, a retrial's, an adopted trial's), the watch's turns and pauses,
+    /// `decide`'s `now_ms` — [`WallClock`] in the product.
     pub(crate) trial_clock: Arc<dyn TrialClock>,
     /// **This process's starter** (U-37, H.3): its parent, by pid and an
     /// earlier start instant — an ordinary start that handed itself over is no
@@ -2080,6 +2080,7 @@ impl<'a> Txn<'a> {
             excluded: &excluded,
             handed_back: road.handed_back,
             data: &road.data,
+            clock: &*road.trial_clock,
         };
         match crate::update_apply::before_deciding(&what, &mut end) {
             BeforeDeciding::Decide => Ok(Pre::Decide),

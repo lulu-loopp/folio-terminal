@@ -893,8 +893,9 @@ line counts only in a change that also changes the scan.
 
 2026-10-27 (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK): the trial's deadline on an update lock
 holder's road is read on the road's own clock, `update_apply::TrialClock` (`Road::trial_clock`
-on both platforms) — the trial's `began_ms`, each turn of `watch_trial`, `decide`'s `now_ms`
-— and the watch pauses through it; the product's is `WallClock` (the wall clock and the
+on both platforms) — every `began_ms` the road records (a launch's, a retrial's, an adopted
+trial's in `adopting`, a reserved last trial's `TrialPlanned`), each turn of `watch_trial`,
+`decide`'s `now_ms` — and the watch pauses through it; the product's is `WallClock` (the wall clock and the
 worker's wait door). It is a per-instance seam like the save budget above: a test that
 proves the watch ended at the trial's end, not at its deadline, hands its road a
 `CountedClock`, which moves only by the pauses it is asked for, ends the trial inside the

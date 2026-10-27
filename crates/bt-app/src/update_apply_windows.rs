@@ -564,9 +564,10 @@ pub(crate) struct Road {
     /// How the installed copy was installed, derived now.
     pub(crate) channel: Option<Channel>,
     pub(crate) limits: Limits,
-    /// **The clock the trial's deadline is read on** — its `began_ms`, the
-    /// watch's turns and pauses, `decide`'s `now_ms` — [`WallClock`] in the
-    /// product.
+    /// **The clock the trial's deadline is read on** — every `began_ms`
+    /// (a launch's, a retrial's, an adopted trial's, a reserved last
+    /// trial's), the watch's turns and pauses, `decide`'s `now_ms` —
+    /// [`WallClock`] in the product.
     pub(crate) trial_clock: Arc<dyn TrialClock>,
     /// This process, by its pid and start time: what the window's mark names
     /// when this process takes it (`update_apply::OWNER_FILE`).
@@ -713,6 +714,7 @@ impl<W: World> Leave for WindowsLeave<'_, W> {
             worker,
             &self.road.home,
             actor,
+            &*self.road.trial_clock,
             &mut |line| self.world.say(line),
         )? {
             crate::update_apply::Reserved::Trial(txn, nonce) => (txn, nonce),
@@ -1880,6 +1882,7 @@ impl<'a> Txn<'a> {
             excluded: &excluded,
             handed_back: road.handed_back,
             data: &road.data,
+            clock: &*road.trial_clock,
         };
         match crate::update_apply::before_deciding(&what, &mut end) {
             BeforeDeciding::Decide => Ok(Pre::Decide),

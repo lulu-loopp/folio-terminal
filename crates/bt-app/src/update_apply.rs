@@ -869,6 +869,7 @@ pub(crate) fn reserve_last_trial(
     worker: &WorkerCtx,
     home: &Home,
     actor: Actor,
+    clock: &dyn TrialClock,
     say: &mut dyn FnMut(&str),
 ) -> Result<Reserved, String> {
     let _lock = match install_txn::try_hold(&home.lock(), Hold::Exclusive) {
@@ -892,7 +893,7 @@ pub(crate) fn reserve_last_trial(
         actor,
         &Event::TrialPlanned {
             nonce,
-            began_ms: now_ms(),
+            began_ms: clock.now_ms(),
         },
         say,
     )?;
@@ -1095,8 +1096,10 @@ pub(crate) enum Watched {
 
 /// **The clock a trial's deadline is read on, and the pause between two
 /// looks at the trial**: every reading of the trial's deadline on a lock
-/// holder's road — its `began_ms` at the launch, the watch's turn, `decide`'s
-/// `now_ms` — and the watch's pause, so one road never mixes two clocks.
+/// holder's road — every `began_ms` it records (a launch's, a retrial's, an
+/// adopted trial's in [`adopting`], a reserved last trial's `TrialPlanned` in
+/// [`reserve_last_trial`]), the watch's turn, `decide`'s `now_ms` — and the
+/// watch's pause, so one road never mixes two clocks.
 /// [`WallClock`] in the product; a test hands a clock that moves only by the
 /// pauses it is asked for, and counts them (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK).
 pub(crate) trait TrialClock: Send + Sync {
@@ -1584,10 +1587,15 @@ pub(crate) fn note_unkept_after_trial_decision(
 /// **The record of a running trial the journal did not know** (U-37): over
 /// `Moving`, `TrialBegan`; over `Stuck`, `RetrialBegan` — with the nonce its
 /// own receipt carries, so that receipt then answers for it, the process its
-/// receipt names exactly (H.1 R3), and `began_ms` now (the record's instant;
-/// its receipt is already here).
-pub(crate) fn adopting(over_stuck: bool, receipt: &Receipt, process: TrialProcess) -> Event {
-    let (nonce, began_ms) = (receipt.nonce, now_ms());
+/// receipt names exactly (H.1 R3), and `began_ms` now on the road's `clock`
+/// (the record's instant; its receipt is already here).
+pub(crate) fn adopting(
+    over_stuck: bool,
+    receipt: &Receipt,
+    process: TrialProcess,
+    clock: &dyn TrialClock,
+) -> Event {
+    let (nonce, began_ms) = (receipt.nonce, clock.now_ms());
     if over_stuck {
         Event::RetrialBegan {
             nonce,
@@ -1672,6 +1680,8 @@ pub(crate) struct Before<'a> {
     pub(crate) excluded: &'a [Running],
     pub(crate) handed_back: Option<HandedBack>,
     pub(crate) data: &'a Path,
+    /// The road's trial clock, which an adopted trial's `began_ms` is read on.
+    pub(crate) clock: &'a dyn TrialClock,
 }
 
 /// **H.3's order**, both platforms: (1) adopt a running trial its receipt names
@@ -1694,6 +1704,7 @@ pub(crate) fn before_deciding(
         excluded,
         handed_back,
         data,
+        clock,
     } = *what;
     // The handed-back trial is never excluded, even when it is this recovery's
     // own starter (the watchdog's hand-back): it is ended here, or it is a
@@ -1731,7 +1742,7 @@ pub(crate) fn before_deciding(
     let unlistable = match found {
         Survey::Adoptable { process, receipt } => {
             return BeforeDeciding::Adopt {
-                event: adopting(over_stuck, &receipt, process),
+                event: adopting(over_stuck, &receipt, process, clock),
                 successor: Running {
                     pid: process.pid,
                     started: process.started,
@@ -3417,7 +3428,7 @@ mod beyond_tests {
             install_txn::durable_write(&home.journal(), &bytes).unwrap();
             let at = home.clone();
             let reserved = on_a_worker(move |worker| {
-                reserve_last_trial(worker, &at, Actor::Applier, &mut |_| {})
+                reserve_last_trial(worker, &at, Actor::Applier, &WallClock, &mut |_| {})
             });
             assert!(
                 matches!(reserved, Ok(Reserved::StoodAside(_))),

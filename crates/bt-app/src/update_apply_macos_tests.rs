@@ -1934,7 +1934,10 @@ fn a_failed_health_swaps_back() {
 /// be reaped, inside the first pause the watch takes with `Trial` durable; the
 /// road's trial clock ([`CountedClock`]) moves only by the pauses, so "at
 /// once" is counted: the watch ends at its next look, with no pause after the
-/// death (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK).
+/// death (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK). A pause taken before `Trial`
+/// is recorded — the launched trial not yet in the process list — waits until
+/// the product's own [`crate::update_apply::launched_trial`] finds it, so no
+/// turn before the record is a spin that could run the clock to its deadline.
 ///
 /// MUTATION: in `trial`, treat the recorded process as alive whatever
 /// `still_running` answers (the watch pauses its way to the deadline).
@@ -1951,11 +1954,18 @@ fn a_dead_trial_rolls_back_at_once() {
         Ok(())
     }));
     let ended_at: Arc<Mutex<Option<usize>>> = Arc::default();
+    let unrecorded = Arc::new(AtomicUsize::new(0));
     let clock = {
-        let (children, journal, ended_at) = (
+        let (children, journal, ended_at, unrecorded) = (
             children.clone(),
             install.home.journal(),
             Arc::clone(&ended_at),
+            Arc::clone(&unrecorded),
+        );
+        let (launched, txn, program) = (
+            Arc::clone(&world.launched),
+            install.txn,
+            install.installed.join(EXE),
         );
         Arc::new(CountedClock::new(move |pause| {
             let trial = std::fs::read(&journal)
@@ -1963,13 +1973,24 @@ fn a_dead_trial_rolls_back_at_once() {
                 .and_then(|bytes| Journal::parse(&bytes).ok())
                 .is_some_and(|journal| journal.body.phase.kind() == PhaseKind::Trial);
             let mut ended_at = ended_at.lock().unwrap();
-            if trial && ended_at.is_none() {
-                for pid in children.started.lock().unwrap().clone() {
-                    children.end(pid);
-                    assert!(children.ended(pid).is_some(), "the trial {pid} is reaped");
-                }
-                *ended_at = Some(pause);
+            if ended_at.is_some() {
+                return;
             }
+            if !trial {
+                // Not yet recorded: the launched trial is not in the process
+                // list yet. Wait for the event the next turn records it on.
+                unrecorded.fetch_add(1, Ordering::SeqCst);
+                let nonce = trial_nonce(&launched.lock().unwrap()[0]);
+                crate::lane::wait_until("the launched trial in the process list", || {
+                    crate::update_apply::launched_trial(txn, nonce, &program, None).is_some()
+                });
+                return;
+            }
+            for pid in children.started.lock().unwrap().clone() {
+                children.end(pid);
+                assert!(children.ended(pid).is_some(), "the trial {pid} is reaped");
+            }
+            *ended_at = Some(pause);
         }))
     };
     let mut road = install.road(limits(5_000, 20_000));
@@ -1983,7 +2004,9 @@ fn a_dead_trial_rolls_back_at_once() {
     assert_eq!(
         clock.pauses(),
         ended_at,
-        "rolled back at the first look after the death, not at the deadline: {:?}",
+        "rolled back at the first look after the death, not at the deadline \
+         ({} pauses before `Trial` was recorded): {:?}",
+        unrecorded.load(Ordering::SeqCst),
         world.said
     );
     assert!(said(&world, "ended without a receipt"));
