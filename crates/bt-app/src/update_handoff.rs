@@ -523,7 +523,7 @@ impl Leaving {
     /// live applier that has it opens the window, and nothing is started
     /// here; otherwise `program`, the installed build (this process's own
     /// executable), is started with what the header names. The wait for the
-    /// applier is read on the wall clock ([`Leaving::leave_on`]).
+    /// applier is read on the monotonic clock ([`Leaving::leave_on`]).
     pub(crate) fn leave(
         self,
         me: Running,
