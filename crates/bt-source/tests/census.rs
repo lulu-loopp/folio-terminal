@@ -50,10 +50,10 @@ const FIXTURE_STRUCTS: [&str; 4] = ["App", "WindowRuntime", "TabState", "LeafSes
 /// pane's launch, `LaunchFacts`, nested beside it (ticket O-4a, M5). The
 /// contract's M0 also names `ShellSession`; it is declared here only when M8's
 /// rename gives it a declaration, because the census refuses a struct the
-/// package does not declare (`CensusFailure::NoSuchStruct`). M6's `ShellLife`
-/// and M7's `AttentionAccount` are not declared: each nest is the fact
-/// (`LeafSession.life`, `LeafSession.attention`), as the contract's §3.3 counts
-/// them.
+/// package does not declare (`CensusFailure::NoSuchStruct`). M7's
+/// `AttentionAccount` is not declared: its nest, `LeafSession.attention`, is the
+/// fact, as the contract's §3.3 counts it; M6's `ShellLife` (ticket O-4b) will
+/// not be declared either, for the same reason.
 const STRUCTS: [&str; 10] = [
     "App",
     "WindowRuntime",

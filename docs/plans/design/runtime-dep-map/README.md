@@ -571,9 +571,10 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      other writer, `deliver_attention`, stays at the root (the census rule above). O-4a nested the clock, the bell's
      edge and the capability with the ledger in `LeafSession.attention: AttentionAccount`, so what it writes is that
      one fact (owner attention, written at the root and in `runtime/attention.rs`) and `LeafSession.session`
-     (`clear_attention`; ten writer modules). Ruled 2026-10-27 (the O-4 judgement's D15): it is released under batch
-     23's shared-fact rule, to `runtime/attention.rs` by clause (a), the page that writes the account, which makes
-     `runtime/attention.rs` the session's eleventh writer module; the release line is written when O-4b lands.
+     (`clear_attention`; ten writer modules) — two census owners, which the owner-column rule above holds for a
+     ruling. That ruling is D15 (2026-10-27, the O-4 judgement): it is released under batch 23's shared-fact rule,
+     to `runtime/attention.rs` by clause (a), the page that writes the account, which makes `runtime/attention.rs`
+     the session's eleventh writer module; the release line is written when O-4b lands.
      `tab_queue_leader`, whose root callers are all in `settle_attention`, waits with it.
    - `animated_pane_viewports` (held at batch 18, behind `preview_image_placement`) — tied `runtime/panes.rs` /
      `runtime/preview.rs` once its root caller moved; it is the pane-motion viewports, and the owner column gives
