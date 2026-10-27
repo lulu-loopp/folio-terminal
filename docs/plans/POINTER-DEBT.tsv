@@ -153,7 +153,6 @@ crate::runtime::mouse (outside any item)	N-B	crate::runtime::mouse
 crate::runtime::mouse (outside any item)	N-B	crate::runtime::mouse
 crate::runtime::mouse (outside any item)	N-E	crate::runtime::mouse
 crate::runtime::mouse::Runtime::apply_pointer_cursor	N-P	crate::runtime::mouse
-crate::runtime::mouse::Runtime::apply_pointer_cursor	N-P	crate::runtime::mouse
 crate::runtime::mouse::Runtime::arm_row_press	N-E	crate::runtime::mouse
 crate::runtime::mouse::Runtime::begin_drag	N-E	crate::runtime::mouse
 crate::runtime::mouse::Runtime::begin_row_drag	N-E	crate::runtime::mouse
