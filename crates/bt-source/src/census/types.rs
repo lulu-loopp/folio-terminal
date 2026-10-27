@@ -533,6 +533,9 @@ pub(crate) struct MethodDecl {
     /// gives them, to substitute a use site's arguments.
     pub(crate) impl_params: Vec<String>,
     pub(crate) self_args: Vec<Ty>,
+    /// The `impl` block's self type as written there: the type the method is
+    /// declared on, which the bare name it is filed under does not say.
+    pub(crate) self_ty: Option<Ty>,
     pub(crate) params: Vec<Ty>,
     /// The item, when a product build can contain it: what a call resolved
     /// to this declaration reaches.
@@ -948,6 +951,7 @@ impl Declarations {
                         ret,
                         impl_params: Vec::new(),
                         self_args: Vec::new(),
+                        self_ty: None,
                         params,
                         callable: None,
                     });
@@ -966,6 +970,7 @@ impl Declarations {
                 }
                 None => (Vec::new(), Vec::new()),
             };
+        let self_ty = written.self_ty.clone();
         written.enter(&signature.generics);
         let ret = match &signature.output {
             syn::ReturnType::Default => Ty::Tuple(Vec::new()),
@@ -982,6 +987,7 @@ impl Declarations {
                 ret,
                 impl_params,
                 self_args,
+                self_ty,
                 params,
                 callable,
             });
@@ -1245,7 +1251,33 @@ pub(crate) struct Method {
     pub(crate) by_position: Vec<Option<Vec<Ty>>>,
     /// The product items of the workspace a call of it reaches; empty for a
     /// method of the standard lists.
-    pub(crate) callees: BTreeSet<Callable>,
+    pub(crate) callees: Callees,
+}
+
+/// What a call reaches: the product items of the workspace, or why the census
+/// follows it to none though it reaches one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Callees {
+    pub(crate) items: BTreeSet<Callable>,
+    /// Set when the call reaches a product item the rules cannot name — the
+    /// walk lists the site as not followed with this reason, never drops it.
+    pub(crate) refused: Option<String>,
+}
+
+impl Callees {
+    pub(crate) fn items(items: BTreeSet<Callable>) -> Self {
+        Self {
+            items,
+            refused: None,
+        }
+    }
+
+    pub(crate) fn refused(why: String) -> Self {
+        Self {
+            items: BTreeSet::new(),
+            refused: Some(why),
+        }
+    }
 }
 
 impl Method {
@@ -1268,7 +1300,7 @@ fn with_closure(class: Class, ret: Ty, closure: Vec<Ty>) -> Method {
         ret,
         closure,
         by_position: Vec::new(),
-        callees: BTreeSet::new(),
+        callees: Callees::default(),
     }
 }
 

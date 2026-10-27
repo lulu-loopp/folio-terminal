@@ -284,3 +284,144 @@ fn the_unclassified_are_listed_least_referenced_first() {
         ]
     );
 }
+
+// ── calls into the subject's traits on another package's types ───────────
+
+/// The foreign-trait fixture: the subject (`tests/fixtures/dep_map_foreign/app/`) and the other
+/// package whose types it implements its own traits on (`…/term/`), each its own universe, the
+/// census taken over both as the real tree's is over the workspace.
+fn foreign_fixture() -> (Arc<Index>, FieldCensus) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("dep_map_foreign");
+    let package = |folder: &str, package: &str, name: &str| {
+        let at = root.join(folder);
+        let universe = Universe::declare(
+            format!("the foreign-trait fixture's {folder}"),
+            vec![TargetRoot {
+                id: TargetId {
+                    package: package.to_owned(),
+                    kind: TargetKind::Library,
+                    name: name.to_owned(),
+                },
+                file: at.join("lib").with_extension("rs"),
+            }],
+            vec![DiskScope::under(&at)],
+            Vendor::Excluded,
+        )
+        .expect("the fixture is there");
+        Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
+    };
+    let app = package("app", "foreign-fixture", "foreign_fixture");
+    let term = package("term", "term-fixture", "term_fixture");
+    let census =
+        FieldCensus::take(&app, &FIXTURE_STRUCTS, &[&app, &term]).expect("the fixture's structs");
+    assert!(
+        census.unparsed().is_empty(),
+        "every declaration of the fixture parses: {:?}",
+        census.unparsed()
+    );
+    (app, census)
+}
+
+/// The fixture's not-followed rows, as `(function, called, reason)`.
+fn not_followed(census: &FieldCensus) -> Vec<(&str, &str, &str)> {
+    census
+        .unfollowed()
+        .iter()
+        .map(|row| {
+            (
+                row.function.as_str(),
+                row.called.as_str(),
+                row.reason.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// RED (T-CENSUS-FOLLOWS-CALLS-INTO-BT-APP-TRAITS, 2026-10-27) — **a call into the subject's
+/// own trait, implemented on another package's type, is an edge to the file the impl is
+/// written in.**
+///
+/// The census keys a method by its type's bare name, so it kept a call's callees to the
+/// declarations of the receiver type's own packages: a same-named type elsewhere must not
+/// answer. That also dropped the subject's trait impls on the type, which the orphan rule puts
+/// outside the type's package: O-3's `TermViewPorts` forwards on bt-term's `DualPlaneSession`
+/// reached nothing, with no edge and no not-followed row. An impl outside the type's packages
+/// now answers when its own self type is placed at the receiver type's declaration — the call
+/// graph's rule (`trait_members`, by the resolved self type). `twin.rs`'s `Session`, named like
+/// the other package's, has its own `Ports` and never answers for it.
+///
+/// RED before: no edge, and nothing not followed. MUTATION: admit every declaration of the
+/// subject package beside the type's own (`packages` plus the subject), and the twin's `port`
+/// answers too: the two calls are "a call more than one item answers to" and the edge is gone.
+#[test]
+fn a_call_into_a_subject_trait_on_another_packages_type_is_an_edge() {
+    let (index, census) = foreign_fixture();
+    let map = DependencyMap::of(&census, &index);
+    let edges: Vec<(&str, &str, usize, &str)> = map
+        .topics()
+        .iter()
+        .map(|edge| {
+            (
+                edge.from.as_str(),
+                edge.to.as_str(),
+                edge.calls,
+                edge.example.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        edges,
+        [(
+            "runtime/panes.rs",
+            "ports.rs",
+            2,
+            "crate::runtime::panes::poke -> crate::ports::<Session as Ports>::port"
+        )]
+    );
+    assert!(
+        !not_followed(&census)
+            .iter()
+            .any(|(_, called, _)| *called == "port" || called.ends_with("::port")),
+        "a call of `port` is followed: {:?}",
+        not_followed(&census)
+    );
+}
+
+/// RED (T-CENSUS-FOLLOWS-CALLS-INTO-BT-APP-TRAITS, 2026-10-27) — **a call the census cannot
+/// follow to one implementation is listed as not followed, by kind; never dropped.**
+///
+/// Two shapes. `prod`'s `nudge` reaches the subject's `impl Nudge for Cell`, whose self type is
+/// written `Cell`: a standard type's name and the other package's, and the census's rules do
+/// not read the `use` that says which, so the impl cannot be placed at the receiver's type. And
+/// `Window::paint`'s `self.glass.shine()` is a call through `B::Glass`, an associated type of a
+/// generic, which reaches whichever implementation the backend names: the census reads the
+/// bound's declaration for what the call does, and follows it to no implementation.
+///
+/// RED before: neither is listed, and neither is an edge. MUTATION: in
+/// `Resolver::workspace_methods`, drop an outside impl whose self type is not placed instead of
+/// refusing it, and `prod`'s row is gone; in `Resolver::bound_method`, answer without the
+/// refusal, and `paint`'s row is gone.
+#[test]
+fn a_call_the_census_cannot_follow_to_one_implementation_is_listed_by_kind() {
+    let (_, census) = foreign_fixture();
+    assert_eq!(
+        not_followed(&census),
+        [
+            (
+                "Window::paint",
+                "shine",
+                "a call through an associated type, which the census follows to no \
+                 implementation: `B::Glass`"
+            ),
+            (
+                "prod",
+                "nudge",
+                "a method a trait implements outside its type's package, on a self type the \
+                 rules do not place: `Cell` is both a standard type and a workspace type"
+            ),
+        ]
+    );
+}
