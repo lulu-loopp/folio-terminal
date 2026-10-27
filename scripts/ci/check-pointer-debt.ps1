@@ -38,7 +38,11 @@
 # import row of that needle is refused, an import row of a needle no moved owner
 # there reads is refused naming the needle, and an import row with no needle
 # column is refused. Rows compare on `owner` and `door` alone, so a base written
-# before the `needle` column matches row for row. A base row with no `module`
+# before the `needle` column matches row for row; but every import row of one
+# module and door shares that key, so an import row with a needle matches only a
+# base import row of the same needle, or one written before the column, and
+# never one of another needle - the imports judged are the ones added, in any
+# order of the list (K2 batch 23's review, finding 1). A base row with no `module`
 # (the list before that column) is never paired: it only matches whole, or is
 # removed. There is no rename arm here: a row has no reason
 # of its own to carry the dated reason a rename needs, so a renamed owner is an
@@ -159,10 +163,24 @@ foreach ($row in $before) {
     $allowed[$row.Key].Add($row)
 }
 
+# An import row's key is its module and door, which every import of that module and door shares,
+# so an import row with a needle takes a base row of its own needle, else one written before the
+# needle column, and never a base row of another needle: the rows left to judge are the imports
+# that were added, whatever their order in the list (K2 batch 23's review, finding 1).
 $unmatched = @()
 foreach ($row in $now) {
+    $at = -1
     if ($allowed.ContainsKey($row.Key) -and $allowed[$row.Key].Count -gt 0) {
-        $allowed[$row.Key].RemoveAt(0)
+        $pool = $allowed[$row.Key]
+        if ($row.Outside -and $null -ne $row.Needle) {
+            for ($i = 0; $i -lt $pool.Count -and $at -lt 0; $i++) { if ($pool[$i].Needle -ceq $row.Needle) { $at = $i } }
+            for ($i = 0; $i -lt $pool.Count -and $at -lt 0; $i++) { if ($null -eq $pool[$i].Needle) { $at = $i } }
+        } else {
+            $at = 0
+        }
+    }
+    if ($at -ge 0) {
+        $allowed[$row.Key].RemoveAt($at)
     } else {
         $unmatched += $row
     }

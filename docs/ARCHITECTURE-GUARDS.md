@@ -1175,7 +1175,11 @@ row with no needle column are refused. The needles come from the moved owner
 rows, never from the import's text, and rows still compare on owner and door,
 so a base written before the column matches row for row (2026-10-27, ruled in
 K2 batch 23, replacing the count of moved owners: two moved owners that read
-three button and wheel types bring three imports and no new reader).
+three button and wheel types bring three imports and no new reader). Every import
+row of one module and door shares that key, so an import row with a needle matches
+only a base import row of the same needle (or one written before the column), never
+one of another needle: the imports judged are the ones added, in any order of the
+list (2026-10-27, batch 23's review, finding 1).
 
 ## Runtime voice
 

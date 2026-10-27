@@ -327,7 +327,9 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    `(outside any item)` row in the module a reader moved into once per needle that the moved owner rows at that
    module and door read, and refuses a needle none of them reads. Before this ruling the cap was the count of
    moved owners (ruling Q1 (b)), which refused batch 23's `runtime/settings.rs`: two moved owners there read three
-   button and wheel types, so the file has three imports and no new reader.
+   button and wheel types, so the file has three imports and no new reader. An import row matches a base row only
+   of its own needle (or one written before the column), so the imports judged are the ones added, whatever their
+   order in the list (batch 23's review, finding 1).
 
    **Held items** (each row's generated `called_from` home is not where it goes):
    - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).
@@ -362,12 +364,12 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `Runtime::settings_field_holds_the_keyboard`, which only reads the settings field and whose one caller is
      `Runtime::clipboard_focus`, went to `runtime/clipboard.rs` as a tail in batch 10.
      What holds it is that `runtime/clipboard.rs` would have been a new writer of `WindowRuntime.settings`.
-     Batch 23 moved it to `runtime/settings.rs`, once K2 opened that file (2026-10-26, above).
      Batch 15 moved `Runtime::record_settings_key` and `Runtime::settings_field_key` to `runtime/keyboard.rs`,
      which already writes that fact, so neither adds a writer module. `settings_field_key` writes nothing else, and
      its first caller stands. `record_settings_key` also writes `App.shortcuts`, whose owner is keyboard and which
      `runtime/keyboard.rs` already writes; it went to one of its two owners, as `Runtime::expand_commit` did, and the
-     root stops writing `App.shortcuts`.
+     root stops writing `App.shortcuts`. Batch 23 moved `paste_into_settings_field` to `runtime/settings.rs`, once K2
+     opened that file (2026-10-26, above).
    - `Runtime::note_card_hint` and `Runtime::advance_card_hint` (batch 13) — their `called_from` home is
      `runtime/frame.rs`, but `note_card_hint` writes `App.settings_store`, whose census owner is
      `main[settings]`, and `runtime/frame.rs` does not write it; K2 opens no `runtime/settings.rs`, so it stays,
@@ -391,6 +393,10 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      has a root product caller that holds (`advance_scheme_watch`; `add_scheme` and `reread_schemes`; `add_scheme`;
      `open_scheme_for_editing`), so they stay with their callers (ruled 2026-10-26, D2) and move when the scheme
      watch does.
+   - `Runtime::settings_values`, `Runtime::settings_layout`, `Runtime::drag_settings_menu_bar` and `rail_state_for`
+     (after batch 23; batch 23's review, finding 6) — not judged in batch 23. Their generated `called_from` home is now
+     `runtime/settings.rs`, because their callers moved there. They are candidates for the next batch that judges
+     the settings topic's rest.
    - `math_copy_window` (batch 13) — tied `main.rs` / `runtime/frame.rs` / `runtime/math.rs`, and
      `retire_spent_math_copy` at the root called it in the product (the rule above); batch 14 moved both to
      `runtime/math.rs`.

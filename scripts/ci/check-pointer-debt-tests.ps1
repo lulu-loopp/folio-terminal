@@ -5,7 +5,9 @@
 # more, a move whose old module still lists the owner and an ambiguous move are each refused; and
 # an import row of the module a reader moved into is accepted once per needle the owners moved in
 # with its door read (ruled in K2 batch 23, 2026-10-27), and refused for a second row of a needle,
-# for a needle no moved owner reads, without a needle column, or with no reader moved.
+# for a needle no moved owner reads, without a needle column, or with no reader moved; an import
+# row pairs with a base import of its own needle only, so the imports judged are the ones added,
+# whatever their order in the list (batch 23's review, findings 1 and 4).
 
 $ErrorActionPreference = "Stop"
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
@@ -140,10 +142,40 @@ try {
             "an import row of a needle no moved owner reads" `
             "it imports PanStep, which no owner moved into crate::runtime::settings with N-B reads (they read: ElementState, MouseButton, MouseScrollDelta)"
 
+        # An import row pairs with a base import of its own needle, never another's (batch 23's
+        # review, finding 1). The module already imports MouseButton for an owner of its own; an
+        # owner reading ElementState moves in and brings that import, which the list sorts before
+        # the old one. Paired by key alone, the new row took the old row's place and MouseButton
+        # was judged and refused: a false red.
+        $press = "${tabs}::Runtime::press_tab`tN-B`t${tabs}`tMouseButton`n"
+        $tabsMouse = "${tabs} (outside any item)`tN-B`t${tabs}`tMouseButton`n"
+        $tabsElement = "${tabs} (outside any item)`tN-B`t${tabs}`tElementState`n"
+        $tabsWheel = "${tabs} (outside any item)`tN-B`t${tabs}`tMouseScrollDelta`n"
+        $release = "crate::Runtime::release_tab`tN-B`tcrate`tElementState`n"
+        Commit-Base ($header + $press + $release + $import + $tabsMouse) "a module that already imports MouseButton"
+        Passes ($header + $press + (Moved $release) + $import + $tabsElement + $tabsMouse) `
+            "an import added before the module's own import in the list" "1 import(s) of moved readers"
+
+        # The same pairing, the other way: the module imports MouseButton, an owner reading
+        # MouseButton and MouseScrollDelta moves in with the MouseScrollDelta import, and an
+        # ElementState import nobody reads comes too, sorted first. Paired by key alone it took
+        # MouseButton's place and passed; it is refused, by name.
+        $wheelPress = "crate::Runtime::wheel_tab`tN-B`tcrate`tMouseButton`n" + "crate::Runtime::wheel_tab`tN-B`tcrate`tMouseScrollDelta`n"
+        Commit-Base ($header + $press + $wheelPress + $import + $tabsMouse) "a module that already imports MouseButton, and a wheel owner at the root"
+        Refused ($header + $press + (Moved ("crate::Runtime::wheel_tab`tN-B`tcrate`tMouseButton`n")) +
+            (Moved ("crate::Runtime::wheel_tab`tN-B`tcrate`tMouseScrollDelta`n")) + $import + $tabsElement + $tabsMouse + $tabsWheel) `
+            "an unread import sorted before the module's own import" `
+            "it imports ElementState, which no owner moved into crate::runtime::tabs with N-B reads (they read: MouseButton, MouseScrollDelta)"
+
         # A row whose owner is not written in its module is malformed, not read as something else.
         Commit-Base ($header + $scroll + $scroll + $scrollE + $wheel + $import) "the base again"
         Refused ($all + "crate::Runtime::x`tN-B`tcrate::other`tMouseButton`n") "a row outside its module" `
             "a row whose owner is not written in its module"
+
+        # What the needle rule refuses and the owner count let through (finding 4): one owner moved
+        # in reading MouseButton, and one import of ElementState.
+        Refused ($movedAll + $tabsElement) "one owner moved in and an import of a needle it does not read" `
+            "it imports ElementState, which no owner moved into crate::runtime::tabs with N-B reads (they read: MouseButton)"
 
         # A move never lands where its owner was already listed at the base (review N1): with
         # crate::f and crate::runtime::tabs::f both at the base, the tabs owner doubling while
@@ -160,5 +192,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-pointer-debt: the two columns' transitions, unchanged, moved, moved-and-read-less, moved-and-read-more, added, still-at-its-module, ambiguous, import, a second import of a needle, unowed import, other-door import, needle-less import, batch 23's three-needle import, unread-needle import, malformed-row and destination-already-listed cases pass"
+Write-Host "check-pointer-debt: the two columns' transitions, unchanged, moved, moved-and-read-less, moved-and-read-more, added, still-at-its-module, ambiguous, import, a second import of a needle, unowed import, other-door import, needle-less import, batch 23's three-needle import, unread-needle import, import added before the module's own, unread import sorted first, one owner and an unread import, malformed-row and destination-already-listed cases pass"
 exit 0
