@@ -677,8 +677,10 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
 
 The order is the contract's §3.2, view before session and least-referenced first,
 measured. "Sites" counts every use of the field (all kinds). The doors come from
-`doors.tsv`. `LeafSession` now has **42** fields: `attention_ended` is new since
-the note and belongs to M7.
+`doors.tsv`. `LeafSession` had **45** fields before O-2, four more than the note's
+41: `attention_ended` (it belongs to M7), `process_folder`, `program_kind` and
+`paste_hold` are new since the note. It has **41** after O-2, `view` included
+(recounted 2026-10-27).
 
 - **O-2 (M0–M1).** Five fields, in this order:
 
@@ -700,10 +702,12 @@ the note and belongs to M7.
       `rescan_pane_references`
   - `card_skip` has no writer, only one `&mut` lend (`aim_card_window`). Its door
     is new.
-  - **Done** (O-2, `ad657a414`): the five are `TermView`'s, nested as
-    `LeafSession.view`, with the rows they had re-keyed; `LeafSession` has 38
-    fields and `TermView` 5. `card_skip`'s door went to O-3 (ruled at O-2's
-    judgement).
+  - **Done** 2026-10-27 (O-2, `ad657a414`): the five are `TermView`'s, nested as
+    `LeafSession.view`, with the rows they had re-keyed. `LeafSession` goes from
+    45 to 41 fields (with `view`), and `TermView` has 5. The nest adds 13
+    `LeafSession.view` read rows (where a view field is read) and takes the
+    unattributed-read header from 174 to 180. `card_skip`'s door went to O-3
+    (ruled at O-2's judgement).
 - **O-3 (M2–M4).** Four fields:
 
   | field | sites | door present |

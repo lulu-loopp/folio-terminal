@@ -783,6 +783,10 @@ fn every_field_of_the_declared_structs_has_an_inventory_row() {
 /// K2 puts the item in. Its reads are not pinned: they move with K2's batches
 /// and are held by the runtime dependency map's guard.
 ///
+/// The writer table below is the writers as of M1 (2026-10-27). O-3 edits a
+/// row when its writer becomes a `TermView` door, for example M3's
+/// `commit_presented` for `presented_metrics`.
+///
 /// MUTATION: leave `card_skip` on `LeafSession`, and the first assertion
 /// names it; drop `wake_terminal_column`'s write, or write `leaf.view` whole,
 /// and the writer sets differ.
@@ -857,24 +861,29 @@ fn the_five_view_fields_are_term_views() {
 /// answers for them. Its one view-derived input is its `holds_the_keyboard`
 /// parameter, computed by the caller (the future `report_keyboard_focus`
 /// door), so the census has no row of any column — read, write, access,
-/// membership or inner — of any `TermView` fact whose function is the drain.
+/// membership or inner — of any `TermView` fact whose function is the drain,
+/// nor of the nest `LeafSession.view` itself: a drain that handed the whole
+/// view to a helper (`&leaf.view`) would show only as a row of the nest.
 /// The assertion grows with `TermView`: every field O-3 moves under it is
 /// covered without an edit here. The drain's own rows are asserted present,
 /// so a renamed drain cannot pass by matching nothing.
 ///
-/// MUTATION: have `drain_leaf_pty` read `leaf.view.card_skip`, and its read
-/// row is named.
+/// MUTATION: have `drain_leaf_pty` read `leaf.view.card_skip`, or take
+/// `&leaf.view`, and its row is named.
 #[test]
 fn the_drain_reads_no_view_field() {
     let census = the_census();
     let is_drain = |function: &str| function.split(' ').next() == Some("drain_leaf_pty");
+    let is_view = |fact: &str| fact.starts_with("TermView.") || fact == "LeafSession.view";
     let all = || census.rows().iter().chain(census.reads());
     assert!(
-        all().any(|row| is_drain(&row.function) && row.fact.starts_with("LeafSession.")),
+        all().any(|row| is_drain(&row.function)
+            && row.fact.starts_with("LeafSession.")
+            && !is_view(&row.fact)),
         "the drain is found by its name"
     );
     let touched: Vec<String> = all()
-        .filter(|row| is_drain(&row.function) && row.fact.starts_with("TermView."))
+        .filter(|row| is_drain(&row.function) && is_view(&row.fact))
         .map(|row| format!("{} {}", row.fact, row.column.name()))
         .collect();
     assert!(
