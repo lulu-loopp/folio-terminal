@@ -9213,6 +9213,7 @@ crates/bt-platform/src/logon_hook.rs	bt-platform crate::logon_hook::string_text	
 crates/bt-platform/src/logon_hook.rs	bt-platform crate::logon_hook::string_text	Ambiguous	take_while	1	
 crates/bt-platform/src/logon_hook.rs	bt-platform crate::logon_hook::units	Ambiguous	collect	2	
 crates/bt-platform/src/logon_hook.rs	bt-platform crate::logon_hook::units	Ambiguous	encode_utf16	1	
+crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::a_box_would_be_seen	Ambiguous	is_null	1	2026-10-27: `unsafe { NSApp }.is_null()` is on AppKit's `*mut AnyObject` global, the same read macos_dialogs::message_box makes, asked again by the query that cannot call it (T-STOP-NOTICE-BOX-QUERY-MACOS)
 crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::add_the_delegate_selectors	Ambiguous	as_bool	1	
 crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::add_the_delegate_selectors	Ambiguous	cast_mut	1	
 crates/bt-platform/src/macos_app.rs	bt-platform crate::macos_app::add_the_delegate_selectors	Ambiguous	is_null	1	
