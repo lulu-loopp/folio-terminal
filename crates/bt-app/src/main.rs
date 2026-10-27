@@ -64126,7 +64126,7 @@ mod clipboard_path_tests {
         let send = method_body("Runtime", "send_paste");
         assert!(
             send.contains("offer_pty_input(target, bytes, context)")
-                && send.contains("None => PtyTarget::of(pty.as_ref(), birth.as_ref()),")
+                && send.contains("None => PtyTarget::of(life.pty(), life.birth()),")
                 && send.contains("Ok(landed.queued())"),
             "the paste reports the wrapper's success rather than what the ring \
              did with the bytes:\n{send}"
