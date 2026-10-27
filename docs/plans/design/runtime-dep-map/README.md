@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **284 items, 240 free functions and 44 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 23's head; 329, 242 and 87 before it,
+- **unclassified.tsv**: **285 items, 241 free functions and 44 `Runtime`
+  methods**, still in `main.rs` (at plan row 59's head: K2 batch 23's 284 and row
+  66's `say_in_a_box_or_on_stderr`; 329, 242 and 87 before batch 23,
   368, 274 and 94 before batch 22,
   419, 303 and 116 before batch 21,
   459, 341 and 118 before batch 20,
@@ -327,13 +328,18 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    2026-10-27, plan row 59). A doc link names a moved item by its path (`runtime::<topic>::name` at the root,
    `super::<topic>::name` inside `runtime/`), and rustdoc resolves that path with privacy, so the eighteen
    topic modules a link names are `pub(crate) mod` in `runtime/mod.rs`, and eleven linked private functions are
-   widened (`pub(super)` or `pub(crate)`). The trade: a non-test `use runtime::<topic>::…` at the crate root
-   now compiles, so the rule that forbids it is kept by review until a bt-source guard refuses it (plan row
-   80).
+   widened (`pub(super)` or `pub(crate)`). The trade is wider than an import: any path into a topic module now
+   compiles at the crate root and in every module outside `runtime/`, a `use runtime::<topic>::…` item and a
+   full path in an expression or a type (`runtime::clipboard::paste_road(…)`) alike, with no `use` at all. The
+   rule that forbids them is kept by review until a bt-source guard refuses them (plan row 80), reading every
+   path, not `use` items alone. `runtime/pointer` counts as a topic module (ruled 2026-10-27, row 59's
+   review): the root's road into `runtime/` is only what `runtime/mod.rs` re-exports, so the root's existing
+   product paths into `runtime::pointer::…` are the guard's first findings to judge.
 
-   **A batch updates `docs/ARCHITECTURE.md` §13 in two places**: the topic table's method counts for the
-   files it fills, and the count sentence under "Still in `main.rs`" (the 2026-09-21 table under it is
-   retired, 2026-10-27, plan row 59).
+   **A batch updates `docs/ARCHITECTURE.md` §13 in three places**: the topic table's method counts for the
+   files it fills, the "through batch N" list of what each batch moved in (the paragraph above the table), and
+   the count sentence under "Still in `main.rs`" (the 2026-09-21 table under it is retired, 2026-10-27, plan
+   row 59).
 
    **A moved reader's imports are counted by needle** (ruled 2026-10-27, in K2 batch 23).
    `POINTER-DEBT.tsv`'s rows carry the needle each occurrence matched. `check-pointer-debt.ps1` accepts an
