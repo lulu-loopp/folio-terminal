@@ -4539,10 +4539,18 @@ pub(crate) mod tests {
     /// O's panic hook, possibly on the thread that holds the table, and gives
     /// up at once rather than deadlock.
     ///
+    /// "Never waits" is the return arriving while the table is still held, not
+    /// a time (T-ELAPSED-UPPER-BOUNDS-ON-OTHER-WAITS): the table is let go only
+    /// after it came, or after the suite's patience
+    /// (`crate::lane::within_patience`) ran out without it.
+    ///
     /// MUTATION: in `let_go_of_every_claim`, `lock()` the table instead of
     /// trying it.
     #[test]
     fn letting_go_of_the_claims_never_waits_for_a_held_table() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         let (held, release) = std::sync::mpsc::channel::<()>();
         let (holding, is_held) = std::sync::mpsc::channel::<()>();
         let holder = bt_platform::spawn_at_priority(
@@ -4551,17 +4559,24 @@ pub(crate) mod tests {
             move |_worker| {
                 let _table = claims().lock().expect("the table");
                 holding.send(()).unwrap();
-                let _ = release.recv_timeout(std::time::Duration::from_secs(10));
+                let _ = release.recv();
             },
         )
         .unwrap();
         is_held.recv().unwrap();
-        let began = std::time::Instant::now();
-        let_go_of_every_claim();
-        let took = began.elapsed();
+        let returned = Arc::new(AtomicBool::new(false));
+        let letting_go = {
+            let returned = Arc::clone(&returned);
+            std::thread::spawn(move || {
+                let_go_of_every_claim();
+                returned.store(true, Ordering::SeqCst);
+            })
+        };
+        let while_held = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
         held.send(()).unwrap();
         holder.join().unwrap();
-        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+        letting_go.join().unwrap();
+        assert!(while_held, "letting go returned while the table was held");
     }
 
     /// The writer's retirement through its admitted door (`doors::SessionWriterRetire`), on a test

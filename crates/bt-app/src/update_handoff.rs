@@ -75,7 +75,7 @@ use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
 use crate::persist::Reply;
-use crate::update_apply::{ExitGuard, Leave, Left, Outgoing, Window};
+use crate::update_apply::{ExitGuard, Leave, Left, Outgoing, WaitClock, WallClock, Window};
 use crate::update_txn::{Class, Event, HeaderOutcome, Home, Journal, Nonce, Refusal, Role, TxnId};
 
 /// **What Prepare leaves the job holding** (U-20 / U-27 make it; the job keeps
@@ -522,9 +522,23 @@ impl Leaving {
     /// the window's mark taken ([`crate::update_apply::take_the_window`]) — a
     /// live applier that has it opens the window, and nothing is started
     /// here; otherwise `program`, the installed build (this process's own
-    /// executable), is started with what the header names.
+    /// executable), is started with what the header names. The wait for the
+    /// applier is read on the wall clock ([`Leaving::leave_on`]).
     pub(crate) fn leave(
         self,
+        me: Running,
+        program: &Path,
+        spawner: &mut dyn Spawner,
+        worker: Option<&WorkerCtx>,
+    ) -> Left {
+        self.leave_on(&WallClock, me, program, spawner, worker)
+    }
+
+    /// [`Leaving::leave`], with the wait for the applier O started read and
+    /// paused on `clock` (T-ELAPSED-UPPER-BOUNDS-ON-OTHER-WAITS).
+    pub(crate) fn leave_on(
+        self,
+        clock: &dyn WaitClock,
         me: Running,
         program: &Path,
         spawner: &mut dyn Spawner,
@@ -552,7 +566,7 @@ impl Leaving {
         if let (Some((home, txn)), Some(applier), Some(worker)) =
             (&self.transaction, self.applier, worker)
         {
-            let until = Instant::now() + self.applier_within;
+            let until = clock.now() + self.applier_within;
             loop {
                 if crate::update_apply::window_owner(home, *txn) == Some(applier) {
                     break;
@@ -564,7 +578,7 @@ impl Leaving {
                     ));
                     break;
                 }
-                let left = until.saturating_duration_since(Instant::now());
+                let left = until.saturating_duration_since(clock.now());
                 if left.is_zero() {
                     crate::diagnostics::note(&format!(
                         "Folio: the applier {} took no window mark within {} s; this process takes the duty",
@@ -573,7 +587,7 @@ impl Leaving {
                     ));
                     break;
                 }
-                bt_platform::wait::sleep_within(worker, Duration::from_millis(50).min(left));
+                clock.pause(worker, Duration::from_millis(50).min(left));
             }
         }
         if let Some((home, txn)) = &self.transaction {
@@ -2759,6 +2773,11 @@ mod tests {
     /// once — the hook's own message box is then the crash's window — and
     /// leaves the slot as it was.
     ///
+    /// "Never waits" is the answer arriving while the slot is still held, not
+    /// a time (T-ELAPSED-UPPER-BOUNDS-ON-OTHER-WAITS): the slot is let go only
+    /// after the answer came, or after the suite's patience
+    /// (`crate::lane::within_patience`) ran out without it.
+    ///
     /// MUTATION: in `leave_in_panic`, `lock()` the slot instead of trying it.
     #[test]
     fn the_panic_road_never_waits_for_a_held_armed_slot() {
@@ -2770,18 +2789,30 @@ mod tests {
             move |_worker| {
                 let _slot = super::ARMED.lock().expect("the slot");
                 holding.send(()).unwrap();
-                let _ = release.recv_timeout(Duration::from_secs(10));
+                let _ = release.recv();
             },
         )
         .unwrap();
         is_held.recv().unwrap();
-        let began = Instant::now();
-        let left = super::leave_in_panic();
-        let took = began.elapsed();
+        let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leaver = {
+            let answered = Arc::clone(&answered);
+            std::thread::spawn(move || {
+                let left = super::leave_in_panic();
+                answered.store(true, std::sync::atomic::Ordering::SeqCst);
+                left
+            })
+        };
+        let while_held =
+            crate::lane::within_patience(|| answered.load(std::sync::atomic::Ordering::SeqCst));
         held.send(()).unwrap();
         holder.join().unwrap();
+        let left = leaver.join().unwrap();
+        assert!(
+            while_held,
+            "the panic road answered while the slot was held"
+        );
         assert_eq!(left, None);
-        assert!(took < Duration::from_secs(2), "{took:?}");
     }
 
     /// RED (U-34, round 4; Codex's finding 12) — **a claim the platform will
