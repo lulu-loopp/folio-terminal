@@ -2810,10 +2810,10 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 284 (240 free functions, 44 methods) after batch 23. The table
-of the 2026-09-21 manifest's sort (201 methods then left) is retired (2026-10-27, plan row 59): since
-K2, `docs/plans/design/runtime-dep-map/unclassified.tsv` is the list, and each item's topic is decided
-by its batch (`runtime-dep-map/README.md`).
+into their topics batch by batch: 285 (241 free functions, 44 methods) after batch 23 and row 66's
+`say_in_a_box_or_on_stderr`. The table of the 2026-09-21 manifest's sort (201 methods then left) is
+retired (2026-10-27, plan row 59): since K2, `docs/plans/design/runtime-dep-map/unclassified.tsv` is
+the list, and each item's topic is decided by its batch (`runtime-dep-map/README.md`).
 
 ---
 
