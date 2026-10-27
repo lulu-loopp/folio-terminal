@@ -325,17 +325,17 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    its own, which puts `runtime/mod.rs` on `FILES_THAT_MAY_NAME_A_PLATFORM`. The review checks the platform of
    every re-export's callers.
 
-   **The topic modules are `pub(crate)` for rustdoc, and the import rule above is kept by review** (ruled
-   2026-10-27, plan row 59). A doc link names a moved item by its path (`runtime::<topic>::name` at the root,
-   `super::<topic>::name` inside `runtime/`), and rustdoc resolves that path with privacy, so the eighteen
-   topic modules a link names are `pub(crate) mod` in `runtime/mod.rs`, and eleven linked private functions are
-   widened (`pub(super)` or `pub(crate)`). The trade is wider than an import: any path into a topic module now
-   compiles at the crate root and in every module outside `runtime/`, a `use runtime::<topic>::…` item and a
-   full path in an expression or a type (`runtime::clipboard::paste_road(…)`) alike, with no `use` at all. The
-   rule that forbids them is kept by review until a bt-source guard refuses them (plan row 80), reading every
-   path, not `use` items alone. `runtime/pointer` counts as a topic module (ruled 2026-10-27, row 59's
-   review): the root's road into `runtime/` is only what `runtime/mod.rs` re-exports, so the root's existing
-   product paths into `runtime::pointer::…` are the guard's first findings to judge.
+   **The topic modules are `pub(crate)` for rustdoc, and the import rule above is kept by a guard** (ruled
+   2026-10-27, plan row 59; the guard 2026-10-27, plan row 80). A doc link names a moved item by its path
+   (`runtime::<topic>::name` at the root, `super::<topic>::name` inside `runtime/`), and rustdoc resolves that
+   path with privacy, so the eighteen topic modules a link names are `pub(crate) mod` in `runtime/mod.rs`, and
+   eleven linked private functions are widened (`pub(super)` or `pub(crate)`). The trade is wider than an
+   import: any path into a topic module compiles at the crate root and in every module outside `runtime/`, a
+   `use runtime::<topic>::…` item and a full path in an expression or a type (`runtime::clipboard::paste_road(…)`)
+   alike, with no `use` at all. `crates/bt-source/tests/root_topic_paths.rs` refuses them, reading every path,
+   not `use` items alone (`docs/ARCHITECTURE-GUARDS.md`, "Runtime topics from outside"). `runtime/pointer` counts
+   as a topic module (ruled 2026-10-27, row 59's review); the root's seventeen product paths into
+   `runtime::pointer::…` the guard found first now go through twelve names `runtime/mod.rs` re-exports.
 
    **A batch updates `docs/ARCHITECTURE.md` §13 in three places**: the topic table's method counts for the
    files it fills, the "through batch N" list of what each batch moved in (the paragraph above the table), and

@@ -423,7 +423,7 @@ impl WindowHost for Arc<Window> {
     fn pointer_in_window(&self) -> Option<(i32, i32)> {
         crate::native_window_of(self)
             .ok()
-            .and_then(crate::runtime::pointer::pointer_in_native_window)
+            .and_then(crate::runtime::pointer_in_native_window)
     }
     fn present_facts(&self) -> bt_platform::NativePresentFacts {
         crate::native_window_of(self)

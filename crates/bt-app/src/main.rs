@@ -9047,12 +9047,12 @@ struct App<B: Backend = Native> {
     /// **The application's pointer capture** (T-POINTER-CAPTURE §2.2): the one
     /// gesture that holds the pointer, in whichever window latched it. See
     /// [`runtime::pointer::PointerCapture`].
-    pointer_capture: Option<runtime::pointer::PointerCapture>,
+    pointer_capture: Option<runtime::PointerCapture>,
     /// **The buttons pressed while a capture was held** (T-POINTER-CAPTURE
     /// R-5 rule 3, R-8): each went nowhere, and its release goes nowhere too,
     /// in whichever window it arrives and even after the capture has ended.
     /// See [`runtime::pointer::ButtonSet`].
-    swallowed: runtime::pointer::ButtonSet,
+    swallowed: runtime::ButtonSet,
     /// Every capture a lifecycle door ended (T-POINTER-CAPTURE R-9), by its owner's name and the
     /// ending's, for a test to read which ending each door ran.
     #[cfg(test)]
@@ -9366,7 +9366,7 @@ impl<B: Backend> App<B> {
             pending_new_windows: Vec::new(),
             drag_broker: None,
             pointer_capture: None,
-            swallowed: runtime::pointer::ButtonSet::default(),
+            swallowed: runtime::ButtonSet::default(),
             #[cfg(test)]
             capture_endings: Vec::new(),
             pending_handover: None,
@@ -10272,7 +10272,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// the loop has not yet read** (0.4.4 ticket 11). Written by the door from
     /// inside message dispatch, emptied by [`Runtime::spend_parked_pans`] on
     /// the wake the door sent; see [`runtime::pointer::touch::ParkedPans`].
-    parked_pans: runtime::pointer::touch::ParkedPans,
+    parked_pans: runtime::ParkedPans,
     /// **The drop this window is holding, waiting for the turn boundary**
     /// (GitHub issue #1 ②).
     ///
@@ -10476,10 +10476,10 @@ struct WindowRuntime<B: Backend = Native> {
     /// **What the frame measured for the pointer router** (T-POINTER-CAPTURE
     /// §2.1): rebuilt where the overlay is built, read by every walk until the
     /// next frame. See [`runtime::pointer::PointerFacts`].
-    pointer_facts: runtime::pointer::PointerFacts,
+    pointer_facts: runtime::PointerFacts,
     /// **The router's answer for the event being handled**, walked once at the
     /// event's door (R-4). See [`runtime::pointer::PointerMemo`].
-    pointer_memo: runtime::pointer::PointerMemo,
+    pointer_memo: runtime::PointerMemo,
     click_tracker: ClickTracker,
     line_wheel_remainder: f64,
     pixel_wheel_remainder: f64,
@@ -34664,7 +34664,7 @@ struct NewWindowParts<B: Backend = Native> {
     /// Where this window's touch door parks the pans the system recognised —
     /// see [`WindowRuntime::parked_pans`]. Made where the door is opened,
     /// because the door is opened before there is a window runtime to hold it.
-    parked_pans: runtime::pointer::touch::ParkedPans,
+    parked_pans: runtime::ParkedPans,
     /// The application's favicon store, handed to this window's mark rasterizer
     /// so that a page drawn here wears what any window in the process learned
     /// about its site — see [`App::favicons`].
@@ -34907,8 +34907,8 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         ime_system_caret,
         pointer_position: None,
         pointer_last_seen: None,
-        pointer_facts: runtime::pointer::PointerFacts::default(),
-        pointer_memo: runtime::pointer::PointerMemo::default(),
+        pointer_facts: runtime::PointerFacts::default(),
+        pointer_memo: runtime::PointerMemo::default(),
         click_tracker: ClickTracker::default(),
         line_wheel_remainder: 0.0,
         pixel_wheel_remainder: 0.0,
@@ -35300,7 +35300,7 @@ struct OpenedWindow {
     math_context_menu: bt_platform::MathContextMenu,
     ime_system_caret: bt_platform::ImeSystemCaret,
     platform_chrome: bt_platform::PlatformChrome,
-    parked_pans: runtime::pointer::touch::ParkedPans,
+    parked_pans: runtime::ParkedPans,
     custom_window_frame: bt_platform::CustomWindowFrame,
     ime_report: ime_report::Report,
     window: Arc<Window>,
@@ -35802,8 +35802,7 @@ impl Runtime<'_, Native> {
                     // winit made the registration this undoes when it built the window.
                     // Reported and never propagated: a window that answers nothing to a
                     // finger is a window, and a launch that died instead is not.
-                    let parked_pans =
-                        runtime::pointer::touch::let_the_system_translate_touch(native, &proxy);
+                    let parked_pans = runtime::let_the_system_translate_touch(native, &proxy);
                     // **This window's own chrome, read where it was measured** (M3-3;
                     // T-MAC-LIGHTS needs it one step earlier than M3-3 did). `install` is
                     // where the platform is asked what it still draws in this bar, and the
@@ -36596,9 +36595,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// shuts the sheet: the gear's toggle, the sheet's own `Esc` and its own close press, and a
     /// verb that hands the reader a document instead.
     fn settings_closed(&mut self) {
-        self.end_capture(runtime::pointer::OwnerGone(
-            runtime::pointer::Gone::SettingsSheet,
-        ));
+        self.end_capture(runtime::OwnerGone(runtime::Gone::SettingsSheet));
     }
 
     /// Discharge what the command line is still owed, on the window it opened.
@@ -51461,7 +51458,7 @@ impl<B: Backend> FolioApp<B> {
             // costs one frame instead of one frame each, and this is the line that
             // keeps that from being a reordering — whatever arrives next answers the
             // window the wheel has already moved.
-            if !runtime::pointer::is_wheel_event(&event)
+            if !runtime::is_wheel_event(&event)
                 && let Err(error) = runtime.flush_wheel()
             {
                 self.fail(event_loop, error);
@@ -51592,7 +51589,7 @@ impl<B: Backend> FolioApp<B> {
                 // **Every pointer event goes through one door** (T-POINTER-CAPTURE
                 // cut 1): the pointer module names the kinds and owns their
                 // answers, so this dispatcher reads no pointer field.
-                event if runtime::pointer::is_pointer_event(&event) => runtime.pointer_event(event),
+                event if runtime::is_pointer_event(&event) => runtime.pointer_event(event),
                 // **A file let go of over this window** (GitHub issue #1 ②). One
                 // event per file and no marker between drops, so the path is
                 // written down here and the batch is spent at the turn boundary —
@@ -52836,7 +52833,7 @@ fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
     // cut 1). Its answer is exhaustive over every kind winit has, so a kind added
     // to winit stops that match compiling, and every kind it does not claim is
     // one of the rows below.
-    runtime::pointer::station_of(event).unwrap_or_else(|| match event {
+    runtime::station_of(event).unwrap_or_else(|| match event {
         WindowEvent::CloseRequested => Station::EventClose,
         WindowEvent::KeyboardInput { .. } => Station::EventKey,
         WindowEvent::Ime(Ime::Enabled) => Station::ImeEnabled,
@@ -64520,7 +64517,7 @@ mod printed_path_provenance_tests {
             .expect("the one door every modifier state comes through");
         let arm = &loop_body[at..];
         let arm = &arm[..arm
-            .find("event if runtime::pointer::is_pointer_event")
+            .find("event if runtime::is_pointer_event")
             .unwrap_or(arm.len())];
         assert!(
             arm.contains(pointer_door),

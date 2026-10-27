@@ -130,6 +130,11 @@ pub(crate) use peek::{
 #[cfg(test)]
 pub(crate) use pointer::a_capture_still_holds_its_pointer;
 pub(crate) use pointer::platform_pointer_of;
+pub(crate) use pointer::touch::{ParkedPans, let_the_system_translate_touch};
+pub(crate) use pointer::{
+    ButtonSet, Gone, OwnerGone, PointerCapture, PointerFacts, PointerMemo, is_pointer_event,
+    is_wheel_event, pointer_in_native_window, station_of,
+};
 #[cfg(test)]
 pub(crate) use preview::{
     animation_layer_key, animation_refusal_notice, animation_surface_exists, answer_one_picture,
