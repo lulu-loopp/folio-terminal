@@ -4449,7 +4449,7 @@ impl RailState {
     /// `None` when this window has no such button on screen at all.
     ///
     /// The precedence is the posture's own and is the same one
-    /// [`crate::profile_menu_anchor`] walks for the button's *box*: the focus
+    /// [`crate::runtime::profiles::profile_menu_anchor`] walks for the button's *box*: the focus
     /// column supersedes both ordinary surfaces in either tab layout
     /// ([`Self::focus`]'s own sentence), a vertical layout hangs the picker off
     /// the rail, and a horizontal one hangs it under the strip. The `None` is

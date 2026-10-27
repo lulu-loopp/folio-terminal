@@ -775,10 +775,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// vector for as long as the process runs.
     ///
     /// **The summoned terminal writes itself down like any other window**, and
-    /// is filtered out where the list is *read* ([`most_recently_active_window`])
-    /// rather than where it is written. One exclusion, at the one door that
-    /// cares, is a rule that cannot be half-applied — and the fact this records
-    /// is true of it: the reader really was in it.
+    /// is filtered out where the list is *read*
+    /// ([`crate::update_job::most_recently_active_window`]) rather than where it is written. One
+    /// exclusion, at the one door that cares, is a rule that cannot be half-applied — and the fact
+    /// this records is true of it: the reader really was in it.
     pub(crate) fn note_this_window_was_visited(&mut self) {
         let id = self.window.window.id();
         self.app.activated.retain(|visited| *visited != id);
@@ -1488,7 +1488,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// Nothing is done here whatever the gate says: raised, the reader is asked;
     /// busy, the reader is already being asked about something else and this
     /// press is dropped (ticket 58). Every git request names what it is about
-    /// ([`crate::dirty_gate_names`]), so it is never nothing to ask.
+    /// ([`dirty_gate_names`]), so it is never nothing to ask.
     pub(in crate::runtime) fn ask_before_the_verb(
         &mut self,
         request: restore::GateRequest,
@@ -1623,7 +1623,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// written to `session.json`, and its pool goes with it as the list of files
     /// the switcher will list next launch (`TabState::preview_content`) —
     /// measured on the real machine, where emptying it wrote `"pool": []` and a
-    /// three-file history came back empty. See [`crate::answer_an_exit_over`],
+    /// three-file history came back empty. See [`answer_an_exit_over`],
     /// which is the whole of this but the write.
     ///
     /// The close is the one verb this does not own: it is the event loop's, and

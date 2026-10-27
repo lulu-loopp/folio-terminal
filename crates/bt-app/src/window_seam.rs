@@ -1326,7 +1326,7 @@ impl ImeCaretDoor for bt_platform::ImeSystemCaret {
     }
 }
 
-/// Assemble a window's runtime from [`NewWindowParts`] and the resting value of
+/// Assemble a window's runtime from [`crate::NewWindowParts`] and the resting value of
 /// everything else.
 /// **What the display a window is on says one of its frames is worth**, in
 /// millihertz, or `None` when the platform will not say.
@@ -1336,7 +1336,7 @@ impl ImeCaretDoor for bt_platform::ImeSystemCaret {
 /// whose handle is momentarily unavailable — which happens on Windows between a
 /// display change and the message that announces it — is better paced to the
 /// main display than to nothing at all. Both answers pass through
-/// [`pace::interval_from_millihertz`], so neither can put a window on a rate no
+/// [`crate::pace::interval_from_millihertz`], so neither can put a window on a rate no
 /// panel runs at.
 pub(crate) fn display_frame_rate_millihertz(window: &Window) -> Option<u32> {
     window
@@ -1410,7 +1410,7 @@ pub(crate) fn native_dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
 
 /// The window's outer rectangle as winit itself reports it, in physical pixels.
 ///
-/// The fall-back half of [`dpi_snapshot`]. An empty rectangle for a window
+/// The fall-back half of [`crate::dpi_snapshot`]. An empty rectangle for a window
 /// whose position the platform will not state — which every caller already
 /// reads as "no geometry is known about this window" rather than as a place.
 pub(crate) fn winit_outer_rect(window: &Window) -> bt_platform::WindowRect {

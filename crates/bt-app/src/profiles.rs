@@ -13411,7 +13411,7 @@ pub enum TabMenuRow {
     /// The `+` opens the default profile wherever the pane you were looking at
     /// is standing; this opens *this tab's* shell where *this tab's* shell is,
     /// which is the same relationship `Duplicate pane` has to a bare split. The
-    /// two facts come off one leaf, which is the rule [`new_tab_cwd`] already
+    /// two facts come off one leaf, which is the rule [`crate::runtime::tabs::new_tab_cwd`] already
     /// states: a profile taken from one pane and a folder from another describes
     /// a pane that does not exist.
     Duplicate,

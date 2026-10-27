@@ -2289,7 +2289,7 @@ pub(crate) fn a_page_is_off_the_glass(
 /// apart, and is on screen the first time anyone opens a preview, because
 /// landing one *is* a structural edit.
 ///
-/// The pair is [`animated_pane_viewports`]' and not a second sampler beside it.
+/// The pair is [`super::panes::animated_pane_viewports`]' and not a second sampler beside it.
 /// `preview_body_viewport` delegates to `pane_body_viewport`, so this is
 /// literally the terminal seats' computation applied to one more seat: extent
 /// from the solve, corner from the tween. That equality is what makes R2 hold

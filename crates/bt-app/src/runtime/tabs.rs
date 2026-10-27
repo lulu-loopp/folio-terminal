@@ -2424,8 +2424,8 @@ impl<B: Backend> Runtime<'_, B> {
     /// gains an entry at this slot*, drawn as the stand-in
     /// ([`Runtime::strip_stand_in`]) the reader is about to see become a tab.
     /// What differs is only who performs it, and no foreign landing is ever
-    /// handed to [`release_verdict`] — [`broker_verdict`] is the verdict for a
-    /// hand that opened somewhere else.
+    /// handed to [`super::mouse::release_verdict`] — [`super::windows::broker_verdict`] is the
+    /// verdict for a hand that opened somewhere else.
     pub(crate) fn foreign_strip_landing(
         &self,
         cargo: &DragSource,
@@ -2824,7 +2824,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// **Let go over the run's padding** — [`DragRelease::Extract`]'s two hands.
     ///
     /// One verdict and two payloads, dispatched here rather than inside
-    /// [`release_verdict`], because the verdict is a fact about the *landing* and
+    /// [`super::mouse::release_verdict`], because the verdict is a fact about the *landing* and
     /// this is a fact about the *hand*: the run gains an entry at this slot
     /// either way, and what that entry is made of is the payload's business.
     pub(in crate::runtime) fn commit_strip_extract(
@@ -4155,7 +4155,7 @@ pub(crate) fn grabbed_offset(
 ///
 /// The two offers a run makes a pane are read off two different questions about
 /// one pointer, and which one is being asked is decided here rather than inside
-/// [`Runtime::survey_strip`], for [`landing_for_aim`]'s reason: this is a
+/// [`Runtime::survey_strip`], for [`super::mouse::landing_for_aim`]'s reason: this is a
 /// *ruling*, and a ruling that needs a `Renderer` to state is a ruling no test
 /// ever reads back.
 ///
@@ -4170,7 +4170,7 @@ pub(crate) fn grabbed_offset(
 /// * `holding` — the tab the pane in the hand lives in.
 /// * `showing` — the tab whose layout is on the stage right now, which the
 ///   spring can have moved away from `holding` at any point in the gesture. It
-///   is [`landing_for_aim`]'s own second argument and it is here for the same
+///   is [`super::mouse::landing_for_aim`]'s own second argument and it is here for the same
 ///   reason: whether a room is "the one you are standing in" is a fact about
 ///   the *view*, and a pane is a tab and a seat (K135).
 /// * `adopt_fits` — whether that tab's tree can actually take another pane
@@ -4254,7 +4254,7 @@ pub(crate) fn pane_strip_landing(
 /// [`pane_strip_landing`]'s sibling and deliberately the same shape: a run
 /// answers two questions about one pointer, and which of them is being asked is
 /// decided here rather than inside [`Runtime::survey_strip`], for
-/// [`landing_for_aim`]'s reason — this is a *ruling*, and a ruling that needs a
+/// [`super::mouse::landing_for_aim`]'s reason — this is a *ruling*, and a ruling that needs a
 /// `Renderer` to state is a ruling no test ever reads back.
 ///
 /// * `over` — the tab whose own rectangle the pointer is standing on
@@ -4397,7 +4397,7 @@ pub(crate) fn tab_close_action(
 /// **Where a new tab's shell stands** — the folder somebody named, or the one
 /// the pane you were looking at is standing in.
 ///
-/// A free function for [`split_axis`]'s reason: it is the whole of what
+/// A free function for [`crate::split_axis`]'s reason: it is the whole of what
 /// `New terminal in folder…` promises, and a promise that needs a live window
 /// and a ConPTY to state is a promise no test ever reads back.
 ///
@@ -4513,7 +4513,7 @@ pub(crate) fn absorb_tab_into_layout(
 }
 
 /// **Which surface this window is drawing its tab list on** — §7.1.6e″'s one
-/// author, and the precedence [`profile_menu_anchor`] walks for the `+`'s box.
+/// author, and the precedence [`super::profiles::profile_menu_anchor`] walks for the `+`'s box.
 ///
 /// `focus_column` is "the card column is on screen", which is focus mode and
 /// nothing else: [`seats::focus_rail_geometry`] answers `Some` for every window

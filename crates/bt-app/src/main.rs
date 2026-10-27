@@ -1222,28 +1222,31 @@ struct PasteTarget {
 
 /// **Which road one prepared paste takes into one pane** (0.4.4 tickets 02 and 03).
 ///
-/// The answer of [`paste_road`], which is the **one** place the window decides whether a paste
-/// asks: every paste gesture reaches it through `Runtime::deliver_paste` — the clipboard's road
-/// and the road of paths in hand both end there — and nothing else in the tree asks the question
-/// (the design note's §1, "four doors, one road", written when there were four gestures).
+/// The answer of [`runtime::clipboard::paste_road`], which is the **one** place the window decides
+/// whether a paste asks: every paste gesture reaches it through `Runtime::deliver_paste` — the
+/// clipboard's road and the road of paths in hand both end there — and nothing else in the tree
+/// asks the question (the design note's §1, "four doors, one road", written when there were four
+/// gestures).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PasteRoad {
-    /// Today's bytes, now: [`paste_text`], bracketed if the program asked for it.
+    /// Today's bytes, now: [`runtime::clipboard::paste_text`], bracketed if the program asked for
+    /// it.
     AsTyped,
     /// **A PowerShell prompt the shell opened in order, behind ConPTY** — the block lands whole
     /// on PSReadLine's input line and nothing runs until the reader's one Enter (owner's ruling
     /// 2026-09-22, ruling 2; 0.4.4 ticket 03). Never shown the card. The bytes are
-    /// [`powershell_input_line`]'s.
+    /// [`runtime::clipboard::powershell_input_line`]'s.
     InputLine,
     /// The card: nothing is sent until the reader answers. Carries the count the card shows, so
     /// the text is scanned once.
     Ask { lines: usize },
 }
 
-/// **The facts [`paste_road`] turns on**, read off one pane at the moment of the paste.
+/// **The facts [`runtime::clipboard::paste_road`] turns on**, read off one pane at the moment of
+/// the paste.
 ///
 /// A value rather than a window, so the rule can be read and mutated without one — the wheel
-/// ruling's footing, which [`paste_target_is_live`] stands on too.
+/// ruling's footing, which [`runtime::clipboard::paste_target_is_live`] stands on too.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PasteFacts {
     /// The payload was `ClipboardPayload::Text`. Every other arm — a copied file's paths, a
@@ -1306,7 +1309,8 @@ struct PendingPaste {
     lines: usize,
     /// **The shell's continuation mark, when the block is one command wrapped with it** — every
     /// line but the last ends with it ([`input::continued_by`], 0.4.4 ticket 45). Then the card's
-    /// default is `Join`, and the join takes the marks off ([`paste_answer_text`]).
+    /// default is `Join`, and the join takes the marks off
+    /// ([`runtime::clipboard::paste_answer_text`]).
     continued: Option<char>,
     /// **Where the keyboard moved the card's focus**, or `None` while it stands where the card
     /// opened it — on the default (owner's ruling 2026-09-23: the card is a standard two-button
@@ -1342,14 +1346,16 @@ impl PendingPaste {
 enum StagedPaste {
     /// Write this now.
     Send(String),
-    /// Write these bytes now, exactly: a PowerShell prompt's input line ([`powershell_input_line`]).
+    /// Write these bytes now, exactly: a PowerShell prompt's input line
+    /// ([`runtime::clipboard::powershell_input_line`]).
     InputLine(std::borrow::Cow<'static, [u8]>),
     /// Held on the leaf; the card is up and nothing was sent.
     Held,
 }
 
 /// **What the one writer writes** — text it spells for the pane the way a paste always was
-/// ([`paste_text`]), or bytes a road already spelled ([`StagedPaste::InputLine`]).
+/// ([`runtime::clipboard::paste_text`]), or bytes a road already spelled
+/// ([`StagedPaste::InputLine`]).
 #[derive(Clone, Copy, Debug)]
 enum PasteBody<'a> {
     Text(&'a str),
@@ -1939,12 +1945,12 @@ impl MathWorkerRequest {
     ///
     /// **A read of a file's pixels is the same case** (T-PEEK-ANSWER-IDENTITY): a newer read of
     /// the same file — a picture's decode or a video's frame, the two roads of one record in the
-    /// window's peek cache ([`ask_for_peek_pixels`]) — for the same window displaces the read
-    /// waiting for it, on the same three grounds: the window asks a file whose read is out only
-    /// after the file-change news let that read go ([`forget_a_picture`]), its record then awaits
-    /// the newer id alone ([`peek_awaits`]), and a joined read would leave it awaiting an answer
-    /// that never comes. Everything else waits behind what is in line: nothing else on this share
-    /// is coalesced.
+    /// window's peek cache ([`runtime::peek::ask_for_peek_pixels`]) — for the same window displaces
+    /// the read waiting for it, on the same three grounds: the window asks a file whose read is out
+    /// only after the file-change news let that read go ([`runtime::preview::forget_a_picture`]),
+    /// its record then awaits the newer id alone ([`runtime::preview::peek_awaits`]), and a joined
+    /// read would leave it awaiting an answer that never comes. Everything else waits behind what
+    /// is in line: nothing else on this share is coalesced.
     fn relate(waiting: &Self, asked: &Self) -> lane::Relation {
         let same_file_for_the_same_window =
             |waiting_leaf: &ShellAddress, waiting_path: &Path, leaf: &ShellAddress, path: &Path| {
@@ -2354,8 +2360,9 @@ struct VideoGlance {
     frame: Option<bt_platform::video::VideoFrame>,
     facts: preview::VideoFacts,
     /// When the file said it was last written, as the worker that decoded it saw it — the third
-    /// field of the texture's own name ([`video_frame_texture_key`]) and nothing else. `None` for
-    /// a filesystem that will not say, which simply never matches a real timestamp.
+    /// field of the texture's own name ([`runtime::preview::video_frame_texture_key`]) and nothing
+    /// else. `None` for a filesystem that will not say, which simply never matches a real
+    /// timestamp.
     mtime: Option<SystemTime>,
 }
 
@@ -2494,7 +2501,7 @@ struct MarkdownSourceBlock {
     font_size: f32,
     line_height: f32,
     /// One monospace column, in pixels. Zero until the face has been measured,
-    /// which is the same "cannot wrap yet" [`preview_wrap_columns`] answers.
+    /// which is the same "cannot wrap yet" [`runtime::preview::preview_wrap_columns`] answers.
     advance: f32,
 }
 
@@ -2505,7 +2512,7 @@ impl MarkdownSourceBlock {
     /// row count that becomes the block's height and the painter asks it for the
     /// span of every row it draws; a block whose height was measured at one fold
     /// and drawn at another is a block that ends in the middle of the paragraph
-    /// under it. The rule is the source face's own ([`preview_wrap_columns`]):
+    /// under it. The rule is the source face's own ([`runtime::preview::preview_wrap_columns`]):
     /// a line wider than the pane folds at a word where it can, and a pane too
     /// narrow for one column does not fold at all.
     fn wrap(&self, width: f32) -> preview_edit::WrapLayout {
@@ -3051,7 +3058,7 @@ impl DocumentMath {
     }
 
     /// **The answer this document was already given for one formula**, if it was
-    /// given one — see [`Self::ink`] and [`answer_one_formula`].
+    /// given one — see [`Self::ink`] and [`runtime::math::answer_one_formula`].
     ///
     /// The whole key and not three quarters of it: a document set in one ink
     /// answers nothing about a page being set in another.
@@ -3316,7 +3323,7 @@ impl DocumentPictures {
     }
 
     /// **Every file this page is waiting on only to make a sharper raster of**,
-    /// beside the raster it wants made — see [`owe_sharpened_rasters`].
+    /// beside the raster it wants made — see [`runtime::preview::owe_sharpened_rasters`].
     fn sharpening(&self) -> impl Iterator<Item = (&PathBuf, &MarkdownRasterKey)> {
         self.waiting.iter().filter_map(|(file, wait)| match wait {
             PictureWaitFor::Sharpening(key) => Some((file, key)),
@@ -3453,7 +3460,7 @@ impl PagePicture {
 /// waiting for a **sharpening** is already drawing the picture at its own
 /// intrinsic size, and the decode it asked for is an input to the exact-size
 /// resample and nothing else: its arrival owes that pass
-/// ([`owe_sharpened_rasters`]) and not a re-shape of every paragraph on the page.
+/// ([`runtime::preview::owe_sharpened_rasters`]) and not a re-shape of every paragraph on the page.
 #[derive(Clone, Debug)]
 enum PictureWaitFor {
     Pixels,
@@ -3680,7 +3687,7 @@ struct PageArtKey {
 ///
 /// One function, because the layout that reserves the box, the painter that
 /// fills it and the resample that is asked for exactly those pixels must not be
-/// able to disagree — the discipline [`image_destination`] states for the image
+/// able to disagree — the discipline [`runtime::preview::image_destination`] states for the image
 /// pane, said again for the page.
 /// **What stands where a picture does not** (user ruling 2026-08-28; §7.1.3k ①
 /// and ③): the alt text, and one line saying why there is no picture.
@@ -4197,10 +4204,10 @@ struct PreviewPane {
     /// source is there again.
     ///
     /// **The page the surface is on is untouched by the flip**, which is what
-    /// keeps the browser alive across it: [`a_page_was_replaced`] reads
+    /// keeps the browser alive across it: [`runtime::web::a_page_was_replaced`] reads
     /// [`Self::source`], sees the page's own `PreviewSource::Web`, and the seat
     /// keeps its engine. What changes is one boolean handed to
-    /// [`a_page_is_off_the_glass`] — the page goes invisible, it is not
+    /// [`runtime::web::a_page_is_off_the_glass`] — the page goes invisible, it is not
     /// navigated and it is not closed, so flipping back costs a
     /// `SetIsVisible(true)` and no load at all.
     page_source: Option<PathBuf>,
@@ -5306,7 +5313,7 @@ fn markdown_list_marker(
 /// Where it is *in the body* rather than where it is on screen — which is all
 /// the builder can honestly say. A link is a run inside a paragraph of
 /// proportional text that has already wrapped, so where it landed is a question
-/// only the shaper answers; [`measure_preview_links`] asks it, one paragraph at
+/// only the shaper answers; [`runtime::preview::measure_preview_links`] asks it, one paragraph at
 /// a time, where a `&mut Renderer` is in hand.
 #[derive(Clone, Debug)]
 struct PreviewLinkSite {
@@ -5492,7 +5499,7 @@ struct PreviewTextBox {
 #[derive(Clone, Debug, PartialEq)]
 struct PreviewLink {
     /// Where a press lands on it — a run's own box, and for a chip the **pill**
-    /// that was drawn round that run ([`markdown_chip_ground`]), so the padding
+    /// that was drawn round that run ([`runtime::preview::markdown_chip_ground`]), so the padding
     /// a reader can see is padding a reader can hit.
     rect: [f32; 4],
     target: String,
@@ -5816,7 +5823,7 @@ enum MarkdownCaretSeat {
 struct MarkdownCaretPaint {
     seat: MarkdownCaretSeat,
     /// **Drawn only while this surface holds the keyboard.** The text face's own
-    /// rule ([`build_preview_text_body`]): a body you have clicked away from
+    /// rule ([`runtime::preview::build_preview_text_body`]): a body you have clicked away from
     /// keeps what it had marked and has no caret, because nothing is going to
     /// land there.
     lit: bool,
@@ -5849,7 +5856,7 @@ struct MarkdownCaretPaint {
 /// in cells, while this page has two faces and only one of them has cells. So
 /// what travels is the composition itself, and each face does its own
 /// arithmetic on it — the monospace block in the very columns
-/// [`markdown_source_cell`] counts, the prose block through the very seams
+/// [`runtime::preview::markdown_source_cell`] counts, the prose block through the very seams
 /// [`preview_live::ProseRows`] was measured in.
 ///
 /// **Never written into the buffer.** The composition is drawn at the caret and
@@ -6062,7 +6069,7 @@ struct ProseParagraph {
 /// **Ask the shaper which glass a range of one paragraph covers.**
 ///
 /// [`bt_render::WindowRenderer::measure_preview_highlight`] at the one real call
-/// site; a parameter so that the arithmetic [`preview_selection_bands`] *is*
+/// site; a parameter so that the arithmetic [`runtime::preview::preview_selection_bands`] *is*
 /// about — which bytes of which piece — can be asked with no GPU in the room.
 type PreviewHighlightMeasure<'a> =
     dyn FnMut(&bt_render::PreviewParagraph, Range<usize>) -> Vec<[f32; 4]> + 'a;
@@ -6695,7 +6702,7 @@ struct FileMenuState {
     /// show two preview rails at once — a split, or a float over a docked pane —
     /// so "the document menu is up" cannot stand in for it. And the press router
     /// has to be able to tell a press that is this menu's own close from a press
-    /// that is somewhere else ([`press_spends_itself_closing`]).
+    /// that is somewhere else ([`runtime::mouse::press_spends_itself_closing`]).
     ///
     /// **It was `Option<PreviewSurface>` until 2026-09-13** and answered for the
     /// pill alone, which is why the `…` chip beside it could not be shut by
@@ -7066,7 +7073,7 @@ fn path_is_previewable_image(path: &Path) -> bool {
 /// wrong.
 ///
 /// Since that same ruling the head's `↗` asks this too
-/// ([`preview_page_hand_off`]): a predicate that says which lane a name opens on
+/// ([`runtime::preview::preview_page_hand_off`]): a predicate that says which lane a name opens on
 /// and a button that says "this seat's content can go to a browser" are one
 /// claim about one class.
 fn path_opens_as_a_page(path: &Path) -> bool {
@@ -7343,7 +7350,7 @@ enum FilesFocusArrival {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct FilesKeyboardFocus {
     /// The column, or `None` while a shell has the keyboard. Stale readings are
-    /// healed at the *read*, by [`files_keyboard_seat_of`].
+    /// healed at the *read*, by [`runtime::files::files_keyboard_seat_of`].
     owner: Option<LeafId>,
     /// Whether that column's selection wears the accent ring.
     ///
@@ -7688,7 +7695,8 @@ struct LeafSession {
     /// away. Looking at the tab is not one of them —
     /// [`attention::Event::MarkSeen`] is the arrival with nothing to say.
     attention: attention::AttentionLedger,
-    /// **Whether a road that ends this pane has already given its place up** ([`end_leaves_of`]).
+    /// **Whether a road that ends this pane has already given its place up**
+    /// ([`runtime::panes::end_leaves_of`]).
     ///
     /// Set by that walk and read by nothing else. A window closed and then retired by a quit
     /// before it is reaped is walked twice, and the ledger answers a second
@@ -7729,7 +7737,8 @@ struct LeafSession {
     text_scale: TextScale,
     /// **The metrics this pane's session and projection were last applied at** — derived from
     /// [`Self::text_scale`], the Settings size and the window's display scale by
-    /// [`pane_cell_metrics`], and written only by [`apply_leaf_metrics`] and the constructor.
+    /// [`pane_cell_metrics`], and written only by [`runtime::terminal::apply_leaf_metrics`] and the
+    /// constructor.
     ///
     /// A derived value, not a second owner of the size: every writer re-derives it from the rung.
     /// It is what the pane's grid is solved from ([`Self::grid_for`]) and what its next picture is
@@ -8272,7 +8281,7 @@ struct TabState {
     ///
     /// **And by its target too, since 2026-08-29** (§7.1.5g ⑦). The box is what
     /// the underline is drawn from; the target is what the pointing finger is
-    /// decided from ([`preview_link_answers_a_press`]), and the two are held in
+    /// decided from ([`runtime::preview::preview_link_answers_a_press`]), and the two are held in
     /// one place for `terminal_link_grasp`'s reason one surface along — so the
     /// shape and the mark cannot come to disagree about which run is a link, nor
     /// the shape and the verb about what that run would do.
@@ -9528,7 +9537,7 @@ struct TearOut {
     /// window` pointed at a *verb*, and the window opens where every other new
     /// window opens. A tear-out does name one — the hand let go somewhere, and
     /// that somewhere is the whole of what it said — so it carries the pointer
-    /// and the grip and [`tear_out_rect`] turns them into a rectangle at the
+    /// and the grip and [`runtime::windows::tear_out_rect`] turns them into a rectangle at the
     /// target monitor's dpi.
     at: Option<((i32, i32), TearGrip)>,
 }
@@ -9838,7 +9847,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// — which is the default. The field exists because that setting answers a
     /// question about **text**, and a gesture is not text: `⌥`+wheel over the
     /// card column is chrome asking which of two readings a notch has, and the
-    /// column has no opinion about what `⌥a` types. See [`column_notch`], which
+    /// column has no opinion about what `⌥a` types. See [`runtime::panes::column_notch`], which
     /// is the one reader, and §13.33 ① for why there is exactly one.
     modifiers_held: ModifiersState,
     /// **Whether the press under the hand was taken as the secondary one**
@@ -10116,7 +10125,7 @@ struct WindowRuntime<B: Backend = Native> {
     files_watch: files_watch::FilesWatch,
     /// The Win32 cursor the page last asked for, while the pointer is over it.
     ///
-    /// Kept beside the page rather than folded into [`pointer_cursor`]'s six
+    /// Kept beside the page rather than folded into [`runtime::mouse::pointer_cursor`]'s six
     /// answers: that function decides what *this window* means by a rectangle,
     /// and this is another program saying what it means by one. The one place
     /// they meet is [`Runtime::apply_pointer_cursor`], where the page's answer
@@ -10179,7 +10188,7 @@ struct WindowRuntime<B: Backend = Native> {
     last_presented_frame: Option<ViewportFrame>,
     /// How many times a terminal picture has been *composed and published*.
     ///
-    /// The counter [`chrome_tick_reuses_picture`] reads. It is bumped at the one
+    /// The counter [`runtime::frame::chrome_tick_reuses_picture`] reads. It is bumped at the one
     /// line a composed frame enters the presentation slot, which is what makes
     /// it a fact about pictures rather than about events: a trigger that is
     /// held, skipped as unchanged, or answered from the glass moves nothing.
@@ -10236,7 +10245,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// they were carried there anyway, by the caret's blink and the strip's ring,
     /// at whatever rate those happened to be running; once a tick began
     /// re-presenting the picture on the glass instead
-    /// ([`chrome_tick_reuses_picture`]) they were not carried at all, and a wheel
+    /// ([`runtime::frame::chrome_tick_reuses_picture`]) they were not carried at all, and a wheel
     /// forwarded into an unfocused alternate screen moved that pane only when
     /// something else — a keystroke, a pointer move, the focused shell speaking —
     /// published a frame of its own. Measured on two panes running `less`: with
@@ -10364,7 +10373,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// `Ime::Disabled` and every window focus change, on purpose.** A cancel is
     /// a request an input method may refuse, and the lifecycle notices around it
     /// are not the composition ending — a barrier a notice can take down is not
-    /// a barrier. See [`composition_ruling`] for the whole rule.
+    /// a barrier. See [`runtime::keyboard::composition_ruling`] for the whole rule.
     composing_in: Composing,
     ime_active: bool,
     /// **The caret area the input method is wanted to follow, and the one it was
@@ -10415,7 +10424,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// hides itself got a desktop toast about a window they were looking at.
     ///
     /// Cached for [`window_hidden`]'s reason and sampled on the same turns —
-    /// [`sample_window_place`] writes all four together, and the doors that fire
+    /// [`runtime::frame::sample_window_place`] writes all four together, and the doors that fire
     /// *inside* a turn read them back from here rather than asking the desktop
     /// twice about one instant. Born `true`, which is the same answer the first
     /// sample gives for a window that has just opened, and the quiet direction
@@ -10444,7 +10453,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// re-places it.
     taskbar_flash: Option<TaskbarFlash>,
     /// **The last reading of where this window is, whole** (ticket 48): the
-    /// four facts [`sample_window_place`] answered, focus included, as the pass
+    /// four facts [`runtime::frame::sample_window_place`] answered, focus included, as the pass
     /// that decides a delivery takes them. Written with the four fields above in
     /// one assignment by [`Runtime::observe_window_place`] and by nothing else:
     /// at the head of every turn, at the window's birth, and by an attention
@@ -14305,7 +14314,7 @@ impl TabState {
     /// the vault for it: no profile, no place, no path. Writing a row that
     /// reopened as *something* would be inventing the tab the user closed, and
     /// the honest answer to "what was that" is to say nothing rather than to
-    /// guess. It is the same refusal [`pane_can_become_a_tab`] makes about the
+    /// guess. It is the same refusal [`runtime::tabs::pane_can_become_a_tab`] makes about the
     /// same leaf, one door over.
     fn seed(&self) -> Option<seed::Seed> {
         let seat = self.seats.identity();
@@ -14544,7 +14553,7 @@ fn close_wait_over(
 
 /// **What has become of one buffer a wait for saves is about**, with its name, if one of
 /// these tabs' pools holds it ([`preview::PreviewPool::at_the_close`]) — a close's wait reads
-/// its own window's tabs ([`what_a_close_wait_found`]), a quit's every window's
+/// its own window's tabs ([`runtime::windows::what_a_close_wait_found`]), a quit's every window's
 /// (`FolioApp::settle_the_quits_saves`, S-6c), because a tab may move between windows
 /// while the quit waits.
 fn where_a_save_stands(
@@ -16404,7 +16413,7 @@ impl ImeOwner {
 ///
 /// What a paste is for: when one of these holds the keyboard, the clipboard's
 /// text goes into it — never into the terminal the field happens to be
-/// standing on. Derived from the ladder by [`text_field_holding`], never listed
+/// standing on. Derived from the ladder by [`runtime::clipboard::text_field_holding`], never listed
 /// a second time beside it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TextFieldSeat {
@@ -16464,7 +16473,7 @@ enum ClipboardWriteEffect {
 ///
 /// One rung's caret cannot be produced the way the others are: the grid's is a
 /// property of a **composed frame**, computed in the seat's coordinates by the
-/// renderer and translated by [`window_ime_cursor_area`], and it exists only
+/// renderer and translated by [`runtime::keyboard::window_ime_cursor_area`], and it exists only
 /// inside the pass that made the picture. So the total decision is made here, on
 /// nothing but the rung, and the two answers it can give are "ask the frame" and
 /// "ask the field" — [`Runtime::field_ime_caret`] then measures whichever field
@@ -16521,7 +16530,7 @@ enum CompositionOrigin {
     Modal,
 }
 
-/// **What a composition event is**, as far as [`composition_ruling`] needs to
+/// **What a composition event is**, as far as [`runtime::keyboard::composition_ruling`] needs to
 /// know (§7.1.5a″).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ComposingEvent {
@@ -16577,7 +16586,7 @@ enum Composing {
     /// can come between an ending's clear and its result, so a result cannot be
     /// mistaken for the reader's own typing. It does **not** prove that a clear
     /// this window has already seen was the only one — see bound ③ on
-    /// [`composition_ruling`].
+    /// [`runtime::keyboard::composition_ruling`].
     Retiring(CompositionOrigin),
 }
 
@@ -16590,7 +16599,7 @@ impl Composing {
         }
     }
 
-    /// Apply what [`composition_ruling`] decided.
+    /// Apply what [`runtime::keyboard::composition_ruling`] decided.
     fn after(self, next: ComposingAfter, here: &CompositionOrigin) -> Self {
         match next {
             ComposingAfter::Unchanged => self,
@@ -16618,7 +16627,7 @@ enum ComposingAfter {
     Retire,
 }
 
-/// [`composition_ruling`]'s answer: whether these letters are answered at all,
+/// [`runtime::keyboard::composition_ruling`]'s answer: whether these letters are answered at all,
 /// and what becomes of the recorded composition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompositionRuling {
@@ -17450,8 +17459,8 @@ enum MouseRoute {
     /// program can drop it on its own with `\e[?1006l`, and any of the three read
     /// from the modes at that moment would answer an SGR press with X10 bytes the
     /// program cannot pair with anything it is holding. Both the release
-    /// ([`route_forwarded_mouse_button`]) and the moves
-    /// ([`route_forwarded_mouse_motion`]) answer from here. The button is latched
+    /// ([`runtime::mouse::route_forwarded_mouse_button`]) and the moves
+    /// ([`runtime::mouse::route_forwarded_mouse_motion`]) answer from here. The button is latched
     /// for the same reason it always was — a release, and a drag report, name the
     /// button that went down.
     Forward {
@@ -17988,7 +17997,7 @@ impl FilesRowClicks {
     }
 
     /// Forget the last click. Anything that is not a press on a row that
-    /// carries a second verb breaks the chain — see [`files_row_counts_clicks`]
+    /// carries a second verb breaks the chain — see [`runtime::files::files_row_counts_clicks`]
     /// for which rows those are, and why the folder row stopped being one of
     /// them on 2026-08-19.
     fn interrupt(&mut self) {
@@ -18089,7 +18098,7 @@ struct CommandFlash {
 ///
 /// Two shapes and one clock, because they answer one question: *where did I just
 /// get sent*. Which of the two a jump uses is not a style choice, it is a fact
-/// about what there is to point at — see [`recall_flash`].
+/// about what there is to point at — see [`runtime::palette::recall_flash`].
 #[derive(Clone, Debug, PartialEq)]
 enum FlashBand {
     /// The row a jump landed on, named by the content it is showing rather than
@@ -18197,8 +18206,8 @@ impl SearchRefresh {
     }
 }
 
-/// One terminal pane's search, re-asked — what [`rescan_leaf_for_search`] found and what the
-/// refresh decides from it.
+/// One terminal pane's search, re-asked — what [`runtime::search::rescan_leaf_for_search`] found
+/// and what the refresh decides from it.
 struct LeafSearchRescan {
     /// The answer, as the cache that replaces the previous one.
     cache: SearchScanCache,
@@ -18968,7 +18977,7 @@ impl TabRename {
 /// **The chords are the field's own** (user ruling 2026-08-20 for `Ctrl+A`; the
 /// rest arrived with the 0.3 migration onto [`text_field::TextField`]), and none
 /// of them is **a row of `shortcuts::BINDINGS`** — the same ownership
-/// [`graph_key_of`] writes down and `preview_edit::command`'s own
+/// [`runtime::git::graph_key_of`] writes down and `preview_edit::command`'s own
 /// `"a" => SelectAll` already follows. That table is the registry of chords this
 /// window *claims from a shell*, editable one day from a panel; while this
 /// editor holds the keyboard there is no shell to claim anything from, and a
@@ -18982,13 +18991,13 @@ impl TabRename {
 /// word, and `Shift` with any motion drags the selection's far end along.
 /// **The clipboard, as one key press can reach it** (0.3): what the press wants put on it, read
 /// back by the caller ([`Self::copied`]). A paste is not here: the window asks the clipboard lane
-/// for it when the chord is one ([`rename_pastes`], T-CLIPBOARD-LANE) and never hands the chord to
-/// [`rename_key`]; the line lands through the editor's own insert door (`Runtime::rename_ime`) on
-/// the turn the clipboard answers.
+/// for it when the chord is one ([`runtime::keyboard::rename_pastes`], T-CLIPBOARD-LANE) and never
+/// hands the chord to [`runtime::keyboard::rename_key`]; the line lands through the editor's own
+/// insert door (`Runtime::rename_ime`) on the turn the clipboard answers.
 ///
-/// A struct rather than a bare return because it keeps [`rename_key`] pure: the whole editor
-/// stays testable without a window handle, which is what the tests this migration is pinned by
-/// depend on.
+/// A struct rather than a bare return because it keeps [`runtime::keyboard::rename_key`] pure: the
+/// whole editor stays testable without a window handle, which is what the tests this migration is
+/// pinned by depend on.
 #[derive(Debug, Default)]
 struct RenameClipboard {
     /// What this press wants put on the clipboard, if anything.
@@ -18999,7 +19008,7 @@ struct RenameClipboard {
 /// (gesture audit 2026-08-26, 丙3).
 ///
 /// A printed **file** path wears the finger with or without `Ctrl`
-/// ([`terminal_link_answers_a_press`]), so the same finger stands over two
+/// ([`runtime::terminal::terminal_link_answers_a_press`]), so the same finger stands over two
 /// destinations and the difference between "opens here" and "leaves for the
 /// system" has no projection anywhere on the glass. This is that projection,
 /// and it is one clause on a status line that was already being drawn.
@@ -19482,7 +19491,7 @@ enum PeekCacheEntry {
     /// the computation lane minted for it (T-PEEK-ANSWER-IDENTITY). An answer is filed only for
     /// the read that asked it: one that comes home under another identity answers a question this
     /// window no longer asks — the file changed under the read, and a surface asked again — and is
-    /// set aside, never filed ([`peek_awaits`]).
+    /// set aside, never filed ([`runtime::preview::peek_awaits`]).
     Pending {
         asked: computation_lane::ComputationId,
     },
@@ -19516,9 +19525,10 @@ enum PeekCacheEntry {
 /// neither is ever evicted, because each is the record of a question and an evicted record
 /// reads as *never asked*: the pane's, the page's and the flyout's next resolve would ask the
 /// worker again with no new input. A `Pending` leaves by its answer; a `Failed` leaves with the
-/// last surface that names its file ([`let_go_unnamed_peek_records`]), by
-/// the file-change road ([`forget_a_picture`]), or by a new peek over its file — a hover that
-/// settles ([`peek_reads_the_file`]) or a glance card that opens ([`peek_card_opened`]).
+/// last surface that names its file ([`runtime::peek::let_go_unnamed_peek_records`]), by
+/// the file-change road ([`runtime::preview::forget_a_picture`]), or by a new peek over its file —
+/// a hover that settles ([`runtime::peek::peek_reads_the_file`]) or a glance card that opens
+/// ([`runtime::peek::peek_card_opened`]).
 impl bt_term::Weighed for PeekCacheEntry {
     fn bytes_held(&self) -> u64 {
         match self {
@@ -19532,7 +19542,7 @@ impl bt_term::Weighed for PeekCacheEntry {
     }
 }
 
-/// **What became of a request for a file's pixels** ([`ask_for_peek_pixels`]).
+/// **What became of a request for a file's pixels** ([`runtime::peek::ask_for_peek_pixels`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PeekAsk {
     /// The computation lane admitted it under this identity: the file is `Pending` until the
@@ -19542,8 +19552,8 @@ enum PeekAsk {
     /// that free the lane are the next hand-out).
     NotNow,
     /// The lane's thread could not be started: the file is filed as failed
-    /// ([`unstarted_pixels`]), so it is asked again only by new input to the surface — a new
-    /// hover, the file opened again.
+    /// ([`runtime::peek::unstarted_pixels`]), so it is asked again only by new input to the surface
+    /// — a new hover, the file opened again.
     Unstarted,
     /// It was not asked and will not be: a file this window does not open, or a lane that has
     /// stopped.
@@ -19801,7 +19811,7 @@ struct PreviewImageState {
     /// per event is a question about a size the hand has already left.
     scale_settle_deadline: Option<Instant>,
     /// **Where this picture stands this frame**, in physical pixels of the whole
-    /// surface — [`image_destination`]'s answer against the body its host gave
+    /// surface — [`runtime::preview::image_destination`]'s answer against the body its host gave
     /// it, and `None` while there is nowhere for it to stand at all (the decode
     /// is out, the body has no extent, the host has gone).
     ///
@@ -19813,7 +19823,7 @@ struct PreviewImageState {
     /// rectangle down once, where the zoom and the clamp already are, is what
     /// keeps the two hosts from arriving at two different answers to "how big is
     /// this picture" — and it is the same discipline
-    /// [`image_destination`]'s own doc comment states: one rectangle, one author.
+    /// [`runtime::preview::image_destination`]'s own doc comment states: one rectangle, one author.
     drawn: Option<[f32; 4]>,
     /// **How large the thing in this file really is, when that is not how large
     /// the pixels are** (user ruling 2026-08-27; §7.23).
@@ -19830,7 +19840,7 @@ struct PreviewImageState {
     /// ([`bt_term::DecodedInlineImage::native_size`]) — the same two numbers in
     /// the same two roles as a recording's, which is why it is this field and
     /// not a second one. The meta line says both when they differ; see
-    /// [`image_meta_sentence`].
+    /// [`runtime::preview::image_meta_sentence`].
     ///
     /// A **video** parts the two. Its pixels are one frame decoded into
     /// [`VIDEO_FRAME_FIT_PX`], so `native` is at most 1920×1080 however large the
@@ -19867,7 +19877,7 @@ impl PreviewImageState {
     /// The standing answer a picture pane keeps — the raster it is drawing, the
     /// content key that raster was made from, the decode's own dimensions and
     /// whatever pass is in flight — is read in front of the decode store
-    /// ([`surface_pixels`]), so it outlives the pixels exactly as a page's does.
+    /// ([`runtime::preview::surface_pixels`]), so it outlives the pixels exactly as a page's does.
     /// That is what must not survive the bytes changing: kept, it would go on
     /// drawing the old picture of a file that has been replaced, and would ask
     /// for nothing because what it holds is what it wants.
@@ -20066,7 +20076,7 @@ struct ImageZoom {
     mode: ImageZoomMode,
     /// How far the picture has been carried from the body's centre, in physical
     /// pixels. Meaningful only while the drawn picture is larger than the body on
-    /// that axis; [`image_destination`] clamps it to nothing on any axis where it
+    /// that axis; [`runtime::preview::image_destination`] clamps it to nothing on any axis where it
     /// is not, which is what makes "let go of the mouse" and "resize the pane"
     /// arrive at the same place.
     pan: [f32; 2],
@@ -20381,11 +20391,11 @@ impl CardAim {
 ///   carry is cleared, so `+1, −1` at the top of the ladder steps down once, exactly as it would
 ///   one rung below the top.
 ///
-/// Only the vertical component is read ([`wheel_zoom_notches`]), after [`upright_wheel`]; a
-/// report that has none falls through to the routes it had. Reports merged into one burst before
-/// the flush are summed first, as every wheel route here sums them ([`WheelBurst::plus`]), so a
-/// reversal inside one burst nets. A touch pan with the modifier held enters as pixels and takes
-/// the same carry.
+/// Only the vertical component is read ([`wheel_zoom_notches`]), after
+/// [`runtime::mouse::upright_wheel`]; a report that has none falls through to the routes it had.
+/// Reports merged into one burst before the flush are summed first, as every wheel route here sums
+/// them ([`WheelBurst::plus`]), so a reversal inside one burst nets. A touch pan with the modifier
+/// held enters as pixels and takes the same carry.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TextSizeAim {
     /// The pane this fraction was turned over.
@@ -20631,7 +20641,7 @@ impl ImageClicks {
 /// the link it landed on is still going to answer; after them it is a drag and
 /// the link is not. It is the same latch and the same six pixels every other
 /// press on this desk is measured against, and the same shape as the terminal's
-/// `click_no_drag` — see [`preview_press_opens_its_link`].
+/// `click_no_drag` — see [`runtime::preview::preview_press_opens_its_link`].
 #[derive(Clone, Debug)]
 struct PreviewTextDrag {
     /// The gesture's own surface, not the one under the pointer: a selection
@@ -20758,7 +20768,7 @@ const IMAGE_PAN_KEY_SHIFT_STEP: f32 = 1.0 / 2.0;
 /// **What a picture surface has to draw with**, once the decode store and the
 /// answer the surface is already standing on have both been asked (§7.1.3u ③).
 ///
-/// [`answer_one_picture`]'s `known`, said about the other consumer of the same
+/// [`runtime::preview::answer_one_picture`]'s `known`, said about the other consumer of the same
 /// store. A picture pane is not a markdown page, but it holds a picture in
 /// exactly the same way: a raster it is drawing, made from a decode that a
 /// byte-bounded cache is free to let go of at any moment.
@@ -20796,7 +20806,7 @@ enum SurfacePixels {
 }
 
 /// **What one picture surface must do about its pixels this frame** — see
-/// [`picture_errand`].
+/// [`runtime::preview::picture_errand`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PictureErrand {
     /// Draw, and ask nobody anything.
@@ -20891,8 +20901,8 @@ impl FrameImageReferences {
 /// (§7.1.5g, user ruling 2026-08-20).
 ///
 /// **This is the terminal's one clicking rule, and it is older than this slice.**
-/// [`local_image_activation`] has always spelled it for inline image references —
-/// a plain click puts the picture on the preview seat, `Ctrl` hands it to the
+/// [`runtime::terminal::local_image_activation`] has always spelled it for inline image references
+/// — a plain click puts the picture on the preview seat, `Ctrl` hands it to the
 /// system's viewer — while OSC 8 hyperlinks had been written the other way round:
 /// nothing at all without `Ctrl`, and `Ctrl` meaning *leave*. One terminal with
 /// two clickable kinds of reference and two rules for them is this product
@@ -21012,8 +21022,9 @@ enum HyperlinkActivation {
 /// Two surfaces point at things — a reference printed in the terminal and a link written in a
 /// previewed document — and the ruling is that they follow one rule: 「click stays in the window,
 /// Ctrl+click hands over」. So each surface says *what* its string names, in its own grammar
-/// ([`terminal_reference_row`], [`preview_reference_row`]), and [`reference_activation`] is the
-/// one function that says what a press on that spends. No surface reads the modifier on its own.
+/// ([`terminal_reference_row`], [`runtime::preview::preview_reference_row`]), and
+/// [`reference_activation`] is the one function that says what a press on that spends. No surface
+/// reads the modifier on its own.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ReferenceRow {
     /// `http`/`https` — the row [`web_address_activation`] reads.
@@ -21209,7 +21220,7 @@ fn web_address_activation(intent: ClickIntent, uri: &str) -> WebAddressActivatio
 /// [`ClickIntent`] splits every row: a plain click asks for this window's own
 /// answer, `Ctrl` asks for the system's. So a `file:` link to a readable file
 /// opens the preview seat plainly and the system's handler under `Ctrl`, which is
-/// letter for letter what [`local_image_activation`] has always done with an
+/// letter for letter what [`runtime::terminal::local_image_activation`] has always done with an
 /// inline picture.
 ///
 /// **Where the plain half is empty, a plain click does nothing** — a web address
@@ -22007,9 +22018,9 @@ struct TabTriggerHand {
 
 /// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
 ///
-/// The one the queue would send you to ([`next_attention_stop`]'s 先到先服务), which is what makes
-/// it the honest answer to "which request is this dot reporting" — a tab is a lid over panes, and
-/// the claim it wears is the loudest of theirs.
+/// The one the queue would send you to ([`runtime::attention::next_attention_stop`]'s 先到先服务), which
+/// is what makes it the honest answer to "which request is this dot reporting" — a tab is a lid
+/// over panes, and the claim it wears is the loudest of theirs.
 fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {
     tab.sessions
         .iter()
@@ -24536,7 +24547,7 @@ impl PaneMotion {
     /// including for a seat with no entry, because a pane nothing is animating
     /// is a pane that is simply there.
     ///
-    /// Read by [`pane_fade_veil_layers`], which is where P177's fade is actually
+    /// Read by [`runtime::panes::pane_fade_veil_layers`], which is where P177's fade is actually
     /// drawn, and by [`Self::settle_frame_debt`], which is what makes it owe the
     /// frames it runs on.
     fn opacity_of(&self, seat: SeatId, now: Instant, motion: Motion) -> f32 {
@@ -25442,7 +25453,7 @@ struct OverlayStack {
     /// **to** one. It is in the overlay at all only because the seats' document
     /// lane runs a whole pass earlier, so a bar handed to that lane would be
     /// painted under the very text it has to ride over (see
-    /// [`scroll_bar_layer`]) — it is not a surface, and every surface above is
+    /// [`runtime::peek::scroll_bar_layer`]) — it is not a surface, and every surface above is
     /// entitled to cover it, starting with the rail. A float's bar is not here:
     /// it has to stand above its own window and below the next one, so it rides
     /// in [`Self::float`] beside the window it belongs to.
@@ -25538,7 +25549,7 @@ struct OverlayStack {
     flight: marks::Band,
     /// The arriving panes' veil and the dock drawing (`#dock-shift` 24,
     /// `#dock-preview` 25) — drawings *on* the layout rather than surfaces over
-    /// the window. See [`ground_overlay_layers`].
+    /// the window. See [`runtime::math::ground_overlay_layers`].
     ground: marks::Band,
     /// `.srchbar { z-index: 30 }` — **the in-pane search capsule** (§7.1.5d).
     ///
@@ -26150,7 +26161,7 @@ enum DropLanding {
     /// goes on offering that pointer the tear-out it always offered. Once the
     /// stage is somebody else's, the same entry is the way home: resting on it
     /// springs the view back, and letting go on it moves no pane at all, because
-    /// the pane never left. See [`pane_strip_landing`].
+    /// the pane never left. See [`runtime::tabs::pane_strip_landing`].
     ///
     /// **And a row rested on an entry is opened *in* that tab** (§7.1.1's second
     /// tab-strip verb, landed 2026-08-30): the pointer is aimed at a room and
@@ -26159,7 +26170,7 @@ enum DropLanding {
     /// door — a file lands on that tab's landing preview pane or splits one out
     /// at the fixed right seat, a folder re-roots that tab's column or gets it
     /// one — so nothing about opening a file had to be written a second time for
-    /// the strip. See [`row_strip_landing`].
+    /// the strip. See [`runtime::tabs::row_strip_landing`].
     StripAdopt { tab: TabId },
     /// **K130/G82** — the layout's own rim: the *root* splits on this side.
     ///
@@ -26220,7 +26231,7 @@ impl DropLanding {
     /// The aim this landing was read off, for the three that are aimed at the
     /// layout — and `None` for the two the strip answered.
     ///
-    /// The exact inverse of [`landing_for_aim`], and written as one function so
+    /// The exact inverse of [`runtime::mouse::landing_for_aim`], and written as one function so
     /// that it stays one: a plan is built from an aim, and re-deriving "which
     /// pane, which side" from a landing at each of U6's call sites is how the
     /// preview and the drop would come to disagree about the very question they
@@ -26574,7 +26585,7 @@ struct Drag {
     landing: Option<DropLanding>,
     /// **What the box last promised to write into**, read off the window at the
     /// same instant as [`Self::landing`] and compared against a second reading at
-    /// the release — see [`PasteOffer`] and [`paste_offer_survives`].
+    /// the release — see [`PasteOffer`] and [`runtime::clipboard::paste_offer_survives`].
     ///
     /// Beside the landing rather than derived from it at the release, because
     /// the whole point is that it is a reading taken at a *different moment*:
@@ -27049,7 +27060,7 @@ impl BrokerAim {
 }
 
 /// **What letting go does when the hand is not over the window that is holding
-/// it** (multiwindow slice F2) — [`release_verdict`]'s counterpart one level up.
+/// it** (multiwindow slice F2) — [`runtime::mouse::release_verdict`]'s counterpart one level up.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BrokerRelease {
     /// Nothing crossed a boundary, so the window's own verdict stands.
@@ -28876,7 +28887,7 @@ struct WebPlacement {
     presence: webhost::WebPresence,
     rect: Option<webhost::WebBounds>,
     /// Where in the overlay stack this page's hole is punched — see
-    /// [`bt_render::WebHole::above`] and [`hole_for`]. `None` for a page whose
+    /// [`bt_render::WebHole::above`] and [`runtime::web::hole_for`]. `None` for a page whose
     /// pane is a seat, which is under the whole stack; the float's own layer for
     /// a page whose pane is a floating window.
     above: Option<usize>,
@@ -29245,7 +29256,7 @@ enum Popup {
     ///
     /// The ninth name on this list and the first one raised on the *tab list*
     /// rather than on the stage, which is why it is also the second entry of
-    /// [`popup_owner`] that answers [`PopupOwner::Tabs`]: it is an extension of
+    /// [`runtime::panes::popup_owner`] that answers [`PopupOwner::Tabs`]: it is an extension of
     /// the surface that grew it, and a sidebar that retracted out from under a
     /// menu standing beside it is the 2026-08-25 report with a different list in
     /// it.
@@ -30244,7 +30255,7 @@ impl PopupsUp {
 ///
 /// One list of tabs, three places it can be drawn — and every question about
 /// the `+`, its `˅` and the menu that `˅` raises has to start by answering
-/// which. [`tab_surface`] is the one author of that answer.
+/// which. [`runtime::tabs::tab_surface`] is the one author of that answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TabSurface {
     /// `.tabs` — the horizontal strip under the caption.
@@ -30273,7 +30284,7 @@ enum TabSurface {
 /// rail row hangs out (G102). What closes it generally is the popup saying
 /// where it came from, which is a fact this window already holds for every one
 /// of them: [`Popup::Profile`] hangs off whichever surface carries the `+` and
-/// [`Popup::Tab`] off the row a right press landed on — both [`tab_surface`]'s
+/// [`Popup::Tab`] off the row a right press landed on — both [`runtime::tabs::tab_surface`]'s
 /// answer — and the other seven are raised inside the stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PopupOwner {
@@ -33774,8 +33785,8 @@ fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
 /// **§7.1.6k (user ruling, 2026-08-20) — move one pane into another tab, at the
 /// place the gesture aimed at.**
 ///
-/// A free function over two [`TabState`]s for the reason [`tear_pane_into_tab`]
-/// and [`absorb_tab_into_layout`] are: everything this gesture *decides* is a
+/// A free function over two [`TabState`]s for the reason [`runtime::panes::tear_pane_into_tab`]
+/// and [`runtime::tabs::absorb_tab_into_layout`] are: everything this gesture *decides* is a
 /// fact about two tabs, and the only thing the window contributes is the solved
 /// rectangles and the strip surgery. Those are arguments here.
 ///
@@ -33797,7 +33808,7 @@ fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
 /// **A centre evicts, and the eviction is this function's** (N161). An arriving
 /// *subtree* takes the target pane's slot, so the target pane leaves for the
 /// strip as a tab of its own — [`pane_into_new_tab`], the very call
-/// [`absorb_tab_into_layout`] makes for a merging tab, with the host's pin
+/// [`runtime::tabs::absorb_tab_into_layout`] makes for a merging tab, with the host's pin
 /// (N160②). It is done here rather than by the window because it is a fact about
 /// the two trees; what the window does with the tab that comes back is the
 /// window's.
@@ -33821,7 +33832,7 @@ fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
 ///
 /// `None` when the seat is not in `from`'s tree, when the target's tree cannot
 /// take the pane at this aim (H93), or when a centre would evict a pane the
-/// strip cannot hold ([`pane_can_become_a_tab`], the third place M147 can act on
+/// strip cannot hold ([`runtime::tabs::pane_can_become_a_tab`], the third place M147 can act on
 /// that one answer). Nothing is mutated on any of those paths: the plan is built
 /// and judged before the first edit, so a refusal leaves both tabs exactly as
 /// they were and the gesture goes home (J120).
@@ -34372,7 +34383,7 @@ fn terminal_palette(
 /// every profile has it: a PowerShell tab is folder-named too. What made it
 /// surface now is Command Prompt, whose only report *is* the folder.
 ///
-/// `holds_the_keyboard` is [`seat_holds_the_keyboard`] already answered for this
+/// `holds_the_keyboard` is [`runtime::terminal::seat_holds_the_keyboard`] already answered for this
 /// pane — the four bits are the window's and the tab's, and a leaf can supply
 /// none of them about itself.
 /// **Did this pane commit a synchronized update while it was being fed?**
@@ -38922,7 +38933,7 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
     }
 
     /// **Two windows at once, both mutable** — what a transfer needs and cannot
-    /// otherwise have, for [`two_tabs_mut`]'s reason one layer up.
+    /// otherwise have, for [`runtime::tabs::two_tabs_mut`]'s reason one layer up.
     ///
     /// `None` when either is not open or when they are the same window; the
     /// second is the caller having asked a question with no answer rather than a
@@ -48036,9 +48047,9 @@ impl<B: Backend> FolioApp<B> {
     /// A worker is the application's and so is its answer channel, so this is the
     /// layer that may call `try_recv` on one: the batch is then offered to every
     /// window in turn and each takes only what is addressed to it
-    /// ([`answers_for`]). While the *windows* drained, the first one in the
+    /// ([`runtime::math::answers_for`]). While the *windows* drained, the first one in the
     /// opening order took every pending answer and dropped whatever it could not
-    /// place — see [`answers_for`] for what that looked like on the glass.
+    /// place — see [`runtime::math::answers_for`] for what that looked like on the glass.
     ///
     /// The `bool` is the lane going away under us, carried out rather than acted
     /// on here: turning a worker off is one sentence for the process, but the
@@ -53587,7 +53598,7 @@ fn window_event_station(event: &WindowEvent) -> hang_watch::Station {
 struct PreparedClipboardPaste {
     text: Option<String>,
     /// **The text is the clipboard's own** (`ClipboardPayload::Text`), as against paths Folio
-    /// spelled. The one arm [`paste_road`] may ask about (0.4.4 ticket 02).
+    /// spelled. The one arm [`runtime::clipboard::paste_road`] may ask about (0.4.4 ticket 02).
     clipboard_text: bool,
     notice: Option<String>,
     /// **Every encoding a picture-and-nothing-else clipboard offered**, best
@@ -53660,7 +53671,7 @@ enum WheelAxis {
 /// **Cut a pane across its longer side.** The whole of what "auto" means, as a
 /// function of the only two numbers it turns on.
 ///
-/// A function rather than three lines inside a method, for [`wheel_route`]'s
+/// A function rather than three lines inside a method, for [`runtime::mouse::wheel_route`]'s
 /// reason: it is the rule the pane head's `⊞` promises, and a promise made by a
 /// button has to be pinnable without a window, a renderer and a solve behind it.
 ///
@@ -54492,7 +54503,7 @@ fn session_title(
 }
 
 /// Where a files card or column opens, and whether that is the account's home standing in for a
-/// folder nobody could say ([`files_root_of`]).
+/// folder nobody could say ([`runtime::files::files_root_of`]).
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct FilesRoot {
     root: String,
@@ -58001,7 +58012,7 @@ fn restore_window_placement(
 ///
 /// Both halves of the round trip name the same rectangle — the window's *outer*
 /// rect, the one `GetWindowRect` reports — so restoring is nothing but the
-/// logical-to-physical direction of [`persisted_window_bounds`]. `opened_at`
+/// logical-to-physical direction of [`runtime::windows::persisted_window_bounds`]. `opened_at`
 /// supplies the corner for the two cases that have no recorded one: a first run,
 /// and a rectangle whose monitor is gone.
 fn startup_window_rect(

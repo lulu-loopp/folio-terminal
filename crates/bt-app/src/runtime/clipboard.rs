@@ -239,7 +239,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// §7.6 is written under: this is an outlet for the ledger, never a second copy of it.
     /// Store the reader's answer about copy-on-select (丙4).
     ///
-    /// Nothing else to do: [`should_copy_on_select_release`] reads the loaded
+    /// Nothing else to do: [`super::terminal::should_copy_on_select_release`] reads the loaded
     /// settings at the moment a drag is let go, so the next release after this
     /// write already answers the new way — the same shape
     /// [`Self::apply_terminal_notifications`] has, and for the same reason.
@@ -955,7 +955,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// — the clipboard's ([`Self::apply_clipboard_payload`], from the paste chord, the Edit menu and
     /// the terminal's menu) and paths in hand ([`Self::paste_paths_into`], from a drop, a dragged
     /// path and a saved clipboard picture) — so [`stage_paste`] — and through it
-    /// [`crate::paste_road`] — is asked exactly once per paste, after the address is known to be
+    /// [`paste_road`] — is asked exactly once per paste, after the address is known to be
     /// live and before a byte is written. A paste it holds
     /// raises the card and sends nothing; the card's answer spends it through
     /// [`Self::answer_paste_card`].
@@ -1391,7 +1391,7 @@ pub(crate) fn paste_offer_survives(
 /// **A text write happens only when the glass is certainly ours** (review
 /// 2026-09-17 round 2).
 ///
-/// The opposite default to [`glass_allows_a_drop`], and the asymmetry is the
+/// The opposite default to [`super::mouse::glass_allows_a_drop`], and the asymmetry is the
 /// ruling rather than an inconsistency: bytes on a command line are not visible
 /// as a mistake and cannot be undone by repeating the gesture, so the answer
 /// this window does not have is the answer it refuses on.

@@ -5730,7 +5730,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// Split out because across a window boundary the pane is not in this
     /// window's tabs to be found: the subtree travels on the broker
-    /// ([`DragBroker::cargo_tree`]) and this window answers about *its* tree with
+    /// ([`crate::DragBroker::cargo_tree`]) and this window answers about *its* tree with
     /// *its* viewport and *its* setting, which is the only place those three
     /// live. One author for "will it fit", asked by two callers.
     pub(crate) fn arrival_fits(&self, target: TabId, arriving: &bt_layout::LayoutNode) -> bool {
@@ -6740,7 +6740,7 @@ pub(crate) fn aim_card_window(
     focus_thumb::aim_card_skip(&leaf.session, &mut leaf.card_skip, rows, steps, site)
 }
 
-/// **The F2 budget's own probe** — see [`dump_chrome_frame`], which it copies
+/// **The F2 budget's own probe** — see [`super::floats::dump_chrome_frame`], which it copies
 /// down to the environment variable's shape.
 ///
 /// It prints the four counters and the number of cards that were visible, once
@@ -7070,7 +7070,7 @@ pub(crate) fn frame_row_of_anchor(
 ///
 /// It is the one modifier this window has not already spent on the wheel.
 /// `Shift`+wheel is taken twice over — it is the preview body's *other axis*
-/// (`scroll_preview_body`) and it is [`wheel_route`]'s explicit "this notch is
+/// (`scroll_preview_body`) and it is [`super::mouse::wheel_route`]'s explicit "this notch is
 /// mine, not the program's" override, which is §7.1.5f's sentence in the wheel's
 /// own words. `Ctrl`+wheel is the pair Windows reports AltGr as when it is
 /// joined by `Alt`, and it is also the chord every desktop reserves for scale;
@@ -7092,7 +7092,7 @@ pub(crate) fn frame_row_of_anchor(
 /// **What this is handed is `WindowRuntime::modifiers_held`, not
 /// `modifiers`** (T-MAC-LIVE, §13.33 ①). The two differ on exactly one machine
 /// and for exactly one key: M1-7 ruled that `Option` is text, so
-/// [`input::effective_modifiers`] takes the `Alt` winit reports for it out of
+/// [`crate::input::effective_modifiers`] takes the `Alt` winit reports for it out of
 /// the state every chord and every text box reads (§13.13 ③). Handed that
 /// state, this function answered `List` to every notch a Mac could produce —
 /// the aim was unreachable there from the day the port landed, and no setting
@@ -7117,7 +7117,7 @@ pub(crate) fn column_notch(modifiers: ModifiersState) -> ColumnNotch {
 /// … return; }` (mock-up 6570-6575). A pane with no "before" rectangle does not
 /// FLIP, it fades, and the early `return` on 6573 makes the two *alternatives*
 /// rather than stages: a pane that came from somewhere slides, a pane that did
-/// not exist appears. [`PaneTween::FadeIn`] already models it and
+/// not exist appears. [`crate::PaneTween::FadeIn`] already models it and
 /// [`PaneMotion::opacity_of`] already answers it; this is the drawing.
 ///
 /// **Ruling — the fade is carried by a veil in the ground colour, not by
@@ -7212,7 +7212,7 @@ fn persisted_pane_count(node: &LayoutNodeV1) -> usize {
 /// **Which surface each popup is an extension of**, given the surface the tab
 /// list is currently drawn on.
 ///
-/// Exhaustive on [`Popup`] for [`PopupsUp::holds`]'s reason: a ninth popup does
+/// Exhaustive on [`Popup`] for [`crate::PopupsUp::holds`]'s reason: a ninth popup does
 /// not compile until it has said where it grows from.
 pub(crate) fn popup_owner(popup: Popup, tabs: TabSurface) -> PopupOwner {
     match popup {

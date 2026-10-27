@@ -889,7 +889,7 @@ pub enum CaretRows<'a> {
 /// of a *folded* row against the column of a whole line: leaving a folded block
 /// at row three carries the column of that row, not of the line it is part of.
 /// That is the same compromise the source face's own
-/// [`crate::step_preview_caret_by_row`] makes, said once here rather than
+/// [`crate::runtime::preview::step_preview_caret_by_row`] makes, said once here rather than
 /// discovered twice.
 pub fn step_by_row(
     content: &str,

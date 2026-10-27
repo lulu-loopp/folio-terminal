@@ -225,8 +225,8 @@ impl Owed<ComputationId> for Asker {
 type Held = lane::Request<ComputationId, Asker>;
 
 /// **One worker's door**: what the worker runs for one request, made on the worker's own thread
-/// from the capability the thread door lent it. The product's are [`crate::run_decoration_worker`],
-/// [`crate::scale_door`] and [`crate::path_door`].
+/// from the capability the thread door lent it. The product's are [`run_decoration_worker`],
+/// [`scale_door`] and [`path_door`].
 pub(crate) type Door<Job> = Box<dyn FnMut(&WorkerCtx, Job) -> MathWorkerResult>;
 
 /// **One request that has ended, taken by the window thread**: its share, its identity, its

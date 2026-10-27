@@ -1289,9 +1289,9 @@ fn push_hits<U: LineUnits>(
 /// there is no rule of the mock-up's to follow here, so the reference product for this surface
 /// supplies one rather than this file inventing a fourth convention.
 ///
-/// A free function for [`crate::graph_key_of`]'s reason: what `Alt+W` *does* is a property of the
-/// capsule and has to be assertable without a keyboard, while the translation from winit lives
-/// beside the window that reads winit.
+/// A free function for [`crate::runtime::git::graph_key_of`]'s reason: what `Alt+W` *does* is a
+/// property of the capsule and has to be assertable without a keyboard, while the translation from
+/// winit lives beside the window that reads winit.
 ///
 /// Case-folded, because `Alt+Shift+W` is still the reader reaching for whole-word — every other
 /// letter binding in this window folds the same way.

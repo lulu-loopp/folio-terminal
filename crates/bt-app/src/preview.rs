@@ -9596,7 +9596,7 @@ pub fn take_preview_worker_notice(notice_pending: &mut bool) -> Option<&'static 
 ///
 /// So the modifier is not read here at all. This says which of three kinds of
 /// thing the string names; **which door a press on it leaves by** is
-/// [`crate::preview_link_activation`]'s question, and it answers it out of the
+/// [`crate::runtime::preview::preview_link_activation`]'s question, and it answers it out of the
 /// terminal's own `http(s)` row rather than out of a second opinion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LinkAction {
@@ -9624,8 +9624,8 @@ pub enum LinkAction {
     ///
     /// Not a verb either: a plain press on one does nothing, and `Ctrl` hands it to whatever the
     /// machine has registered for its scheme — the terminal's own row, read by
-    /// [`crate::preview_link_activation`]. It carries the target as written, trimmed, because
-    /// that is what is handed over.
+    /// [`crate::runtime::preview::preview_link_activation`]. It carries the target as written,
+    /// trimmed, because that is what is handed over.
     Scheme(String),
     /// **A `file:` link that names no path on this machine** — a share's `file://server/…` off
     /// Windows, where [`bt_platform::file_uri_to_path`] reads no path out of a remote authority.
@@ -9645,7 +9645,7 @@ pub enum LinkAction {
 ///
 /// **A link that points at a file is a way of pointing at a file**, and this
 /// window has exactly one answer for that: show it in the preview. It is the
-/// same sentence [`crate::files_row_activation`] makes about a row in the tree
+/// same sentence [`crate::runtime::files::files_row_activation`] makes about a row in the tree
 /// and the file menu makes about its first item — 指到文件=预览它 — and a
 /// third answer for the third door would be three things to keep in step.
 /// Anything the preview cannot read is *still* previewed: it lands on the seat

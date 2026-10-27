@@ -2745,7 +2745,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// This used to turn one away, and it said so as §7.1.6b′ ③'s refusal rather
     /// than a second one — *"没有任何 tab 面会接一个文件行,所以也没有任何 tab 面
     /// 有理由为它挪动自己"*. The premise is what changed: every tab surface takes
-    /// a row now ([`row_strip_landing`]), so a hand carrying one to the foot of a
+    /// a row now ([`super::tabs::row_strip_landing`]), so a hand carrying one to the foot of a
     /// long card column has exactly the reason ③ said it did not have. The gate
     /// is gone rather than inverted — this function asks nothing about what is in
     /// the hand any more, which is the shape it had before ③ needed saying.
@@ -6496,7 +6496,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// where in the lane the press landed and by nothing else: on the thumb it
     /// takes hold of it, and anywhere else on the track it pages toward the
     /// press — the platform's convention, and
-    /// [`termscroll::TerminalScrollBar::paged_from`] owns both halves of it.
+    /// [`crate::termscroll::TerminalScrollBar::paged_from`] owns both halves of it.
     fn press_terminal_thumb(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
         let Some((seat, bar)) = self.terminal_bar_under(position) else {
             return Ok(false);
@@ -6599,7 +6599,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// [`Self::dirty_gate_layout`]'s shape with one difference that matters: the
     /// names are read off the transaction rather than re-derived from the pools,
     /// because they span every window and this borrow holds one. See
-    /// [`quit::Quit::names`].
+    /// [`crate::quit::Quit::names`].
     pub(crate) fn quit_card_layout(&mut self) -> Option<restore::QuitLayout> {
         let quit = self.app.quit.as_ref()?;
         if !quit.is_asking() {
@@ -6656,7 +6656,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// [`Self::file_row_under`] answers the *context menu's* question, which is
     /// a different question and not a narrower one: it wants a whole
-    /// [`FileMenuTarget`] — a path, a door and which verbs the row has — and it
+    /// [`crate::FileMenuTarget`] — a path, a door and which verbs the row has — and it
     /// declines the two kinds of row that lead nowhere. This one answers "which
     /// row", because the glance card has its own rules about which kinds of row
     /// it will show and the drag has different ones again.
@@ -6928,9 +6928,9 @@ pub(crate) fn web_page_cursor(system_cursor_id: u32) -> Option<winit::window::Cu
 
 /// **Where a button event is answered from** (user report, 2026-09-10).
 ///
-/// `live` is [`WindowRuntime::pointer_position`] — where the hand *is* — and it
+/// `live` is [`crate::WindowRuntime::pointer_position`] — where the hand *is* — and it
 /// is `None` the moment winit says `CursorLeft`. `last_seen` is
-/// [`WindowRuntime::pointer_last_seen`], the same value kept after the hand has
+/// [`crate::WindowRuntime::pointer_last_seen`], the same value kept after the hand has
 /// gone.
 ///
 /// **A button coming up is answered from the remembered place when the live one
@@ -7601,14 +7601,14 @@ pub(crate) fn landing_for_aim(
 /// `TabState` held one `PtySession`, [`seats::Seats`] named one `terminal` seat —
 /// so a pane leaving one produced either a tab with no shell or a tab with two,
 /// and I106 is the crash report for the first. Both halves of that argument are
-/// now false. Phase A gave every Terminal leaf its own [`LeafSession`], so the
+/// now false. Phase A gave every Terminal leaf its own [`crate::LeafSession`], so the
 /// tab a pane leaves keeps a shell per leaf that stayed and the tab it becomes
 /// gets the one that travelled with it. Nothing is spawned and nothing is killed:
 /// the ConPTY, the screen and the scrollback are the same objects on both sides
 /// of the gesture, which is the only reading of "tear this pane out" that does
 /// not lose the user's work.
 ///
-/// What remains of the old caution is [`pane_can_become_a_tab`], one step
+/// What remains of the old caution is [`super::tabs::pane_can_become_a_tab`], one step
 /// upstream: a files column or a preview still cannot be a strip entry, and
 /// [`Runtime::survey_strip`] declines to offer the landing at all rather than
 /// letting the release find that out. M147 rules a refusal must be visible, and a
@@ -7724,7 +7724,7 @@ pub(crate) fn press_pins_a_peek(
 /// placed against the flyout's own frame, it holds the flyout open while the hand
 /// is in it ([`Runtime::drive_float_hover`]), and it dies with it
 /// ([`Runtime::forget_dead_float_gestures`]). The pair is one region with two
-/// rectangles in it, which is exactly what [`file_peek::corridor`] already says
+/// rectangles in it, which is exactly what [`crate::file_peek::corridor`] already says
 /// about a card and its row.
 ///
 /// **`Menu` still outranks both**, and that is not an oversight: a press outranks

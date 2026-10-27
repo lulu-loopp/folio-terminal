@@ -830,9 +830,9 @@ impl<B: Backend> Runtime<'_, B> {
 /// function so the budget each road may spend can be pinned over a real leaf.
 ///
 /// `cache` is carried only while it is an answer to **the same question**: the same seat and the
-/// same [`WindowRuntime::search_revision`]. Anything else — a new query, a flipped toggle, another
-/// pane — starts a new walk, and the old cursor is never read again. The history half reads at
-/// most [`SearchRefresh::walk_budget`] owed lines on top of whatever froze since the last scan.
+/// same [`crate::WindowRuntime::search_revision`]. Anything else — a new query, a flipped toggle,
+/// another pane — starts a new walk, and the old cursor is never read again. The history half reads
+/// at most [`SearchRefresh::walk_budget`] owed lines on top of whatever froze since the last scan.
 pub(crate) fn rescan_leaf_for_search(
     compiled: &bt_transcript::search::CompiledSearch,
     leaf: &LeafSession,

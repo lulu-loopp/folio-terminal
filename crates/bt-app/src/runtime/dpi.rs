@@ -681,7 +681,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// produces, and that function rounds a border, two paddings and a line
     /// height each on its own — so it is not a function of the logical box
     /// alone and cannot be worked back out of the scale afterwards. Hence the
-    /// `is_on` gate, [`mouse_trace::is_on`]'s own: solving a column is not
+    /// `is_on` gate, [`crate::mouse_trace::is_on`]'s own: solving a column is not
     /// something a display change pays for when nobody asked for a trace.
     ///
     /// One line per terminal mini seat, keyed by the same tab and seat every

@@ -3397,7 +3397,7 @@ pub enum GitRole {
 ///
 /// Two conditions, and the second is not the first restated. A surface nobody is
 /// looking at is never read, whatever happens in any shell: that is the same gate
-/// [`crate::columns_wanting_git`] keeps for the first reading, and it is kept
+/// [`crate::runtime::files::columns_wanting_git`] keeps for the first reading, and it is kept
 /// again here because "something changed" is not on its own a reason to spend a
 /// subprocess. And the command has to have happened *in* this repository — a
 /// `cargo build` in an unrelated tree is not news about this one.
@@ -3407,7 +3407,7 @@ pub enum GitRole {
 /// answer for it is *no* rather than a guess at where it might be standing.
 ///
 /// A free function taking the facts rather than a method, for
-/// [`crate::columns_wanting_git`]'s reason exactly: the promise is about what is
+/// [`crate::runtime::files::columns_wanting_git`]'s reason exactly: the promise is about what is
 /// *not* read, and a promise that can only be checked by starting a window is a
 /// promise nothing checks.
 #[must_use]

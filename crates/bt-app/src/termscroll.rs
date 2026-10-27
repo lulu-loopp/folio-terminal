@@ -467,7 +467,7 @@ pub fn fade_wait_deadline(rest: Instant, now: Instant) -> Option<Instant> {
 
 /// The mark, on a layer of its own.
 ///
-/// A layer for [`crate::scroll_bar_layer`]'s reason, which is a z-order fact
+/// A layer for [`crate::runtime::peek::scroll_bar_layer`]'s reason, which is a z-order fact
 /// rather than tidiness: within one layer the fills are drawn before the
 /// document's own, so a thumb pushed onto the pane's quads would be painted
 /// under the very text it has to ride over.

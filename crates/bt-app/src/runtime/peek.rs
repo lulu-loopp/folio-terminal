@@ -349,7 +349,7 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     /// **Ask the decoration worker for one file's native pixels, and file the record of the
-    /// question** — [`crate::ask_for_peek_pixels`] for the window's focused shell, the one door
+    /// question** — [`ask_for_peek_pixels`] for the window's focused shell, the one door
     /// every surface that shows a file's pixels asks through (the picture pane's refit, a markdown
     /// page's pictures, the glance card and the hover flyout). A window whose decoration worker has
     /// stopped asks nothing.
@@ -368,7 +368,7 @@ impl<B: Backend> Runtime<'_, B> {
         )
     }
 
-    /// **Every file a surface of this window names to the peek cache** — [`crate::peek_files_named`]
+    /// **Every file a surface of this window names to the peek cache** — [`peek_files_named`]
     /// over this window's tabs, its card and its flyout.
     pub(in crate::runtime) fn peek_files_named(&self) -> BTreeSet<String> {
         peek_files_named(
@@ -387,7 +387,7 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     /// **The failed peeks no surface names any more, let go of**
-    /// ([`crate::let_go_unnamed_peek_records`]; T-PEEK-CACHE-QUESTION-RECORDS). Run by the walk of
+    /// ([`let_go_unnamed_peek_records`]; T-PEEK-CACHE-QUESTION-RECORDS). Run by the walk of
     /// the surfaces ([`Self::refresh_preview_for_layout`]), by the flyout's new peek before it files
     /// anything, and when the flyout comes down — the surfaces that leave by a road that names no
     /// file (a tab closed, a pane handed another subject, a page scrolled on) are caught by the
@@ -2246,7 +2246,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// A file path is all that is asked, then: both a document and a page have
     /// one, and a composed glance has none. The class is not re-spelled here by
-    /// extension — the page lane's own fork ([`source_opens_as_a_page`]) is
+    /// extension — the page lane's own fork ([`super::preview::source_opens_as_a_page`]) is
     /// where `.html` and `.pdf` are written down (§7.16 ④), and it is asked on
     /// the way through, not duplicated on the way in.
     fn file_peek_promotes(&self) -> bool {
@@ -2573,7 +2573,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// ruling (§7.1.2). A float torn off a docked column carries no trigger at
     /// all, and one summoned from a pane head names a leaf rather than a tab;
     /// both answer `None` here, and both are right to — see
-    /// [`tab_trailing_targets`].
+    /// [`super::preview::tab_trailing_targets`].
     pub(in crate::runtime) fn peeking_tab(&self) -> Option<usize> {
         match self.window.float.peek().and_then(|win| win.origin)? {
             float::FloatTrigger::Tab(id) => self.window.tabs.iter().position(|tab| tab.id == id),
@@ -2727,7 +2727,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// `settled` is true when a hover has just settled on the subject — a new peek — and false
     /// on the re-entries of one peek as its decode and its resample land: a `Failed` entry for a
-    /// named file is read again only on a new peek ([`crate::peek_reads_the_file`]).
+    /// named file is read again only on a new peek ([`peek_reads_the_file`]).
     pub(in crate::runtime) fn show_or_request_peek(
         &mut self,
         candidate: &PeekCandidate,
@@ -2957,7 +2957,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// The shape the glance card's head offers, if the pointer is on it.
     ///
     /// A card whose head is pressed but not yet carried keeps the open hand
-    /// rather than swapping to the closed one, and that is [`float_grasp`]'s own
+    /// rather than swapping to the closed one, and that is [`super::mouse::float_grasp`]'s own
     /// K113: a press that has not become a drag has not made anything happen,
     /// and a cursor that changed there would say it had. The closed hand arrives
     /// with the carry, through the float the promotion opens.
@@ -2998,7 +2998,7 @@ pub(crate) fn peek_cache_key_for_decode(
 }
 
 /// **A scroll bar on a layer of its own** — the overlay's answer to
-/// [`push_block_scroll_indicator`], which is the same bar drawn into a block.
+/// [`super::preview::push_block_scroll_indicator`], which is the same bar drawn into a block.
 ///
 /// A layer rather than more quads on the surface's own, and that is a z-order
 /// fact rather than tidiness: within one layer the order is the layer's own
@@ -3062,7 +3062,7 @@ pub(crate) fn scroll_bar_layer(
 /// would move its document sideways when the thumb went down.
 ///
 /// `content` is the document's own extent **along `axis`** — the same number
-/// [`preview_document_max_scroll`] takes the page out of — so the bar's
+/// [`super::preview::preview_document_max_scroll`] takes the page out of — so the bar's
 /// `overflow` and the clamp on the stored offset are one quantity by
 /// construction, and a thumb dragged to the far end of its track lands exactly
 /// where the wheel stops. The whole `scroll` is taken and the axis picks out of
@@ -3109,7 +3109,7 @@ pub(crate) fn preview_body_bar(
 ///
 /// A composed document has no path, so it is never a page however its name is
 /// spelled: a git diff of `docs/design/ui-mockup.html` is a reading of a repository,
-/// exactly as [`preview_page_hand_off`] has always said.
+/// exactly as [`super::preview::preview_page_hand_off`] has always said.
 ///
 /// # What a page's row earns (user ruling 2026-08-25)
 ///
@@ -3214,10 +3214,11 @@ pub(crate) fn peek_reads_the_file(
 /// the state it already keeps: a picture pane — a seat or a float of any tab, in the background as
 /// much as on the glass — by the picture it holds ([`PreviewPane::image`]); a markdown page, on
 /// any of those panes or on the card, by every picture in reach it asked about
-/// ([`DocumentPictures::files`]); the glance card by its file (`card_file`); and the hover flyout
-/// by its subject while it is up (`flyout`). A free function over the tabs for
-/// [`animation_surface_exists`]' reason: the set is derived from what the window holds, rather
-/// than kept beside it as a second record that could disagree, and tabs are what a test can build.
+/// ([`crate::DocumentPictures::files`]); the glance card by its file (`card_file`); and the hover
+/// flyout by its subject while it is up (`flyout`). A free function over the tabs for
+/// [`super::preview::animation_surface_exists`]' reason: the set is derived from what the window
+/// holds, rather than kept beside it as a second record that could disagree, and tabs are what a
+/// test can build.
 pub(crate) fn peek_files_named(
     tabs: &[TabState],
     peek_pane: &PreviewPane,
@@ -3244,13 +3245,13 @@ pub(crate) fn peek_files_named(
 }
 
 /// **A failed peek no surface names any more is let go of** (T-PEEK-CACHE-QUESTION-RECORDS) —
-/// [`AnimationCache::let_go_unnamed`]'s rule, for the peek cache.
+/// [`crate::AnimationCache::let_go_unnamed`]'s rule, for the peek cache.
 ///
 /// A `Failed` record is kept exactly as long as some surface names its file (`named`, from
 /// [`peek_files_named`]): while one does, its redraws read the failure and ask nothing; when the
 /// last one has gone, the file's next showing is new input and asks. A decode in flight is kept
-/// until its answer, which [`file_peek_answer`] files nowhere if the file is unnamed by then. A
-/// decode is weight, which the budget governs.
+/// until its answer, which [`super::preview::file_peek_answer`] files nowhere if the file is
+/// unnamed by then. A decode is weight, which the budget governs.
 pub(crate) fn let_go_unnamed_peek_records(peek_cache: &mut PeekCache, named: &BTreeSet<String>) {
     let unnamed: Vec<String> = peek_cache
         .iter()
@@ -3271,8 +3272,9 @@ pub(crate) fn let_go_unnamed_peek_records(peek_cache: &mut PeekCache, named: &BT
 /// **Never over a read in flight** (T-PEEK-ANSWER-IDENTITY round 2): a `Pending` is the record of
 /// a surface's question, and its answer is the one road that tells the surfaces waiting on it — the
 /// flyout's re-entry, a page's sharpening and re-flow, the panes' and card's redraw. Pixels filed
-/// over it would leave that answer awaited by no record and set aside ([`peek_awaits`]), and the
-/// surfaces waiting would hear nothing. The read's own answer files the same file's pixels.
+/// over it would leave that answer awaited by no record and set aside
+/// ([`super::preview::peek_awaits`]), and the surfaces waiting would hear nothing. The read's own
+/// answer files the same file's pixels.
 pub(crate) fn remember_decode(
     peek_cache: &mut PeekCache,
     source: &bt_term::InlineImageSource,
@@ -3309,8 +3311,8 @@ pub(crate) fn remember_decode(
 /// delivery end is how a `.png` and a `.mp4` would come to disagree about who owns it.
 ///
 /// **And it files what it asked**: a read admitted is `Pending` under the identity the lane
-/// minted, which its answer is filed by ([`file_peek_answer`]); a thread that could not be
-/// started is the unstarted record. A full lane or a refusal files nothing.
+/// minted, which its answer is filed by ([`super::preview::file_peek_answer`]); a thread that could
+/// not be started is the unstarted record. A full lane or a refusal files nothing.
 pub(crate) fn ask_for_peek_pixels(
     peek_cache: &mut PeekCache,
     computation: &computation_lane::ComputationLane,
@@ -3446,7 +3448,7 @@ fn facts_of_a_file_the_user_chose(path: &Path) -> (bool, Option<u64>) {
 ///
 /// **The card's own top-left, and the window grows down and right from it.** A
 /// peek float promotes to a window of its own size and therefore does not move
-/// at all ([`FloatHeadPress`]); a card promotes to something larger, so some
+/// at all ([`crate::FloatHeadPress`]); a card promotes to something larger, so some
 /// edge has to travel. The top-left is the edge that must not, because the head
 /// is at the top-left and the head is where the hand is: keeping it still is
 /// keeping the hand still, and every other choice slides the thing being carried

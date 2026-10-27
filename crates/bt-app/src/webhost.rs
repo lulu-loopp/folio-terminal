@@ -1000,7 +1000,7 @@ pub(crate) fn web_presence(body: Option<[f32; 4]>, obstructed: bool) -> WebPrese
 /// an opaque slab of the window's ground colour and every page's floor sits
 /// under every page opened after it, so one left standing is a pane of `--termbg`
 /// over a page that is on the glass. The hole obeys exactly this sentence
-/// already ([`crate::hole_for`]); this is the floor obeying it too.
+/// already ([`crate::runtime::web::hole_for`]); this is the floor obeying it too.
 ///
 /// Compared the way [`rasterization_owed`] compares its number, and for its
 /// reason: what is asked and what was said travel from the same source, so
@@ -2427,7 +2427,7 @@ pub(crate) struct WebSeat {
     /// The magnification this seat last **moved** to, and when.
     ///
     /// A page's foot flashes it and then goes back to being the hover line
-    /// ([`crate::page_foot_flash`]). It lives on the seat rather than on the
+    /// ([`crate::runtime::preview::page_foot_flash`]). It lives on the seat rather than on the
     /// window because a zoom is a fact about one page: two panes side by side
     /// hold two engines at two magnifications, and one slot on the window would
     /// have the second one's notch confirming itself on the first one's foot.

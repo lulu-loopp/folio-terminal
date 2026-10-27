@@ -530,7 +530,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// **And a composition does not come with it** (review 2026-09-17 P2-b).
     /// §7.1.5a″'s ruling is that a composition belongs to the field it started
     /// in and is cancelled when that field goes away — never committed into
-    /// whatever is holding the keyboard next. [`settle_composition_owner`] keeps
+    /// whatever is holding the keyboard next. [`Self::settle_composition_owner`] keeps
     /// that promise at the tail of every pass, but it asks it of
     /// [`composition_outlived_its_field`], which compares **kinds** of owner:
     /// one shell and another shell are both [`ImeOwner::Shell`], so a
@@ -588,7 +588,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// closing §7.14b 挂账 ⓑ).
     ///
     /// One reading of [`Self::preview_keyboard_surface`] and a fork on what kind
-    /// of surface it named, which is the same shape [`a_page_still_has_a_pane`]
+    /// of surface it named, which is the same shape [`super::web::a_page_still_has_a_pane`]
     /// already takes for the same reason: **the float answers instead of the
     /// tree, not beside it.** `pop_out_preview` closes the seat by design, so a
     /// popped-out page has no seat for the layout to focus and never will again
@@ -921,7 +921,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// A seat-origin one does — and it belongs to the *caller* now that there is
     /// more than one caller. The terminal's caret is computed by the frame
     /// machinery in the seat's own coordinates and is translated by
-    /// [`crate::window_ime_cursor_area`] where it is read (§4.1, one translation); the
+    /// [`window_ime_cursor_area`] where it is read (§4.1, one translation); the
     /// preview's is measured off the pane rectangle and is already the window's.
     /// Translating here would have applied the seat's origin to a rectangle that
     /// never had one.

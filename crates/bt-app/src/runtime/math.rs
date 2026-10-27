@@ -35,7 +35,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// Split from the boxes because the *geometry* of the tab surface is a pure
     /// function of a layout and two geometries — which is what
-    /// [`tab_surface_tip_boxes`] can therefore be tested as — while the words are
+    /// [`super::tooltips::tab_surface_tip_boxes`] can therefore be tested as — while the words are
     /// a fact about which tab is running what, and only a live window has that.
     ///
     /// An id naming a tab this window does not have says nothing, and
@@ -2702,7 +2702,7 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     /// **Hand one band of the overlay to the arrival register** — see
-    /// [`arrival::Passages::stage`].
+    /// [`crate::arrival::Passages::stage`].
     ///
     /// The one door, so that "how a popup arrives" is a fact about this window
     /// rather than about each of the thirteen bands: the span, the curve, the
@@ -2825,7 +2825,7 @@ pub(crate) fn claimed_by(
 /// **What one of a page's formulas draws, and whether the engine still has to be
 /// asked for it** (§7.1.3u ③).
 ///
-/// [`answer_one_picture`]'s twin, and the same sentence about the same mistake:
+/// [`super::preview::answer_one_picture`]'s twin, and the same sentence about the same mistake:
 /// *a miss reads as never asked*. [`PreviewMathCache`] is bounded in bytes and
 /// evicts by last use, while a page asks for every formula on it — so a document
 /// whose distinct rasters are worth more than the budget evicts one the page is
@@ -2837,7 +2837,7 @@ pub(crate) fn claimed_by(
 /// that picture when the cache lets the pixels go, and asks for nothing: the
 /// picture is an `Arc`, so what it draws it holds and nothing is copied.
 ///
-/// Out here as a free function for [`answer_one_picture`]'s reason: a `Runtime`
+/// Out here as a free function for [`super::preview::answer_one_picture`]'s reason: a `Runtime`
 /// needs a device layer and a window to exist, and what a test has to be able to
 /// put in front of this is the real cache.
 pub(crate) fn answer_one_formula(
@@ -3044,7 +3044,7 @@ pub(crate) fn ground_overlay_layers(
     layers
 }
 
-/// The same probe, for the overlay stack — see [`dump_chrome_frame`].
+/// The same probe, for the overlay stack — see [`super::floats::dump_chrome_frame`].
 ///
 /// Both channels, because "which pass painted this" is half of any answer the
 /// dump is asked for: chrome is drawn under the overlays, so a stray box that is

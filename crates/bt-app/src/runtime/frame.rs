@@ -3168,7 +3168,7 @@ pub(crate) fn verified_target_of(
 /// is a **separate** bit rather than a third arm of this `||`. Minimised and cloaked are the window
 /// telling us where it is; covered is somebody else's window standing in front of one that is
 /// perfectly on screen, and [`notify::desktop_reach`] answers the two differently — see
-/// [`attention::Reach::Toast`].
+/// [`bt_workbench::attention::Reach::Toast`].
 ///
 /// A window whose handle cannot be got is reported reachable, on
 /// [`bt_platform::cloaked_from_attribute`]'s reasoning: under-stating flashes a taskbar button
@@ -3380,7 +3380,7 @@ pub(crate) fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
 /// [`Runtime::chrome_over`] with the stack as a value — the whole of the rule,
 /// where a test can read it.
 ///
-/// A free function for [`a_page_is_off_the_glass`]' reason: what it answers is a
+/// A free function for [`super::web::a_page_is_off_the_glass`]' reason: what it answers is a
 /// question about five numbers and a list, and a method would need a window to
 /// ask it.
 pub(crate) fn chrome_over(
@@ -3460,7 +3460,7 @@ pub(crate) fn pty_frame_is_unchanged(
 /// pane: the frame [`Runtime::publish_frame_inner`] composed is the focused
 /// leaf's, and the frame it was compared against is the focused leaf's.
 /// `unpainted_pane_output` is the rest of the window — see
-/// [`WindowRuntime::unpainted_pane_output`] for what it costs to leave it out.
+/// [`crate::WindowRuntime::unpainted_pane_output`] for what it costs to leave it out.
 ///
 /// A drain may be dropped only when both halves are quiet. A sibling pane that
 /// has spoken makes the window's content new however still the focused pane is,

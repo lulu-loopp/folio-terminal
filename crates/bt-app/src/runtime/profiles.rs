@@ -1021,7 +1021,7 @@ impl<B: Backend> Runtime<'_, B> {
 }
 
 /// The same walk, keeping the answer to "which layer won?" that
-/// [`display_title`] throws away.
+/// [`crate::display_title`] throws away.
 ///
 /// One function with two readers rather than two functions agreeing: the tab's
 /// tooltip states the provenance out loud (M140, mock-up 4197-4199), and a
@@ -1031,7 +1031,7 @@ impl<B: Backend> Runtime<'_, B> {
 /// claim: the profile's own name is what a tab is called when no one has said
 /// anything about it, and it has no provenance to report.
 /// **Which button the profile picker hangs off** — the fifth reader of the one
-/// fact [`tab_surface_tip_boxes`]'s doc lists four readers of, and the first one
+/// fact [`super::tooltips::tab_surface_tip_boxes`]'s doc lists four readers of, and the first one
 /// that got it wrong in a way nothing could see.
 ///
 /// The rule is one sentence: **ask the column first, and if it answered that is

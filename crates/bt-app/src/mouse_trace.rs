@@ -112,7 +112,7 @@ pub fn rect_word(rect: [f32; 4]) -> String {
 /// Every field here is read once, before any router has had a chance to move it
 /// — `mouse_input`'s own opening station, in the wheel's words. The pointer and
 /// the three geometries are the pair a resize can put out of step; the
-/// modifiers are what [`crate::column_notch`] reads; `events` and `routings` are
+/// modifiers are what [`crate::runtime::panes::column_notch`] reads; `events` and `routings` are
 /// the window's own two counters, and they are what pairs this line with the
 /// `wheel_queue` lines above it that were merged into the delta it carries.
 pub struct WheelEntry {

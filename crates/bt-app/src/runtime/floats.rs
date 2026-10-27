@@ -3651,7 +3651,7 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **B22 — bring the resizing cards up to date with the hand.**
     ///
-    /// Derived from [`WindowRuntime::divider_drag`] rather than mirrored into the tween
+    /// Derived from [`Self::held_divider_drag`] rather than mirrored into the tween
     /// at every place a drag starts and ends, and for the reason `refresh_chrome`
     /// already gives about `body.dragging`: a drag ends by four doors — the
     /// button coming up, Esc, losing the mouse capture, and the layout being torn
@@ -3825,7 +3825,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// never seen.
     ///
     /// Floats are left out here and drawn on their own layer — see
-    /// [`PageKeepsake::float`].
+    /// [`crate::PageKeepsake::float`].
     fn page_keepsake_icons(&self) -> Vec<bt_render::ChromeIcon> {
         self.window
             .page_keepsakes

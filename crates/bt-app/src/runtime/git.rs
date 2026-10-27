@@ -160,7 +160,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// composed there.
     ///
     /// The very rectangle the painter drew it in
-    /// ([`build_preview_markdown_body`]'s gap arm), because a candidate list
+    /// ([`super::preview::build_preview_markdown_body`]'s gap arm), because a candidate list
     /// placed from a second derivation is a list standing beside the caret it
     /// claims to follow.
     pub(in crate::runtime) fn markdown_gap_paragraphs(
@@ -4303,7 +4303,7 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// Whether this window is standing on its **Git page** this frame.
     ///
-    /// The float's answer to [`column_keyboard`]'s question, and it is made of
+    /// The float's answer to [`super::files::column_keyboard`]'s question, and it is made of
     /// the same two facts a column's `git_pages_shown` entry is: the master
     /// switch, and the page the view is on. A window has no seat layout to be
     /// collapsed out of and no tab to be switched away from, so for a float
@@ -4742,7 +4742,7 @@ pub(crate) fn git_full_path(root: &Path, path: &str) -> PathBuf {
     root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
-/// Whether a floating window is showing its **Git page** — [`column_keyboard`]'s
+/// Whether a floating window is showing its **Git page** — [`super::files::column_keyboard`]'s
 /// question, asked of the host that is not in a tab.
 ///
 /// The two facts a column's `git_pages_shown` entry is made of, and for a float
@@ -4852,7 +4852,7 @@ pub(crate) fn graph_key_of(key: &Key, modifiers: ModifiersState) -> Option<git_g
 /// screen are to be read again, and why they are the only candidates.
 ///
 /// The master switch and the "is it showing" gate are asked here for
-/// [`columns_wanting_git`]'s reason — they are promises about what is *not* read,
+/// [`super::files::columns_wanting_git`]'s reason — they are promises about what is *not* read,
 /// and a promise that can only be checked by starting a window is a promise
 /// nothing checks. What is new is the third fact:
 ///
@@ -4892,7 +4892,7 @@ pub(crate) fn git_surfaces_wanting_reread(
 /// **R31's fourth moment, the window's half: the repositories this window
 /// wants the kernel's news about** — the roots of its surfaces that are drawn.
 ///
-/// The seat a window holds in [`git_watch::GitWatch`] is exactly this set, so a
+/// The seat a window holds in [`crate::git_watch::GitWatch`] is exactly this set, so a
 /// surface that is not on the glass (a column on its Files page, a page in a tab
 /// that is not on screen, which `Runtime::git_surfaces_on_screen` never lists)
 /// subscribes to nothing and is told nothing.

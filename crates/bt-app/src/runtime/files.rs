@@ -580,7 +580,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// **A column that has not read those folders yet** answers the same way it
     /// answers a keyboard walking into them: the expansions are recorded and the
     /// reads are asked for, and the row is revealed when the disk comes back —
-    /// see [`WindowRuntime::files_locate`].
+    /// see [`crate::WindowRuntime::files_locate`].
     ///
     /// **And a file inside that folder can be the row it selects** (user ruling
     /// 2026-09-20 — the glance card's foot, 「在 Folio 文件列里定位到该文件夹并选中
@@ -3242,7 +3242,7 @@ impl<B: Backend> Runtime<'_, B> {
 /// not already kept: taking a row *out* of that file must be allowed whatever the
 /// row says, or a tightened policy leaves rows nobody can delete.
 ///
-/// **The door is [`page_destination`] and not [`switcher_row_destination`]**,
+/// **The door is [`page_destination`] and not [`super::web::switcher_row_destination`]**,
 /// which is the whole of the 2026-08-24 fix. "Would navigate to it now" is a
 /// question only the door the press actually goes through can answer, and since
 /// W2 slice ⑤ that door has been `page_destination`: a `file:` row is a *name
@@ -3625,8 +3625,8 @@ pub(crate) fn dropped_files_seat_at(
 }
 
 /// **The folder a files card or a files column taken from a pane is rooted at** (issue #28,
-/// T-CWD-FROM-PROCESS): the folder the pane is standing in ([`LeafSession::folder`] — its shell's
-/// last report, else its shell process's folder, else the folder it was opened in), and the
+/// T-CWD-FROM-PROCESS): the folder the pane is standing in ([`crate::LeafSession::folder`] — its
+/// shell's last report, else its shell process's folder, else the folder it was opened in), and the
 /// account's home only when none of those can be said — which the root carries, so the card and
 /// the column say "Folder unknown" rather than showing a home folder as the pane's.
 ///

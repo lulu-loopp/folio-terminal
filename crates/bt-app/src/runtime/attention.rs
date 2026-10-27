@@ -1186,9 +1186,9 @@ impl<B: Backend> Runtime<'_, B> {
 
 /// **A pane is going away, so the place it held goes with it** (`attention` plan §4 B4).
 ///
-/// One leaf, and only ever asked by [`end_leaves_of`], which is the one step all five roads that
-/// end a pane take. The window's serial is not wound back — a place that was handed out was handed
-/// out, and the ledger says why in its own words.
+/// One leaf, and only ever asked by [`super::panes::end_leaves_of`], which is the one step all five
+/// roads that end a pane take. The window's serial is not wound back — a place that was handed out
+/// was handed out, and the ledger says why in its own words.
 pub(crate) fn expire_leaf_attention(
     at: attention::Site,
     reach: attention::Reach,

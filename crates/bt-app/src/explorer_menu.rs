@@ -2158,7 +2158,7 @@ pub fn description_for(
 
 /// **The language a process with no window speaks in, read from the settings
 /// in `home` and from nothing else** (B-EXPLORER-CLAIM, 0.4.6) — the one lookup
-/// [`say_at_the_front_door`] and `explorer_menu::serve` share.
+/// [`crate::say_at_the_front_door`] and `explorer_menu::serve` share.
 ///
 /// Through [`persist::SettingsStore::peek_language`] and never through a store:
 /// opening one asks who writes the data directory, and the answer — the claim,

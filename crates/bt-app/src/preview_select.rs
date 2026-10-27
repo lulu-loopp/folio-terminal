@@ -16,7 +16,7 @@
 //! ([`Place`]). Two things follow, and both are the reason for the choice:
 //!
 //! * **A place survives a scroll.** Only the blocks a pane can currently show
-//!   are laid out ([`crate::build_preview_markdown_body`] skips the rest), so the
+//!   are laid out ([`crate::runtime::preview::build_preview_markdown_body`] skips the rest), so the
 //!   paragraphs of a `PreviewBody` are renumbered by every wheel notch. A
 //!   selection anchored to one of them would slide up the document as the reader
 //!   scrolled away from it.

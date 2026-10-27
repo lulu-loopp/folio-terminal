@@ -11412,7 +11412,7 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     /// What the window knows about its own picture, for
-    /// [`chrome_tick_reuses_picture`].
+    /// [`super::frame::chrome_tick_reuses_picture`].
     pub(in crate::runtime) fn picture_on_glass(&self) -> PictureOnGlass {
         PictureOnGlass {
             frame_pending: self.window.pending_frames.pending_frame().is_some(),
@@ -13778,7 +13778,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// flyout at the settle pointer.
     ///
     /// **Only the answer to the read the window awaits** (T-PEEK-ANSWER-IDENTITY): `asked` is the
-    /// identity of the request this answers, and [`crate::file_peek_answer`] files it only for the
+    /// identity of the request this answers, and [`file_peek_answer`] files it only for the
     /// file's read in flight under that identity. An answer the window has let go of — the file
     /// changed under the read and a surface asked about the bytes there now — is set aside here:
     /// nothing is filed, no surface is told, no page is sharpened from it.
@@ -14094,7 +14094,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// #60).
     ///
     /// The gesture in flight before the thing under the pointer, exactly as
-    /// [`float_grasp`] reads it: a picture carried past its own pane keeps the
+    /// [`super::mouse::float_grasp`] reads it: a picture carried past its own pane keeps the
     /// closed hand, because the shape changing mid-drag would say something
     /// happened when nothing did (K113, and the mock-up's own line 1710).
     pub(in crate::runtime) fn image_grasp(&self) -> Option<ImageGrasp> {
@@ -14317,7 +14317,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// this window has already presented; the only things that changed are held
     /// by the renderer — the chrome quads, the caret's blink phase — and by the
     /// pane transforms, which are re-sampled because they are a function of
-    /// this instant. See [`chrome_tick_reuses_picture`] for why that is a
+    /// this instant. See [`super::frame::chrome_tick_reuses_picture`] for why that is a
     /// complete account of what an animation tick can have moved.
     pub(in crate::runtime) fn present_retained_picture(&mut self) -> Result<()> {
         let mut attempt = self.begin_present_attempt(FrameSource::Expose, true, true);
@@ -14706,7 +14706,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// **Nothing here navigates and nothing here closes.** Turning to the source
     /// writes one path onto the pane; turning back clears it. The engine learns
-    /// about it exactly once, a frame later, as [`a_page_is_off_the_glass`]'s
+    /// about it exactly once, a frame later, as [`super::web::a_page_is_off_the_glass`]'s
     /// fifth reason — a `SetIsVisible(false)` and a hole not punched. The page
     /// keeps its history, its scroll, its form fields and its process, because
     /// none of them was asked a question. That is the whole of why this is not
@@ -14883,7 +14883,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// or `None` for the standing fact underneath it. What comes back is the same
     /// thing except during the ninety milliseconds after it changes, when it is
     /// briefly the *old* phrase on its way out — see
-    /// [`settling::Crossfade`] for why the two take turns in the box rather than
+    /// [`crate::settling::Crossfade`] for why the two take turns in the box rather than
     /// overlapping in it, and for why the hold in front of them is untouched.
     ///
     /// The second half of the answer is the *dissolve* rather than the ink,
@@ -14943,7 +14943,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// **The card a window with nothing to draw wears**, drawn into its body
     /// (§7.39; owner's ruling 2026-09-12).
     ///
-    /// [`refused_preview_card`]'s second host. The pane builds its own
+    /// [`super::floats::refused_preview_card`]'s second host. The pane builds its own
     /// [`CardWords`] and hands them to the paint through
     /// [`seats::PreviewCardContent`]; a float has no seat and no dressing pass,
     /// so it builds the same words here and pushes them through the same
@@ -15374,7 +15374,7 @@ impl<B: Backend> Runtime<'_, B> {
 
 /// A scale factor as something a key can be compared by.
 ///
-/// **One definition**, for [`math_em_milli`]'s reason: the scale arrives as a
+/// **One definition**, for [`crate::math_em_milli`]'s reason: the scale arrives as a
 /// float, two roundings of one float are two different keys, and a `HashMap`
 /// cannot be asked about a float at all.
 pub(crate) fn scale_ppm(scale: f32) -> u32 {
@@ -15558,7 +15558,7 @@ pub(crate) fn crumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
 /// read the same `(name, target)` pairs they always did.
 ///
 /// `home` is a value rather than a read inside this function for
-/// [`first_run::Capability`]'s reason: what a Mac's rail says is a claim a
+/// [`crate::first_run::Capability`]'s reason: what a Mac's rail says is a claim a
 /// Windows runner is entitled to check. It is ignored unless it is **rooted** —
 /// an empty `HOME` is a prefix of every path, and a row that answered `~ › / ›
 /// Applications` to it would be worse than the row this ruling replaced.
@@ -15869,7 +15869,7 @@ pub(crate) fn preview_opened_label() -> &'static str {
 }
 
 /// **Whether the file's read in flight awaits the answer to the request `asked`**
-/// (T-PEEK-ANSWER-IDENTITY; [`AnimationCache::awaits`]'s rule, for the peek cache) — the one
+/// (T-PEEK-ANSWER-IDENTITY; [`crate::AnimationCache::awaits`]'s rule, for the peek cache) — the one
 /// question a peek answer may be filed for. An answer under any other identity is set aside: its
 /// read was let go of — the file changed under it ([`forget_a_picture`]) — and a newer one asked
 /// in its place, or none.
@@ -15891,11 +15891,12 @@ pub(crate) fn peek_awaits(
 /// Filed only for the read in flight that awaits `asked` ([`peek_awaits`]): the answer to a read
 /// the window has let go of is set aside — it was read from bytes the file no longer holds, and
 /// the window's newer read is the one filed. A failure is filed only for a file some surface
-/// names (T-PEEK-CACHE-QUESTION-RECORDS; [`AnimationCache::answered_for_nobody`]'s rule): for a
-/// file no surface names by the time it lands, its read in flight is let go of and nothing is
-/// filed, since a record nobody is showing would be one [`let_go_unnamed_peek_records`] exists to
-/// end. Pixels are filed either way: they are weight, which the budget governs. `true` when the
-/// answer was the awaited one — the one case in which the surfaces standing on the file are told.
+/// names (T-PEEK-CACHE-QUESTION-RECORDS; [`crate::AnimationCache::answered_for_nobody`]'s rule):
+/// for a file no surface names by the time it lands, its read in flight is let go of and nothing is
+/// filed, since a record nobody is showing would be one
+/// [`super::peek::let_go_unnamed_peek_records`] exists to end. Pixels are filed either way: they
+/// are weight, which the budget governs. `true` when the answer was the awaited one — the one case
+/// in which the surfaces standing on the file are told.
 pub(crate) fn file_peek_answer(
     peek_cache: &mut PeekCache,
     named: &BTreeSet<String>,
@@ -16127,7 +16128,7 @@ fn taskbar_severity(state: ProgressState) -> u8 {
 
 /// How far along one progress report says it is, for ranking only.
 ///
-/// A report with no percentage reads as 100 for the same reason [`ring_arc`]
+/// A report with no percentage reads as 100 for the same reason [`crate::ring_arc`]
 /// draws it as a full turn with nothing remembered: `OSC 9;4` states 2 and 4
 /// carry the percentage optionally because they are a change to a run already
 /// on the wire, and when no number was ever on the wire there is nothing to
@@ -16226,9 +16227,9 @@ pub(crate) fn window_taskbar_progress(
 }
 
 /// **Ask the computation lane to open one animated file for the window at `leaf`** — what
-/// [`AnimationCache::ask_for_showing`] hears of each file it asks: admitted under the identity the
-/// lane minted, which the decode in flight is recorded under and its answer is filed by; its thread
-/// not started; or turned away at the door.
+/// [`crate::AnimationCache::ask_for_showing`] hears of each file it asks: admitted under the
+/// identity the lane minted, which the decode in flight is recorded under and its answer is filed
+/// by; its thread not started; or turned away at the door.
 pub(crate) fn ask_to_open(
     computation: &computation_lane::ComputationLane,
     leaf: ShellAddress,
@@ -16419,11 +16420,11 @@ pub(crate) fn deliver_clipboard_picture(
 /// **What the shared GPU cache calls one decoded video frame**: the file, when it was last
 /// written, and the size it came back at.
 ///
-/// [`peek_page_texture_key`]'s twin, and for its reasons: two files are two pictures, one file
-/// rewritten is two pictures, and one file decoded into two boxes is two rasters of the same
-/// picture. A picture file needs none of this — its texture is named by a hash of its own bytes —
-/// and a frame cannot be, because the bytes it was decoded from are a container this process
-/// never held whole.
+/// [`super::peek::peek_page_texture_key`]'s twin, and for its reasons: two files are two pictures,
+/// one file rewritten is two pictures, and one file decoded into two boxes is two rasters of the
+/// same picture. A picture file needs none of this — its texture is named by a hash of its own
+/// bytes — and a frame cannot be, because the bytes it was decoded from are a container this
+/// process never held whole.
 pub(crate) fn video_frame_texture_key(
     path: &Path,
     mtime: Option<SystemTime>,
@@ -16540,10 +16541,10 @@ pub(crate) fn resolve_document_pictures(
 ///
 /// # An answer is an answer (user report 2026-09-10, `docs/DESIGN.md` §7.1.3u)
 ///
-/// The decode store is a **cache**: bounded in bytes ([`MAX_PEEK_CACHE_BYTES`])
+/// The decode store is a **cache**: bounded in bytes ([`crate::MAX_PEEK_CACHE_BYTES`])
 /// and letting go of its least recently used entry whenever a decode arrives.
 /// The reach a page asks for is bounded in *pictures*
-/// ([`MARKDOWN_PICTURE_MARGIN`]), not in bytes — so a README whose screenshots
+/// ([`crate::MARKDOWN_PICTURE_MARGIN`]), not in bytes — so a README whose screenshots
 /// are 3200×2000 wants nine decodes of 24 MiB against a 192 MiB ceiling, and
 /// every decode that lands throws out one the page is still drawing.
 ///
@@ -17094,7 +17095,7 @@ pub(crate) fn image_zoom_key(
 /// the drag's and the grab cursor's own condition, so the hand and the keys say
 /// one fact), and that is the whole of how the arrows are shared: a picture with
 /// nothing hidden has nothing to pan, and its `←`/`→` keep travelling the folder
-/// ([`preview_neighbours::key`]). Once it is drawn larger than its body on
+/// ([`crate::preview_neighbours::key`]). Once it is drawn larger than its body on
 /// *either* axis every arrow is the pan's, including the axis that does not
 /// move: a reader zoomed into a tall picture who presses `←` is asking to look
 /// left, not for the previous file. `Ctrl`, `Alt` and the command key are not
@@ -17145,12 +17146,12 @@ pub(crate) fn image_pan_key(
 /// its reason.
 ///
 /// **A miss is not "never asked".** The pane consulted the decode store and
-/// nothing else, so with a visible working set over [`MAX_PEEK_CACHE_BYTES`]
+/// nothing else, so with a visible working set over [`crate::MAX_PEEK_CACHE_BYTES`]
 /// every decode that landed evicted a picture another host was drawing, the
 /// refit that arrival triggered found that miss, asked again, and the cycle ran
 /// on its own with no input — §7.1.3u's report in the consumer that fix did not
 /// touch. The answer a surface was already given is a `PeekThumbnail`: it names
-/// the decode it was resampled from ([`PeekThumbnail::content_key`]), and the
+/// the decode it was resampled from ([`crate::PeekThumbnail::content_key`]), and the
 /// decode's own dimensions are beside it on the picture. That is everything the
 /// arithmetic below it needs.
 pub(crate) fn surface_pixels(
@@ -17398,7 +17399,8 @@ pub(crate) fn animation_layer_key(surface: PreviewSurface, serial: u64) -> Strin
     format!("gif:{surface:?}:{serial}")
 }
 
-/// **Whether a surface is still in the window**, for [`AnimationCache::forget_surfaces_gone`].
+/// **Whether a surface is still in the window**, for
+/// [`crate::AnimationCache::forget_surfaces_gone`].
 ///
 /// A surface is in the window while some tab holds its view — a seat of a tab in the background
 /// as much as one on the glass, and a float filed under whichever tab it was torn from — and the
@@ -17527,12 +17529,12 @@ pub(crate) fn picture_files_of<'a>(
 /// declared 62.5.
 ///
 /// **The rate is the window's own display frame** (closure review 2,
-/// 2026-09-18). It was [`pace::DEFAULT_FRAME_INTERVAL`], a flat sixteen milliseconds,
+/// 2026-09-18). It was [`crate::pace::DEFAULT_FRAME_INTERVAL`], a flat sixteen milliseconds,
 /// and a window has no business keeping two rates: on a 144 Hz panel the
 /// display gate admitted a turn seven milliseconds after a present and this one
 /// turned it away, which is how a picture that had arrived could find every door
 /// shut — the state the review's counterexample is built on. One clock, read
-/// from the glass ([`pace::FrameClock::interval`]), and the constant stays only
+/// from the glass ([`crate::pace::FrameClock::interval`]), and the constant stays only
 /// as the fallback that clock is born with.
 ///
 /// The first tick of a window's life is always due: there is no last one to be
@@ -19132,7 +19134,7 @@ pub(crate) fn markdown_prose_paragraphs(
 /// spelling and is set plain. That is what "a fence keeps its syntax
 /// highlighting" costs, and it costs nothing else: the walk itself is not
 /// re-run, because the highlighting is keyed on the block's own content
-/// ([`MarkdownIntrinsicKey`]) and the caret standing in a block does not change
+/// ([`crate::MarkdownIntrinsicKey`]) and the caret standing in a block does not change
 /// what it says.
 pub(crate) fn push_markdown_source_block(
     into: (
@@ -19639,7 +19641,7 @@ pub(crate) fn preview_selection_bands(
 /// in one pane and not the one beside it. So the same answer governs both.
 ///
 /// **Asked of the bytes and not of the gesture**, which is the one place this
-/// reads differently from [`should_copy_on_select_release`] next door. That one
+/// reads differently from [`super::terminal::should_copy_on_select_release`] next door. That one
 /// carries a `!single_click` guard so that focusing a pane never blanks the
 /// clipboard; here the same guard is already spent, because a click that
 /// selected nothing leaves nothing to write and a click that selected a *word* —
@@ -20226,7 +20228,7 @@ pub(crate) fn preview_reference_row(target: &str, document: &Path) -> ReferenceR
 /// Whether the preview link under the pointer would answer a press right now —
 /// and therefore whether the pointer wears the hand.
 ///
-/// [`terminal_link_answers_a_press`] one surface along, and the same sentence:
+/// [`super::terminal::terminal_link_answers_a_press`] one surface along, and the same sentence:
 /// the underline says "there is a link here", which is a fact about the
 /// document; the finger says "and *this* press, with the keys held the way they
 /// are held right now, is one that goes somewhere".

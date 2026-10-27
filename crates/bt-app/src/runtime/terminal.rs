@@ -1723,7 +1723,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// **One derivation, three consumers** — the painter, the hover, and the
     /// press. A press that could take a mark the painter had not drawn is the
-    /// same defect [`preview::ScrollBar`] exists to prevent, read in time rather
+    /// same defect [`crate::preview::ScrollBar`] exists to prevent, read in time rather
     /// than in space: you cannot grab what is not there. So the visibility rule
     /// is asked once and everything that cares reads the answer.
     fn terminal_column_thumb(&self, seat: SeatId, now: Instant) -> termscroll::Thumb {
@@ -2008,7 +2008,7 @@ pub(crate) fn should_copy_on_select_release(
 /// viewport is showing.
 ///
 /// A function rather than four lines inside [`Runtime::step_command_mark`], for
-/// [`stepped_tab`]'s reason one file over: the ends are the whole of the rule and
+/// [`super::tabs::stepped_tab`]'s reason one file over: the ends are the whole of the rule and
 /// the ends are what a window, a session and a solve make expensive to reach.
 ///
 /// **`at` is `None` when the viewport is above every command** — scrolled into

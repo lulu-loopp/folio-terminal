@@ -2378,7 +2378,7 @@ fn line(answer: &Result<Eligible, NotEligible>, offers: bool) -> String {
 /// **Which window a second `folio.exe`'s request lands in** (§7.59) — pure, and
 /// the whole of the rule.
 ///
-/// `visited` is [`App::activated`], oldest first; `open` is the windows that are
+/// `visited` is [`crate::App::activated`], oldest first; `open` is the windows that are
 /// actually on the screen this turn, in the order they opened; `quake` names the
 /// summoned terminal if this run has one.
 ///
@@ -2400,7 +2400,7 @@ fn line(answer: &Result<Eligible, NotEligible>, offers: bool) -> String {
 /// windows at all — and the caller opens an ordinary window, which is the
 /// ruling's own sentence for that case.
 ///
-/// Generic over the key for [`Windows`]' reason: `WindowId` is winit's and a test
+/// Generic over the key for [`crate::Windows`]' reason: `WindowId` is winit's and a test
 /// cannot make one, while the rule is not about winit.
 pub(crate) fn most_recently_active_window<K: Copy + Eq>(
     visited: &[K],
