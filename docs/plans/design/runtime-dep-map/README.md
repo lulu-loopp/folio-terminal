@@ -45,6 +45,13 @@ function value, or a receiver the rules do not type:
 - 3,903 sites call a method name that a standard type also has.
 - 285 sites reach more than one item, for example two types of the same name in two
   modules.
+- A call through an associated type of a generic (`B::Glass`, `B::Compositor`) reaches
+  whichever implementation the backend names. The census reads what the call does from
+  the bound's declaration and follows it to no implementation: 566 sites at plan row 83
+  (2026-10-27), listed since then and silent before (following them is plan row 84).
+  A trait method the subject implements on another package's type is followed to the
+  impl when the impl's self type is placed at the receiver's type, and listed as not
+  followed when the rules cannot place it (none at row 83).
 
 These are S-2a's call graph's to close. The map is a lower bound on edges and an
 exact count of what it does see.
@@ -753,6 +760,8 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
     main.rs` (2), `runtime/mouse.rs -> main.rs` (1) and `runtime/frame.rs ->
     main.rs` (1), and the `TermViewPorts` items' `called_by` and their callers'
     `calls`. The fix is a bt-source plan row of its own; the map regenerates then.
+    **Closed** by plan row 83 (2026-10-27): those four rows now count 45, 10, 176
+    and 49, and `Runtime::return_to_live_for_input`'s `calls` 5 (`main.rs` 4).
 - **O-4 (M5–M7).**
   - **M5, the launch facts.** Six fields, opening mostly `main.rs`, plus
     `runtime/{panes,tabs,clipboard,terminal,floats,mouse,peek,profiles,dpi}.rs` for
