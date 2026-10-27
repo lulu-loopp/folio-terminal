@@ -135,7 +135,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // child byte it caused have been quiet. A new geometry event re-opens the transaction,
                 // so a divider storm cannot install an intermediate commit's still-moving cursor.
                 let prompt_the_shell_opened = leaf.session.shell_prompt_opened_in_order();
-                let integration = leaf.integration;
+                let integration = leaf.launch.integration;
                 if let Some(reanchor_input) = take_psreadline_resize_reanchor_input(
                     ResizeReanchor {
                         pending: &mut leaf.pending_psreadline_resize_reanchor,

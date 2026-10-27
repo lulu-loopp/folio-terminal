@@ -1283,7 +1283,7 @@ fn a_tab_is_named_where_its_shell_was_put_down_until_that_shell_reports() {
         .expect("the shell's own announcement");
     // Both halves of one fact, exactly as the spawn writes them: the field
     // the vault reads and the rung the session's own ladder stands on.
-    leaf.spawn_place = Some(started_in.clone());
+    leaf.launch.spawn_place = Some(started_in.clone());
     leaf.session.set_spawn_directory(Some(started_in.clone()));
 
     let mut tab = tab_holding(leaf);
@@ -1462,7 +1462,7 @@ fn a_title_that_only_repeats_the_program_it_was_started_from_is_not_a_name() {
     let program = PathBuf::from(r"C:\WINDOWS\System32\cmd.exe");
     let titled = |title: &str, program: Option<&Path>| {
         let mut leaf = leaf_saying("x");
-        leaf.program = program.map(Path::to_path_buf);
+        leaf.launch.program = program.map(Path::to_path_buf);
         leaf.session
             .feed(format!("\x1b]0;{title}\x07").as_bytes())
             .unwrap();
@@ -1519,7 +1519,7 @@ fn a_title_that_only_repeats_the_program_it_was_started_from_is_not_a_name() {
     // The consequence, through the two stacks that read it: with the title
     // refused, the folder is what names both.
     let mut leaf = leaf_saying("x");
-    leaf.program = Some(program.clone());
+    leaf.launch.program = Some(program.clone());
     leaf.session
         .feed(b"\x1b]0;C:\\WINDOWS\\System32\\cmd.exe\x07")
         .unwrap();
@@ -2494,9 +2494,10 @@ fn a_sharpening_decode_is_awaited_and_its_completion_sharpens_the_picture() {
 #[test]
 fn a_tab_that_never_reported_a_folder_is_seeded_where_its_shell_was_put_down() {
     let started_in = PathBuf::from(r"C:\Users\dev");
-    let tab = tab_holding(LeafSession {
-        spawn_place: Some(started_in.clone()),
-        ..leaf_saying("no report from this one")
+    let tab = tab_holding({
+        let mut leaf = leaf_saying("no report from this one");
+        leaf.launch.spawn_place = Some(started_in.clone());
+        leaf
     });
     assert_eq!(
         tab.seed(),
@@ -2519,12 +2520,13 @@ fn a_tab_that_never_reported_a_folder_is_seeded_where_its_shell_was_put_down() {
 
     // A report supersedes it the moment one arrives — the first rung is
     // still first, and it is the only one anybody actually *said*.
-    let reported = tab_holding(LeafSession {
-        spawn_place: Some(started_in.clone()),
-        ..leaf_saying(&format!(
+    let reported = tab_holding({
+        let mut leaf = leaf_saying(&format!(
             "\u{1b}]7;file://localhost{}\u{7}",
             host_uri_path(r"D:\Developer\folio-terminal")
-        ))
+        ));
+        leaf.launch.spawn_place = Some(started_in.clone());
+        leaf
     });
     assert_eq!(
         reported.seed(),
@@ -2714,6 +2716,7 @@ fn a_torn_out_pane_carries_its_own_shell_into_its_own_tab() {
         .sessions
         .get_mut(&SeatId(2))
         .expect("the right-hand pane")
+        .launch
         .profile = gitbash.to_owned();
     assert_ne!(
         gitbash,

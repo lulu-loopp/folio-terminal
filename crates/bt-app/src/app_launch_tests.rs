@@ -337,14 +337,16 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
     // MUTATION, observed red: answer `seed_place_for_a_new_shell` with `Carried` whatever
     // `born_named` says — the named leaf's restart goes to the fixed folder.
     let born_in = PathBuf::from(r"D:\项目\clicked");
-    let named = LeafSession {
-        spawn_place: Some(born_in.clone()),
-        born_named: true,
-        ..leaf_saying("no report from this shell")
+    let named = {
+        let mut leaf = leaf_saying("no report from this shell");
+        leaf.launch.spawn_place = Some(born_in.clone());
+        leaf.launch.born_named = true;
+        leaf
     };
-    let carried = LeafSession {
-        spawn_place: Some(born_in.clone()),
-        ..leaf_saying("no report from this shell either")
+    let carried = {
+        let mut leaf = leaf_saying("no report from this shell either");
+        leaf.launch.spawn_place = Some(born_in.clone());
+        leaf
     };
     let fixed = profiles::StartAt::Fixed(PathBuf::from(r"E:\固定"));
     let restarted_in = |leaf: &LeafSession| {
@@ -361,7 +363,7 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
             &fixed,
             &profiles::StartingDir::AccountHome,
             profiles::PathNamespace::Windows,
-            restart_seed(&leaf.profile, leaf.seed_place_for_a_new_shell()).cwd,
+            restart_seed(&leaf.launch.profile, leaf.seed_place_for_a_new_shell()).cwd,
             &Nowhere,
         )
         .working_directory
@@ -383,13 +385,14 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
     // The `+` and a picker row beside a pane born named still carry (the review's unpinned
     // clause). MUTATION, observed red: answer `place_for_a_new_tab_beside` with
     // `seed_place_for_a_new_shell` — the folder arrives named.
-    let reported = LeafSession {
-        spawn_place: Some(PathBuf::from(r"D:\项目\clicked")),
-        born_named: true,
-        ..leaf_saying(&format!(
+    let reported = {
+        let mut leaf = leaf_saying(&format!(
             "\u{1b}]7;file://localhost{}\u{7}",
             host_uri_path(r"D:\Developer\elsewhere")
-        ))
+        ));
+        leaf.launch.spawn_place = Some(PathBuf::from(r"D:\项目\clicked"));
+        leaf.launch.born_named = true;
+        leaf
     };
     assert_eq!(
         reported.place_for_a_new_tab_beside(),
@@ -404,22 +407,24 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
 fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
     let born_in = PathBuf::from(r"D:\Projects\chosen-folder");
 
-    let silent = LeafSession {
-        spawn_place: Some(born_in.clone()),
-        ..leaf_saying("no report from this shell")
+    let silent = {
+        let mut leaf = leaf_saying("no report from this shell");
+        leaf.launch.spawn_place = Some(born_in.clone());
+        leaf
     };
     assert_eq!(
-        restart_seed(&silent.profile, silent.seed_place_for_a_new_shell()).cwd,
+        restart_seed(&silent.launch.profile, silent.seed_place_for_a_new_shell()).cwd,
         Some(profiles::SeedPlace::Carried(born_in.clone())),
         "the folder the pane was born in, not the profile's default"
     );
 
-    let reported = LeafSession {
-        spawn_place: Some(born_in.clone()),
-        ..leaf_saying(&format!(
+    let reported = {
+        let mut leaf = leaf_saying(&format!(
             "\u{1b}]7;file://localhost{}\u{7}",
             host_uri_path(r"D:\Developer\folio-terminal")
-        ))
+        ));
+        leaf.launch.spawn_place = Some(born_in.clone());
+        leaf
     };
     assert_eq!(
         reported.place_for_a_new_shell(),
@@ -429,9 +434,10 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
 
     // A WSL pane put down at its shell's home hands its mark on; `profiles::place_for` reads a
     // place equal to the home mark as the shell's home (round 2), pinned in `profiles::tests`.
-    let at_home = LeafSession {
-        spawn_place: Some(PathBuf::from("~")),
-        ..leaf_saying("no report from this shell either")
+    let at_home = {
+        let mut leaf = leaf_saying("no report from this shell either");
+        leaf.launch.spawn_place = Some(PathBuf::from("~"));
+        leaf
     };
     assert_eq!(at_home.place_for_a_new_shell(), Some(PathBuf::from("~")));
 }

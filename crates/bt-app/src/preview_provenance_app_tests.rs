@@ -83,7 +83,7 @@ fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
         // carried through the real transaction, because a resize left open withholds every
         // decoration for as long as it stays open (`decorations_allowed`).
         let local_grid = leaf.grid;
-        let integration = leaf.integration;
+        let integration = leaf.launch.integration;
         commit_leaf_resize(
             &mut leaf.session,
             None,

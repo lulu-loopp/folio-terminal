@@ -4135,6 +4135,7 @@ fn a_pane_carries_its_profile_by_id_so_a_table_move_cannot_move_it() {
         tab.sessions
             .get_mut(&seat)
             .expect("the fixture files a session under every terminal")
+            .launch
             .profile = id.to_owned();
     }
 
@@ -4168,7 +4169,11 @@ fn a_pane_carries_its_profile_by_id_so_a_table_move_cannot_move_it() {
     // keeps the name of what it was, and the revive spends the degradation
     // once — the fallback profile, with the missing id carried so the pane's
     // first line can say it.
-    tab.sessions.get_mut(&left).expect("the left pane").profile = "a-row-nobody-has".to_owned();
+    tab.sessions
+        .get_mut(&left)
+        .expect("the left pane")
+        .launch
+        .profile = "a-row-nobody-has".to_owned();
     assert!(!profiles::has_id("a-row-nobody-has"));
     assert_eq!(tab.term_leaf(left, false).profile_id, "a-row-nobody-has");
 

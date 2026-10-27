@@ -46,16 +46,21 @@ const FIXTURE_STRUCTS: [&str; 4] = ["App", "WindowRuntime", "TabState", "LeafSes
 /// a lend of `TabState.preview_pool` — the view being `PreviewPane` and the two
 /// contents that hold its state, a view of a pool buffer and a picture (ticket
 /// O-8, invariant 2) — and a terminal pane's view, `TermView`, nested in
-/// `LeafSession` (ticket O-2, the contract's M0 and M1). The contract's M0 also
-/// names `ShellSession`; it is declared here only when M8's rename gives it a
-/// declaration, because the census refuses a struct the package does not
-/// declare (`CensusFailure::NoSuchStruct`).
-const STRUCTS: [&str; 9] = [
+/// `LeafSession` (ticket O-2, the contract's M0 and M1), and the facts of a
+/// pane's launch, `LaunchFacts`, nested beside it (ticket O-4a, M5). The
+/// contract's M0 also names `ShellSession`; it is declared here only when M8's
+/// rename gives it a declaration, because the census refuses a struct the
+/// package does not declare (`CensusFailure::NoSuchStruct`). M6's `ShellLife`
+/// and M7's `AttentionAccount` are not declared: each nest is the fact
+/// (`LeafSession.life`, `LeafSession.attention`), as the contract's §3.3 counts
+/// them.
+const STRUCTS: [&str; 10] = [
     "App",
     "WindowRuntime",
     "TabState",
     "LeafSession",
     "TermView",
+    "LaunchFacts",
     "PreviewBuffer",
     "PreviewPane",
     "DocumentView",
@@ -79,6 +84,18 @@ const TERM_VIEW_M2_M4: [&str; 4] = [
     "metrics",
     "last_presented_frame",
     "projection",
+];
+
+/// The fields M5 moved from `LeafSession` into `LaunchFacts` (the ownership
+/// contract's §3.3; ticket O-4a), with their one writer each.
+const LAUNCH_FACTS: [(&str, &str); 7] = [
+    ("profile", "finish_leaf_birth"),
+    ("paste_recipient", "finish_leaf_birth"),
+    ("integration", "finish_leaf_birth"),
+    ("program", "finish_leaf_birth"),
+    ("program_kind", "finish_leaf_birth"),
+    ("spawn_place", "place_leaf"),
+    ("born_named", "place_leaf"),
 ];
 
 fn workspace_root() -> PathBuf {
@@ -915,6 +932,68 @@ fn the_view_fields_are_term_views() {
             ("write", "Runtime::rescan_pane_references"),
         ])
     );
+}
+
+/// RED (O-4a) — **the seven launch facts M5 moved are `LaunchFacts`', nested in
+/// `LeafSession` with its lifetime, and each is written by the one item that
+/// wrote it on the leaf.**
+///
+/// The ownership contract's M5 (§3.3) moves `profile`, `paste_recipient`,
+/// `integration`, `program`, `program_kind`, `spawn_place` and `born_named`
+/// under `LeafSession.launch: LaunchFacts`. Each is a fact the shell's start
+/// alone knew: `finish_leaf_birth` writes the first five where the shell lands
+/// and `place_leaf` the place and whether it was named, and nothing writes or
+/// lends any of them after. So each is a fact of `LaunchFacts` and none of
+/// `LeafSession`; `LeafSession.launch` is the one field of the leaf whose type
+/// is `LaunchFacts`, and it is written and lent nowhere after construction.
+/// Reads are not pinned (they move with K2's batches and are held by the
+/// runtime dependency map's guard).
+///
+/// MUTATION: leave `born_named` on `LeafSession`, and the first assertion names
+/// it; drop `place_leaf`'s write of `spawn_place`, write `leaf.launch` whole, or
+/// write `leaf.launch.profile` from `restart_shell`, and the writer sets differ.
+#[test]
+fn the_launch_facts_are_launch_facts() {
+    let census = the_census();
+    let facts: BTreeSet<&str> = census
+        .facts()
+        .iter()
+        .map(|fact| fact.fact.as_str())
+        .collect();
+    for (field, _) in LAUNCH_FACTS {
+        assert!(
+            facts.contains(format!("LaunchFacts.{field}").as_str())
+                && !facts.contains(format!("LeafSession.{field}").as_str()),
+            "`{field}` is `LaunchFacts`' and not `LeafSession`'s"
+        );
+    }
+    let nests: Vec<&str> = census
+        .facts()
+        .iter()
+        .filter(|fact| {
+            fact.fact.starts_with("LeafSession.") && fact.declared.contains("LaunchFacts")
+        })
+        .map(|fact| fact.fact.as_str())
+        .collect();
+    assert_eq!(nests, ["LeafSession.launch"], "one nest");
+    let writers = |fact: &str| -> Vec<(&'static str, String)> {
+        let mut out: Vec<(&'static str, String)> = census
+            .rows()
+            .iter()
+            .filter(|row| row.fact == fact)
+            .map(|row| (row.column.name(), row.function.clone()))
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(writers("LeafSession.launch"), [], "the nest");
+    for (field, writer) in LAUNCH_FACTS {
+        assert_eq!(
+            writers(&format!("LaunchFacts.{field}")),
+            [("write", writer.to_owned())],
+            "`{field}`'s one writer"
+        );
+    }
 }
 
 /// RED (O-2; the ownership contract's (b)1 and (c)1) — **the drain takes the

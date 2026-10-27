@@ -609,7 +609,8 @@ impl<B: Backend> Runtime<'_, B> {
                     .folder()
                     .map(|cwd| cwd.display().to_string())
                     .or_else(|| {
-                        leaf.program
+                        leaf.launch
+                            .program
                             .as_ref()
                             .and_then(|path| path.file_name())
                             .map(|name| name.to_string_lossy().into_owned())
