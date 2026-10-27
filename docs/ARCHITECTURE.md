@@ -730,7 +730,7 @@ transient, follows the existing hand-over road, and is not written into the
 table, so the next writer question asks again. A process
 with no window never asks it: `--explorer-command` (`explorer_menu::serve`) and
 the front door's refusal (`say_at_the_front_door`, which carries `--version`
-and `--help`) read their language through `main::door_language` →
+and `--help`) read their language through `explorer_menu::door_language` →
 `persist::SettingsStore::peek_language` over
 `persist::storage_dir_as_it_stands()` — bytes on the settings lane, no claim,
 no folder made or moved, no refused file kept. `--uninstall-cleanup` takes the
@@ -959,7 +959,7 @@ renders a document formula on the same engine and is not terminal typesetting.
 holds the arm to it. A host with no lane answers the same tasks a budget at a
 time through `bt_compose::pump`.
 
-The seams that already implement this shape: `bt-app::main::run_path_verify_worker`
+The seams that already implement this shape: `bt-app::computation_lane::run_path_verify_worker`
 (*one question, one call, one answer, and nothing else runs here*),
 `bt-app::computation_lane` (formulas, decodes, glances, resamples and printed paths, on the
 completion seam since S-8: three FIFO shares, each with its own ledger, bound and death),
@@ -2811,16 +2811,9 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
 into their topics batch by batch: 284 (240 free functions, 44 methods) after batch 23. The table
-below is the 2026-09-21 manifest's sort of the 201 methods then left
-(`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
-
-| topic | methods | owns | why it has not moved |
-|---|---|---|---|
-| `launch` | 4 | `Runtime::create` — starts the endpoints and probes and registers their wakes — `reseed_editor_env`, `apply_launch_opens`, `arrival_fits` | a source reader bound to `main.rs` by `include_str!` (`docs/plans/bt-app-split-prep.md` Appendix C) |
-| `settings` | 31 | the settings modal, `apply_settings_choice`, schemes and their watch, `open_font_settings` | a reader that compared door lines in universe order (same appendix); since batch 23 (2026-10-26) the readers compare them sorted and `runtime/settings.rs` holds the topic, and what stays is the scheme and storage watch with the methods it calls (eight), and the sheet's layout and values (`settings_values`, `settings_layout`, `drag_settings_menu_bar`, `rail_state_for`), whose `called_from` home is now `runtime/settings.rs` |
-| `focus` | 51 | focus mode, cards and their hints, terminal thumbs, focus seats, the quit card | the same reader shape as `settings` |
-| unassigned | 112 | appearance applies, the storage watch and pins, minted pages, `open_local_path` and `reveal_in_explorer` (hand-off), path-verification asks, `send_user_input`, composition, retirement, `finish_synchronized_update_if_due` | the theme regex assigns them no topic; not ruled |
-| newer than the manifest | 3 | `apply_web_color_scheme`, `open_unverified_reference`, `hand_uri_to_the_system` | added after the move; no topic yet |
+of the 2026-09-21 manifest's sort (201 methods then left) is retired (2026-10-27, plan row 59): since
+K2, `docs/plans/design/runtime-dep-map/unclassified.tsv` is the list, and each item's topic is decided
+by its batch (`runtime-dep-map/README.md`).
 
 ---
 

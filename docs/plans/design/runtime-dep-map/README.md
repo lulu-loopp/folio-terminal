@@ -322,6 +322,18 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    its own, which puts `runtime/mod.rs` on `FILES_THAT_MAY_NAME_A_PLATFORM`. The review checks the platform of
    every re-export's callers.
 
+   **The topic modules are `pub(crate)` for rustdoc, and the import rule above is kept by review** (ruled
+   2026-10-27, plan row 59). A doc link names a moved item by its path (`runtime::<topic>::name` at the root,
+   `super::<topic>::name` inside `runtime/`), and rustdoc resolves that path with privacy, so the eighteen
+   topic modules a link names are `pub(crate) mod` in `runtime/mod.rs`, and eleven linked private functions are
+   widened (`pub(super)` or `pub(crate)`). The trade: a non-test `use runtime::<topic>::…` at the crate root
+   now compiles, so the rule that forbids it is kept by review until a bt-source guard refuses it (plan row
+   80).
+
+   **A batch updates `docs/ARCHITECTURE.md` §13 in two places**: the topic table's method counts for the
+   files it fills, and the count sentence under "Still in `main.rs`" (the 2026-09-21 table under it is
+   retired, 2026-10-27, plan row 59).
+
    **A moved reader's imports are counted by needle** (ruled 2026-10-27, in K2 batch 23).
    `POINTER-DEBT.tsv`'s rows carry the needle each occurrence matched. `check-pointer-debt.ps1` accepts an
    `(outside any item)` row in the module a reader moved into once per needle that the moved owner rows at that
@@ -652,7 +664,7 @@ the note and belongs to M7.
   - Files opened: `main.rs`, `runtime/preview.rs`, `runtime/panes.rs`,
     `runtime/frame.rs`, `runtime/terminal.rs`, `runtime/peek.rs`.
   - Doors present:
-    - `Runtime::wake_terminal_thumb` (`main.rs`)
+    - `Runtime::wake_terminal_thumb` (`runtime/terminal.rs`)
     - `runtime::terminal::Runtime::wake_terminal_column`
     - `runtime::frame::Runtime::redraw` for `presented_metrics`
     - the two writers of `frame_image_references`: `publish_frame_inner` and
