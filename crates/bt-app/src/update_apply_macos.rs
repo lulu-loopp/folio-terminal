@@ -154,7 +154,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
@@ -165,8 +165,8 @@ use bt_platform::{HostPlatform, launch_agent};
 use crate::cli;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
-    Ahead, BeforeDeciding, Deferral, ExitGuard, Leave, Recording, Watch, Watched, Window,
-    stop_trial, trial_runs,
+    Ahead, BeforeDeciding, Deferral, ExitGuard, Leave, Recording, TrialClock, WallClock, Watch,
+    Watched, Window, stop_trial, trial_runs,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -306,6 +306,10 @@ pub(crate) struct Road {
     /// no home folder to find it from.
     pub(crate) agents: Option<PathBuf>,
     pub(crate) limits: Limits,
+    /// **The clock the trial's deadline is read on** — its `began_ms`, the
+    /// watch's turns and pauses, `decide`'s `now_ms` — [`WallClock`] in the
+    /// product.
+    pub(crate) trial_clock: Arc<dyn TrialClock>,
     /// **This process's starter** (U-37, H.3): its parent, by pid and an
     /// earlier start instant — an ordinary start that handed itself over is no
     /// candidate.
@@ -662,6 +666,7 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
                 data: data.clone(),
                 agents: launch_agents(),
                 limits: Limits::PRODUCT,
+                trial_clock: Arc::new(WallClock),
                 starter: install_flip::parent_of_this_process(),
                 handed_back: None,
                 layouts: own_layouts(),
@@ -1495,7 +1500,7 @@ impl<'a> Txn<'a> {
         handed: &[OsString],
     ) -> Result<Ended, String> {
         let nonce = crate::update_job::mint_nonce();
-        let began_ms = now_ms();
+        let began_ms = self.road.trial_clock.now_ms();
         let over_stuck = self.phase() == PhaseKind::Stuck;
         let mut args = trial_words(self.road.txn, &nonce).to_vec();
         if over_stuck {
@@ -1577,6 +1582,7 @@ impl<'a> Txn<'a> {
             started,
             poll: road.limits.poll,
             trial_within_ms: road.limits.trial_within_ms,
+            clock: &*road.trial_clock,
         };
         // LaunchServices reports no pid: the trial is the receipt's own, or
         // the process of the installed executable that carries its words —
@@ -1869,7 +1875,7 @@ impl<'a> Txn<'a> {
                 located,
                 receipt: receipt.clone(),
                 trial_alive,
-                now_ms: now_ms(),
+                now_ms: self.road.trial_clock.now_ms(),
             });
             match action {
                 Action::Revert { .. } => return self.revert(actor),
@@ -2220,16 +2226,6 @@ fn read_receipt(path: &Path) -> Option<Result<Receipt, String>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => Some(Err(error.to_string())),
     }
-}
-
-/// Wall-clock milliseconds, as `Trial`'s `began_ms` is recorded (recovery in
-/// another process measures the same deadline from it).
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
 }
 
 /// **The product's check of a restored bundle** ([`Hands::verify_restored`]):

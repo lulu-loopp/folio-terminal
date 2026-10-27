@@ -1093,6 +1093,87 @@ pub(crate) enum Watched {
     Unrecorded { process: TrialProcess, why: String },
 }
 
+/// **The clock a trial's deadline is read on, and the pause between two
+/// looks at the trial**: every reading of the trial's deadline on a lock
+/// holder's road — its `began_ms` at the launch, the watch's turn, `decide`'s
+/// `now_ms` — and the watch's pause, so one road never mixes two clocks.
+/// [`WallClock`] in the product; a test hands a clock that moves only by the
+/// pauses it is asked for, and counts them (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK).
+pub(crate) trait TrialClock: Send + Sync {
+    /// Milliseconds, as `Trial`'s `began_ms` is recorded.
+    fn now_ms(&self) -> u64;
+    /// One pause between two looks, through `worker`'s wait door.
+    fn pause(&self, worker: &WorkerCtx, pause: Duration);
+}
+
+/// **The product's [`TrialClock`]**: the wall clock ([`now_ms`]) and the
+/// worker's wait door (`bt_platform::wait::sleep_within`).
+pub(crate) struct WallClock;
+
+impl TrialClock for WallClock {
+    fn now_ms(&self) -> u64 {
+        now_ms()
+    }
+
+    fn pause(&self, worker: &WorkerCtx, pause: Duration) {
+        bt_platform::wait::sleep_within(worker, pause);
+    }
+}
+
+/// **A test's [`TrialClock`]** (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK): it starts
+/// at one wall reading and moves only by the pauses it is asked for — it never
+/// sleeps — counts them, and runs `at_pause` inside each, with its number from
+/// one. A test makes the trial's end happen in the pause of its choosing and
+/// asks how many pauses the watch took: "at once" is counted, never timed.
+#[cfg(test)]
+pub(crate) struct CountedClock {
+    began_ms: u64,
+    /// The clock's reading, and the pauses so far.
+    now: std::sync::Mutex<(u64, usize)>,
+    at_pause: std::sync::Mutex<Box<dyn FnMut(usize) + Send>>,
+}
+
+#[cfg(test)]
+impl CountedClock {
+    pub(crate) fn new(at_pause: impl FnMut(usize) + Send + 'static) -> Self {
+        let began_ms = now_ms();
+        Self {
+            began_ms,
+            now: std::sync::Mutex::new((began_ms, 0)),
+            at_pause: std::sync::Mutex::new(Box::new(at_pause)),
+        }
+    }
+
+    /// The pauses the watch asked for.
+    pub(crate) fn pauses(&self) -> usize {
+        self.now.lock().unwrap().1
+    }
+
+    /// How far the pauses moved the clock.
+    pub(crate) fn moved_ms(&self) -> u64 {
+        self.now.lock().unwrap().0 - self.began_ms
+    }
+}
+
+#[cfg(test)]
+impl TrialClock for CountedClock {
+    fn now_ms(&self) -> u64 {
+        self.now.lock().unwrap().0
+    }
+
+    fn pause(&self, _worker: &WorkerCtx, pause: Duration) {
+        let number = {
+            let mut now = self.now.lock().unwrap();
+            now.0 = now
+                .0
+                .saturating_add(u64::try_from(pause.as_millis()).unwrap_or(u64::MAX));
+            now.1 += 1;
+            now.1
+        };
+        (self.at_pause.lock().unwrap())(number);
+    }
+}
+
 /// **What a trial's watch is over**: the home, who records, the trial this
 /// holder just launched if the journal records none yet, and the clock.
 pub(crate) struct Watch<'a> {
@@ -1106,6 +1187,8 @@ pub(crate) struct Watch<'a> {
     pub(crate) poll: Duration,
     /// The trial's deadline, counted from its `began_ms`.
     pub(crate) trial_within_ms: u64,
+    /// The clock the deadline is read on, and the pause between two looks.
+    pub(crate) clock: &'a dyn TrialClock,
 }
 
 /// **The trial, waited for** (W7, W8, M7, M8): the one the journal records —
@@ -1115,8 +1198,8 @@ pub(crate) struct Watch<'a> {
 /// launch's nonce and the receipt at its name, if one is there already: on
 /// macOS [`launched_trial`]) and which is then recorded (`TrialBegan` over
 /// `Moving`, `RetrialBegan` over `Stuck`).
-/// Then, polling through the wait door until the deadline counted from its
-/// start: a receipt the journal accepts — this transaction's, this trial's
+/// Then, polling on the watch's clock (the wait door in the product) until
+/// the deadline counted from its start: a receipt the journal accepts — this transaction's, this trial's
 /// nonce — is recorded as `Committed` by the watch's
 /// actor ([`Watched::Committed`]); any other is said once and waited past. The
 /// recorded process no longer `alive` (by its pid, its start time and its
@@ -1249,12 +1332,12 @@ pub(crate) fn watch_trial(
                 }
             }
         }
-        let now = now_ms();
+        let now = watch.clock.now_ms();
         if now >= deadline {
             say("BT_UPDATE_APPLY no receipt by the trial's deadline");
             return Ok(Watched::NoReceipt);
         }
-        bt_platform::wait::sleep_within(
+        watch.clock.pause(
             worker,
             watch.poll.min(Duration::from_millis(deadline - now)),
         );

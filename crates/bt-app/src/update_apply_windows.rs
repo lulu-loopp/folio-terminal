@@ -185,8 +185,8 @@ use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
     Ahead, BeforeDeciding, Carried, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave,
-    Limits, Opener, Opens, Recording, Watch, Watched, Window, failed_words, now_ms, owed_at_logon,
-    read_receipt, stop_trial, trial_runs, trial_words, until_let_go,
+    Limits, Opener, Opens, Recording, TrialClock, WallClock, Watch, Watched, Window, failed_words,
+    owed_at_logon, read_receipt, stop_trial, trial_runs, trial_words, until_let_go,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -564,6 +564,10 @@ pub(crate) struct Road {
     /// How the installed copy was installed, derived now.
     pub(crate) channel: Option<Channel>,
     pub(crate) limits: Limits,
+    /// **The clock the trial's deadline is read on** — its `began_ms`, the
+    /// watch's turns and pauses, `decide`'s `now_ms` — [`WallClock`] in the
+    /// product.
+    pub(crate) trial_clock: Arc<dyn TrialClock>,
     /// This process, by its pid and start time: what the window's mark names
     /// when this process takes it (`update_apply::OWNER_FILE`).
     pub(crate) me: Running,
@@ -596,6 +600,7 @@ impl Road {
             policy: Policy::System,
             channel,
             limits: Limits::PRODUCT,
+            trial_clock: Arc::new(WallClock),
             me: crate::update_apply::this_process(),
             starter: install_flip::parent_of_this_process(),
             handed_back: None,
@@ -1528,7 +1533,7 @@ impl<'a> Txn<'a> {
     /// W6 → W7 → W8, or the rollback.
     fn trial(&mut self, worker: &WorkerCtx, world: &mut impl World) -> Result<Ended, String> {
         let nonce = crate::update_job::mint_nonce();
-        let began_ms = now_ms();
+        let began_ms = self.road.trial_clock.now_ms();
         let args = trial_words(self.txn(), &nonce);
         let pid = match world.launch_trial(&self.road.installed, &args) {
             Ok(pid) => pid,
@@ -1614,6 +1619,7 @@ impl<'a> Txn<'a> {
             started: None,
             poll: road.limits.poll,
             trial_within_ms: road.limits.trial_within_ms,
+            clock: &*road.trial_clock,
         };
         let images = [road.installed.as_path()];
         let watched = crate::update_apply::watch_trial(
@@ -1688,7 +1694,7 @@ impl<'a> Txn<'a> {
                 located,
                 receipt: receipt.clone(),
                 trial_alive,
-                now_ms: now_ms(),
+                now_ms: self.road.trial_clock.now_ms(),
             });
             match action {
                 Action::Revert { .. } => return self.revert(actor, world),
@@ -2016,7 +2022,7 @@ impl<'a> Txn<'a> {
         handed: &[OsString],
     ) -> Result<Ended, String> {
         let nonce = crate::update_job::mint_nonce();
-        let began_ms = now_ms();
+        let began_ms = self.road.trial_clock.now_ms();
         let mut args = trial_words(self.txn(), &nonce).to_vec();
         // Its card says the update is incomplete, as `Stuck`'s start's
         // always does (U-29).
@@ -2172,7 +2178,7 @@ impl<'a> Txn<'a> {
             located,
             receipt: None,
             trial_alive: false,
-            now_ms: now_ms(),
+            now_ms: self.road.trial_clock.now_ms(),
         };
         let Action::FinishCommit {
             delete_backup,
