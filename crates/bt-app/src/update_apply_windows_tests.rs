@@ -38,7 +38,9 @@ use bt_platform::trust_harness::{
 };
 use bt_winres::digest::sha256;
 
-use crate::update_apply::{LastTrialCommit, Left, Window, commit_last_trial_as};
+use crate::update_apply::{
+    CountedClock, LastTrialCommit, Left, Window, commit_last_trial_as, now_ms,
+};
 use crate::update_handoff::{Leaving, Spawner};
 use crate::update_job::Failure;
 use crate::update_prepare_windows::tests::build_that;
@@ -156,9 +158,6 @@ enum Trial {
     Silent,
     /// Ends at once, writing nothing.
     Dies,
-    /// Runs, is recorded, and ends by itself within its first second,
-    /// writing nothing (U-38's Windows twin).
-    DiesSoon,
 }
 
 type MoveHook = Box<dyn FnMut(&Move) + Send>;
@@ -298,14 +297,6 @@ impl World for Fake {
             Trial::Silent => return Ok(pid),
             Trial::Dies => {
                 self.children.end(pid);
-                return Ok(pid);
-            }
-            Trial::DiesSoon => {
-                let children = self.children.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(300));
-                    children.end(pid);
-                });
                 return Ok(pid);
             }
             Trial::Answers | Trial::AnswersAndKeeps | Trial::AnswersThenDies => nonce,
@@ -572,6 +563,7 @@ impl Install {
             policy: self.ca.policy(),
             channel: Some(Channel::Ours),
             limits,
+            trial_clock: Arc::new(WallClock),
             me: Running {
                 pid: std::process::id(),
                 started: 0,
@@ -1752,23 +1744,36 @@ fn a_failed_health_reverses_the_moves_and_relaunches_the_old_build() {
 ///
 /// (b).2 W7: "the trial gone … → `RollbackIntent`"; W9.
 ///
+/// "At once" is counted, not timed (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK): the
+/// road's trial clock ([`CountedClock`]) moves only by the watch's pauses, and
+/// the trial, gone before its launch returns, is seen gone at the watch's
+/// first look — no pause at all.
+///
 /// MUTATION: in `Txn::watch`, answer the trial alive whatever the process list
-/// says (the applier then waits out the 60 s deadline).
+/// says (the watch then pauses its way to the 60 s deadline: 1500 pauses).
 #[test]
 fn a_dead_trial_rolls_back_at_once() {
     let Some(install) = Install::new("dead") else {
         return;
     };
-    let began = Instant::now();
-    let (ended, world) = applied(&install, limits(20_000, 60_000), install.world(Trial::Dies));
+    let clock = Arc::new(CountedClock::new(|_| {}));
+    let mut road = install.road(limits(20_000, 60_000));
+    road.trial_clock = clock.clone();
+    let (ended, world) = applied_on(&install, road, install.world(Trial::Dies));
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
-    assert!(
-        began.elapsed() < Duration::from_secs(30),
-        "rolled back at once, not at the deadline: {:?}",
-        began.elapsed()
+    assert_eq!(
+        clock.pauses(),
+        0,
+        "rolled back at the first look, not at the deadline: {:?}",
+        world.said
     );
     assert!(
         said_at(&world, "ended without a receipt").is_some(),
+        "{:?}",
+        world.said
+    );
+    assert!(
+        said_at(&world, "no receipt by the trial's deadline").is_none(),
         "{:?}",
         world.said
     );
@@ -3578,24 +3583,61 @@ fn a_persons_start_beside_the_launch_is_never_the_recorded_trial() {
 /// next look — the rollback begins within moments, not at the 60 s deadline.
 ///
 /// The clean VM's M9cut-style kill landed 4 ms too late to show it on the
-/// Mac; here the trial ends by itself 300 ms after its launch, after `Trial`
-/// is recorded.
+/// Mac; here the trial, after `Trial` is recorded, is ended by its handle
+/// inside the watch's seventh pause — 280 ms on the road's trial clock
+/// ([`CountedClock`], which moves only by the pauses: T-TRIAL-DEATH-WAIT-
+/// CONTROLLED-CLOCK) — and the watch must end at its next look: seven pauses,
+/// never an eighth.
 ///
 /// MUTATION: in `Txn::watch`, answer the trial alive whatever the process
-/// list says.
+/// list says (1500 pauses, to the deadline); or in `watch_trial`, pause until
+/// the deadline rather than one poll (one pause, the deadline's).
 #[test]
 fn a_trial_that_dies_in_its_first_second_ends_the_wait_at_once() {
     let Some(install) = Install::new("dies-soon") else {
         return;
     };
-    let began = Instant::now();
-    let (ended, world) = applied(
-        &install,
-        limits(20_000, 60_000),
-        install.world(Trial::DiesSoon),
-    );
-    let took = began.elapsed();
+    const DIES_AT: usize = 7;
+    let ended_at: Arc<Mutex<Option<usize>>> = Arc::default();
+    let clock = {
+        let (children, home, ended_at) = (
+            install.children.clone(),
+            install.home.clone(),
+            Arc::clone(&ended_at),
+        );
+        Arc::new(CountedClock::new(move |pause| {
+            if pause != DIES_AT {
+                return;
+            }
+            let journal = Journal::parse(&std::fs::read(home.journal()).unwrap()).unwrap();
+            let Phase::Trial { process, .. } = journal.body.phase else {
+                panic!("the watch pauses only over the recorded trial: {journal:?}");
+            };
+            children.end(process.pid);
+            *ended_at.lock().unwrap() = Some(pause);
+        }))
+    };
+    let mut road = install.road(limits(20_000, 60_000));
+    road.trial_clock = clock.clone();
+    let (ended, world) = applied_on(&install, road, install.world(Trial::Silent));
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert_eq!(
+        *ended_at.lock().unwrap(),
+        Some(DIES_AT),
+        "the trial lived to the pause it dies in: {:?}",
+        world.said
+    );
+    assert_eq!(
+        clock.pauses(),
+        DIES_AT,
+        "the wait ended at the first look after the death: {:?}",
+        world.said
+    );
+    assert!(
+        clock.moved_ms() < 1_000,
+        "within its first second on the trial's clock: {} ms",
+        clock.moved_ms()
+    );
     assert!(
         wrote(&world).contains("Trial, RollbackIntent"),
         "recorded, then rolled back: {:?}",
@@ -3607,8 +3649,9 @@ fn a_trial_that_dies_in_its_first_second_ends_the_wait_at_once() {
         world.said
     );
     assert!(
-        took < Duration::from_secs(30),
-        "at once, not the 60 s deadline: {took:?}"
+        said_at(&world, "no receipt by the trial's deadline").is_none(),
+        "{:?}",
+        world.said
     );
     rolled_back_on_disk(&install);
 }
@@ -6252,6 +6295,7 @@ fn rescue_part(root: &Path) {
             end_within: Duration::from_secs(10),
             journal_held_within: JOURNAL_HELD_WITHIN_UNDER_TEST,
         },
+        trial_clock: Arc::new(WallClock),
         me,
         starter: install_flip::parent_of_this_process(),
         handed_back: Some(handed_back),
