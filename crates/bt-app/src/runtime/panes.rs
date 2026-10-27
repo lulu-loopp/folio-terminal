@@ -18,26 +18,28 @@ use crate::{
     split_axis, tabs_a_close_loses, toast,
 };
 use crate::{
-    ColumnNotch, CommandFlash, DividerDrag, DividerGrip, Drag, DragCarry, DragHandover, DragSource,
-    DropLanding, FilesFocusArrival, FlashBand, FolderPick, FormulaSwitches, FrameImageReferences,
-    FrameTraces, HandoverInto, LeafId, LeafOnStage, LeafSession, MathHoverExit, MenuPaint, Motion,
-    NewWindowPlan, NoticeHost, PaneDraw, PaneMenuState, PaneTransform, PopoverTrigger, Popup,
-    PopupOwner, PresentIntent, PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY,
-    RAIL_TRANSITION, RevealTween, RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed,
-    TabId, TabState, TabSurface, TearOut, attention_trace, auto_split_axis, card_trace,
-    closing_this_pane_closes_the_tab, cmdrail, create_leaf_session, files, float, glyph_trace,
-    hang_watch, marks, mouse_trace, notice, notify, palette, present_diagnostics,
-    presentation_physical_size, preview, preview_trace, profiles, restore, restore_row_seed,
-    row_verb, schedule_leaf_grid_change, scrollback_quota, seats, solve_seats, solve_tree,
-    video_seat, webhost,
+    CardAim, ColumnNotch, CommandFlash, DividerDrag, DividerGrip, Drag, DragCarry, DragHandover,
+    DragSource, DropLanding, FilesFocusArrival, FlashBand, FolderPick, FormulaSwitches,
+    FrameImageReferences, FrameTraces, HandoverInto, LeafId, LeafOnStage, LeafSession,
+    MathHoverExit, MenuPaint, Motion, NewWindowPlan, NoticeHost, PaneDraw, PaneMenuState,
+    PaneTransform, PeekCache, PeekCacheEntry, PopoverTrigger, Popup, PopupOwner, PresentIntent,
+    PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY, RAIL_TRANSITION, RevealTween,
+    RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed, TabId, TabState, TabSurface,
+    TearOut, attention_trace, auto_split_axis, card_trace, closing_this_pane_closes_the_tab,
+    cmdrail, create_leaf_session, files, float, focus_thumb, glyph_trace, hang_watch, marks,
+    mouse_trace, notice, notify, palette, present_diagnostics, presentation_physical_size, preview,
+    preview_trace, profiles, restore, restore_row_seed, row_verb, schedule_leaf_grid_change,
+    scrollback_quota, seats, solve_seats, solve_tree, trace, video_seat, web_thumb, webhost,
+    wheel_zoom_notches,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
-use bt_layout::{Axis, SeatId, SeatLayout, SeatMetrics, SizePolicy};
+use bt_layout::{Axis, SeatId, SeatKind, SeatLayout, SeatMetrics, SizePolicy};
 use bt_persist::LayoutNodeV1;
 use bt_render::{
     ChromePalette, FrameSource, FrameTrigger, GridSize, PresentOutcome, PresentPhase, Travel,
 };
+use bt_term::normalized_local_image_path_key;
 use bt_viewport::horizontal::ContentColumn;
 use bt_viewport::{ViewSelection, ViewportFrame};
 use bt_workbench::attention;
@@ -6068,6 +6070,758 @@ impl<B: Backend> Runtime<'_, B> {
         self.float_holding_the_page(leaf)
             .is_none()
             .then_some(leaf.seat)
+    }
+
+    /// The same question asked of a drag the caller is holding.
+    ///
+    /// [`Runtime::release_drag`] takes the drag out of the window before it
+    /// decides anything — a gesture that has ended must not be in flight while
+    /// its own consequences run — so the commit cannot ask `self.drag` what it
+    /// was aiming at. It asks the drag it has.
+    pub(crate) fn plan_inputs_for(&self, drag: &Drag) -> Option<PlanInputs> {
+        let landing = drag.landing?;
+        // The strip's two landings draw themselves in the strip (K124: "the
+        // preview in the strip is the ghost now"), so there is no dock box for
+        // them and never was one to fade.
+        landing.layout_aim()?;
+        let showing = self.window.tabs[self.window.active_tab].id;
+        // **The one place a source is turned into the *shape* it arrives in**
+        // (M156, and §7.1.6k′'s addition to it). `Some` means "a whole subtree
+        // arrives and is renumbered on the way in"; `None` means "a seat of the
+        // tree being planned changes places and keeps its own name".
+        //
+        // Written here rather than in [`Runtime::plan_for`] because this is the
+        // cache key: the shape is part of what the plan is a function of, and a
+        // spring that moves the view mid-gesture changes the shape without
+        // changing the landing.
+        let cargo = match &drag.source {
+            // A row arrives as one leaf, and that leaf is built where the plan
+            // is (see [`Runtime::plan_for`]) — a row has no tree of its own to
+            // carry, which is the whole difference between it and a tab.
+            DragSource::Row(_) => None,
+            // **§7.1.6k′ — a pane is one shape at home and the other away.** In
+            // the tab on screen it is a seat this tree owns, so it arrives *as
+            // itself*: the same `Seat`, the same id, its fixed extent along
+            // with it, and a centre that trades payloads rather than evicting
+            // anybody (L138). Once the spring has left the hand in one tab and
+            // the view in another, that seat is not in the tree being planned
+            // at all — it is a subtree from another room, exactly like a tab's,
+            // and it arrives the way one does.
+            DragSource::Pane(leaf) if leaf.tab == showing => None,
+            DragSource::Pane(leaf) => Some(bt_layout::LayoutNode::seat(
+                self.tab_state(leaf.tab)?
+                    .seats
+                    .tree()
+                    .find_seat(leaf.seat)?
+                    .clone(),
+            )),
+            DragSource::Tab(id) => Some(self.tab_state(*id)?.seats.tree().clone()),
+        };
+        Some(PlanInputs {
+            landing,
+            source: drag.source.clone(),
+            tree: self.seats.tree().clone(),
+            cargo,
+            viewport: self.window.seat_viewport,
+            scale_ppm: seats::scale_ppm(self.window.renderer.dpi_milli().get()),
+        })
+    }
+
+    /// **Spend this window's thumbnail budget for this frame** (§7.1.6b′ F2).
+    ///
+    /// The four gates live in `focus_thumb`; this is where the first two are
+    /// *applied*, because they are the two that need the picture:
+    ///
+    /// * **The mode** — no focus column, no thumbnails, and the cache is emptied
+    ///   rather than left to rot. That is what makes the frame after `Exit` cost
+    ///   exactly what a frame cost before F2 existed, and the counter dump says so
+    ///   out loud.
+    /// * **Visibility** — the cards are filtered on `FocusRailGeometry::viewport`,
+    ///   the very rectangle `focus_rail_chrome` clips its drawing to. One number,
+    ///   not two agreeing rules: a card that is drawn is a card that is projected,
+    ///   and there is no third state where one is true and the other is not.
+    ///
+    /// Everything past that is handed down unevaluated — a `SeatDemand` per seat
+    /// carrying a *reference* to the session or the cache — so the walks that
+    /// actually cost something happen on the far side of the damage check and the
+    /// throttle, where a gate can still refuse them.
+    ///
+    /// # And the reads a card arms (user ruling 2026-08-21)
+    ///
+    /// **A seat projected into a card is on screen, and that is the whole of why
+    /// its document may be read.** "A background tab does not load" is older than
+    /// this mode and was right when it was written: a tab nobody was looking at
+    /// had nothing on the glass. §7.1.6b′ gave that rule a new subject — the card
+    /// column puts *every* seat of *every* visible tab on the glass, shrunk — and
+    /// what a card then drew for an unread document was a sentence that was never
+    /// going to come true: `📄 Loading…` on a files column nobody was walking, a
+    /// bare `notes.md / MD` face over a document nobody was reading.
+    ///
+    /// So the two reads a card can be missing are armed **here**, and here is the
+    /// whole of the boundary:
+    ///
+    /// * **Only in the mode.** The arming is below the gate above, so a window
+    ///   that is not in focus mode returns before either list exists and a
+    ///   background tab is left exactly as it was.
+    /// * **Once.** The document's ledger is the buffer's own
+    ///   ([`preview::PreviewBuffer::claim_head_read`]) and the directory's is the
+    ///   cache's own (`DirCache::mark_pending`) — the same two ledgers the
+    ///   ordinary doors have always written, so a card looked at sixty times a
+    ///   second reads each thing once and a refusal is never retried.
+    /// * **Never on this thread.** Both go to the workers that already own those
+    ///   two lanes; nothing here touches a disk.
+    ///
+    /// The projection itself is untouched: it still quotes only what is in
+    /// memory, and the next pass finds the body there because somebody else put
+    /// it there.
+    pub(crate) fn refresh_focus_thumbnails(&mut self, now: Instant, scale: f32, why: &'static str) {
+        // **This window's id, read before any borrow** (`BT_CARD_TRACE`,
+        // §7.1.6b′) — `mouse_trace::window_line`'s own rule: the clamp below
+        // stands inside a live `&mut` of this window's tabs, where `&self`
+        // cannot be taken, so the number is taken here and carried.
+        let window = u64::from(self.window.window.id());
+        let geometry = self.focus_rail_geometry_now(now);
+        // **The tab holding the pane that is in the air** (缺陷 #189, widened by
+        // B2 on 2026-09-01). Its seat is being drawn twice while the gesture
+        // lasts — once on its own card and once as the stand-in — and the second
+        // of those may be somewhere else in this column, or in **another
+        // window's** column entirely. `carried_pane` is what makes the second
+        // case answerable: `stand_in_pane` goes quiet the instant the pointer
+        // crosses off this glass, which is exactly when the picture is wanted.
+        // It is one tab, for the length of one gesture, and the throttle is the
+        // same one every other card pays.
+        let in_hand = self
+            .carried_pane()
+            .or_else(|| self.stand_in_pane())
+            .map(|leaf| leaf.tab);
+        // And the box the picture will be drawn in, when the window it is going
+        // into is the only one that has a card (B2) — see [`DragBroker::guest_mini`].
+        let guest_mini = self
+            .app
+            .drag_broker
+            .as_ref()
+            .filter(|broker| broker.source == self.window_id())
+            .and_then(|broker| broker.guest_mini);
+        if geometry.is_none() && !(in_hand.is_some() && guest_mini.is_some()) {
+            self.window.focus_thumbs.clear();
+            // Nothing on the glass can be behind anything, so the clock stops
+            // here rather than carrying a debt out of the mode — gate 1's own
+            // sentence, said about the frame schedule.
+            self.window.cards.nothing_to_draw();
+            return;
+        }
+        // The counters as they stood before this pass, so that what the pass did
+        // can be read off the gates themselves — see [`focus_thumb::CardClock`].
+        let gates_before = self.window.focus_thumbs.stats();
+        // **Which cards are projected this frame, and into what box.** One list
+        // rather than two walks, because a window with no column of its own
+        // still owes a picture of the pane it is carrying, and a second walk to
+        // say so would be a second copy of everything below — the demands, the
+        // unread documents, the pages asked for.
+        let mut boxes: Vec<(usize, [f32; 4])> = Vec::new();
+        if let Some(geometry) = geometry.as_ref() {
+            for (index, card) in geometry.cards.iter().enumerate() {
+                let Some(tab) = self.window.tabs.get(index) else {
+                    continue;
+                };
+                if in_hand == Some(tab.id) || geometry.card_is_in_view(index) {
+                    boxes.push((index, card.mini));
+                }
+            }
+        }
+        // The carried pane's tab, when this window drew no card for it — which
+        // is every window not in focus mode, and it is most of them. The box is
+        // the target's own, at the target's scale, so what is projected is the
+        // size it will be drawn: the source has no card to take a size from, and
+        // inventing one would be this window guessing at another's column.
+        if let Some(tab) = in_hand
+            && let Some((width, height)) = guest_mini
+            && let Some(index) = self.window.tabs.iter().position(|state| state.id == tab)
+            && !boxes.iter().any(|(at, _)| *at == index)
+        {
+            boxes.push((index, [0.0, 0.0, width, height]));
+        }
+        for &(index, mini) in &boxes {
+            let Some(tab) = self.window.tabs.get_mut(index) else {
+                continue;
+            };
+            for seat in seats::focus_mini_seats(tab.seats.tree(), mini, scale) {
+                if seat.kind == SeatKind::Terminal
+                    && let Some(leaf) = tab.sessions.get_mut(&seat.id)
+                {
+                    let rows = focus_thumb::mini_rows(
+                        seat.rect,
+                        focus_thumb::MiniMetrics::TERM.line_px(scale),
+                        scale,
+                    );
+                    let demand = focus_thumb::SeatDemand {
+                        id: seat.id,
+                        columns: focus_thumb::mini_columns(
+                            seat.rect,
+                            self.window.focus_mini_advance,
+                            scale,
+                        ),
+                        rows,
+                        source: focus_thumb::SeatSource::Terminal {
+                            session: &leaf.session,
+                            skip: leaf.card_skip,
+                        },
+                    };
+                    // **`card walk`'s one product call site** (T-CARD-TRACE,
+                    // §7.1.6b′). The reason is this pass's caller's — a frame,
+                    // or the notch that re-spends the projection — because it is
+                    // the one field nothing inside the station can answer.
+                    //
+                    // The number goes in by value (T-CARD-NO-PASSIVE-CLAMP): a
+                    // frame writes a line about this card and never writes the
+                    // card's place, so a grid the window wears for an instant on
+                    // its way to another display cannot take the reader's place
+                    // with it.
+                    self.window.focus_thumbs.trace_card_walk(
+                        tab.id,
+                        &demand,
+                        leaf.card_skip,
+                        now,
+                        card_trace::Card {
+                            window,
+                            tab: tab.id,
+                            seat: seat.id,
+                            why,
+                        },
+                    );
+                }
+            }
+        }
+        let mono_advance = self.window.focus_mini_advance;
+        let face_advance = self.window.focus_mini_face_advance;
+        let mut visible = BTreeSet::new();
+        // What the cards could not draw out of memory, gathered by tab index
+        // because the sending needs `&mut self` and the walking holds `&self`.
+        let mut unread_documents: Vec<(usize, preview::PreviewSource)> = Vec::new();
+        let mut unread_dirs: Vec<(usize, focus_thumb::UnreadDir)> = Vec::new();
+        // **And the web seats of the cards that are in the column** (§7.11).
+        // Gathered for the same reason and spent the same way: the decision is
+        // `web_thumb::WebThumbs::due`'s, the asking needs `&mut self`, and the
+        // walk below holds the tab list immutably.
+        let mut wanted_pictures: Vec<web_thumb::PageDemand> = Vec::new();
+        let pages = &self.window.web;
+        let page_pictures = &self.window.web_thumbs;
+        // **And the pictures the cards can draw out of memory** (user ruling
+        // 2026-08-30; §7.1.6b⁵). Read and never asked for: this is the window's
+        // decode cache exactly as it stands, and a seat whose file is not in it
+        // is the face it has always been. See [`card_picture_in`].
+        let decodes = &self.window.peek_cache;
+        // **And the tab holding the pane that is in the air** (缺陷 #189). Its
+        // seat is being drawn twice while the gesture lasts — see the walk above,
+        // which is where a card's visibility and the pane in the hand are
+        // reconciled into the one list this loop is handed.
+        for (index, mini) in boxes {
+            let Some(tab) = self.window.tabs.get(index) else {
+                continue;
+            };
+            visible.insert(tab.id);
+            // The mini boxes are solved here rather than inside the budget
+            // because they are *geometry*, and geometry is `seats`'s: what comes
+            // back is each seat's own rectangle, and each seat's own rectangle is
+            // what its column count is cut from — which is §3.3's "the same
+            // session at another width" in the only form a 263px-wide card has
+            // room for — and, since 2026-08-20, its vertical twin: how many rows
+            // that rectangle holds is how many rows it is handed.
+            let demands: Vec<focus_thumb::SeatDemand<'_>> =
+                seats::focus_mini_seats(tab.seats.tree(), mini, scale)
+                    .into_iter()
+                    .filter_map(|seat| {
+                        // **The document this seat is on, if nobody has read
+                        // it.** Asked here rather than inside `mini_source`,
+                        // which must stay a projection: it answers what is in
+                        // memory and this is the question of what is not.
+                        if seat.kind == SeatKind::Preview
+                            && let Some(source) = tab.unread_card_document(seat.id)
+                        {
+                            unread_documents.push((index, source));
+                        }
+                        // **The page on this seat, if it is one** (§7.11). Two
+                        // separate readings, and the split is the same one
+                        // `unread_card_document` makes one line above: the
+                        // picture it *has* goes into the projection, and the
+                        // picture it is *owed* goes on a list the caller acts
+                        // on past the walk. Neither is a question the
+                        // projection may ask.
+                        let leaf = LeafId {
+                            tab: tab.id,
+                            seat: seat.id,
+                        };
+                        if let Some(web) = pages.get(&leaf) {
+                            wanted_pictures.push(web_thumb::PageDemand {
+                                leaf,
+                                url: web.identity().unwrap_or_default().to_owned(),
+                                facts: web.capture_facts(),
+                                card: Some(web_thumb::CardCell {
+                                    size: (
+                                        (seat.rect[2] - seat.rect[0]).round().max(0.0) as u32,
+                                        (seat.rect[3] - seat.rect[1]).round().max(0.0) as u32,
+                                    ),
+                                    scale,
+                                }),
+                            });
+                        }
+                        // **The picture on this seat, if this window has one**
+                        // (§7.1.6b⁵) — the third reading in the same place and
+                        // the same split as the two above it: what a seat *has*
+                        // goes into the projection, and nothing on this line
+                        // asks for what it has not.
+                        let picture = tab
+                            .card_picture_path(seat.id)
+                            .and_then(|path| card_picture_in(decodes, path));
+                        let source = tab.mini_source(
+                            seat.id,
+                            seat.kind,
+                            page_pictures.picture(leaf),
+                            picture,
+                        )?;
+                        // **The seat's own face decides both counts.** A row's
+                        // height and a column's width are two readings of the
+                        // same face, so they are taken from one table
+                        // (`focus_thumb::MiniMetrics`) rather than chosen here —
+                        // which is what stops a seat being measured for thirteen
+                        // rows of one size and drawn in another.
+                        let metrics = source.metrics();
+                        let advance = if metrics.mono {
+                            mono_advance
+                        } else {
+                            face_advance
+                        };
+                        Some(focus_thumb::SeatDemand {
+                            id: seat.id,
+                            columns: focus_thumb::mini_columns(seat.rect, advance, scale),
+                            rows: focus_thumb::mini_rows(seat.rect, metrics.line_px(scale), scale),
+                            source,
+                        })
+                    })
+                    .collect();
+            unread_dirs.extend(
+                self.window
+                    .focus_thumbs
+                    .project(tab.id, &demands, now)
+                    .into_iter()
+                    .map(|ask| (index, ask)),
+            );
+        }
+        self.window.focus_thumbs.retain_visible(&visible);
+        // **The card column's frame debt, settled where the cards were actually
+        // drawn** (§7.1.6b′, T-5). A pass that got every seat level owes nothing;
+        // a pass gate 4 refused a seat on does, because that gate is a *skip* and
+        // not a deferral — the seat keeps its old picture with nothing queued to
+        // come back for it, and until this line the only thing that ever came back
+        // was an integrated shell's 16 ms breath. See [`focus_thumb::CardClock`].
+        self.window
+            .cards
+            .settled(gates_before, self.window.focus_thumbs.stats());
+        self.photograph_pages(wanted_pictures, now);
+        dump_focus_thumb_frame(
+            visible.len(),
+            self.window.focus_thumbs.stats(),
+            self.window.web_thumbs.stats(),
+        );
+        self.arm_card_reads(unread_documents, unread_dirs);
+    }
+
+    /// **Go and get what the cards could not draw** — the sending half of
+    /// [`Self::refresh_focus_thumbnails`]'s ruling, and the only place in this
+    /// window where a background tab's content is asked for.
+    ///
+    /// Split out because the walk above holds the tab list immutably and both
+    /// ledgers are written through `&mut`; the lists it carries are the frame's
+    /// own and are empty on every frame after the first sight of a card.
+    pub(crate) fn arm_card_reads(
+        &mut self,
+        documents: Vec<(usize, preview::PreviewSource)>,
+        dirs: Vec<(usize, focus_thumb::UnreadDir)>,
+    ) {
+        for (index, source) in documents {
+            let Some(tab) = self.window.tabs.get_mut(index) else {
+                continue;
+            };
+            let id = tab.id;
+            // The buffer's own ledger says whether this is the first asking, and
+            // says it while filing that it was asked (P151's restore, the
+            // glance's card and an opened pane all come through the same door).
+            let Some(want) = tab
+                .preview_pool
+                .get_mut(&source)
+                .and_then(preview::PreviewBuffer::claim_head_read)
+            else {
+                continue;
+            };
+            if !self.app.preview_worker.request(preview::PreviewRequest {
+                window: self.window_id(),
+                tab: id,
+                source,
+                want,
+            }) {
+                self.disable_preview_worker();
+                break;
+            }
+        }
+        for (index, ask) in dirs {
+            let Some(tab) = self.window.tabs.get_mut(index) else {
+                continue;
+            };
+            let id = tab.id;
+            let Some(root) = tab.files.get(&ask.seat).map(|state| state.root.clone()) else {
+                continue;
+            };
+            // Marked before the send, exactly as `files_trees` marks it, so the
+            // walk that runs on this very frame sees a question already asked.
+            tab.file_trees
+                .entry(ask.seat)
+                .or_default()
+                .mark_pending(&ask.key);
+            let request = files::DirRequest {
+                window: self.window_id(),
+                host: files::FilesHost::Docked(LeafId {
+                    tab: id,
+                    seat: ask.seat,
+                }),
+                path: files::full_path(&root, &ask.key),
+                key: ask.key,
+            };
+            if !self.app.files_worker.request(request) {
+                self.disable_files_worker();
+                break;
+            }
+        }
+    }
+
+    /// A wheel notch over the rail, turned into vertical motion.
+    ///
+    /// [`Self::scroll_tab_strip`]'s opposite number, and it takes the same notch
+    /// distance for the same reason: "a notch that changed length depending on
+    /// what it was over is a distance the hand has to relearn at every surface".
+    /// What it does not need is that function's axis translation — the rail is a
+    /// vertical scroller and a vertical wheel already says what it means.
+    /// **Aim one card's terminal seat**, if the pointer is over one (user ruling
+    /// 2026-08-21, §7.1.6b′ 「卡片窗口瞄准」). Reports whether the notch was
+    /// spent here.
+    ///
+    /// # Why the wheel, and why no menu
+    ///
+    /// The thing being set is *where down a screen a window is pointed*, and a
+    /// wheel is what this desktop uses to point a window down a screen. A menu
+    /// row would have to name a number, and the number a reader wants is the one
+    /// where the furniture stops — which they find by watching the card, not by
+    /// counting rows in a dialog. So the gesture is the direct one: turn the
+    /// wheel over the seat and watch the picture move.
+    ///
+    /// **Up lifts the window and down lowers it, stopping at the tail.** That is
+    /// the same direction the wheel means over any document: away from you is
+    /// back through what has already gone past. Zero is a floor and not a wrap —
+    /// a reader who keeps turning down lands on the tail and stays there.
+    ///
+    /// **One detent is one row — and a detent is what the driver adds up to,
+    /// not what one report of it says** (user report 2026-08-21). A
+    /// high-resolution wheel and a precision touchpad deliver one detent as a
+    /// run of small travels, so the fraction is carried between reports in
+    /// [`CardAim`] and the row falls on the piece that completes it. The
+    /// consequence for *this* function is the order below: the seat is found
+    /// **before** the notch is measured, because a report too small to be a
+    /// whole row is still this seat's report and must be kept rather than
+    /// dropped through to the column's own scrolling. That reading of "spent
+    /// here" is now confined to the modified gesture, where it is the only
+    /// honest answer — under `Alt` there is no other claimant for the fraction —
+    /// and it is exactly what made the *unmodified* wheel unusable while this
+    /// function stood on the plain path: see [`column_notch`].
+    ///
+    /// **The gesture is `Alt`+wheel** ([`column_notch`], user ruling 2026-08-21;
+    /// it asked for no modifier for one day, and the correction is recorded
+    /// beside the original in §7.1.6b′). A flick of the wheel already arrives as
+    /// a merged burst of notches (`queue_wheel`), so crossing a dozen rows of
+    /// status bar is one flick rather than a dozen gestures — with `Alt` held
+    /// down for it.
+    ///
+    /// **Only a terminal seat answers.** A files column, a preview and a face
+    /// have no tail to be lifted off — what they draw is read from the top
+    /// already — so a notch over one of them falls through to the column, which
+    /// is what the reader will read it as: they were scrolling the list and the
+    /// pointer happened to be over a card.
+    ///
+    /// **The click table did not change by a character.** `hit_focus_rail` still
+    /// answers `Tab(i)` over the whole card and `TabClose(i)` over the ×, and
+    /// this function is not on that path: a mini seat is still not a click
+    /// target, and the ruling that says so ("clicking a card is clicking that
+    /// tab") is about presses, not about notches.
+    pub(crate) fn aim_focus_card_window(
+        &mut self,
+        now: Instant,
+        delta: MouseScrollDelta,
+    ) -> Result<bool> {
+        // **This window's id, read before any borrow** (`BT_MOUSE_TRACE`,
+        // §7.60). Every station past the card walk stands inside a live `&mut`
+        // of this window's own tabs, where `Runtime::mouse_trace`'s `&self`
+        // cannot be taken; `mouse_trace::window_line` is the same door reached
+        // with a number instead.
+        let window = u64::from(self.window.window.id());
+        // A report with no vertical travel in it is not an aim and has nothing
+        // to carry — a horizontal wheel over a card is still the column's.
+        let notches = wheel_zoom_notches(delta);
+        if notches == 0.0 {
+            mouse_trace::window_line(window, || {
+                format!("wheel_aim leave=no-travel notches={notches}")
+            });
+            return Ok(false);
+        }
+        let Some(position) = self.window.pointer_position else {
+            mouse_trace::window_line(window, || {
+                format!("wheel_aim leave=no-pointer notches={notches}")
+            });
+            return Ok(false);
+        };
+        let Some(geometry) = self.focus_rail_geometry_now(now) else {
+            mouse_trace::window_line(window, || {
+                format!("wheel_aim leave=no-column notches={notches}")
+            });
+            return Ok(false);
+        };
+        let [list_top, list_bottom] = geometry.viewport;
+        let point = [position.x as f32, position.y as f32];
+        if point[1] < list_top || point[1] >= list_bottom {
+            mouse_trace::window_line(window, || {
+                format!(
+                    "wheel_aim leave=outside-viewport point={},{} viewport={list_top},{list_bottom}",
+                    point[0], point[1]
+                )
+            });
+            return Ok(false);
+        }
+        let scale = self.window.renderer.scale_factor() as f32;
+        // Read before the walk rather than inside its `else`: what the refusal
+        // has to say is how many cards it looked at, and a count is a number
+        // where the list itself would be a borrow held across a trace line.
+        let cards = geometry.cards.len();
+        let Some((index, card)) = geometry
+            .cards
+            .iter()
+            .enumerate()
+            .find(|(_, card)| seats::rect_holds(card.body, point[0], point[1]))
+        else {
+            mouse_trace::window_line(window, || {
+                format!(
+                    "wheel_aim leave=no-card point={},{} cards={cards}",
+                    point[0], point[1]
+                )
+            });
+            return Ok(false);
+        };
+        let mini = card.mini;
+        let tabs = self.window.tabs.len();
+        let Some(tab) = self.window.tabs.get_mut(index) else {
+            mouse_trace::window_line(window, || {
+                format!("wheel_aim leave=no-tab index={index} cards={cards} tabs={tabs}")
+            });
+            return Ok(false);
+        };
+        let tab_id = tab.id;
+        let Some(seat) = seats::focus_mini_seats(tab.seats.tree(), mini, scale)
+            .into_iter()
+            .find(|seat| {
+                seat.kind == SeatKind::Terminal && seats::rect_holds(seat.rect, point[0], point[1])
+            })
+        else {
+            mouse_trace::window_line(window, || {
+                format!(
+                    "wheel_aim leave=no-mini-seat index={index} tab={tab_id:?} mini={} point={},{}",
+                    mouse_trace::rect_word(mini),
+                    point[0],
+                    point[1]
+                )
+            });
+            return Ok(false);
+        };
+        let seat_id = seat.id;
+        let Some(leaf) = tab.sessions.get_mut(&seat_id) else {
+            mouse_trace::window_line(window, || {
+                format!("wheel_aim leave=no-session index={index} tab={tab_id:?} seat={seat_id:?}")
+            });
+            return Ok(false);
+        };
+        let target = LeafId {
+            tab: tab_id,
+            seat: seat_id,
+        };
+        // **Read before the spend consumes it** (`BT_MOUSE_TRACE`, §7.60): the
+        // identity a carry is filed under, and the fraction filed there, are
+        // exactly what tells a notch that was carried from one that was aimed at
+        // a target the window had stopped recognising.
+        let carried_before = self.window.card_aim;
+        let skip_before = leaf.card_skip;
+        // Whole detents, once whatever this seat is already holding is added in.
+        // A report that does not complete one is **spent here anyway** — it is
+        // being carried, and handing it on to the column as well would scroll
+        // the list with the same turn of the wheel that is aiming a window in it.
+        let steps = CardAim::spend(&mut self.window.card_aim, target, delta);
+        let carried_after = self.window.card_aim;
+        // One builder, three exits: what a reader needs is the same ten fields
+        // whether the notch moved the window or was carried, and the two
+        // `card_skip` numbers on the line are what say which.
+        let aim_line = |skip_after: usize| {
+            mouse_trace::WheelAim {
+                index,
+                tab: format!("{tab_id:?}"),
+                seat: format!("{seat_id:?}"),
+                // Spelled `TabId(n)/SeatId(n)` rather than `LeafId`'s own
+                // `Debug`, whose braces and spaces would put a value with blanks
+                // in it on a key=value line.
+                at_before: carried_before.map(|aim| format!("{:?}/{:?}", aim.at.tab, aim.at.seat)),
+                carried_before: carried_before.map(|aim| aim.carried.delta()),
+                steps,
+                carried_after: carried_after.map(|aim| aim.carried.delta()),
+                skip_before,
+                skip_after,
+            }
+            .line()
+        };
+        if steps == 0 {
+            mouse_trace::window_line(window, || aim_line(skip_before));
+            return Ok(true);
+        }
+        let rows = focus_thumb::mini_rows(
+            seat.rect,
+            focus_thumb::MiniMetrics::TERM.line_px(scale),
+            scale,
+        );
+        // **The card this notch is about** (`BT_CARD_TRACE`, T-CARD-TRACE). The
+        // three ids were read above, before this `&mut` of the tab's sessions;
+        // `wheel` is the reason every station under the aim carries, which is
+        // how a card's own file is told apart from the frames around it.
+        let card = card_trace::Card {
+            window,
+            tab: tab_id,
+            seat: seat_id,
+            why: card_trace::why::WHEEL,
+        };
+        // The wheel trace records the clamped numeric skip on either exit.
+        if !aim_card_window(leaf, rows, steps, card) {
+            let unchanged = leaf.card_skip;
+            mouse_trace::window_line(window, || aim_line(unchanged));
+            return Ok(true);
+        }
+        let aimed = leaf.card_skip;
+        mouse_trace::window_line(window, || aim_line(aimed));
+        // **The gesture channel** (`focus_thumb`, 2026-08-21): the hand moved
+        // this seat's window, so this seat re-projects on the pass below
+        // whatever the 10Hz clock would otherwise have said. The credit is one
+        // seat's and it is spent by the pass that uses it — the budget gate 4
+        // exists to defend is about a *shell* outrunning a 160px card, and it
+        // has nothing to say about a wheel a hand is turning.
+        self.window.focus_thumbs.unthrottle(tab_id, seat.id);
+        // The picture is behind the number, so the projection is spent again
+        // before the chrome is built — the order every frame already uses.
+        self.refresh_focus_thumbnails(now, scale, card_trace::why::WHEEL);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        // An aim outlives the window, so it goes into `session.json` on the
+        // ordinary debounce rather than once per notch.
+        self.mark_session_dirty(now);
+        Ok(true)
+    }
+}
+
+/// Apply the whole rows spent by `CardAim` to the leaf's card window.
+///
+/// `site` names the card and says the notch is what ran the aim —
+/// `BT_CARD_TRACE` and nothing else (§7.1.6b′).
+pub(crate) fn aim_card_window(
+    leaf: &mut LeafSession,
+    rows: usize,
+    steps: i32,
+    site: card_trace::Card,
+) -> bool {
+    focus_thumb::aim_card_skip(&leaf.session, &mut leaf.card_skip, rows, steps, site)
+}
+
+/// **The F2 budget's own probe** — see [`dump_chrome_frame`], which it copies
+/// down to the environment variable's shape.
+///
+/// It prints the four counters and the number of cards that were visible, once
+/// per frame that spent the budget. That is what makes the ruling's three claims
+/// checkable *on a real machine* rather than only in a test: scroll a card out of
+/// the column and `visible` drops while `dropped` ticks; leave the window alone
+/// and `projections` stops moving while `unchanged` climbs; press `Exit` and the
+/// line stops being written at all, because there is no budget left to spend.
+pub(crate) fn dump_focus_thumb_frame(
+    visible: usize,
+    stats: focus_thumb::ThumbStats,
+    pages: web_thumb::WebThumbStats,
+) {
+    // **The page lane on the same line and not on a second switch** (W2 slice
+    // ⑥). It is the same budget seen from the one seat whose content this
+    // window cannot compute, and a reader watching a card fill in wants the
+    // projection counters and the capture counters against one another: a
+    // `captures` that never moves beside a `hidden` that climbs is the whole
+    // story of a column full of background tabs, and two files could not say it.
+    static FOCUS_THUMB_DUMP: trace::Dump = trace::Dump::new(|files| files.focus_thumb.as_deref());
+    FOCUS_THUMB_DUMP.line(|| {
+        format!(
+            "focus-thumb visible={visible} projections={} unchanged={} throttled={} dropped={} \
+             captures={} pictures={} page-frames={} page-hidden={} page-closing={} \
+             page-blank={} page-inflight={} page-throttled={} page-unchanged={} \
+             page-stale={}",
+            stats.projections,
+            stats.skipped_unchanged,
+            stats.skipped_throttled,
+            stats.dropped_offscreen,
+            pages.captures,
+            pages.pictures,
+            pages.frames,
+            pages.skipped_hidden,
+            pages.skipped_closing,
+            pages.skipped_blank,
+            pages.skipped_in_flight,
+            pages.skipped_throttled,
+            pages.skipped_unchanged,
+            pages.dropped_stale,
+        )
+    });
+}
+
+/// **The pixels a card may draw for one file, and nothing else** (user ruling
+/// 2026-08-30; §7.1.6b⁵).
+///
+/// The whole of the reading half of "a card draws the real thumbnail", and it is
+/// a free function over the cache rather than a method on [`Runtime`] for the
+/// borrow the frame walk needs: `refresh_focus_thumbnails` holds the tab list
+/// immutably while it asks this of the window's decode cache, and a `&self`
+/// method would put both borrows on the same object.
+///
+/// **It asks for nothing.** `Pending`, `Failed` and an absent entry are one
+/// answer here — `None`, which the caller reads as "this seat is a face" — and
+/// none of the three inserts a `Pending` or sends a task. That is the ruling
+/// stated in code: *不起新解码、不拉新帧*. A file the window has decoded for some
+/// other surface is free; a file it has not is a face until something the reader
+/// did decodes it.
+///
+/// The key is [`normalized_local_image_path_key`], which is the key the picture
+/// lane, the glance card and the animation clock all use — so a card, a pane and
+/// a hover over one file are one decode and one texture.
+pub(crate) fn card_picture_in<'a>(
+    cache: &'a PeekCache,
+    path: &Path,
+) -> Option<focus_thumb::CardPicture<'a>> {
+    match cache.get(&normalized_local_image_path_key(path))? {
+        PeekCacheEntry::Ready {
+            key,
+            rgba,
+            width_px,
+            height_px,
+            ..
+        } => Some(focus_thumb::CardPicture {
+            key,
+            rgba,
+            width_px: *width_px,
+            height_px: *height_px,
+        }),
+        PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_) => None,
     }
 }
 

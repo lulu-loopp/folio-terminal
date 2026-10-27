@@ -180,21 +180,21 @@ impl std::ops::Index<usize> for Layout {
 }
 
 #[derive(Clone, Debug)]
-struct Record {
+pub(super) struct Record {
     id: u64,
-    exact: bool,
+    pub(super) exact: bool,
     intrinsic: bool,
 }
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct State {
-    records: Vec<Record>,
-    unknown: std::collections::BTreeSet<usize>,
+    pub(super) records: Vec<Record>,
+    pub(super) unknown: std::collections::BTreeSet<usize>,
     next_id: u64,
     /// New index -> old index, derived from edit coordinates, never text hashes.
     pub(super) remap: Vec<Option<usize>>,
-    height: f32,
-    images: Vec<usize>,
+    pub(super) height: f32,
+    pub(super) images: Vec<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -591,7 +591,7 @@ impl Anchor {
         view.clamp(layout);
     }
 
-    fn remap_text(
+    pub(super) fn remap_text(
         &mut self,
         source: &SourceBlocks,
         blocks: &[preview::MarkdownBlock],
@@ -891,9 +891,9 @@ fn fixed_text_position(
     })
 }
 
-struct RuntimeMeasure<'a, G: Glass> {
-    gpu: &'a mut G::Device,
-    renderer: &'a mut G,
+pub(super) struct RuntimeMeasure<'a, G: Glass> {
+    pub(super) gpu: &'a mut G::Device,
+    pub(super) renderer: &'a mut G,
 }
 
 impl<G: Glass> Measure for RuntimeMeasure<'_, G> {
@@ -938,7 +938,11 @@ pub(super) struct Build<'a> {
 
 /// Capture from the geometry/frame that was actually displayed, before any
 /// estimated box or measurement environment is replaced.
-fn capture(old: &PreviewDocument, view: View, measure: &mut dyn Measure) -> Option<Anchor> {
+pub(super) fn capture(
+    old: &PreviewDocument,
+    view: View,
+    measure: &mut dyn Measure,
+) -> Option<Anchor> {
     let PreviewDocument::Markdown {
         blocks,
         ranges,
@@ -1015,342 +1019,152 @@ fn capture(old: &PreviewDocument, view: View, measure: &mut dyn Measure) -> Opti
     Some(anchor)
 }
 
-impl<B: Backend> Runtime<'_, B> {
-    /// Moving between image bands is also viewport work. Keep the parse, height
-    /// index and prose records; resolve only the indexed image occurrences in
-    /// reach. Retiring/entering images become estimates until visible again.
-    pub(super) fn update_markdown_picture_reach(
-        &mut self,
-        surface: PreviewSurface,
-        body: [f32; 4],
-        scale: f32,
-        document: Option<&Path>,
-        reach: PictureReach,
-    ) {
-        let previous = self
-            .preview_pane(surface)
-            .and_then(|p| p.doc_key())
-            .map_or(PictureReach::from_the_top(), |k| k.art.picture_reach);
-        let doc = self.preview_pane_mut(surface).take_document();
-        let PreviewDocument::Markdown {
-            blocks,
-            ranges,
-            maps,
-            source,
-            layout,
-            intrinsic,
-            pictures,
-            math,
-            mut wrap,
-        } = doc
-        else {
-            self.preview_pane_mut(surface).reflow_document(doc);
-            return;
-        };
-        let state = &mut Arc::make_mut(&mut wrap).viewport;
-        let selected: Vec<_> = state
-            .images
-            .iter()
-            .skip(reach.first)
-            .take(reach.last.saturating_sub(reach.first) + 1)
-            .map(|&i| blocks[i].clone())
-            .collect();
-        for band in [previous, reach] {
-            for &index in state
-                .images
-                .iter()
-                .skip(band.first)
-                .take(band.last.saturating_sub(band.first) + 1)
+/// One fence's syntax highlighting, from its info string alone (#49).
+///
+/// **The info string and nothing else.** A ` ```rust ` fence is highlighted as
+/// Rust; a fence with no info string is not highlighted at all, and neither is
+/// one naming a language whose grammar is not in the box. There is deliberately
+/// no sniffing of the fence's contents: an author who wrote three backticks and
+/// nothing after them wrote a block of *preformatted text*, and guessing a
+/// language for it would colour a directory listing as though it were code.
+///
+/// The lines are expanded first because that is how the fence draws them — the
+/// spans that come back are measured in the columns those expanded lines
+/// occupy, which is what the paint below indexes by.
+pub(crate) fn markdown_fence_highlight(lang: Option<&str>, text: &str) -> highlight::Highlighting {
+    let Some(grammar) = highlight::syntax_for_fence(lang) else {
+        return highlight::Highlighting::default();
+    };
+    let lines: Vec<String> = text.lines().map(preview::expand_tabs).collect();
+    highlight::Highlighting::of(&lines, grammar)
+}
+
+/// How wide a code fence insists on being: its longest line, plus its border
+/// and padding on both sides.
+///
+/// **The measurer is injected**, which is what makes the ruling ("a fence does
+/// not reflow, so the page scrolls to it") assertable without a GPU: the
+/// arithmetic around the measurement is the part that can be wrong, and it is
+/// all here. Tabs are expanded first, for the same reason the fence's own lines
+/// are drawn expanded — a tab is a stop, and a stop the width calculation did
+/// not take is a last column that cannot be reached.
+pub(crate) fn markdown_fence_width(
+    text: &str,
+    metrics: seats::PreviewMarkdownMetrics,
+    mut measure: impl FnMut(&[bt_render::PreviewRun]) -> f32,
+) -> f32 {
+    let widest = text
+        .lines()
+        .map(|line| {
+            let runs = [bt_render::PreviewRun {
+                text: preview::expand_tabs(line),
+                color: [0, 0, 0],
+                mono: true,
+                bold: false,
+                italic: false,
+                font_scale: 1.0,
+                inline_box_px: None,
+            }];
+            measure(&runs)
+        })
+        .fold(0.0_f32, f32::max);
+    if widest <= 0.0 {
+        return 0.0;
+    }
+    widest + (metrics.code_border + metrics.code_padding_x) * 2.0
+}
+
+/// Everything about a document that a pane's width cannot change, **measured
+/// once per block content and remembered** (§7.1.3q, ticket T4).
+///
+/// A free function with the measurer and the cache both injected, for
+/// [`lay_markdown_out`]'s reason twice over: the expensive thing is the
+/// measurer, and "an edit to one paragraph re-measured nothing else" is a
+/// sentence about how often it was asked — which a test can only say if it owns
+/// it.
+///
+/// **Two kinds are remembered and the rest cost nothing.** A table's columns are
+/// a shaping call per cell and a fence's highlighting is a walk of a grammar;
+/// every other block's intrinsic is [`MarkdownBlockIntrinsic::default`], which
+/// is four zeroes and is cheaper to build than to look up. Before this, one
+/// keystroke anywhere in a document re-walked syntect over every fence in it —
+/// `highlight.rs` said so in as many words — because the whole vector hung off
+/// the document's revision.
+pub(crate) fn measure_markdown_intrinsics(
+    blocks: &[preview::MarkdownBlock],
+    source: MarkdownSourceBytes<'_>,
+    pass: IntrinsicPass<'_>,
+    cache: &mut MarkdownIntrinsicCache,
+    measure: &mut WidthMeasure<'_>,
+) -> Vec<MarkdownBlockIntrinsic> {
+    let IntrinsicPass {
+        metrics,
+        math,
+        palette,
+        scale_ppm,
+        math_generation,
+    } = pass;
+    cache.begin_pass();
+    let intrinsics = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            // Which of the two halves of the key this kind needs — and `None`
+            // for every kind that is not measured at all, which is what keeps a
+            // paragraph out of the map entirely.
+            let generation = match block {
+                preview::MarkdownBlock::Table { .. } => Some(Some(math_generation)),
+                preview::MarkdownBlock::Code { .. } => Some(None),
+                _ => None,
+            };
+            let key = generation.and_then(|generation| source.key(index, scale_ppm, generation));
+            if let Some(key) = &key
+                && let Some(intrinsic) = cache.get(key)
             {
-                state.records[index].exact = false;
-                state.unknown.insert(index);
+                return intrinsic;
             }
-        }
-        let width = wrap.frame.expect("Markdown frame").width();
-        let pictures = self.resolve_document_pictures(
-            &selected,
-            document,
-            width,
-            PictureReach {
-                first: 0,
-                last: selected.len().saturating_sub(1),
-            },
-            &pictures,
-        );
-        self.preview_pane_mut(surface)
-            .reflow_document(PreviewDocument::Markdown {
-                blocks,
-                ranges,
-                maps,
-                source,
-                layout,
-                intrinsic,
-                pictures,
-                math,
-                wrap,
-            });
-        self.ensure_markdown_viewport(surface, body, scale);
-    }
-
-    /// A caret navigation target is made visible before asking its text rows.
-    /// In particular Ctrl+End cannot be clamped to an unrealized paragraph's
-    /// estimated height. The normal body rebuild then consumes this same parse.
-    pub(super) fn prepare_markdown_caret_view(
-        &mut self,
-        surface: PreviewSurface,
-        body: [f32; 4],
-        scale: f32,
-    ) {
-        let old_key = self
-            .preview_pane(surface)
-            .and_then(|p| p.doc_key().cloned());
-        let old_scroll = self.preview_pane(surface).map_or(0.0, |p| p.scroll()[1]);
-        self.rebuild_preview_document(surface, body, scale);
-        // **The caret's own block**, which is one of the source blocks and not
-        // necessarily the first of them (2026-09-23).
-        let seat = self.preview_caret_seat_block(surface);
-        let target = self.preview_pane(surface).and_then(|pane| {
-            let PreviewDocument::Markdown {
-                source,
-                layout,
-                wrap,
-                ..
-            } = pane.doc()
-            else {
-                return None;
+            let intrinsic = match block {
+                preview::MarkdownBlock::Table { rows, .. } => {
+                    let count = rows.iter().map(Vec::len).max().unwrap_or(0);
+                    if count == 0 {
+                        return MarkdownBlockIntrinsic::default();
+                    }
+                    let columns = markdown_table_columns(rows, metrics, |cell, heading| {
+                        let runs = markdown_runs(cell, palette, heading, math, metrics.font_size);
+                        measure(&runs, metrics.font_size, metrics.line_height)
+                    });
+                    // Plus the hairline that closes the last row and the one down
+                    // the far edge: `border-collapse` draws one between
+                    // neighbours and one at each end.
+                    let width = columns.iter().sum::<f32>() + metrics.table_border;
+                    MarkdownBlockIntrinsic {
+                        columns,
+                        width,
+                        rows: rows.len(),
+                        ..MarkdownBlockIntrinsic::default()
+                    }
+                }
+                preview::MarkdownBlock::Code { lang, text } => MarkdownBlockIntrinsic {
+                    // The fence's own 85% and its own 1.45, not the body's: a
+                    // longest line measured at the prose size would reserve a
+                    // scroll extent the fence never uses.
+                    width: markdown_fence_width(text, metrics, |runs| {
+                        measure(runs, metrics.code_font, metrics.code_line_height)
+                    }),
+                    rows: text.lines().count().max(1),
+                    highlight: markdown_fence_highlight(lang.as_deref(), text),
+                    ..MarkdownBlockIntrinsic::default()
+                },
+                _ => MarkdownBlockIntrinsic::default(),
             };
-            let index = source.get(seat?)?.index();
-            let placed = layout.get(index)?;
-            let padding = seats::preview_markdown_metrics(scale).padding_y;
-            let top = padding + placed.top;
-            (!wrap.viewport.records.get(index)?.exact
-                || top + placed.height <= pane.scroll()[1]
-                || top >= pane.scroll()[1] + body[3] - body[1])
-                .then_some(top)
-        });
-        if let Some(top) = target {
-            self.preview_pane_mut(surface).scroll_top_to(top);
-            self.ensure_markdown_viewport(surface, body, scale);
-        }
-        let changed = self.preview_pane(surface).is_some_and(|p| {
-            p.doc_key() != old_key.as_ref() || p.scroll()[1] != old_scroll || p.md_prose().is_none()
-        });
-        if changed {
-            let blocks = self.preview_prose_geometry(surface, scale, None);
-            let prose = preview_caret_prose(&blocks, self.preview_caret_seat_block(surface));
-            self.preview_pane_mut(surface).keep_prose(prose, blocks);
-        }
-    }
-
-    pub(super) fn rebuild_markdown_geometry(
-        &mut self,
-        surface: PreviewSurface,
-        body: [f32; 4],
-        scale: f32,
-        old: &PreviewDocument,
-        build: Build<'_>,
-    ) -> (
-        Layout,
-        Vec<MarkdownBlockIntrinsic>,
-        Arc<preview_wrap::Document>,
-        GeometryCost,
-    ) {
-        // The clock runs only when the trace is open, `DocumentBuild`'s rule.
-        let clock = preview_trace::global().map(|_| Instant::now());
-        let metrics = seats::preview_markdown_metrics(scale);
-        let (left, right) = preview::markdown_measure_box(body, metrics);
-        let frame =
-            preview_wrap::Frame::new(right - left, scale, self.app.gpu.font_environment_epoch());
-        let scroll = self.preview_pane(surface).map_or(0.0, |p| p.scroll()[1]);
-        let mut view = View {
-            scroll,
-            height: body[3] - body[1],
-            padding: metrics.padding_y,
-            end: false,
-        };
-        let mut old_view = view;
-        if let PreviewDocument::Markdown { layout, wrap, .. } = old {
-            old_view.padding = wrap
-                .frame
-                .map_or(metrics.padding_y, |f| f.metrics().padding_y);
-            if wrap.viewport.height > 0.0 {
-                old_view.height = wrap.viewport.height;
+            if let Some(key) = key {
+                cache.insert(key, intrinsic.clone());
             }
-            view.end = scroll > 0.0
-                && scroll >= layout.extent() + 2.0 * old_view.padding - old_view.height - 0.5;
-        }
-        let mut measure = RuntimeMeasure {
-            gpu: &mut self.app.gpu,
-            renderer: &mut self.window.renderer,
-        };
-        let mut anchor = build
-            .edits
-            .and_then(|_| capture(old, old_view, &mut measure));
-        let mut pass = self
-            .window
-            .markdown_wraps
-            .prepare(old, build.edits.is_some(), frame);
-        let (mut state, mut layout, mut intrinsic) = State::reconcile(Reconcile {
-            old,
-            blocks: build.blocks,
-            ranges: build.bytes.ranges,
-            content: build.bytes.content,
-            source: build.source,
-            frame,
-            edits: build.edits,
-            art_changed: build.art_changed,
-        });
-        let reconciled = clock.map(|clock| clock.elapsed());
-        let clock = clock.map(|_| Instant::now());
-        if let Some(anchor) = &mut anchor
-            && let PreviewDocument::Markdown { ranges, .. } = old
-        {
-            state.remap_anchor(
-                anchor,
-                ranges,
-                build.bytes.ranges,
-                build.edits.unwrap_or_default(),
-            );
-            anchor.remap_text(
-                build.source,
-                build.blocks,
-                build.bytes.ranges,
-                build.maps,
-                build.edits.unwrap_or_default(),
-            );
-        }
-        let palette = bt_render::chrome_palette();
-        let realized = Realize {
-            blocks: build.blocks,
-            source: build.source,
-            art: build.art,
-            layout: &mut layout,
-            intrinsic: &mut intrinsic,
-            state: &mut state,
-            pass: &mut pass,
-            bytes: build.bytes,
-            intrinsic_pass: IntrinsicPass {
-                metrics,
-                math: build.art.math,
-                palette: &palette,
-                scale_ppm: scale_ppm(scale),
-                math_generation: self.window.preview_math.generation,
-            },
-            cache: &mut self.window.markdown_intrinsics,
-        }
-        .ensure(&mut view, anchor, &mut measure);
-        let cost = GeometryCost {
-            realized,
-            reconcile: reconciled.unwrap_or_default(),
-            realize: clock.map(|clock| clock.elapsed()).unwrap_or_default(),
-        };
-        let pane = self.preview_pane_mut(surface);
-        pane.scroll_top_to(view.scroll);
-        let mut wrap = pass.document();
-        Arc::make_mut(&mut wrap).viewport = state;
-        (layout, intrinsic, wrap, cost)
-    }
-
-    /// Called even on parse-key equality: scroll and viewport-height changes do
-    /// not change a Markdown parse key. This path never visits the full parse.
-    pub(super) fn ensure_markdown_viewport(
-        &mut self,
-        surface: PreviewSurface,
-        body: [f32; 4],
-        scale: f32,
-    ) {
-        let metrics = seats::preview_markdown_metrics(scale);
-        let (mut view, pending) = {
-            let Some(pane) = self.preview_pane(surface) else {
-                return;
-            };
-            let PreviewDocument::Markdown { layout, wrap, .. } = pane.doc() else {
-                return;
-            };
-            let view = View {
-                scroll: pane.scroll()[1],
-                height: body[3] - body[1],
-                padding: metrics.padding_y,
-                end: pane.scroll()[1] > 0.0
-                    && pane.scroll()[1]
-                        >= layout.extent() + 2.0 * metrics.padding_y - (body[3] - body[1]) - 0.5,
-            };
-            (view, wrap.viewport.pending(layout, view))
-        };
-        if !pending {
-            self.preview_pane_mut(surface)
-                .fit_viewport_height(view.height);
-            return;
-        }
-        let old = self.preview_pane_mut(surface).take_document();
-        let PreviewDocument::Markdown {
-            blocks,
-            ranges,
-            maps,
-            source,
-            mut layout,
-            mut intrinsic,
-            math,
-            pictures,
-            mut wrap,
-        } = old
-        else {
-            unreachable!();
-        };
-        let content = self
-            .preview_buffer_on(surface)
-            .and_then(|b| b.content().cloned())
-            .unwrap_or_default();
-        let mut pass = self.window.markdown_wraps.resume(&wrap);
-        let palette = bt_render::chrome_palette();
-        let state = &mut Arc::make_mut(&mut wrap).viewport;
-        Realize {
-            blocks: &blocks,
-            source: &source,
-            art: PageArt {
-                math: &math,
-                pictures: &pictures,
-                theme: bt_render::current_theme(),
-            },
-            layout: &mut layout,
-            intrinsic: &mut intrinsic,
-            state,
-            pass: &mut pass,
-            bytes: MarkdownSourceBytes {
-                content: &content,
-                ranges: &ranges,
-            },
-            intrinsic_pass: IntrinsicPass {
-                metrics,
-                math: &math,
-                palette: &palette,
-                scale_ppm: scale_ppm(scale),
-                math_generation: self.window.preview_math.generation,
-            },
-            cache: &mut self.window.markdown_intrinsics,
-        }
-        .ensure(
-            &mut view,
-            None,
-            &mut RuntimeMeasure {
-                gpu: &mut self.app.gpu,
-                renderer: &mut self.window.renderer,
-            },
-        );
-        let pane = self.preview_pane_mut(surface);
-        pane.scroll_top_to(view.scroll);
-        pane.reflow_document(PreviewDocument::Markdown {
-            blocks,
-            ranges,
-            maps,
-            source,
-            layout,
-            intrinsic,
-            math,
-            pictures,
-            wrap,
-        });
-    }
+            intrinsic
+        })
+        .collect();
+    cache.end_pass();
+    intrinsics
 }
 
 #[cfg(test)]

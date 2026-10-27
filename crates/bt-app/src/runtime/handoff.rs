@@ -18,7 +18,8 @@ use anyhow::Result;
 use crate::handoff_lane::{
     Answer, Ask, Duty, FollowUp, HandoffId, OnAccepted, RefusalWords, Reply,
 };
-use crate::{FOOT_REVEAL_FEEDBACK, RevealedFoot, Runtime, i18n, toast};
+use crate::{FOOT_REVEAL_FEEDBACK, RevealedFoot, Runtime, handoff_lane, i18n, toast};
+use std::path::Path;
 
 impl<B: Backend> Runtime<'_, B> {
     /// **Put one hand-off on the lane**, hold its request with what its answer is owed, and
@@ -146,4 +147,38 @@ impl<B: Backend> Runtime<'_, B> {
         }
         Ok(())
     }
+
+    /// Show a path in Explorer — **the one door all three feet go through**
+    /// (user ruling, 2026-08-13).
+    ///
+    /// The three used to answer differently: the preview's foot opened the
+    /// file's *parent folder*, the column's opened its root through
+    /// `open_local_path`, and the float's spawned `explorer.exe` itself, past
+    /// the audited bridges entirely. One verb printed on three strips has to be
+    /// one verb, and now it is: [`bt_platform::reveal_in_explorer`], which
+    /// highlights a file inside its folder and opens a folder as itself.
+    ///
+    /// Reported, because a foot confirms in place and a confirmation printed
+    /// over a reveal that never happened is the one thing worse than silence —
+    /// which since 2026-09-22 is the lane's answer arriving: the foot hands
+    /// [`reveal_ask`] off itself, naming its confirmation with
+    /// [`handoff_lane::Ask::when_handed_over`], and it is drawn when the system
+    /// has taken the reveal. A refusal is a courtesy, not an error path: a
+    /// window that refuses to keep working because a file manager would not start
+    /// is a worse answer than a button that quietly did nothing.
+    pub(crate) fn reveal_in_explorer(&mut self, path: &Path) -> Result<()> {
+        self.hand_off(reveal_ask(path))
+    }
+}
+
+/// **A reveal in the file manager, as the OS hand-off lane is asked it** — the one verb all three
+/// feet print (`Runtime::reveal_in_explorer`).
+pub(crate) fn reveal_ask(path: &Path) -> handoff_lane::Ask {
+    handoff_lane::Ask::new(
+        bt_platform::Handoff::Reveal(path.to_path_buf()),
+        handoff_lane::Refusal {
+            stderr: Some(("recoverable reveal failure", "show a path in File Explorer")),
+            program_notice: false,
+        },
+    )
 }

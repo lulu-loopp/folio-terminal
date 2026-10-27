@@ -90,10 +90,13 @@
 //! All of them are the mock-up's, copied here because this is the only place
 //! that draws them and a constant with one reader belongs beside it.
 
+use std::path::Path;
+
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad};
 
 use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
 use crate::settings::push_float_window;
+use crate::{home_crumb_for, seats};
 
 /// How long the pointer must rest on a row before the card comes up — "350ms
 /// intent (the tab-peek constant)" (6367).
@@ -239,7 +242,7 @@ pub fn peek_foot_address(
     let Some(folder) = file.and_then(std::path::Path::parent) else {
         return String::new();
     };
-    crate::home_shortened_path_on(&folder.display().to_string(), platform, home).into_owned()
+    home_shortened_path_on(&folder.display().to_string(), platform, home).into_owned()
 }
 
 /// **Where a press on the foot's address lands** — the strip left of the
@@ -1790,6 +1793,41 @@ pub fn dwell<T: PartialEq + ?Sized>(over: Option<&T>, waiting: Option<&T>) -> Dw
         (Some(over), Some(waiting)) if over == waiting => Dwell::Keep,
         (Some(_), _) => Dwell::Start,
     }
+}
+
+/// **A foot spells the path its rail's crumbs spell** (§13.40).
+///
+/// The files column and a torn-out files tree both print their root along the
+/// bottom of the surface, and both printed it whole: a Mac read
+/// `/Users/alice/folio-port/repo` in the foot of a window whose breadcrumbs
+/// read `~ › folio-port › repo`. Two spellings of one place in one window is
+/// the fault §13.32 ③ was about, and the foot is the same reader's same
+/// question — so it asks [`home_crumb_for`], which is the rail's own rule.
+///
+/// The separator between `~` and what stands below it is **taken from the
+/// string the filesystem handed over**, never invented: this function therefore
+/// never has to know which character the *running* host writes, and a Windows
+/// workstation can read what a Mac's foot says. On Windows nothing is
+/// substituted and the borrowed string is the string that went in.
+pub(crate) fn home_shortened_path_on<'a>(
+    path: &'a str,
+    platform: bt_platform::HostPlatform,
+    home: Option<&Path>,
+) -> std::borrow::Cow<'a, str> {
+    let Some(home) = home_crumb_for(Path::new(path), platform, home) else {
+        return std::borrow::Cow::Borrowed(path);
+    };
+    let below = Path::new(path)
+        .strip_prefix(home)
+        .map_or(0, |rest| rest.as_os_str().len());
+    if below == 0 {
+        return std::borrow::Cow::Owned(seats::PREVIEW_CRUMB_HOME.to_owned());
+    }
+    std::borrow::Cow::Owned(format!(
+        "{}{}",
+        seats::PREVIEW_CRUMB_HOME,
+        &path[path.len() - below - 1..]
+    ))
 }
 
 #[cfg(test)]

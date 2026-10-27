@@ -1842,7 +1842,7 @@ impl<W: Copy + Eq> Job<W> {
                     "Folio: update job — {} was prepared at an earlier launch and is verified again",
                     offer.tag()
                 );
-                self.presenter = crate::most_recently_active_window(
+                self.presenter = most_recently_active_window(
                     presenters.visited,
                     presenters.open,
                     presenters.quake,
@@ -2113,11 +2113,8 @@ impl<W: Copy + Eq> Job<W> {
         {
             return false;
         }
-        let next = crate::most_recently_active_window(
-            presenters.visited,
-            presenters.open,
-            presenters.quake,
-        );
+        let next =
+            most_recently_active_window(presenters.visited, presenters.open, presenters.quake);
         let moved = next != self.presenter;
         self.presenter = next;
         moved
@@ -2185,11 +2182,8 @@ impl<W: Copy + Eq> Job<W> {
             && let Some(offer) = Offer::mint(mint(), &eligible.tag, evidence.platform)
         {
             self.state = State::Available(offer);
-            self.presenter = crate::most_recently_active_window(
-                presenters.visited,
-                presenters.open,
-                presenters.quake,
-            );
+            self.presenter =
+                most_recently_active_window(presenters.visited, presenters.open, presenters.quake);
             self.offered_this_launch = true;
         }
         self.answer = Some(answer);
@@ -2379,6 +2373,47 @@ fn line(answer: &Result<Eligible, NotEligible>, offers: bool) -> String {
         ),
         Err(why) => format!("Folio: update job — no offer: {}", why.why()),
     }
+}
+
+/// **Which window a second `folio.exe`'s request lands in** (§7.59) — pure, and
+/// the whole of the rule.
+///
+/// `visited` is [`App::activated`], oldest first; `open` is the windows that are
+/// actually on the screen this turn, in the order they opened; `quake` names the
+/// summoned terminal if this run has one.
+///
+/// Three clauses, and each answers a case the others cannot:
+///
+/// * **The last window the reader was in**, which is the whole request: somebody
+///   pressed a taskbar icon, and what they mean by "Folio" is the window they
+///   were last looking at.
+/// * **Never the summoned terminal** (§7.54). It is a companion and not a window
+///   a reader came to, and it spends most of its life hidden — a tab that landed
+///   in it would be a tab nobody can see, opened in answer to a click.
+/// * **A window that has never been focused is still a window.** A run restored
+///   from `session.json` and left alone has an `activated` list with nothing in
+///   it that is still open, and the honest answer then is the oldest window
+///   rather than none at all: the fallback opens a *window*, and a run that
+///   already has one does not need a second.
+///
+/// `None` only when every open window is the summoned one, or when there are no
+/// windows at all — and the caller opens an ordinary window, which is the
+/// ruling's own sentence for that case.
+///
+/// Generic over the key for [`Windows`]' reason: `WindowId` is winit's and a test
+/// cannot make one, while the rule is not about winit.
+pub(crate) fn most_recently_active_window<K: Copy + Eq>(
+    visited: &[K],
+    open: &[K],
+    quake: Option<K>,
+) -> Option<K> {
+    let eligible = |key: &&K| open.contains(key) && Some(**key) != quake;
+    visited
+        .iter()
+        .rev()
+        .find(eligible)
+        .or_else(|| open.iter().find(eligible))
+        .copied()
 }
 
 #[cfg(test)]

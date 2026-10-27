@@ -26,13 +26,15 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Result;
 use bt_platform::admission::{WaitToken, doors};
 use bt_render::{
-    CellMetrics, ChromeLabelWeight, ChromeTextAdvances, FrameTrigger, GlyphCensus, ImeCursorArea,
-    OverlayGroup, OverlayLayer, PeekImageOverlay, PresentConfiguration, PresentOutcome,
-    PresentPhase, PresentationGeometry, PreviewBody, PreviewImage, PreviewParagraph, PreviewRun,
-    PreviewRunBox, PreviewTextFrame, PreviewTextRow, RenderError, RendererPresentState, SeatFrame,
-    SeatViewport, TableBlockKey, TableBlockPaint, VideoLayer, WebHole,
+    CellMetrics, ChromeLabelWeight, ChromeTextAdvances, FrameTrigger, GlyphCensus, GpuContext,
+    ImeCursorArea, OverlayGroup, OverlayLayer, PeekImageOverlay, PresentConfiguration,
+    PresentOutcome, PresentPhase, PresentationGeometry, PreviewBody, PreviewImage,
+    PreviewParagraph, PreviewRun, PreviewRunBox, PreviewTextFrame, PreviewTextRow, RebuiltWindow,
+    RenderError, RendererPresentState, SeatFrame, SeatViewport, TableBlockKey, TableBlockPaint,
+    VideoLayer, WebHole,
 };
 use bt_render::{
     ChromeIcon, ChromeLabel, ChromeQuad, MathBandFace, MathBandTrace, MathHit, MathToolBoxes,
@@ -42,7 +44,10 @@ use winit::dpi::{PhysicalSize, Position, Size};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopClosed, EventLoopProxy};
 use winit::window::{Cursor, Window, WindowId};
 
-use crate::AppEvent;
+use crate::{
+    AppEvent, DpiSnapshot, WIN32_DEFAULT_DPI, WindowRuntime, native_window_of, note_gpu_adapter,
+    window_surface_target,
+};
 
 /// **How any thread brings the window thread's loop round with news** — winit's
 /// `EventLoopProxy` in the product, a recording channel in a test.
@@ -157,7 +162,7 @@ impl Backend for Native {
         gpu: &mut Self::Device,
         windows: Vec<&mut crate::WindowRuntime<Self>>,
     ) -> Result<(), RenderError> {
-        crate::rebuild_every_native_surface(gpu, windows)
+        rebuild_every_native_surface(gpu, windows)
     }
 
     fn open_window(
@@ -381,7 +386,7 @@ impl WindowHost for Arc<Window> {
             .collect()
     }
     fn frame_rate_millihertz(&self) -> Option<u32> {
-        crate::display_frame_rate_millihertz(self)
+        display_frame_rate_millihertz(self)
     }
     fn is_iconic(&self) -> bool {
         crate::native_window_of(self).is_ok_and(bt_platform::is_window_minimized)
@@ -497,7 +502,7 @@ impl WindowHost for Arc<Window> {
         crate::option_as_alt(self, option_sends_alt);
     }
     fn dpi_snapshot(&self) -> anyhow::Result<crate::DpiSnapshot> {
-        crate::native_dpi_snapshot(self)
+        native_dpi_snapshot(self)
     }
     fn clipboard(
         &self,
@@ -1318,5 +1323,110 @@ impl ImeCaretDoor for bt_platform::ImeSystemCaret {
     }
     fn destroy(&mut self) {
         bt_platform::ImeSystemCaret::destroy(self);
+    }
+}
+
+/// Assemble a window's runtime from [`NewWindowParts`] and the resting value of
+/// everything else.
+/// **What the display a window is on says one of its frames is worth**, in
+/// millihertz, or `None` when the platform will not say.
+///
+/// The current monitor first and the primary one only as a fallback: a window
+/// straddling two panels is on the one the platform names for it, and a window
+/// whose handle is momentarily unavailable — which happens on Windows between a
+/// display change and the message that announces it — is better paced to the
+/// main display than to nothing at all. Both answers pass through
+/// [`pace::interval_from_millihertz`], so neither can put a window on a rate no
+/// panel runs at.
+pub(crate) fn display_frame_rate_millihertz(window: &Window) -> Option<u32> {
+    window
+        .current_monitor()
+        .or_else(|| window.primary_monitor())
+        .and_then(|monitor| monitor.refresh_rate_millihertz())
+}
+
+/// **Every window's swapchain, built again on the device layer** — [`Backend::rebuild_every_surface`]
+/// for the product's windows.
+pub(crate) fn rebuild_every_native_surface(
+    gpu: &mut GpuContext,
+    windows: Vec<&mut WindowRuntime>,
+) -> std::result::Result<(), RenderError> {
+    // **Every window lets go of the old swapchain first** (T-WEBVIEW-WARMUP-DROPS-THE-DEVICE):
+    // a composition visual keeps the swapchain it shows, and through it the device, and the
+    // new device is asked of the same adapter — see `Compositor::let_go_of_the_picture`.
+    for window in &windows {
+        bt_platform::admission::admitted::<bt_platform::admission::doors::CompositorCommit, _>(
+            |token| window.compositor.let_go_of_the_picture(token),
+        )
+        .unwrap_or_else(|refused| Err(refused.to_string()))
+        .map_err(|error| {
+            RenderError::DeviceLost(format!("a window kept its old picture: {error}"))
+        })?;
+    }
+    let rebuilt: Vec<RebuiltWindow<'_>> = windows
+        .into_iter()
+        .map(|window: &mut WindowRuntime| {
+            // **Built before the renderer is borrowed**, out of a
+            // `Compositor` and a `Window` this entry goes on owning, and
+            // never stored — see [`window_surface_target`], which is the
+            // one place any platform's door is named. Its contract is what
+            // makes that the only sound arrangement: on Windows the visual
+            // has to be live at the instant the surface is made, and on
+            // macOS the view has to have been emptied of the layer the old
+            // surface left on it. Both happen in there, for all three
+            // callers, and this one is the caller they happen *for*.
+            let target = window_surface_target(&window.window, &window.compositor);
+            RebuiltWindow::OnScreen(&mut window.renderer, target)
+        })
+        .collect();
+    pollster::block_on(gpu.rebuild_after_device_loss(rebuilt))?;
+    note_gpu_adapter(gpu);
+    Ok(())
+}
+
+/// [`WindowHost::dpi_snapshot`] for winit's window: the platform's answer, and winit's where the
+/// platform will not give one.
+pub(crate) fn native_dpi_snapshot(window: &Window) -> Result<DpiSnapshot> {
+    let native = native_window_of(window)?;
+    let winit_scale = window.scale_factor();
+    let (win32_dpi, authoritative_scale) = match bt_platform::get_dpi_for_window(native) {
+        Ok(dpi) => (dpi, f64::from(dpi) / WIN32_DEFAULT_DPI),
+        Err(_) => (
+            (winit_scale * WIN32_DEFAULT_DPI).round() as u32,
+            winit_scale,
+        ),
+    };
+    let rect = match bt_platform::get_window_rect(native) {
+        Ok(rect) => rect,
+        Err(_) => winit_outer_rect(window),
+    };
+    Ok(DpiSnapshot {
+        winit_scale,
+        win32_dpi,
+        authoritative_scale,
+        rect,
+    })
+}
+
+/// The window's outer rectangle as winit itself reports it, in physical pixels.
+///
+/// The fall-back half of [`dpi_snapshot`]. An empty rectangle for a window
+/// whose position the platform will not state — which every caller already
+/// reads as "no geometry is known about this window" rather than as a place.
+pub(crate) fn winit_outer_rect(window: &Window) -> bt_platform::WindowRect {
+    let Ok(position) = window.outer_position() else {
+        return bt_platform::WindowRect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+    };
+    let size = window.outer_size();
+    bt_platform::WindowRect {
+        left: position.x,
+        top: position.y,
+        right: position.x.saturating_add(size.width as i32),
+        bottom: position.y.saturating_add(size.height as i32),
     }
 }
