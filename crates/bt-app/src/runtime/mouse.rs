@@ -6898,6 +6898,40 @@ impl<B: Backend> Runtime<'_, B> {
         self.mark_session_dirty(Instant::now());
         Ok(())
     }
+
+    pub(crate) fn send_user_input(
+        &mut self,
+        bytes: &[u8],
+        context: &'static str,
+        kind: UserInputKind,
+    ) -> Result<()> {
+        let view_changed = kind.returns_view_to_live() && self.return_to_live_for_input();
+        // Typing into the stand-in shell is what makes it yours. From here on a
+        // Restore appends beside it instead of clearing it away underneath you.
+        if self.window.placeholder_tab == Some(self.window.tabs[self.window.active_tab].id) {
+            self.window.placeholder_tab = None;
+        }
+        self.pending_keyboard_at = Some(Instant::now());
+        // No shell, nowhere for the bytes to go (§7.1.6h). Reached only if a
+        // keystroke got past `keyboard_owner_is_a_shell`, which a folder tab
+        // already answers `false` for — so this is the belt on a gesture that
+        // has no business arriving, written as a `flatten` rather than an
+        // `expect` because "nothing was typed into" is a real outcome and a
+        // panic is not.
+        write_pty_input(
+            self.focused()
+                .map_or(PtyTarget::Nowhere, |leaf| leaf.person_input_target()),
+            bytes,
+            context,
+        )?;
+        if view_changed {
+            self.publish_frame(FrameTrigger {
+                occurred_at: self.pending_keyboard_at.unwrap_or_else(Instant::now),
+                source: FrameSource::Keyboard,
+            })?;
+        }
+        Ok(())
+    }
 }
 
 /// The cursor a hosted page asked for, in winit's vocabulary.

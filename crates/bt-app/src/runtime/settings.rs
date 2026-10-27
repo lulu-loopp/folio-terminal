@@ -1,24 +1,24 @@
 //! **The settings page, on the window thread** (re-sort D5, ruled 2026-10-26): `Runtime`'s
-//! methods that open, close and scroll the sheet, route the pointer into it (the four
-//! `settings::geometry::PointerHost` methods), apply what a row answers, and work the Advanced
-//! groups and rows, the profile editor's fields, scheme edit and delete, the cards' gesture hint
-//! and focus mode's on/off.
+//! methods that open, close and scroll the sheet, lay it out and read its content and values,
+//! route the pointer into it (the four `settings::geometry::PointerHost` methods), apply what a row
+//! or a slider answers, and work the Advanced groups and rows, the profile editor's fields, scheme
+//! edit and delete, the cards' gesture hint and focus mode's on/off.
 //!
 //! `crate::settings` is the sheet's model (rows, layout, geometry, values, and the trait the window
 //! drives it through); this file reads it, and it never reads this one. Moved out of `main.rs` by
-//! K2 (T-SPLIT-2B) batch 23. Bodies unchanged.
+//! K2 (T-SPLIT-2B) batches 23 and 24. Bodies unchanged.
 
 use crate::window_seam::prelude::*;
 use crate::{
     Announce, ApplicationChange, FilePick, RAIL_TRANSITION, RevealTween, Runtime,
-    block_max_height_px, cardhint, context_menu, explorer_menu, handoff_lane, i18n,
-    install_minimum_contrast, marks, profiles, psreadline, rail_state_for, resolve_theme_mode,
-    schemes, seats, settings, shell_integration, system_os_theme, text_field, toast, update,
-    update_card,
+    attention_copilot, attention_wire, block_max_height_px, cardhint, context_menu, explorer_menu,
+    handoff_lane, hang_watch, i18n, install_minimum_contrast, marks, preview, profiles,
+    programs_lane, psreadline, rail_state_for, resolve_theme_mode, schemes, seats, settings,
+    shell_integration, shortcuts, system_os_theme, text_field, toast, update, update_card,
 };
 use anyhow::Result;
 use bt_persist::ThemeModeV1;
-use bt_render::{FrameSource, FrameTrigger, Theme, ThemeChange, set_theme};
+use bt_render::{FrameSource, FrameTrigger, Theme, ThemeChange, current_cursor_style, set_theme};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -2028,6 +2028,623 @@ impl<B: Backend> Runtime<'_, B> {
             self.window.settings.set_hover(moved.map(|layout| {
                 settings::hit(&layout, &self.settings_values(), position.x, position.y)
             }));
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The settings dialog's placement in the window as it is now, or `None`
+    /// when it is shut — or open but unhostable, which is the same thing to
+    /// everyone downstream.
+    ///
+    /// Unhostable has to read as shut and not as "open but invisible": an
+    /// invisible modal still swallows Esc and every click, and that is a window
+    /// nobody can get out of.
+    /// `&mut` for one reason: the open picker's width is a fact about glyphs, and
+    /// only the font knows it. The measuring happens here, beside the renderer,
+    /// exactly as the peek strip's and the restore prompt's do, and the geometry
+    /// itself stays a pure function of the numbers handed to it.
+    pub(crate) fn settings_layout(&mut self) -> Option<Arc<settings::SettingsLayout>> {
+        if !self.window.settings.is_open() {
+            self.window.settings_geometry.clear();
+            return None;
+        }
+        // **The dialog's own lane** (GitHub issue #3 — see
+        // [`hang_watch::Station::Settings`]). Every road that draws, hovers or
+        // hit-tests this page comes through here, and until this slice the
+        // milliseconds it spends were charged to whichever of `window_event` and
+        // `publish_frame_inner` happened to enclose it — two true labels, neither
+        // of which named the dialog to the reader of a slow-hold line.
+        let trace_start = self.app.trace_perf.then(Instant::now);
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let scale = self.window.renderer.scale_factor() as f32;
+        // Content is read from its owners. Geometry is computed only when one
+        // of these inputs changes; hover, focus and redraw are readers of it.
+        let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
+        let content =
+            self.settings_dialog(&rows, &shortcuts, &profile_lines, &scheme_files, &values);
+        let content_us = trace_start.map_or(0, |start| start.elapsed().as_micros());
+        // **The agent rows' own edge**, and it is not a convenience: their switches are inert
+        // while the file they name is one this build will not edit, so a press cannot be what
+        // notices that the reader has unpicked the link or cleared the read-only bit. Opening the
+        // page is (re-review, round 3). One re-read per visit, never per frame and never per turn.
+        let agents_opened = self
+            .window
+            .settings
+            .take_agents_open_edge(content.shows_agents(self.window.settings.category()));
+        if agents_opened {
+            self.refresh_agent_rows();
+            // Which agents are on this machine is the program walk's answer: asked again here.
+            self.ask_the_program_walk(programs_lane::Trigger::AgentsPage);
+            // And which copilot it is: the page that prints the version asks for it at every
+            // visit, a failure included (T-FRESH-FACTS).
+            attention_copilot::reask_probe(attention_copilot::ProbeTrigger::AgentsPage);
+        }
+        let profiles_opened = self.window.settings.take_profiles_open_edge(
+            self.window.settings.category() == settings::SettingsCategory::Profiles
+                && content.editor.is_none(),
+        );
+        if profiles_opened {
+            shell_integration::begin_profile_observation_for(&self.app.profile_programs);
+            // The environment the next pane is born from, which the editor's rows are
+            // composed over (`shell_integration::page_environment`).
+            shell_integration::request_page_environment();
+            // Every row's program, and WSL's distributions, asked again as the page opens.
+            self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
+        }
+        // Use the refreshed fact on this very layout, including its geometry.
+        let refreshed_values = agents_opened.then(|| settings::SettingsValues {
+            claude_hooks: self.app.claude_hooks_installed,
+            codex_notify: self.app.codex_notify_installed,
+            copilot_hooks: self.app.copilot_hooks_installed,
+            agent_config_refusals: self.app.agent_config_refusals,
+            ..values.clone()
+        });
+        let content = settings::SettingsContent {
+            values: refreshed_values.as_ref().unwrap_or(&values),
+            ..content
+        };
+        // The second probe on the same door and for the same argument: the page that prints which
+        // copilot this machine has is the page that asks. Idempotent, and an atomic load after the
+        // first call — see `attention_copilot::begin_probe`.
+        if content.probes_copilot(self.window.settings.category()) {
+            attention_copilot::begin_probe();
+        }
+        // **And the mark on the gear is answered on the same door** (§7.51),
+        // for the two probes' argument read the other way round: this is the one
+        // place that knows the reader is looking at the page the row is on, and
+        // "looking at it" is the whole of what the mark was asking for. The row
+        // is not behind a disclosure and it is not the twelfth of twelve, so a
+        // reader on this page has been shown it.
+        //
+        // Idempotent, and a disk write on exactly one frame — see
+        // `update::answer_mark`, which is also where the gear's own repaint is
+        // argued about.
+        //
+        // **The row keeps the mark for the rest of this visit** (0.4.6
+        // T-GEAR-MARK-LANDS): the panel is told the gear was lit before the
+        // answer puts it out, so the update row wears the dot the gear led the
+        // reader to until they leave the page — `seen_tag` stays the one answer.
+        if self.window.settings.category() == settings::SettingsCategory::About {
+            self.window
+                .settings
+                .carry_update_mark(update::gear_mark_is_lit(&self.app.update_job));
+            update::answer_mark();
+        }
+        let inputs = settings::geometry::Inputs::new(
+            [width as f32, height as f32],
+            scale,
+            self.window.renderer.font_revision(),
+            &self.window.settings,
+            self.window.settings_scroll,
+            content,
+        );
+        // **Every picker's width is measured, not only the open one's**
+        // (§7.1.6c-5): a button is as wide as its own longest option now, so the
+        // geometry needs the font for every row on the page and not just for the
+        // popup. Handed over as a closure for `build`'s own reason — the
+        // renderer owns the face, and the geometry stays a pure function of what
+        // it is told.
+        let probes_us = trace_start.map_or(0, |start| {
+            start.elapsed().as_micros().saturating_sub(content_us)
+        });
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let laid = self.window.settings_geometry.read(inputs, |inputs| {
+            let leaving_station = hang_watch::enter(hang_watch::Station::Settings);
+            let mut measure_us = 0;
+            let mut measure_calls = 0;
+            let mut measure = |text: &str, size: f32| {
+                let start = trace_start.map(|_| Instant::now());
+                let width = renderer.measure_chrome_text(gpu, text, size);
+                measure_us += start.map_or(0, |start| start.elapsed().as_micros());
+                measure_calls += 1;
+                width
+            };
+            let laid = inputs.layout(&mut measure);
+            if let Some(start) = trace_start {
+                let total_us = start.elapsed().as_micros();
+                crate::diagnostics::stderr_line(format!(
+                    "BT_PERF_TRACE settings_layout content_us={content_us} probes_us={probes_us} measure_calls={measure_calls} measure_us={measure_us} geometry_us={} total_us={total_us}",
+                    total_us.saturating_sub(content_us + probes_us + measure_us)
+                ));
+            }
+            hang_watch::at(leaving_station);
+            laid
+        });
+        // **The keyboard never rests on a control that is not a stop** (047-EXPERIENCE). A stop
+        // can stop being one while nobody presses anything — About's Version control is a stop
+        // only while enabled, and it disables itself while a check or a download runs — and the
+        // ring is drawn only on a stop, so a focus left behind there is a keyboard with no ring.
+        // Asked on the one road every draw, hover and hit test comes through, with the placement
+        // this layout made, and answered by the rule every press already ends with
+        // ([`settings::SettingsPanel::keep_focus_reachable`]: the nearest stop beside it on the
+        // page).
+        if let Some(layout) = &laid {
+            self.window
+                .settings
+                .keep_focus_on_a_stop(content, layout.placed_profile_buttons());
+        }
+        laid
+    }
+
+    /// The dialog's contents this frame, for the callers that need them beside a
+    /// layout — the focus walk and the draw.
+    ///
+    /// It hands back the two owned lists as well, because a `SettingsContent`
+    /// borrows them and a borrow of a temporary does not outlive the call that
+    /// made it. Every caller therefore reads the *same* two lists it hands to
+    /// the panel, which is what keeps the focus order and the boxes from being
+    /// derived one frame apart.
+    pub(crate) fn settings_content(
+        &self,
+    ) -> (
+        Vec<settings::SettingsRow>,
+        Vec<shortcuts::ShortcutRow>,
+        Vec<profiles::ProfileLine>,
+        Vec<settings::SchemeFileLine>,
+        settings::SettingsValues,
+    ) {
+        (
+            {
+                let mut rows = settings::visible_rows(self.window.rail.layout);
+                settings::retain_powershell_profile_remover(
+                    &mut rows,
+                    shell_integration::powershell_profile_line_present(),
+                );
+                settings::retain_legacy_psreadline_remover(
+                    &mut rows,
+                    psreadline::legacy_copy_present(),
+                );
+                rows
+            },
+            {
+                // **The fourth refusal, on the row it is about** (§7.54). The
+                // claim is refused outside this table — by Windows, to a chord
+                // this table considers perfectly legal — so the fact is joined
+                // to the rows here, where both halves are in hand, rather than
+                // inside `editor_rows`, which knows only the table.
+                let mut shortcuts = self.app.shortcuts.editor_rows();
+                if self.app.quake.hotkey_taken() {
+                    shortcuts::note_the_summon_is_taken(&mut shortcuts);
+                }
+                shortcuts
+            },
+            // Derived here rather than held on `Runtime`, for the two lists
+            // beside it: the page has to show what is true *this frame*, and a
+            // copy kept on the struct is a copy that has to be refreshed by
+            // whoever changed the table, in every place they changed it.
+            profiles::page_lines(
+                &self.app.profile_programs,
+                self.default_profile(),
+                self.default_profile_is_automatic(),
+            ),
+            // And the folder, for the third list's own reason: which of the
+            // scheme pickers' rows are files the reader wrote is what is in
+            // `%APPDATA%\Folio\schemes\` *now*, and the catalogue is re-read on
+            // a reason rather than on a clock — so reading it here is reading
+            // the same revision the pickers above are drawn from.
+            //
+            // It outlived the `Delete scheme…` menu it was struck for (user
+            // ruling 2026-08-19): the verbs moved onto the picker's own rows,
+            // and this is still the answer to which rows they are drawn on.
+            schemes::catalogue()
+                .user_files()
+                .into_iter()
+                .map(|(name, file)| settings::SchemeFileLine {
+                    name: name.to_owned(),
+                    file: file.to_owned(),
+                })
+                .collect(),
+            // **And what every row reads**, which is what the dialog is holding as much as its
+            // rows are: a sentence is a function of the answer beside it, and since 2026-08-25 a
+            // row's height is a function of the sentence. Derived here with the lists, and for
+            // their reason — every caller then reads the *same* answers it hands to the panel.
+            self.settings_values(),
+        )
+    }
+
+    /// The two lists plus the third fact the dialog is holding: which pages have
+    /// their Advanced group open (§7.1.6c-5).
+    ///
+    /// A function and not a field, for `settings_content`'s own reason: the
+    /// disclosure state lives in `settings.json` and this reads it there, so the
+    /// height, the focus order and the draw cannot be built from a copy that has
+    /// drifted from the file. Resolving the stored keys here is also where an
+    /// unknown one is dropped — §5.4 逐叶降级, and `AdvancedOpen::from_keys` is
+    /// the one place it happens.
+    pub(crate) fn settings_dialog<'a>(
+        &self,
+        rows: &'a [settings::SettingsRow],
+        shortcuts: &'a [shortcuts::ShortcutRow],
+        profiles: &'a [profiles::ProfileLine],
+        scheme_files: &'a [settings::SchemeFileLine],
+        values: &'a settings::SettingsValues,
+    ) -> settings::SettingsContent<'a> {
+        settings::SettingsContent {
+            rows,
+            shortcuts,
+            profiles,
+            scheme_files,
+            advanced: self.advanced_open(),
+            // **`None` is "no clock"**, which is a window under reduced motion,
+            // a group that has finished moving, and every test in `settings`.
+            // The group is then simply open or shut exactly as `advanced` says,
+            // which is the picture this dialog drew before it could animate at
+            // all — the red line the whole block is written under, said in one
+            // `Option`.
+            // Read the animation clock's one sample. Sampling Instant::now()
+            // here would make each hit test/draw ask for different geometry.
+            advanced_reveal: self
+                .window
+                .advanced_reveal_sample
+                .map(|(page, reveal)| (page, f32::from(reveal) / 1000.0)),
+            editor: self.editor_subject(),
+            values,
+        }
+    }
+
+    /// What the editor sub-page is standing on, resolved out of the profile
+    /// table — or `None` while the Profiles page is showing its list.
+    ///
+    /// **Re-read every frame rather than held**, which is what makes it safe for
+    /// the editor to hold nothing but an index: a reorder or an Undo moves rows
+    /// under it, and a copy of the profile taken when the page opened would be a
+    /// page drawing a row that is no longer there. The index itself is kept in
+    /// step by the verbs that move it.
+    fn editor_subject(&self) -> Option<settings::EditorSubject> {
+        let editor = self.window.settings.editor()?;
+        let index = editor.index;
+        if index >= profiles::count() {
+            return None;
+        }
+        let user = profiles::is_user(index);
+        let start_at = profiles::start_at(index);
+        let env = profiles::env(index);
+        Some(settings::EditorSubject {
+            index,
+            title: profiles::title(index),
+            user,
+            colour: match profiles::mark(index) {
+                marks::ChromeMark::ProfileGeneric { colour } => {
+                    marks::MarkColour::ALL.iter().position(|it| *it == colour)
+                }
+                // A profile of the reader's own that still wears the mark it was
+                // duplicated with is on none of the eight, and its picker says
+                // so rather than ticking a colour it is not.
+                _ => None,
+            },
+            colour_reason: profiles::mark_is_its_own(index),
+            // **The `Name` field's refusal travels with the answers** (moved here 2026-08-25): it
+            // replaces that row's sentence, a sentence is a number of lines and a number of lines
+            // is a row's height, so the layout has to be able to read it.
+            refusal: editor.refusal.map(i18n::Text::text),
+            // And the `Program` field's, for the same reason (0.4.6 ticket 74).
+            program_refusal: editor.program_refusal.map(i18n::Text::text),
+            login: profiles::login(index),
+            start_at: match start_at {
+                profiles::StartAt::Inherit => 0,
+                profiles::StartAt::Home => 1,
+                profiles::StartAt::Fixed(_) => 2,
+            },
+            fixed_folder: match &start_at {
+                profiles::StartAt::Fixed(path) => Some(profiles::intern_path(path)),
+                _ => None,
+            },
+            hyperlink: match env
+                .iter()
+                .find(|(name, _)| name == settings::FORCE_HYPERLINK_NAME)
+                .map(|(_, value)| value.as_str())
+            {
+                // Nothing said is `Auto`: the terminal's own declaration stands,
+                // which is `hyperlink_declaration`'s behaviour byte for byte.
+                None => 0,
+                Some("0") => 2,
+                Some(_) => 1,
+            },
+            // **The editor's own length of the same sentence**: this row has the
+            // page's whole width, where the list's third line shares its row
+            // with an action run.
+            capability: profiles::capability_in_editor(
+                index,
+                self.app
+                    .profile_programs
+                    .known_shell(&profiles::id(index))
+                    .as_ref(),
+            )
+            .text(),
+            // The ghosts are not the reader's and are not counted: they are what
+            // this terminal says to a session of this profile.
+            env_rows: editor.env.len(),
+            integration: settings::INTEGRATION_OPTIONS
+                .iter()
+                .position(|choice| *choice == profiles::integration_choice(index))
+                .unwrap_or_default(),
+            integration_auto: profiles::integration_auto_label(
+                index,
+                self.app
+                    .profile_programs
+                    .known_shell(&profiles::id(index))
+                    .as_ref(),
+            ),
+            // **Every variable this terminal sets for a session of this profile,
+            // less whatever this profile has already said** (owner ruling
+            // 2026-10-11 on H2 Q4): read off the launch's own composition, so a
+            // PowerShell gets no `FORCE_HYPERLINK` ghost because its own script is
+            // the half that declares links, a `NO_COLOR` row takes `COLORTERM` and
+            // `TERM` away, and a name the reader has a row for is no longer the
+            // terminal's to say — which is what makes adopting a ghost a move and
+            // not a duplication.
+            //
+            // Composed from the environment the next pane would be born from — the account's
+            // current one, asked for as the page opens — for the kind of program the walk found,
+            // and empty while either is still being asked (`shell_integration::page_environment`,
+            // `ProfilePrograms::known_shell`), as the sentence and the `Auto` label say
+            // "checking" until the kind is known.
+            ghosts: settings::held_ghosts(
+                &profiles::row_of(&profiles::id(index))
+                    .zip(shell_integration::page_environment())
+                    .zip(self.app.profile_programs.known_shell(&profiles::id(index)))
+                    .map(|((row, before_folio), program_kind)| {
+                        shell_integration::declared_environment(
+                            &row,
+                            &program_kind,
+                            shell_integration::Scripts::installed(),
+                            &before_folio,
+                            attention_wire::endpoint_name(),
+                        )
+                    })
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(name, value)| settings::EnvGhost {
+                        name: profiles::intern_text(&name),
+                        value: match value {
+                            shell_integration::DeclaredValue::Said(value) => {
+                                settings::GhostValue::Said(profiles::intern_text(&value))
+                            }
+                            shell_integration::DeclaredValue::PerPane => {
+                                settings::GhostValue::PerPane
+                            }
+                        },
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+        })
+    }
+
+    /// Which pages have their Advanced group open, as the settings file says.
+    fn advanced_open(&self) -> settings::AdvancedOpen {
+        settings::AdvancedOpen::from_keys(
+            self.app
+                .settings_store
+                .loaded()
+                .advanced_open
+                .iter()
+                .map(String::as_str),
+        )
+    }
+
+    /// What every row in the settings dialog currently reads.
+    pub(crate) fn settings_values(&self) -> settings::SettingsValues {
+        settings::SettingsValues {
+            theme: self.app.settings_store.loaded().theme_mode,
+            cursor: current_cursor_style(),
+            tab_layout: self.window.rail.layout,
+            sidebar: self.window.rail.mode,
+            display_formulas: self.app.settings_store.loaded().display_formulas,
+            inline_formulas: self.app.settings_store.loaded().inline_formulas,
+            repair_row_breaks: self.app.settings_store.loaded().repair_row_breaks,
+            tables: self.app.settings_store.loaded().tables,
+            block_max_height: self.app.settings_store.loaded().block_max_height,
+            focus_card_height: self.app.settings_store.loaded().focus_card_height,
+            // The one effective table — the object the Shortcuts page records
+            // into — so the `Cards` row names the chord that answers, in this
+            // platform's spelling and after any rebind (0.4.4 ticket 06).
+            focus_mode_chord: self
+                .app
+                .shortcuts
+                .accelerator(shortcuts::Action::ToggleFocusMode),
+            scrollback_lines: self.app.settings_store.loaded().scrollback_lines,
+            line_wrapping: self.app.settings_store.loaded().line_wrapping,
+            copy_on_select: self.app.settings_store.loaded().copy_on_select,
+            multiline_paste_ask: self.app.settings_store.loaded().multiline_paste_ask,
+            terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
+            turn_end_notification: self.app.settings_store.loaded().turn_end_notification,
+            shell_integration: self.app.settings_store.loaded().shell_integration,
+            powershell_profile_line_present: shell_integration::powershell_profile_line_present(),
+            git_panel: self.app.settings_store.loaded().git_panel,
+            update_check: self.app.settings_store.loaded().update_check,
+            version_update: update_card::version_row(
+                &self.app.update_job,
+                update::check_view(),
+                update::offer().as_deref(),
+                update::unix_epoch_ms(),
+                i18n::current(),
+            ),
+            update_mark: self
+                .window
+                .settings
+                .update_row_marked(update::gear_mark_is_lit(&self.app.update_job)),
+            // The panel's, for this visit (T-UNINSTALL-UX).
+            uninstall_remove_data: self.window.settings.uninstall_remove_data(),
+            key_hints: self.app.settings_store.loaded().key_hints,
+            option_sends_alt: self.app.settings_store.loaded().option_sends_alt,
+            // The machine's own answer, cached at the three moments it can
+            // change — see `App::context_menu_installed`.
+            context_menu: self.app.context_menu_installed,
+            // **Not cached on `App`**, unlike the row above, and the difference
+            // is which thread writes it: this answer is produced on a worker and
+            // already lives behind one lock in `explorer_menu`, so a second copy
+            // here would be a copy that a window which happened not to be redrawn
+            // could hold a stale version of. One `Mutex` read per frame the
+            // dialog is up is not a cost worth a second store.
+            explorer_first_page: explorer_menu::state().registered(),
+            // **What the machine could do, beside what it has done.** Both halves
+            // are cheap here — one remembered kernel answer and one cell the start
+            // settled (`explorer_menu::package_file`), nothing asked of the disk —
+            // and neither can be answered by the row itself, which is why the
+            // answer is handed in.
+            explorer_first_page_offered: explorer_menu::first_page_offered(
+                explorer_menu::supported(),
+                explorer_menu::package_file().is_some(),
+            ),
+            // The same, over a file instead of the registry.
+            claude_hooks: self.app.claude_hooks_installed,
+            // And the same again, over codex's own file.
+            codex_notify: self.app.codex_notify_installed,
+            // The other half of the same three reads: why a file will not be edited, when the
+            // answer is not `Off` at all. Handed in, never asked for here — the three sentences
+            // are read off the disk and this runs on every frame the dialog is up.
+            agent_config_refusals: self.app.agent_config_refusals,
+            // And over copilot's own hooks directory, with the second fact this one needs beside
+            // it: whether the copilot on this machine can carry the signal at all.
+            copilot_hooks: self.app.copilot_hooks_installed,
+            copilot_readiness: self.app.copilot_readiness,
+            split_direction: self.app.settings_store.loaded().split_direction,
+            search_engine: self.app.settings_store.loaded().search_engine,
+            launch_opens: self.app.settings_store.loaded().launch_opens,
+            minimum_contrast: self.app.settings_store.loaded().minimum_contrast,
+            web_color_scheme: self.app.settings_store.loaded().web_color_scheme,
+            language: self.app.settings_store.loaded().language,
+            default_profile: self.default_profile(),
+            terminal_font: settings::family_index(
+                &self.app.settings_store.loaded().terminal_font_family,
+            ),
+            terminal_cjk_font: settings::cjk_family_index(
+                &self.app.settings_store.loaded().terminal_cjk_font_family,
+            ),
+            font_size: settings::font_size_index(
+                self.app.settings_store.loaded().terminal_font_size,
+            ),
+            light_scheme: settings::scheme_index(
+                &self.app.settings_store.loaded().light_scheme,
+                true,
+            ),
+            dark_scheme: settings::scheme_index(
+                &self.app.settings_store.loaded().dark_scheme,
+                false,
+            ),
+            // **This window's posture, not the file's** (§7.1.6b′). All five
+            // doors turn the window's bit and only the row also writes the file,
+            // so the row has to report what it can see: the window it is standing
+            // in. See `settings::SettingsValues::focus_mode`.
+            focus_mode: self.window.focus_mode,
+            profile_available: (0..profiles::count())
+                .map(|index| self.app.profile_programs.row_is_available(index))
+                .collect(),
+            editor: self.editor_subject(),
+            background_image: !self.app.settings_store.loaded().background_image.is_empty(),
+            background_fit: settings::image_fit_index(
+                self.app.settings_store.loaded().background_fit,
+            ),
+            background_image_opacity: self.app.settings_store.loaded().background_image_opacity,
+            background_opacity: self.app.settings_store.loaded().background_opacity,
+            acrylic: self.app.settings_store.loaded().acrylic,
+            always_on_top: self.app.settings_store.loaded().always_on_top,
+            quake_height: self.app.settings_store.loaded().quake_height,
+            quake_width: self.app.settings_store.loaded().quake_width,
+            quake_dismiss_on_blur: self.app.settings_store.loaded().quake_dismiss_on_blur,
+            quake_top_gap: self.app.settings_store.loaded().quake_top_gap,
+            quake_restore: self.app.settings_store.loaded().quake_restore,
+            // **The resolved item and not the stored id**, on `default_profile`'s ruling one field
+            // above: item zero is "whatever the default profile is", and an id this machine no
+            // longer has ticks it — which is where a summon on an unknown profile really does open.
+            quake_profile: profiles::position_of(
+                &self.app.settings_store.loaded().quake_profile_id,
+            )
+            .map_or(0, |index| index + 1),
+            // A fact about the machine and not about the file, which is why it is
+            // read off the claim rather than out of the settings - see
+            // `quake::Quake::hotkey_taken`.
+            quake_hotkey_taken: self.app.quake.hotkey_taken(),
+            // Both asked of the machine once, at startup, and remembered — see
+            // `App::acrylic_available` / `translucency_available`. Asking
+            // DWM per frame would be a syscall inside a hover repaint.
+            acrylic_available: self.app.acrylic_available,
+            translucency_available: self.window.translucency_available,
+            scheme_in_force_is_user_file: self.scheme_in_force().is_some(),
+        }
+    }
+
+    /// A slider row, driven to a whole percentage by an arrow key or a drag.
+    ///
+    /// One function for both rows, because the two differ only in which field
+    /// they write — and one function for the keyboard and the pointer, because a
+    /// drag that persisted differently from an arrow press would be two settings
+    /// with one name.
+    pub(crate) fn apply_slider(&mut self, row: settings::SettingsRow, value: u8) -> Result<bool> {
+        let Some(range) = row.control().range() else {
+            return Ok(false);
+        };
+        let value = range.clamp(value);
+        let mut settings = self.app.settings_store.loaded().clone();
+        match row {
+            settings::SettingsRow::ImageOpacity => settings.background_image_opacity = value,
+            settings::SettingsRow::BackgroundOpacity => settings.background_opacity = value,
+            settings::SettingsRow::QuakeHeight => settings.quake_height = value,
+            settings::SettingsRow::QuakeWidth => settings.quake_width = value,
+            _ => return Ok(false),
+        }
+        if &settings == self.app.settings_store.loaded() {
+            return Ok(false);
+        }
+        if !self.app.settings_store.store(settings) {
+            return Ok(false);
+        }
+        // The ground is re-put whether or not it moved the clear: the picture's
+        // own percentage lives on the quad and not on the clear, and
+        // `set_window_ground` is the one thing that knows which of the two a
+        // given change touched.
+        self.apply_window_ground()?;
+        // A drag repaints every frame it moves, and a ground whose only change
+        // was the picture's opacity does not advance the revision — so the
+        // repaint has to be asked for here rather than left to
+        // `apply_window_ground`.
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Read the open picker's thumb backwards into an offset (§7.1.6c-5).
+    ///
+    /// `preview::scroll_dragged_to` and not arithmetic of its own: a thumb is a
+    /// picture of the offset, and dragging one is reading that picture backwards
+    /// — a second implementation is how a bar and its own hit test come apart.
+    fn drag_settings_menu_bar(
+        &mut self,
+        bar: &preview::ScrollBar,
+        position: PhysicalPosition<f64>,
+    ) -> Result<()> {
+        let held = self
+            .held_settings_menu_bar_drag()
+            .copied()
+            .unwrap_or_default();
+        let along = bar.along([position.x as f32, position.y as f32]);
+        let scrolled = preview::scroll_dragged_to(bar, along, held);
+        if !self.window.settings.scroll_menu(scrolled) {
+            return Ok(());
         }
         if self.refresh_chrome() {
             self.present_chrome_change()?;
