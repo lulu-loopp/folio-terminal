@@ -2651,6 +2651,34 @@ impl<B: Backend> Runtime<'_, B> {
         }
         Ok(())
     }
+
+    /// The scheme the window is **actually wearing**, as a name and a file, when
+    /// that file is one of the user's own (§7.1.6c-4d).
+    ///
+    /// `None` for a bundled scheme, which has no file anywhere, and `None` for
+    /// the stored default, which is bundled by definition. The canvas decides
+    /// which of the two rows is being asked, by luma — the question
+    /// `Runtime::customise_scheme` asks and the question the chrome asks, and
+    /// deliberately not the theme setting, because a `BT_BG` override makes
+    /// those two disagree and it is the canvas the reader is looking at.
+    ///
+    /// One reading with two callers — the dialog's `Delete scheme` predicate and
+    /// the press that acts on it — so a button that is live and a press that
+    /// finds nothing to delete cannot come apart.
+    fn scheme_in_force(&self) -> Option<(String, String)> {
+        let light = bt_render::background_is_light(bt_render::background_rgb());
+        let stored = if light {
+            self.app.settings_store.loaded().light_scheme.clone()
+        } else {
+            self.app.settings_store.loaded().dark_scheme.clone()
+        };
+        if stored.is_empty() {
+            return None;
+        }
+        let catalogue = schemes::catalogue();
+        let file = catalogue.user_file_of(&stored, light)?.to_owned();
+        Some((stored, file))
+    }
 }
 
 impl<B: Backend> settings::geometry::PointerHost for Runtime<'_, B> {
