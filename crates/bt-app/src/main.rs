@@ -7948,8 +7948,8 @@ struct TermView {
     /// constructor.
     ///
     /// A derived value, not a second owner of the size: every writer re-derives it from the rung.
-    /// It is what the pane's grid is solved from ([`LeafSession::grid_for`]) and what its next picture is
-    /// drawn at ([`bt_render::SeatFrame::metrics`]).
+    /// It is what the pane's grid is solved from ([`LeafSession::grid_for`]) and what its next
+    /// picture is drawn at ([`bt_render::SeatFrame::metrics`]).
     metrics: bt_render::CellMetrics,
     /// The frame this leaf last put on the glass.
     ///
@@ -17413,9 +17413,10 @@ impl LeafSession {
     /// The grid stage of the session's one sizing door, and the single road every geometry solve
     /// takes on its way to a leaf, focused or not. Splitting the timing in two is the whole point
     /// and is the user's 2026-08-06 ruling written down: the *picture* follows the hand in real
-    /// time, so the actor reflows in this very turn, and the thing that is debounced is only the **notification to ConPTY** — a `ResizePseudoConsole` call that
-    /// re-enters conhost, reflows the child's screen buffer and invalidates PSReadLine's anchor, which
-    /// is not a thing to do sixty times a second on every pane of a split.
+    /// time, so the actor reflows in this very turn, and the thing that is debounced is only the
+    /// **notification to ConPTY** — a `ResizePseudoConsole` call that re-enters conhost, reflows
+    /// the child's screen buffer and invalidates PSReadLine's anchor, which is not a thing to do
+    /// sixty times a second on every pane of a split.
     ///
     /// Before this, only the pane holding the keyboard had a coalescer. Its siblings were told
     /// unconditionally on every `Resized`, so widening a window with four panes open made three
@@ -17423,23 +17424,24 @@ impl LeafSession {
     /// anchor repairs per event on top. The pane with the keyboard is not the pane that can afford
     /// this; it is only the pane whose defect was noticed first.
     ///
-    /// **And a pane behind another tab defers its own reflow too** (user report 2026-09-09). The walk
-    /// that carries a solve to every tab is right and stays: the rectangle this window has is a fact
-    /// about the window, and a tab that answered it only when somebody looked at it is a tab whose
-    /// shell believes whatever was true last time it was on stage. What was wrong is the *timing* it
-    /// borrowed. `resize_at` is a full vendor reflow of that pane's grid, on the window thread; six
-    /// tabs made five of them per `Resized` and twelve made eleven, and measured on the reporter's
-    /// machine that is what stopped the pane the hand was actually dragging from keeping up — the
-    /// frame this window owes the glass was queued behind reflows of panes nobody could see. The
-    /// ruling those reflows were paying is a ruling about the picture, and a hidden pane has none.
+    /// **And a pane behind another tab defers its own reflow too** (user report 2026-09-09). The
+    /// walk that carries a solve to every tab is right and stays: the rectangle this window has is
+    /// a fact about the window, and a tab that answered it only when somebody looked at it is a tab
+    /// whose shell believes whatever was true last time it was on stage. What was wrong is the
+    /// *timing* it borrowed. `resize_at` is a full vendor reflow of that pane's grid, on the window
+    /// thread; six tabs made five of them per `Resized` and twelve made eleven, and measured on the
+    /// reporter's machine that is what stopped the pane the hand was actually dragging from keeping
+    /// up — the frame this window owes the glass was queued behind reflows of panes nobody could
+    /// see. The ruling those reflows were paying is a ruling about the picture, and a hidden pane
+    /// has none.
     ///
     /// So `Behind` schedules and does not reflow, and [`commit_leaf_resize`] does the reflow at the
-    /// quiet boundary in the same breath as the ConPTY notification — the deferred-local-reflow path
-    /// that release already documents and already runs whenever our own actor is behind the released
-    /// rectangle. A hidden pane therefore still follows every resize; it arrives once per gesture
-    /// rather than once per event, exactly like its child. [`Runtime::activate_tab`] re-solves and
-    /// reflows the tab it puts on stage, so a tab brought forward mid-gesture is on the glass at the
-    /// width it is being shown at.
+    /// quiet boundary in the same breath as the ConPTY notification — the deferred-local-reflow
+    /// path that release already documents and already runs whenever our own actor is behind the
+    /// released rectangle. A hidden pane therefore still follows every resize; it arrives once per
+    /// gesture rather than once per event, exactly like its child. [`Runtime::activate_tab`]
+    /// re-solves and reflows the tab it puts on stage, so a tab brought forward mid-gesture is on
+    /// the glass at the width it is being shown at.
     ///
     /// Answers whether our own grid moved, so a caller that keeps a shadow of it can follow.
     fn propose_size(&mut self, change: GridChange) -> Result<bool> {

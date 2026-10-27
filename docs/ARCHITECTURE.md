@@ -2208,10 +2208,9 @@ A new size reaches a pane's grid at once and its shell at the quiet boundary.
 | close | `bt-app` | `Runtime::finish_resize_if_quiescent` → `bt_term::DualPlaneSession::finish_resize_if_quiescent`; an owed PSReadLine repair through `runtime::dpi::take_psreadline_resize_reanchor_input` → `write_pty_input` | the repair's bytes | window thread, a later turn (it runs before the release in `Runtime::turn`) |
 | a birth's missed size | `bt-app` | `Runtime::land_births` → `Runtime::land_own_shell` (or, for a restart's successor, `Runtime::land_restart` → `runtime::panes::land_successor`) → `land_shell_birth` → `apply_owed_shell_resize` → `pty_door::resize`; a silent birth death's last-resort shell through `Runtime::land_birth_death_fallback` → `runtime::tabs::land_birth_death_fallback` → `land_birth_death_fallback_shell` → `apply_owed_shell_resize` | `bt_pty::PtySize` | window thread, when the `bt-pty-birth` worker's shell lands |
 
-The free functions that sequence it, in call order:
+The free functions and the one method that sequence it, in call order:
 `resize_worth_solving`, `size_authority_for_rectangle`, `solve_seats`,
-`leaf_resize_plan`, the method `LeafSession::propose_size` (the free
-`schedule_leaf_grid_change` until O-3, 2026-10-27), `plan_grid_change`,
+`leaf_resize_plan`, `LeafSession::propose_size`, `plan_grid_change`,
 `coalesce_pty_resize_on_grid_change`, `coalesce_pty_resize`,
 `release_due_leaf_resize`, `service_pending_pty_resize`, `take_due_pty_resize`,
 `pty_resize_wake_deadline`, `commit_leaf_resize`, `pty_size`,

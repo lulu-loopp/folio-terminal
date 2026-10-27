@@ -784,17 +784,16 @@ fn every_field_of_the_declared_structs_has_an_inventory_row() {
 /// RED (O-2, O-3) — **the nine view fields M1–M4 moved are `TermView`'s, nested
 /// in `LeafSession` with its lifetime, and their writers are the ones they had.**
 ///
-/// The ownership contract's M1 (§3.3) moves `thumb_awake`, `column_awake`,
-/// `card_skip`, `presented_metrics` and `frame_image_references` under
-/// `LeafSession.view: TermView`, and M2–M4 move `text_scale`, `metrics`,
-/// `last_presented_frame` and `projection` after them; no writer changes module
-/// (§3.4: the rows' functions stay equal, only the fact column moves). So each is
-/// a fact of `TermView` and none of `LeafSession`; `LeafSession.view` is the one
-/// field of the leaf whose type is `TermView`, and it is written nowhere after
-/// construction (two destructures lend it, to reach the projection); and each moved field's proven writes and lends are exactly the
-/// items that wrote and lent it on the leaf, by item and whatever module K2 puts
-/// the item in. Its reads are not pinned: they move with K2's batches and are
-/// held by the runtime dependency map's guard.
+/// The ownership contract's M1 (§3.3) moves `thumb_awake`, `column_awake`, `card_skip`,
+/// `presented_metrics` and `frame_image_references` under `LeafSession.view: TermView`, and M2–M4
+/// move `text_scale`, `metrics`, `last_presented_frame` and `projection` after them; no writer
+/// changes module (§3.4: the rows' functions stay equal, only the fact column moves). So each is a
+/// fact of `TermView` and none of `LeafSession`; `LeafSession.view` is the one field of the leaf
+/// whose type is `TermView`, and it is written nowhere after construction (two destructures lend
+/// it, to reach the projection); and each moved field's proven writes and lends are exactly the
+/// items that wrote and lent it on the leaf, by item and whatever module K2 puts the item in. Its
+/// reads are not pinned: they move with K2's batches and are held by the runtime dependency map's
+/// guard.
 ///
 /// The writer table below is the writers as of M4 (2026-10-27). One row changed
 /// function in O-3, as the contract's M3 asks: the presented pair is written by
@@ -928,23 +927,31 @@ fn the_view_fields_are_term_views() {
 /// nor of the nest `LeafSession.view` itself: a drain that handed the whole
 /// view to a helper (`&leaf.view`) would show only as a row of the nest.
 /// The assertion grows with `TermView`: every field O-3 moves under it is
-/// covered without an edit here. The drain's own rows are asserted present,
-/// so a renamed drain cannot pass by matching nothing.
+/// covered without an edit here. Since O-3 the drain reports through
+/// `LeafSession::report_keyboard_focus`, whose body is the drain's too: a view
+/// read written there is the drain's read, so the door is held to the same
+/// rule. Each one's own rows are asserted present, so a renamed drain or door
+/// cannot pass by matching nothing.
 ///
 /// MUTATION: have `drain_leaf_pty` read `leaf.view.card_skip`, or take
-/// `&leaf.view`, and its row is named.
+/// `&leaf.view`, or have `report_keyboard_focus` read `self.view.projection`,
+/// and its row is named.
 #[test]
 fn the_drain_reads_no_view_field() {
+    const DRAIN: [&str; 2] = ["drain_leaf_pty", "LeafSession::report_keyboard_focus"];
     let census = the_census();
-    let is_drain = |function: &str| function.split(' ').next() == Some("drain_leaf_pty");
+    let name = |function: &str| function.split(' ').next().unwrap_or_default().to_owned();
+    let is_drain = |function: &str| DRAIN.contains(&name(function).as_str());
     let is_view = |fact: &str| fact.starts_with("TermView.") || fact == "LeafSession.view";
     let all = || census.rows().iter().chain(census.reads());
-    assert!(
-        all().any(|row| is_drain(&row.function)
-            && row.fact.starts_with("LeafSession.")
-            && !is_view(&row.fact)),
-        "the drain is found by its name"
-    );
+    for drain in DRAIN {
+        assert!(
+            all().any(|row| name(&row.function) == drain
+                && row.fact.starts_with("LeafSession.")
+                && !is_view(&row.fact)),
+            "`{drain}` is found by its name"
+        );
+    }
     let touched: Vec<String> = all()
         .filter(|row| is_drain(&row.function) && is_view(&row.fact))
         .map(|row| format!("{} {}", row.fact, row.column.name()))
@@ -962,11 +969,25 @@ fn the_drain_reads_no_view_field() {
 /// of `bt-app` that resolves to an item, the callee's key and the caller's
 /// (`Resolver::key`: `package module::Owner::name`). Calls written inside a
 /// closure of an item are the item's. An edge the rules cannot follow is kept
-/// with its candidates, so a guard can refuse one that could reach what it pins
-/// instead of passing it in silence.
+/// with its candidates and the names it spells (the site's name, and the macro,
+/// path, generator or cut-off item the edge names), so a guard can refuse one
+/// that could reach what it pins instead of passing it in silence.
 struct Callers {
     by_callee: BTreeMap<String, BTreeSet<String>>,
-    unfollowed: Vec<(String, String, Vec<String>)>,
+    unfollowed: Vec<Unfollowed>,
+}
+
+/// One call edge the rules cannot follow, out of `caller`.
+struct Unfollowed {
+    caller: String,
+    what: String,
+    candidates: Vec<String>,
+    spelled: Vec<String>,
+}
+
+/// The last `::` segment of a key or a written path: the name an edge spells.
+fn last_segment(path: &str) -> &str {
+    path.rsplit("::").next().unwrap_or(path)
 }
 
 impl Callers {
@@ -978,16 +999,22 @@ impl Callers {
             .unwrap_or_default()
     }
 
-    /// Every unfollowed edge one of whose candidates is one of `callees`.
+    /// Every unfollowed edge that could reach one of `callees`: one of its
+    /// candidates is one of them, or it spells one of their names.
     fn unfollowed_into(&self, callees: &[&str]) -> Vec<String> {
         self.unfollowed
             .iter()
-            .filter(|(_, _, candidates)| {
-                candidates
+            .filter(|edge| {
+                edge.candidates
                     .iter()
                     .any(|candidate| callees.contains(&candidate.as_str()))
+                    || edge.spelled.iter().any(|spelled| {
+                        callees
+                            .iter()
+                            .any(|callee| last_segment(callee) == last_segment(spelled))
+                    })
             })
-            .map(|(caller, what, _)| format!("{caller} -> `{what}` (unfollowed)"))
+            .map(|edge| format!("{} -> `{}` (unfollowed)", edge.caller, edge.what))
             .collect()
     }
 }
@@ -1027,30 +1054,33 @@ fn bt_app_callers() -> Callers {
         }
         let from = resolver.key(caller);
         for edge in resolver.resolve_callees(caller) {
-            let (what, candidates) = match &edge.to {
-                Target::Item(callee) => {
+            let Target::Unresolved(unresolved) = &edge.to else {
+                if let Target::Item(callee) = &edge.to {
                     by_callee
                         .entry(resolver.key(*callee))
                         .or_default()
                         .insert(from.clone());
-                    continue;
                 }
-                Target::Unresolved(Unresolved::Ambiguous { method, candidates }) => {
-                    (method.clone(), candidates)
-                }
-                Target::Unresolved(Unresolved::Dynamic { what, candidates }) => {
-                    (what.clone(), candidates)
-                }
-                Target::Unresolved(Unresolved::OtherArm { candidates }) => {
-                    (edge.site.name.clone(), candidates)
-                }
-                _ => continue,
+                continue;
             };
-            unfollowed.push((
-                from.clone(),
+            let (what, candidates) = match unresolved {
+                Unresolved::Ambiguous { method, candidates } => {
+                    (method.clone(), candidates.clone())
+                }
+                Unresolved::Dynamic { what, candidates } => (what.clone(), candidates.clone()),
+                Unresolved::OtherArm { candidates } => (edge.site.name.clone(), candidates.clone()),
+                Unresolved::Macro { name } => (name.clone(), Vec::new()),
+                Unresolved::Generated { by } => (by.clone(), Vec::new()),
+                Unresolved::Path { written, .. } => (written.clone(), Vec::new()),
+                Unresolved::Cutoff { what } => (what.clone(), Vec::new()),
+                Unresolved::Unparsed { .. } => (edge.site.name.clone(), Vec::new()),
+            };
+            unfollowed.push(Unfollowed {
+                caller: from.clone(),
+                spelled: vec![edge.site.name.clone(), what.clone()],
                 what,
-                candidates.iter().map(|id| resolver.key(*id)).collect(),
-            ));
+                candidates: candidates.iter().map(|id| resolver.key(*id)).collect(),
+            });
         }
     }
     Callers {
@@ -1083,22 +1113,28 @@ fn app(path: &str) -> String {
 ///   handed to a helper (no field site at all): in `bt-app`'s product the
 ///   setters' callers are the stages and the constructor, `bare_leaf`, which
 ///   sets them on a session before there is a leaf; `resize_at`'s are the grid
-///   stage and `commit_leaf_resize`, the release's local reflow. An edge the
-///   graph cannot follow to one of them is refused, never passed.
+///   stage and `commit_leaf_resize`, the release's local reflow; and
+///   `DualPlaneSession::resize`, bt-term's own `resize_at` at the present
+///   instant, has none (its call into `resize_at` is bt-term's, which this graph
+///   does not walk, so it is pinned by its own name). An edge the graph cannot
+///   follow is refused when a candidate or a name it spells is one of them,
+///   never passed.
 ///
 /// MUTATION: have `apply_line_wrapping` call `leaf.session.set_layout_key`
 /// again, or `apply_leaf_metrics` call `set_font_size_subpixels`; have a
-/// panes walk write `leaf.grid`; or call `set_layout_key` from a helper that is
-/// handed `&mut leaf.session` — each is named.
+/// panes walk write `leaf.grid` or call `leaf.session.resize`; or call
+/// `set_layout_key` from a helper that is handed `&mut leaf.session` — each is
+/// named.
 #[test]
 fn every_sizing_write_is_a_size_proposal() {
-    const SETTERS: [&str; 6] = [
+    const SETTERS: [&str; 7] = [
         "set_cell_height_subpixels",
         "set_cell_width_subpixels",
         "set_ascii_baseline_subpixels",
         "set_font_size_subpixels",
         "set_layout_key",
         "resize_at",
+        "resize",
     ];
     const STAGES: [&str; 3] = [
         "LeafSession::propose_cell",
@@ -1173,6 +1209,7 @@ fn every_sizing_write_is_a_size_proposal() {
             "resize_at",
             vec![app("LeafSession::propose_size"), app("commit_leaf_resize")],
         ),
+        ("resize", vec![]),
     ] {
         let mut expected = expected;
         expected.sort();
@@ -1194,7 +1231,7 @@ fn every_sizing_write_is_a_size_proposal() {
 /// names the road, so the road can be counted: in `bt-app`'s product each
 /// setter's only caller is its port, and each port's callers are the list
 /// below, which a new caller or a lost one changes. An edge the graph cannot
-/// follow to a setter or a port is refused.
+/// follow is refused when a candidate or a name it spells is a setter or a port.
 ///
 /// MUTATION: have `Runtime::set_hovered_math` call `set_math_hover` directly,
 /// or call `port_clear_selection` from a new item — each is named.
