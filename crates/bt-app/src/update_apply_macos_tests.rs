@@ -3782,42 +3782,60 @@ fn a_start_beside_an_unrecorded_trial_commits_it_and_starts_nothing_more() {
 ///
 /// The rehearsal's M9cut and M11-rolledback: the trial killed before it was
 /// seen, and 89.8 s without a window before `no receipt by the trial's
-/// deadline`. The stand-in for `open -W` here is a program that returns at
-/// once, and nothing of the new bundle ever runs. The road's trial clock
-/// ([`CountedClock`]) moves only by the watch's pauses, and a pause waits for
-/// the stand-in to have ended — the end of its output, which closes as it
-/// exits — so nothing spins on a live launch, and "at once" is counted: the
-/// watch is over long before its clock reaches the deadline
-/// (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK).
+/// deadline`. The stand-in for `open -W` here is `/bin/cat` reading a pipe
+/// the test holds, and nothing of the new bundle ever runs. The road's trial
+/// clock ([`CountedClock`]) moves only by the watch's pauses
+/// (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK). The launch cannot end before the
+/// test ends it, so the watch's first look always finds it running and takes
+/// a pause, on every platform and under any load. Inside that first pause,
+/// the test closes the pipe and waits for the end of the stand-in's output,
+/// which closes as it exits. The watch must then be over before its clock
+/// reaches the deadline. Each pause is one poll, so the clock reads at most a
+/// few polls; "at once" is counted, not timed.
 ///
-/// MUTATION: in `Txn::watch_trial`, pass `&mut || false` as `launch_over`.
+/// MUTATIONS: in `Txn::watch_trial`, pass `&mut || false` as `launch_over` (the
+/// watch pauses its way to the deadline: 750 pauses, 30 000 ms); or in
+/// `watch_trial`, pause until the deadline rather than one poll (the first
+/// pause alone takes the clock to 30 000 ms).
 #[test]
 fn a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once() {
     if !on_macos() {
         return;
     }
     let install = Install::new("unseen");
-    let output: Arc<Mutex<Option<std::process::ChildStdout>>> = Arc::default();
-    let handed = Arc::clone(&output);
+    const TRIAL_WITHIN_MS: u64 = 30_000;
+    type Pipes = (std::process::ChildStdin, std::process::ChildStdout);
+    let pipes: Arc<Mutex<Option<Pipes>>> = Arc::default();
+    let handed = Arc::clone(&pipes);
     let world = Fake {
         on_launch_held: Some(Box::new(move |_, _| {
-            let mut child = bt_platform::quiet_command("/usr/bin/true")
-                .stdin(Stdio::null())
+            let mut child = bt_platform::quiet_command("/bin/cat")
+                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()?;
-            *handed.lock().unwrap() = child.stdout.take();
+            let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
+                panic!("the stand-in's pipes");
+            };
+            *handed.lock().unwrap() = Some((input, output));
             Ok(child)
         })),
         ..Fake::default()
     };
-    let clock = Arc::new(CountedClock::new(move |_| {
-        if let Some(mut out) = output.lock().unwrap().take() {
-            // The end of its output: the stand-in has exited.
-            let _ = out.read_to_end(&mut Vec::new());
-        }
-    }));
-    let mut road = install.road(limits(5_000, 30_000));
+    let ended_in: Arc<Mutex<Option<usize>>> = Arc::default();
+    let clock = {
+        let ended_in = Arc::clone(&ended_in);
+        Arc::new(CountedClock::new(move |pause| {
+            if let Some((input, mut output)) = pipes.lock().unwrap().take() {
+                // The launch ends here: its input closes, and the end of its
+                // output is the stand-in's exit.
+                drop(input);
+                let _ = output.read_to_end(&mut Vec::new());
+                *ended_in.lock().unwrap() = Some(pause);
+            }
+        }))
+    };
+    let mut road = install.road(limits(5_000, TRIAL_WITHIN_MS));
     road.trial_clock = clock.clone();
     let (ended, world) = applied(road, world);
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
@@ -3826,11 +3844,22 @@ fn a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once() {
         "{:?}",
         world.said
     );
+    assert_eq!(
+        *ended_in.lock().unwrap(),
+        Some(1),
+        "the launch ran until the watch's first pause: {:?}",
+        world.said
+    );
     assert!(
-        clock.pauses() >= 1 && clock.moved_ms() < 30_000,
+        clock.moved_ms() < TRIAL_WITHIN_MS,
         "over at the launch's end, not at the deadline: {} pauses, {} ms",
         clock.pauses(),
         clock.moved_ms()
+    );
+    assert!(
+        !said(&world, "no receipt by the trial's deadline"),
+        "{:?}",
+        world.said
     );
     assert_eq!(version_of(&install.installed), "1.0", "swapped back");
 }
