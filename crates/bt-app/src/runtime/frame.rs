@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::TabId;
+use crate::present_gate::presentation_equivalent;
 use crate::runtime::math::math_copy_window;
 use crate::wake_owner::WakeOwner;
 use crate::window_seam::prelude::*;
@@ -13,8 +14,8 @@ use crate::{
     SearchRefresh, ShellAddress, TabPress, TabState, cmdrail, computation_lane,
     disable_math_worker_state, files, foreground_program, git, handoff_lane, hang_watch,
     hyperlink_activation, i18n, ime_outbound, lane, mark_leaf_painted, notify, pace,
-    present_diagnostics, present_gate, presentation_equivalent, preview, seats, settings, settling,
-    taskbar_lane, termscroll, toast, update, webhost,
+    present_diagnostics, present_gate, preview, seats, settings, settling, taskbar_lane,
+    termscroll, toast, update, webhost,
 };
 use anyhow::Context;
 use anyhow::Result;

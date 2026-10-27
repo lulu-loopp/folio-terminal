@@ -4042,34 +4042,41 @@ const PINS: [Pin; 23] = [
 /// `run_from_environment` for its refusal line. This is the call-site half of their `# effects`
 /// rows; the registry guard separately proves that each helper itself takes `WorkerCtx`.
 fn the_remover_effect_doors_are_called_only_from_their_worker_roads(world: &World) -> Vec<String> {
-    let src = world.src("bt-platform");
+    remover_door_failures(
+        world.src("bt-platform"),
+        &[
+            ("copy_new", "bt-platform crate::deferred_removal::schedule"),
+            (
+                "failure_without_plan",
+                "bt-platform crate::deferred_removal::run_from_environment",
+            ),
+        ],
+    )
+}
+
+/// [`the_remover_effect_doors_are_called_only_from_their_worker_roads`] over `src`, each helper
+/// `(name, road)` called once, by its road — the product's two, or a planted crate's. A call under
+/// a statement's `#[cfg…]` is refused ([`gated`]) and its helper's callers are not also compared.
+fn remover_door_failures(src: &Src, roads: &[(&str, &str)]) -> Vec<String> {
     let mut failures = Vec::new();
-    for (name, wanted) in [
-        (
-            "copy_new",
-            BTreeMap::from([(
-                "bt-platform crate::deferred_removal::schedule".to_owned(),
-                1,
-            )]),
-        ),
-        (
-            "failure_without_plan",
-            BTreeMap::from([(
-                "bt-platform crate::deferred_removal::run_from_environment".to_owned(),
-                1,
-            )]),
-        ),
-    ] {
+    for &(name, road) in roads {
+        let wanted = BTreeMap::from([(road.to_owned(), 1)]);
         let mut callers = BTreeMap::new();
+        let mut refused = false;
         for at in src.named(name) {
             let file_start = src.index.file_at(at).map_or(0, |file| file.span().start());
             let before = src.lex(at.saturating_sub(8).max(file_start), at);
             if src.is(before.last(), "fn") || !src.in_product(at) {
                 continue;
             }
+            if let Some(refusal) = gated(src, at, &format!("`deferred_removal::{name}`")) {
+                failures.push(refusal);
+                refused = true;
+                continue;
+            }
             *callers.entry(src.owner_of(at)).or_insert(0) += 1;
         }
-        if callers != wanted {
+        if !refused && callers != wanted {
             failures.push(format!(
                 "`deferred_removal::{name}` is called only by its pinned worker road; found \
                  {callers:?}, wanted {wanted:?}"
@@ -4800,7 +4807,9 @@ fn parameter_names(src: &Src, record: &ItemRecord) -> Vec<&'static str> {
 ///   path); a path with generic arguments or a leading `::`; `Enum::*` and `Enum::{…}`; a rename
 ///   (`as`); a macro or a nested `fn` of the name; and **the landmark itself written inside the
 ///   arguments of a macro not in [`IN_PLACE_MACROS`] or inside a nested `fn`'s body**, which runs
-///   where the macro puts it or when the `fn` is called, not where it is written.
+///   where the macro puts it or when the `fn` is called, not where it is written; and **the
+///   landmark under a statement's `#[cfg…]`** ([`under_statement_cfg`], the reader the pin tables
+///   refuse a gated call with), which would place the calls after it on a build it is not in.
 ///
 /// A string and a comment are not code: the lexer gives no identifier inside either. What is not
 /// followed: a landmark called inside a helper the owner calls (the helper's call is another
@@ -4962,6 +4971,12 @@ fn landmarks_in(
                 };
                 let why = match (landmark, apart_why) {
                     (Some(_), Some(why)) => Some(why),
+                    // The index reads a file's, an item's and a module's `cfg`, never a
+                    // statement's: a gated landmark would place the calls after it on a build it
+                    // is not in.
+                    (Some(_), None) if under_statement_cfg(src, &toks, index) => Some(
+                        "the landmark under a statement's `#[cfg…]`, which the guard does not read",
+                    ),
                     (Some(name), None) => {
                         found.push((tok.start, name));
                         None
@@ -5008,7 +5023,9 @@ fn the_role_and_phase_writers_are_called_only_where_they_are_pinned(world: &Worl
 /// [`the_role_and_phase_writers_are_called_only_where_they_are_pinned`] over `world`, with its
 /// pins, its owners' landmarks, its pinned callback entries and the dependency crates of each
 /// package with landmarks ([`dependency_crates`]) as arguments — the product's, or a planted
-/// crate's.
+/// crate's. A pinned writer's call or `enter_callback` entry under a statement's `#[cfg…]`
+/// ([`under_statement_cfg`]) is refused ([`gated`]); its pin or entry is not also missing or
+/// miscounted.
 fn pinned_writer_failures(
     world: &World,
     pins: &[Pin],
@@ -5036,6 +5053,10 @@ fn pinned_writer_failures(
     };
     let mut calls: Vec<PinnedCall<'_>> = Vec::new();
     let mut callbacks: BTreeMap<(String, String, String), usize> = BTreeMap::new();
+    // A call under a statement's `#[cfg…]` is refused ([`gated`]), and its pin or its callback
+    // entry is not also said to be missing or miscounted: the refusal says why, once.
+    let mut unread_owners: BTreeSet<String> = BTreeSet::new();
+    let mut refused_callbacks: BTreeSet<(String, String, String)> = BTreeSet::new();
     for src in &world.srcs {
         for (&writer, &module) in &writers {
             for at in src.named(writer) {
@@ -5066,9 +5087,19 @@ fn pinned_writer_failures(
                         .get(2)
                         .filter(|t| t.kind == Kind::Literal)
                         .map_or_else(|| "<not a literal>".to_owned(), |t| src.text(*t).to_owned());
-                    *callbacks
-                        .entry((src.package.to_owned(), src.module_at(at).to_owned(), name))
-                        .or_insert(0) += 1;
+                    let key = (src.package.to_owned(), src.module_at(at).to_owned(), name);
+                    match gated(src, at, &format!("`admission::enter_callback({})`", key.2)) {
+                        Some(refusal) => {
+                            failures.push(refusal);
+                            refused_callbacks.insert(key);
+                        }
+                        None => *callbacks.entry(key).or_insert(0) += 1,
+                    }
+                    continue;
+                }
+                if let Some(refusal) = gated(src, at, &called(writer)) {
+                    failures.push(refusal);
+                    unread_owners.insert(src.owner_of(at));
                     continue;
                 }
                 calls.push(PinnedCall {
@@ -5088,7 +5119,7 @@ fn pinned_writer_failures(
         calls,
         &wanted,
         owner_landmarks,
-        &BTreeSet::new(),
+        &unread_owners,
         &mut scopes,
     ));
     let wanted: BTreeMap<(String, String, String), usize> = pinned_callbacks
@@ -5105,7 +5136,7 @@ fn pinned_writer_failures(
         })
         .collect();
     for (key, count) in &callbacks {
-        if wanted.get(key) != Some(count) {
+        if wanted.get(key) != Some(count) && !refused_callbacks.contains(key) {
             failures.push(format!(
                 "`admission::enter_callback({})` is called {count}× in `{} {}`, where the pinned \
                  entries say {}",
@@ -5118,7 +5149,10 @@ fn pinned_writer_failures(
             ));
         }
     }
-    for key in wanted.keys().filter(|key| !callbacks.contains_key(*key)) {
+    for key in wanted
+        .keys()
+        .filter(|key| !callbacks.contains_key(*key) && !refused_callbacks.contains(*key))
+    {
         failures.push(format!(
             "the pinned callback entry `enter_callback({})` in `{} {}` is not there",
             key.2, key.0, key.1
@@ -13470,6 +13504,12 @@ fn planted_door_failures(tag: &str, uses: &str, tail: &str, more: &str) -> Vec<S
     let main = PLANTED_DOOR_MAIN
         .replace("{tail}", tail)
         .replace("{more}", more);
+    planted_door_main_failures(tag, uses, &main)
+}
+
+/// [`pinned_door_failures`] over the planted crate whose `main` is `main` as written, after
+/// [`PLANTED_LANDMARK_ITEMS`], [`PLANTED_DOOR_ITEMS`] and `uses`, with the planted door pins.
+fn planted_door_main_failures(tag: &str, uses: &str, main: &str) -> Vec<String> {
     let world = planted_world(
         tag,
         &format!("{PLANTED_LANDMARK_ITEMS}{PLANTED_DOOR_ITEMS}{uses}{main}"),
@@ -13771,6 +13811,251 @@ fn a_pinned_call_under_a_statement_cfg_is_refused() {
         assert!(
             failures.len() == 1
                 && failures[0].starts_with("the pinned call `")
+                && failures[0].contains("stands under a statement's `#[cfg…]`"),
+            "{tag}: refused, once: {failures:?}"
+        );
+    }
+}
+
+/// A planted `main` for the writer table's statement-`cfg` cases, after [`PLANTED_LANDMARK_ITEMS`]:
+/// `cli::parse(…)`, then `event_loop.run_app(…)`, then `{tail}`.
+const PLANTED_WRITER_MAIN: &str = r#"
+pub fn main() {
+    cli::parse();
+    let event_loop = 0;
+    event_loop.run_app();
+    {tail}
+}
+"#;
+
+/// [`pinned_writer_failures`] over the planted `main` with `tail` after `run_app`, its one pin
+/// `admission::exiting` after `run_app` — with the planted `main`'s text, for its lines.
+fn planted_tail_exiting(tag: &str, tail: &str) -> (Vec<String>, String) {
+    let main = PLANTED_WRITER_MAIN.replace("{tail}", tail);
+    let pins = [Pin {
+        module: "admission",
+        writer: "exiting",
+        owner: "planted crate::main",
+        after: Some("run_app"),
+    }];
+    let owners = [("planted crate::main", product_main_landmarks())];
+    let world = planted_world(tag, &format!("{PLANTED_LANDMARK_ITEMS}{main}"));
+    (
+        pinned_writer_failures(&world, &pins, &owners, &[], &BTreeMap::new()),
+        main,
+    )
+}
+
+/// RED (T-WINDOW-WAITS-STATEMENT-CFG) — **a pinned writer's call under a statement's `#[cfg…]` is
+/// refused**, as the door table's is: the index reads a file's, an item's and a module's `cfg` but
+/// no statement's, so `#[cfg(test)] admission::exiting();` after `run_app` would meet the tail's
+/// pin on a build it is not in. Refused once, by call, line and owner, for the gated statement,
+/// a gated block, a `cfg_attr`, an inner `#![cfg]`, a match arm, and a gated second call beside
+/// the real one (refused, not a surplus); a gated statement holding no pinned call changes nothing.
+///
+/// MUTATION: drop the [`gated`] check of [`pinned_writer_failures`]' writer calls — the gated
+/// calls meet the pin (`[]`) and the second call beside the real one is a surplus.
+#[test]
+fn a_pinned_writer_call_under_a_statement_cfg_is_refused() {
+    for (tag, tail) in [
+        ("ww-writer-cfg-plain", "admission::exiting();"),
+        (
+            "ww-writer-cfg-elsewhere",
+            "admission::exiting(); #[cfg(feature = \"menu\")] { let _menu = 0; }",
+        ),
+    ] {
+        assert_eq!(
+            planted_tail_exiting(tag, tail).0,
+            Vec::<String>::new(),
+            "{tag}: the tail's `exiting` meets its pin"
+        );
+    }
+    for (tag, tail) in [
+        (
+            "ww-writer-cfg-statement",
+            "#[cfg(test)] admission::exiting();",
+        ),
+        (
+            "ww-writer-cfg-block",
+            "#[cfg(any())] { admission::exiting(); }",
+        ),
+        (
+            "ww-writer-cfg-attr",
+            "#[cfg_attr(test, cfg(any()))] admission::exiting();",
+        ),
+        (
+            "ww-writer-cfg-inner",
+            "{ #![cfg(test)] admission::exiting(); }",
+        ),
+        (
+            "ww-writer-cfg-arm",
+            "match 0 { #[cfg(test)] _ => admission::exiting(), _ => {} }",
+        ),
+        (
+            "ww-writer-cfg-beside",
+            "admission::exiting();\n#[cfg(test)] admission::exiting();",
+        ),
+    ] {
+        let (failures, main) = planted_tail_exiting(tag, tail);
+        let line = planted_main_line(&main, "cfg");
+        assert!(
+            failures.len() == 1
+                && failures[0].starts_with("the pinned call `admission::exiting` at ")
+                && failures[0].contains(&format!("lib.rs:{line} (planted crate::main)"))
+                && failures[0].contains("stands under a statement's `#[cfg…]`"),
+            "{tag}: refused at line {line}, once: {failures:?}"
+        );
+    }
+}
+
+/// RED (T-WINDOW-WAITS-STATEMENT-CFG) — **a pinned callback entry under a statement's `#[cfg…]`
+/// is refused**: `enter_callback`'s calls are counted by the writer table's own finder, so a gated
+/// entry would make up its pinned count on a build it is not in. Refused once — the entry is not
+/// also "not there" or miscounted; a gated entry beside the real one is refused, not counted.
+///
+/// MUTATION: count a gated `enter_callback` again (drop its [`gated`] check) — the gated entry
+/// meets the pinned count (`[]`), and beside the real one it is "called 2×".
+#[test]
+fn a_callback_entry_under_a_statement_cfg_is_refused() {
+    let entry = [("planted", "crate", "planted-cb", 1)];
+    let failures = |tag: &str, body: &str| {
+        let world = planted_world(tag, &format!("pub fn main() {{\n{body}\n}}\n"));
+        pinned_writer_failures(&world, &[], &[], &entry, &BTreeMap::new())
+    };
+    assert_eq!(
+        failures(
+            "ww-callback-cfg-plain",
+            "admission::enter_callback(\"planted-cb\", || ());"
+        ),
+        Vec::<String>::new(),
+        "the entry is where its pin says"
+    );
+    for (tag, body) in [
+        (
+            "ww-callback-cfg-statement",
+            "#[cfg(test)] admission::enter_callback(\"planted-cb\", || ());",
+        ),
+        (
+            "ww-callback-cfg-beside",
+            "admission::enter_callback(\"planted-cb\", || ()); \
+             #[cfg(test)] { admission::enter_callback(\"planted-cb\", || ()); }",
+        ),
+    ] {
+        let failures = failures(tag, body);
+        assert!(
+            failures.len() == 1
+                && failures[0]
+                    .starts_with("the pinned call `admission::enter_callback(\"planted-cb\")` at ")
+                && failures[0].contains("stands under a statement's `#[cfg…]`"),
+            "{tag}: refused, once: {failures:?}"
+        );
+    }
+}
+
+/// RED (T-WINDOW-WAITS-STATEMENT-CFG) — **a landmark under a statement's `#[cfg…]` is refused**:
+/// a gated `run_app` would place the calls written after it on a build it is not in. The reader
+/// is the one landmark reader both pin tables place through, so each table reports the refusal
+/// once and its owner's pins are not also "not there".
+///
+/// MUTATION: drop the [`under_statement_cfg`] arm of [`landmarks_in`] — the gated `run_app` is
+/// read (`Ok(Some("run_app"))`) and the two tables place their calls after it: the writer table's
+/// `enter_window_thread` meets its pin after `run_app` (`[]`), and the door table's build-error
+/// settle and flush, written after the gated `run_app`, are placed after it instead of after
+/// `build` (their `build` pins "not there", their `run_app` pins called 2×).
+#[test]
+fn a_landmark_under_a_statement_cfg_is_refused() {
+    let main = |gate: &str| {
+        format!(
+            "\npub fn main() {{\ncli::parse();\nlet event_loop = 0;\n\
+             {gate}{{ event_loop.run_app(); }}\nadmission::enter_window_thread();\n}}\n"
+        )
+    };
+    assert_eq!(
+        planted_main_landmark("ww-landmark-cfg-plain", &main("")),
+        Ok(Some("run_app")),
+        "an ungated `run_app` is read"
+    );
+    let refusal = "a landmark name appears where the guard cannot read it: `run_app` in `planted \
+                   crate::main` at ";
+    let gated_main = main("#[cfg(test)] ");
+    let read = planted_main_landmark("ww-landmark-cfg-read", &gated_main);
+    let line = planted_main_line(&gated_main, "cfg");
+    assert!(
+        read.as_ref().is_err_and(|why| why.starts_with(refusal)
+            && why.contains(&format!("lib.rs:{line}, the landmark under a statement's"))),
+        "the gated `run_app` is refused at line {line}: {read:?}"
+    );
+    let pins = [Pin {
+        module: "admission",
+        writer: "enter_window_thread",
+        owner: "planted crate::main",
+        after: Some("run_app"),
+    }];
+    let owners = [("planted crate::main", product_main_landmarks())];
+    let world = planted_world(
+        "ww-landmark-cfg-writers",
+        &format!("{PLANTED_LANDMARK_ITEMS}{gated_main}"),
+    );
+    let failures = pinned_writer_failures(&world, &pins, &owners, &[], &BTreeMap::new());
+    assert!(
+        failures.len() == 1 && failures[0].starts_with(refusal),
+        "the writer table: refused, once: {failures:?}"
+    );
+    // The gated `run_app` before the build-error arm: read, it would place that arm's settle and
+    // flush after `run_app` instead of after `build`.
+    let door_main = PLANTED_DOOR_MAIN
+        .replace(
+            "if fail {",
+            "#[cfg(test)] { let event_loop = EventLoop; event_loop.run_app(); }\nif fail {",
+        )
+        .replace("{tail}", PLANTED_TAIL_SETTLE)
+        .replace("{more}", "");
+    let failures = planted_door_main_failures("ww-landmark-cfg-doors", "", &door_main);
+    assert!(
+        failures.len() == 1 && failures[0].starts_with(refusal),
+        "the door table: refused, once: {failures:?}"
+    );
+}
+
+/// RED (T-WINDOW-WAITS-STATEMENT-CFG, ruling D3) — **a remover helper's call under a statement's
+/// `#[cfg…]` is refused**: the remover-effect doors' callers are counted by owner, so a gated call
+/// from another function would be counted on a build it is not in — or, inside the road, make up
+/// the road's one call. Refused once; its helper's callers are not also compared.
+///
+/// MUTATION: drop the [`gated`] check of [`remover_door_failures`] — the gated caller is counted
+/// (a second owner in "found"), and the gated call in the road meets the road's count (`[]`).
+#[test]
+fn a_remover_helper_call_under_a_statement_cfg_is_refused() {
+    let failures = |tag: &str, schedule: &str, other: &str| {
+        let world = planted_world(
+            tag,
+            &format!(
+                "pub mod deferred_removal {{\npub fn copy_new() {{}}\n\
+                 pub fn schedule() {{ {schedule} }}\npub fn other() {{ {other} }}\n}}\n"
+            ),
+        );
+        remover_door_failures(
+            world.src("planted"),
+            &[("copy_new", "planted crate::deferred_removal::schedule")],
+        )
+    };
+    assert_eq!(
+        failures("ww-remover-cfg-plain", "copy_new();", ""),
+        Vec::<String>::new(),
+        "the helper is called by its road"
+    );
+    for (tag, schedule, other) in [
+        (
+            "ww-remover-cfg-elsewhere",
+            "copy_new();",
+            "#[cfg(test)] copy_new();",
+        ),
+        ("ww-remover-cfg-road", "#[cfg(any())] { copy_new(); }", ""),
+    ] {
+        let failures = failures(tag, schedule, other);
+        assert!(
+            failures.len() == 1
+                && failures[0].starts_with("the pinned call `deferred_removal::copy_new` at ")
                 && failures[0].contains("stands under a statement's `#[cfg…]`"),
             "{tag}: refused, once: {failures:?}"
         );

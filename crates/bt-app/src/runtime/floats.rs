@@ -3,8 +3,10 @@
 
 use super::pointer::{Gone, OwnerGone};
 use crate::runtime::files::{files_root_of, files_row_activation, files_row_menu_subject};
+use crate::runtime::handoff::reveal_ask;
 use crate::runtime::panes::popup_owner;
 use crate::runtime::panes::risen_frame;
+use crate::runtime::preview::{revealable_preview_file, shown_address};
 use crate::web_thumb;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -14,8 +16,7 @@ use crate::{
     PreviewRailFrame, PreviewSurface, RevealedFoot, RowActivation, RowHost, Runtime, TabRename,
     TabSurface, TermMenuState, card_trace, display_title, favicon, files, float, git, git_graph,
     git_panel, hang_watch, i18n, indeterminate_start_milliturns, marks, menubar, preview,
-    preview_select, profiles, restore, revealable_preview_file, seats, shown_address, update,
-    webhost, webnav,
+    preview_select, profiles, restore, seats, update, webhost, webnav,
 };
 use crate::{
     FilesRoot, RESIZING_CARD_TRANSITION, ReferenceCard, RevealTween, TerminalReference,
@@ -2858,7 +2859,7 @@ impl<B: Backend> Runtime<'_, B> {
         // spawning `explorer.exe` itself as this once did: one verb printed on
         // three strips is one verb, and a bridge that only one of the three
         // goes around is a bridge with a hole in it.
-        self.hand_off(crate::reveal_ask(Path::new(&root)).when_handed_over(
+        self.hand_off(reveal_ask(Path::new(&root)).when_handed_over(
             crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Float(id)),
         ))
     }
@@ -2885,7 +2886,7 @@ impl<B: Backend> Runtime<'_, B> {
         else {
             return Ok(());
         };
-        self.hand_off(crate::reveal_ask(&path).when_handed_over(
+        self.hand_off(reveal_ask(&path).when_handed_over(
             crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Float(id)),
         ))
     }

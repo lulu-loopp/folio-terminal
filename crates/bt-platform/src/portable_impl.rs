@@ -927,6 +927,85 @@ impl DirWatch {
     }
 }
 
+/// **Many directory watches on one thread, before FSEvents** (T-DIR-WATCH-ONE-THREAD).
+///
+/// The same four contracts as [`DirWatch`], as members of one set. Refused at the opening, as
+/// every `DirWatch` door is, so no member is ever started here.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub struct DirWatchSet {
+    /// Never constructed: the opening refuses.
+    _never: std::convert::Infallible,
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+impl DirWatchSet {
+    /// Open a set. Refused.
+    pub fn open(ctx: &crate::admission::WorkerCtx) -> Result<Self, std::io::Error> {
+        let _ = ctx;
+        Err(unwatched())
+    }
+
+    /// Whether the set has ended. Unreachable.
+    #[must_use]
+    pub fn has_ended(&self) -> bool {
+        match self._never {}
+    }
+
+    /// The tree contract, as a member. Unreachable.
+    pub fn start(
+        &self,
+        ctx: &crate::admission::WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        let _ = (ctx, path, wake);
+        match self._never {}
+    }
+
+    /// The named tree contract, as a member. Unreachable.
+    pub fn start_named(
+        &self,
+        ctx: &crate::admission::WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        let _ = (ctx, path, wake);
+        match self._never {}
+    }
+
+    /// The here-only contract, as a member. Unreachable.
+    pub fn start_shallow(
+        &self,
+        ctx: &crate::admission::WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        let _ = (ctx, path, wake);
+        match self._never {}
+    }
+
+    /// The named here-only contract, as a member. Unreachable.
+    pub fn start_shallow_named(
+        &self,
+        ctx: &crate::admission::WorkerCtx,
+        path: &Path,
+        wake: impl Fn(DirChange<'_>) + Send + 'static,
+    ) -> Result<DirWatch, std::io::Error> {
+        let _ = (ctx, path, wake);
+        match self._never {}
+    }
+
+    /// The door the real arms retire a set through. Unreachable.
+    pub fn retire_within(
+        self,
+        ctx: &crate::admission::WorkerCtx,
+        bound: std::time::Duration,
+    ) -> bool {
+        let _ = (ctx, bound);
+        match self._never {}
+    }
+}
+
 /// The one error every [`DirWatch`] door answers with.
 #[cfg(not(any(windows, target_os = "macos")))]
 fn unwatched() -> std::io::Error {

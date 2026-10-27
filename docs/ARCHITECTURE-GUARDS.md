@@ -374,7 +374,11 @@ base's row had (`check-unfollowed-edges-tests.ps1` plants each verdict). When re
 receiver or resolve the call; when the door reach must go blind there, regenerate with
 `scripts/generate-unfollowed-edges.ps1` and date the reason. A function the walk reaches for the
 first time brings its sites in as added keys — expected, and each takes a dated reason like any
-other. The per-door counts are printed by
+other. A row whose name is a file-system question (`is_file`, `exists`, `metadata`,
+`file_type`, …) always carries a dated reason — the request-door guard cannot classify it —, held
+by `every_file_system_shaped_unfollowed_edge_carries_a_dated_reason`
+(T-UNTYPED-RECEIVER-FS-CALLS-TRIAGE): type the receiver, and the guard sees the question as the
+effect it is. The per-door counts are printed by
 `window_waits_tests::the_unfollowed_edges_of_each_completions_door_are_printed`, a diagnostic.
 
 How a guard uses it: build the resolver once over the packages it judges, with `Arms` saying which
@@ -482,6 +486,28 @@ had. A pin is one call: the calls are counted per (writer, owner, landmark), and
 a second call matching a pin already met is reported as a surplus
 (`a_second_call_matching_a_pin_is_a_surplus`).
 
+A statement's `cfg` is refused, not read (T-WINDOW-WAITS-STATEMENT-CFG,
+2026-10-26). The index reads a file's, an item's and a module's `cfg`, never a
+statement's, so a gated call would count on a build it is not in:
+`#[cfg(test)] admission::exiting();` after `run_app` would meet the tail's pin.
+One reader (`window_waits_tests::under_statement_cfg`) serves every pin table:
+a call or a landmark that stands under a `#[cfg…]` or `#[cfg_attr(…)]` — the
+statement, block, match arm or list element an outer one governs, or the block an
+inner `#![…]` one opens — is refused by what is called, line and owner. That
+covers a pinned writer's call, an `enter_callback` entry, a remover helper's call
+(`deferred_removal::copy_new`, `failure_without_plan`), a pinned door's call
+(below), and a landmark of `LANDMARKS`. A gated landmark is refused through the
+one placement engine, so each table reports it once. A refused call's pin, entry
+or helper is not also called missing or miscounted. The predicate is not
+evaluated: a pin has no platform or feature column, so a call that is in one
+shipped build and not another can be neither counted nor dropped. A pinned call
+or a landmark that must be platform-gated moves into a gated item (a `fn`, a
+module), whose `cfg` the index reads
+(`a_pinned_writer_call_under_a_statement_cfg_is_refused`,
+`a_callback_entry_under_a_statement_cfg_is_refused`,
+`a_landmark_under_a_statement_cfg_is_refused`,
+`a_remover_helper_call_under_a_statement_cfg_is_refused`).
+
 A wait reached through the generic admission is pinned by its door
 (T-DOOR-PINS-BY-DOOR, 2026-10-25): `DOOR_PINS` places each call of a pinned door
 after its owner's landmark, through the same placement and count as `PINS`
@@ -527,13 +553,12 @@ macro's arguments and nested `fn`. A pinned door's call that stands under a
 statement's `#[cfg…]` or `#[cfg_attr(…)]` (the statement or block an outer one
 governs, or the block an inner `#![…]` one opens) is refused: the index reads a
 file's, an item's and a module's `cfg` but never a statement's, so a gated call
-would meet its pin on a build it is not in. The writer table (`PINS`) does not
-read statement `cfg`s yet — a stated gap, T-WINDOW-WAITS-STATEMENT-CFG (0.4.9 plan
-row 60). Not read: closures and run-time-dead branches — a call in a closure's
-body, or in a branch that never runs (`if cfg!(…)`, `if false`), is placed where
-it is written, as a landmark is, and is still in the build, so a closure written
-after `run_app` that is never called, or a settle under `if false`, would meet
-the tail's pin. An
+would meet its pin on a build it is not in — the same reader, and the same
+refusal, as the writer table's and the landmarks' (above). Not read: closures
+and run-time-dead branches — a call in a closure's body, or in a branch that
+never runs (`if cfg!(…)`, `if false`), is placed where it is written, as a
+landmark is, and is still in the build, so a closure written after `run_app`
+that is never called, or a settle under `if false`, would meet the tail's pin. An
 unreadable admission is refused wherever it is (it may be a pinned door's), and
 its owner's pins are not also called "not there" (`deleting_the_tail_settle_is_red`,
 `a_second_settle_in_another_branch_is_a_surplus`,
@@ -612,7 +637,9 @@ process` is not walked, and those rows are a closed list (`window_waits_tests::N
 walked door that reaches one is a `NotWalked` violation, since the reach contradicts the row, and
 moving a row out of the walk is a diff that list names. The walk fails on an effect (a
 `# vocabulary` path; under `std::fs`, `std::net`, `std::process`, `std::os::{windows, unix}::fs` or
-the `std::io` read and write handles; a `Path`'s or `PathBuf`'s question to the disk (`is_file`,
+the `std::io` read and write handles, but not a method of a `Metadata`, `FileType` or
+`Permissions` value or of their `*Ext` traits, which reads the value (ruling D2, 2026-10-26); a
+`Path`'s or `PathBuf`'s question to the disk (`is_file`,
 `exists`, `metadata`, `read_dir`, `canonicalize`, …); `std::env::set_current_dir`; a function of the `windows`
 crate's `Storage::FileSystem`, `System::Registry` and `System::IO` modules, or the shell's
 `ShellExecute(Ex)W` and `SHCreateStreamOnFileEx`), an `# entrances` item, an owner door's or a

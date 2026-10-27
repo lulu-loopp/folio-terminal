@@ -3,16 +3,17 @@
 
 use crate::input::Keystroke;
 use crate::runtime::floats::float_dock_label;
+use crate::runtime::handoff::reveal_ask;
 use crate::runtime::math::answers_for;
+use crate::runtime::preview::foot_revealed_label;
 use crate::runtime::web::page_destination;
 use crate::window_seam::prelude::*;
 use crate::{
     ColumnKeyboard, FOOT_REVEAL_FEEDBACK, FileMenuTarget, FileMenuTreeRow, FilesEditPlace,
     FilesEditRow, FilesFocusArrival, FilesLocate, FolderPick, FootSaying, LeafId, PointerTarget,
     ReferenceCard, RenameSubject, RevealedFoot, RowActivation, RowHost, Runtime, SplitSeed,
-    TabClick, TabRename, files, float, foot_revealed_label, git_panel, hang_watch,
-    home_shortened_path, i18n, marks, palette_index, path_opens_as_a_page, preview, profiles,
-    seats, settings, toast, webnav,
+    TabClick, TabRename, files, float, git_panel, hang_watch, home_shortened_path, i18n, marks,
+    palette_index, path_opens_as_a_page, preview, profiles, seats, settings, toast, webnav,
 };
 use crate::{FilesRoot, TabState, pane_folder};
 use anyhow::Result;
@@ -2111,7 +2112,7 @@ impl<B: Backend> Runtime<'_, B> {
         // level too far out. A failure to reach Explorer withholds the
         // confirmation rather than claiming one, which is the honest report —
         // so the confirmation waits for the lane to say Explorer took it.
-        self.hand_off(crate::reveal_ask(Path::new(&root)).when_handed_over(
+        self.hand_off(reveal_ask(Path::new(&root)).when_handed_over(
             crate::handoff_lane::OnAccepted::Revealed(RevealedFoot::Column(seat)),
         ))
     }
