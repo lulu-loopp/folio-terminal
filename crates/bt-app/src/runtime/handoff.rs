@@ -169,6 +169,40 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn reveal_in_explorer(&mut self, path: &Path) -> Result<()> {
         self.hand_off(reveal_ask(path))
     }
+
+    /// Hand one path to the system's default handler, and say so when the window
+    /// declines. The answer arrives later, on the OS hand-off lane's completion
+    /// (2026-09-22); a caller that owes the reader something on success hands
+    /// [`open_local_path_ask`] off itself, with the confirmation it names
+    /// ([`handoff_lane::Ask::when_handed_over`]).
+    ///
+    /// The refusal is spoken rather than logged: a double click that does
+    /// nothing at all is indistinguishable from a double click that was not
+    /// registered, and "the files tree does not run programs" is a rule the user
+    /// is entitled to be told once, in the same one-line status the worker
+    /// notices use.
+    ///
+    /// The answer is reported because a *foot* has something to do with it that
+    /// a row has not: it confirms in place, and a confirmation printed over a
+    /// reveal that never happened would be the one thing worse than silence.
+    pub(crate) fn open_local_path(&mut self, path: &Path) -> Result<()> {
+        self.hand_off(open_local_path_ask(path))
+    }
+}
+
+/// **A files row's open, as the OS hand-off lane is asked it** — the system's default handler for
+/// `path`, refused in the files row's words (`Runtime::open_local_path`).
+pub(crate) fn open_local_path_ask(path: &Path) -> handoff_lane::Ask {
+    handoff_lane::Ask::new(
+        bt_platform::Handoff::Open(path.to_path_buf()),
+        handoff_lane::Refusal {
+            stderr: Some((
+                "recoverable files row open failure",
+                "open an activated files row with its default handler",
+            )),
+            program_notice: true,
+        },
+    )
 }
 
 /// **A reveal in the file manager, as the OS hand-off lane is asked it** — the one verb all three

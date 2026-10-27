@@ -17277,7 +17277,7 @@ mod tests {
                     "impl<B: Backend> settings::geometry::PointerHost for Runtime<'_, B>"
                 )),
                 bt_source::View::Raw,
-                bt_source::Scope::Module("crate".to_owned()),
+                bt_source::Scope::Module("crate::runtime::settings".to_owned()),
             )
             .is_empty()
         );

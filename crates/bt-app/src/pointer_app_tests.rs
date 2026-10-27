@@ -1443,14 +1443,17 @@ fn every_lifecycle_door_ends_the_capture() {
         .flat_map(|name| resolved_callers_of("SettingsPanel", name))
         .collect();
     for (door, why) in [
-        ("toggle_settings_panel", "the gear"),
         (
-            "open_scheme_for_editing",
+            "crate::runtime::settings::Runtime::toggle_settings_panel",
+            "the gear",
+        ),
+        (
+            "crate::Runtime::open_scheme_for_editing",
             "the verb that hands the reader a scheme file",
         ),
     ] {
         assert!(
-            closers.contains(&format!("crate::Runtime::{door}")),
+            closers.contains(door),
             "the call graph finds {why} shutting the sheet: {closers:?}"
         );
     }
