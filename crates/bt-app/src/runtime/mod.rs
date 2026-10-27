@@ -151,10 +151,13 @@ pub(crate) use preview::{
     preview_wrap_columns, push_markdown_source_block, resolve_document_pictures, scale_ppm,
     source_opens_as_a_page, step_preview_caret_by_row, strip_animation_tick_is_due, surface_pixels,
     surface_subject_of, surface_takes_image_zoom, surfaces_reading, switcher_rows,
-    tab_trailing_targets, tick_owes_a_present, unverified_reference_handoff,
-    video_frame_texture_key, video_still_destination, viewport_of_rect, window_taskbar_progress,
-    zoom_about,
+    tab_trailing_targets, tick_owes_a_present, video_frame_texture_key, video_still_destination,
+    viewport_of_rect, window_taskbar_progress, zoom_about,
 };
+// Its one test caller (`tests.rs`, a share handed over) is Windows-only, so the
+// re-export carries the same gate.
+#[cfg(all(test, windows))]
+pub(crate) use preview::unverified_reference_handoff;
 #[cfg(test)]
 pub(crate) use profiles::profile_menu_anchor;
 #[cfg(test)]

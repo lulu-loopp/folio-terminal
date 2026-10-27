@@ -319,6 +319,8 @@ use bt_viewport::{
 // K2 (T-SPLIT-2B) moved these free functions into their `runtime/` topics; the root names them
 // again so that its callers, and its test modules through `use super::*`, read them as before.
 use runtime::platform_pointer_of;
+#[cfg(all(test, windows))]
+use runtime::unverified_reference_handoff;
 // K2 batch 22 (T-SPLIT-2B) moved these free functions beside their callers in modules outside
 // `runtime/`; the root names them again for its own callers and, through `use super::*`, its
 // test modules.
@@ -407,11 +409,11 @@ use runtime::{
     tab_trailing_targets, take_math_worker_notice, take_pending_paste,
     take_psreadline_resize_reanchor_input, tear_out_rect, tear_pane_into_tab,
     terminal_ime_cursor_area, terminal_link_answers_a_press, text_field_holding,
-    tick_owes_a_present, tooltip_anchor_for, two_tabs_mut, unverified_reference_handoff,
-    upright_wheel, verified_target_of, video_frame_texture_key, video_still_destination,
-    viewport_of_rect, wheel_axis, wheel_points_sideways, wheel_route, wheel_steps_text_size,
-    window_ime_cursor_area, window_is_exposed, window_is_hidden, window_minimum_changed,
-    window_taskbar_progress, zoom_about,
+    tick_owes_a_present, tooltip_anchor_for, two_tabs_mut, upright_wheel, verified_target_of,
+    video_frame_texture_key, video_still_destination, viewport_of_rect, wheel_axis,
+    wheel_points_sideways, wheel_route, wheel_steps_text_size, window_ime_cursor_area,
+    window_is_exposed, window_is_hidden, window_minimum_changed, window_taskbar_progress,
+    zoom_about,
 };
 use update_job::most_recently_active_window;
 // **The attention ledger lives in `bt-workbench`** (D-57, `docs/ARCHITECTURE.md` §12.1). This line
@@ -61469,7 +61471,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 30] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 31] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -61516,6 +61518,9 @@ mod platform_gate_tests {
         "profiles_app_tests.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
+        // A test re-export gated as its only test caller is: a share handed over, which
+        // only Windows names by its own spelling (`tests.rs`).
+        "runtime/mod.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
         // Windows-only test fixtures: real Windows PowerShell 5.1 panes running Folio's
