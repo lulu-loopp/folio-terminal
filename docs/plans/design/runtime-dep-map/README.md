@@ -301,6 +301,13 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    its own, which puts `runtime/mod.rs` on `FILES_THAT_MAY_NAME_A_PLATFORM`. The review checks the platform of
    every re-export's callers.
 
+   **A moved reader's imports are counted by needle** (ruled 2026-10-27, in K2 batch 23).
+   `POINTER-DEBT.tsv`'s rows carry the needle each occurrence matched. `check-pointer-debt.ps1` accepts an
+   `(outside any item)` row in the module a reader moved into once per needle that the moved owner rows at that
+   module and door read, and refuses a needle none of them reads. Before this ruling the cap was the count of
+   moved owners (ruling Q1 (b)), which refused batch 23's `runtime/settings.rs`: two moved owners there read three
+   button and wheel types, so the file has three imports and no new reader.
+
    **Held items** (each row's generated `called_from` home is not where it goes):
    - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).
    - `files_float_content_height` (tied `runtime/dpi.rs` / `runtime/floats.rs`) — the owner column

@@ -1164,6 +1164,19 @@ does the embedded-spaces list (its rows name no item). When red,
 move the read to the entry and hand the answer down as a parameter or an
 installed answer; the grammar is not widened to quiet a refusal.
 
+**The pointer debt's import rows** (`scripts/ci/check-pointer-debt.ps1`): its rows
+carry a last column, `needle`, the needle each occurrence matched, written by the
+query (`pointer_app_tests::the_six_doors`); a reader moved into a module brings its imports,
+and an `(outside any item)` row the base does not have is
+accepted for a module and door only for a needle that an owner row moved into
+that module with that door reads, once per needle. A second import row of a
+needle, an import of a needle no moved owner there reads (named), and an import
+row with no needle column are refused. The needles come from the moved owner
+rows, never from the import's text, and rows still compare on owner and door,
+so a base written before the column matches row for row (2026-10-27, ruled in
+K2 batch 23, replacing the count of moved owners: two moved owners that read
+three button and wheel types bring three imports and no new reader).
+
 ## Runtime voice
 
 The rule: a `Runtime` method says its `diagnostics.log` line through the window it

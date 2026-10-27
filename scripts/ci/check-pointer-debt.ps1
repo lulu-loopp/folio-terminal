@@ -16,7 +16,7 @@
 # because the list holds one row per occurrence, an owner reading one thing fewer
 # is a row deleted, which passes. The commented header is not compared.
 #
-# A row is `owner`, `door` and `module`, the module the owner is written in;
+# A row is `owner`, `door`, `module` (the module the owner is written in) and `needle`;
 # rows compare on `owner` and `door`. **A moved row is not added**
 # (T-MOVED-NOT-ADDED-RULE, `moved-rows.ps1`): a row the base does not have whose
 # owner, with its module taken off, and door are a gone base row's, at another
@@ -27,10 +27,20 @@
 # moved, held to the base row count, as check-dead-code's U-44 rule does: the
 # check reads the list, not the tree.) A reader moved into a module brings its
 # imports: an `(outside any item)` row the base does not have is accepted for a
-# module and door only up to the number of owners moved into that module with
-# that door in the same diff (ruling Q1 (b)), and refused beyond it. A base row
-# with no `module` (the list before the column) is never paired: it only
-# matches whole, or is removed. There is no rename arm here: a row has no reason
+# module and door only for a needle that an owner moved into that module with
+# that door in the same diff reads, and once per needle (ruled in K2 batch 23,
+# 2026-10-27, replacing ruling Q1 (b)'s count of owners: an import names a
+# needle, and two moved owners reading three button and wheel types bring three
+# imports and no new reader). Every row's last column, `needle`, is the needle
+# its occurrence matched, written by the query; the moved owner rows say which
+# needles moved in, never the import's own text. So, per module and door: an
+# import row whose needle a moved owner row there reads is accepted, a second
+# import row of that needle is refused, an import row of a needle no moved owner
+# there reads is refused naming the needle, and an import row with no needle
+# column is refused. Rows compare on `owner` and `door` alone, so a base written
+# before the `needle` column matches row for row. A base row with no `module`
+# (the list before that column) is never paired: it only matches whole, or is
+# removed. There is no rename arm here: a row has no reason
 # of its own to carry the dated reason a rename needs, so a renamed owner is an
 # added row, as before.
 #
@@ -65,7 +75,8 @@ if (-not (Test-Path -LiteralPath $list)) {
 $outside = " (outside any item)"
 
 # A row is a data line: not blank, not a comment, not the column header. Its key is `owner` and
-# `door`; `module` is $null in a list written before the column.
+# `door`; `module` is $null in a list written before that column, and `needle` in one written
+# before the needle column.
 function Read-DebtRows([string[]]$lines) {
     $rows = @()
     $header = $false
@@ -73,10 +84,11 @@ function Read-DebtRows([string[]]$lines) {
         if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
         if (-not $header) { $header = $true; continue }
         $columns = $line.Split("`t")
-        if ($columns.Count -lt 2 -or $columns.Count -gt 3) { throw "$relative has a row that is not owner, door and module: $line" }
+        if ($columns.Count -lt 2 -or $columns.Count -gt 4) { throw "$relative has a row that is not owner, door, module and needle: $line" }
         $module = $null
         $tail = $null
-        if ($columns.Count -eq 3) {
+        $needle = if ($columns.Count -eq 4) { $columns[3] } else { $null }
+        if ($columns.Count -ge 3) {
             $module = $columns[2]
             if ($columns[0] -ceq "$module$outside") {
                 $tail = $null
@@ -91,6 +103,7 @@ function Read-DebtRows([string[]]$lines) {
             Door    = $columns[1]
             Module  = $module
             Tail    = $tail
+            Needle  = $needle
             Outside = $columns[0].EndsWith($outside, [StringComparison]::Ordinal)
         }
     }
@@ -158,8 +171,8 @@ $leftover = @(foreach ($rows in $allowed.Values) { foreach ($row in $rows) { Get
 
 $added = @()
 $moves = 0
-# Per module and door: the owners moved in, and the import rows accepted for them.
-$movedOwners = [Collections.Generic.Dictionary[string, Collections.Generic.HashSet[string]]]::new([StringComparer]::Ordinal)
+# Per module and door: the needles the owners moved in read, and the import rows accepted for them.
+$movedNeedles = [Collections.Generic.Dictionary[string, Collections.Generic.HashSet[string]]]::new([StringComparer]::Ordinal)
 $results = Find-MovedRows -Unmatched @($unmatched | Where-Object { -not $_.Outside } | ForEach-Object { Get-MoveRow $_ }) `
     -Leftover $leftover -Tree @($now | ForEach-Object { Get-MoveRow $_ }) -Base @($before | ForEach-Object { Get-MoveRow $_ })
 foreach ($result in $results) {
@@ -168,8 +181,8 @@ foreach ($result in $results) {
         $moves += 1
         Write-Host "moved     $($row.Key -replace "`t", ' | ') (from $($result.Was))"
         $place = "$($row.Module)`t$($row.Door)"
-        if (-not $movedOwners.ContainsKey($place)) { $movedOwners[$place] = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
-        [void]$movedOwners[$place].Add($row.Tail)
+        if (-not $movedNeedles.ContainsKey($place)) { $movedNeedles[$place] = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
+        if ($null -ne $row.Needle) { [void]$movedNeedles[$place].Add($row.Needle) }
     } elseif ($result.Verdict -eq "added") {
         $added += $row.Key
     } else {
@@ -177,19 +190,21 @@ foreach ($result in $results) {
     }
 }
 $imports = 0
-$spent = [Collections.Generic.Dictionary[string, int]]::new([StringComparer]::Ordinal)
+$spent = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($row in @($unmatched | Where-Object { $_.Outside })) {
     $place = "$($row.Module)`t$($row.Door)"
-    $owed = if ($null -ne $row.Module -and $movedOwners.ContainsKey($place)) { $movedOwners[$place].Count } else { 0 }
-    $used = if ($spent.ContainsKey($place)) { $spent[$place] } else { 0 }
-    if ($used -lt $owed) {
-        $spent[$place] = $used + 1
-        $imports += 1
-        Write-Host "import    $($row.Key -replace "`t", ' | ') (for a reader moved into $($row.Module))"
-    } elseif ($owed -gt 0) {
-        $added += "$($row.Key): more import rows for $($row.Module) and $($row.Door) than the $owed owner(s) moved into it with that door"
-    } else {
+    if ($null -eq $row.Module -or -not $movedNeedles.ContainsKey($place)) {
         $added += $row.Key
+    } elseif ($null -eq $row.Needle) {
+        $added += "$($row.Key): an import row names its needle (the list's needle column), and this one names none"
+    } elseif (-not $movedNeedles[$place].Contains($row.Needle)) {
+        $read = (@($movedNeedles[$place]) | Sort-Object) -join ", "
+        $added += "$($row.Key): it imports $($row.Needle), which no owner moved into $($row.Module) with $($row.Door) reads (they read: $read)"
+    } elseif (-not $spent.Add("$place`t$($row.Needle)")) {
+        $added += "$($row.Key): a second import row of $($row.Needle) for $($row.Module) and $($row.Door): one import row per needle a moved owner reads"
+    } else {
+        $imports += 1
+        Write-Host "import    $($row.Key -replace "`t", ' | ') | $($row.Needle) (for a reader moved into $($row.Module))"
     }
 }
 

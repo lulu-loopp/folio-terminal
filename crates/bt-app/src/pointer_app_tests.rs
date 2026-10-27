@@ -628,48 +628,62 @@ fn the_pointer_guard_exemption_ends_at_the_module_boundary() {
 /// `bt_source` needles: the pointer fields (N-P), the position type (N-E), the
 /// button and wheel types (N-B), the system cursor reads (N-S), the pointer
 /// kinds of a window event (N-W) and the translated-touch road (N-T).
-fn the_six_doors() -> Vec<(&'static str, Pattern)> {
+///
+/// Each needle is its spelling: a path when it has a `::`, an identifier
+/// otherwise ([`door_pattern`]). The spelling is the list's `needle` column, so
+/// `check-pointer-debt.ps1` can tell which needle an import row brings in and
+/// which needles the owners moved beside it read (ruled in K2 batch 23,
+/// 2026-10-27).
+fn the_six_doors() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("N-P", Pattern::identifier("pointer_position")),
-        ("N-P", Pattern::identifier("pointer_last_seen")),
-        ("N-E", Pattern::identifier("PhysicalPosition")),
-        ("N-B", Pattern::identifier("MouseButton")),
-        ("N-B", Pattern::identifier("ElementState")),
-        ("N-B", Pattern::identifier("MouseScrollDelta")),
-        ("N-S", Pattern::path("bt_platform::pointer_position")),
-        (
-            "N-S",
-            Pattern::path("bt_platform::pointer_position_in_window"),
-        ),
+        ("N-P", "pointer_position"),
+        ("N-P", "pointer_last_seen"),
+        ("N-E", "PhysicalPosition"),
+        ("N-B", "MouseButton"),
+        ("N-B", "ElementState"),
+        ("N-B", "MouseScrollDelta"),
+        ("N-S", "bt_platform::pointer_position"),
+        ("N-S", "bt_platform::pointer_position_in_window"),
         // The window's own door onto the system cursor (`WindowHost::pointer_in_window`),
         // declared and implemented in the seam, which is exempt for it: every call is a read.
-        ("N-S", Pattern::identifier("pointer_in_window")),
-        ("N-W", Pattern::path("WindowEvent::CursorMoved")),
-        ("N-W", Pattern::path("WindowEvent::CursorLeft")),
-        ("N-W", Pattern::path("WindowEvent::CursorEntered")),
-        ("N-W", Pattern::path("WindowEvent::MouseInput")),
-        ("N-W", Pattern::path("WindowEvent::MouseWheel")),
-        ("N-T", Pattern::identifier("PanStep")),
-        (
-            "N-T",
-            Pattern::path("bt_platform::let_the_system_translate_touch"),
-        ),
+        ("N-S", "pointer_in_window"),
+        ("N-W", "WindowEvent::CursorMoved"),
+        ("N-W", "WindowEvent::CursorLeft"),
+        ("N-W", "WindowEvent::CursorEntered"),
+        ("N-W", "WindowEvent::MouseInput"),
+        ("N-W", "WindowEvent::MouseWheel"),
+        ("N-T", "PanStep"),
+        ("N-T", "bt_platform::let_the_system_translate_touch"),
     ]
 }
 
+/// The `bt_source` pattern a door's needle is searched by: a path when the
+/// spelling has a `::`, an identifier otherwise.
+fn door_pattern(needle: &'static str) -> Pattern {
+    if needle.contains("::") {
+        Pattern::path(needle)
+    } else {
+        Pattern::identifier(needle)
+    }
+}
+
 /// **Every occurrence of a door's needle outside [`POINTER_MODULE`]**, one row
-/// each: `owner<TAB>door<TAB>module`, the owner the item the occurrence stands
+/// each: `owner<TAB>door<TAB>module<TAB>needle`, the owner the item the occurrence stands
 /// in — or, for an occurrence in no item (an import, an alias), the module it
 /// is written in — and the module the owner is written in, sorted. No file and
 /// no line; the module is its own column so that `check-pointer-debt.ps1` reads
 /// a row moved to another module as that row moved, not as one added
-/// (T-MOVED-NOT-ADDED-RULE).
+/// (T-MOVED-NOT-ADDED-RULE). The last column is the needle the occurrence
+/// matched, so an import row says which read it serves (ruled in K2 batch 23).
 fn pointer_reads_outside_the_module() -> Vec<String> {
     let index = source();
     let mut rows = Vec::new();
-    for (door, pattern) in the_six_doors() {
+    for (door, needle_text) in the_six_doors() {
         let found = index
-            .search(&Search::new(needle!(pattern), View::Identifiers))
+            .search(&Search::new(
+                needle!(door_pattern(needle_text)),
+                View::Identifiers,
+            ))
             .unwrap_or_else(|failure| panic!("{failure}"))
             .in_the_product(index);
         for (owner, count) in found.owners(index) {
@@ -679,7 +693,7 @@ fn pointer_reads_outside_the_module() -> Vec<String> {
                 continue;
             }
             rows.extend(std::iter::repeat_n(
-                format!("{owner}\t{door}\t{}", owner.module_path),
+                format!("{owner}\t{door}\t{}\t{needle_text}", owner.module_path),
                 count,
             ));
         }
@@ -697,7 +711,7 @@ fn pointer_reads_outside_the_module() -> Vec<String> {
             for owner in file.owners() {
                 if !is_pointer_module(&owner.module_path) {
                     rows.push(format!(
-                        "{0} (outside any item)\t{door}\t{0}",
+                        "{0} (outside any item)\t{door}\t{0}\t{needle_text}",
                         owner.module_path
                     ));
                 }
@@ -716,7 +730,9 @@ const DEBT_HEADER: &str = "\
 # `every_pointer_read_is_the_routers_or_a_captures`; do not edit by hand. A reader moved behind the
 # router leaves this file in the same commit; nothing adds a row (scripts/ci/check-pointer-debt.ps1).
 # `module` is the module the owner is written in: a row moved to another module is that row moved.
-owner\tdoor\tmodule
+# `needle` is the needle the occurrence matched: an import row is accepted only for a needle a moved
+# owner reads (ruled in K2 batch 23, 2026-10-27).
+owner\tdoor\tmodule\tneedle
 ";
 
 fn rendered_debt() -> String {
