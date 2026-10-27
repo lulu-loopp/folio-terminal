@@ -251,8 +251,8 @@ impl SystemBoxes for ToldBoxes {
 /// box's synchronous fallback wrote (the name, the notice), handed to the run's `stderr` road
 /// as one entry.
 ///
-/// MUTATION: raise the box whatever the answer (today's `SystemBox::say`, which called the box
-/// unconditionally) — a box is raised and no line is handed over.
+/// MUTATION: the unseen arm drops the line (`None => {}`) — no line is handed over. (Raising
+/// the box on `None` cannot be written: there is no `Seen` value to raise it with.)
 #[test]
 fn a_stop_notice_no_box_would_show_is_a_queued_stderr_line() {
     let notice = i18n::stopped_changes_lost(&[persist::SETTINGS_FILE_NAME]);
