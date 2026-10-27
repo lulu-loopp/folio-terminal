@@ -789,6 +789,17 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
     | `attention` | 22 | none: 14 write sites in 7 items |
 
     Files opened: `main.rs` and `runtime/attention.rs`.
+  - **Done** 2026-10-27 (O-4a, M5 `532293578` and M7 `b0728e128`): M5's seven launch
+    facts (the six above and `program_kind`) are `LaunchFacts`', nested as
+    `LeafSession.launch` and declared in the census (ten structs), with their rows
+    re-keyed and their one writer each unchanged. M7's ledger, bell edge, clock and
+    capability are `LeafSession.attention: AttentionAccount`, one fact whose
+    writers are the seven items its four parts had (`attention_ended` stays on
+    the leaf); `attention_clock`'s pair and `bell_reported`'s row leave
+    `doors.tsv` with their facts. Typing `attention_ledger_deadline`'s closure
+    removes the `?.attention_clock` unknown and its unfollowed `deadline` edge.
+    `LeafSession` goes from 37 to 28 fields; the unattributed-read header stays
+    at 182. M6 is O-4b.
 - **O-5 (M8).** What remains goes into `ShellSession`: `session` (177 sites),
   `pty` (20), `grid` (17), `conpty_grid` (10), the revisions, the owed input, `wake`
   and `incarnation`.
