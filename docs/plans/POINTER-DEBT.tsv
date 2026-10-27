@@ -25,7 +25,6 @@ crate::ForeignDrag::pointer	N-E	crate	PhysicalPosition
 crate::PeekCandidate::pointer	N-E	crate	PhysicalPosition
 crate::PeekHover::observe	N-E	crate	PhysicalPosition
 crate::PeekThumbnail::overlay	N-E	crate	PhysicalPosition
-crate::Runtime::drag_settings_menu_bar	N-E	crate	PhysicalPosition
 crate::TabPress::armed	N-E	crate	PhysicalPosition
 crate::TabPress::settled	N-E	crate	PhysicalPosition
 crate::TabPress::travelled	N-E	crate	PhysicalPosition
@@ -470,6 +469,7 @@ crate::runtime::settings (outside any item)	N-B	crate::runtime::settings	MouseBu
 crate::runtime::settings (outside any item)	N-B	crate::runtime::settings	MouseScrollDelta
 crate::runtime::settings (outside any item)	N-E	crate::runtime::settings	PhysicalPosition
 crate::runtime::settings::<Runtime as settings::geometry::PointerHost>::settings_drag	N-E	crate::runtime::settings	PhysicalPosition
+crate::runtime::settings::Runtime::drag_settings_menu_bar	N-E	crate::runtime::settings	PhysicalPosition
 crate::runtime::settings::Runtime::scroll_settings	N-B	crate::runtime::settings	MouseScrollDelta
 crate::runtime::settings::Runtime::scroll_settings	N-P	crate::runtime::settings	pointer_position
 crate::runtime::settings::Runtime::scroll_settings	N-P	crate::runtime::settings	pointer_position

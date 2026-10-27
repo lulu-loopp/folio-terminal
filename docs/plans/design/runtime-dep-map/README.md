@@ -64,9 +64,10 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **285 items, 241 free functions and 44 `Runtime`
-  methods**, still in `main.rs` (at plan row 59's head: K2 batch 23's 284 and row
-  66's `say_in_a_box_or_on_stderr`; 329, 242 and 87 before batch 23,
+- **unclassified.tsv**: **276 items, 241 free functions and 35 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 24's head; 285, 241 and 44 before it,
+  at plan row 59's head: K2 batch 23's 284 and row 66's `say_in_a_box_or_on_stderr`;
+  329, 242 and 87 before batch 23,
   368, 274 and 94 before batch 22,
   419, 303 and 116 before batch 21,
   459, 341 and 118 before batch 20,
