@@ -265,6 +265,13 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    the prefix the same way (ruled at batch 17, where `runtime/pointer/release.rs` called
    `crate::button_router_position(`).
 
+   **A test re-export whose test callers are all platform-gated carries the same cfg** (ruled 2026-10-26, after
+   batch 21's chain failed on macOS: `unverified_reference_handoff`'s only test caller, in `tests.rs`, is
+   `#[cfg(windows)]`, and the ungated re-export was an unused import there). Both sides carry it: the
+   `runtime/mod.rs` re-export and the root's `use runtime::…` line, each `#[cfg(all(test, windows))]` on a line of
+   its own, which puts `runtime/mod.rs` on `FILES_THAT_MAY_NAME_A_PLATFORM`. The review checks the platform of
+   every re-export's callers.
+
    **Held items** (each row's generated `called_from` home is not where it goes):
    - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).
    - `files_float_content_height` (tied `runtime/dpi.rs` / `runtime/floats.rs`) — the owner column
