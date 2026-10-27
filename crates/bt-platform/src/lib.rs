@@ -18951,7 +18951,10 @@ mod windows_impl {
     /// once and before the windows close, every configuration change it could
     /// keep neither in its file nor as a copy in the data directory's `recovered`
     /// folder. It is the same situation: there is no window to put a card on, and
-    /// the box needs no file, no data directory and no renderer of Folio's.
+    /// the box needs no file, no data directory and no renderer of Folio's. That
+    /// stop reaches this box through [`SeenBox::say`], after asking
+    /// [`a_box_would_be_seen`] (T-STOP-NOTICE-BOX-QUERY-MACOS), which here is
+    /// always yes.
     ///
     /// `HWND::default()` is the ownerless box: the process has no window to be
     /// modal to, which is the whole situation. `MB_SETFOREGROUND` because the
@@ -18996,6 +18999,27 @@ mod windows_impl {
     /// is the one that differs (`macos_dialogs::standalone_alert`).
     pub fn standalone_alert(title: &str, text: &str) {
         message_box(title, text);
+    }
+
+    /// **The box a reader would see** (T-STOP-NOTICE-BOX-QUERY-MACOS) — on this platform
+    /// always, so it carries nothing: [`message_box`] is the ownerless `MB_SETFOREGROUND` box,
+    /// shown on the interactive desktop, and it never writes `stderr`.
+    pub struct SeenBox(());
+
+    impl SeenBox {
+        /// Raise the box: [`message_box`], which has no fallback on this platform.
+        pub fn say(self, title: &str, text: &str) {
+            message_box(title, text);
+        }
+    }
+
+    /// **Would a box raised now be seen?** Yes, with no question asked of the system: a
+    /// resident Folio with windows is on the interactive desktop, where the ownerless
+    /// foreground box is shown, and the stop nobody will read (the system's end of the session)
+    /// does not ask — it says through `diagnostics.log` alone.
+    #[must_use]
+    pub fn a_box_would_be_seen() -> Option<SeenBox> {
+        Some(SeenBox(()))
     }
 }
 
@@ -19214,26 +19238,27 @@ pub enum SystemNews {
 #[cfg(windows)]
 pub use windows_impl::{
     Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
-    ImeSystemCaret, MathContextMenu, Notifier, SaveFilePicker, SystemSettingsWatch, Taskbar,
-    active_keyboard_layout, adopt_parent_console, announce_explorer_menu_change, apartments_left,
-    cancel_composition, cjk_font_families, client_area_animation_enabled, clipboard_text,
-    cloaked_from_attribute, current_thread_priority, current_user_registry_string,
-    current_user_registry_subkeys, detach_console, directory_folds_case, documents_directory,
-    dpi_at, exposed_from_probe, exposure_probe_points, file_product_version, flash_window,
-    get_dpi_for_window, get_window_rect, get_work_area, hide_every_window_of_this_process,
-    install_console_ctrl_handler, install_context_menu, install_window_class_background,
-    is_window_cloaked, is_window_minimized, keyboard_layout_shift_table, keyboard_layouts,
-    leave_process, let_the_system_translate_touch, message_box, monitor_id_at,
-    monospace_family_named, monospace_font_families, os_ui_language, pointer_position,
-    pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
-    register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
-    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, silence_std_streams, stand_window_at, standalone_alert,
-    std_error_is_console, stop_flashing_window, system_backdrop_available, system_uses_light_apps,
-    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
-    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_key_is_dead,
-    virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount, window_is_exposed,
-    work_area_at, write_std_error, write_to_console,
+    ImeSystemCaret, MathContextMenu, Notifier, SaveFilePicker, SeenBox, SystemSettingsWatch,
+    Taskbar, a_box_would_be_seen, active_keyboard_layout, adopt_parent_console,
+    announce_explorer_menu_change, apartments_left, cancel_composition, cjk_font_families,
+    client_area_animation_enabled, clipboard_text, cloaked_from_attribute, current_thread_priority,
+    current_user_registry_string, current_user_registry_subkeys, detach_console,
+    directory_folds_case, documents_directory, dpi_at, exposed_from_probe, exposure_probe_points,
+    file_product_version, flash_window, get_dpi_for_window, get_window_rect, get_work_area,
+    hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
+    install_window_class_background, is_window_cloaked, is_window_minimized,
+    keyboard_layout_shift_table, keyboard_layouts, leave_process, let_the_system_translate_touch,
+    message_box, monitor_id_at, monospace_family_named, monospace_font_families, os_ui_language,
+    pointer_position, pointer_position_in_window, read_context_menu, recycle,
+    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
+    request_window_close, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
+    set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
+    stand_window_at, standalone_alert, std_error_is_console, stop_flashing_window,
+    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
+    top_level_window_at, virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error,
+    write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -19282,7 +19307,8 @@ pub use portable_impl::Compositor;
 /// module's copy, and a second definition would be two spellings of one choice.
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable_impl::{
-    FolderPicker, ImagePicker, MathContextMenu, SaveFilePicker, message_box, standalone_alert,
+    FolderPicker, ImagePicker, MathContextMenu, SaveFilePicker, SeenBox, a_box_would_be_seen,
+    message_box, standalone_alert,
 };
 
 /// **The watch doors, on a platform whose filesystem does not speak** (M2-1).
@@ -20001,6 +20027,13 @@ pub use macos_app::{delegate_answers_the_dock_menu, winit_delegate_already_answe
 /// ticket was raised for.
 #[cfg(target_os = "macos")]
 pub use macos_app::delegate_answers_the_edit_menus_clipboard_rows;
+
+/// **Would a box raised now be seen, and the box to raise when it would**
+/// (T-STOP-NOTICE-BOX-QUERY-MACOS, 0.4.9 plan row 66) — one name on every arm: macOS asks
+/// `message_box`'s three questions (`macos_app`), Windows answers yes (`windows_impl`: the
+/// ownerless foreground box is shown), the portable arm answers no (`portable_impl`).
+#[cfg(target_os = "macos")]
+pub use macos_app::{SeenBox, a_box_would_be_seen};
 
 /// **The Services provider object — Finder's *Services ▸ Open in Folio***
 /// (M4-9).
@@ -21668,7 +21701,7 @@ mod macos_dialog_backend_tests {
             "the one place a panel is shown shows it as a sheet:\n{putting_up}"
         );
         let alert = source_test::body(
-            &ItemQuery::function("message_box").in_module("crate::macos_dialogs"),
+            &ItemQuery::function("raise_alert").in_module("crate::macos_dialogs"),
         );
         assert!(
             alert.contains("alert.runModal();"),
@@ -21757,7 +21790,9 @@ mod macos_dialog_backend_tests {
         let body = source_test::body(
             &ItemQuery::function("message_box").in_module("crate::macos_dialogs"),
         );
-        let runs_at = body.find("alert.runModal();").expect("it raises the alert");
+        let runs_at = body
+            .find("raise_alert(mtm, title, text);")
+            .expect("it raises the alert");
         for guard in ["MainThreadMarker::new()", "NSApp }.is_null()"] {
             let at = body
                 .find(guard)
@@ -21804,7 +21839,9 @@ mod macos_dialog_backend_tests {
         let asks = body
             .find("if !an_alert_would_be_seen(mtm) {")
             .expect("the third question is asked");
-        let runs_at = body.find("alert.runModal();").expect("it raises the alert");
+        let runs_at = body
+            .find("raise_alert(mtm, title, text);")
+            .expect("it raises the alert");
         assert!(
             asks < runs_at,
             "the question is asked after the modal is already running:\n{body}"

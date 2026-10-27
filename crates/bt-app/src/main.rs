@@ -15529,14 +15529,54 @@ trait NativeSay {
     fn say(&mut self, text: &str);
 }
 
-/// The operating system's own message box ([`bt_platform::message_box`]): on a
+/// The operating system's own message box ([`bt_platform::SeenBox`]): on a
 /// stop the windows are being taken down and the renderer may be what failed, so,
 /// as before the first window, there is no window to put a card on.
 struct SystemBox;
 
 impl NativeSay for SystemBox {
     fn say(&mut self, text: &str) {
-        bt_platform::message_box(APP_NAME, text);
+        say_in_a_box_or_on_stderr(self, text);
+    }
+}
+
+/// **What a stop's notice asks of the system's box** (T-STOP-NOTICE-BOX-QUERY-MACOS, 0.4.9 plan
+/// row 66): whether a box raised now would be seen, the box when it would, and the run's
+/// `stderr` road when it would not — so a test can be the platform.
+trait SystemBoxes {
+    /// The box a reader would see, as the platform answers it.
+    type Seen;
+    fn would_be_seen(&mut self) -> Option<Self::Seen>;
+    fn raise(&mut self, seen: Self::Seen, text: &str);
+    fn line(&mut self, text: String);
+}
+
+impl SystemBoxes for SystemBox {
+    type Seen = bt_platform::SeenBox;
+
+    fn would_be_seen(&mut self) -> Option<bt_platform::SeenBox> {
+        bt_platform::a_box_would_be_seen()
+    }
+
+    fn raise(&mut self, seen: bt_platform::SeenBox, text: &str) {
+        seen.say(APP_NAME, text);
+    }
+
+    fn line(&mut self, text: String) {
+        diagnostics::stderr_line(text);
+    }
+}
+
+/// **Say a stop's notice in a box only when a box would be seen; otherwise on the run's
+/// `stderr` road** (T-STOP-NOTICE-BOX-QUERY-MACOS). The question comes first: on macOS a box
+/// nobody would see falls back to two lines written synchronously on the window thread into
+/// `diagnostics.log`, beside the writer's queue. Asked first, the unseen notice is the same two
+/// lines — the name and the text — as one queued [`diagnostics::stderr_line`], in order with
+/// every other line and inside the way out's fence.
+fn say_in_a_box_or_on_stderr(boxes: &mut impl SystemBoxes, text: &str) {
+    match boxes.would_be_seen() {
+        Some(seen) => boxes.raise(seen, text),
+        None => boxes.line(format!("{APP_NAME}\n{text}")),
     }
 }
 

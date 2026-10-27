@@ -576,6 +576,44 @@ pub fn delegate_answers_the_four_selectors() -> bool {
     })
 }
 
+/// **A box a reader would see, ready to be raised** — what [`a_box_would_be_seen`] answers
+/// when its three questions are yes (T-STOP-NOTICE-BOX-QUERY-MACOS). It holds the main thread's
+/// marker the answer was read with, so [`SeenBox::say`] needs no question of its own.
+pub struct SeenBox(MainThreadMarker);
+
+impl SeenBox {
+    /// Raise the box: `crate::macos_dialogs`'s alert, with no fallback — the answer that made
+    /// this value is the reader.
+    pub fn say(self, title: &str, text: &str) {
+        crate::macos_dialogs::raise_alert(self.0, title, text);
+    }
+}
+
+/// **Would a box raised now be seen?** — `message_box`'s three questions asked without saying
+/// anything (T-STOP-NOTICE-BOX-QUERY-MACOS, 0.4.9 plan row 66): on the main thread, with an
+/// application, and that application frontmost or showing a window
+/// (`crate::macos_dialogs::an_alert_would_be_seen`, the one spelling of the rule). Reads only:
+/// the thread, AppKit's `NSApp` global and three getters, so a window-thread caller asks it
+/// with no effect. A controlled stop asks it before it says a lost configuration change, so the
+/// unseen case goes through `bt-app`'s queued `stderr` road instead of the box's synchronous
+/// fallback.
+#[must_use]
+pub fn a_box_would_be_seen() -> Option<SeenBox> {
+    // The first two questions are spelled here AND in `macos_dialogs::message_box`, on purpose:
+    // the native-labels guard's UNREAD row for the `NSApp` read is keyed to `message_box`.
+    let mtm = MainThreadMarker::new()?;
+    // SAFETY: AppKit's own global, read on the main thread — which is the only thread that
+    // writes it — as a pointer and nothing more.
+    if unsafe { crate::macos_dialogs::NSApp }.is_null() {
+        return None;
+    }
+    if crate::macos_dialogs::an_alert_would_be_seen(mtm) {
+        Some(SeenBox(mtm))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bt_source::ItemQuery;

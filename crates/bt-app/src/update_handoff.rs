@@ -1017,7 +1017,9 @@ mod tests {
             );
         }
         // **Every caller of the application's box, each with why it may raise one** — the box
-        // is the product's one modal, allowed only where there is no window to put a card on.
+        // is the product's one modal, allowed only where there is no window to put a card on. A
+        // controlled stop's lost-change notice is not here: it asks `a_box_would_be_seen` first
+        // and raises a `SeenBox` (T-STOP-NOTICE-BOX-QUERY-MACOS).
         let allowed = [
             (
                 "crate::announce_panic",
@@ -1026,12 +1028,6 @@ mod tests {
             (
                 "crate::say_at_the_front_door",
                 "a launch that is about to exit and has no console to write to",
-            ),
-            (
-                "crate::SystemBox::say",
-                "a controlled stop, before its windows close, saying the configuration changes \
-                 it could keep neither in their files nor in `recovered` (T-QUIT-DOCUMENTS, \
-                 design note 2026-10-11 revision (d)3)",
             ),
         ];
         let mut every_box: Vec<String> = search(needle!("bt_platform::message_box("))
