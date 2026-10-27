@@ -729,6 +729,19 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
     `runtime/search.rs`, `runtime/tooltips.rs`, `runtime/clipboard.rs`,
     `runtime/math.rs`, `runtime/preview.rs`, `runtime/peek.rs`, `ime_outbound.rs`.
     `projection` alone touches ten of them.
+  - **Done** 2026-10-27 (O-3, `5d07b49dd`): the four are `TermView`'s, with their rows
+    re-keyed. `LeafSession` goes from 41 to 37 fields, and `TermView` has 9. The
+    doors: `LeafSession::propose_size` (grid; the old `schedule_leaf_grid_change`)
+    with its stages `propose_cell` and `propose_layout`, the seven
+    `TermViewPorts::port_*` forwards, `LeafSession::report_keyboard_focus`, and
+    `TermView::commit_presented`, now `last_presented_frame`'s and
+    `presented_metrics`' one writer (a method of the field's own type, so it is
+    not a `doors.tsv` row). `projection` keeps its 13 writers in 5 modules. The
+    nest adds `LeafSession.view` rows where a moved field is reached, two of them
+    access rows (the nested patterns of `insert_path_into_terminal` and
+    `send_paste`), and takes the unattributed-read header from 180 to 182.
+    `card_skip`'s door, sent here by O-2, was not built: it was not in O-3's
+    judgement, and the ruling makes `commit_presented` the one `TermView` method.
 - **O-4 (M5–M7).**
   - **M5, the launch facts.** Six fields, opening mostly `main.rs`, plus
     `runtime/{panes,tabs,clipboard,terminal,floats,mouse,peek,profiles,dpi}.rs` for
