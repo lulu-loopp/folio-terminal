@@ -9381,7 +9381,7 @@ mod windows_impl {
         os::windows::ffi::{OsStrExt, OsStringExt},
         path::{Path, PathBuf},
         sync::{
-            Arc, Mutex, OnceLock,
+            Arc, Mutex, OnceLock, PoisonError,
             atomic::{AtomicBool, AtomicI32, Ordering},
         },
     };
@@ -9401,8 +9401,8 @@ mod windows_impl {
     use windows::Win32::{
         Foundation::{
             COLORREF, CloseHandle, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, GENERIC_WRITE,
-            GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT,
-            RPC_E_CHANGED_MODE, SetLastError, WAIT_EVENT, WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
+            GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT,
+            POINT, RECT, RPC_E_CHANGED_MODE, SetLastError, WIN32_ERROR, WPARAM,
         },
         Globalization::{GetUserDefaultUILanguage, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME},
         Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
@@ -9456,7 +9456,10 @@ mod windows_impl {
                 CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
                 OpenClipboard, SetClipboardData,
             },
-            IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
+            IO::{
+                CancelIoEx, CreateIoCompletionPort, GetOverlappedResult, GetQueuedCompletionStatus,
+                OVERLAPPED, PostQueuedCompletionStatus,
+            },
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
             // Explorer's context menu is a handful of `REG_SZ` values under
             // `HKEY_CURRENT_USER`, and nothing else — see
@@ -9467,9 +9470,8 @@ mod windows_impl {
                 RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
             },
             Threading::{
-                CreateEventW, GetCurrentThread, GetThreadPriority, INFINITE, ResetEvent, SetEvent,
-                SetThreadPriority, THREAD_PRIORITY, THREAD_PRIORITY_ABOVE_NORMAL,
-                THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL, WaitForMultipleObjects,
+                GetCurrentThread, GetThreadPriority, INFINITE, SetThreadPriority, THREAD_PRIORITY,
+                THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL,
             },
         },
         UI::{
@@ -17558,40 +17560,36 @@ mod windows_impl {
     /// name must treat it as a match, because a filter that dropped it would
     /// drop exactly the burst that overflowed.
     ///
-    /// **Dropping it cancels.** The watcher thread waits on the directory's
-    /// completion and on a stop event at once, so `drop` is a `SetEvent` and a
-    /// join rather than a flag the thread notices on its next notification —
-    /// which for a directory nothing is writing to would be never.
+    /// **Retiring it cancels.** Its directory is one member of a [`DirWatchSet`]
+    /// — the set it was started on, or for the four `DirWatch::start*` doors a
+    /// set of one that it owns — and the set's one watcher thread waits on the
+    /// set's I/O completion port, which carries every member's completion and
+    /// every request the owners post. So retiring is a request posted to the
+    /// port and a bounded wait for the thread to say the directory is gone,
+    /// rather than a flag the thread notices on its next notification — which
+    /// for a directory nothing is writing to would be never.
     ///
     /// **It can also end on its own** (T-DIRWATCH-LIFECYCLE): a read the kernel
     /// refuses after the first, or a completion that reports an error (the
     /// directory removed, the share gone, the handle closed under it), ends the
-    /// watcher thread. The error is kept in `crate::watch_end::WatchEnd`,
+    /// member. The error is kept in `crate::watch_end::WatchEnd`,
     /// [`DirWatch::is_armed`] turns false, and `wake` is called once with
-    /// [`DirChange::Ended`].
+    /// [`DirChange::Ended`]. The set's other members go on listening.
     pub struct DirWatch {
-        dir: SendHandle,
-        stop: SendHandle,
-        change: SendHandle,
-        thread: Option<std::thread::JoinHandle<()>>,
-        end: Arc<crate::watch_end::WatchEnd>,
+        /// What the watcher thread says about this member: its end, and whether
+        /// its directory is gone from the set.
+        member: Arc<WatchMember>,
+        /// The member's number on the port: the completion key of its reads and
+        /// of the removal its owner posts.
+        id: usize,
+        /// The port of the set this member belongs to, for the removal.
+        port: Arc<Port>,
+        /// The set of one the four `DirWatch::start*` doors open, owned by the
+        /// one member it carries and retired with it.
+        own: Option<DirWatchSet>,
+        /// Not yet retired through its door.
+        live: bool,
     }
-
-    /// A kernel handle on its way to the thread that will use it.
-    ///
-    /// A raw `HANDLE` is not `Send` because it is a pointer-shaped value and the
-    /// compiler cannot know what it points at. These three are process-wide
-    /// kernel objects with exactly one user apiece — the watcher thread — and
-    /// [`DirWatch::retire_within`] joins that thread before closing any of them, so there
-    /// is no moment at which two threads hold one of these and no moment at which
-    /// a closed handle is still reachable.
-    #[derive(Clone, Copy)]
-    struct SendHandle(HANDLE);
-
-    // SAFETY: see the type's own note. The handle is created on the calling
-    // thread, used only by the watcher thread, and closed by the calling thread
-    // after that thread has been joined.
-    unsafe impl Send for SendHandle {}
 
     /// 64 KiB, the largest buffer the kernel will fill for a *network* directory
     /// and a comfortable one for a local tree.
@@ -17842,56 +17840,57 @@ mod windows_impl {
         /// its first read, and stays armed until it ends on its own.
         #[must_use]
         pub fn is_armed(&self) -> bool {
-            self.end.still_armed()
+            self.member.end.still_armed()
         }
 
         /// The error that ended the watcher on its own, handed over once.
         pub fn take_failure(&mut self) -> Option<std::io::Error> {
-            self.end.take_failure()
+            self.member.end.take_failure()
         }
 
         /// **The door: stop the watch, and wait — up to `bound`, on the worker `ctx`
-        /// lends — for its thread to leave; then close its handles.** Answers whether
-        /// the thread left in time (T-DROP-DOORS, D-40): *a directory watch is
-        /// retired through its bounded door on the worker that holds it, never by
-        /// its drop.*
+        /// lends — for its directory to leave its set.** Answers whether it left in
+        /// time (T-DROP-DOORS, D-40): *a directory watch is retired through its
+        /// bounded door on the worker that holds it, never by its drop.*
         ///
-        /// The thread cancels its own read: the stop event is one of the two things
-        /// it waits on, so setting it is enough, and a `CancelIoEx` from here would
-        /// be a second thread reaching into an operation whose `OVERLAPPED` lives on
-        /// that thread's stack. The handles are closed only once it has gone — a
-        /// handle closed while the thread still held it would be a handle reused for
-        /// something else by the time it got round to using it. A thread still
-        /// inside the kernel past `bound` is let go with the three handles it holds,
-        /// which the process's end closes: never a handle closed under a reader.
+        /// The watcher thread cancels its own read: the removal is posted to the
+        /// set's port, and the thread answers it with a `CancelIoEx` on the
+        /// member's own `OVERLAPPED` and closes the directory's handle when that
+        /// read has come back — a `CancelIoEx` from here would be a second thread
+        /// reaching into an operation whose `OVERLAPPED` the watcher thread owns,
+        /// and a handle closed from here would be a handle closed under a reader.
+        /// A directory still not gone past `bound` is let go: the thread closes it
+        /// when its read comes back, and never before.
+        ///
+        /// A watch opened by one of the four `DirWatch::start*` doors owns the set
+        /// of one it was started on, and the door retires that set too — the join
+        /// of its one thread, within what is left of `bound`.
         pub fn retire_within(
             mut self,
             ctx: &crate::admission::WorkerCtx,
             bound: std::time::Duration,
         ) -> bool {
-            // SAFETY: the stop event lives until the handles are closed below, after
-            // the thread that shares it has gone.
-            unsafe {
-                let _ = SetEvent(self.stop.0);
-            }
-            let Some(thread) = self.thread.take() else {
-                return true;
-            };
+            self.live = false;
             let deadline = std::time::Instant::now() + bound;
-            while !thread.is_finished() {
+            if !self.member.is_gone() {
+                self.port.post(self.id, None);
+            }
+            while !self.member.is_gone() {
                 if std::time::Instant::now() >= deadline {
+                    if let Some(set) = self.own.take() {
+                        set.let_go();
+                    }
                     return false;
                 }
                 crate::wait::sleep_within(ctx, crate::DIR_WATCH_RETIRE_POLL);
             }
-            let _ = thread.join();
-            // SAFETY: the only other user of these handles has been joined.
-            unsafe {
-                close(self.dir.0);
-                close(self.change.0);
-                close(self.stop.0);
+            match self.own.take() {
+                Some(set) => set.retire_within(
+                    ctx,
+                    deadline.saturating_duration_since(std::time::Instant::now()),
+                ),
+                None => true,
             }
-            true
         }
 
         /// Start watching `path` and everything under it.
@@ -17928,6 +17927,10 @@ mod windows_impl {
         /// **Only a worker may start one** (`ctx`, the thread door's capability):
         /// the wait for the first read and the join on refusal happen here, and
         /// the window thread never waits (B5 design note, revision (c)3).
+        ///
+        /// This door opens a [`DirWatchSet`] of one for the watch, which the watch
+        /// owns; a caller with many directories opens one set and starts each on
+        /// it, so that they share its one thread.
         pub fn start(
             ctx: &crate::admission::WorkerCtx,
             path: &Path,
@@ -17993,279 +17996,700 @@ mod windows_impl {
             Self::start_scoped(ctx, path, WatchDepth::HereOnly, wake)
         }
 
+        /// **A set of one, owned by the watch it carries.** The directory is opened
+        /// first, so a path that cannot be watched is refused before any thread
+        /// exists; a first read that is refused retires the set it opened, so no
+        /// thread is left behind the error.
         fn start_scoped(
-            _ctx: &crate::admission::WorkerCtx,
+            ctx: &crate::admission::WorkerCtx,
             path: &Path,
             depth: WatchDepth,
             wake: impl Fn(DirChange<'_>) + Send + 'static,
         ) -> Result<Self, std::io::Error> {
-            let mut units = path.as_os_str().encode_wide().collect::<Vec<u16>>();
-            if units.contains(&0) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "watched path contains an embedded NUL",
-                ));
-            }
-            units.push(0);
-            // `FILE_LIST_DIRECTORY` is the access right `ReadDirectoryChangesW`
-            // needs, `BACKUP_SEMANTICS` is what lets `CreateFileW` open a
-            // directory at all, and `OVERLAPPED` is what lets the read be
-            // cancelled — without it the thread would block in the kernel with
-            // no way out but a change that may never come.
-            //
-            // All three shares are granted because this handle must not be the
-            // reason somebody else cannot rename or delete a file in their own
-            // working tree.
-            let dir = unsafe {
-                CreateFileW(
-                    PCWSTR(units.as_ptr()),
-                    FILE_LIST_DIRECTORY.0,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    None,
-                    OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-                    None,
-                )
-            }
-            .map_err(win32_io_error)?;
-            // Manual-reset, both of them. The stop event has to stay signalled
-            // once it is set — the thread may be anywhere between two waits when
-            // `drop` fires — and the completion event is reset by hand before
-            // each read so that a stale signal cannot be mistaken for an answer
-            // to the read that has not been issued yet.
-            let change = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
-                Ok(handle) => handle,
+            let dir = open_directory(path)?;
+            let set = match DirWatchSet::open(ctx) {
+                Ok(set) => set,
                 Err(error) => {
+                    // SAFETY: no read was ever issued on the handle.
                     unsafe { close(dir) };
-                    return Err(win32_io_error(error));
-                }
-            };
-            let stop = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
-                Ok(handle) => handle,
-                Err(error) => {
-                    unsafe { close(dir) };
-                    unsafe { close(change) };
-                    return Err(win32_io_error(error));
-                }
-            };
-            let (dir, change, stop) = (SendHandle(dir), SendHandle(change), SendHandle(stop));
-            // The word that makes `start` mean what it says. The thread sends it
-            // once, the instant its first read is outstanding — or sends the
-            // refusal instead, which is this function's error and not a thread
-            // that dies in private after the caller has been told it has a
-            // watcher.
-            let (armed, listening) = std::sync::mpsc::channel::<Result<(), std::io::Error>>();
-            let end = Arc::new(crate::watch_end::WatchEnd::default());
-            let ended = Arc::clone(&end);
-            let thread = crate::spawn_at_priority(
-                "bt-dir-watch",
-                crate::ThreadPriority::Normal,
-                move |_ctx| watch_loop(dir, change, stop, depth, armed, &ended, wake),
-            );
-            let thread = match thread {
-                Ok(thread) => thread,
-                Err(error) => {
-                    unsafe { close(dir.0) };
-                    unsafe { close(change.0) };
-                    unsafe { close(stop.0) };
                     return Err(error);
                 }
             };
-            // A `RecvError` is the thread ending without a word, which is a
-            // panic between the spawn and the read — there is no return path
-            // there that does not send. The watcher is not contained, so under the
-            // resident panic hook that panic ends the process before the channel
-            // closes: this arm is reached only where no fatal hook is installed.
-            let refused = match listening.recv() {
-                Ok(Ok(())) => {
-                    return Ok(Self {
-                        dir,
-                        stop,
-                        change,
-                        thread: Some(thread),
-                        end,
-                    });
+            match set.enlist(ctx, dir, depth, wake) {
+                Ok(mut watch) => {
+                    watch.own = Some(set);
+                    Ok(watch)
                 }
-                Ok(Err(error)) => error,
-                Err(_) => std::io::Error::other("the directory watcher ended before it listened"),
-            };
-            // Join first, close after — the same order `drop` keeps, and for the
-            // same reason: a handle closed while that thread still held it is a
-            // handle reused for something else by the time it gets to it.
-            let _ = thread.join();
-            unsafe {
-                close(dir.0);
-                close(change.0);
-                close(stop.0);
+                Err(error) => {
+                    let _ = set.retire_within(ctx, crate::DIR_WATCH_RETIRE_BUDGET);
+                    Err(error)
+                }
             }
-            Err(refused)
         }
     }
 
     impl Drop for DirWatch {
         /// Waits for nothing. After [`DirWatch::retire_within`] there is nothing left;
-        /// without it, the thread is told to stop and let go of, with the three handles
-        /// it may still be using left to the process's end — a handle closed while the
-        /// thread still held it would be a handle reused for something else by the
-        /// time it got round to using it — and the drop says so once.
+        /// without it, the directory is told to leave its set (a set of one is told to
+        /// stop) and let go of — the watcher thread closes its handle once its read has
+        /// come back, never under it — and the drop says so once.
+        fn drop(&mut self) {
+            if !self.live {
+                return;
+            }
+            match self.own.take() {
+                Some(set) => set.let_go(),
+                None => {
+                    if !self.member.is_gone() {
+                        self.port.post(self.id, None);
+                    }
+                }
+            }
+            crate::door_skipped::say(
+                "a directory watch (`DirWatch`)",
+                "its retire door",
+                "its directory was told to leave its set and let go of",
+            );
+        }
+    }
+
+    /// **Many directory watches on one thread** (T-DIR-WATCH-ONE-THREAD).
+    ///
+    /// One I/O completion port and one `bt-dir-watch` thread blocked on it.
+    /// Every member is a directory handle associated with the port under the
+    /// member's own number, with one `ReadDirectoryChangesW` outstanding, so
+    /// every member's completion arrives on the one thread — and so does every
+    /// request the owners make: an arrival ([`DirWatchSet::start`] and its three
+    /// siblings, which return already listening, exactly as `DirWatch::start`
+    /// does), a removal ([`DirWatch::retire_within`]) and the set's stop
+    /// ([`DirWatchSet::retire_within`]). The port has no limit on its members,
+    /// so there is no second thread at any count.
+    ///
+    /// Each member keeps what a `DirWatch` always had of its own: its handle,
+    /// its `OVERLAPPED`, its 64 KiB buffer, its depth, its contract and its
+    /// `wake`. An overflow, a remote directory's `ERROR_NOTIFY_ENUM_DIR`, a
+    /// rename's two records and a member's own end are read exactly as before,
+    /// member by member; one member's end is not another's.
+    ///
+    /// **Every `wake` runs on the one thread, one after another.** The contract
+    /// already asks each to filter, stamp and wake and nothing slower; a member
+    /// whose changes arrive while another's `wake` runs has them kept in its own
+    /// kernel buffer, and the worst a long wait costs it is that buffer
+    /// overflowing into [`DirChange::Unknown`] — news every caller already takes.
+    ///
+    /// **Retiring it stops every member and joins the thread.** Members still
+    /// held after that answer their own door at once: their directories went
+    /// with the set.
+    pub struct DirWatchSet {
+        port: Arc<Port>,
+        state: Arc<SetState>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    /// **The set's I/O completion port**, closed when its last holder lets go —
+    /// the set, its thread and every member that may still post its removal.
+    struct Port(HANDLE);
+
+    // SAFETY: a completion port is a process-wide kernel object, and the only
+    // calls made on it — `PostQueuedCompletionStatus` from any holder and
+    // `GetQueuedCompletionStatus` from the set's thread — are documented
+    // thread-safe. It is closed once, by the last `Arc`, when no thread can
+    // reach it any more.
+    unsafe impl Send for Port {}
+    unsafe impl Sync for Port {}
+
+    impl Port {
+        /// Post a packet: a request with no `OVERLAPPED` (`packet` absent), or
+        /// an arrival whose `Add` box rides in the `OVERLAPPED` slot.
+        fn post(&self, key: usize, packet: Option<*const OVERLAPPED>) -> bool {
+            // SAFETY: posting is sound on a live port, and `self` is one; the
+            // packet pointer is an opaque word the set's thread reads back.
+            unsafe { PostQueuedCompletionStatus(self.0, 0, key, packet) }.is_ok()
+        }
+    }
+
+    impl Drop for Port {
+        fn drop(&mut self) {
+            // SAFETY: the last holder of the port is going; nothing waits on it.
+            unsafe { close(self.0) };
+        }
+    }
+
+    /// The completion key of the set's own requests: an arrival (with its box)
+    /// or the stop (without). Members are numbered from one up.
+    const SET_KEY: usize = 0;
+
+    /// What a set's owners and its thread share.
+    struct SetState {
+        /// Whether the thread still takes arrivals. Cleared, under this lock, by
+        /// the thread as it leaves, before it drops what is still queued — so an
+        /// arrival is either refused here or answered there, and never left
+        /// waiting on a thread that has gone.
+        open: Mutex<bool>,
+        /// The next member's number.
+        next: std::sync::atomic::AtomicUsize,
+    }
+
+    /// **One member, as its owner and the watcher thread both see it.**
+    #[derive(Default)]
+    struct WatchMember {
+        /// Its end, if it came to one on its own.
+        end: crate::watch_end::WatchEnd,
+        /// Its directory has left the set: the handle is closed and no read of
+        /// it is outstanding.
+        gone: AtomicBool,
+    }
+
+    impl WatchMember {
+        fn is_gone(&self) -> bool {
+            self.gone.load(Ordering::Acquire)
+        }
+    }
+
+    impl DirWatchSet {
+        /// **Open a set: its port, and its one `bt-dir-watch` thread**, which waits
+        /// on the port and nothing else. Members are started on it afterwards.
+        ///
+        /// **Only a worker may open one** (`ctx`), as only a worker may start a
+        /// watch.
+        pub fn open(_ctx: &crate::admission::WorkerCtx) -> Result<Self, std::io::Error> {
+            // SAFETY: a new port, associated with no file.
+            let port = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, None, 0, 1) }
+                .map_err(win32_io_error)?;
+            let port = Arc::new(Port(port));
+            let state = Arc::new(SetState {
+                open: Mutex::new(true),
+                next: std::sync::atomic::AtomicUsize::new(SET_KEY + 1),
+            });
+            let (heard, kept) = (Arc::clone(&port), Arc::clone(&state));
+            let thread = crate::spawn_at_priority(
+                "bt-dir-watch",
+                crate::ThreadPriority::Normal,
+                move |_ctx| set_loop(&heard, &kept),
+            )?;
+            Ok(Self {
+                port,
+                state,
+                thread: Some(thread),
+            })
+        }
+
+        /// Whether the set's thread has finished, so the set hears nothing more
+        /// and starts nothing.
+        #[must_use]
+        pub fn has_ended(&self) -> bool {
+            self.thread
+                .as_ref()
+                .is_none_or(std::thread::JoinHandle::is_finished)
+        }
+
+        /// [`DirWatch::start`]'s contract, as a member of this set.
+        pub fn start(
+            &self,
+            ctx: &crate::admission::WorkerCtx,
+            path: &Path,
+            wake: impl Fn(DirChange<'_>) + Send + 'static,
+        ) -> Result<DirWatch, std::io::Error> {
+            self.start_member(ctx, path, WatchDepth::Tree, move |change| {
+                wake(change.nameless())
+            })
+        }
+
+        /// [`DirWatch::start_named`]'s contract, as a member of this set.
+        pub fn start_named(
+            &self,
+            ctx: &crate::admission::WorkerCtx,
+            path: &Path,
+            wake: impl Fn(DirChange<'_>) + Send + 'static,
+        ) -> Result<DirWatch, std::io::Error> {
+            self.start_member(ctx, path, WatchDepth::Tree, wake)
+        }
+
+        /// [`DirWatch::start_shallow`]'s contract, as a member of this set.
+        pub fn start_shallow(
+            &self,
+            ctx: &crate::admission::WorkerCtx,
+            path: &Path,
+            wake: impl Fn(DirChange<'_>) + Send + 'static,
+        ) -> Result<DirWatch, std::io::Error> {
+            self.start_member(ctx, path, WatchDepth::HereOnly, move |change| {
+                wake(change.nameless())
+            })
+        }
+
+        /// [`DirWatch::start_shallow_named`]'s contract, as a member of this set.
+        pub fn start_shallow_named(
+            &self,
+            ctx: &crate::admission::WorkerCtx,
+            path: &Path,
+            wake: impl Fn(DirChange<'_>) + Send + 'static,
+        ) -> Result<DirWatch, std::io::Error> {
+            self.start_member(ctx, path, WatchDepth::HereOnly, wake)
+        }
+
+        /// **The door: stop every member, and wait — up to `bound`, on the worker
+        /// `ctx` lends — for the set's thread to leave.** Answers whether it left in
+        /// time. The thread cancels every outstanding read and closes each handle
+        /// as its read comes back, then returns; a thread still standing past
+        /// `bound` is let go and finishes on its own.
+        pub fn retire_within(
+            mut self,
+            ctx: &crate::admission::WorkerCtx,
+            bound: std::time::Duration,
+        ) -> bool {
+            self.ask_to_stop();
+            let Some(thread) = self.thread.take() else {
+                return true;
+            };
+            let deadline = std::time::Instant::now() + bound;
+            while !thread.is_finished() {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                crate::wait::sleep_within(ctx, crate::DIR_WATCH_RETIRE_POLL);
+            }
+            let _ = thread.join();
+            true
+        }
+
+        /// The stop, posted while the thread still takes requests.
+        fn ask_to_stop(&self) {
+            if *self
+                .state
+                .open
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+            {
+                self.port.post(SET_KEY, None);
+            }
+        }
+
+        /// Stopped and let go of, waiting for nothing and saying nothing: the
+        /// set of one a watch owned, when the watch itself was let go of.
+        fn let_go(mut self) {
+            self.ask_to_stop();
+            drop(self.thread.take());
+        }
+
+        /// **One member started**: its handle opened here, on the worker, and its
+        /// first read issued by the set's thread, which says so before this
+        /// returns.
+        fn start_member(
+            &self,
+            ctx: &crate::admission::WorkerCtx,
+            path: &Path,
+            depth: WatchDepth,
+            wake: impl Fn(DirChange<'_>) + Send + 'static,
+        ) -> Result<DirWatch, std::io::Error> {
+            self.enlist(ctx, open_directory(path)?, depth, wake)
+        }
+
+        /// **An opened directory joins the set**: associated with the port under a
+        /// number of its own, handed to the set's thread, and listening when this
+        /// returns. The handle is the set's from here on, refused or not.
+        fn enlist(
+            &self,
+            _ctx: &crate::admission::WorkerCtx,
+            dir: HANDLE,
+            depth: WatchDepth,
+            wake: impl Fn(DirChange<'_>) + Send + 'static,
+        ) -> Result<DirWatch, std::io::Error> {
+            let id = self.state.next.fetch_add(1, Ordering::Relaxed);
+            // Every completion of this handle's reads now arrives on the set's
+            // port under the member's number.
+            if let Err(error) = unsafe { CreateIoCompletionPort(dir, Some(self.port.0), id, 0) } {
+                unsafe { close(dir) };
+                return Err(win32_io_error(error));
+            }
+            let member = Arc::new(WatchMember::default());
+            // The word that makes `start` mean what it says. The thread sends it
+            // once, the instant the member's first read is outstanding — or sends
+            // the refusal instead, which is this function's error and not a
+            // member that ends in private after the caller has been told it has a
+            // watcher.
+            let (armed, listening) = std::sync::mpsc::channel::<Result<(), std::io::Error>>();
+            let add = Box::into_raw(Box::new(Add {
+                slot: Box::new(Slot {
+                    dir,
+                    id,
+                    depth,
+                    overlapped: OVERLAPPED::default(),
+                    buffer: vec![0u32; DIR_WATCH_BUFFER_BYTES / std::mem::size_of::<u32>()],
+                    names: Vec::new(),
+                    wake: Box::new(wake),
+                    member: Arc::clone(&member),
+                    leaving: false,
+                }),
+                armed,
+            }));
+            {
+                let open = self
+                    .state
+                    .open
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if !*open
+                    || !self
+                        .port
+                        .post(SET_KEY, Some(add.cast::<OVERLAPPED>().cast_const()))
+                {
+                    drop(open);
+                    // SAFETY: the box was never posted, so this is still its only
+                    // pointer; no read was ever issued on the handle.
+                    drop(unsafe { Box::from_raw(add) });
+                    unsafe { close(dir) };
+                    return Err(std::io::Error::other(
+                        "the directory watch set takes no more directories",
+                    ));
+                }
+            }
+            // A `RecvError` is the arrival dropped unanswered, which only the set's
+            // thread leaving does — the set was stopped, or its thread panicked,
+            // which under the resident panic hook ends the process first.
+            match listening.recv() {
+                Ok(Ok(())) => Ok(DirWatch {
+                    member,
+                    id,
+                    port: Arc::clone(&self.port),
+                    own: None,
+                    live: true,
+                }),
+                Ok(Err(error)) => Err(error),
+                Err(_) => Err(std::io::Error::other(
+                    "the directory watcher ended before it listened",
+                )),
+            }
+        }
+    }
+
+    /// **A directory opened for watching**: the handle every read of a member is
+    /// issued on, or the refusal that is its start's error — a path that is not
+    /// there (`NotFound`), one this process may not open, an embedded NUL.
+    fn open_directory(path: &Path) -> Result<HANDLE, std::io::Error> {
+        let mut units = path.as_os_str().encode_wide().collect::<Vec<u16>>();
+        if units.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "watched path contains an embedded NUL",
+            ));
+        }
+        units.push(0);
+        // `FILE_LIST_DIRECTORY` is the access right `ReadDirectoryChangesW`
+        // needs, `BACKUP_SEMANTICS` is what lets `CreateFileW` open a
+        // directory at all, and `OVERLAPPED` is what lets its reads complete
+        // on the set's port and be cancelled — without it the thread would
+        // block in the kernel with no way out but a change that may never
+        // come.
+        //
+        // All three shares are granted because this handle must not be the
+        // reason somebody else cannot rename or delete a file in their own
+        // working tree.
+        unsafe {
+            CreateFileW(
+                PCWSTR(units.as_ptr()),
+                FILE_LIST_DIRECTORY.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                None,
+            )
+        }
+        .map_err(win32_io_error)
+    }
+
+    impl Drop for DirWatchSet {
+        /// Waits for nothing. After [`DirWatchSet::retire_within`] there is nothing
+        /// left; without it, the thread is told to stop and let go of — it cancels
+        /// and closes its members' handles itself — and the drop says so once.
         fn drop(&mut self) {
             if let Some(thread) = self.thread.take() {
-                // SAFETY: setting an event is sound from any thread that has it, and
-                // this one is never closed on this road.
-                unsafe {
-                    let _ = SetEvent(self.stop.0);
-                }
+                self.ask_to_stop();
                 drop(thread);
                 crate::door_skipped::say(
-                    "a directory watch (`DirWatch`)",
+                    "a directory watch set (`DirWatchSet`)",
                     "its retire door",
-                    "its watcher was told to stop and let go of, with its three handles",
+                    "its watcher was told to stop and let go of",
                 );
             }
         }
     }
 
-    /// The watcher thread: issue a read, wait for it or for the stop, repeat.
-    ///
-    /// `armed` carries the outcome of the *first* read back to [`DirWatch::start`],
-    /// which is blocked on it — see the promise that function makes. Every pass
-    /// after that one is this thread's own business, and a pass that fails ends
-    /// the watch through `end` (T-DIRWATCH-LIFECYCLE): the error is recorded and
-    /// `wake` hears [`DirChange::Ended`] once. Only the stop event ends it
-    /// without a word.
-    fn watch_loop(
-        dir: SendHandle,
-        change: SendHandle,
-        stop: SendHandle,
-        depth: WatchDepth,
+    /// **An arrival, on its way to the set's thread** inside the `OVERLAPPED` slot
+    /// of a posted packet: the member, and where to say whether it listens.
+    struct Add {
+        slot: Box<Slot>,
         armed: std::sync::mpsc::Sender<Result<(), std::io::Error>>,
-        end: &crate::watch_end::WatchEnd,
-        wake: impl Fn(DirChange<'_>),
-    ) {
+    }
+
+    /// **One member, as the set's thread holds it.** Boxed, so the `OVERLAPPED`
+    /// and the buffer the kernel writes into stay where they are for as long as
+    /// a read may be outstanding; touched by the set's thread only, from the
+    /// moment its arrival is dequeued.
+    struct Slot {
+        dir: HANDLE,
+        id: usize,
+        depth: WatchDepth,
+        // Written afresh before every read, because the kernel leaves its own
+        // status in the fields a second read would otherwise inherit. A read is
+        // always awaited or cancelled-and-awaited before the slot is freed.
+        overlapped: OVERLAPPED,
         // `u32` and not `u8`: the kernel writes `FILE_NOTIFY_INFORMATION` records
         // into this and requires DWORD alignment, which a `Vec<u8>` does not
         // promise. Since defect #186 the records are also *read* — see
         // [`DirWatch`] — and the alignment the call requires is the same
         // alignment that walk needs.
-        let mut buffer = vec![0u32; DIR_WATCH_BUFFER_BYTES / std::mem::size_of::<u32>()];
-        // Reused across passes so that a busy folder does not allocate per
+        buffer: Vec<u32>,
+        // Reused across completions so that a busy folder does not allocate per
         // notification. It is cleared and refilled by every walk.
-        let mut names: Vec<OsString> = Vec::new();
-        // Declared once, outside the loop, so that its address is fixed for as
-        // long as the kernel may be writing to it — and written afresh at the top
-        // of every pass, because the kernel leaves its own status in the fields a
-        // second read would otherwise inherit. The read is always awaited or
-        // cancelled before the next iteration reuses it.
-        let mut overlapped;
-        // Taken by the first pass and never seen again: `start` is waiting for
-        // exactly one word, and after it has had it this thread is on its own.
-        let mut armed = Some(armed);
-        loop {
-            overlapped = OVERLAPPED {
-                hEvent: change.0,
-                ..OVERLAPPED::default()
-            };
-            let reset = unsafe { ResetEvent(change.0) };
+        names: Vec<OsString>,
+        wake: Box<dyn Fn(DirChange<'_>) + Send>,
+        member: Arc<WatchMember>,
+        // Its read has been cancelled: the next completion is its last.
+        leaving: bool,
+    }
+
+    impl Slot {
+        /// Issue the member's read: the directory, at the depth its caller asked.
+        fn issue(&mut self) -> windows::core::Result<()> {
+            self.overlapped = OVERLAPPED::default();
             #[cfg(test)]
             first_read_gate::wait_if_held();
-            let issued = match reset {
-                Ok(()) => unsafe {
-                    ReadDirectoryChangesW(
-                        dir.0,
-                        buffer.as_mut_ptr().cast::<std::ffi::c_void>(),
-                        u32::try_from(DIR_WATCH_BUFFER_BYTES).unwrap_or(u32::MAX),
-                        // A repository is a tree and a commit touches any
-                        // depth of it; a preview seat is one file and its
-                        // directory is only being asked because there is no way
-                        // to subscribe to a file. The caller said which.
-                        depth.recursive(),
-                        DIR_WATCH_FILTER,
-                        None,
-                        Some(std::ptr::from_mut(&mut overlapped)),
-                        None,
-                    )
-                },
-                // The event could not be cleared, so a read issued now would be
-                // answered by a stale signal. It is the same failure as a read
-                // that was refused, and on the first pass it is `start`'s error.
-                Err(error) => Err(error),
+            let issued = unsafe {
+                ReadDirectoryChangesW(
+                    self.dir,
+                    self.buffer.as_mut_ptr().cast::<std::ffi::c_void>(),
+                    u32::try_from(DIR_WATCH_BUFFER_BYTES).unwrap_or(u32::MAX),
+                    // A repository is a tree and a commit touches any depth of
+                    // it; a preview seat is one file and its directory is only
+                    // being asked because there is no way to subscribe to a
+                    // file. The caller said which.
+                    self.depth.recursive(),
+                    DIR_WATCH_FILTER,
+                    None,
+                    Some(std::ptr::from_mut(&mut self.overlapped)),
+                    None,
+                )
             };
             #[cfg(test)]
             if issued.is_ok() {
-                first_read_gate::note_read_issued(depth);
+                first_read_gate::note_read_issued(self.depth);
             }
-            if let Some(armed) = armed.take() {
-                // The first pass answers `start`, whose error a refused first
-                // read is: the caller never had a watch, so nothing has ended.
-                let _ = armed.send(issued.clone().map_err(win32_io_error));
-                if issued.is_err() {
-                    return;
-                }
-            } else if let Err(error) = issued {
-                // The directory went away, or the handle did, after the caller
-                // was told it had a watch: the watch has ended.
-                end.record(win32_io_error(error));
-                wake(DirChange::Ended);
-                return;
+            issued
+        }
+
+        /// Cancel the outstanding read; its completion, which still comes, is the
+        /// member's last.
+        fn cancel(&mut self) {
+            self.leaving = true;
+            // SAFETY: the read was issued on this handle with this `OVERLAPPED`,
+            // by this thread, and the slot outlives its completion.
+            unsafe {
+                let _ = CancelIoEx(self.dir, Some(std::ptr::from_ref(&self.overlapped)));
             }
-            let signalled = unsafe { WaitForMultipleObjects(&[stop.0, change.0], false, INFINITE) };
-            if signalled != WAIT_EVENT(WAIT_OBJECT_0.0 + 1) {
-                // Stopped, or the wait itself failed — the error read before
-                // anything else can overwrite it. Either way this thread is
-                // finished — but the read it issued is still outstanding, and the
-                // `OVERLAPPED` it is writing into is about to go out of scope, so
-                // it is cancelled and *waited for* before that happens.
-                let failed = (signalled != WAIT_OBJECT_0).then(std::io::Error::last_os_error);
-                unsafe {
-                    let _ = CancelIoEx(dir.0, Some(std::ptr::from_ref(&overlapped)));
-                    let mut ignored = 0u32;
-                    let _ = GetOverlappedResult(dir.0, &overlapped, &mut ignored, true);
-                }
-                // The stop is the owner's drop and says nothing; a failed wait
-                // is an end.
-                if let Some(error) = failed {
-                    end.record(error);
-                    wake(DirChange::Ended);
-                }
-                return;
-            }
-            let mut written = 0u32;
-            let completed = unsafe { GetOverlappedResult(dir.0, &overlapped, &mut written, false) };
-            if let Err(error) = completed {
+        }
+
+        /// **One completion read**, and the next read issued. Answers the error
+        /// that ended the member, if one did.
+        fn hear(
+            &mut self,
+            completed: windows::core::Result<()>,
+            written: u32,
+        ) -> Option<std::io::Error> {
+            match completed {
                 // `ERROR_NOTIFY_ENUM_DIR` is the kernel saying it could not keep
                 // the list (a remote directory's overflow): something changed and
                 // it will not say what, which is not an end.
-                if error.code() == windows::Win32::Foundation::ERROR_NOTIFY_ENUM_DIR.to_hresult() {
-                    wake(DirChange::Unknown);
-                    continue;
+                Err(error)
+                    if error.code()
+                        == windows::Win32::Foundation::ERROR_NOTIFY_ENUM_DIR.to_hresult() =>
+                {
+                    (self.wake)(DirChange::Unknown);
                 }
-                end.record(win32_io_error(error));
-                wake(DirChange::Ended);
-                return;
+                // The directory went away, or the handle did, after the caller
+                // was told it had a watch: the watch has ended.
+                Err(error) => return Some(win32_io_error(error)),
+                // `written == 0` is the kernel saying the buffer overflowed and it
+                // has stopped keeping track of what changed. It is the one
+                // completion that can name nothing, and it is reported as itself —
+                // *something changed and I will not say what* — rather than as an
+                // empty list, which would read as "nothing changed" to the one
+                // caller that acts on the names.
+                Ok(()) if written == 0 => (self.wake)(DirChange::Unknown),
+                Ok(()) => {
+                    self.names.clear();
+                    // SAFETY: the kernel wrote `written` bytes of
+                    // `FILE_NOTIFY_INFORMATION` records into `buffer`, which is
+                    // `u32`-aligned as the call requires, and the walk never steps
+                    // past `written`.
+                    unsafe { read_change_names(&self.buffer, written as usize, &mut self.names) };
+                    if self.names.is_empty() {
+                        // A completion whose records this walk could not make sense
+                        // of is the overflow's twin: bytes arrived, so something
+                        // moved, and the honest thing is to say so without naming
+                        // anything.
+                        (self.wake)(DirChange::Unknown);
+                    } else {
+                        (self.wake)(DirChange::Named(&self.names));
+                    }
+                }
             }
-            // `written == 0` is the kernel saying the buffer overflowed and it
-            // has stopped keeping track of what changed. It is the one
-            // completion that can name nothing, and it is reported as itself —
-            // *something changed and I will not say what* — rather than as an
-            // empty list, which would read as "nothing changed" to the one
-            // caller that acts on the names.
-            if written == 0 {
-                wake(DirChange::Unknown);
+            self.issue().err().map(win32_io_error)
+        }
+
+        /// **The member ended on its own**: the error kept, `Ended` said once and
+        /// last, the directory gone.
+        fn end(self: Box<Self>, error: std::io::Error) {
+            self.member.end.record(error);
+            (self.wake)(DirChange::Ended);
+            self.leave();
+        }
+
+        /// The directory leaves the set: no read of it is outstanding, so its
+        /// handle is closed, and its owner is told last, after the `wake` it
+        /// carried is gone too.
+        fn leave(self: Box<Self>) {
+            // SAFETY: no read is outstanding on the handle, and this thread is its
+            // only user.
+            unsafe { close(self.dir) };
+            let member = Arc::clone(&self.member);
+            drop(self);
+            member.gone.store(true, Ordering::Release);
+        }
+    }
+
+    /// **The set's thread**: wait on the port, and answer what it says — an
+    /// arrival, a member's completion, a removal, the stop.
+    ///
+    /// A member's arrival is answered with its first read, and the outcome goes
+    /// back to the start that is waiting for it. A completion is read the way
+    /// every `DirWatch` completion always was, and the member's next read is
+    /// issued; a completion or a re-issue that fails ends that member alone
+    /// (T-DIRWATCH-LIFECYCLE). A removal cancels the member's read, and the
+    /// cancelled completion closes its handle. The stop cancels every read, and
+    /// the thread returns when the last of them has come back.
+    fn set_loop(port: &Port, state: &SetState) {
+        let mut slots: BTreeMap<usize, Box<Slot>> = BTreeMap::new();
+        let mut stopping = false;
+        loop {
+            let mut written = 0u32;
+            let mut key = 0usize;
+            let mut packet: *mut OVERLAPPED = std::ptr::null_mut();
+            // SAFETY: the port is live for as long as this thread holds it, and
+            // the three out-parameters are this frame's own.
+            let dequeued = unsafe {
+                GetQueuedCompletionStatus(port.0, &mut written, &mut key, &mut packet, INFINITE)
+            };
+            if packet.is_null() {
+                if let Err(error) = dequeued {
+                    // The wait itself failed, which is the port failing: nothing
+                    // more can be heard on it. Every member's read is cancelled
+                    // and *waited for* before its slot is freed, and every member
+                    // has ended.
+                    let code = win32_code(error.code());
+                    for (_, slot) in std::mem::take(&mut slots) {
+                        // SAFETY: the read was issued on this handle with this
+                        // `OVERLAPPED`; the blocking wait returns once the kernel
+                        // has let go of both.
+                        unsafe {
+                            let _ =
+                                CancelIoEx(slot.dir, Some(std::ptr::from_ref(&slot.overlapped)));
+                            let mut ignored = 0u32;
+                            let _ =
+                                GetOverlappedResult(slot.dir, &slot.overlapped, &mut ignored, true);
+                        }
+                        slot.end(std::io::Error::from_raw_os_error(code));
+                    }
+                    break;
+                }
+                // A request: the stop, or one member's removal.
+                if key == SET_KEY {
+                    stopping = true;
+                    for slot in slots.values_mut() {
+                        if !slot.leaving {
+                            slot.cancel();
+                        }
+                    }
+                } else if let Some(slot) = slots.get_mut(&key)
+                    && !slot.leaving
+                {
+                    slot.cancel();
+                }
+                if stopping && slots.is_empty() {
+                    break;
+                }
                 continue;
             }
-            names.clear();
-            // SAFETY: the kernel wrote `written` bytes of `FILE_NOTIFY_INFORMATION`
-            // records into `buffer`, which is `u32`-aligned as the call requires,
-            // and the walk below never steps past `written`.
-            unsafe { read_change_names(&buffer, written as usize, &mut names) };
-            if names.is_empty() {
-                // A completion whose records this walk could not make sense of
-                // is the overflow's twin: bytes arrived, so something moved, and
-                // the honest thing is to say so without naming anything.
-                wake(DirChange::Unknown);
+            if key == SET_KEY {
+                // SAFETY: a packet on the set's key that carries a pointer is an
+                // arrival, and its pointer is the `Add` box `start_member` leaked
+                // into it; this is the one place it is reclaimed.
+                let Add { mut slot, armed } = *unsafe { Box::from_raw(packet.cast::<Add>()) };
+                let issued = if stopping {
+                    Err(windows::core::Error::from_hresult(
+                        windows::Win32::Foundation::ERROR_OPERATION_ABORTED.to_hresult(),
+                    ))
+                } else {
+                    slot.issue()
+                };
+                match issued {
+                    Ok(()) => {
+                        let _ = armed.send(Ok(()));
+                        slots.insert(slot.id, slot);
+                    }
+                    Err(error) => {
+                        // A refused first read is `start`'s error: the caller never
+                        // had a watch, so nothing has ended.
+                        unsafe { close(slot.dir) };
+                        let _ = armed.send(Err(win32_io_error(error)));
+                    }
+                }
                 continue;
             }
-            wake(DirChange::Named(&names));
+            // A member's read came back. Every member keeps its slot until its last
+            // read has, so the slot is here.
+            let Some(slot) = slots.get_mut(&key) else {
+                continue;
+            };
+            if slot.leaving {
+                if let Some(slot) = slots.remove(&key) {
+                    slot.leave();
+                }
+                if stopping && slots.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            if let Some(error) = slot.hear(dequeued, written)
+                && let Some(slot) = slots.remove(&key)
+            {
+                slot.end(error);
+            }
+        }
+        // Leaving: no arrival is taken from here on, and whatever was posted
+        // before that is dropped — an arrival's dropped answer is its start's
+        // error, and a removal has nothing left to remove.
+        *state.open.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        loop {
+            let mut written = 0u32;
+            let mut key = 0usize;
+            let mut packet: *mut OVERLAPPED = std::ptr::null_mut();
+            // SAFETY: as above; a zero wait answers at once.
+            let dequeued = unsafe {
+                GetQueuedCompletionStatus(port.0, &mut written, &mut key, &mut packet, 0)
+            };
+            if packet.is_null() {
+                if dequeued.is_err() {
+                    return;
+                }
+                continue;
+            }
+            if key == SET_KEY {
+                // SAFETY: an arrival's box, as above, reclaimed once.
+                let add = unsafe { Box::from_raw(packet.cast::<Add>()) };
+                // SAFETY: no read was ever issued on the arrival's handle.
+                unsafe { close(add.slot.dir) };
+            }
         }
     }
 
@@ -19213,11 +19637,11 @@ pub enum SystemNews {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    Compositor, CustomWindowFrame, DirChange, DirWatch, FilePickKind, FolderPicker, ImagePicker,
-    ImeSystemCaret, MathContextMenu, Notifier, SaveFilePicker, SystemSettingsWatch, Taskbar,
-    active_keyboard_layout, adopt_parent_console, announce_explorer_menu_change, apartments_left,
-    cancel_composition, cjk_font_families, client_area_animation_enabled, clipboard_text,
-    cloaked_from_attribute, current_thread_priority, current_user_registry_string,
+    Compositor, CustomWindowFrame, DirChange, DirWatch, DirWatchSet, FilePickKind, FolderPicker,
+    ImagePicker, ImeSystemCaret, MathContextMenu, Notifier, SaveFilePicker, SystemSettingsWatch,
+    Taskbar, active_keyboard_layout, adopt_parent_console, announce_explorer_menu_change,
+    apartments_left, cancel_composition, cjk_font_families, client_area_animation_enabled,
+    clipboard_text, cloaked_from_attribute, current_thread_priority, current_user_registry_string,
     current_user_registry_subkeys, detach_console, directory_folds_case, documents_directory,
     dpi_at, exposed_from_probe, exposure_probe_points, file_product_version, flash_window,
     get_dpi_for_window, get_window_rect, get_work_area, hide_every_window_of_this_process,
@@ -19293,6 +19717,11 @@ pub use portable_impl::{
 /// portable one would be a duplicate definition there.
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub use portable_impl::{DirChange, DirWatch};
+
+/// **The set of watches on one thread, on a platform whose filesystem does not speak**
+/// (T-DIR-WATCH-ONE-THREAD): refused, as every [`DirWatch`] door is.
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub use portable_impl::DirWatchSet;
 
 /// **The trash and the font list, on a platform that has neither door written**
 /// (M2-2, M2-4).
@@ -19866,6 +20295,11 @@ mod macos_watch;
 /// three files and holds the lists to each other.
 #[cfg(target_os = "macos")]
 pub use macos_watch::{DirChange, DirWatch};
+
+/// **The set of watches on one thread, on macOS** (T-DIR-WATCH-ONE-THREAD): one run loop
+/// carrying one FSEvents stream per member.
+#[cfg(target_os = "macos")]
+pub use macos_watch::DirWatchSet;
 
 /// **A path as `NSURL`, and the trash** (M2-2).
 ///
@@ -22425,7 +22859,7 @@ mod watch_contract_tests {
              notices later:\n{body}"
         );
         let watcher =
-            source_test::body(&ItemQuery::function("watch_loop").in_module("crate::macos_watch"));
+            source_test::body(&ItemQuery::function("tear_down").in_module("crate::macos_watch"));
         assert!(
             watcher.contains("FSEventStreamStop(stream.as_ptr());\n        FSEventStreamInvalidate(stream.as_ptr());\n        FSEventStreamRelease(stream.as_ptr());"),
             "the watcher thread's teardown is stop, then invalidate, then release — any other \
@@ -24583,6 +25017,514 @@ mod dir_watch_tests {
         let skipped = crate::door_skipped::dropped_alone(watch, "a drop while the watcher is held");
         assert_eq!(skipped, 1, "the drop says its skipped door once");
         drop(release);
+    }
+}
+
+/// **Many directory watches on one thread** (T-DIR-WATCH-ONE-THREAD): the Windows arm of
+/// `DirWatchSet`, read against the promises `dir_watch_tests` holds a lone watch to — each member
+/// listening when its start returns, hearing its own directory by its own contract, leaving alone,
+/// ending alone — plus the one this ticket adds: every member on the set's one thread.
+#[cfg(all(test, windows))]
+mod dir_watch_set_tests {
+    use super::{
+        DirChange, DirWatch, DirWatchSet, admission::WorkerCtx, windows_impl::first_read_gate,
+    };
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+        sync::{Arc, mpsc},
+        time::{Duration, Instant},
+    };
+
+    /// **A set is opened, and a member started, where the product does it: on a worker.**
+    fn on_a_worker<T: Send + 'static>(start: impl FnOnce(&WorkerCtx) -> T + Send + 'static) -> T {
+        super::spawn_at_priority("bt-dir-watch-test", super::ThreadPriority::Normal, start)
+            .expect("start a worker for the watch")
+            .join()
+            .expect("the worker answered")
+    }
+
+    /// The `dir_watch_tests` budgets, for the same two claims: *eventually*, and *nothing at all*.
+    const ARRIVES_WITHIN: Duration = Duration::from_secs(5);
+    const SILENCE_FOR: Duration = Duration::from_millis(600);
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = bt_testpath::temp_path(&format!("bt-dir-watch-set-{name}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("make a scratch directory");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn opened() -> Arc<DirWatchSet> {
+        Arc::new(on_a_worker(DirWatchSet::open).expect("open a directory watch set"))
+    }
+
+    /// Which of the four doors a member is started through.
+    #[derive(Clone, Copy)]
+    enum Door {
+        Tree,
+        TreeNamed,
+        Shallow,
+        ShallowNamed,
+    }
+
+    /// What a member's `wake` heard, as the test reads it.
+    #[derive(Debug, Eq, PartialEq)]
+    enum Word {
+        Named(Vec<OsString>),
+        Unknown,
+        Ended,
+    }
+
+    /// A member of `set` on `path`, through `door`, telling `tx` every word with its `label`.
+    fn member(
+        set: &Arc<DirWatchSet>,
+        door: Door,
+        path: &Path,
+        label: usize,
+        tx: &mpsc::Sender<(usize, Word)>,
+    ) -> DirWatch {
+        let (set, path, tx) = (Arc::clone(set), path.to_path_buf(), tx.clone());
+        on_a_worker(move |ctx| {
+            let wake = move |change: DirChange<'_>| {
+                let word = match change {
+                    DirChange::Named(names) => Word::Named(names.to_vec()),
+                    DirChange::Unknown => Word::Unknown,
+                    DirChange::Ended => Word::Ended,
+                };
+                let _ = tx.send((label, word));
+            };
+            match door {
+                Door::Tree => set.start(ctx, &path, wake),
+                Door::TreeNamed => set.start_named(ctx, &path, wake),
+                Door::Shallow => set.start_shallow(ctx, &path, wake),
+                Door::ShallowNamed => set.start_shallow_named(ctx, &path, wake),
+            }
+        })
+        .expect("watch a directory this process just made")
+    }
+
+    fn retired_within(watch: DirWatch, bound: Duration) -> bool {
+        on_a_worker(move |ctx| watch.retire_within(ctx, bound))
+    }
+
+    fn retired(watch: DirWatch) -> bool {
+        retired_within(watch, crate::DIR_WATCH_RETIRE_BUDGET)
+    }
+
+    fn set_retired(set: Arc<DirWatchSet>) -> bool {
+        let set = Arc::try_unwrap(set).unwrap_or_else(|_| panic!("the test holds the set alone"));
+        on_a_worker(move |ctx| set.retire_within(ctx, crate::DIR_WATCH_RETIRE_BUDGET))
+    }
+
+    /// The next word `label` said within the budget, skipping everyone else's.
+    fn next_from(rx: &mpsc::Receiver<(usize, Word)>, label: usize) -> Option<Word> {
+        let deadline = Instant::now() + ARRIVES_WITHIN;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok((from, word)) if from == label => return Some(word),
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    /// Whether `label` says nothing for [`SILENCE_FOR`], whatever the others say.
+    fn silent(rx: &mpsc::Receiver<(usize, Word)>, label: usize) -> bool {
+        let deadline = Instant::now() + SILENCE_FOR;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok((from, _)) if from == label => return false,
+                Ok(_) => {}
+                Err(_) => return true,
+            }
+        }
+        true
+    }
+
+    /// The first word each of `count` labels said, or `None` if one stayed quiet past the budget.
+    fn first_word_of_each<T>(
+        rx: &mpsc::Receiver<(usize, T)>,
+        count: usize,
+    ) -> Option<std::collections::BTreeMap<usize, T>> {
+        let mut heard = std::collections::BTreeMap::new();
+        let deadline = Instant::now() + ARRIVES_WITHIN;
+        while heard.len() < count {
+            let left = deadline.checked_duration_since(Instant::now())?;
+            let (label, word) = rx.recv_timeout(left).ok()?;
+            heard.entry(label).or_insert(word);
+        }
+        Some(heard)
+    }
+
+    /// RED (T-DIR-WATCH-ONE-THREAD) — **eight directories, through all four doors, are heard on
+    /// one watcher thread.**
+    ///
+    /// Each member's `wake` says which thread it runs on, and every member is made to speak, so
+    /// the one thread is one that listens rather than one that does nothing. The thread's own
+    /// identity is the probe, not a census of the process: a lone watch another test let go of
+    /// may still be leaving while this one runs, and a count would read it.
+    ///
+    /// MUTATION: start every member as a lone `DirWatch` of its own (a thread per directory) —
+    /// the eight members speak on eight threads.
+    #[test]
+    fn a_set_watches_many_directories_on_one_thread() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let set = opened();
+        let scratch: Vec<Scratch> = (0..8)
+            .map(|index| Scratch::new(&format!("many-{index}")))
+            .collect();
+        let doors = [
+            Door::Tree,
+            Door::TreeNamed,
+            Door::Shallow,
+            Door::ShallowNamed,
+        ];
+        let (tx, rx) = mpsc::channel::<(usize, (std::thread::ThreadId, Option<String>))>();
+        let watches: Vec<DirWatch> = scratch
+            .iter()
+            .enumerate()
+            .map(|(label, dir)| {
+                let (set, path, tx) = (Arc::clone(&set), dir.0.clone(), tx.clone());
+                let door = doors[label % doors.len()];
+                on_a_worker(move |ctx| {
+                    let wake = move |_: DirChange<'_>| {
+                        let here = std::thread::current();
+                        let _ = tx.send((label, (here.id(), here.name().map(str::to_owned))));
+                    };
+                    match door {
+                        Door::Tree => set.start(ctx, &path, wake),
+                        Door::TreeNamed => set.start_named(ctx, &path, wake),
+                        Door::Shallow => set.start_shallow(ctx, &path, wake),
+                        Door::ShallowNamed => set.start_shallow_named(ctx, &path, wake),
+                    }
+                })
+                .expect("watch a directory this process just made")
+            })
+            .collect();
+        for dir in &scratch {
+            std::fs::write(dir.0.join("appeared.txt"), b"hello").expect("write a file");
+        }
+        let heard = first_word_of_each(&rx, scratch.len())
+            .expect("every member of the set reports its own directory");
+        let threads: std::collections::HashSet<std::thread::ThreadId> =
+            heard.values().map(|(thread, _)| *thread).collect();
+        assert_eq!(
+            threads.len(),
+            1,
+            "eight directories under four contracts are heard on one watcher thread"
+        );
+        assert!(
+            heard
+                .values()
+                .all(|(_, name)| name.as_deref() == Some("bt-dir-watch")),
+            "and that thread is the set's own watcher"
+        );
+        for watch in watches {
+            assert!(retired(watch), "each member left its set within its bound");
+        }
+        assert!(set_retired(set), "the set's thread left within its bound");
+    }
+
+    /// PIN (T-DIR-WATCH-ONE-THREAD) — **two directories of one set both report, each by its own
+    /// contract.**
+    ///
+    /// A shallow named member hears its own entry by name, a tree named member names a change
+    /// two levels down relative to its own root, and a nameless member hears only that something
+    /// moved — the completions of three handles on one port, never one member's names in
+    /// another's `wake`.
+    ///
+    /// MUTATION: hand every completion to the first member's `wake` — the second and third
+    /// members never speak.
+    #[test]
+    fn two_directories_of_one_set_both_report() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let set = opened();
+        let (here, tree, plain) = (
+            Scratch::new("both-here"),
+            Scratch::new("both-tree"),
+            Scratch::new("both-plain"),
+        );
+        let (tx, rx) = mpsc::channel();
+        let a = member(&set, Door::ShallowNamed, &here.0, 0, &tx);
+        let b = member(&set, Door::TreeNamed, &tree.0, 1, &tx);
+        let c = member(&set, Door::Tree, &plain.0, 2, &tx);
+
+        std::fs::write(here.0.join("a.txt"), b"a").expect("write into the shallow member");
+        let mut named_a = false;
+        while let Some(word) = next_from(&rx, 0) {
+            if let Word::Named(names) = &word
+                && names.iter().any(|name| name == "a.txt")
+            {
+                named_a = true;
+                break;
+            }
+        }
+        assert!(named_a, "the shallow named member names its own entry");
+
+        std::fs::create_dir_all(tree.0.join("sub")).expect("make a subtree");
+        std::fs::write(tree.0.join("sub").join("b.txt"), b"b").expect("write two levels down");
+        let mut named_b = false;
+        while let Some(word) = next_from(&rx, 1) {
+            if let Word::Named(names) = &word
+                && names
+                    .iter()
+                    .any(|name| Path::new(name) == Path::new("sub").join("b.txt"))
+            {
+                named_b = true;
+                break;
+            }
+        }
+        assert!(
+            named_b,
+            "the tree named member names the change relative to its own root"
+        );
+
+        std::fs::write(plain.0.join("c.txt"), b"c").expect("write into the nameless member");
+        assert_eq!(
+            next_from(&rx, 2),
+            Some(Word::Unknown),
+            "the nameless member hears that something moved, and no names"
+        );
+        for watch in [a, b, c] {
+            assert!(retired(watch), "each member left its set within its bound");
+        }
+        assert!(set_retired(set), "the set's thread left within its bound");
+    }
+
+    /// PIN (T-DIR-WATCH-ONE-THREAD) — **removing one member mid-run stops its news and keeps the
+    /// other's.**
+    ///
+    /// Both members are proved awake first, so the silence afterwards is the removal and not a
+    /// member that never listened.
+    ///
+    /// MUTATION: make the removal stop the whole set — the kept member goes silent too.
+    #[test]
+    fn removing_one_member_mid_run_silences_it_and_keeps_the_other() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let set = opened();
+        let (gone, kept) = (Scratch::new("remove-gone"), Scratch::new("remove-kept"));
+        let (tx, rx) = mpsc::channel();
+        let a = member(&set, Door::Shallow, &gone.0, 0, &tx);
+        let b = member(&set, Door::Shallow, &kept.0, 1, &tx);
+        std::fs::write(gone.0.join("before.txt"), b"x").expect("write before the removal");
+        assert!(
+            next_from(&rx, 0).is_some(),
+            "the member to be removed is awake"
+        );
+        std::fs::write(kept.0.join("before.txt"), b"x").expect("write before the removal");
+        assert!(
+            next_from(&rx, 1).is_some(),
+            "the member to be kept is awake"
+        );
+
+        assert!(
+            retired(a),
+            "the removed member left its set within its bound"
+        );
+        while rx.try_recv().is_ok() {}
+        std::fs::write(gone.0.join("after.txt"), b"x").expect("write after the removal");
+        std::fs::write(kept.0.join("after.txt"), b"x").expect("write after the removal");
+        assert!(
+            next_from(&rx, 1).is_some(),
+            "the kept member still hears its directory"
+        );
+        assert!(
+            silent(&rx, 0),
+            "the removed member hears nothing written afterwards"
+        );
+        assert!(retired(b), "the kept member left its set within its bound");
+        assert!(set_retired(set), "the set's thread left within its bound");
+    }
+
+    /// RED (T-DIR-WATCH-ONE-THREAD) — **retiring the set stops every member and joins its one
+    /// thread.**
+    ///
+    /// The members are still held when the set goes: their own doors then answer at once, since
+    /// their directories went with the set, and nothing written afterwards reaches either.
+    ///
+    /// MUTATION: let the set's door return without stopping its members (a thread per member
+    /// left behind it) — the members go on hearing their directories.
+    #[test]
+    fn retiring_the_set_stops_every_member_and_joins_its_thread() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let set = opened();
+        let (one, two) = (Scratch::new("stop-one"), Scratch::new("stop-two"));
+        let (tx, rx) = mpsc::channel();
+        let a = member(&set, Door::Tree, &one.0, 0, &tx);
+        let b = member(&set, Door::ShallowNamed, &two.0, 1, &tx);
+        std::fs::write(one.0.join("before.txt"), b"x").expect("write before the stop");
+        assert!(next_from(&rx, 0).is_some(), "the first member is awake");
+        std::fs::write(two.0.join("before.txt"), b"x").expect("write before the stop");
+        assert!(next_from(&rx, 1).is_some(), "the second member is awake");
+
+        assert!(set_retired(set), "the set's thread left within its bound");
+        while rx.try_recv().is_ok() {}
+        std::fs::write(one.0.join("after.txt"), b"x").expect("write after the stop");
+        std::fs::write(two.0.join("after.txt"), b"x").expect("write after the stop");
+        assert!(
+            silent(&rx, 0),
+            "the first member hears nothing after the set stopped"
+        );
+        assert!(silent(&rx, 1), "nor does the second");
+        assert!(
+            retired_within(a, Duration::ZERO) && retired_within(b, Duration::ZERO),
+            "a member of a stopped set has nothing left to wait for"
+        );
+    }
+
+    /// PIN (T-DIR-WATCH-ONE-THREAD; T-DIRWATCH-LIFECYCLE) — **a member whose directory goes away
+    /// ends alone.**
+    ///
+    /// It says `Ended` once, is unarmed and keeps its error; the set's other member goes on
+    /// hearing its own directory.
+    ///
+    /// MUTATION: end the whole set on one member's failed completion — the other member's write
+    /// is never heard.
+    #[test]
+    fn a_member_whose_directory_goes_away_ends_alone() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let set = opened();
+        let (going, staying) = (Scratch::new("end-going"), Scratch::new("end-staying"));
+        let (tx, rx) = mpsc::channel();
+        let mut a = member(&set, Door::Tree, &going.0, 0, &tx);
+        let b = member(&set, Door::Tree, &staying.0, 1, &tx);
+        std::fs::remove_dir_all(&going.0).expect("remove the watched directory");
+        let mut ended = false;
+        while let Some(word) = next_from(&rx, 0) {
+            if word == Word::Ended {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended, "the member whose directory went says `Ended`");
+        assert!(!a.is_armed(), "and is no longer armed");
+        assert!(
+            a.take_failure().is_some(),
+            "and keeps the error that ended it"
+        );
+        std::fs::write(staying.0.join("still.txt"), b"x").expect("write into the other member");
+        assert_eq!(
+            next_from(&rx, 1),
+            Some(Word::Unknown),
+            "the set's other member still hears its directory"
+        );
+        assert!(retired(a), "the ended member's door answers");
+        assert!(retired(b), "the other member left its set within its bound");
+        assert!(set_retired(set), "the set's thread left within its bound");
+    }
+
+    /// PIN (T-DIR-WATCH-ONE-THREAD) — **a member joining a set that is already running is
+    /// listening when its start returns.**
+    ///
+    /// `dir_watch_tests::a_change_made_after_start_returns_is_never_missed`, against a set that
+    /// already carries a member: the gate holds the set's thread short of the newcomer's first
+    /// read, so "a read is outstanding" when the start returns can only mean the start waited for
+    /// it.
+    ///
+    /// MUTATION: answer the arrival before its first read is issued — the flag is false and the
+    /// write made before the gate opens is never heard.
+    #[test]
+    fn a_new_member_is_listening_before_its_start_returns() {
+        let set = opened();
+        let (first, second) = (Scratch::new("join-first"), Scratch::new("join-second"));
+        let (tx, rx) = mpsc::channel();
+        let a = {
+            let _turn = first_read_gate::watchers_take_turns();
+            member(&set, Door::Shallow, &first.0, 0, &tx)
+        };
+        let gate = first_read_gate::hold();
+        let b = member(&set, Door::Shallow, &second.0, 1, &tx);
+        let outstanding_when_start_returned = gate.a_read_is_outstanding();
+        std::fs::write(second.0.join("appeared.txt"), b"hello").expect("write a file");
+        gate.release();
+        assert!(
+            next_from(&rx, 1).is_some(),
+            "a change made after the newcomer's start returned reaches it"
+        );
+        assert!(
+            outstanding_when_start_returned,
+            "the newcomer's start returned with no read outstanding"
+        );
+        assert!(retired(a), "the first member left its set within its bound");
+        assert!(retired(b), "the newcomer left its set within its bound");
+        assert!(set_retired(set), "the set's thread left within its bound");
+        drop(gate);
+    }
+
+    /// PIN (T-DIR-WATCH-ONE-THREAD; T-DROP-DOORS, D-40) — **a member whose `wake` the set's
+    /// thread is standing in is retired within its bound.**
+    ///
+    /// Every member's `wake` runs on the one thread, so a member being removed may be waiting
+    /// behind its own news. No time at all is not enough; the suite's patience, with the wake let
+    /// go, is — and the door answers only after the wake returned.
+    ///
+    /// MUTATION: mark the member gone when its removal is posted rather than when its handle is
+    /// closed — the first door answers `true`.
+    #[test]
+    fn a_member_held_in_its_wake_is_retired_within_its_bound() {
+        let _turn = first_read_gate::watchers_take_turns();
+        let set = opened();
+        let scratch = Scratch::new("held");
+        let held_member = |set: &Arc<DirWatchSet>| {
+            let (entered, inside) = mpsc::channel();
+            let (release, held) = mpsc::channel::<()>();
+            let left = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let leaving = Arc::clone(&left);
+            let (set, path) = (Arc::clone(set), scratch.0.clone());
+            let watch = on_a_worker(move |ctx| {
+                set.start(ctx, &path, move |_| {
+                    let _ = entered.send(());
+                    let _ = held.recv();
+                    leaving.store(true, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+            .expect("watch a directory this process just made");
+            std::fs::write(scratch.0.join("hold.txt"), b"x").expect("write into the directory");
+            crate::door_skipped::received(&inside, "the set's thread inside the member's wake");
+            (watch, release, left)
+        };
+
+        let (watch, release, _left) = held_member(&set);
+        assert!(
+            !retired_within(watch, Duration::ZERO),
+            "a member whose wake is running has not left within no time at all"
+        );
+        drop(release);
+
+        let (watch, release, left) = held_member(&set);
+        let (going, on_its_way) = mpsc::channel();
+        let (answered, heard) = mpsc::channel();
+        let leaving = Arc::clone(&left);
+        std::thread::spawn(move || {
+            let _ = going.send(());
+            let left_in_time = retired_within(watch, crate::door_skipped::PATIENCE);
+            let _ = answered.send((
+                left_in_time,
+                leaving.load(std::sync::atomic::Ordering::SeqCst),
+            ));
+        });
+        crate::door_skipped::received(&on_its_way, "the retiring thread");
+        drop(release);
+        let (left_in_time, wake_returned) =
+            crate::door_skipped::received(&heard, "the door, once the wake is let go");
+        assert!(left_in_time, "the member left within the door's bound");
+        assert!(
+            wake_returned,
+            "the door answered before the member's wake returned"
+        );
+        assert!(set_retired(set), "the set's thread left within its bound");
     }
 }
 

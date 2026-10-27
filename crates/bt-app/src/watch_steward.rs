@@ -153,8 +153,16 @@ pub trait Held: Send {
     fn retire_within(self: Box<Self>, ctx: &WorkerCtx, bound: std::time::Duration) -> bool;
 }
 
-/// **The platform's door**: `bt_platform::DirWatch`, by depth.
+/// **The platform's door**: `bt_platform::DirWatch`, by depth, every member on the process's one
+/// `bt_platform::DirWatchSet` (T-DIR-WATCH-ONE-THREAD) — one watcher thread for every directory of
+/// every ear, however many there are.
 pub struct Kernel;
+
+/// **The set the platform's door starts every watch on**, opened by the first start and kept for
+/// the process's life, as the steward's own worker is. It survives a worker that unwinds: the next
+/// worker starts its members on it again. A set whose thread has ended is retired here and a fresh
+/// one opened, so a start never meets a set that hears nothing.
+static KERNEL_SET: Mutex<Option<bt_platform::DirWatchSet>> = Mutex::new(None);
 
 impl Door for Kernel {
     fn start(
@@ -164,13 +172,30 @@ impl Door for Kernel {
         depth: Depth,
         wake: Box<dyn Fn(DirChange<'_>) + Send>,
     ) -> std::io::Result<Box<dyn Held>> {
+        let mut held = lock(&KERNEL_SET);
+        if let Some(ended) =
+            Option::take_if(&mut *held, |set| bt_platform::DirWatchSet::has_ended(set))
+        {
+            let _ = bt_platform::DirWatchSet::retire_within(
+                ended,
+                ctx,
+                bt_platform::DIR_WATCH_RETIRE_BUDGET,
+            );
+        }
+        let set = match Option::take(&mut *held) {
+            Some(set) => set,
+            None => bt_platform::DirWatchSet::open(ctx)?,
+        };
         let watch = match depth {
-            Depth::Tree => bt_platform::DirWatch::start(ctx, path, wake),
-            Depth::TreeNamed => bt_platform::DirWatch::start_named(ctx, path, wake),
-            Depth::Shallow => bt_platform::DirWatch::start_shallow(ctx, path, wake),
-            Depth::ShallowNamed => bt_platform::DirWatch::start_shallow_named(ctx, path, wake),
-        }?;
-        Ok(Box::new(watch))
+            Depth::Tree => bt_platform::DirWatchSet::start(&set, ctx, path, wake),
+            Depth::TreeNamed => bt_platform::DirWatchSet::start_named(&set, ctx, path, wake),
+            Depth::Shallow => bt_platform::DirWatchSet::start_shallow(&set, ctx, path, wake),
+            Depth::ShallowNamed => {
+                bt_platform::DirWatchSet::start_shallow_named(&set, ctx, path, wake)
+            }
+        };
+        *held = Some(set);
+        Ok(Box::new(watch?))
     }
 }
 
@@ -522,8 +547,9 @@ impl WatchSteward {
             let cause = Cause::of(&error);
             (lane.note)(&unheard_line(path, &cause));
             reports.push((*ear, path.clone(), MemberReport::Failed(cause.clone())));
-            // The ended watch is retired here, on the worker, through its door: its thread has
-            // already finished, so the door's join is the formality the bound never reaches.
+            // The ended watch is retired here, on the worker, through its door: the member has
+            // already said `Ended` and is leaving its set, so the door waits at most a poll or two
+            // for the set's thread to say it is gone, well inside the bound.
             if let Member::Armed(ended) = std::mem::replace(member, Member::Failed(cause)) {
                 retire(lane, ctx, path, ended);
             }
@@ -1276,36 +1302,41 @@ mod tests {
     /// the compiler checks; this holds the drops.
     ///
     /// MUTATION: give `FilesWatch` a field `held: Option<bt_platform::DirWatch>` (a watch the
-    /// window thread would drop) — the occurrence outside the steward is named.
+    /// window thread would drop) — the occurrence outside the steward is named; the same with
+    /// `bt_platform::DirWatchSet`.
     #[test]
     fn only_the_steward_starts_or_drops_a_watch() {
         use bt_source::{Index, ModuleSpec, Pattern, Scope, Search, View, needle};
 
         let index = Index::of_package("bt-app");
-        let named_in = |scope: Scope| {
-            index
-                .search(
-                    &Search::new(needle!(Pattern::identifier("DirWatch")), View::Identifiers)
-                        .in_scope(scope),
-                )
-                .unwrap_or_else(|failure| panic!("{failure}"))
-                .in_the_product(index)
-        };
-        let everywhere = named_in(Scope::Everything);
-        let steward = named_in(Scope::Modules(vec![ModuleSpec::tree(
-            "crate::watch_steward",
-        )]));
-        assert!(
-            !steward.is_empty(),
-            "the steward itself no longer names the watch, so this gate is reading nothing"
-        );
-        assert_eq!(
-            everywhere.len(),
-            steward.len(),
-            "`DirWatch` is named outside the watch steward — a watch held there is started or \
-             dropped off the steward's thread:\n{}",
-            everywhere.report(index)
-        );
+        // The set the members share is the steward's too (T-DIR-WATCH-ONE-THREAD): a set held
+        // elsewhere would be every member's thread retired off the steward's.
+        for name in ["DirWatch", "DirWatchSet"] {
+            let named_in = |scope: Scope| {
+                index
+                    .search(
+                        &Search::new(needle!(Pattern::identifier(name)), View::Identifiers)
+                            .in_scope(scope),
+                    )
+                    .unwrap_or_else(|failure| panic!("{failure}"))
+                    .in_the_product(index)
+            };
+            let everywhere = named_in(Scope::Everything);
+            let steward = named_in(Scope::Modules(vec![ModuleSpec::tree(
+                "crate::watch_steward",
+            )]));
+            assert!(
+                !steward.is_empty(),
+                "the steward itself no longer names `{name}`, so this gate is reading nothing"
+            );
+            assert_eq!(
+                everywhere.len(),
+                steward.len(),
+                "`{name}` is named outside the watch steward — a watch held there is started or \
+                 dropped off the steward's thread:\n{}",
+                everywhere.report(index)
+            );
+        }
     }
 
     /// PIN — **a change reaches the ear's listener with the member it is about.**
@@ -1324,5 +1355,61 @@ mod tests {
         wait_for_a_wake(&wakes, "the arming");
         door.moved(&folder("repo"));
         assert_eq!(said.try_recv().ok(), Some(folder("repo")));
+    }
+
+    /// PIN (T-DIR-WATCH-ONE-THREAD) — **the platform's door carries every ear on its one set.**
+    ///
+    /// Two ears at two depths, on a steward of the test's own over the real [`super::Kernel`]: both
+    /// members arm and both are heard, each with its own member, through the one set the door
+    /// keeps for the process. The thread count itself is the platform's claim
+    /// (`bt_platform`'s `dir_watch_set_tests`), read there because only there can a test take the
+    /// watchers' turn.
+    ///
+    /// MUTATION: have `Kernel::start` keep no set (a fresh one per start, dropped at once) — the
+    /// members' set stops under them and neither change is heard.
+    #[test]
+    fn the_kernel_door_carries_every_ear_on_one_set() {
+        let steward: &'static Steward = Box::leak(Box::new(Steward::new(super::Kernel, |_| {})));
+        let (woke, wakes) = mpsc::channel();
+        steward.install_wake(move || {
+            let _ = woke.send(());
+        });
+        let scratch = |name: &str| {
+            let dir = bt_testpath::temp_path(&format!("folio-kernel-one-set-{name}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("make a scratch directory");
+            dir
+        };
+        let (tree, here) = (scratch("tree"), scratch("here"));
+        let (heard, said) = mpsc::channel::<PathBuf>();
+        let listener = |heard: mpsc::Sender<PathBuf>| -> super::Listener {
+            Arc::new(move |path: &Path, change| {
+                if change != DirChange::Ended {
+                    let _ = heard.send(path.to_path_buf());
+                }
+            })
+        };
+        let mut tree_ear = steward.open_ear(Depth::Tree, listener(heard.clone()));
+        let mut here_ear = steward.open_ear(Depth::ShallowNamed, listener(heard));
+        tree_ear.want(&BTreeSet::from([tree.clone()]), BTreeSet::new());
+        here_ear.want(&BTreeSet::from([here.clone()]), BTreeSet::new());
+        let (mut tree_armed, mut here_armed) = (false, false);
+        while !(tree_armed && here_armed) {
+            wait_for_a_wake(&wakes, "the two members arming");
+            tree_armed |= states(&tree_ear).contains(&(tree.clone(), MemberReport::Armed));
+            here_armed |= states(&here_ear).contains(&(here.clone(), MemberReport::Armed));
+        }
+
+        std::fs::create_dir_all(tree.join("deep")).expect("make a subtree");
+        std::fs::write(tree.join("deep").join("x.txt"), b"x").expect("write deep in the tree");
+        std::fs::write(here.join("y.txt"), b"y").expect("write into the shallow member");
+        let mut members = BTreeSet::new();
+        while members.len() < 2 {
+            members.insert(crate::lane::receive(&said, "a change from each member"));
+        }
+        assert_eq!(members, BTreeSet::from([tree.clone(), here.clone()]));
+        drop((tree_ear, here_ear));
+        let _ = std::fs::remove_dir_all(&tree);
+        let _ = std::fs::remove_dir_all(&here);
     }
 }
