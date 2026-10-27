@@ -1223,6 +1223,38 @@ whose road moved to the door is taken off in the same change. Across commits
 seed): a row the base does not carry, or a count that grew, is refused by identity
 (`gates-can-fail` plants a row). A row is never added for a new line.
 
+## Runtime topics from outside
+
+The rule: the crate root and every module outside `runtime/` reach `runtime`'s items
+only through what `runtime/mod.rs` re-exports (`runtime::AfterTheWait`,
+`use runtime::platform_pointer_of;`), never by a path into a topic module
+(T-ROOT-NEVER-IMPORTS-A-RUNTIME-TOPIC, 2026-10-27, plan row 80). Plan row 59 made the
+topic modules `pub(crate) mod` so that rustdoc resolves the doc links that name a moved
+item by its path; from then on `runtime::<topic>::item` compiles anywhere in the crate,
+and this guard is what keeps K2's one road. `runtime/pointer` is a topic like the rest.
+
+Where and what to do: `crates/bt-source/tests/root_topic_paths.rs`
+(`bt_app_reaches_runtime_topics_only_through_the_re_exports`) reads, through
+`bt-source`, every product path outside `runtime/` whose head is `runtime` (spelled
+`runtime`, `crate::runtime`, `self::runtime` or `super::…::runtime`) followed by the
+name of a child module of `crate::runtime` — private ones included — and asserts there
+are none. The shapes read: a path in an expression, a type, a pattern, an `impl` header
+or a generic argument (G1); a module-level `use` in any tree shape, by its
+`bt_source::UseRecord` names and globs (G2); a `use` inside a body (G3); a macro's
+arguments, counted with their candidate certainty (G4). Doc comments and literals are
+not code and not read (G5). Product is `Occurrence::in_the_product` and, for a
+module-level `use`, the `use`'s own `cfg` (`UseRecord::variant`), so a
+`#[cfg(test)] use` at the root is out of the product by its own gate (plan row 77's
+blind spot is not inherited). Refused by their line, never passed: a `use` that names
+`runtime` under another name or opens it by a glob, a group, glob or rename after
+`runtime::` inside a body, a path whose head is not `crate`, `self` or `super`, and a
+path under a `#[cfg]` on a statement or a match arm inside an item (no grain reads that
+gate). There is no allow list. Its fixture (`tests/fixtures/root_topic_paths/`) plants
+each shape (`every_path_into_a_runtime_topic_from_outside_is_named`,
+`a_test_gated_use_is_out_of_the_product_by_its_own_gate`). When red, add the name to a
+re-export in `runtime/mod.rs` and spell the path `runtime::name`; gate a test-only
+statement by its item, not the statement.
+
 ## Native labels
 
 The rule: every word a person reads on a native menu or dialog that `bt-platform`
