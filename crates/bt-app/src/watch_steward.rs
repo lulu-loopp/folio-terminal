@@ -547,8 +547,9 @@ impl WatchSteward {
             let cause = Cause::of(&error);
             (lane.note)(&unheard_line(path, &cause));
             reports.push((*ear, path.clone(), MemberReport::Failed(cause.clone())));
-            // The ended watch is retired here, on the worker, through its door: its thread has
-            // already finished, so the door's join is the formality the bound never reaches.
+            // The ended watch is retired here, on the worker, through its door: the member has
+            // already said `Ended` and is leaving its set, so the door waits at most a poll or two
+            // for the set's thread to say it is gone, well inside the bound.
             if let Member::Armed(ended) = std::mem::replace(member, Member::Failed(cause)) {
                 retire(lane, ctx, path, ended);
             }

@@ -90,7 +90,7 @@
 //! event — and because each member's root, depth filter and `WATCH_ROOT` end are
 //! read against its own stream exactly as before. The cost the ticket was about
 //! is the thread, and that is one.
-
+//!
 //! # A request is a run loop source, not a flag
 //!
 //! `CFRunLoopStop` on a loop that has not started yet does nothing, and the
