@@ -45390,6 +45390,11 @@ mod focus_mode_door_tests {
     /// is taken, so a match at the head of a file cannot reach into the one
     /// concatenated in front of it; two occurrences on one line answer once, as
     /// the line reading did.
+    ///
+    /// The order is the index's file order (by relative path), which moving a
+    /// door between files changes and nothing in the doors does; a test that
+    /// names the doors compares the lines sorted, so it holds which lines and
+    /// how many of each, and not where the files sort.
     fn lines_holding(needle: &str) -> Vec<&'static str> {
         let index = source();
         let union = index.union();
@@ -45428,13 +45433,15 @@ mod focus_mode_door_tests {
     #[test]
     fn only_the_chord_and_the_settings_row_write_the_bit() {
         let needle = "self.set_focus_mode(";
-        let doors = lines_holding(needle);
-        let expected = [
+        let mut doors = lines_holding(needle);
+        doors.sort_unstable();
+        let mut expected = [
             // `Appearance ▸ Focus mode: On/Off`, through `focus_mode_requested`.
             format!("{needle}on)?;"),
             // `Ctrl+Shift+Z`, through `toggle_focus_mode`.
             format!("{needle}!self.window.focus_mode)"),
         ];
+        expected.sort_unstable();
         assert_eq!(
             doors, expected,
             "focus mode is entered and left through two doors and no others"
@@ -45636,19 +45643,21 @@ mod focus_mode_door_tests {
     #[test]
     fn the_cards_offer_is_spent_in_one_place_and_given_back_in_one() {
         let needle = "settings.cards_gesture_hint_offer =";
-        let writes = lines_holding(needle);
+        let mut writes = lines_holding(needle);
+        writes.sort_unstable();
+        let mut expected = [
+            // Spent on the frame the bubble is raised.
+            format!("{needle} false;"),
+            // And given back by `Reset to defaults` on the page Cards is on.
+            needle.to_owned(),
+            // And, third, taken from a hand edit of this machine's own
+            // `settings.json` by the storage pass's merge (T-STORE-MERGE-SETTINGS):
+            // a receipt about this machine, written by a person on it.
+            format!("{needle} merged.cards_gesture_hint_offer;"),
+        ];
+        expected.sort_unstable();
         assert_eq!(
-            writes,
-            [
-                // Spent on the frame the bubble is raised.
-                format!("{needle} false;"),
-                // And given back by `Reset to defaults` on the page Cards is on.
-                needle.to_owned(),
-                // And, third, taken from a hand edit of this machine's own
-                // `settings.json` by the storage pass's merge (T-STORE-MERGE-SETTINGS):
-                // a receipt about this machine, written by a person on it.
-                format!("{needle} merged.cards_gesture_hint_offer;"),
-            ],
+            writes, expected,
             "the offer has one spender, one restorer, and the merge of a hand edit",
         );
 
