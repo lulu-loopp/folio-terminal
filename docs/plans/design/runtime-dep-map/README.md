@@ -747,6 +747,17 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
     `send_paste`), and takes the unattributed-read header from 180 to 182.
     `card_skip`'s door, sent here by O-2, was not built: it was not in O-3's
     judgement, and the ruling makes `commit_presented` the one `TermView` method.
+  - **Blind spot (review F2, 2026-10-27):** the map does not count a call into a
+    bt-app trait implemented on another package's type, so no call into
+    `TermViewPorts` is in it. `crates/bt-source/src/census/resolve.rs:539-543`
+    (`workspace_methods`) keeps a method's callees only from the type's own
+    packages, and `DualPlaneSession` is bt-term's. The writes stay right (the class
+    comes from the declaration), and no unknown or unfollowed row shows the drop.
+    Undercounted: the `topics.tsv` rows `runtime/math.rs -> main.rs` (8 port calls
+    missing; 36 -> 37 counts only `propose_layout`), `runtime/clipboard.rs ->
+    main.rs` (2), `runtime/mouse.rs -> main.rs` (1) and `runtime/frame.rs ->
+    main.rs` (1), and the `TermViewPorts` items' `called_by` and their callers'
+    `calls`. The fix is a bt-source plan row of its own; the map regenerates then.
 - **O-4 (M5–M7).**
   - **M5, the launch facts.** Six fields, opening mostly `main.rs`, plus
     `runtime/{panes,tabs,clipboard,terminal,floats,mouse,peek,profiles,dpi}.rs` for

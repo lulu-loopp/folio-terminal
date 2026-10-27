@@ -25,13 +25,15 @@ use super::*;
 
 use std::collections::VecDeque;
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use bt_platform::trust_harness::done_once_let_go;
+
+use crate::update_apply::{CountedClock, now_ms};
 
 use crate::update_prepare_macos::tests::fixture::{
     HOMEBREW_MARKER, Scratch, fake_brew, homebrew_install, on_macos, run, sign, version_of,
@@ -465,6 +467,7 @@ impl Install {
             data: self.data.clone(),
             agents: Some(self.agents.clone()),
             limits,
+            trial_clock: Arc::new(WallClock),
             starter: None,
             handed_back: None,
             layouts: own_layouts(),
@@ -1927,11 +1930,17 @@ fn a_failed_health_swaps_back() {
 /// process left to stop.
 ///
 /// W7: "P alive: P waits for the receipt until the deadline" — only while the
-/// recorded trial process lives. The test ends the trial as soon as `Trial`
-/// is durable; the deadline is twenty seconds away.
+/// recorded trial process lives. The test ends the trial, and waits for it to
+/// be reaped, inside the first pause the watch takes with `Trial` durable; the
+/// road's trial clock ([`CountedClock`]) moves only by the pauses, so "at
+/// once" is counted: the watch ends at its next look, with no pause after the
+/// death (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK). A pause taken before `Trial`
+/// is recorded — the launched trial not yet in the process list — waits until
+/// the product's own [`crate::update_apply::launched_trial`] finds it, so no
+/// turn before the record is a spin that could run the clock to its deadline.
 ///
 /// MUTATION: in `trial`, treat the recorded process as alive whatever
-/// `still_running` answers (the rollback waits for the deadline).
+/// `still_running` answers (the watch pauses its way to the deadline).
 #[test]
 fn a_dead_trial_rolls_back_at_once() {
     if !on_macos() {
@@ -1944,36 +1953,68 @@ fn a_dead_trial_rolls_back_at_once() {
         started.start_trial(bundle, args);
         Ok(())
     }));
-    let killer = {
-        let children = children.clone();
-        let journal = install.home.journal();
-        std::thread::spawn(move || {
-            let give_up = Instant::now() + Duration::from_secs(20);
-            while Instant::now() < give_up {
-                let trial = std::fs::read(&journal)
-                    .ok()
-                    .and_then(|bytes| Journal::parse(&bytes).ok())
-                    .is_some_and(|journal| journal.body.phase.kind() == PhaseKind::Trial);
-                if trial {
-                    for pid in children.started.lock().unwrap().clone() {
-                        children.end(pid);
-                    }
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(10));
+    let ended_at: Arc<Mutex<Option<usize>>> = Arc::default();
+    let unrecorded = Arc::new(AtomicUsize::new(0));
+    let clock = {
+        let (children, journal, ended_at, unrecorded) = (
+            children.clone(),
+            install.home.journal(),
+            Arc::clone(&ended_at),
+            Arc::clone(&unrecorded),
+        );
+        let (launched, txn, program) = (
+            Arc::clone(&world.launched),
+            install.txn,
+            install.installed.join(EXE),
+        );
+        Arc::new(CountedClock::new(move |pause| {
+            let trial = std::fs::read(&journal)
+                .ok()
+                .and_then(|bytes| Journal::parse(&bytes).ok())
+                .is_some_and(|journal| journal.body.phase.kind() == PhaseKind::Trial);
+            let mut ended_at = ended_at.lock().unwrap();
+            if ended_at.is_some() {
+                return;
             }
-        })
+            if !trial {
+                // Not yet recorded: the launched trial is not in the process
+                // list yet. Wait for the event the next turn records it on.
+                unrecorded.fetch_add(1, Ordering::SeqCst);
+                let nonce = trial_nonce(&launched.lock().unwrap()[0]);
+                crate::lane::wait_until("the launched trial in the process list", || {
+                    crate::update_apply::launched_trial(txn, nonce, &program, None).is_some()
+                });
+                return;
+            }
+            for pid in children.started.lock().unwrap().clone() {
+                children.end(pid);
+                assert!(children.ended(pid).is_some(), "the trial {pid} is reaped");
+            }
+            *ended_at = Some(pause);
+        }))
     };
-    let began = Instant::now();
-    let (ended, world) = applied(install.road(limits(5_000, 20_000)), world);
-    killer.join().unwrap();
+    let mut road = install.road(limits(5_000, 20_000));
+    road.trial_clock = clock.clone();
+    let (ended, world) = applied(road, world);
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
-    assert!(
-        began.elapsed() < Duration::from_secs(12),
-        "rolled back {:?} after the start: it waited for the deadline",
-        began.elapsed()
+    let ended_at = ended_at
+        .lock()
+        .unwrap()
+        .expect("the trial was recorded and ended");
+    assert_eq!(
+        clock.pauses(),
+        ended_at,
+        "rolled back at the first look after the death, not at the deadline \
+         ({} pauses before `Trial` was recorded): {:?}",
+        unrecorded.load(Ordering::SeqCst),
+        world.said
     );
     assert!(said(&world, "ended without a receipt"));
+    assert!(
+        !said(&world, "no receipt by the trial's deadline"),
+        "{:?}",
+        world.said
+    );
     assert!(!said(&world, "is asked to"), "{:?}", world.said);
     assert_eq!(version_of(&install.installed), "1.0");
 }
@@ -3742,7 +3783,12 @@ fn a_start_beside_an_unrecorded_trial_commits_it_and_starts_nothing_more() {
 /// The rehearsal's M9cut and M11-rolledback: the trial killed before it was
 /// seen, and 89.8 s without a window before `no receipt by the trial's
 /// deadline`. The stand-in for `open -W` here is a program that returns at
-/// once, and nothing of the new bundle ever runs.
+/// once, and nothing of the new bundle ever runs. The road's trial clock
+/// ([`CountedClock`]) moves only by the watch's pauses, and a pause waits for
+/// the stand-in to have ended — the end of its output, which closes as it
+/// exits — so nothing spins on a live launch, and "at once" is counted: the
+/// watch is over long before its clock reaches the deadline
+/// (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK).
 ///
 /// MUTATION: in `Txn::watch_trial`, pass `&mut || false` as `launch_over`.
 #[test]
@@ -3751,26 +3797,41 @@ fn a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once() {
         return;
     }
     let install = Install::new("unseen");
+    let output: Arc<Mutex<Option<std::process::ChildStdout>>> = Arc::default();
+    let handed = Arc::clone(&output);
     let world = Fake {
-        on_launch_held: Some(Box::new(|_, _| {
-            bt_platform::quiet_command("/usr/bin/true")
+        on_launch_held: Some(Box::new(move |_, _| {
+            let mut child = bt_platform::quiet_command("/usr/bin/true")
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null())
-                .spawn()
+                .spawn()?;
+            *handed.lock().unwrap() = child.stdout.take();
+            Ok(child)
         })),
         ..Fake::default()
     };
-    let began = Instant::now();
-    let (ended, world) = applied(install.road(limits(5_000, 30_000)), world);
-    let took = began.elapsed();
+    let clock = Arc::new(CountedClock::new(move |_| {
+        if let Some(mut out) = output.lock().unwrap().take() {
+            // The end of its output: the stand-in has exited.
+            let _ = out.read_to_end(&mut Vec::new());
+        }
+    }));
+    let mut road = install.road(limits(5_000, 30_000));
+    road.trial_clock = clock.clone();
+    let (ended, world) = applied(road, world);
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert!(
         said(&world, "ended before it could be seen"),
         "{:?}",
         world.said
     );
-    assert!(took < Duration::from_secs(15), "at once: {took:?}");
+    assert!(
+        clock.pauses() >= 1 && clock.moved_ms() < 30_000,
+        "over at the launch's end, not at the deadline: {} pauses, {} ms",
+        clock.pauses(),
+        clock.moved_ms()
+    );
     assert_eq!(version_of(&install.installed), "1.0", "swapped back");
 }
 

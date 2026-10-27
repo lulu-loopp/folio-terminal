@@ -277,8 +277,8 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
 /// and the scale), the effective-size derivation and the apply operation, in both orders — and
 /// then through `apply_tabs_leaf_metrics`, the walk a transfer to another window takes.
 ///
-/// MUTATION: store the product — derive from `leaf.view.metrics.font_size_px` scaled instead of from
-/// the rung — and the two orders part; key the memo by size alone — and the move to 2.0 keeps
+/// MUTATION: store the product — derive from `leaf.view.metrics.font_size_px` scaled instead of
+/// from the rung — and the two orders part; key the memo by size alone — and the move to 2.0 keeps
 /// the 1.5 cell.
 #[test]
 fn settings_then_dpi_equals_dpi_then_settings_equals_a_direct_measure() {
@@ -539,8 +539,8 @@ fn the_rung_is_never_written_and_every_rebuilt_view_starts_at_100() {
 ///
 /// MUTATION: add `let size = leaf.view.text_scale;` to any other method (an alias read) — reading 2
 /// names it; add `leaf.view.text_scale = TextScale::ACTUAL;` in `Runtime::activate_tab` (an extra
-/// writer) — readings 1 and 2; call `self.window.renderer.base_metrics().cell_width_px` from a
-/// hit test — reading 4.
+/// writer) — readings 1 and 2; call `self.window.renderer.base_metrics().cell_width_px` from a hit
+/// test — reading 4.
 #[test]
 fn the_rung_has_one_owner() {
     // 1. One writer.
