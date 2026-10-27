@@ -6069,6 +6069,61 @@ impl<B: Backend> Runtime<'_, B> {
             .is_none()
             .then_some(leaf.seat)
     }
+
+    /// The same question asked of a drag the caller is holding.
+    ///
+    /// [`Runtime::release_drag`] takes the drag out of the window before it
+    /// decides anything — a gesture that has ended must not be in flight while
+    /// its own consequences run — so the commit cannot ask `self.drag` what it
+    /// was aiming at. It asks the drag it has.
+    pub(crate) fn plan_inputs_for(&self, drag: &Drag) -> Option<PlanInputs> {
+        let landing = drag.landing?;
+        // The strip's two landings draw themselves in the strip (K124: "the
+        // preview in the strip is the ghost now"), so there is no dock box for
+        // them and never was one to fade.
+        landing.layout_aim()?;
+        let showing = self.window.tabs[self.window.active_tab].id;
+        // **The one place a source is turned into the *shape* it arrives in**
+        // (M156, and §7.1.6k′'s addition to it). `Some` means "a whole subtree
+        // arrives and is renumbered on the way in"; `None` means "a seat of the
+        // tree being planned changes places and keeps its own name".
+        //
+        // Written here rather than in [`Runtime::plan_for`] because this is the
+        // cache key: the shape is part of what the plan is a function of, and a
+        // spring that moves the view mid-gesture changes the shape without
+        // changing the landing.
+        let cargo = match &drag.source {
+            // A row arrives as one leaf, and that leaf is built where the plan
+            // is (see [`Runtime::plan_for`]) — a row has no tree of its own to
+            // carry, which is the whole difference between it and a tab.
+            DragSource::Row(_) => None,
+            // **§7.1.6k′ — a pane is one shape at home and the other away.** In
+            // the tab on screen it is a seat this tree owns, so it arrives *as
+            // itself*: the same `Seat`, the same id, its fixed extent along
+            // with it, and a centre that trades payloads rather than evicting
+            // anybody (L138). Once the spring has left the hand in one tab and
+            // the view in another, that seat is not in the tree being planned
+            // at all — it is a subtree from another room, exactly like a tab's,
+            // and it arrives the way one does.
+            DragSource::Pane(leaf) if leaf.tab == showing => None,
+            DragSource::Pane(leaf) => Some(bt_layout::LayoutNode::seat(
+                self.tab_state(leaf.tab)?
+                    .seats
+                    .tree()
+                    .find_seat(leaf.seat)?
+                    .clone(),
+            )),
+            DragSource::Tab(id) => Some(self.tab_state(*id)?.seats.tree().clone()),
+        };
+        Some(PlanInputs {
+            landing,
+            source: drag.source.clone(),
+            tree: self.seats.tree().clone(),
+            cargo,
+            viewport: self.window.seat_viewport,
+            scale_ppm: seats::scale_ppm(self.window.renderer.dpi_milli().get()),
+        })
+    }
 }
 
 /// **U8, R3 — a mid-FLIP terminal pane's viewport and scissor.**
