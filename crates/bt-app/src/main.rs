@@ -328,7 +328,7 @@ use runtime::unverified_reference_handoff;
 use computation_lane::raster_peek_page;
 use explorer_menu::door_language;
 use file_peek::home_shortened_path_on;
-#[cfg(test)]
+#[cfg(all(test, windows))]
 use handoff_lane::files_program_refused_notice;
 #[cfg(test)]
 use present_gate::presentation_equivalent;
