@@ -2773,9 +2773,9 @@ Every method below runs on the **window thread** and holds `&mut App` and
 ownership. "Asks" names the lanes of §5.1 whose requests the file sends or
 whose answers it applies; "doors and rows" names the §6 doors and the §5.3
 rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the methods K2
-(T-SPLIT-2B) has moved in since, updated with each batch (through batch 22: `profiles.rs` and
+(T-SPLIT-2B) has moved in since, updated with each batch (through batch 23: `profiles.rs` and
 `search.rs` +1 each in batch 1, `web.rs` +2 in batch 2 and +1 in batch 3, `dpi.rs` +1 in batch 3,
-`palette.rs` +5 in batch 5, `terminal.rs` +2 in batch 6, `git.rs` +3 in batch 7; batch 8 moved free functions only; `clipboard.rs` +1 in batch 9; `floats.rs` +4, `frame.rs` +1 and `clipboard.rs` +1 in batch 10; `terminal.rs` +1 in batch 11; `windows.rs` +1 in batch 12; `frame.rs` +10, `terminal.rs` +1, `handoff.rs` +1, `web.rs` +1, `math.rs` +1 and `keyboard.rs` +1 in batch 13; `math.rs` +5, `profiles.rs` +1, `frame.rs` +1 and `terminal.rs` +1 in batch 14; `keyboard.rs` +7, `floats.rs` +1, `windows.rs` +1, `terminal.rs` +1 and `math.rs` +1 in batch 15; `tabs.rs` +4, `panes.rs` +1 and `mouse.rs` +1 in batch 16; `mouse.rs` +14, `files.rs` +2, `tabs.rs` +1, `tooltips.rs` +1 and `terminal.rs` +2 in batch 17; `panes.rs` +7 in batch 18; `preview.rs` +2 in batch 19; `preview.rs` +1 and `frame.rs` +1 in batch 20; `preview.rs` +21 and `panes.rs` +1 in batch 21; `keyboard.rs` +8, `preview.rs` +4, `panes.rs` +3, `mouse.rs` +3 and `handoff.rs` +1 in batch 22).
+`palette.rs` +5 in batch 5, `terminal.rs` +2 in batch 6, `git.rs` +3 in batch 7; batch 8 moved free functions only; `clipboard.rs` +1 in batch 9; `floats.rs` +4, `frame.rs` +1 and `clipboard.rs` +1 in batch 10; `terminal.rs` +1 in batch 11; `windows.rs` +1 in batch 12; `frame.rs` +10, `terminal.rs` +1, `handoff.rs` +1, `web.rs` +1, `math.rs` +1 and `keyboard.rs` +1 in batch 13; `math.rs` +5, `profiles.rs` +1, `frame.rs` +1 and `terminal.rs` +1 in batch 14; `keyboard.rs` +7, `floats.rs` +1, `windows.rs` +1, `terminal.rs` +1 and `math.rs` +1 in batch 15; `tabs.rs` +4, `panes.rs` +1 and `mouse.rs` +1 in batch 16; `mouse.rs` +14, `files.rs` +2, `tabs.rs` +1, `tooltips.rs` +1 and `terminal.rs` +2 in batch 17; `panes.rs` +7 in batch 18; `preview.rs` +2 in batch 19; `preview.rs` +1 and `frame.rs` +1 in batch 20; `preview.rs` +21 and `panes.rs` +1 in batch 21; `keyboard.rs` +8, `preview.rs` +4, `panes.rs` +3, `mouse.rs` +3 and `handoff.rs` +1 in batch 22; `settings.rs` opened with 42 and `handoff.rs` +1 in batch 23).
 
 | file | methods | owns | asks | doors and rows |
 |---|---|---|---|---|
@@ -2789,7 +2789,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 | `floats.rs` | 66 | floating windows, popups and chevron menus; the file, terminal and page menus | observation (files, git); hand-off (reveal) | — |
 | `frame.rs` | 36 | chrome refresh, frame publication and present attempts, `turn`, hyperlink activation | presentation (on this thread); session (the drain frame); observation (math); hand-off (refusals) | row 6 (the search refresh in `publish_frame`) |
 | `git.rs` | 106 | the git column, graph, compare and checkout; its menus, prompts and writes to a repository | observation (`bt-git-worker`, whose `git` children go through `quiet_command`); ingress (`git_watch`) | — |
-| `handoff.rs` | 6 | the `Runtime` side of the OS hand-off lane: submit, hold each request with its duty, answer a refusal at the door at once and the rest when they end | hand-off | never calls `bt_platform::handoff` itself (`no_handoff_runs_on_the_window_thread`) |
+| `handoff.rs` | 7 | the `Runtime` side of the OS hand-off lane: submit, hold each request with its duty, answer a refusal at the door at once and the rest when they end | hand-off | never calls `bt_platform::handoff` itself (`no_handoff_runs_on_the_window_thread`) |
 | `i18n.rs` | 2 | applying and adopting the language | — | — |
 | `keyboard.rs` | 51 | `keyboard_input` and its rung order (§8), shortcuts and key hints, the IME caret, cursor blink | session (input) | IME native affinity (§5.2); `store_keybindings`, row 20 |
 | `math.rs` | 53 | formulas in terminal and preview: requests, results, hover tools, toggles, copying LaTeX | observation (`bt-math-worker`) | — |
@@ -2801,6 +2801,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 | `profiles.rs` | 25 | the profile table: launching, menus, the editor, store and re-read, the default profile, the root menu | storage; ingress (`storage_watch`) | row 2 (`add_to_profile`) |
 | `quake.rs` | 9 | the summoned window: show, hide, its profile and arrangement | — | — |
 | `search.rs` | 23 | the find box, its highlights and stepping | — | row 6 (`refresh_search`) |
+| `settings.rs` | 42 | the settings sheet: opening, closing, scrolling and its pointer (the four `PointerHost` methods), applying a choice and each setting's apply, the Advanced groups and rows, the profile editor's fields and their paste, scheme edit and delete, the cards' gesture hint, the font settings, focus mode's on/off | storage (`store_profiles`, `store_defaults`, `store_requested`); hand-off (`open_font_settings`); observation (the Explorer package request) | `bt_platform::pick_file`, `bt_platform::recycle`; store writes, row 20 |
 | `tabs.rs` | 76 | the tab strip: new, close, activate, rename, drag, tear out; the tab menu; tables | — | — |
 | `terminal.rs` | 42 | the terminal pane: `drain_pty`, command marks, scroll and column bars, restart, fonts, selection, the PowerShell intent | session (drain, pane birth) | rows 2 (`spend_powershell_intent`), 5 (`apply_terminal_font`), 19 |
 | `tooltips.rs` | 10 | tooltips | — | — |
@@ -2809,14 +2810,14 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 329 (242 free functions, 87 methods) after batch 22. The table
+into their topics batch by batch: 284 (240 free functions, 44 methods) after batch 23. The table
 below is the 2026-09-21 manifest's sort of the 201 methods then left
 (`docs/plans/bt-app-split-2a-manifest-2026-09-21.tsv`):
 
 | topic | methods | owns | why it has not moved |
 |---|---|---|---|
 | `launch` | 4 | `Runtime::create` — starts the endpoints and probes and registers their wakes — `reseed_editor_env`, `apply_launch_opens`, `arrival_fits` | a source reader bound to `main.rs` by `include_str!` (`docs/plans/bt-app-split-prep.md` Appendix C) |
-| `settings` | 31 | the settings modal, `apply_settings_choice`, schemes and their watch, `open_font_settings` | a reader that compares door lines in universe order (same appendix) |
+| `settings` | 31 | the settings modal, `apply_settings_choice`, schemes and their watch, `open_font_settings` | a reader that compared door lines in universe order (same appendix); since batch 23 (2026-10-26) the readers compare them sorted and `runtime/settings.rs` holds the topic, and what stays is the scheme and storage watch with the methods it calls (eight) |
 | `focus` | 51 | focus mode, cards and their hints, terminal thumbs, focus seats, the quit card | the same reader shape as `settings` |
 | unassigned | 112 | appearance applies, the storage watch and pins, minted pages, `open_local_path` and `reveal_in_explorer` (hand-off), path-verification asks, `send_user_input`, composition, retirement, `finish_synchronized_update_if_due` | the theme regex assigns them no topic; not ruled |
 | newer than the manifest | 3 | `apply_web_color_scheme`, `open_unverified_reference`, `hand_uri_to_the_system` | added after the move; no topic yet |

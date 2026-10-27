@@ -1141,9 +1141,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_layout	Ambiguous	satur
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_layout	Ambiguous	unwrap_or	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_values	Ambiguous	collect	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_values	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::write_editor_field	Path	ProfilesNameBlank	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::write_editor_field	Path	ProfilesNameTaken	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
-crates/bt-app/src/main.rs	bt-app crate::Runtime::write_editor_field	Path	ProfilesProgramHasArguments	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::SourceBlocks::get	Ambiguous	map	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::SourceBlocks::get	Ambiguous	ok	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/main.rs	bt-app crate::SourceBlocks::new	Ambiguous	all	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
@@ -3091,6 +3088,9 @@ crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::Runtime::sear
 crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::rescan_leaf_for_search	Ambiguous	as_micros	1	unreviewed	2026-10-24: T-SPLIT-2B batch 1; the same site, moved by K2 batch 1 with `rescan_leaf_for_search` from main.rs into runtime/search.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::rescan_leaf_for_search	Ambiguous	elapsed	1	unreviewed	2026-10-24: T-SPLIT-2B batch 1; the same site, moved by K2 batch 1 with `rescan_leaf_for_search` from main.rs into runtime/search.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::rescan_leaf_for_search	Ambiguous	map_or	1	unreviewed	2026-10-24: T-SPLIT-2B batch 1; the same site, moved by K2 batch 1 with `rescan_leaf_for_search` from main.rs into runtime/search.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::write_editor_field	Path	ProfilesNameBlank	1	unreviewed	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `write_editor_field` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::write_editor_field	Path	ProfilesNameTaken	1	unreviewed	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `write_editor_field` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::write_editor_field	Path	ProfilesProgramHasArguments	1	unreviewed	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `write_editor_field` from main.rs into runtime/settings.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::close_tab	Ambiguous	proceeds	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::finish_rename	Ambiguous	is_empty	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::measure_open_rename	Ambiguous	unwrap_or_default	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))

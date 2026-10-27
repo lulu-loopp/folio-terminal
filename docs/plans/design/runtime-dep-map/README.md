@@ -64,8 +64,9 @@ exact count of what it does see.
   `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
-- **unclassified.tsv**: **329 items, 242 free functions and 87 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 22's head; 368, 274 and 94 before it,
+- **unclassified.tsv**: **284 items, 240 free functions and 44 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 23's head; 329, 242 and 87 before it,
+  368, 274 and 94 before batch 22,
   419, 303 and 116 before batch 21,
   459, 341 and 118 before batch 20,
   503, 383 and 120 before batch 19,
@@ -135,6 +136,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 18 | `runtime/mouse.rs` | moved by batch 17, before row 17 by the live map (46 items with the ties `Runtime::glass_here`, `Runtime::note_terminal_thumb_hover`, `route_forwarded_mouse_button` and `Runtime::focus_pane_at` and four tails; `Runtime::browse_for_root`, `Runtime::toggle_switcher_pin` and the tail `switcher_pin_is_allowed` went to `runtime/files.rs` and `Runtime::settle_home` to `runtime/tabs.rs` by their census owners, and the tails `Runtime::command_tick_card`, `Runtime::woke_terminal_thumb`, `Runtime::wake_terminal_thumb`, `page_destination` and `switcher_row_destination` to `runtime/tooltips.rs`, `runtime/terminal.rs` and `runtime/web.rs` by the owner column, below; `Runtime::scroll_settings`, `Runtime::settings_mouse_input`, `Runtime::open_settings_on_row`, `Runtime::toggle_settings_panel`, `Runtime::send_user_input` and `Runtime::toggle_pin` held, below) | — |
    | 19 | `runtime/preview.rs` | cut into three batches by sub-topic (ruled at batch 19, below): batch 19 moved the document bodies (44 items, with `markdown_gap_paragraph` by the owner column, below; `push_markdown_table` held, below); batch 20 moved pictures, zoom, video and surfaces (40 items, with `animated_pane_viewports` by the owner column and `Runtime::play_button_rasters` by its census owner, below; eight held, below), and batch 21 moved pages, sources, the foot, crumbs, hand-off, refusal cards, switcher rows, the taskbar and landing (51 items: 50 into `runtime/preview.rs`, with the ties `Runtime::open_minted_page_on`, `revealable_preview_file`, `Runtime::gated_minted_target` and `Runtime::resizing_cards_frame` by the owner column and the foot pair `Runtime::foot_saying` and `Runtime::sweep_foot_phrases` together, and `Runtime::plan_inputs_for` to `runtime/panes.rs` by the owner column, below; `markdown_image_extent` held, below) | — |
    | — | the §13 re-sort (`docs/ARCHITECTURE.md` §13's "Still in `main.rs`") | moved by batch 22 (ruled 2026-10-26: 39 items out of `main.rs`, 7 methods and 32 free functions, and the whole `Runtime` blocks of `ime_outbound.rs` (8 methods) and `preview_viewport.rs` (4) into `runtime/keyboard.rs` and `runtime/preview.rs`; `Runtime::reveal_in_explorer` and `reveal_ask` to `runtime/handoff.rs` by clause (b); the six focus-card rows to `runtime/panes.rs` by clause (a); `Runtime::focus_seat`, `Runtime::focus_the_pane_a_path_landed_in` and `Runtime::settle_focus_on` to `runtime/mouse.rs` by the multi-owner rule, below; the three function values `web_page_cursor`, `files_a_tab_stands_on` and `seeded_tab` by first caller; the five holds the two blocks released (`ime_owner`, `popup_takes_the_key`, `terminal_ime_cursor_area`, `preview_caret_prose` and `scale_ppm`) with the tail `window_ime_cursor_area`; twelve rows beside their callers outside `runtime/`, with seven tails: `window_seam.rs` 4, `computation_lane.rs` 7, `preview_viewport.rs` 3, and one each into `handoff_lane.rs`, `update_job.rs`, `present_gate.rs`, `file_peek.rs` and `explorer_menu.rs`, below; `native_window_of`, `option_as_alt`, `is_format_or_bidi_control`, `measure_markdown_local` and `markdown_prose_face` held, below) | — |
+   | — | `runtime/settings.rs` (re-sort D5) | moved by batch 23 (ruled 2026-10-26, which opened the file: 45 items out of `main.rs`, 43 into `runtime/settings.rs` (38 methods, the four `PointerHost` methods as one trait-impl block, and `contains_point`) and `Runtime::open_local_path` with `open_local_path_ask` into `runtime/handoff.rs` (D6); the four facts that already had several writer modules and gained `settings` are accepted by the shared-fact rule, below; `Runtime::add_scheme`, `Runtime::advance_scheme_watch`, `Runtime::advance_storage_watch` and `Runtime::adopt_option_as_alt` held by the census rule and `Runtime::reread_schemes`, `Runtime::apply_scheme`, `Runtime::open_scheme_for_editing` and `Runtime::settings_closed` with their root callers, below) | — |
 
    **From batch 14 on, the order is the live map's** (ruled at batch 14). The smallest-sum-first rule above is
    applied to the map regenerated at each batch's base, not to this table's numbers, which were read at batch 1's
@@ -194,6 +196,25 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    moved `ime_outbound.rs`'s block (8 methods) into `runtime/keyboard.rs` and `preview_viewport.rs`'s (4) into
    `runtime/preview.rs`; `Runtime::trace_ime_cancel` and `Runtime::destroy_ime_caret`, which the held
    `Runtime::cancel_composition` calls, are `pub(crate)`.
+
+   **K2 opens `runtime/settings.rs`** (ruled 2026-10-26, re-sort D5, reversing 2026-10-24's "K2 opens no
+   `runtime/settings.rs`"). Batch 23 moved the settings group there, with `Runtime::paste_into_settings_field` and
+   `Runtime::write_editor_field` (D3 of the re-sort); the held entries below that rested on the 2026-10-24 rule say
+   which closed. The module now exists, so the census owner `main[settings]` is renamed `settings` in the four
+   annotation rows that named it (`App.settings_store`, `WindowRuntime.advanced_reveal_sample`,
+   `WindowRuntime.settings`, `WindowRuntime.settings_scroll`), and `runtime/settings.rs` is that owner's module for
+   clause (a). A whole trait-impl block for `Runtime` moves as one block of its own, after the destination's
+   inherent block (ruled at batch 23, D5: `move.py`'s trait-block shape), as the `PointerHost` impl did.
+
+   **A fact that already has several writer modules may gain the module of the page that writes it** (ruled
+   2026-10-26, at batch 23, D1). The census rule above holds an item whose move would make a single-writer fact a
+   two-module one; a fact that is multi-writer already does not hold the move when the module it gains is the owner
+   of the page whose code writes it. Batch 23's four: `App.update_job` ({root, update_card} → {root, settings,
+   update_card}; `apply_settings_choice_announcing` through `show_failure`, the Updates row), `LeafSession.session`
+   (ten writer modules → eleven; `apply_block_max_height` and `apply_repair_row_breaks` through the terminal's own
+   setter `set_math_layout_options`), and `WindowRuntime.focus_mode` and `WindowRuntime.focus_reveal` ({root,
+   windows} → {root, settings, windows}; `set_focus_mode`, the Appearance page's toggle). A fact going from one
+   writer module to two still holds the item.
 
    **When the ownership census names an owner for a field an item writes, the owner column wins over the first
    caller** (a judged exception, batch 6). `deliver_osc_attention` is called only from `Runtime::drain_pty` in
@@ -341,6 +362,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `Runtime::settings_field_holds_the_keyboard`, which only reads the settings field and whose one caller is
      `Runtime::clipboard_focus`, went to `runtime/clipboard.rs` as a tail in batch 10.
      What holds it is that `runtime/clipboard.rs` would have been a new writer of `WindowRuntime.settings`.
+     Batch 23 moved it to `runtime/settings.rs`, once K2 opened that file (2026-10-26, above).
      Batch 15 moved `Runtime::record_settings_key` and `Runtime::settings_field_key` to `runtime/keyboard.rs`,
      which already writes that fact, so neither adds a writer module. `settings_field_key` writes nothing else, and
      its first caller stands. `record_settings_key` also writes `App.shortcuts`, whose owner is keyboard and which
@@ -351,11 +373,24 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `main[settings]`, and `runtime/frame.rs` does not write it; K2 opens no `runtime/settings.rs`, so it stays,
      as `paste_into_settings_field` does. The two are `WindowRuntime.card_hint`'s only writers, so
      `advance_card_hint` stays with it: moving one alone would make that fact a new two-module one.
+     Batch 23 moved both to `runtime/settings.rs` (2026-10-26, above); `WindowRuntime.card_hint` went from the root
+     to `runtime/settings.rs` whole.
    - `Runtime::advance_scheme_watch`, `Runtime::advance_storage_watch` and `mark_leaf_painted` (batch 13) — their
      `called_from` home is `runtime/frame.rs`, but they write `App.scheme_watch` (other writers `add_scheme` and
      `create`), `App.storage_watch` (other writer `create`) and `LeafSession.last_seen_revision` (other writer
      `mark_leaf_seen`), whose other writers stay at the root (the census rule above). `advance_storage_watch`
-     also writes facts of several census owners.
+     also writes facts of several census owners. At batch 23 the first two still hold in the settings topic's
+     rest: `App.scheme_watch` and `App.storage_watch` would go from the root alone to the root and
+     `runtime/settings.rs` (`Runtime::create` keeps writing both), and `Runtime::add_scheme`, the other writer of
+     `App.scheme_watch`, holds with them.
+   - `Runtime::adopt_option_as_alt` (batch 23) — in the settings group, but it writes `WindowRuntime.modifiers`
+     (owner keyboard), which `FolioApp::on_window_event` writes at the root, so `runtime/settings.rs` would make it a
+     two-module fact (the census rule above).
+   - `Runtime::reread_schemes`, `Runtime::apply_scheme`, `Runtime::open_scheme_for_editing` and
+     `Runtime::settings_closed` (batch 23) — in the settings group and blocked by none of their own facts, but each
+     has a root product caller that holds (`advance_scheme_watch`; `add_scheme` and `reread_schemes`; `add_scheme`;
+     `open_scheme_for_editing`), so they stay with their callers (ruled 2026-10-26, D2) and move when the scheme
+     watch does.
    - `math_copy_window` (batch 13) — tied `main.rs` / `runtime/frame.rs` / `runtime/math.rs`, and
      `retire_spent_math_copy` at the root called it in the product (the rule above); batch 14 moved both to
      `runtime/math.rs`.
@@ -371,7 +406,10 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `runtime/preview.rs`; the owner column gives preview panes and their doors to `runtime/preview.rs`; batch 21,
      the third of the preview batches, moved both there.
    - `Runtime::open_local_path` — its `called_from` home is `runtime/floats.rs`, but
-     `Runtime::apply_settings_choice_announcing` at the root calls it in the product (the rule above).
+     `Runtime::apply_settings_choice_announcing` at the root calls it in the product (the rule above). Batch 23
+     moved that caller to `runtime/settings.rs`, which closed the hold; its callers are then `runtime/floats.rs`,
+     `runtime/files.rs` and `runtime/settings.rs`, and the re-sort's D6 sent it, with `open_local_path_ask`, to
+     `runtime/handoff.rs`, which §13 gives the `Runtime` side of the OS hand-off lane.
    - `reveal_ask` — its `called_from` home is `runtime/floats.rs`, but `Runtime::reveal_in_explorer` at the root
      calls it in the product (the rule above); it stays with `reveal_in_explorer`. Batch 22 moved both to
      `runtime/handoff.rs` (above).
@@ -442,6 +480,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `runtime/mouse.rs` would be a new writer, and K2 opens no `runtime/settings.rs`, so they stay, as
      `paste_into_settings_field` does. `Runtime::toggle_settings_panel` (tied with `runtime/keyboard.rs` and the
      root) stays with them: its root caller is `Runtime::open_settings_on_row`, and it writes `settings_scroll` too.
+     Batch 23 moved all four to `runtime/settings.rs` (2026-10-26, above).
    - `restore_row_seed`, `Runtime::append_edge`, `decided_birth`, `create_leaf_session`,
      `Runtime::focus_rail_geometry_now`, `closing_this_pane_closes_the_tab` and `solve_tree` (batch 18) — their
      `called_from` home is `runtime/panes.rs` (tied with `main.rs` for the last two), but
@@ -505,7 +544,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    - `home_crumb_for`, `open_local_path_ask` and `printable_address` (found at batch 21's review) — tied `main.rs` /
      `runtime/preview.rs`, but `home_shortened_path_on`, `Runtime::open_local_path` and
      `HyperlinkHover::status_text_in` at the root call them in the product (the rule above). `open_local_path_ask`
-     waits with `Runtime::open_local_path`, held above. Batch 22 moved `home_shortened_path_on` into `file_peek.rs`,
+     waits with `Runtime::open_local_path`, held above; batch 23 moved both to `runtime/handoff.rs`. Batch 22 moved `home_shortened_path_on` into `file_peek.rs`,
      a module outside `runtime/`, which imports `home_crumb_for` from the root; `home_crumb_for` is now tied
      `file_peek.rs` / `runtime/preview.rs` and stays for the next re-sort.
    - `row_verb` (since batch 18, found at batch 21's review) — its `called_from` home is `runtime/panes.rs` (two of
@@ -577,8 +616,9 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
 4. **The 16 items with no measured caller stay put or go with their topic:**
    - `Runtime`'s `Deref`/`DerefMut` stay with the struct.
    - `main` stays.
-   - The four `PointerHost` methods stay in `main.rs` until D-30 opens the settings
-     topic (ruled 2026-10-24: K2 opens no `runtime/settings.rs`).
+   - The four `PointerHost` methods stayed in `main.rs` while K2 opened no
+     `runtime/settings.rs` (ruled 2026-10-24); batch 23 moved their impl block whole
+     into it (2026-10-26, above).
    - The rest are reached only as function values or through a receiver the map
      does not type (`web_page_cursor`, `seeded_tab`, `path_door`, `scale_door`, …).
      Read their call sites before moving them. Batch 22 moved these four and

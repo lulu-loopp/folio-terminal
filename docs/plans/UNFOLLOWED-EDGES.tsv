@@ -2070,17 +2070,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::add_scheme	Ambiguous	text	1
 crates/bt-app/src/main.rs	bt-app crate::Runtime::add_scheme	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::add_scheme	Ambiguous	to_string	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::announce_persistence_faults	Ambiguous	flatten	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::apply_editor_choice	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::apply_editor_choice	Ambiguous	get	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::apply_editor_choice	Ambiguous	saturating_sub	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::apply_editor_choice	Ambiguous	to_owned	2	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::apply_explorer_place	Ambiguous	to_owned	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::browse_for_program	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::browse_for_program	Ambiguous	as_deref	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::browse_for_program	Ambiguous	as_os_str	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::browse_for_program	Ambiguous	len	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::browse_for_program	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::browse_for_program	Ambiguous	text	1	2026-10-21: T-NATIVE-LABELS-FROM-THE-CALLER; `i18n::Text::text`, a language-table read, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	as_deref	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	as_millis	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	clone	1	
@@ -2110,11 +2099,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	take	1
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	then	2	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	to_string	2	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::create	Ambiguous	unwrap_or	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::delete_scheme_file	Ambiguous	as_deref	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::delete_scheme_file	Ambiguous	text	3	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::delete_scheme_file	Ambiguous	to_owned	3	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::delete_scheme_file	Ambiguous	to_string	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::edit_scheme_at	Ambiguous	to_string	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::editor_subject	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::editor_subject	Ambiguous	into_iter	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::editor_subject	Ambiguous	iter	1	
@@ -2131,8 +2115,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::report_skipped_schemes	Ambiguou
 crates/bt-app/src/main.rs	bt-app crate::Runtime::report_skipped_schemes	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::reread_schemes	Ambiguous	text	2	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::reread_schemes	Ambiguous	to_owned	2	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::reseed_editor_env	Ambiguous	collect	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::reseed_editor_env	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::retire_the_stand_in	Ambiguous	saturating_sub	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_content	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_content	Ambiguous	map	1	
@@ -2145,7 +2127,6 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_layout	Ambiguous	satur
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_layout	Ambiguous	unwrap_or	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_values	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::Runtime::settings_values	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::Runtime::toggle_advanced_group	Ambiguous	retarget	1	
 crates/bt-app/src/main.rs	bt-app crate::SURFACE_SELFTEST_AFTER	Ambiguous	ok	2	
 crates/bt-app/src/main.rs	bt-app crate::SURFACE_SELFTEST_AFTER	Ambiguous	parse	1	
 crates/bt-app/src/main.rs	bt-app crate::SourceBlocks::get	Ambiguous	map	1	
@@ -4645,6 +4626,25 @@ crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::Runtime::sear
 crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::rescan_leaf_for_search	Ambiguous	as_micros	1	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `rescan_leaf_for_search` from main.rs into runtime/search.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::rescan_leaf_for_search	Ambiguous	elapsed	1	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `rescan_leaf_for_search` from main.rs into runtime/search.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/search.rs	bt-app crate::runtime::search::rescan_leaf_for_search	Ambiguous	map_or	1	2026-10-24: T-SPLIT-2B batch 1; the same site, moved with `rescan_leaf_for_search` from main.rs into runtime/search.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::apply_editor_choice	Ambiguous	and_then	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `apply_editor_choice` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::apply_editor_choice	Ambiguous	get	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `apply_editor_choice` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::apply_editor_choice	Ambiguous	saturating_sub	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `apply_editor_choice` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::apply_editor_choice	Ambiguous	to_owned	2	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `apply_editor_choice` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::apply_explorer_place	Ambiguous	to_owned	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `apply_explorer_place` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::browse_for_program	Ambiguous	and_then	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `browse_for_program` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::browse_for_program	Ambiguous	as_deref	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `browse_for_program` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::browse_for_program	Ambiguous	as_os_str	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `browse_for_program` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::browse_for_program	Ambiguous	len	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `browse_for_program` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::browse_for_program	Ambiguous	map	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `browse_for_program` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::browse_for_program	Ambiguous	text	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `browse_for_program` from main.rs into runtime/settings.rs: K2 moves the item, not the call; the finding stands: T-NATIVE-LABELS-FROM-THE-CALLER; `i18n::Text::text`, a language-table read, which calls no door
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::delete_scheme_file	Ambiguous	as_deref	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `delete_scheme_file` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::delete_scheme_file	Ambiguous	text	3	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `delete_scheme_file` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::delete_scheme_file	Ambiguous	to_owned	3	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `delete_scheme_file` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::delete_scheme_file	Ambiguous	to_string	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `delete_scheme_file` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::edit_scheme_at	Ambiguous	to_string	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `edit_scheme_at` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::reseed_editor_env	Ambiguous	collect	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `reseed_editor_env` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::reseed_editor_env	Ambiguous	map	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `reseed_editor_env` from main.rs into runtime/settings.rs: K2 moves the item, not the call
+crates/bt-app/src/runtime/settings.rs	bt-app crate::runtime::settings::Runtime::toggle_advanced_group	Ambiguous	retarget	1	2026-10-27: T-SPLIT-2B batch 23; the same site, moved by K2 batch 23 with `toggle_advanced_group` from main.rs into runtime/settings.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::browse_for_new_tab_root	Ambiguous	as_deref	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::browse_for_new_tab_root	Ambiguous	or_else	1	
 crates/bt-app/src/runtime/tabs.rs	bt-app crate::runtime::tabs::Runtime::commit_row_into_new_tab	Ambiguous	to_string	1	
