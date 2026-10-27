@@ -700,6 +700,10 @@ the note and belongs to M7.
       `rescan_pane_references`
   - `card_skip` has no writer, only one `&mut` lend (`aim_card_window`). Its door
     is new.
+  - **Done** (O-2, `ad657a414`): the five are `TermView`'s, nested as
+    `LeafSession.view`, with the rows they had re-keyed; `LeafSession` has 38
+    fields and `TermView` 5. `card_skip`'s door went to O-3 (ruled at O-2's
+    judgement).
 - **O-3 (M2–M4).** Four fields:
 
   | field | sites | door present |
