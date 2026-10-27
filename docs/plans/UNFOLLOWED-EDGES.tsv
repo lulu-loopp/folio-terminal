@@ -8840,15 +8840,14 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DeferredState::ca
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DeferredState::cancel_request	Ambiguous	unwrap_or_else	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DeferredState::take_result	Ambiguous	into_inner	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DeferredState::take_result	Ambiguous	unwrap_or_else	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatch::start	Dynamic	wake	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatch::start_scoped	Ambiguous	as_ptr	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatch::start_scoped	Ambiguous	collect	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatch::start_scoped	Ambiguous	contains	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatch::start_scoped	Ambiguous	encode_wide	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatch::start_scoped	Ambiguous	join	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatch::start_scoped	Ambiguous	map_err	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatch::start_scoped	Ambiguous	push	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatch::start_shallow	Dynamic	wake	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatch::retire_within	Ambiguous	saturating_duration_since	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatchSet::ask_to_stop	Ambiguous	unwrap_or_else	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatchSet::enlist	Ambiguous	cast	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatchSet::enlist	Ambiguous	cast_const	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatchSet::enlist	Ambiguous	unwrap_or_else	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatchSet::open	Ambiguous	map_err	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatchSet::start	Dynamic	wake	1	2026-10-26: T-DIR-WATCH-ONE-THREAD: a handed-in closure or function value (a member's `wake`, called on the set's watcher thread); its doors are reached at the definer
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::DirWatchSet::start_shallow	Dynamic	wake	1	2026-10-26: T-DIR-WATCH-ONE-THREAD: a handed-in closure or function value (a member's `wake`, called on the set's watcher thread); its doors are reached at the definer
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::FolderPicker::new	Ambiguous	as_bool	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::FolderPicker::request	Ambiguous	collect	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::FolderPicker::request	Ambiguous	encode_wide	1	
@@ -8879,11 +8878,20 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Notifier::show	Dy
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Notifier::take_activations	Ambiguous	map	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Notifier::take_activations	Ambiguous	unwrap_or_default	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Notifier::without_registration	Ambiguous	is_ok	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Port::post	Ambiguous	is_ok	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::SaveFilePicker::new	Ambiguous	as_bool	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::SaveFilePicker::request	Ambiguous	collect	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::SaveFilePicker::request	Ambiguous	encode_wide	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::SaveFilePicker::request	Ambiguous	push	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::SaveFilePicker::request	Ambiguous	unwrap_or_default	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Slot::end	Dynamic	(value)	1	2026-10-26: T-DIR-WATCH-ONE-THREAD: a handed-in closure or function value (a member's `wake`, called on the set's watcher thread); its doors are reached at the definer
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Slot::hear	Ambiguous	code	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Slot::hear	Ambiguous	map	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Slot::hear	Ambiguous	to_hresult	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Slot::hear	Dynamic	(value)	4	2026-10-26: T-DIR-WATCH-ONE-THREAD: a handed-in closure or function value (a member's `wake`, called on the set's watcher thread); its doors are reached at the definer
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Slot::issue	Ambiguous	cast	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Slot::issue	Ambiguous	unwrap_or	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Slot::leave	Ambiguous	store	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::SystemSettingsWatch::install	Ambiguous	as_bool	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Taskbar::new	Ambiguous	as_bool	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::Taskbar::new	Ambiguous	is_ok	1	
@@ -9050,6 +9058,12 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::native_present_fa
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::newest_live_owner	Dynamic	still_ours	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::open_clipboard_with_retry	Ambiguous	map_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::open_clipboard_with_retry	Ambiguous	to_string	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::open_directory	Ambiguous	as_ptr	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::open_directory	Ambiguous	collect	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::open_directory	Ambiguous	contains	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::open_directory	Ambiguous	encode_wide	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::open_directory	Ambiguous	map_err	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::open_directory	Ambiguous	push	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::os_ui_language	Ambiguous	as_mut_ptr	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::os_ui_language	Ambiguous	collect	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::os_ui_language	Ambiguous	into_iter	1	
@@ -9123,6 +9137,15 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_clipboard_tex
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_clipboard_text	Ambiguous	map_err	3	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_clipboard_text	Ambiguous	push	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_current_thread_priority	Ambiguous	is_ok	1	
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_loop	Ambiguous	cast	2	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_loop	Ambiguous	code	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_loop	Ambiguous	end	1	2026-10-26: T-DIR-WATCH-ONE-THREAD: the watcher thread's own `Slot` or `Running` method (issue, end, leave) on a map entry the grammar does not type; its body issues or cancels a read, says the end or sends the leave, and holds no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_loop	Ambiguous	is_err	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_loop	Ambiguous	is_null	2	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_loop	Ambiguous	issue	1	2026-10-26: T-DIR-WATCH-ONE-THREAD: the watcher thread's own `Slot::issue` on the new arrival's slot, taken out of its `Add` box, a receiver the grammar does not type; its body issues the member's first read and holds no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_loop	Ambiguous	send	2	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_loop	Ambiguous	to_hresult	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_loop	Ambiguous	unwrap_or_else	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_system_backdrop	Ambiguous	cast	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_system_backdrop	Ambiguous	map_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::set_window_dark_mode	Ambiguous	cast	1	
@@ -9165,15 +9188,6 @@ crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::touch_to_the_syst
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::track_math_context_menu	Ambiguous	map_err	4	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::virtual_key_of_scan_code	Ambiguous	ok	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::virtual_screen_rect	Ambiguous	saturating_add	2	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::watch_loop	Ambiguous	as_mut_ptr	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::watch_loop	Ambiguous	cast	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::watch_loop	Ambiguous	clone	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::watch_loop	Ambiguous	code	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::watch_loop	Ambiguous	is_err	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::watch_loop	Ambiguous	map_err	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::watch_loop	Ambiguous	to_hresult	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::watch_loop	Ambiguous	unwrap_or	1	
-crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::watch_loop	Dynamic	wake	7	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::wheel_scroll_amount	Ambiguous	cast	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::wheel_scroll_amount	Ambiguous	map_err	1	
 crates/bt-platform/src/lib.rs	bt-platform crate::windows_impl::wide_null	Ambiguous	collect	1	
@@ -9686,8 +9700,14 @@ crates/bt-platform/src/macos_video.rs	bt-platform crate::video::macos_video::rea
 crates/bt-platform/src/macos_video.rs	bt-platform crate::video::macos_video::read_first_frame	Ambiguous	tracksWithMediaType	1	
 crates/bt-platform/src/macos_video.rs	bt-platform crate::video::macos_video::read_first_frame	Dynamic	lap	5	
 crates/bt-platform/src/macos_video.rs	bt-platform crate::video::macos_video::valid_length	Ambiguous	contains	1	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::DirWatch::start	Dynamic	wake	1	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::DirWatch::start_shallow	Dynamic	wake	1	
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::DirWatch::retire_within	Ambiguous	saturating_duration_since	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::DirWatchSet::start	Dynamic	wake	1	2026-10-26: T-DIR-WATCH-ONE-THREAD: a handed-in closure or function value (a member's `wake`, called on the set's watcher thread); its doors are reached at the definer
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::DirWatchSet::start_shallow	Dynamic	wake	1	2026-10-26: T-DIR-WATCH-ONE-THREAD: a handed-in closure or function value (a member's `wake`, called on the set's watcher thread); its doors are reached at the definer
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::Running::end	Dynamic	(value)	1	2026-10-26: T-DIR-WATCH-ONE-THREAD: a handed-in closure or function value (a member's `wake`, called on the set's watcher thread); its doors are reached at the definer
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::Running::root_gone	Ambiguous	load	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::SetShared::post	Ambiguous	push_back	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::SetShared::post	Ambiguous	unwrap_or_else	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::arm	Ambiguous	cast	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::on_events	Ambiguous	add	1	
 crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::on_events	Ambiguous	borrow_mut	1	
 crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::on_events	Ambiguous	cast	3	
@@ -9705,21 +9725,16 @@ crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::read_event
 crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::read_event	Ambiguous	is_some	1	
 crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::read_event	Ambiguous	next	2	
 crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::read_event	Ambiguous	to_owned	2	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::stop_source	Ambiguous	cast	2	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::stop_source	Ambiguous	cast_mut	1	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::stop_source	Ambiguous	stop	1	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::stop_source	Ambiguous	store	1	
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::request_source	Ambiguous	stop	1	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	add_source	1	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	cast	1	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	clone	3	
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	clone	1	
 crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	expect	2	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	invalidate	3	
 crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	is_err	1	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	load	3	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	remove_source	3	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	store	1	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Dynamic	(value)	1	
-crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Dynamic	root_gone	1	
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	leave	1	2026-10-26: T-DIR-WATCH-ONE-THREAD: the watcher thread's own `Slot` or `Running` method (issue, end, leave) on a map entry the grammar does not type; its body issues or cancels a read, says the end or sends the leave, and holds no door
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	lock	2	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	remove_source	1	
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	send	2	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/macos_watch.rs	bt-platform crate::macos_watch::watch_loop	Ambiguous	unwrap_or_else	2	2026-10-26: T-DIR-WATCH-ONE-THREAD; a standard-library, windows-crate or Core Foundation method (Option, Result, Instant, pointer, atomic, Mutex, Sender, VecDeque, OsStr, HRESULT, CFRunLoop) on a receiver the grammar does not type, which reaches no door
 crates/bt-platform/src/macos_webview.rs	bt-platform crate::webview::macos::Shared::load	Ambiguous	URLByDeletingLastPathComponent	1	
 crates/bt-platform/src/macos_webview.rs	bt-platform crate::webview::macos::Shared::load	Ambiguous	isFileURL	1	
 crates/bt-platform/src/macos_webview.rs	bt-platform crate::webview::macos::Shared::load	Ambiguous	path	1	
