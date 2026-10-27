@@ -2769,7 +2769,7 @@ pub(crate) fn raise_dirty_gate_over(
 /// **What has become of every buffer a close waits for**, by name, read off the
 /// window's tabs (S-6b): a buffer no pool here holds any more — its tab gone, or
 /// discarded — loses nothing, and is read as saved.
-fn what_a_close_wait_found(
+pub(crate) fn what_a_close_wait_found(
     tabs: &[TabState],
     wait: &restore::CloseWait,
 ) -> Vec<(String, preview::AtTheClose)> {

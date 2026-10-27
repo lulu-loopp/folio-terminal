@@ -3165,7 +3165,7 @@ fn settings_key_of(key: &Key, modifiers: ModifiersState, repeat: bool) -> settin
 /// **The window's own paste predicate** (B-AUDIT-046 RT-1): `Shift+Insert` and
 /// `Ctrl+Shift+V` are a paste in this box exactly as they are at the terminal's
 /// rung, rather than a `Ctrl+V` of its own spelling.
-fn rename_pastes(key: &Key, modifiers: ModifiersState) -> bool {
+pub(crate) fn rename_pastes(key: &Key, modifiers: ModifiersState) -> bool {
     input::is_paste_shortcut(key, modifiers)
 }
 

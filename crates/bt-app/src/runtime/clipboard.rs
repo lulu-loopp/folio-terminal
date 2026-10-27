@@ -1289,7 +1289,7 @@ fn paste_spelled<T>(
 /// `setting on ∧ payload was text ∧ !bracketed ∧ more than one line`, with ticket 03's PowerShell
 /// road standing in front of the question. The cheap facts are read first, so a bracketed paste
 /// or a path is never scanned, and a single line is scanned once and allocates nothing.
-fn paste_road(text: &str, facts: PasteFacts) -> PasteRoad {
+pub(crate) fn paste_road(text: &str, facts: PasteFacts) -> PasteRoad {
     if !facts.clipboard_text || facts.bracketed {
         return PasteRoad::AsTyped;
     }
@@ -1321,7 +1321,7 @@ fn paste_road(text: &str, facts: PasteFacts) -> PasteRoad {
 /// * **C2, Folio's own bytes** — [`input::input_line_bytes`]: today's sanitized text with every
 ///   break as a Shift+Enter record. Taken for text Folio has to change (a control character it
 ///   drops, a lone `\r` PSReadLine would delete), because C1 would bypass that cleanup.
-fn powershell_input_line(text: &str) -> std::borrow::Cow<'static, [u8]> {
+pub(crate) fn powershell_input_line(text: &str) -> std::borrow::Cow<'static, [u8]> {
     if input::psreadline_pastes_it_unchanged(text) {
         std::borrow::Cow::Borrowed(PSREADLINE_PASTE_INPUT)
     } else {
@@ -1381,7 +1381,10 @@ pub(crate) fn clipboard_focus_of(
 /// naming a live shell at all. And a missing `promised` refuses as loudly as a
 /// mismatch: it is a release whose box never promised a paste in the first
 /// place.
-fn paste_offer_survives(promised: Option<PasteOffer>, at_release: Option<PasteOffer>) -> bool {
+pub(crate) fn paste_offer_survives(
+    promised: Option<PasteOffer>,
+    at_release: Option<PasteOffer>,
+) -> bool {
     promised.is_some() && promised == at_release
 }
 

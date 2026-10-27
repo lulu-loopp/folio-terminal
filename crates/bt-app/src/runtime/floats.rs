@@ -4060,7 +4060,7 @@ pub(crate) fn files_float_content_height(
 /// in the file; a run that wants a clean one deletes it first. Failures are
 /// swallowed whole: a diagnostic that can take the window down with it is a
 /// second bug wearing the first one's clothes.
-fn dump_chrome_frame(chrome: &seats::ChromeGroup) {
+pub(super) fn dump_chrome_frame(chrome: &seats::ChromeGroup) {
     let Some(path) = entry_doors::installed().chrome_dump.clone() else {
         return;
     };

@@ -2975,7 +2975,7 @@ impl<B: Backend> Runtime<'_, B> {
 /// **What a file's pixels are filed as when the lane's thread could not be started**: a failed
 /// decode, in the decoder error's words, so every surface reading the window's cache agrees and
 /// asks again only on its own new input.
-fn unstarted_pixels() -> PeekCacheEntry {
+pub(crate) fn unstarted_pixels() -> PeekCacheEntry {
     PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
         DECODE_UNSTARTED.to_owned(),
     ))

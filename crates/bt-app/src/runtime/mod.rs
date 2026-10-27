@@ -8,31 +8,31 @@
 //! `use crate::settings;` is `error[E0255]`. A topic file writes its own
 //! imports, where the two names cannot collide.
 
-mod attention;
-mod clipboard;
+pub(crate) mod attention;
+pub(crate) mod clipboard;
 mod configuration;
 mod diagnostics;
 mod dpi;
-mod files;
+pub(crate) mod files;
 mod first_run;
 mod floats;
-mod frame;
-mod git;
+pub(crate) mod frame;
+pub(crate) mod git;
 mod handoff;
 mod i18n;
-mod keyboard;
-mod math;
-mod mouse;
-mod palette;
-mod panes;
-mod peek;
+pub(crate) mod keyboard;
+pub(crate) mod math;
+pub(crate) mod mouse;
+pub(crate) mod palette;
+pub(crate) mod panes;
+pub(crate) mod peek;
 pub(crate) mod pointer;
-mod preview;
-mod profiles;
+pub(crate) mod preview;
+pub(crate) mod profiles;
 mod quake;
-mod search;
+pub(crate) mod search;
 mod settings;
-mod tabs;
+pub(crate) mod tabs;
 pub(crate) use tabs::owe_birth_death_fallback_resize;
 pub(crate) use windows::AfterTheWait;
 #[cfg(test)]
@@ -185,8 +185,8 @@ pub(crate) use web::{
     a_retirement_happens_on_this_turn, hole_for, page_destination, revived_page_of,
     switcher_row_destination,
 };
-mod terminal;
+pub(crate) mod terminal;
 mod tooltips;
 mod update_card;
-mod web;
-mod windows;
+pub(crate) mod web;
+pub(crate) mod windows;

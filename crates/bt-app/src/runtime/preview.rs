@@ -19673,7 +19673,7 @@ pub(crate) fn preview_press_opens_its_link(latch: &DragLatch) -> bool {
 /// the ground drawn round it is what a reader sees and therefore what a reader
 /// aims at, and one rectangle answering the paint, the press and the hover card
 /// is the same discipline [`markdown_image_extent`] states for a picture.
-fn measure_preview_links<G: Glass>(
+pub(crate) fn measure_preview_links<G: Glass>(
     gpu: &mut G::Device,
     renderer: &mut G,
     body: &bt_render::PreviewBody,
@@ -19871,7 +19871,7 @@ fn place_preview_math<G: Glass>(
 /// family for a bar a hand can hold: quiet at rest, the brighter row ink under
 /// the pointer, and the accent — the one saturated colour the chrome spends —
 /// while it is being dragged.
-fn push_block_scroll_indicator(
+pub(super) fn push_block_scroll_indicator(
     block: &mut bt_render::PreviewBlock,
     (index, offset, content): (usize, f32, f32),
     lit: Option<(usize, bool)>,
@@ -20208,7 +20208,7 @@ pub(crate) fn preview_link_activation(
 /// machine's handler on `Ctrl`. A target that names nothing — an anchor, an empty string, a
 /// relative link in a document with no folder — is [`ReferenceRow::Nothing`] under both
 /// modifiers: there is no request in it to refuse.
-fn preview_reference_row(target: &str, document: &Path) -> ReferenceRow {
+pub(crate) fn preview_reference_row(target: &str, document: &Path) -> ReferenceRow {
     match preview::link_action(target, document) {
         preview::LinkAction::Preview(path) => ReferenceRow::Local {
             path,

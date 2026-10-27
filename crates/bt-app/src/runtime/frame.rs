@@ -3325,7 +3325,7 @@ fn apply_hover_marks(
 /// **Each probe is an owner-thread door** (`doors::PlaceHidden`, `doors::PlaceExposure`, row 13's
 /// residue): admitted where it is asked, and a refused probe keeps the answer of `previous`, the
 /// place this window last observed.
-fn sample_window_place(
+pub(crate) fn sample_window_place(
     window: &impl WindowHost,
     focused: bool,
     previous: notify::WindowPlace,
