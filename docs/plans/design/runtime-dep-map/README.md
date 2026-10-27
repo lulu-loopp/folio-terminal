@@ -137,6 +137,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | 19 | `runtime/preview.rs` | cut into three batches by sub-topic (ruled at batch 19, below): batch 19 moved the document bodies (44 items, with `markdown_gap_paragraph` by the owner column, below; `push_markdown_table` held, below); batch 20 moved pictures, zoom, video and surfaces (40 items, with `animated_pane_viewports` by the owner column and `Runtime::play_button_rasters` by its census owner, below; eight held, below), and batch 21 moved pages, sources, the foot, crumbs, hand-off, refusal cards, switcher rows, the taskbar and landing (51 items: 50 into `runtime/preview.rs`, with the ties `Runtime::open_minted_page_on`, `revealable_preview_file`, `Runtime::gated_minted_target` and `Runtime::resizing_cards_frame` by the owner column and the foot pair `Runtime::foot_saying` and `Runtime::sweep_foot_phrases` together, and `Runtime::plan_inputs_for` to `runtime/panes.rs` by the owner column, below; `markdown_image_extent` held, below) | — |
    | — | the §13 re-sort (`docs/ARCHITECTURE.md` §13's "Still in `main.rs`") | moved by batch 22 (ruled 2026-10-26: 39 items out of `main.rs`, 7 methods and 32 free functions, and the whole `Runtime` blocks of `ime_outbound.rs` (8 methods) and `preview_viewport.rs` (4) into `runtime/keyboard.rs` and `runtime/preview.rs`; `Runtime::reveal_in_explorer` and `reveal_ask` to `runtime/handoff.rs` by clause (b); the six focus-card rows to `runtime/panes.rs` by clause (a); `Runtime::focus_seat`, `Runtime::focus_the_pane_a_path_landed_in` and `Runtime::settle_focus_on` to `runtime/mouse.rs` by the multi-owner rule, below; the three function values `web_page_cursor`, `files_a_tab_stands_on` and `seeded_tab` by first caller; the five holds the two blocks released (`ime_owner`, `popup_takes_the_key`, `terminal_ime_cursor_area`, `preview_caret_prose` and `scale_ppm`) with the tail `window_ime_cursor_area`; twelve rows beside their callers outside `runtime/`, with seven tails: `window_seam.rs` 4, `computation_lane.rs` 7, `preview_viewport.rs` 3, and one each into `handoff_lane.rs`, `update_job.rs`, `present_gate.rs`, `file_peek.rs` and `explorer_menu.rs`, below; `native_window_of`, `option_as_alt`, `is_format_or_bidi_control`, `measure_markdown_local` and `markdown_prose_face` held, below) | — |
    | — | `runtime/settings.rs` (re-sort D5) | moved by batch 23 (ruled 2026-10-26, which opened the file: 45 items out of `main.rs`, 43 into `runtime/settings.rs` (38 methods, the four `PointerHost` methods as one trait-impl block, and `contains_point`) and `Runtime::open_local_path` with `open_local_path_ask` into `runtime/handoff.rs` (D6); the four facts that already had several writer modules and gained `settings` are accepted by the shared-fact rule, below; `Runtime::add_scheme`, `Runtime::advance_scheme_watch`, `Runtime::advance_storage_watch` and `Runtime::adopt_option_as_alt` held by the census rule and `Runtime::reread_schemes`, `Runtime::apply_scheme`, `Runtime::open_scheme_for_editing` and `Runtime::settings_closed` with their root callers, below) | — |
+   | — | `runtime/settings.rs` and `runtime/mouse.rs` (the settings topic's rest) | moved by batch 24 (ruled 2026-10-27: 9 `Runtime` methods out of `main.rs`; `Runtime::settings_layout`, `Runtime::drag_settings_menu_bar` and `Runtime::apply_slider`, with the five tails `Runtime::settings_content`, `Runtime::settings_dialog`, `Runtime::settings_values`, `Runtime::editor_subject` and `Runtime::advanced_open`, into `runtime/settings.rs`; `Runtime::send_user_input` into `runtime/mouse.rs` by the multi-owner rule, below; `rail_state_for` and `Runtime::return_to_live_for_input` held, below) | — |
 
    **From batch 14 on, the order is the live map's** (ruled at batch 14). The smallest-sum-first rule above is
    applied to the map regenerated at each batch's base, not to this table's numbers, which were read at batch 1's
@@ -407,8 +408,12 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      watch does.
    - `Runtime::settings_values`, `Runtime::settings_layout`, `Runtime::drag_settings_menu_bar` and `rail_state_for`
      (after batch 23; batch 23's review, finding 6) — not judged in batch 23. Their generated `called_from` home is now
-     `runtime/settings.rs`, because their callers moved there. They are candidates for the next batch that judges
-     the settings topic's rest.
+     `runtime/settings.rs`, because their callers moved there. Batch 24 (2026-10-27) judged them: the three methods
+     moved to `runtime/settings.rs`, `Runtime::settings_layout` and `Runtime::drag_settings_menu_bar` with
+     `Runtime::apply_slider`, and `Runtime::settings_values` as one of five root-only tails (with
+     `Runtime::settings_content`, `Runtime::settings_dialog`, `Runtime::editor_subject` and `Runtime::advanced_open`).
+     `rail_state_for` stays: its root product caller is `Runtime::create`, which holds, so it moves when `create`
+     does.
    - `math_copy_window` (batch 13) — tied `main.rs` / `runtime/frame.rs` / `runtime/math.rs`, and
      `retire_spent_math_copy` at the root called it in the product (the rule above); batch 14 moved both to
      `runtime/math.rs`.
@@ -456,7 +461,8 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      none of them keyboard (`TabState.git_graph_view`, git; `WindowRuntime.palette`, palette;
      `WindowRuntime.search`, search). Its other writes (`WindowRuntime.rename`, owner tabs, and the keyboard-owned
      `composing`, `preedit` and `ime_cursor`) keyboard.rs writes already. Held for a ruling (the two-owners clause
-     above). The re-sort (2026-10-26) kept it held; it calls `Runtime::trace_ime_cancel` and
+     above); at batch 24 (2026-10-27) the multi-owner rule finds no module that writes all its facts, so it stays
+     held. The re-sort (2026-10-26) kept it held; it calls `Runtime::trace_ime_cancel` and
      `Runtime::destroy_ime_caret`, which batch 22 moved into `runtime/keyboard.rs` as `pub(crate)`.
    - `Runtime::show_settings_choice_at`, `Runtime::shortcut_focus`, `Runtime::apply_settings_choice`,
      `Runtime::toggle_settings_panel` and `Runtime::woke_terminal_thumb` (batch 15) — their `called_from` home is
@@ -472,9 +478,19 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      there, with `window_ime_cursor_area` as a tail.
    - `Runtime::send_user_input` (batch 15) — tied `runtime/keyboard.rs` / `runtime/mouse.rs`, and it writes facts of
      two census owners, `TabState.pending_keyboard_at` (keyboard) and `WindowRuntime.placeholder_tab` (windows);
-     either home would be a new writer of the other's fact. Held for a ruling (the two-owners clause above).
+     either home would be a new writer of the other's fact. Held for a ruling (the two-owners clause above). Batch 24
+     (2026-10-27) moved it to `runtime/mouse.rs` by the multi-owner rule: mouse.rs is the one module that already
+     writes both facts (through `send_mouse_input_to`, since batch 17). It was eligible from the multi-owner rule's
+     ruling at batch 22 and was not re-judged at batch 22 or 23. The placement is the rule's, not §13's: §13 gives
+     "session (input)" to `runtime/keyboard.rs`, which would be a new writer of windows' `placeholder_tab`, so
+     `runtime/mouse.rs` is not the input path's home by design. It is re-judged when `placeholder_tab` gets a door
+     (the ownership contract's O-5 / registry work).
    - `Runtime::return_to_live_for_input` (batch 15) — tied `main.rs` / `runtime/keyboard.rs`; its root caller is
-     `Runtime::send_user_input`, held above, so it waits for it.
+     `Runtime::send_user_input`, held above, so it waited for it. Batch 24 (2026-10-27) moved `send_user_input` and
+     left it held: it writes `LeafSession.projection` (owner frame) and `LeafSession.session` (owner terminal), and two
+     modules already write both (`runtime/panes.rs` and `runtime/terminal.rs`), so the multi-owner rule finds no one
+     home; it is also O-3's own item (contract M4, one view door that calls one session door).
+     `runtime/mouse.rs`'s `send_user_input` calls it at the root, a private method its descendant can call.
    - `strip_insert_slot`, `solve_seats`, `presentation_physical_size` and `pane_can_become_a_tab` (batch 16) — their
      `called_from` home is `runtime/tabs.rs` (tied with `main.rs` for the last), but `cli_tab_slot`,
      `create_tab_state` and `Runtime::create`, `Runtime::create`, and `plan_for` at the root call them in the
@@ -528,6 +544,10 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      moving it would change that import or need a root re-export, so it stays (it is in D8's markdown-layout
      cluster, plan row 69, below).
      The moved `build_preview_markdown_body` imports it from the root.
+   - `markdown_table_columns` (found at batch 24's judgement, 2026-10-27) — no root product caller, but
+     `table_block.rs`, outside `runtime/`, imports it by its root path, and that module's own doc says it "lives in
+     `main.rs` beside the rest of the markdown layout"; it stays with D8's markdown-layout cluster (plan row 69), as
+     `push_markdown_table` does.
    - `preview_open_lane` and `path_opens_as_a_page` (held at batch 19's judgement) — the first is a tail of
      `source_opens_as_a_page`, but `preview_neighbours.rs`, outside `runtime/`, imports it by its root path, so it
      stays (the same rule); `path_opens_as_a_page`, whose root callers are it and `preview_page_hand_off`, waits with
