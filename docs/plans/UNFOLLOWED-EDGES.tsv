@@ -1940,6 +1940,7 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::publish_window_directory	Ambig
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::publish_window_directory	Ambiguous	filter_map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::publish_window_directory	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::refresh_main_menu	Ambiguous	map	1	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::register_for_restart_held_by	Dynamic	held	1	2026-10-27: T-RESTART-REGISTRATION (review F4): the trial's gate asked through a function value — update_trial::defer in the product (a mutex read, no door), a test's own Gate::defer in a test
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::report_to_quit	Dynamic	report	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::say_the_cancelled_quit	Ambiguous	find_map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::say_the_cancelled_quit	Ambiguous	then_some	1	
@@ -2287,6 +2288,7 @@ crates/bt-app/src/main.rs	bt-app crate::profile_banner_name	Ambiguous	unwrap_or_
 crates/bt-app/src/main.rs	bt-app crate::prose_source_lines	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::prose_source_lines	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::push_markdown_table	Ambiguous	as_deref_mut	1	
+crates/bt-app/src/main.rs	bt-app crate::release_trial_writer	Dynamic	(value)	1	2026-10-27: T-RESTART-REGISTRATION (review F4): TrialStores::restart, the committed trial's restart registration — register_restart_now through the loop's Backend::register_restart (RegisterApplicationRestart, returns at once), a no-op in quit_tests' stores
 crates/bt-app/src/main.rs	bt-app crate::report_frame_shape_stop	Dynamic	announce	1	
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	map_or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	or_else	1	
