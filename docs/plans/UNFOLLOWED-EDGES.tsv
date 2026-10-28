@@ -1991,17 +1991,6 @@ crates/bt-app/src/main.rs	bt-app crate::HoverFloat::others	Ambiguous	into_iter	1
 crates/bt-app/src/main.rs	bt-app crate::HyperlinkHover::status_text_in	Ambiguous	unwrap_or	1	
 crates/bt-app/src/main.rs	bt-app crate::ImageClicks::register	Ambiguous	then_some	1	
 crates/bt-app/src/main.rs	bt-app crate::LandTween::sample	Ambiguous	as_secs_f32	1	
-crates/bt-app/src/main.rs	bt-app crate::LeafSession::announced_title	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::LeafSession::announced_title	Ambiguous	eq_ignore_ascii_case	1	
-crates/bt-app/src/main.rs	bt-app crate::LeafSession::announced_title	Ambiguous	get	2	
-crates/bt-app/src/main.rs	bt-app crate::LeafSession::announced_title	Ambiguous	is_empty	2	
-crates/bt-app/src/main.rs	bt-app crate::LeafSession::announced_title	Ambiguous	len	2	
-crates/bt-app/src/main.rs	bt-app crate::LeafSession::announced_title	Ambiguous	strip_prefix	1	
-crates/bt-app/src/main.rs	bt-app crate::LeafSession::announced_title	Ambiguous	then_some	1	
-crates/bt-app/src/main.rs	bt-app crate::LeafSession::announced_title	Ambiguous	to_string_lossy	1	
-crates/bt-app/src/main.rs	bt-app crate::LeafSession::birth_at	Ambiguous	and_then	1	
-crates/bt-app/src/main.rs	bt-app crate::LeafSession::place_for_a_new_shell	Ambiguous	or_else	1	
-crates/bt-app/src/main.rs	bt-app crate::LeafSession::shell_answered	Ambiguous	answered	1	
 crates/bt-app/src/main.rs	bt-app crate::LeafWake::bit	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::LeafWake::output	Ambiguous	lock	1	
 crates/bt-app/src/main.rs	bt-app crate::LeafWake::output	Ambiguous	raise	1	
@@ -2107,6 +2096,17 @@ crates/bt-app/src/main.rs	bt-app crate::Runtime::reread_schemes	Ambiguous	to_own
 crates/bt-app/src/main.rs	bt-app crate::Runtime::retire_the_stand_in	Ambiguous	saturating_sub	1	
 crates/bt-app/src/main.rs	bt-app crate::SURFACE_SELFTEST_AFTER	Ambiguous	ok	2	
 crates/bt-app/src/main.rs	bt-app crate::SURFACE_SELFTEST_AFTER	Ambiguous	parse	1	
+crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	and_then	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::announced_title, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
+crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	eq_ignore_ascii_case	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::announced_title, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
+crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	get	2	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::announced_title, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
+crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	is_empty	2	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::announced_title, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
+crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	len	2	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::announced_title, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
+crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	strip_prefix	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::announced_title, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
+crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	then_some	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::announced_title, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
+crates/bt-app/src/main.rs	bt-app crate::ShellSession::announced_title	Ambiguous	to_string_lossy	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::announced_title, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
+crates/bt-app/src/main.rs	bt-app crate::ShellSession::birth_at	Ambiguous	and_then	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::birth_at, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
+crates/bt-app/src/main.rs	bt-app crate::ShellSession::place_for_a_new_shell	Ambiguous	or_else	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::place_for_a_new_shell, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
+crates/bt-app/src/main.rs	bt-app crate::ShellSession::shell_answered	Ambiguous	answered	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::shell_answered, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8)
 crates/bt-app/src/main.rs	bt-app crate::SourceBlocks::get	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::SourceBlocks::get	Ambiguous	ok	1	
 crates/bt-app/src/main.rs	bt-app crate::SourceBlocks::new	Ambiguous	all	1	
