@@ -16882,8 +16882,8 @@ mod windows_impl {
             CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
             SaveFilePickerState, ShellPickKind, TOUCH_GOES_TO_THE_SYSTEM, TouchToTheSystem,
             compositor_failure, let_the_system_translate_touch, newest_live_owner,
-            pan_gesture_configuration, primary_language_id, retry_open_clipboard,
-            the_system_s_gesture_is_answered_here, touch_goes_to_the_system, wide_null,
+            pan_gesture_configuration, retry_open_clipboard, the_system_s_gesture_is_answered_here,
+            touch_goes_to_the_system, wide_null,
         };
         use crate::handoff::{validate_local_image_path, validate_openable_path};
         use crate::{NativeWindow, PanStep, PanTrack};
