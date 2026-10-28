@@ -3455,8 +3455,12 @@ fn ime_native_facts(window: &impl WindowHost) -> ime_report::NativeFacts {
 /// review F5, ruled 2026-10-27). Windows' `ImeSystemCaret` is the hidden Win32
 /// caret Pinyin, Magnifier, the emoji panel and every `GetGUIThreadInfo` reader
 /// follow; the Mac's is a no-op, so feeding its slot would compute an area on
-/// every offer and book a held area's wake for nothing.
-const SYSTEM_CARET_FED: bool = cfg!(windows);
+/// every offer and book a held area's wake for nothing. A value read off the
+/// platform crate (§4.3), not a `cfg` of this one.
+const SYSTEM_CARET_FED: bool = matches!(
+    bt_platform::host_platform(),
+    bt_platform::HostPlatform::Windows
+);
 
 #[cfg(test)]
 #[path = "keyboard_tests.rs"]
