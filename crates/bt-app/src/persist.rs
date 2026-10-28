@@ -5084,6 +5084,7 @@ pub(crate) mod tests {
         let answered = bt_platform::session_end::answer(
             bt_platform::session_end::WM_QUERYENDSESSION,
             0,
+            0,
             &crate::session_end::hear,
         );
         assert_eq!(

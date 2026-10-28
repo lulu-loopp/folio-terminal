@@ -254,3 +254,49 @@ fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
         "and it leaves anyway"
     );
 }
+
+/// RED (T-RESTART-REGISTRATION) — **an update's hand-over takes the restart registration back
+/// before anything is handed over**: from there on, who opens Folio is the election's, and a
+/// reboot before this process has left must not start a third contender.
+///
+/// The update's quit walked to its way out with the session landed (`Handoff::Owed`), then the
+/// loop's own `FolioApp::hand_the_update_over`; the headless application has no staged
+/// transaction, so the hand-over itself is refused and said — the registration is taken back
+/// whatever the hand-over then does.
+///
+/// MUTATION: drop the `B::withdraw_restart` call in `FolioApp::hand_the_update_over` — the
+/// hand-over leaves a registration standing.
+#[test]
+fn the_update_hand_over_takes_the_restart_registration_back() {
+    crate::test_support::on_the_window_thread();
+    let folio = crate::headless::HeadlessFolio::with_tabs(
+        "handoff-restart",
+        vec![crate::test_support::ringing_tab(1, 1)],
+        0,
+    );
+    let mut application = crate::headless::HeadlessApplication::of(folio);
+    let now = Instant::now();
+    let txn = crate::update_txn::TxnId::new([0x5a; 16]);
+    let mut quit = quit::Quit::begin_for(Vec::new(), quit::Reason::UpdateRestart { txn });
+    assert_eq!(quit.documents(&[], now), quit::QuitStep::Photograph);
+    assert_eq!(quit.photographed(), quit::QuitStep::Write);
+    assert_eq!(
+        quit.written(quit::WriteVerdict::Landed),
+        quit::QuitStep::Retire
+    );
+    let _ = quit.retired(now);
+    assert_eq!(quit.pages(true, now), quit::QuitStep::Exit);
+    assert_eq!(quit.handoff(), quit::Handoff::Owed, "the session landed");
+    application.folio.app.as_mut().expect("the application").quit = Some(quit);
+    let _ = application.event_loop.ledger.take();
+
+    let leaves = application
+        .folio
+        .hand_the_update_over(&application.event_loop, now);
+    let effects = application.event_loop.ledger.take();
+    assert!(
+        effects.contains(&crate::headless::WindowEffect::RestartWithdrawn),
+        "the registration is taken back: {effects:?}"
+    );
+    assert!(leaves, "an update with nothing staged is not handed over, and the quit leaves");
+}

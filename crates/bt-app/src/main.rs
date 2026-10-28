@@ -49141,6 +49141,22 @@ impl<B: Backend> FolioApp<B> {
         Ok(())
     }
 
+    /// **Windows is asked to start this program again after its restart**
+    /// (T-RESTART-REGISTRATION): after an update's reboot, a sign-in with "Restart apps" on, or
+    /// the Restart Manager's close — on [`bt_platform::session_end::RESTART_FLAGS`]' occasions,
+    /// never after a crash or a hang. The line is empty: a plain start reopens the saved layout
+    /// as a click does. Cheap, and said only when it is refused: nothing a person sees depends on
+    /// it.
+    fn register_for_restart(&self, event_loop: &B::Loop) {
+        if let Err(refused) =
+            B::register_restart(event_loop, bt_platform::session_end::RESTART_FLAGS)
+        {
+            diagnostics::note(&format!(
+                "{APP_NAME} will not be started again after the system's restart: {refused}"
+            ));
+        }
+    }
+
     /// **The system asked this application to quit, and it is waiting** (M3-1).
     ///
     /// Folio's own quit is what runs: the card about unsaved names, the save,
@@ -49212,9 +49228,11 @@ impl<B: Backend> FolioApp<B> {
     ///
     /// [`Self::settle_session_end_keeping_in`], what no file takes kept in the data directory's
     /// `recovered` folder.
-    fn settle_session_end(&mut self) {
-        let _ = self
-            .settle_session_end_keeping_in(&persist::storage_dir().join(preview::RECOVERED_FOLDER));
+    fn settle_session_end(&mut self, event_loop: &B::Loop) {
+        let _ = self.settle_session_end_keeping_in(
+            event_loop,
+            &persist::storage_dir().join(preview::RECOVERED_FOLDER),
+        );
     }
 
     /// [`Self::settle_session_end`], what no file takes kept in `recovery` — a test's own folder
@@ -49232,7 +49250,11 @@ impl<B: Backend> FolioApp<B> {
     /// did not land is copied into `recovery` (§5.3 row 20c) before the line comes down. A save
     /// stalled on the disk delays the document behind it: the sentinel stays, and the next start
     /// offers the layout back — the edits are worth more than the last moments of layout.
-    fn settle_session_end_keeping_in(&mut self, recovery: &Path) -> Vec<preview::Kept> {
+    fn settle_session_end_keeping_in(
+        &mut self,
+        event_loop: &B::Loop,
+        recovery: &Path,
+    ) -> Vec<preview::Kept> {
         let heard = session_end::take();
         let mut kept = Vec::new();
         if heard.is_empty() || self.app.is_none() {
@@ -49241,6 +49263,7 @@ impl<B: Backend> FolioApp<B> {
         // The one budget counts from here: the hand-overs ahead of the document spend it.
         let asked_at = Instant::now();
         let mut lines_down = false;
+        let mut closed = false;
         for end in heard {
             let quit = self.app.as_ref().and_then(|app| app.quit.as_ref());
             let a_quit_holds_it = quit.is_some_and(quit::Quit::document_is_frozen);
@@ -49270,6 +49293,10 @@ impl<B: Backend> FolioApp<B> {
                 // Every change the hold kept off the document is recorded now: the windows as
                 // they stand are the layout again.
                 session_end::Settled::TakenBack => app.record_session(Instant::now()),
+                // **The Restart Manager closed Folio** (T-RESTART-REGISTRATION): left for the
+                // end of this turn, after every piece of news before it is settled — unless a
+                // quit past its photograph is already on its way out, whose leaving is its own.
+                session_end::Settled::Closed => closed = !a_quit_holds_it,
             }
             if let Some(handed) = handed {
                 kept.extend(self.keep_what_the_systems_end_did_not_save(
@@ -49287,7 +49314,37 @@ impl<B: Backend> FolioApp<B> {
                 }
             }
         }
+        if closed {
+            self.leave_at_the_systems_close(event_loop, recovery);
+        }
         kept
+    }
+
+    /// **Leave, because the Restart Manager closed Folio** (`ENDSESSION_CLOSEAPP`,
+    /// T-RESTART-REGISTRATION). An installer, or the system's servicing, needs a file this
+    /// process holds: it asked as a shutdown asks — and the question wrote the layout and dropped
+    /// `session.lock` — but the session goes on, and nobody ends the process. So it leaves by
+    /// itself, by the road a stop that is not a quit takes ([`Self::stop_every_window`]: every
+    /// window `ending`, so what was open stays in the file, and its unsaved edits kept), with the
+    /// document the question wrote still held. The process then exits 0, and a restart it
+    /// registered for ([`Self::register_for_restart`]) opens that layout again.
+    fn leave_at_the_systems_close(&mut self, event_loop: &B::Loop, recovery: &Path) {
+        let stopped = self.stop_every_window_keeping_in(recovery);
+        exit_diagnostics::say_last_window_closed(
+            exit_diagnostics::LastWindowCause::SystemClosedIt,
+            diagnostics::note,
+        );
+        if let Err(error) = stopped {
+            crate::diagnostics::stderr_line(format!("child shutdown failed: {error:#}"));
+        }
+        if let Some(app) = self.app.as_mut() {
+            app.web_spare.abandon();
+        }
+        self.windows.clear();
+        if let Some(app) = self.app.as_mut() {
+            app.finish();
+        }
+        event_loop.exit();
     }
 
     /// **Everything the system's end of the session would lose, handed to the storage worker,
@@ -50678,7 +50735,7 @@ impl<B: Backend> FolioApp<B> {
                     // U-21, §C.3): an update whose session landed is handed over — `Handoff`
                     // durable, then the applier started, on the storage worker — and the loop
                     // comes back for the answer rather than waiting for it.
-                    if !self.hand_the_update_over(now) {
+                    if !self.hand_the_update_over(event_loop, now) {
                         return Ok(());
                     }
                     // The run's sentinel, dropped once — `App::finish`, spent
@@ -51023,7 +51080,7 @@ impl<B: Backend> FolioApp<B> {
     /// exit guard with whom it leaves behind (`update_handoff::arm`, U-34): the applier it
     /// started, or nobody — then the process starts Folio again at its very end
     /// (`update_handoff::leave_armed`).
-    fn hand_the_update_over(&mut self, now: Instant) -> bool {
+    fn hand_the_update_over(&mut self, event_loop: &B::Loop, now: Instant) -> bool {
         let Some(app) = self.app.as_mut() else {
             return true;
         };
@@ -51036,6 +51093,15 @@ impl<B: Backend> FolioApp<B> {
         match quit.handoff() {
             quit::Handoff::NotOwed | quit::Handoff::Done => true,
             quit::Handoff::Owed => {
+                // **The system's restart is no longer this process's to ask for**
+                // (T-RESTART-REGISTRATION): from the hand-over on, who opens Folio is the
+                // election's (`update_handoff`), and a reboot before this process has left must
+                // not start a third contender beside the applier and the rescue entrance.
+                if let Err(refused) = B::withdraw_restart(event_loop) {
+                    diagnostics::note(&format!(
+                        "{APP_NAME}: the restart registration was not taken back before update {txn}'s hand-over: {refused}"
+                    ));
+                }
                 // The exit guard was armed when Restart was pressed
                 // (`App::restart_for_update`, U-34).
                 let sent = app
@@ -52327,6 +52393,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // moment there is an application to hang a bar on. Off macOS it
                 // is a no-op that costs one branch.
                 self.install_main_menu();
+                // **And Windows is told to start Folio again after its restart**, once and
+                // here: the first window is the run's own — every door process, and every start
+                // that handed itself to a running Folio or to the rescue build, left before the
+                // loop — so the one registration is the data directory's owner's.
+                self.register_for_restart(event_loop);
                 // A shortcut file that could not be read owes the user a sentence
                 // naming it (§5.3), and this is the first moment there is a window
                 // to say it on — the store was opened before one existed. Anchored
@@ -52469,7 +52540,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // this turn and may end the process as soon as it has asked every application, so the
             // write is not left for `about_to_wait`'s chain. The document is already held.
             AppEvent::SessionEnding => {
-                self.settle_session_end();
+                self.settle_session_end(event_loop);
                 Ok(())
             }
             // **Nothing here either** (U-3): the fact is in `install_channel`'s

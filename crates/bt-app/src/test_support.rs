@@ -478,6 +478,7 @@ pub(crate) fn the_system_asks() -> Option<isize> {
     bt_platform::session_end::answer(
         bt_platform::session_end::WM_QUERYENDSESSION,
         0,
+        0,
         &session_end::hear,
     )
 }

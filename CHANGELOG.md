@@ -19,6 +19,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- On Windows, Folio comes back with its windows after an update restarts the computer when "Restart apps" is on in Settings, and it now closes when an installer asks it to instead of staying open. <!-- zh: pending T-RESTART-REGISTRATION -->
 - The previous and next buttons at the sides of a picture preview now light up when the pointer is over them, and the pointer shows a pointing hand there even when the picture is zoomed in. <!-- zh: pending T-PREVIEW-NEIGHBOUR-BUTTON-HOVER -->
 - On Windows 11, resting the pointer on the maximize button opens the snap layouts, and Win+Z shows them over the button. <!-- zh: pending T-SNAP-LAYOUTS-MAXBUTTON -->
 - On Windows 10 machines without a graphics driver, Folio no longer closes at its first start or when Settings opens. <!-- zh: 在没有显卡驱动的 Windows 10 电脑上，Folio 不再在首次启动或打开设置时关闭。 -->

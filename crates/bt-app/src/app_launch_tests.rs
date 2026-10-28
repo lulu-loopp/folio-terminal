@@ -534,3 +534,53 @@ fn a_refused_video_prewarm_is_said_once() {
         "in the door's words: {said:?}"
     );
 }
+
+/// RED (T-RESTART-REGISTRATION; the owner's ruling) — **the launch asks the system to start
+/// Folio again after its restart, once, on the ruled occasions: never after a crash or a hang,
+/// always after an update's reboot and the Restart Manager's close.**
+///
+/// The registration the launch's first window makes (`FolioApp::register_for_restart`, from
+/// `resumed`), through the backend's door, recorded by the headless loop.
+///
+/// MUTATION: register with `RESTART_NO_HANG` alone in `FolioApp::register_for_restart` (a crash
+/// restart without the ruling) — the flags admit a crash; register twice — two records.
+#[test]
+fn the_launch_registers_the_restart_on_the_ruled_occasions() {
+    use bt_platform::session_end::{
+        RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT,
+    };
+    crate::test_support::on_the_window_thread();
+    let folio = crate::headless::HeadlessFolio::with_tabs(
+        "launch-restart",
+        vec![crate::test_support::ringing_tab(1, 1)],
+        0,
+    );
+    let application = crate::headless::HeadlessApplication::of(folio);
+    let _ = application.event_loop.ledger.take();
+    application
+        .folio
+        .register_for_restart(&application.event_loop);
+    let registered: Vec<u32> = application
+        .event_loop
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            crate::headless::WindowEffect::RestartRegistered { flags } => Some(flags),
+            _ => None,
+        })
+        .collect();
+    let [flags] = registered.as_slice() else {
+        panic!("one registration: {registered:?}");
+    };
+    assert_eq!(
+        flags & (RESTART_NO_CRASH | RESTART_NO_HANG),
+        RESTART_NO_CRASH | RESTART_NO_HANG,
+        "no restart after a crash or a hang: {flags:#x}"
+    );
+    assert_eq!(
+        flags & (RESTART_NO_REBOOT | RESTART_NO_PATCH),
+        0,
+        "a restart after the update's reboot and the installer's close: {flags:#x}"
+    );
+}

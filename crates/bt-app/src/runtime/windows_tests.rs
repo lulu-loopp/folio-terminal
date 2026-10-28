@@ -1762,7 +1762,7 @@ impl Quitting {
         let recovery = self.recovery();
         self.application
             .folio
-            .settle_session_end_keeping_in(&recovery)
+            .settle_session_end_keeping_in(&self.application.event_loop, &recovery)
     }
 
     /// What the test's worker was handed, in the order it would serve it.
@@ -1872,6 +1872,66 @@ fn the_systems_end_saves_every_edit_before_the_document_lands() {
     assert_eq!(quitting.application.folio.windows.len(), 2);
 }
 
+/// RED (T-RESTART-REGISTRATION) — **the Restart Manager's close is the question and then a
+/// leaving: both edits and the layout are written first, and then the loop is asked to exit with
+/// every window let go.**
+///
+/// `ENDSESSION_CLOSEAPP`: an installer or the system's servicing needs a file Folio holds. The
+/// session goes on, so nobody ends the process; before this ticket the question wrote the
+/// layout, `WM_ENDSESSION(TRUE)` was heard as nothing, and Folio stayed — its document held for
+/// the rest of the run, and the installer told the file was in use.
+///
+/// MUTATION: in `FolioApp::settle_session_end_keeping_in`, answer `Settled::Closed` with
+/// `closed = false` — both windows stay and the loop is never asked to exit.
+#[test]
+fn the_restart_managers_close_saves_then_leaves() {
+    let _news = crate::test_support::EndSessionHome::new("end-closed");
+    let mut quitting = Quitting::open("end-closed", ["one.md", "two.md"]);
+    quitting.on_one_working_lane();
+    assert_eq!(crate::test_support::the_system_asks(), Some(1));
+    let _ = quitting.settle_the_systems_end();
+    assert_eq!(
+        (quitting.file(1), quitting.file(2)),
+        (format!("{READ}{TYPED}"), format!("{READ}{TYPED}")),
+        "both edits are in their files"
+    );
+    assert!(!quitting.sentinel_stands(), "and the layout landed");
+    assert_eq!(quitting.application.folio.windows.len(), 2, "nothing is gone yet");
+    let _ = quitting.application.event_loop.ledger.take();
+
+    assert_eq!(
+        bt_platform::session_end::answer(
+            bt_platform::session_end::WM_ENDSESSION,
+            1,
+            bt_platform::session_end::ENDSESSION_CLOSEAPP,
+            &crate::session_end::hear
+        ),
+        Some(0),
+        "the close is processed"
+    );
+    let kept = quitting.settle_the_systems_end();
+    assert_eq!(kept, Vec::new(), "nothing more was owed");
+    assert_eq!(
+        quitting.application.folio.windows.len(),
+        0,
+        "every window is let go"
+    );
+    assert!(
+        quitting
+            .application
+            .event_loop
+            .ledger
+            .take()
+            .contains(&crate::headless::WindowEffect::Exit),
+        "and the loop is asked to exit, so the process leaves by itself"
+    );
+    assert_eq!(quitting.copies(), Vec::<String>::new(), "nothing is copied");
+    assert!(
+        !quitting.sentinel_stands(),
+        "the run's clean exit stands"
+    );
+}
+
 /// RED (T-ENDSESSION-SAVES) — **a save that had not landed when the document's wait ran out is
 /// copied into `recovered`, never over its file, and the sentinel stands.**
 ///
@@ -1942,6 +2002,7 @@ fn a_session_taken_back_finds_every_window_and_every_edit_as_it_was() {
     assert_eq!(
         bt_platform::session_end::answer(
             bt_platform::session_end::WM_ENDSESSION,
+            0,
             0,
             &crate::session_end::hear
         ),
