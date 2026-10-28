@@ -534,3 +534,182 @@ fn a_refused_video_prewarm_is_said_once() {
         "in the door's words: {said:?}"
     );
 }
+
+/// RED (T-RESTART-REGISTRATION; the coordinator's interim choice, pending the owner's ruling) — **the launch asks the system to start
+/// Folio again after its restart, once, on the ruled occasions: never after a crash or a hang,
+/// always after an update's reboot and the Restart Manager's close.**
+///
+/// The registration the launch's first window makes (`FolioApp::register_for_restart`, from
+/// `resumed` — that road is held by
+/// [`the_restart_is_registered_from_the_first_window_alone`]), through the backend's door,
+/// recorded by the headless loop.
+///
+/// MUTATION: register with `RESTART_NO_HANG` alone in `FolioApp::register_for_restart` (a crash
+/// restart without the ruling) — the flags admit a crash; register twice — two records.
+#[test]
+fn the_launch_registers_the_restart_on_the_ruled_occasions() {
+    use bt_platform::session_end::{
+        RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH, RESTART_NO_REBOOT,
+    };
+    crate::test_support::on_the_window_thread();
+    let folio = crate::headless::HeadlessFolio::with_tabs(
+        "launch-restart",
+        vec![crate::test_support::ringing_tab(1, 1)],
+        0,
+    );
+    let application = crate::headless::HeadlessApplication::of(folio);
+    let _ = application.event_loop.ledger.take();
+    application
+        .folio
+        .register_for_restart(&application.event_loop);
+    let registered: Vec<u32> = application
+        .event_loop
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            crate::headless::WindowEffect::RestartRegistered { flags } => Some(flags),
+            _ => None,
+        })
+        .collect();
+    let [flags] = registered.as_slice() else {
+        panic!("one registration: {registered:?}");
+    };
+    assert_eq!(
+        flags & (RESTART_NO_CRASH | RESTART_NO_HANG),
+        RESTART_NO_CRASH | RESTART_NO_HANG,
+        "no restart after a crash or a hang: {flags:#x}"
+    );
+    assert_eq!(
+        flags & (RESTART_NO_REBOOT | RESTART_NO_PATCH),
+        0,
+        "a restart after the update's reboot and the installer's close: {flags:#x}"
+    );
+}
+
+/// RED (T-RESTART-REGISTRATION, review F3) — **the registration is asked for at the launch's
+/// first window and nowhere else**: resolved by bt-source's call graph (not by the name), the one
+/// product caller of `FolioApp::register_for_restart` is `resumed`, whose first-window block runs
+/// once a process (`if self.app.is_some() { return; }`) and only in the loop every door process
+/// has left before.
+///
+/// MUTATION: delete the call in `resumed` — no caller; call it from `open_pending_window` as
+/// well — a second caller.
+#[test]
+fn the_restart_is_registered_from_the_first_window_alone() {
+    assert_eq!(
+        crate::test_support::resolved_callers_of("FolioApp", "register_for_restart"),
+        std::collections::BTreeSet::from(["crate::FolioApp::resumed".to_owned()]),
+        "the first window asks, and nothing else does"
+    );
+}
+
+/// A headless application over one tab, its ledger emptied, for the restart's tests.
+fn restart_application(tag: &str) -> crate::headless::HeadlessApplication {
+    crate::test_support::on_the_window_thread();
+    let folio = crate::headless::HeadlessFolio::with_tabs(
+        tag,
+        vec![crate::test_support::ringing_tab(1, 1)],
+        0,
+    );
+    let application = crate::headless::HeadlessApplication::of(folio);
+    let _ = application.event_loop.ledger.take();
+    application
+}
+
+/// How many registrations the headless loop recorded since it was last read.
+fn registrations(application: &crate::headless::HeadlessApplication) -> usize {
+    application
+        .event_loop
+        .ledger
+        .take()
+        .into_iter()
+        .filter(|effect| {
+            matches!(
+                effect,
+                crate::headless::WindowEffect::RestartRegistered { .. }
+            )
+        })
+        .count()
+}
+
+/// RED (T-RESTART-REGISTRATION, review F4; the coordinator's ruling of 2026-10-27) — **an
+/// update's trial asks for the restart only once it is committed**: while its transaction can
+/// still roll back, the trial's gate holds the registration back as one of its writers
+/// (`Writer::RestartRegistration`), and the commit's release asks for it through the backend's
+/// door. A reboot before the commit starts no plain Folio beside the logon entrance's recovery.
+///
+/// The test's own gate, a trial's and undecided, in place of the process's
+/// (`FolioApp::register_for_restart_held_by`); the release as `TrialWritesReleased` runs it
+/// (`App::release_trial_writes`).
+///
+/// MUTATION: in `register_for_restart_held_by`, do not ask `held` — the trial registers at its
+/// first window; answer `Writer::RestartRegistration`'s arm in `release_trial_writer` with
+/// nothing — the commit never registers.
+#[test]
+fn a_trial_asks_for_the_restart_only_once_committed() {
+    use crate::update_trial::{Gate, Writer};
+    let mut application = restart_application("restart-trial");
+    let gate = Gate::new();
+    application
+        .folio
+        .register_for_restart_held_by(&application.event_loop, |writer| gate.defer(true, writer));
+    assert_eq!(
+        registrations(&application),
+        0,
+        "nothing is asked before the commit"
+    );
+    assert_eq!(
+        gate.pending(),
+        vec![Writer::RestartRegistration],
+        "the registration waits with the trial's writes"
+    );
+    let event_loop = &application.event_loop;
+    application
+        .folio
+        .app
+        .as_mut()
+        .expect("the application")
+        .release_trial_writes(vec![Writer::RestartRegistration], &|| {
+            crate::register_restart_now::<crate::headless::Headless>(event_loop);
+        });
+    assert_eq!(registrations(&application), 1, "the commit asks, once");
+}
+
+/// RED (T-RESTART-REGISTRATION, review F4) — **a window that saves nothing asks for no
+/// restart**: a start standing in beside the reserved trial, or a second start whose hand-over
+/// found nobody, is not the data directory's writer of record, and a restart of its own would
+/// come back as one more plain start beside the owner's.
+///
+/// The session store over a folder another claim holds (`bt_platform::instance`), so the
+/// store is not its writer, in place of the application's; no trial holds anything.
+///
+/// MUTATION: drop the writer-of-record check in `register_for_restart_held_by` — the window
+/// registers.
+#[test]
+fn a_window_that_saves_nothing_asks_for_no_restart() {
+    let root = bt_testpath::temp_path("bt-restart-非写者 not the writer");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("the scratch folder");
+    let holder = bt_platform::instance::claim_data_directory(&root)
+        .expect("nothing else on this machine has this folder");
+    let mut application = restart_application("restart-non-writer");
+    let store = persist::SessionStore::at(root.join("session.json"), root.join("session.lock"));
+    assert!(
+        !store.is_the_writer_of_record(),
+        "another claim holds the folder"
+    );
+    application
+        .folio
+        .app
+        .as_mut()
+        .expect("the application")
+        .session_store = store;
+    application
+        .folio
+        .register_for_restart_held_by(&application.event_loop, |_| false);
+    assert_eq!(registrations(&application), 0, "nothing is asked");
+    drop(application);
+    drop(holder);
+    let _ = std::fs::remove_dir_all(&root);
+}

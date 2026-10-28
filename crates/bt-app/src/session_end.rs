@@ -26,6 +26,11 @@
 //! one [`owes_the_write`] answers for — hands the edits over and writes the document; the rest are
 //! [`Settled::AlreadySaved`]. A shutdown taken back opens the next span.
 //!
+//! **The Restart Manager's close is the question and then a leaving** (T-RESTART-REGISTRATION):
+//! it asks as a shutdown asks, and the question is settled the same way; then its
+//! `WM_ENDSESSION` says [`Settled::Closed`], and since the session goes on and nobody ends the
+//! process, the loop leaves by itself.
+//!
 //! Window-thread state, so a thread-local: the procedure and the loop are the same thread, and a
 //! test on a thread of its own starts with nothing held.
 
@@ -86,6 +91,10 @@ pub(crate) enum Settled {
     LeftToTheQuit,
     /// The session goes on: the document is let go and the sentinel is back.
     TakenBack,
+    /// **The Restart Manager closed the application** (`ENDSESSION_CLOSEAPP`,
+    /// T-RESTART-REGISTRATION): the session goes on and nobody ends this process, so it leaves
+    /// by itself, with the document its question wrote.
+    Closed,
 }
 
 /// **Settle one piece of news, on the loop's turn.**
@@ -116,6 +125,7 @@ pub(crate) fn settle(
             bt_platform::admission::quit_abandoned();
             Settled::Saved(landed)
         }
+        SessionEnd::Closed => Settled::Closed,
         SessionEnd::TakenBack => {
             HELD.with(|held| held.set(false));
             SETTLED.with(|settled| settled.set(false));

@@ -1340,8 +1340,9 @@ fn product_callers(owner: &str, name: &str) -> BTreeMap<String, usize> {
 /// **Every product item whose body calls `type_owner::name`**, resolved by bt-source's call
 /// graph rather than by the name (a `close` is not the sheet's `close`): the items that spell
 /// the name are read first, and each is asked what its calls of that name reach. Each caller is
-/// `module::Owner::name`.
-fn resolved_callers_of(type_owner: &str, name: &str) -> BTreeSet<String> {
+/// `module::Owner::name`. Also the restart registration's road (`app_launch_tests`,
+/// T-RESTART-REGISTRATION), through [`crate::test_support::resolved_callers_of`].
+pub(crate) fn resolved_callers_of(type_owner: &str, name: &str) -> BTreeSet<String> {
     use bt_source::call_graph::{Arms, Resolver, Target};
     let index = source();
     let resolver = Resolver::new(&[("bt-app", index)], Arms::product())

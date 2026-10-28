@@ -139,6 +139,15 @@ pub(crate) trait Backend: Sized + 'static {
             bt_persist::SessionSidebarModeV1,
         )>,
     ) -> anyhow::Result<(WindowId, crate::WindowRuntime<Self>)>;
+
+    /// **Ask the system to start this program again after its restart, on `flags`' occasions**
+    /// (T-RESTART-REGISTRATION) — `bt_platform::session_end::register_restart`, once per
+    /// process, by the launch's first window (`FolioApp::register_for_restart`).
+    fn register_restart(event_loop: &Self::Loop, flags: u32) -> Result<(), String>;
+
+    /// **Take that back** — `bt_platform::session_end::withdraw_restart`: the process is
+    /// handing itself over to an update's applier.
+    fn withdraw_restart(event_loop: &Self::Loop) -> Result<(), String>;
 }
 
 /// **The product's backend**: winit's window, `bt-render`'s renderer over the shared device,
@@ -175,6 +184,14 @@ impl Backend for Native {
         )>,
     ) -> anyhow::Result<(WindowId, crate::WindowRuntime<Self>)> {
         crate::Runtime::open_window(event_loop, app, plan, like)
+    }
+
+    fn register_restart(_event_loop: &ActiveEventLoop, flags: u32) -> Result<(), String> {
+        bt_platform::session_end::register_restart(flags)
+    }
+
+    fn withdraw_restart(_event_loop: &ActiveEventLoop) -> Result<(), String> {
+        bt_platform::session_end::withdraw_restart()
     }
 }
 

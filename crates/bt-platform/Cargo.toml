@@ -1121,6 +1121,10 @@ windows = { version = "0.62.2", features = [
     # also needs `Win32_Security` above, for the `SECURITY_ATTRIBUTES` it takes
     # and nothing here ever passes.
     "Win32_System_Registry",
+    # `RegisterApplicationRestart` / `UnregisterApplicationRestart`: Windows starts Folio again
+    # after an update's reboot or the Restart Manager's close (`src/session_end.rs`,
+    # T-RESTART-REGISTRATION). A feature, not a package.
+    "Win32_System_Recovery",
     # `ShutdownBlockReasonCreate` / `ShutdownBlockReasonDestroy`: the line the
     # system's shutdown screen shows for a window while the layout is being
     # written (`src/session_end.rs`, B-ENDSESSION).
