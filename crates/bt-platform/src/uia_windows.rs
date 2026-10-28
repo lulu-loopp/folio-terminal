@@ -507,13 +507,32 @@ pub(super) struct Pane {
     seat: u64,
 }
 
+/// **One pane of the publication a question is answered from**: the publication held for the
+/// question's length, and the pane's place in it.
+pub(super) struct Published {
+    text: Arc<WindowText>,
+    index: usize,
+}
+
+impl std::ops::Deref for Published {
+    type Target = PaneText;
+    fn deref(&self) -> &PaneText {
+        &self.text.panes[self.index]
+    }
+}
+
 impl Pane {
-    /// The pane's publication now, and its answer computed from it.
-    fn with<T>(&self, answer: impl FnOnce(&PaneText) -> Result<T>) -> Result<T> {
+    /// **The pane's publication now** — what every answer is computed from; "element not
+    /// available" when the window or the pane is gone.
+    fn published(&self) -> Result<Published> {
         self.shared.alive()?;
         let text = self.shared.snapshot();
-        let pane = text.pane(self.seat).ok_or_else(gone)?;
-        answer(pane)
+        let index = text
+            .panes
+            .iter()
+            .position(|pane| pane.seat == self.seat)
+            .ok_or_else(gone)?;
+        Ok(Published { text, index })
     }
 }
 
@@ -558,27 +577,26 @@ impl IRawElementProviderSimple_Impl for Pane_Impl {
     }
 
     fn GetPropertyValue(&self, propertyid: UIA_PROPERTY_ID) -> Result<VARIANT> {
-        self.with(|pane| {
-            let is = |id: UIA_PROPERTY_ID| propertyid == id;
-            Ok(if is(UIA_ControlTypePropertyId) {
-                VARIANT::from(self.shared.shape.control_type_id())
-            } else if is(UIA_NamePropertyId) {
-                VARIANT::from(pane.name.as_str())
-            } else if is(UIA_AutomationIdPropertyId) {
-                VARIANT::from(format!("pane-{}", pane.seat).as_str())
-            } else if is(UIA_ClassNamePropertyId) {
-                VARIANT::from("FolioTerminalPane")
-            } else if is(UIA_HasKeyboardFocusPropertyId) {
-                VARIANT::from(pane.holds_keyboard)
-            } else if is(UIA_IsKeyboardFocusablePropertyId)
-                || is(UIA_IsEnabledPropertyId)
-                || is(UIA_IsControlElementPropertyId)
-                || is(UIA_IsContentElementPropertyId)
-            {
-                VARIANT::from(true)
-            } else {
-                VARIANT::default()
-            })
+        let pane = self.published()?;
+        let is = |id: UIA_PROPERTY_ID| propertyid == id;
+        Ok(if is(UIA_ControlTypePropertyId) {
+            VARIANT::from(self.shared.shape.control_type_id())
+        } else if is(UIA_NamePropertyId) {
+            VARIANT::from(pane.name.as_str())
+        } else if is(UIA_AutomationIdPropertyId) {
+            VARIANT::from(format!("pane-{}", pane.seat).as_str())
+        } else if is(UIA_ClassNamePropertyId) {
+            VARIANT::from("FolioTerminalPane")
+        } else if is(UIA_HasKeyboardFocusPropertyId) {
+            VARIANT::from(pane.holds_keyboard)
+        } else if is(UIA_IsKeyboardFocusablePropertyId)
+            || is(UIA_IsEnabledPropertyId)
+            || is(UIA_IsControlElementPropertyId)
+            || is(UIA_IsContentElementPropertyId)
+        {
+            VARIANT::from(true)
+        } else {
+            VARIANT::default()
         })
     }
 
@@ -609,7 +627,7 @@ impl IRawElementProviderFragment_Impl for Pane_Impl {
     }
 
     fn BoundingRectangle(&self) -> Result<UiaRect> {
-        self.with(|pane| Ok(self.shared.to_screen(pane.body)))
+        Ok(self.shared.to_screen(self.published()?.body))
     }
 
     fn GetEmbeddedFragmentRoots(&self) -> Result<*mut SAFEARRAY> {
@@ -617,7 +635,7 @@ impl IRawElementProviderFragment_Impl for Pane_Impl {
     }
 
     fn SetFocus(&self) -> Result<()> {
-        self.with(|_| Ok(()))?;
+        self.published()?;
         self.shared.focus_asked.store(self.seat, Ordering::Release);
         self.shared.wake();
         Ok(())
@@ -630,7 +648,8 @@ impl IRawElementProviderFragment_Impl for Pane_Impl {
 
 impl ITextProvider_Impl for Pane_Impl {
     fn GetSelection(&self) -> Result<*mut SAFEARRAY> {
-        let ends = self.with(|pane| Ok(pane.selection().or(pane.caret().map(|at| (at, at)))))?;
+        let pane = self.published()?;
+        let ends = pane.selection().or(pane.caret().map(|at| (at, at)));
         let ranges: Vec<ITextRangeProvider> = ends
             .into_iter()
             .map(|(start, end)| self.range(start, end))
@@ -639,7 +658,7 @@ impl ITextProvider_Impl for Pane_Impl {
     }
 
     fn GetVisibleRanges(&self) -> Result<*mut SAFEARRAY> {
-        let len = self.with(|pane| Ok(pane.len()))?;
+        let len = self.published()?.len();
         safe_array_unknown(&[self.range(0, len)])
     }
 
@@ -652,12 +671,12 @@ impl ITextProvider_Impl for Pane_Impl {
 
     fn RangeFromPoint(&self, point: &UiaPoint) -> Result<ITextRangeProvider> {
         let (x, y) = self.shared.to_client(point.x, point.y);
-        let at = self.with(|pane| Ok(pane.offset_at(x, y)))?;
+        let at = self.published()?.offset_at(x, y);
         Ok(self.range(at, at))
     }
 
     fn DocumentRange(&self) -> Result<ITextRangeProvider> {
-        let len = self.with(|pane| Ok(pane.len()))?;
+        let len = self.published()?.len();
         Ok(self.range(0, len))
     }
 
@@ -675,8 +694,8 @@ impl ITextProvider2_Impl for Pane_Impl {
     }
 
     fn GetCaretRange(&self, isactive: *mut BOOL) -> Result<ITextRangeProvider> {
-        let (active, at) =
-            self.with(|pane| Ok((pane.holds_keyboard, pane.caret().unwrap_or(0))))?;
+        let pane = self.published()?;
+        let (active, at) = (pane.holds_keyboard, pane.caret().unwrap_or(0));
         if !isactive.is_null() {
             // SAFETY: UI Automation's out-parameter, checked non-null.
             unsafe { *isactive = BOOL::from(active) };
@@ -691,7 +710,8 @@ impl IValueProvider_Impl for Pane_Impl {
     }
 
     fn Value(&self) -> Result<BSTR> {
-        self.with(|pane| Ok(BSTR::from(pane.text(0, pane.len(), -1))))
+        let pane = self.published()?;
+        Ok(BSTR::from(pane.text(0, pane.len(), -1)))
     }
 
     fn IsReadOnly(&self) -> Result<BOOL> {
@@ -758,8 +778,8 @@ impl ITextRangeProvider_Impl for Range_Impl {
         let Ok(other) = self.peer(&range) else {
             return Ok(BOOL::from(false));
         };
-        self.pane
-            .with(|pane| Ok(BOOL::from(self.ends(pane) == other.ends(pane))))
+        let pane = self.pane.published()?;
+        Ok(BOOL::from(self.ends(&pane) == other.ends(&pane)))
     }
 
     fn CompareEndpoints(
@@ -769,30 +789,28 @@ impl ITextRangeProvider_Impl for Range_Impl {
         targetendpoint: TextPatternRangeEndpoint,
     ) -> Result<i32> {
         let other = self.peer(&targetrange)?;
-        self.pane.with(|pane| {
-            let (start, end) = self.ends(pane);
-            let (other_start, other_end) = other.ends(pane);
-            let mine = if is_start(endpoint) { start } else { end };
-            let theirs = if is_start(targetendpoint) {
-                other_start
-            } else {
-                other_end
-            };
-            Ok(match mine.cmp(&theirs) {
-                std::cmp::Ordering::Less => -1,
-                std::cmp::Ordering::Equal => 0,
-                std::cmp::Ordering::Greater => 1,
-            })
+        let pane = self.pane.published()?;
+        let (start, end) = self.ends(&pane);
+        let (other_start, other_end) = other.ends(&pane);
+        let mine = if is_start(endpoint) { start } else { end };
+        let theirs = if is_start(targetendpoint) {
+            other_start
+        } else {
+            other_end
+        };
+        Ok(match mine.cmp(&theirs) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
         })
     }
 
     fn ExpandToEnclosingUnit(&self, unit: TextUnit) -> Result<()> {
-        self.pane.with(|pane| {
-            let (start, _) = self.ends(pane);
-            let (start, end) = pane.enclosing(start, Boundary::of_text_unit(unit.0));
-            self.set(start, end);
-            Ok(())
-        })
+        let pane = self.pane.published()?;
+        let (start, _) = self.ends(&pane);
+        let (start, end) = pane.enclosing(start, Boundary::of_text_unit(unit.0));
+        self.set(start, end);
+        Ok(())
     }
 
     fn FindAttribute(
@@ -811,16 +829,15 @@ impl ITextRangeProvider_Impl for Range_Impl {
         ignorecase: BOOL,
     ) -> Result<ITextRangeProvider> {
         let needle = text.to_string();
-        let found = self.pane.with(|pane| {
-            let (start, end) = self.ends(pane);
-            Ok(pane.find(
-                start,
-                end,
-                &needle,
-                backward.as_bool(),
-                ignorecase.as_bool(),
-            ))
-        })?;
+        let pane = self.pane.published()?;
+        let (start, end) = self.ends(&pane);
+        let found = pane.find(
+            start,
+            end,
+            &needle,
+            backward.as_bool(),
+            ignorecase.as_bool(),
+        );
         match found {
             Some((start, end)) => Ok(self.pane.range(start, end)),
             None => none(),
@@ -838,10 +855,9 @@ impl ITextRangeProvider_Impl for Range_Impl {
     }
 
     fn GetBoundingRectangles(&self) -> Result<*mut SAFEARRAY> {
-        let rectangles = self.pane.with(|pane| {
-            let (start, end) = self.ends(pane);
-            Ok(pane.rectangles(start, end))
-        })?;
+        let pane = self.pane.published()?;
+        let (start, end) = self.ends(&pane);
+        let rectangles = pane.rectangles(start, end);
         let mut numbers = Vec::with_capacity(rectangles.len() * 4);
         for rect in rectangles {
             let screen = self.pane.shared.to_screen(rect);
@@ -856,20 +872,18 @@ impl ITextRangeProvider_Impl for Range_Impl {
     }
 
     fn GetText(&self, maxlength: i32) -> Result<BSTR> {
-        self.pane.with(|pane| {
-            let (start, end) = self.ends(pane);
-            Ok(BSTR::from(pane.text(start, end, maxlength)))
-        })
+        let pane = self.pane.published()?;
+        let (start, end) = self.ends(&pane);
+        Ok(BSTR::from(pane.text(start, end, maxlength)))
     }
 
     fn Move(&self, unit: TextUnit, count: i32) -> Result<i32> {
-        self.pane.with(|pane| {
-            let (start, end) = self.ends(pane);
-            let (start, end, moved) =
-                pane.moved_range(start, end, Boundary::of_text_unit(unit.0), count);
-            self.set(start, end);
-            Ok(moved)
-        })
+        let pane = self.pane.published()?;
+        let (start, end) = self.ends(&pane);
+        let (start, end, moved) =
+            pane.moved_range(start, end, Boundary::of_text_unit(unit.0), count);
+        self.set(start, end);
+        Ok(moved)
     }
 
     fn MoveEndpointByUnit(
@@ -878,20 +892,19 @@ impl ITextRangeProvider_Impl for Range_Impl {
         unit: TextUnit,
         count: i32,
     ) -> Result<i32> {
-        self.pane.with(|pane| {
-            let (start, end) = self.ends(pane);
-            let unit = Boundary::of_text_unit(unit.0);
-            let moved = if is_start(endpoint) {
-                let (at, moved) = pane.moved(start, unit, count);
-                self.set(at, end.max(at));
-                moved
-            } else {
-                let (at, moved) = pane.moved(end, unit, count);
-                self.set(start.min(at), at);
-                moved
-            };
-            Ok(moved)
-        })
+        let pane = self.pane.published()?;
+        let (start, end) = self.ends(&pane);
+        let unit = Boundary::of_text_unit(unit.0);
+        let moved = if is_start(endpoint) {
+            let (at, moved) = pane.moved(start, unit, count);
+            self.set(at, end.max(at));
+            moved
+        } else {
+            let (at, moved) = pane.moved(end, unit, count);
+            self.set(start.min(at), at);
+            moved
+        };
+        Ok(moved)
     }
 
     fn MoveEndpointByRange(
@@ -901,21 +914,20 @@ impl ITextRangeProvider_Impl for Range_Impl {
         targetendpoint: TextPatternRangeEndpoint,
     ) -> Result<()> {
         let other = self.peer(&targetrange)?;
-        self.pane.with(|pane| {
-            let (start, end) = self.ends(pane);
-            let (other_start, other_end) = other.ends(pane);
-            let at = if is_start(targetendpoint) {
-                other_start
-            } else {
-                other_end
-            };
-            if is_start(endpoint) {
-                self.set(at, end.max(at));
-            } else {
-                self.set(start.min(at), at);
-            }
-            Ok(())
-        })
+        let pane = self.pane.published()?;
+        let (start, end) = self.ends(&pane);
+        let (other_start, other_end) = other.ends(&pane);
+        let at = if is_start(targetendpoint) {
+            other_start
+        } else {
+            other_end
+        };
+        if is_start(endpoint) {
+            self.set(at, end.max(at));
+        } else {
+            self.set(start.min(at), at);
+        }
+        Ok(())
     }
 
     fn Select(&self) -> Result<()> {

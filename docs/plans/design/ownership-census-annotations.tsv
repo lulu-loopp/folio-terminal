@@ -153,6 +153,7 @@ WindowRuntime.term_menu	-	VIEW	floats	the 2026-09-25 table
 WindowRuntime.textless_frames	-	PROJ	frame	the 2026-09-25 table
 WindowRuntime.tooltip	-	VIEW	tooltips	the 2026-09-25 table
 WindowRuntime.tooltip_anchors	-	PROJ	tooltips	the 2026-09-25 table
+WindowRuntime.uia	-	PROJ	windows	T-UIA-SKELETON (2026-10-27): what the window tells UI Automation; Runtime::flush_uia spends it, Runtime::redraw marks a present owed to it
 WindowRuntime.underlined_image_reference	-	PROJ	frame	the 2026-09-25 table
 WindowRuntime.unpainted_pane_output	-	PROJ	terminal	the 2026-09-25 table
 WindowRuntime.video	-	LIFE	preview	the 2026-09-25 table
