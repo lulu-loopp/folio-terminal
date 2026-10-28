@@ -1900,13 +1900,15 @@ fn a_drag_reflows_at_once_while_the_shell_holds_typed_input() {
 /// RED (T-RESTART-CWD round 2, finding 3) — **the session save writes the one ladder**, the
 /// one every shell started in a pane's place reads.
 ///
+/// Since 2026-10-28 (T-CONTRACT-M8, O-5b) the save takes the pane off the map and calls the
+/// ladder on its session, so the pin matches that call.
+///
 /// MUTATION, observed red: write `working_directory().or(spawn_place)` inline again.
 #[test]
 fn the_session_save_writes_the_one_ladder() {
     let save = method_body("TabState", "term_leaf");
     assert!(
-        save.contains(".and_then(ShellSession::place_for_a_new_shell)")
-            && !save.contains("spawn_place"),
+        save.contains("leaf.place_for_a_new_shell()") && !save.contains("spawn_place"),
         "{save}"
     );
 }

@@ -42766,7 +42766,7 @@ mod formula_tool_seat_tests {
                 < copy.find("self.submit_clipboard_write(").unwrap()
         );
         let validate = method_body("Runtime", "live_paste_target");
-        assert!(validate.contains("tab.sessions.get(&target.seat)"));
+        assert!(validate.contains(".sessions") && validate.contains(".get(&target.seat)"));
         assert!(validate.contains("paste_target_is_live(tab.id, standing, target)"));
     }
 
@@ -46700,7 +46700,7 @@ mod pty_drain_budget_tests {
             sync.contains("self.window.tabs.iter_mut()"),
             "every tab, because a background tab is switched to and not rebuilt"
         );
-        assert!(sync.contains("leaves_mut()"), "and every leaf of each");
+        assert!(sync.contains("panes_mut()"), "and every pane of each");
         for focused_only in ["self.shell_mut()", "self.shell()", "self.focused()"] {
             assert!(
                 !sync.contains(focused_only),
@@ -46708,7 +46708,7 @@ mod pty_drain_budget_tests {
             );
         }
         assert!(
-            sync.contains("leaf.grid.columns"),
+            sync.contains("leaf.session.grid.columns"),
             "and each pane's key carries that pane's own width"
         );
     }

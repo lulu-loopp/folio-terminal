@@ -773,7 +773,7 @@ fn two_panes_at_two_sizes_each_map_the_pointer_with_their_own_cells() {
     assert!(method_body("Runtime", "pane_frame_metrics").contains("presented_metrics"));
     assert!(
         method_body("Runtime", "offer_ime_caret")
-            .contains("self.focused().map(|leaf| leaf.view.metrics)"),
+            .contains("self.focused_pane().map(|leaf| leaf.view.metrics)"),
         "the IME caret is measured in the focused pane's cells"
     );
     for (method, needle) in [
