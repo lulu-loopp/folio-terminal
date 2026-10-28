@@ -670,6 +670,19 @@ impl Shape {
     pub fn has_value_pattern(self) -> bool {
         matches!(self, Self::Edit)
     }
+
+    /// **The shape `BT_UIA_SHAPE` names** — `edit`, `document` or `text`, in any case; anything
+    /// else names none. The variable is the E-1 candidate build's only (ruling R3) and goes before
+    /// landing, with this function.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "edit" => Some(Self::Edit),
+            "document" => Some(Self::Document),
+            "text" => Some(Self::Text),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(windows)]
