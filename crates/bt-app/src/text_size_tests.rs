@@ -5,7 +5,7 @@
 //! and real tabs — the real `step_leaf_text_scale` (the one mutation door's core), the real
 //! `apply_leaf_metrics`, the real `pane_cell_metrics`-shaped derivation through the production
 //! measuring service (`bt_render::CellMetrics::measure_at` behind `bt_render::CellMetricsMemo`),
-//! the real `LeafSession::propose_size` / `release_due_leaf_resize` transaction, and frames the
+//! the real `ShellSession::propose_size` / `release_due_leaf_resize` transaction, and frames the
 //! leaves' own sessions compose. Where the claim is about the window's own wiring — which rung
 //! the wheel reaches first, which metrics a hit test reads, who may write the rung — it is
 //! pinned on the item bodies through `bt_source`.
@@ -46,7 +46,7 @@ fn physical() -> PhysicalSize<u32> {
 /// `leaf_saying` is born with its own 22-pixel rows rather than with its metrics, so the leaf is
 /// first given a different scale and then put at 100 % through the production apply operation,
 /// which is the one writer of the session's cell geometry.
-fn pane_at_rest(text: &str) -> LeafSession {
+fn pane_at_rest(text: &str) -> ShellSession {
     let mut leaf = leaf_saying(text);
     leaf.view.metrics = fixture_cell_metrics(2.0, BASE);
     assert!(apply_leaf_metrics(
@@ -60,7 +60,7 @@ fn pane_at_rest(text: &str) -> LeafSession {
 }
 
 /// Re-solve a leaf into [`body`], as every road that re-solves the panes does.
-fn resolve(leaf: &mut LeafSession, at: Instant) -> bool {
+fn resolve(leaf: &mut ShellSession, at: Instant) -> bool {
     let next = leaf.grid_for(body());
     leaf.propose_size(GridChange {
         next,
@@ -74,14 +74,14 @@ fn resolve(leaf: &mut LeafSession, at: Instant) -> bool {
 }
 
 /// Release whatever the leaf owes its child, as the loop does past the quiet boundary.
-fn settle(leaf: &mut LeafSession, at: Instant) -> Option<LeafResizeCommit> {
+fn settle(leaf: &mut ShellSession, at: Instant) -> Option<LeafResizeCommit> {
     release_due_leaf_resize(leaf, at, false)
         .expect("a shell-less leaf commits")
         .0
 }
 
 /// Everything a neighbour's step could disturb, as one comparable picture.
-fn snapshot(leaf: &LeafSession) -> String {
+fn snapshot(leaf: &ShellSession) -> String {
     format!(
         "{:?}",
         (
@@ -108,7 +108,7 @@ fn snapshot(leaf: &LeafSession) -> String {
 ///
 /// MUTATION: make `step_leaf_text_scale` apply the derived metrics without moving the rung (drop
 /// `leaf.view.text_scale = requested`) — the target's rung reads 100 and the percent assertion goes
-/// red; make `LeafSession::grid_for` read the window's base metrics — the target's grid does not
+/// red; make `ShellSession::grid_for` read the window's base metrics — the target's grid does not
 /// shrink.
 #[test]
 fn stepping_one_pane_changes_its_metrics_and_leaves_its_neighbour_byte_identical() {
@@ -160,7 +160,7 @@ fn stepping_one_pane_changes_its_metrics_and_leaves_its_neighbour_byte_identical
 ///
 /// Driven the way the wheel drives it: reports turned into rungs by the rung's own carry
 /// ([`TextSizeAim::notch`]), each spend applied through the door's core and re-solved through
-/// `LeafSession::propose_size`, and the child released by `release_due_leaf_resize` exactly as
+/// `ShellSession::propose_size`, and the child released by `release_due_leaf_resize` exactly as
 /// the loop releases it. `told_the_child` is the commit's own record of whether
 /// `PtySession::resize` — `ResizePseudoConsole` — is called; the fixture has no ConPTY, so this
 /// counts the decision and not the syscall.
@@ -174,7 +174,7 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
         seat: SeatId(1),
     };
     let started = Instant::now();
-    let turn = |leaf: &mut LeafSession, slot: &mut Option<TextSizeAim>, delta, when| {
+    let turn = |leaf: &mut ShellSession, slot: &mut Option<TextSizeAim>, delta, when| {
         let carry = slot.take();
         let (step, count) = TextSizeAim::notch(carry, slot, at, delta, leaf.view.text_scale);
         if count != 0
@@ -369,7 +369,7 @@ fn a_tab_moved_to_a_window_at_another_scale_is_measured_there() {
 ///
 /// The moving half runs the production moves on real tabs: `tear_pane_into_tab`, and a merge
 /// through `absorb_tab_into_layout` whose arriving seats are renumbered — the rung travels inside
-/// the `LeafSession` that is moved, with no copy in any transfer record. The birth half is every
+/// the `ShellSession` that is moved, with no copy in any transfer record. The birth half is every
 /// constructor's argument, pinned: `Runtime::split_seat` and every caller of `create_tab_state`
 /// (the `+`, a duplicate, a restore, *Reopen closed*) hand new views `TextScale::ACTUAL`.
 ///

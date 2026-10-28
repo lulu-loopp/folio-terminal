@@ -476,7 +476,7 @@ fn cancel_sends_no_bytes_and_leaves_the_clipboard() {
 
 /// RED (0.4.4 ticket 02) — **a restarted shell takes its pending paste with it.**
 ///
-/// `Runtime::restart_shell` puts a new `LeafSession` in the seat; the pending paste lived on the
+/// `Runtime::restart_shell` puts a new `ShellSession` in the seat; the pending paste lived on the
 /// old one, so the card has nothing left to project and the old address names nothing.
 ///
 /// MUTATION: keep the pending paste on the window instead of the leaf — it outlives the shell.

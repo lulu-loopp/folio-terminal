@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use crate::{LeafSession, ShellAddress};
+use crate::{ShellAddress, ShellSession};
 
 pub(crate) const OBSERVATION_INTERVAL: Duration =
     bt_platform::foreground_program::OBSERVATION_INTERVAL;
@@ -76,7 +76,7 @@ fn run(
 /// A pane without a shell process (or a worker that has gone) books no request, so the cadence is
 /// not left waiting for an answer that cannot come.
 pub(crate) fn request(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     address: ShellAddress,
     requests: &mpsc::Sender<Request>,
     now: Instant,
@@ -95,7 +95,7 @@ pub(crate) fn request(
 /// Send a request the cadence has already admitted, including the one successor returned by
 /// [`Cadence::answered`].
 pub(crate) fn dispatch(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     address: ShellAddress,
     requests: &mpsc::Sender<Request>,
 ) {
@@ -121,7 +121,7 @@ pub(crate) fn dispatch(
 /// When `leaf`'s cadence next asks — the instant its next publish is admitted at. Not a wake the
 /// loop books: no turn spends the cadence (T-WINDOW-THREAD-UNDER-LOAD round 3); a test reads it.
 #[cfg(test)]
-pub(crate) fn deadline(leaf: &LeafSession) -> Option<Instant> {
+pub(crate) fn deadline(leaf: &ShellSession) -> Option<Instant> {
     leaf.foreground_program_cadence
         .deadline(leaf.session.foreground_program_probe_is_armed())
 }
@@ -130,7 +130,7 @@ pub(crate) fn deadline(leaf: &LeafSession) -> Option<Instant> {
 /// says whether the compact session-owned fact changed and whether one command-start request was
 /// coalesced behind this answer.
 pub(crate) fn apply_answer(
-    session: &mut LeafSession,
+    session: &mut ShellSession,
     incarnation: u64,
     program: bt_platform::foreground_program::ForegroundProgram,
 ) -> Option<(bool, bool)> {

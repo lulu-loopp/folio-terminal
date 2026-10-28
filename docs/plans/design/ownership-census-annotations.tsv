@@ -55,10 +55,10 @@ App.startup_shells	-	LIFE	the application (Runtime::create)	T-PROGRAMS-REFRESH (
 App.tab_ids	-	LIFE	tabs	the 2026-09-25 table
 App.web_spare	-	LIFE	web	proposed by census-1
 App.web_warmup	-	LIFE	web	proposed by census-1
-LeafSession.attention	-	LIFE	attention (→ bt-workbench)	the 2026-09-25 table; 2026-10-27 (O-4a, M7): the nest of the account, its ledger, bell edge, clock and capability, one fact
-LeafSession.life	-	LIFE	main (the leaf-birth road; ShellLife's transitions)	2026-10-27 (O-4b, M6): the nest of the shell's life, its phase (the PTY inside it) and the spawn-fallback hand-off, one fact written only through ShellLife's transitions (bt-source census pin the_shell_life_is_one_fact_written_only_by_its_transitions); replaces the rows LeafSession.pty (panes, the 2026-09-25 table) and LeafSession.spawn_fallback (main, T-SHELL-BIRTH-DEATH 2026-10-10)
-LeafSession.session	-	HUB	terminal	the 2026-09-25 table
-LeafSession.wake	-	LIFE	main (the leaf-birth road, finish_leaf_birth)	T-SHELL-BIRTH-DEATH (2026-10-10): the field is Some from when a shell is asked until the pane is left without one; the birth road sets it, and runtime::tabs clears it when the reaper retires a birth-death PTY and keeps the pane
+ShellSession.attention	-	LIFE	attention (→ bt-workbench)	the 2026-09-25 table; 2026-10-27 (O-4a, M7): the nest of the account, its ledger, bell edge, clock and capability, one fact
+ShellSession.life	-	LIFE	main (the leaf-birth road; ShellLife's transitions)	2026-10-27 (O-4b, M6): the nest of the shell's life, its phase (the PTY inside it) and the spawn-fallback hand-off, one fact written only through ShellLife's transitions (bt-source census pin the_shell_life_is_one_fact_written_only_by_its_transitions); replaces the rows LeafSession.pty (panes, the 2026-09-25 table) and LeafSession.spawn_fallback (main, T-SHELL-BIRTH-DEATH 2026-10-10)
+ShellSession.session	-	HUB	terminal	the 2026-09-25 table
+ShellSession.wake	-	LIFE	main (the leaf-birth road, finish_leaf_birth)	T-SHELL-BIRTH-DEATH (2026-10-10): the field is Some from when a shell is asked until the pane is left without one; the birth road sets it, and runtime::tabs clears it when the reaper retires a birth-death PTY and keeps the pane
 TabState.file_trees	-	OBS	files	the 2026-09-25 table
 TabState.files	-	VIEW	files	the 2026-09-25 table
 TabState.flip	-	PROJ	tabs	the 2026-09-25 table

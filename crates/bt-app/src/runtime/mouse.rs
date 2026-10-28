@@ -7636,7 +7636,7 @@ pub(crate) fn landing_for_aim(
 /// `TabState` held one `PtySession`, [`seats::Seats`] named one `terminal` seat —
 /// so a pane leaving one produced either a tab with no shell or a tab with two,
 /// and I106 is the crash report for the first. Both halves of that argument are
-/// now false. Phase A gave every Terminal leaf its own [`crate::LeafSession`], so the
+/// now false. Phase A gave every Terminal leaf its own [`crate::ShellSession`], so the
 /// tab a pane leaves keeps a shell per leaf that stayed and the tab it becomes
 /// gets the one that travelled with it. Nothing is spawned and nothing is killed:
 /// the ConPTY, the screen and the scrollback are the same objects on both sides

@@ -5,7 +5,7 @@ use crate::input::Keystroke;
 use crate::runtime::panes::frame_row_of_anchor;
 use crate::window_seam::prelude::*;
 use crate::{
-    LeafSearchRescan, LeafSession, PointerTarget, Runtime, SearchRefresh, SearchScanCache,
+    LeafSearchRescan, PointerTarget, Runtime, SearchRefresh, SearchScanCache, ShellSession,
     hang_watch, input, marks, search, seats, tooltip,
 };
 use anyhow::Result;
@@ -837,7 +837,7 @@ impl<B: Backend> Runtime<'_, B> {
 /// at most [`SearchRefresh::walk_budget`] owed lines on top of whatever froze since the last scan.
 pub(crate) fn rescan_leaf_for_search(
     compiled: &bt_transcript::search::CompiledSearch,
-    leaf: &LeafSession,
+    leaf: &ShellSession,
     seat: SeatId,
     revision: u64,
     cache: Option<&SearchScanCache>,

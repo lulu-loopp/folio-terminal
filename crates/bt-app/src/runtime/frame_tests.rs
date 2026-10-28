@@ -377,7 +377,7 @@ fn a_column_on_a_folder_nobody_could_say_draws_folder_unknown_on_its_foot() {
 /// that reports another folder while the menu is open changes nothing on it; the next opening
 /// reads again.
 ///
-/// MUTATION (observed red): `root_choices` reading every pane through `LeafSession::folder` (the
+/// MUTATION (observed red): `root_choices` reading every pane through `ShellSession::folder` (the
 /// per-frame read) — the open menu offers the new folder.
 #[test]
 fn the_root_menu_reads_the_shells_folders_once_as_it_opens() {

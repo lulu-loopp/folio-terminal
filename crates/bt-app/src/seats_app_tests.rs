@@ -1854,7 +1854,7 @@ fn a_restored_split_tree_reaches_zero_pty_resize_requests_after_a_matching_dpi_s
 /// `seats.identity()` — a stored field naming one fixed leaf, which moves
 /// only when that leaf closes and never with focus — and all four callers
 /// handed that answer to `schedule_grid_change`, which writes through the
-/// `Runtime -> TabState -> LeafSession` deref chain to the *focused* leaf. A
+/// `Runtime -> TabState -> ShellSession` deref chain to the *focused* leaf. A
 /// lone-terminal tab hid it because the two seats are then the same
 /// rectangle. Split the tab, focus the narrow pane, and its shell was told
 /// the wide pane's column count: long lines ran off the right edge instead
@@ -4114,7 +4114,7 @@ fn a_stage_that_will_not_take_the_pane_refuses_it_at_every_dividing_aim() {
 /// the property with an id the table does not hold at all — the strongest
 /// form of "nothing here is resolved against the table" that can be written.
 ///
-/// Red gate: put the index back on `LeafSession` and the last block cannot be
+/// Red gate: put the index back on `ShellSession` and the last block cannot be
 /// expressed at all — there is no `usize` that means "a row this table has
 /// not got" — and the first three assertions become a statement about
 /// whatever row happens to sit where `cmd` sat.

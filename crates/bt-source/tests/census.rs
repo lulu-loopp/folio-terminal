@@ -46,19 +46,20 @@ const FIXTURE_STRUCTS: [&str; 4] = ["App", "WindowRuntime", "TabState", "LeafSes
 /// a lend of `TabState.preview_pool` — the view being `PreviewPane` and the two
 /// contents that hold its state, a view of a pool buffer and a picture (ticket
 /// O-8, invariant 2) — and a terminal pane's view, `TermView`, nested in
-/// `LeafSession` (ticket O-2, the contract's M0 and M1), and the facts of a
-/// pane's launch, `LaunchFacts`, nested beside it (ticket O-4a, M5). The
-/// contract's M0 also names `ShellSession`; it is declared here only when M8's
-/// rename gives it a declaration, because the census refuses a struct the
-/// package does not declare (`CensusFailure::NoSuchStruct`). M7's
-/// `AttentionAccount` is not declared: its nest, `LeafSession.attention`, is the
-/// fact, as the contract's §3.3 counts it; M6's `ShellLife` (ticket O-4b) will
-/// not be declared either, for the same reason.
+/// the session record (ticket O-2, the contract's M0 and M1), and the facts of a
+/// pane's launch, `LaunchFacts`, nested beside it (ticket O-4a, M5). The session
+/// record is `ShellSession`, the contract's M0 name, since M8's rename (ticket
+/// O-5a, 2026-10-27; `ShellSession` before it): the census refuses a struct the
+/// package does not declare (`CensusFailure::NoSuchStruct`), so the name came in
+/// with the rename and replaced the old one, and the count stays ten. M7's
+/// `AttentionAccount` is not declared: its nest, `ShellSession.attention`, is the
+/// fact, as the contract's §3.3 counts it; M6's `ShellLife` (ticket O-4b) is not
+/// declared either, for the same reason.
 const STRUCTS: [&str; 10] = [
     "App",
     "WindowRuntime",
     "TabState",
-    "LeafSession",
+    "ShellSession",
     "TermView",
     "LaunchFacts",
     "PreviewBuffer",
@@ -67,7 +68,7 @@ const STRUCTS: [&str; 10] = [
     "PictureView",
 ];
 
-/// The fields M1 moved from `LeafSession` into `TermView` (the ownership
+/// The fields M1 moved from `ShellSession` into `TermView` (the ownership
 /// contract's §3.3).
 const TERM_VIEW_M1: [&str; 5] = [
     "thumb_awake",
@@ -77,7 +78,7 @@ const TERM_VIEW_M1: [&str; 5] = [
     "frame_image_references",
 ];
 
-/// The fields M2–M4 moved from `LeafSession` into `TermView` (the ownership
+/// The fields M2–M4 moved from `ShellSession` into `TermView` (the ownership
 /// contract's §3.3; ticket O-3).
 const TERM_VIEW_M2_M4: [&str; 4] = [
     "text_scale",
@@ -86,7 +87,7 @@ const TERM_VIEW_M2_M4: [&str; 4] = [
     "projection",
 ];
 
-/// The fields M5 moved from `LeafSession` into `LaunchFacts` (the ownership
+/// The fields M5 moved from `ShellSession` into `LaunchFacts` (the ownership
 /// contract's §3.3; ticket O-4a), with their one writer each.
 const LAUNCH_FACTS: [(&str, &str); 7] = [
     ("profile", "finish_leaf_birth"),
@@ -243,8 +244,8 @@ fn a_writer_moved_into_a_new_module_changes_only_the_module_column() {
 
 /// RED (O-2) — **a field moved into a nested struct changes only its fact key.**
 ///
-/// The ownership contract's M1 moves five fields of `LeafSession` under
-/// `LeafSession.view: TermView`, and its proof is the census: the moved
+/// The ownership contract's M1 moves five fields of `ShellSession` under
+/// `ShellSession.view: TermView`, and its proof is the census: the moved
 /// facts' rows, writes and reads, are the rows they had, with `Leaf.x`
 /// spelled `View.x`. The field the nest adds is reached only on the way to
 /// the fields under it, so it is read wherever one of them is read and is
@@ -799,13 +800,13 @@ fn every_field_of_the_declared_structs_has_an_inventory_row() {
 }
 
 /// RED (O-2, O-3) — **the nine view fields M1–M4 moved are `TermView`'s, nested
-/// in `LeafSession` with its lifetime, and their writers are the ones they had.**
+/// in `ShellSession` with its lifetime, and their writers are the ones they had.**
 ///
 /// The ownership contract's M1 (§3.3) moves `thumb_awake`, `column_awake`, `card_skip`,
-/// `presented_metrics` and `frame_image_references` under `LeafSession.view: TermView`, and M2–M4
+/// `presented_metrics` and `frame_image_references` under `ShellSession.view: TermView`, and M2–M4
 /// move `text_scale`, `metrics`, `last_presented_frame` and `projection` after them; no writer
 /// changes module (§3.4: the rows' functions stay equal, only the fact column moves). So each is a
-/// fact of `TermView` and none of `LeafSession`; `LeafSession.view` is the one field of the leaf
+/// fact of `TermView` and none of `ShellSession`; `ShellSession.view` is the one field of the leaf
 /// whose type is `TermView`, and it is written nowhere after construction (two destructures lend
 /// it, to reach the projection); and each moved field's proven writes and lends are exactly the
 /// items that wrote and lent it on the leaf, by item and whatever module K2 puts the item in. Its
@@ -817,7 +818,7 @@ fn every_field_of_the_declared_structs_has_an_inventory_row() {
 /// the view's own `TermView::commit_presented` (in `runtime::frame`, the module
 /// `Runtime::redraw` wrote it from), which `redraw` calls.
 ///
-/// MUTATION: leave `card_skip` or `projection` on `LeafSession`, and the first
+/// MUTATION: leave `card_skip` or `projection` on `ShellSession`, and the first
 /// assertion names it; drop `wake_terminal_column`'s write, write `leaf.view`
 /// whole, write `leaf.view.last_presented_frame` in `redraw` beside the commit,
 /// or give `runtime::clipboard` a write of `projection` (pass the view to
@@ -833,17 +834,17 @@ fn the_view_fields_are_term_views() {
     for field in TERM_VIEW_M1.iter().chain(TERM_VIEW_M2_M4.iter()) {
         assert!(
             facts.contains(format!("TermView.{field}").as_str())
-                && !facts.contains(format!("LeafSession.{field}").as_str()),
-            "`{field}` is `TermView`'s and not `LeafSession`'s"
+                && !facts.contains(format!("ShellSession.{field}").as_str()),
+            "`{field}` is `TermView`'s and not `ShellSession`'s"
         );
     }
     let nests: Vec<&str> = census
         .facts()
         .iter()
-        .filter(|fact| fact.fact.starts_with("LeafSession.") && fact.declared.contains("TermView"))
+        .filter(|fact| fact.fact.starts_with("ShellSession.") && fact.declared.contains("TermView"))
         .map(|fact| fact.fact.as_str())
         .collect();
-    assert_eq!(nests, ["LeafSession.view"], "one nest");
+    assert_eq!(nests, ["ShellSession.view"], "one nest");
     let writers = |fact: &str| -> Vec<(&'static str, String)> {
         let mut out: Vec<(&'static str, String)> = census
             .rows()
@@ -865,7 +866,7 @@ fn the_view_fields_are_term_views() {
     // (`view: TermView { projection, .. }`): the census counts every step of a
     // struct pattern, so those two lend the nest as well as `TermView.projection`.
     assert_eq!(
-        writers("LeafSession.view"),
+        writers("ShellSession.view"),
         expected(&[
             ("access", "Runtime::insert_path_into_terminal"),
             ("access", "Runtime::send_paste"),
@@ -934,21 +935,21 @@ fn the_view_fields_are_term_views() {
 }
 
 /// RED (O-4a) — **the seven launch facts M5 moved are `LaunchFacts`', nested in
-/// `LeafSession` with its lifetime, and each is written by the one item that
+/// `ShellSession` with its lifetime, and each is written by the one item that
 /// wrote it on the leaf.**
 ///
 /// The ownership contract's M5 (§3.3) moves `profile`, `paste_recipient`,
 /// `integration`, `program`, `program_kind`, `spawn_place` and `born_named`
-/// under `LeafSession.launch: LaunchFacts`. Each is a fact the shell's start
+/// under `ShellSession.launch: LaunchFacts`. Each is a fact the shell's start
 /// alone knew: `finish_leaf_birth` writes the first five where the shell lands
 /// and `place_leaf` the place and whether it was named, and nothing writes or
 /// lends any of them after. So each is a fact of `LaunchFacts` and none of
-/// `LeafSession`; `LeafSession.launch` is the one field of the leaf whose type
+/// `ShellSession`; `ShellSession.launch` is the one field of the leaf whose type
 /// is `LaunchFacts`, and it is written and lent nowhere after construction.
 /// Reads are not pinned (they move with K2's batches and are held by the
 /// runtime dependency map's guard).
 ///
-/// MUTATION: leave `born_named` on `LeafSession`, and the first assertion names
+/// MUTATION: leave `born_named` on `ShellSession`, and the first assertion names
 /// it; drop `place_leaf`'s write of `spawn_place`, write `leaf.launch` whole, or
 /// write `leaf.launch.profile` from `restart_shell`, and the writer sets differ.
 #[test]
@@ -962,19 +963,19 @@ fn the_launch_facts_are_launch_facts() {
     for (field, _) in LAUNCH_FACTS {
         assert!(
             facts.contains(format!("LaunchFacts.{field}").as_str())
-                && !facts.contains(format!("LeafSession.{field}").as_str()),
-            "`{field}` is `LaunchFacts`' and not `LeafSession`'s"
+                && !facts.contains(format!("ShellSession.{field}").as_str()),
+            "`{field}` is `LaunchFacts`' and not `ShellSession`'s"
         );
     }
     let nests: Vec<&str> = census
         .facts()
         .iter()
         .filter(|fact| {
-            fact.fact.starts_with("LeafSession.") && fact.declared.contains("LaunchFacts")
+            fact.fact.starts_with("ShellSession.") && fact.declared.contains("LaunchFacts")
         })
         .map(|fact| fact.fact.as_str())
         .collect();
-    assert_eq!(nests, ["LeafSession.launch"], "one nest");
+    assert_eq!(nests, ["ShellSession.launch"], "one nest");
     let writers = |fact: &str| -> Vec<(&'static str, String)> {
         let mut out: Vec<(&'static str, String)> = census
             .rows()
@@ -985,7 +986,7 @@ fn the_launch_facts_are_launch_facts() {
         out.sort();
         out
     };
-    assert_eq!(writers("LeafSession.launch"), [], "the nest");
+    assert_eq!(writers("ShellSession.launch"), [], "the nest");
     for (field, writer) in LAUNCH_FACTS {
         assert_eq!(
             writers(&format!("LaunchFacts.{field}")),
@@ -995,20 +996,20 @@ fn the_launch_facts_are_launch_facts() {
     }
 }
 
-/// RED (O-4a) — **a pane's attention account is one fact, `LeafSession.attention`,
+/// RED (O-4a) — **a pane's attention account is one fact, `ShellSession.attention`,
 /// written by the attention roads that wrote its four parts.**
 ///
 /// The ownership contract's M7 (§3.3) nests the ledger, the bell's edge, the
-/// credentials' clock and the capability as `LeafSession.attention:
+/// credentials' clock and the capability as `ShellSession.attention:
 /// AttentionAccount`. The account is not one of the census's structs: the nest
 /// is the fact (the contract counts "4 rows → 1"), so a write of any part is a
-/// row of `LeafSession.attention`. The three facts that merged into it had
+/// row of `ShellSession.attention`. The three facts that merged into it had
 /// writers that were all already its writers, so its writer set is the one it
 /// had: seven items in the root and `runtime::attention`. Whether a road that
 /// ends the pane has given its place up, `attention_ended`, stays on the leaf;
 /// its writer, `end_leaves_of` in `runtime::panes`, is not one of these.
 ///
-/// MUTATION: leave `bell_reported` on `LeafSession`, and the first assertion
+/// MUTATION: leave `bell_reported` on `ShellSession`, and the first assertion
 /// names it; reset `leaf.attention.bell_reported` in `end_leaves_of` (a new
 /// writer module), or drop `transfer_tab`'s re-point of the ledger, and the
 /// writer set differs.
@@ -1022,7 +1023,7 @@ fn the_attention_account_is_one_fact() {
         .collect();
     for gone in ["bell_reported", "attention_clock", "attention_capability"] {
         assert!(
-            !facts.contains(format!("LeafSession.{gone}").as_str()),
+            !facts.contains(format!("ShellSession.{gone}").as_str()),
             "`{gone}` is a part of the account, not a field of the leaf"
         );
     }
@@ -1030,15 +1031,15 @@ fn the_attention_account_is_one_fact() {
         .facts()
         .iter()
         .filter(|fact| {
-            fact.fact.starts_with("LeafSession.") && fact.declared.contains("AttentionAccount")
+            fact.fact.starts_with("ShellSession.") && fact.declared.contains("AttentionAccount")
         })
         .map(|fact| fact.fact.as_str())
         .collect();
-    assert_eq!(account, ["LeafSession.attention"], "one account");
+    assert_eq!(account, ["ShellSession.attention"], "one account");
     let writers: BTreeSet<(&'static str, &str)> = census
         .rows()
         .iter()
-        .filter(|row| row.fact == "LeafSession.attention")
+        .filter(|row| row.fact == "ShellSession.attention")
         .map(|row| (row.column.name(), row.function.as_str()))
         .collect();
     assert_eq!(
@@ -1055,7 +1056,7 @@ fn the_attention_account_is_one_fact() {
     );
 }
 
-/// `ShellLife`'s transitions (O-4b): the only calls that may write `LeafSession.life`.
+/// `ShellLife`'s transitions (O-4b): the only calls that may write `ShellSession.life`.
 const LIFE_TRANSITIONS: [&str; 13] = [
     "begin_birth",
     "take_birth",
@@ -1072,19 +1073,19 @@ const LIFE_TRANSITIONS: [&str; 13] = [
     "retire",
 ];
 
-/// The `LeafSession` record's methods that move a *Restart shell* successor (O-4b, ruling E5).
+/// The `ShellSession` record's methods that move a *Restart shell* successor (O-4b, ruling E5).
 const SUCCESSOR_MOVES: [&str; 3] = ["await_successor", "successor_mut", "take_successor"];
 
 /// RED (O-4b; the ownership contract's M6, rulings D2, D5, D9 and E5) — **the shell's life is
 /// one fact, written only by its transitions.**
 ///
-/// The seven fields M6 folded are gone from the census, and `LeafSession.life` is the one fact of
+/// The seven fields M6 folded are gone from the census, and `ShellSession.life` is the one fact of
 /// type `ShellLife`. Every write row of it calls only a transition — or, in the reaper, a call into
 /// the shell through the one lend (`try_wait`, `take_birth_fallback` on what `pty_mut` lent) — and
 /// every access row is one of today's lends kept as they stood: `pty_mut` in the reaper and the two
 /// resize roads, and the two destructures of the input roads. The functions that touch it other
 /// than by reading are these sixteen (§2's 20 → 16: D10 folded the owed-resize roads; E5 kept the
-/// successor's three on the record). And `LeafSession.successor`'s every non-read site is in the
+/// successor's three on the record). And `ShellSession.successor`'s every non-read site is in the
 /// record's three methods that move it.
 ///
 /// MUTATION: `leaf.life.phase = Phase::Kept` written in `keep_birth_death_face` (an assign row);
@@ -1120,21 +1121,23 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
         .collect();
     for gone in GONE {
         assert!(
-            !facts.contains(format!("LeafSession.{gone}").as_str()),
+            !facts.contains(format!("ShellSession.{gone}").as_str()),
             "`{gone}` is a part of the shell's life, not a field of the leaf"
         );
     }
     let life: Vec<&str> = census
         .facts()
         .iter()
-        .filter(|fact| fact.fact.starts_with("LeafSession.") && fact.declared.contains("ShellLife"))
+        .filter(|fact| {
+            fact.fact.starts_with("ShellSession.") && fact.declared.contains("ShellLife")
+        })
         .map(|fact| fact.fact.as_str())
         .collect();
-    assert_eq!(life, ["LeafSession.life"], "one life");
+    assert_eq!(life, ["ShellSession.life"], "one life");
     let rows: Vec<&SiteRow> = census
         .rows()
         .iter()
-        .filter(|row| row.fact == "LeafSession.life")
+        .filter(|row| row.fact == "ShellSession.life")
         .collect();
     let mut stray = Vec::new();
     for row in &rows {
@@ -1194,12 +1197,12 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
     let moves: BTreeSet<&str> = census
         .rows()
         .iter()
-        .filter(|row| row.fact == "LeafSession.successor")
+        .filter(|row| row.fact == "ShellSession.successor")
         .map(|row| row.function.as_str())
         .collect();
     let expected: BTreeSet<String> = SUCCESSOR_MOVES
         .iter()
-        .map(|name| format!("LeafSession::{name}"))
+        .map(|name| format!("ShellSession::{name}"))
         .collect();
     assert_eq!(
         moves,
@@ -1216,11 +1219,11 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
 /// parameter, computed by the caller (the future `report_keyboard_focus`
 /// door), so the census has no row of any column — read, write, access,
 /// membership or inner — of any `TermView` fact whose function is the drain,
-/// nor of the nest `LeafSession.view` itself: a drain that handed the whole
+/// nor of the nest `ShellSession.view` itself: a drain that handed the whole
 /// view to a helper (`&leaf.view`) would show only as a row of the nest.
 /// The assertion grows with `TermView`: every field O-3 moves under it is
 /// covered without an edit here. Since O-3 the drain reports through
-/// `LeafSession::report_keyboard_focus`, whose body is the drain's too: a view
+/// `ShellSession::report_keyboard_focus`, whose body is the drain's too: a view
 /// read written there is the drain's read, so the door is held to the same
 /// rule. Each one's own rows are asserted present, so a renamed drain or door
 /// cannot pass by matching nothing.
@@ -1230,16 +1233,16 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
 /// and its row is named.
 #[test]
 fn the_drain_reads_no_view_field() {
-    const DRAIN: [&str; 2] = ["drain_leaf_pty", "LeafSession::report_keyboard_focus"];
+    const DRAIN: [&str; 2] = ["drain_leaf_pty", "ShellSession::report_keyboard_focus"];
     let census = the_census();
     let name = |function: &str| function.split(' ').next().unwrap_or_default().to_owned();
     let is_drain = |function: &str| DRAIN.contains(&name(function).as_str());
-    let is_view = |fact: &str| fact.starts_with("TermView.") || fact == "LeafSession.view";
+    let is_view = |fact: &str| fact.starts_with("TermView.") || fact == "ShellSession.view";
     let all = || census.rows().iter().chain(census.reads());
     for drain in DRAIN {
         assert!(
             all().any(|row| name(&row.function) == drain
-                && row.fact.starts_with("LeafSession.")
+                && row.fact.starts_with("ShellSession.")
                 && !is_view(&row.fact)),
             "`{drain}` is found by its name"
         );
@@ -1251,6 +1254,243 @@ fn the_drain_reads_no_view_field() {
     assert!(
         touched.is_empty(),
         "the drain touches the view: {touched:?}"
+    );
+}
+
+// ── the session record's name and its doors (O-5a) ─────────────────────────
+
+/// The fields of the session record at O-5a (2026-10-27): the 22 fields `LeafSession` had at
+/// O-4b's head, each now `ShellSession`'s by the contract's M8 rename.
+const SHELL_SESSION_FIELDS: [&str; 22] = [
+    "attention",
+    "attention_ended",
+    "conpty_grid",
+    "foreground_program_cadence",
+    "grid",
+    "has_rail",
+    "incarnation",
+    "last_finished_command",
+    "last_seen_revision",
+    "launch",
+    "life",
+    "output_revision",
+    "paste_hold",
+    "pending_paste",
+    "pending_psreadline_resize_reanchor",
+    "pending_pty_resize",
+    "pending_typing",
+    "process_folder",
+    "session",
+    "successor",
+    "view",
+    "wake",
+];
+
+/// The proven writes and lends (every row that is not a read) of one census fact, sorted, as
+/// `(column, function)`.
+fn non_read_rows(census: &FieldCensus, fact: &str) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = census
+        .rows()
+        .iter()
+        .filter(|row| row.fact == fact)
+        .map(|row| (row.column.name(), row.function.clone()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// RED (O-5a, ruling E1) — **the session record is `ShellSession`: the M8 rename moved every
+/// fact of `LeafSession` to the same field of `ShellSession` and changed no writer.**
+///
+/// The ownership contract's M8 (§3.3) renames the struct and §3.4 asks that the census differ
+/// only in the `fact` column. So no `LeafSession.*` fact is left, the record's facts are exactly
+/// the 22 fields it had at O-4b's head, and each fact's writes and lends are the ones it had
+/// there, by function (the table below is O-4b's head's `fields.tsv`, re-keyed). The two
+/// deliberate changes are O-5a's doors: `last_seen_revision` is written only by
+/// `ShellSession::mark_seen` (E8; it was `mark_leaf_painted` and `mark_leaf_seen`, which now
+/// call it), and `pending_typing` only by `ShellSession::{queue_typing, take_typing}` (E9; it
+/// was `Runtime::queue_typing_in_the_focused_pane` and `drain_leaf_pty`, which now call them).
+/// `life`, `attention`, `launch` and `view` are held by their own pins
+/// (`the_shell_life_is_one_fact_written_only_by_its_transitions`,
+/// `the_attention_account_is_one_fact`, `the_launch_facts_are_launch_facts`,
+/// `the_view_fields_are_term_views`), so they are named here but their rows are not repeated;
+/// `session`'s 47 writer functions are counted, not listed. The reads are not pinned, as O-2's
+/// pin does not pin them: the rename's base-to-head diff of `fields.tsv` shows them equal (the
+/// `fact` column only; O-5a's report §2), and the runtime dependency map's guard holds them
+/// since.
+///
+/// MUTATION (observed red): keep the old name on the struct, and the first assertion names every
+/// field; drop `keep_birth_death_face`'s `leaf.wake = None`, and `wake`'s rows differ; write
+/// `leaf.has_rail = true` in `drain_leaf_pty`, and `has_rail`'s rows differ.
+#[test]
+fn the_session_record_is_shell_session() {
+    let census = the_census();
+    let stale: Vec<&str> = census
+        .facts()
+        .iter()
+        .map(|fact| fact.fact.as_str())
+        .filter(|fact| fact.starts_with("LeafSession."))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "facts still keyed by the old name: {stale:?}"
+    );
+    let mut fields: Vec<&str> = census
+        .facts()
+        .iter()
+        .filter_map(|fact| fact.fact.strip_prefix("ShellSession."))
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(fields, SHELL_SESSION_FIELDS, "the record's facts");
+
+    let expected = |pairs: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+        let mut out: Vec<(&'static str, String)> = pairs
+            .iter()
+            .map(|(column, function)| (*column, (*function).to_owned()))
+            .collect();
+        out.sort();
+        out
+    };
+    let table: [(&str, Vec<(&'static str, String)>); 17] = [
+        ("attention_ended", expected(&[("write", "end_leaves_of")])),
+        (
+            "conpty_grid",
+            expected(&[("write", "release_due_leaf_resize")]),
+        ),
+        (
+            "foreground_program_cadence",
+            expected(&[
+                ("write", "apply_answer"),
+                ("write", "dispatch"),
+                ("write", "request"),
+            ]),
+        ),
+        (
+            "grid",
+            expected(&[
+                ("write", "ShellSession::propose_size"),
+                ("write", "release_due_leaf_resize"),
+            ]),
+        ),
+        (
+            "has_rail",
+            expected(&[("write", "ShellSession::hear_first_mark")]),
+        ),
+        ("incarnation", expected(&[])),
+        (
+            "last_finished_command",
+            expected(&[("write", "drain_leaf_pty")]),
+        ),
+        (
+            "last_seen_revision",
+            expected(&[("write", "ShellSession::mark_seen")]),
+        ),
+        ("output_revision", expected(&[("write", "drain_leaf_pty")])),
+        (
+            "paste_hold",
+            expected(&[
+                ("access", "Runtime::insert_path_into_terminal"),
+                ("access", "Runtime::send_paste"),
+                ("write", "Runtime::advance_the_hold"),
+                ("write", "Runtime::answer_paste_card"),
+                ("write", "Runtime::ask_for_a_paste"),
+            ]),
+        ),
+        (
+            "pending_paste",
+            expected(&[
+                ("access", "Runtime::press_paste_card_key"),
+                ("write", "stage_paste"),
+                ("write", "take_pending_paste"),
+            ]),
+        ),
+        (
+            "pending_psreadline_resize_reanchor",
+            expected(&[
+                ("access", "Runtime::finish_resize_if_quiescent"),
+                ("access", "release_due_leaf_resize"),
+            ]),
+        ),
+        (
+            "pending_pty_resize",
+            expected(&[
+                ("access", "ShellSession::propose_size"),
+                ("access", "release_due_leaf_resize"),
+            ]),
+        ),
+        (
+            "pending_typing",
+            expected(&[
+                ("write", "ShellSession::queue_typing"),
+                ("write", "ShellSession::take_typing"),
+            ]),
+        ),
+        ("process_folder", expected(&[])),
+        (
+            "successor",
+            expected(&[
+                ("access", "ShellSession::successor_mut"),
+                ("membership", "ShellSession::await_successor"),
+                ("membership", "ShellSession::take_successor"),
+            ]),
+        ),
+        (
+            "wake",
+            expected(&[
+                ("write", "finish_leaf_birth"),
+                ("write", "keep_birth_death_face"),
+            ]),
+        ),
+    ];
+    for (field, rows) in table {
+        assert_eq!(
+            non_read_rows(census, &format!("ShellSession.{field}")),
+            rows,
+            "`ShellSession.{field}`'s writes and lends"
+        );
+    }
+    let session_writers: BTreeSet<String> = non_read_rows(census, "ShellSession.session")
+        .into_iter()
+        .map(|(_, function)| function)
+        .collect();
+    assert_eq!(
+        session_writers.len(),
+        47,
+        "`ShellSession.session`'s writer functions are the 47 it had at O-4b's head"
+    );
+}
+
+/// RED (O-5a, ruling E8; the ownership contract's §3.4 M8 pin, its census half) — **what a view
+/// has seen reaches the session through one door.** `ShellSession.last_seen_revision` is written
+/// by `ShellSession::mark_seen` and by nothing else; the two reporters, `mark_leaf_seen` and
+/// `mark_leaf_painted`, call it. Its behaviour half, that the door keeps the larger, is bt-app's
+/// `a_view_reports_seen_and_unread_never_goes_back`: a maximum is arithmetic, which the census
+/// cannot see.
+///
+/// MUTATION (observed red): have `mark_leaf_painted` assign `leaf.last_seen_revision` again, and
+/// the writer set names it.
+#[test]
+fn the_seen_revision_has_one_door() {
+    let census = the_census();
+    assert_eq!(
+        non_read_rows(census, "ShellSession.last_seen_revision"),
+        [("write", "ShellSession::mark_seen".to_owned())],
+        "one door"
+    );
+    let callers = bt_app_callers();
+    let door = app("ShellSession::mark_seen");
+    let mut reporters: Vec<&str> = callers
+        .by_callee
+        .get(&door)
+        .into_iter()
+        .flatten()
+        .map(|caller| last_segment(caller))
+        .collect();
+    reporters.sort_unstable();
+    assert_eq!(
+        reporters,
+        ["mark_leaf_painted", "mark_leaf_seen"],
+        "the reporters"
     );
 }
 
@@ -1393,12 +1633,12 @@ fn app(path: &str) -> String {
 
 /// RED (O-3; the ownership contract's (b)1) — **every sizing write is a size
 /// proposal**: the session's size changes after its birth only through the
-/// three stages of its one door, `LeafSession::propose_cell` (the cell size),
+/// three stages of its one door, `ShellSession::propose_cell` (the cell size),
 /// `propose_layout` (the layout key) and `propose_size` (the grid).
 ///
 /// Two halves, because each sees what the other cannot.
-/// - **The census**: every proven write of `LeafSession.session` that calls one
-///   of the session's sizing setters is in a stage, and `LeafSession.grid`'s
+/// - **The census**: every proven write of `ShellSession.session` that calls one
+///   of the session's sizing setters is in a stage, and `ShellSession.grid`'s
 ///   writers (and `pending_pty_resize`'s lenders) are the grid stage and the
 ///   session's own release, `release_due_leaf_resize`.
 /// - **The call graph**, which also sees a call on a `&mut DualPlaneSession`
@@ -1429,15 +1669,15 @@ fn every_sizing_write_is_a_size_proposal() {
         "resize",
     ];
     const STAGES: [&str; 3] = [
-        "LeafSession::propose_cell",
-        "LeafSession::propose_layout",
-        "LeafSession::propose_size",
+        "ShellSession::propose_cell",
+        "ShellSession::propose_layout",
+        "ShellSession::propose_size",
     ];
     let census = the_census();
     let bypassing: Vec<String> = census
         .rows()
         .iter()
-        .filter(|row| row.fact == "LeafSession.session" && row.column.name() == "write")
+        .filter(|row| row.fact == "ShellSession.session" && row.column.name() == "write")
         .filter(|row| {
             row.kinds.iter().any(|kind| {
                 kind.strip_prefix("call:")
@@ -1462,13 +1702,13 @@ fn every_sizing_write_is_a_size_proposal() {
         out
     };
     assert_eq!(
-        functions("LeafSession.grid", "write"),
-        ["LeafSession::propose_size", "release_due_leaf_resize"],
+        functions("ShellSession.grid", "write"),
+        ["ShellSession::propose_size", "release_due_leaf_resize"],
         "the grid moves by the grid stage and the session's release"
     );
     assert_eq!(
-        functions("LeafSession.pending_pty_resize", "access"),
-        ["LeafSession::propose_size", "release_due_leaf_resize"],
+        functions("ShellSession.pending_pty_resize", "access"),
+        ["ShellSession::propose_size", "release_due_leaf_resize"],
         "and so does the resize it owes the child"
     );
 
@@ -1480,7 +1720,7 @@ fn every_sizing_write_is_a_size_proposal() {
         unfollowed.is_empty(),
         "a call the graph cannot follow may reach a sizing setter: {unfollowed:?}"
     );
-    let cell = app("LeafSession::propose_cell");
+    let cell = app("ShellSession::propose_cell");
     let birth = app("bare_leaf");
     for (setter, expected) in [
         ("set_cell_height_subpixels", vec![cell.clone()]),
@@ -1495,11 +1735,11 @@ fn every_sizing_write_is_a_size_proposal() {
         ("set_font_size_subpixels", vec![cell.clone(), birth.clone()]),
         (
             "set_layout_key",
-            vec![app("LeafSession::propose_layout"), birth.clone()],
+            vec![app("ShellSession::propose_layout"), birth.clone()],
         ),
         (
             "resize_at",
-            vec![app("LeafSession::propose_size"), app("commit_leaf_resize")],
+            vec![app("ShellSession::propose_size"), app("commit_leaf_resize")],
         ),
         ("resize", vec![]),
     ] {
@@ -1616,7 +1856,7 @@ fn each_view_state_port_is_the_only_road_to_its_setter() {
 }
 
 /// RED (O-3; the ownership contract's (b)1 and (c)1) — **the session hears where
-/// the keyboard is through one door, `LeafSession::report_keyboard_focus`, and
+/// the keyboard is through one door, `ShellSession::report_keyboard_focus`, and
 /// only the drain reports it.**
 ///
 /// The window and the view compute the truth and the session consumes it
@@ -1631,7 +1871,7 @@ fn each_view_state_port_is_the_only_road_to_its_setter() {
 fn the_keyboard_focus_is_one_report() {
     let callers = bt_app_callers();
     let setter = term("set_keyboard_focus");
-    let door = app("LeafSession::report_keyboard_focus");
+    let door = app("ShellSession::report_keyboard_focus");
     assert_eq!(callers.of(&setter), std::slice::from_ref(&door), "one door");
     assert_eq!(callers.of(&door), [app("drain_leaf_pty")], "one reporter");
     let unfollowed = callers.unfollowed_into(&[setter.as_str(), door.as_str()]);
@@ -1648,9 +1888,9 @@ fn life(name: &str) -> String {
     app(&format!("ShellLife::{name}"))
 }
 
-/// `bt-app`'s `LeafSession::name`, keyed as the call graph keys it.
+/// `bt-app`'s `ShellSession::name`, keyed as the call graph keys it.
 fn record(name: &str) -> String {
-    app(&format!("LeafSession::{name}"))
+    app(&format!("ShellSession::{name}"))
 }
 
 impl Callers {

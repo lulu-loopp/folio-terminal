@@ -1166,7 +1166,7 @@ fn a_tab_follows_its_folder_when_the_shell_only_repeats_its_launchers_name() {
         "what the shell said outranks where it is standing"
     );
     // Including the one thing a `cmd` pane can say about being busy: the
-    // remainder `LeafSession::announced_title` keeps off Windows' console
+    // remainder `ShellSession::announced_title` keeps off Windows' console
     // convention is a program announcing what it is running.
     assert_eq!(
         named(None, Some("ping -n 8 127.0.0.1"), Some(demo), busy),

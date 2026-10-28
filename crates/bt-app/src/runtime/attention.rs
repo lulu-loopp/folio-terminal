@@ -3,8 +3,8 @@
 
 use crate::window_seam::prelude::*;
 use crate::{
-    AttentionDelivery, LeafSession, Motion, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST,
-    OverInPane, PointerTarget, PreviewSurface, Runtime, TabState, TaskbarFlash, UserInputKind,
+    AttentionDelivery, Motion, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane,
+    PointerTarget, PreviewSurface, Runtime, ShellSession, TabState, TaskbarFlash, UserInputKind,
     WindowRuntime, attention, attention_trace, document_request, emit_attention_lines, float, i18n,
     marks, notice, notify, profiles, quit, seats, taskbar_lane, toast,
 };
@@ -1194,7 +1194,7 @@ impl<B: Backend> Runtime<'_, B> {
 pub(crate) fn expire_leaf_attention(
     at: attention::Site,
     reach: attention::Reach,
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     next_place: &mut attention::Places,
     now: Instant,
     trace: Option<&attention_trace::Trace>,

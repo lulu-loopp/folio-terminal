@@ -1009,7 +1009,7 @@ fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
     );
     let _ = leaf.session.take_pty_writes();
     let physical = PhysicalSize::new(400, 96);
-    let step = |leaf: &mut LeafSession, grid, at| {
+    let step = |leaf: &mut ShellSession, grid, at| {
         leaf.propose_size(GridChange {
             next: grid,
             physical,
@@ -1120,7 +1120,7 @@ fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
         .unwrap();
     assert!(leaf.session.shell_input_region_open());
     let physical = PhysicalSize::new(400, 96);
-    let step = |leaf: &mut LeafSession, grid, at| {
+    let step = |leaf: &mut ShellSession, grid, at| {
         leaf.propose_size(GridChange {
             next: grid,
             physical,
@@ -1171,7 +1171,7 @@ fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
         .resize_finish_deadline()
         .expect("the settlement arms the quiescence that pays it");
     assert!(leaf.session.finish_resize_if_quiescent(deadline).unwrap());
-    let reanchor = |leaf: &mut LeafSession| {
+    let reanchor = |leaf: &mut ShellSession| {
         let integration = leaf.launch.integration;
         let open = leaf.session.shell_input_region_open();
         take_psreadline_resize_reanchor_input(
@@ -1192,7 +1192,7 @@ fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
 
 /// RED — **one shape, many entrances** (independent review 2026-09-17).
 ///
-/// The leak is never about window edges. It is `LeafSession::propose_size` reflowing a shown
+/// The leak is never about window edges. It is `ShellSession::propose_size` reflowing a shown
 /// pane — `next_grid != local_grid`, so `resize_at` opens a transaction — on a solve that
 /// answers the grid the child already holds, so the release used to be cancelled and nothing
 /// was left that could close it. Every way a pane's grid is solved reaches that one shape:
@@ -1369,7 +1369,7 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
 /// glass follows the hand) and **the child is** (`conpty_grid` does not move until the
 /// gesture has been quiet).
 ///
-/// Red gate: make `LeafSession::propose_size` commit instead of coalescing — which is what
+/// Red gate: make `ShellSession::propose_size` commit instead of coalescing — which is what
 /// the unfocused path did — and `conpty_grid` moves inside the loop, sixty times, and the
 /// release at the end has nothing left to carry.
 #[test]
@@ -1866,7 +1866,7 @@ fn a_drag_reflows_at_once_while_the_shell_holds_typed_input() {
 fn the_session_save_writes_the_one_ladder() {
     let save = method_body("TabState", "term_leaf");
     assert!(
-        save.contains(".and_then(LeafSession::place_for_a_new_shell)")
+        save.contains(".and_then(ShellSession::place_for_a_new_shell)")
             && !save.contains("spawn_place"),
         "{save}"
     );

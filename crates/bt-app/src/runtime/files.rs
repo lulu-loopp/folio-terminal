@@ -3625,7 +3625,7 @@ pub(crate) fn dropped_files_seat_at(
 }
 
 /// **The folder a files card or a files column taken from a pane is rooted at** (issue #28,
-/// T-CWD-FROM-PROCESS): the folder the pane is standing in ([`crate::LeafSession::folder`] — its
+/// T-CWD-FROM-PROCESS): the folder the pane is standing in ([`crate::ShellSession::folder`] — its
 /// shell's last report, else its shell process's folder, else the folder it was opened in), and the
 /// account's home only when none of those can be said — which the root carries, so the card and
 /// the column say "Folder unknown" rather than showing a home folder as the pane's.

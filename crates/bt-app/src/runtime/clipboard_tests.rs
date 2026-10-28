@@ -494,7 +494,7 @@ fn recording_lane(folio: &mut HeadlessFolio, executor: &crate::lane::Executor) -
 
 /// A shell whose pseudoconsole is still being born: what is offered to it is held, in order, in
 /// its birth's queue — which is what the test reads back as what the shell was sent.
-fn a_shell_being_born() -> crate::LeafSession {
+fn a_shell_being_born() -> crate::ShellSession {
     let mut leaf = leaf_saying("SHELL 外壳");
     leaf.life.begin_birth(crate::PaneBirth {
         seed: crate::LeafSeed {
@@ -605,7 +605,7 @@ fn a_paste_whose_open_is_refused_five_times_says_so_once_and_writes_nothing() {
 /// and the key, the Chinese commit and the mixed-script key typed while it was owed follow it, in
 /// the order they were typed.
 ///
-/// MUTATION: make `LeafSession::person_input_target` answer `self.input_target()` whatever the
+/// MUTATION: make `ShellSession::person_input_target` answer `self.input_target()` whatever the
 /// hold — the keys reach the shell before the paste (`x中文a粘贴 pasted`).
 #[test]
 fn keys_typed_after_a_paste_reach_the_shell_after_the_pasted_text() {

@@ -2277,7 +2277,7 @@ fn a_restored_expansion_comes_back_as_questions_and_not_as_rows() {
         }));
     let terminals = seats.terminals();
     let focused = terminals[0];
-    let sessions: BTreeMap<SeatId, LeafSession> = terminals
+    let sessions: BTreeMap<SeatId, ShellSession> = terminals
         .iter()
         .map(|s| (*s, leaf_saying("SHELL")))
         .collect();
@@ -3109,7 +3109,7 @@ fn a_tab_switch_leaves_no_menu_standing() {
 /// It asserts against [`tear_pane_into_tab`] because that is what the row
 /// runs — `run_pane_menu_row` → `move_pane_to_new_tab` →
 /// `extract_pane_into_new_tab` → here, the same chain the drag walks. The
-/// marker bytes are the identity: a fresh `LeafSession` says nothing, so a
+/// marker bytes are the identity: a fresh `ShellSession` says nothing, so a
 /// tab whose pane still says `BETA` is a tab holding the object that was
 /// there before, not a copy of it.
 ///

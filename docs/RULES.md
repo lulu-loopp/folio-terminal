@@ -78,7 +78,7 @@ represents, and a ticket that moves a hop keeps it:
    debounce (`Runtime::resize`; red line L10).
 2. **The picture follows the hand; the shell hears once per gesture** (owner's
    ruling 2026-08-06). A shown pane's actor reflows in the solve's own turn
-   (`LeafSession::propose_size`); what waits is only the notification to the
+   (`ShellSession::propose_size`); what waits is only the notification to the
    pseudoconsole, until the pane's 200 ms quiet window has passed *and* no hand is
    on the geometry (a held divider, the OS's size-move loop): one gesture, one
    `ResizePseudoConsole`. A pane behind another tab defers its reflow to the same
@@ -412,7 +412,7 @@ ends with the shell's continuation mark, else *Run line by line* — `Tab` and
 `Esc` or `×` = nothing sent, clipboard untouched. **It is modal (2026-09-23)**:
 it answers only those keys, every other key reaches nothing, and a drop under it
 is refused. The pending paste is
-`LeafSession::pending_paste` and dies with its shell; the answer is re-checked
+`ShellSession::pending_paste` and dies with its shell; the answer is re-checked
 with `live_paste_target` before a byte is sent. Nothing is remembered but the
 setting.
 

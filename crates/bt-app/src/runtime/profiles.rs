@@ -4,7 +4,7 @@
 use crate::runtime::tabs::tab_surface;
 use crate::window_seam::prelude::*;
 use crate::{
-    FilesFocusArrival, LeafSession, MachineNews, Popup, ProgramNews, Runtime, ShownProgramRows,
+    FilesFocusArrival, MachineNews, Popup, ProgramNews, Runtime, ShellSession, ShownProgramRows,
     TabSurface, cli, i18n, launch_wire, pane_folder, persist, profiles, programs_lane, seats,
     settings, shell_integration, text_field, toast,
 };
@@ -112,7 +112,7 @@ impl<B: Backend> Runtime<'_, B> {
         // one 丙2 added — see [`Self::new_tab_seeded_from`].
         let source_cwd = self
             .focused()
-            .and_then(LeafSession::place_for_a_new_tab_beside);
+            .and_then(ShellSession::place_for_a_new_tab_beside);
         let source_profile = self.session_profile();
         self.new_tab_seeded_from(profile, place, &source_profile, source_cwd, environment)
     }
@@ -967,7 +967,7 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **The folders the root menu offers as "a terminal is here"**, read once as it opens
     /// (T-CWD-FROM-PROCESS): every terminal pane of the tab in front of you, each through
-    /// [`LeafSession::folder`] — its report, else its shell process's folder, else where it was
+    /// [`ShellSession::folder`] — its report, else its shell process's folder, else where it was
     /// opened.
     ///
     /// The shells' folders are read here rather than in `profiles` because that is where the
@@ -983,7 +983,7 @@ impl<B: Backend> Runtime<'_, B> {
             .terminals()
             .iter()
             .filter_map(|seat| tab.sessions.get(seat))
-            .filter_map(|leaf: &LeafSession| leaf.folder(door).into_folder())
+            .filter_map(|leaf: &ShellSession| leaf.folder(door).into_folder())
             .map(|cwd| cwd.display().to_string())
             .collect()
     }

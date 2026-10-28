@@ -11,8 +11,8 @@ use crate::lane::Terminal;
 use crate::runtime::keyboard::ime_owner;
 use crate::window_seam::prelude::*;
 use crate::{
-    ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
-    PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
+    ClipboardWriteEffect, Drag, DropLanding, PasteAnswer, PasteBody, PasteCardKey, PasteOffer,
+    PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, ShellSession, StagedPaste,
     TextFieldSeat, UserInputKind, i18n, menubar, offer_pty_input, profile_banner_name, restore,
     seats, text_field, toast,
 };
@@ -789,7 +789,7 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **The pane a paste was aimed at, wherever it stands in this window now** — by tab id, seat
     /// and incarnation, in any tab: its held input is its own whether or not its tab is on top.
-    fn paste_leaf_mut(&mut self, target: PasteTarget) -> Option<&mut LeafSession> {
+    fn paste_leaf_mut(&mut self, target: PasteTarget) -> Option<&mut ShellSession> {
         self.window
             .tabs
             .iter_mut()
@@ -1026,7 +1026,7 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(false);
         };
         let seat = target.seat;
-        let Some(LeafSession {
+        let Some(ShellSession {
             life,
             session,
             view: crate::TermView { projection, .. },

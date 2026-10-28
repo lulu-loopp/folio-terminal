@@ -10,8 +10,8 @@
 use crate::headless::HeadlessFolio;
 use crate::test_support::{self, leaf_saying, tab_holding};
 use crate::{
-    BirthDeathFallback, BirthDecision, BirthWait, LeafSeed, LeafSession, PaneBirth, Phase,
-    ShellLanding, ShellLife, Started, pty_door,
+    BirthDeathFallback, BirthDecision, BirthWait, LeafSeed, PaneBirth, Phase, ShellLanding,
+    ShellLife, ShellSession, Started, pty_door,
 };
 use bt_pty::PtySession;
 use std::num::NonZeroU16;
@@ -349,7 +349,7 @@ fn every_life_transition_is_one_method_and_no_other() {
     let mut tab = crate::test_support::cross_tab(2, &["终了 ended", "未尽 draining", "诞生 born"]);
     let seats = tab.seats.terminals();
     let (ended, draining, born) = (seats[0], seats[1], seats[2]);
-    fn leaf(tab: &mut crate::TabState, seat: crate::SeatId) -> &mut LeafSession {
+    fn leaf(tab: &mut crate::TabState, seat: crate::SeatId) -> &mut ShellSession {
         tab.sessions.get_mut(&seat).expect("the pane")
     }
     leaf(&mut tab, ended)
@@ -484,7 +484,7 @@ fn window_with(tag: &str, name: Name) -> HeadlessFolio {
 }
 
 /// A replacement whose shell has answered: in birth for it (Bearing), what was typed held.
-fn answered_successor() -> Box<LeafSession> {
+fn answered_successor() -> Box<ShellSession> {
     let mut next = leaf_saying("");
     crate::await_shell(&mut next, answered(), decision(), &LeafSeed::default());
     next.life

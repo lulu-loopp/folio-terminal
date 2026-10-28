@@ -10,7 +10,7 @@ use crate::test_support::{leaf_saying, method_body};
 /// A shell-less pane whose history holds `lines` generated lines, each narrow enough never to
 /// wrap on the fixture's forty columns; `name(index)` writes line `index`. Generated, not
 /// recorded (standing rules: fixtures).
-fn pane_with_history(lines: usize, name: impl Fn(usize) -> String) -> LeafSession {
+fn pane_with_history(lines: usize, name: impl Fn(usize) -> String) -> ShellSession {
     let mut text = String::with_capacity(lines * 24);
     for index in 0..lines {
         text.push_str(&name(index));
@@ -22,7 +22,7 @@ fn pane_with_history(lines: usize, name: impl Fn(usize) -> String) -> LeafSessio
 /// The history hits of a whole-plane scan, as the set of `(line, start, end)` a hit is known by.
 fn whole_answer(
     compiled: &bt_transcript::search::CompiledSearch,
-    leaf: &LeafSession,
+    leaf: &ShellSession,
 ) -> std::collections::BTreeSet<(bt_viewport::SearchLine, u32, u32)> {
     search::scan_history(compiled, leaf.session.transcript())
         .iter()

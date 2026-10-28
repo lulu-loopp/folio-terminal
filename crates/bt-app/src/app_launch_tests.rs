@@ -318,7 +318,7 @@ fn startup_polls_pty_until_the_first_text_frame_is_presented() {
 /// `Restart shell` read only the shell's OSC 7 report, so a pane opened by
 /// `New terminal in folder…` (or split off into a folder) whose shell has no
 /// integration restarted at its profile's default folder. The ladder is
-/// [`LeafSession::place_for_a_new_shell`]: the report, else the folder the
+/// [`ShellSession::place_for_a_new_shell`]: the report, else the folder the
 /// spawn put the shell down in, except the shell's-own-home mark, which is
 /// handed on as nothing so the next spawn asks for the home again.
 ///
@@ -330,7 +330,7 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
     // RED (coordinator's ruling 2026-10-05) — **a pane opened in a named folder hands that folder
     // on as named**, so Restart shell, Duplicate tab, Duplicate pane and the splits stand there
     // under Home and a fixed folder too; a pane not born that way hands its folder on as carried
-    // and keeps the profile's rule. The leaf's half is `LeafSession::seed_place_for_a_new_shell`;
+    // and keeps the profile's rule. The leaf's half is `ShellSession::seed_place_for_a_new_shell`;
     // `profiles::place_for` weighs it (pinned by
     // `every_road_that_names_a_folder_opens_there_whatever_the_profile_says`).
     //
@@ -349,7 +349,7 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
         leaf
     };
     let fixed = profiles::StartAt::Fixed(PathBuf::from(r"E:\固定"));
-    let restarted_in = |leaf: &LeafSession| {
+    let restarted_in = |leaf: &ShellSession| {
         struct Nowhere;
         impl bt_pty::ShellEnvironment for Nowhere {
             fn var_os(&self, _: &str) -> Option<std::ffi::OsString> {

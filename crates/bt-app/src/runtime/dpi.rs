@@ -171,7 +171,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// `resize_finish_deadline` already reads every leaf a few lines below in `about_to_wait`.
     ///
     /// A tab with no shell has no pending ConPTY resize to release, because nothing ever
-    /// scheduled one: the queue this drains is a `LeafSession` field, and there is no leaf
+    /// scheduled one: the queue this drains is a `ShellSession` field, and there is no leaf
     /// (§7.1.6h). Answering `None` is answering "nothing is owed and nothing has to be woken
     /// for", which is exactly true.
     pub(in crate::runtime) fn flush_pending_pty_resize(

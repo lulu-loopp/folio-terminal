@@ -490,7 +490,7 @@ pub(crate) enum Held {
 /// the way a pane in birth holds them). One queue per pane: each paste asked for it takes its
 /// place ([`Held::Paste`]), and every write offered after it waits behind it as the write it was
 /// ([`Held::Typed`]), so `Ctrl+V`, `k`, `Ctrl+V` reaches the shell as the first paste, `k`, the
-/// second. Held on the pane's `LeafSession`, so a pane that closes takes what it held with it.
+/// second. Held on the pane's `ShellSession`, so a pane that closes takes what it held with it.
 #[derive(Debug, Default)]
 pub(crate) struct PasteHold {
     items: RefCell<VecDeque<Held>>,

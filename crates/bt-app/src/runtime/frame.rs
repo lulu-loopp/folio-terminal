@@ -17,7 +17,7 @@ use crate::{
     present_diagnostics, present_gate, preview, seats, settings, settling, taskbar_lane,
     termscroll, toast, update, webhost,
 };
-use crate::{LeafSession, TermView, TermViewPorts};
+use crate::{ShellSession, TermView, TermViewPorts};
 use anyhow::Context;
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -3377,7 +3377,7 @@ pub(crate) fn sample_window_place(
 pub(crate) fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
     tabs.iter()
         .flat_map(|tab| tab.leaves())
-        .filter_map(|(_, leaf): (&SeatId, &LeafSession)| leaf.attention.clock.deadline())
+        .filter_map(|(_, leaf): (&SeatId, &ShellSession)| leaf.attention.clock.deadline())
         .min()
 }
 

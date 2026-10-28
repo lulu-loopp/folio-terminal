@@ -20,16 +20,17 @@ use crate::{
 use crate::{
     CardAim, ColumnNotch, CommandFlash, DividerDrag, DividerGrip, Drag, DragCarry, DragHandover,
     DragSource, DropLanding, FilesFocusArrival, FlashBand, FolderPick, FormulaSwitches,
-    FrameImageReferences, FrameTraces, GridChange, HandoverInto, LeafId, LeafOnStage, LeafSession,
+    FrameImageReferences, FrameTraces, GridChange, HandoverInto, LeafId, LeafOnStage,
     MathHoverExit, MenuPaint, Motion, NewWindowPlan, NoticeHost, PaneDraw, PaneMenuState,
     PaneTransform, PeekCache, PeekCacheEntry, PopoverTrigger, Popup, PopupOwner, PresentIntent,
     PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY, RAIL_TRANSITION, RevealTween,
-    RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed, TabId, TabState, TabSurface,
-    TearOut, attention_trace, auto_split_axis, card_trace, closing_this_pane_closes_the_tab,
-    cmdrail, create_leaf_session, files, float, focus_thumb, glyph_trace, hang_watch, marks,
-    mouse_trace, notice, notify, palette, present_diagnostics, presentation_physical_size, preview,
-    preview_trace, profiles, restore, restore_row_seed, row_verb, scrollback_quota, seats,
-    solve_seats, solve_tree, trace, video_seat, web_thumb, webhost, wheel_zoom_notches,
+    RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, ShellSession, SplitSeed, TabId,
+    TabState, TabSurface, TearOut, attention_trace, auto_split_axis, card_trace,
+    closing_this_pane_closes_the_tab, cmdrail, create_leaf_session, files, float, focus_thumb,
+    glyph_trace, hang_watch, marks, mouse_trace, notice, notify, palette, present_diagnostics,
+    presentation_physical_size, preview, preview_trace, profiles, restore, restore_row_seed,
+    row_verb, scrollback_quota, seats, solve_seats, solve_tree, trace, video_seat, web_thumb,
+    webhost, wheel_zoom_notches,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -183,7 +184,7 @@ impl<B: Backend> Runtime<'_, B> {
         let requested = leaf
             .successor
             .as_deref()
-            .and_then(|successor: &LeafSession| successor.launch.program.clone());
+            .and_then(|successor: &ShellSession| successor.launch.program.clone());
         match land_successor(leaf, diagnostics::note)? {
             SuccessorLanding::Waiting => Ok(()),
             SuccessorLanding::Refused(refusal) => {
@@ -245,7 +246,7 @@ impl<B: Backend> Runtime<'_, B> {
             BirthAt::Successor => leaf
                 .successor
                 .as_deref()
-                .map_or(leaf.view.text_scale, |successor: &LeafSession| {
+                .map_or(leaf.view.text_scale, |successor: &ShellSession| {
                     successor.view.text_scale
                 }),
         };
@@ -3042,7 +3043,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// is a popup nothing can dismiss: it takes no input while the dialog owns
     /// the loop, and the click that dismisses the dialog is spent on the dialog.
     ///
-    /// The chooser opens where the pane is standing (`LeafSession::folder`: its
+    /// The chooser opens where the pane is standing (`ShellSession::folder`: its
     /// shell's last report, else its shell process's folder, else the folder it
     /// was opened in) — the same courtesy `browse_for_root` shows a column, and
     /// the same one I88 asks of every arriving shell.
@@ -3401,7 +3402,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// **The geometry is the same sentence for all of them**: a leaf's grid is
     /// [`seats::pane_body_viewport`] of *that leaf's* seat, and of nothing else.
     /// **So is the timing.** Every leaf goes through
-    /// [`crate::LeafSession::propose_size`]: its actor reflows in this turn, and its
+    /// [`crate::ShellSession::propose_size`]: its actor reflows in this turn, and its
     /// child hears the last word of the gesture at the shared 200 ms quiet
     /// boundary. The siblings used to be told at once instead — "they have no
     /// drag to coalesce" was never true of them, only unnoticed, because the
@@ -3470,7 +3471,7 @@ impl<B: Backend> Runtime<'_, B> {
             let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
                 continue;
             };
-            // This leaf's own metrics (ticket 37), through `LeafSession::grid_for`.
+            // This leaf's own metrics (ticket 37), through `ShellSession::grid_for`.
             let next_grid = leaf.grid_for(body);
             leaf.propose_size(GridChange {
                 next: next_grid,
@@ -3548,7 +3549,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// **And one reflow per pane per gesture, which is the half this arrived
     /// without** (user report 2026-09-09). A tree walk is pure and cheap; the
-    /// `resize_at` at the end of [`crate::LeafSession::propose_size`] is a full vendor
+    /// `resize_at` at the end of [`crate::ShellSession::propose_size`] is a full vendor
     /// reflow of that pane's grid on the window thread, and taking it per hidden
     /// pane per OS event put the frame the visible pane owes the glass behind
     /// eleven of them on a twelve-tab window. So every leaf here is `Behind`:
@@ -3787,7 +3788,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// from here writes focus either — reading is not taking.
     pub(in crate::runtime) fn hovered_leaf(
         &self,
-    ) -> Option<(SeatId, &LeafSession, bt_render::GridHit)> {
+    ) -> Option<(SeatId, &ShellSession, bt_render::GridHit)> {
         let (seat, position, frame) = self.pane_hit_context()?;
         let hit = self
             .pane_frame_metrics(seat)?
@@ -6734,7 +6735,7 @@ impl<B: Backend> Runtime<'_, B> {
 /// `site` names the card and says the notch is what ran the aim —
 /// `BT_CARD_TRACE` and nothing else (§7.1.6b′).
 pub(crate) fn aim_card_window(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     rows: usize,
     steps: i32,
     site: card_trace::Card,
@@ -7271,7 +7272,7 @@ fn birth_due(
 /// and a *Restart shell* successor's — in each of its waits, so no birth is one no landing pass
 /// looks at.
 pub(crate) fn births_due(
-    leaf: &LeafSession,
+    leaf: &ShellSession,
     rows_decide: &dyn Fn(&LeafSeed) -> bool,
     locale_settled: bool,
 ) -> Vec<(BirthAt, BirthDue)> {
@@ -7288,7 +7289,7 @@ pub(crate) fn births_due(
 /// Land the successor's shell, if it answered ([`land_shell_birth`]); a landed or refused
 /// successor leaves the pane, which then has no restart in flight.
 pub(crate) fn land_successor(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     note: impl FnMut(&str),
 ) -> Result<SuccessorLanding> {
     let Some(successor) = leaf.successor_mut() else {
@@ -7310,7 +7311,7 @@ pub(crate) fn land_successor(
 /// **The ConPTY source the startup trace records for a pane that has just landed** — its
 /// shell's, or `not-started` for a birth that failed (round 2: a failed identity shell is a
 /// launch shell the trace no longer waits for, and is not a probe's direct input).
-pub(crate) fn landed_source(leaf: &LeafSession, refused: bool) -> Option<String> {
+pub(crate) fn landed_source(leaf: &ShellSession, refused: bool) -> Option<String> {
     if refused {
         return Some("not-started".to_owned());
     }
@@ -7625,7 +7626,7 @@ pub(crate) fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> marks:
 /// still in birth included — is handed `LeafGone` and then has its shell retired, in that order.
 ///
 /// **Exactly once** is two rules, both kept here. A leaf a walk has already ended is not handed
-/// `LeafGone` again ([`LeafSession::attention_ended`]): a window closed and then retired by a quit
+/// `LeafGone` again ([`ShellSession::attention_ended`]): a window closed and then retired by a quit
 /// before it is reaped is walked twice. And a leaf `moving` names — the cargo of a cross-window
 /// handover from this window that is decided and not yet performed — is not ending, so its place
 /// stays; its `LeafGone` comes from whichever road ends it in the window it lands in. Its shell is

@@ -1181,7 +1181,7 @@ struct ClipboardPictureAnswer {
     result: std::result::Result<PathBuf, String>,
 }
 
-/// **The next shell's [`LeafSession::incarnation`]**, and the counter behind it.
+/// **The next shell's [`ShellSession::incarnation`]**, and the counter behind it.
 ///
 /// Process-wide rather than per-window for the reason `TabId`'s counter is: a
 /// pane can be dragged from one window into another, and two counters would
@@ -1274,7 +1274,7 @@ struct PasteFacts {
 impl PasteFacts {
     /// The facts as the pane holds them now, on `host`.
     fn of(
-        leaf: &LeafSession,
+        leaf: &ShellSession,
         clipboard_text: bool,
         ask: bool,
         host: bt_platform::HostPlatform,
@@ -1294,7 +1294,7 @@ impl PasteFacts {
 /// **A multi-line paste waiting for its answer** — the one fact the paste card is a projection of
 /// (0.4.4 ticket 02).
 ///
-/// Held on the leaf it was aimed at ([`LeafSession::pending_paste`]), so it dies with that shell:
+/// Held on the leaf it was aimed at ([`ShellSession::pending_paste`]), so it dies with that shell:
 /// a closed pane, a closed tab and a restarted shell all drop the struct that holds it, and no
 /// code had to be written to clear it on any of those roads.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7486,7 +7486,7 @@ struct DpiSnapshot {
 /// [`TabState::sessions`], which is what keeps red line L1 intact from the other
 /// direction: the layout tree carries no session, and the session carries no
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
-struct LeafSession {
+struct ShellSession {
     /// **This pane's shell, in the one phase it is in** — the ownership contract's M6
     /// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3; ticket O-4b): a shell being
     /// born (its program rows, its locale or its pseudoconsole answered later,
@@ -7498,7 +7498,7 @@ struct LeafSession {
     /// birth beside the shell it replaces: this pane goes on being the one typed into until the
     /// successor lands, and a successor whose birth fails leaves it exactly as it was. `None` on
     /// every pane not being restarted.
-    successor: Option<Box<LeafSession>>,
+    successor: Option<Box<ShellSession>>,
     foreground_program_cadence: foreground_program::Cadence,
     /// **This shell's last process folder read** (T-CWD-FROM-PROCESS), and the moment it was made
     /// at — read on an ask when the shell has reported no folder, and asked again only after the
@@ -7522,18 +7522,17 @@ struct LeafSession {
     /// merging it into another does *not* change it: those move a running shell,
     /// and a running shell is the thing this names.
     incarnation: u64,
-    /// **Which window this shell nudges when it has spoken** — see [`LeafWake`].
-    ///
-    /// Held here rather than only inside the reader thread's closure because it
-    /// is the one end a transfer can reach: the thread was handed its wake-up at
-    /// spawn and will never be handed another, so the cell both of them name is
-    /// where "which window" is allowed to change.
-    ///
-    /// `Some` while this pane has a pseudoconsole or one is being born for it
-    /// ([`Self::life`]): a wake-up is the other end of a
-    /// reader thread, so a pane driven by `BT_PROBE_INPUT` — which has no ConPTY
-    /// behind it — has nothing to re-point and says so, rather than holding a
-    /// cell no thread reads.
+    /// **Which window this shell nudges when it has spoken** — see [`LeafWake`]. **Transport debt
+    /// until O-6** (ownership contract 2026-10-11, revision (b)3; marked 2026-10-27 by
+    /// T-CONTRACT-M8, debt D-1): which window to nudge is a fact about where the session is shown,
+    /// so its owner is the binding — today [`TabState::sessions`] and the commit of
+    /// `FolioApp::transfer_tab`, the one door that rebinds it — and not the session. It sits on the
+    /// session record because the reader thread was handed this cell once, at spawn, and the cell
+    /// is where "which window" may change. O-6's registry routes the wake instead. It does so either
+    /// by one `LeafWake` per session rebound to the window of its sizing view, or by one
+    /// application-wide wake whose drain asks the registry which windows show the session. `Some`
+    /// from the moment a shell is asked for until the pane is left without one (`Kept`); `None` for
+    /// a pane with no reader thread (`Deciding`, `Shellless`, a `BT_PROBE_INPUT` pane).
     wake: Option<Arc<LeafWake>>,
     /// **The facts of this pane's launch** — the ownership contract's M5
     /// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3; ticket O-4a). Written when
@@ -7555,6 +7554,7 @@ struct LeafSession {
     /// moment this is for, and it is why the third rung needs shell integration at all.
     ///
     /// Spent once, by [`drain_leaf_pty`]: a second write would be a second copy of the command.
+    /// Written only through [`Self::queue_typing`] and [`Self::take_typing`].
     pending_typing: Option<(String, bool)>,
     session: DualPlaneSession,
     /// **This pane's attention account** — the ownership contract's M7
@@ -7621,7 +7621,7 @@ struct LeafSession {
     /// grid it always had. A pane is born `false`: the ledger is not restored,
     /// so a revived pane earns its rail at its first prompt like any other.
     ///
-    /// One owner: [`LeafSession::hear_first_mark`], asked in [`drain_leaf_pty`]
+    /// One owner: [`ShellSession::hear_first_mark`], asked in [`drain_leaf_pty`]
     /// where every leaf's bytes pass. It travels with the struct, so a pane torn
     /// out into its own tab keeps it.
     has_rail: bool,
@@ -7640,12 +7640,15 @@ struct LeafSession {
     /// Per leaf because output is per shell, and two shells count their own. The
     /// tab's badge is the aggregate of these (D34: the tab takes its loudest
     /// member's claim), not a separate tally.
+    ///
+    /// Written only through [`Self::mark_seen`], which keeps the larger of what it holds and
+    /// what a view reports, so a pane's unread count never goes backwards.
     last_seen_revision: u64,
     /// **A multi-line paste aimed at this shell, waiting for the card's answer** (0.4.4 ticket
     /// 02) — `None` on every pane but the one the card is asking about.
     ///
     /// Here and not on the window because it is text promised to *this process*, so it dies
-    /// with it. A restarted shell is a new `LeafSession`, a closed pane or tab drops this one,
+    /// with it. A restarted shell is a new `ShellSession`, a closed pane or tab drops this one,
     /// and either way the question is gone with the shell it was about. Written by
     /// `stage_paste`; read by the card's layout, draw and hit; taken by the card's answer.
     pending_paste: Option<PendingPaste>,
@@ -7730,16 +7733,16 @@ impl TermViewPorts for DualPlaneSession {
 }
 
 /// **A terminal pane's view of its shell** — the ownership contract's view owner
-/// (`docs/plans/design/ownership-contract-2026-10-11.md` §2.1), nested in [`LeafSession`] as
-/// [`LeafSession::view`] with the leaf's own lifetime.
+/// (`docs/plans/design/ownership-contract-2026-10-11.md` §2.1), nested in [`ShellSession`] as
+/// [`ShellSession::view`] with the leaf's own lifetime.
 ///
 /// M1 (ticket O-2) moved the fade clocks, the card skip, the presented metrics and the image
 /// references here; M2–M4 (ticket O-3) moved the text size, the metrics, the last presented
 /// frame and the projection. Their writers are the ones they had on the leaf, so the census's
 /// change is their key; the one write that changed function is the presented pair's, which
 /// [`Self::commit_presented`] now records. A view reaches its session only through the
-/// session's doors: the size proposals ([`LeafSession::propose_cell`],
-/// [`LeafSession::propose_layout`], [`LeafSession::propose_size`]) and the bt-term view-state
+/// session's doors: the size proposals ([`ShellSession::propose_cell`],
+/// [`ShellSession::propose_layout`], [`ShellSession::propose_size`]) and the bt-term view-state
 /// ports ([`TermViewPorts`]).
 struct TermView {
     /// **The last moment this pane's scroll bar had a reason to be up** — a
@@ -7795,7 +7798,7 @@ struct TermView {
     /// `TermLeafV1`, `TabV1`, `SessionV1`, a seed or `settings.json` — a relaunch, a startup
     /// restore and *Reopen closed* bring every pane back at 100 %. Written by one mutation door,
     /// `Runtime::step_pane_text_scale`; handed to construction by `create_leaf_session`'s
-    /// caller; carried by the move of this `LeafSession` (tear-out, merge, a transfer to another
+    /// caller; carried by the move of this `ShellSession` (tear-out, merge, a transfer to another
     /// window). Read by the derivation ([`pane_cell_metrics`]) and by the pane head's indicator.
     text_scale: TextScale,
     /// **The metrics this pane's session and projection were last applied at** — derived from
@@ -7804,7 +7807,7 @@ struct TermView {
     /// constructor.
     ///
     /// A derived value, not a second owner of the size: every writer re-derives it from the rung.
-    /// It is what the pane's grid is solved from ([`LeafSession::grid_for`]) and what its next
+    /// It is what the pane's grid is solved from ([`ShellSession::grid_for`]) and what its next
     /// picture is drawn at ([`bt_render::SeatFrame::metrics`]).
     metrics: bt_render::CellMetrics,
     /// The frame this leaf last put on the glass.
@@ -7819,8 +7822,8 @@ struct TermView {
 }
 
 /// **What a terminal pane's shell was launched as** — the ownership contract's M5
-/// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3), nested in [`LeafSession`] as
-/// [`LeafSession::launch`] with the leaf's own lifetime (ticket O-4a).
+/// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3), nested in [`ShellSession`] as
+/// [`ShellSession::launch`] with the leaf's own lifetime (ticket O-4a).
 ///
 /// Each is a fact about the process that only its start knew, so each is written where the
 /// shell is started — the profile, the paste grammar, the integration door and the program by
@@ -7915,7 +7918,7 @@ struct LaunchFacts {
     /// Restart shell, Duplicate tab, Duplicate pane, the splits — carry their folder as named and
     /// stand there whatever the profile's starting place says (coordinator's ruling 2026-10-05,
     /// read with the owner's 2026-10-04 "Restart shell goes back to the folder the pane was
-    /// first opened in"). See [`LeafSession::seed_place_for_a_new_shell`].
+    /// first opened in"). See [`ShellSession::seed_place_for_a_new_shell`].
     ///
     /// Runtime only, like [`Self::spawn_place`]: the session document has no field for it, so a
     /// restored pane's folder is carried and follows its profile's starting place.
@@ -7923,13 +7926,13 @@ struct LaunchFacts {
 }
 
 /// **A terminal pane's attention account** — the ownership contract's M7
-/// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3), nested in [`LeafSession`] as
-/// [`LeafSession::attention`] with the leaf's own lifetime (ticket O-4a).
+/// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3), nested in [`ShellSession`] as
+/// [`ShellSession::attention`] with the leaf's own lifetime (ticket O-4a).
 ///
 /// One fact in the census, written by the attention roads that wrote its four parts on the
 /// leaf; each road goes on calling the ledger's and the clock's own methods, which are their
 /// doors. Plain data: the type has no methods. Whether a road that ends the pane has already
-/// given its place up stays on the leaf ([`LeafSession::attention_ended`]): the road that sets
+/// given its place up stays on the leaf ([`ShellSession::attention_ended`]): the road that sets
 /// it is not one of the account's writers.
 struct AttentionAccount {
     /// **This pane's attention ledger, and with it the place it holds in this window's queue**
@@ -7979,8 +7982,8 @@ struct AttentionAccount {
 }
 
 /// **A terminal pane's shell, in the one phase it is in** — the ownership contract's M6
-/// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3), nested in [`LeafSession`] as
-/// [`LeafSession::life`] with the leaf's own lifetime (ticket O-4b).
+/// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3), nested in [`ShellSession`] as
+/// [`ShellSession::life`] with the leaf's own lifetime (ticket O-4b).
 ///
 /// One fact in the census, and only its transitions write it. Each transition moves the phase
 /// along the edges its own doc names and changes nothing else: what goes with an edge — retiring
@@ -7989,7 +7992,7 @@ struct AttentionAccount {
 /// phase its doc does not name, a transition leaves the phase as it was.
 ///
 /// The shell *Restart shell* brings up in this pane's place stays on the leaf
-/// ([`LeafSession::successor`]), as the leaf's wake-up does: a successor is a whole pane beside
+/// ([`ShellSession::successor`]), as the leaf's wake-up does: a successor is a whole pane beside
 /// this one, not a phase of it.
 struct ShellLife {
     phase: Phase,
@@ -8287,7 +8290,7 @@ impl BirthDeathFallback {
     /// Hold a last-resort shell on the same landing record as every other shell birth, so a pane
     /// resize released before it answers is owed through the same field and landing code.
     fn waiting(
-        leaf: &LeafSession,
+        leaf: &ShellSession,
         shell: pty_door::ShellBirth,
         exit: exit_diagnostics::ShellExit,
     ) -> Self {
@@ -8434,7 +8437,7 @@ struct TabState {
     /// is paid — [`TabState::focused`] answers `Option`, and every reader that
     /// meant "the active tab's shell" now has to say what it means when there
     /// isn't one.
-    sessions: BTreeMap<SeatId, LeafSession>,
+    sessions: BTreeMap<SeatId, ShellSession>,
     /// This tab's files columns, one per Files leaf, keyed by the seat they draw
     /// into — the exact sibling of [`Self::sessions`], and deliberately a second
     /// table rather than a second variant inside the first.
@@ -8445,7 +8448,7 @@ struct TabState {
     /// the red line working: `sessions` is already exactly this shape for
     /// exactly this reason, and the persistence brief records the same move
     /// being made once before — `profile` came off `TabState` and onto
-    /// `LeafSession` so that a fact about a pane would travel with the pane.
+    /// `ShellSession` so that a fact about a pane would travel with the pane.
     ///
     /// **Why two tables and not one tagged union.** `sessions` carries an
     /// invariant this one must not have — it is never empty and it always
@@ -11127,7 +11130,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// One command marks rail per terminal seat of the tab on screen, held across
     /// frames.
     ///
-    /// Keyed by seat and **not** stored on [`LeafSession`], which is the one
+    /// Keyed by seat and **not** stored on [`ShellSession`], which is the one
     /// choice here worth stating: a rail is a function of a ledger *and a
     /// rectangle*, and the rectangle belongs to the solve rather than to the
     /// shell. A cache on the leaf would follow a pane that is torn into another
@@ -11662,7 +11665,7 @@ struct WindowRuntime<B: Backend = Native> {
     exited_tab_waits: ExitedTabWaits,
     /// **What the pointer is over on the multi-line paste card** (0.4.4 ticket 02) — the card's
     /// only state of its own. Whether it is up at all is not stored here: it is
-    /// [`LeafSession::pending_paste`], read through `Runtime::paste_card_seat`.
+    /// [`ShellSession::pending_paste`], read through `Runtime::paste_card_seat`.
     paste_card_hover: Option<restore::PasteCardTarget>,
     /// **What the pointer is over on the update card, and where the keyboard's
     /// ring stands** (0.4.6 U-19) — this window's half of the card. Whether the
@@ -14479,7 +14482,7 @@ impl TabState {
             cwd: self
                 .sessions
                 .get(&seat)
-                .and_then(LeafSession::place_for_a_new_shell)
+                .and_then(ShellSession::place_for_a_new_shell)
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             manual_name: self.manual_name.clone(),
@@ -15403,11 +15406,11 @@ impl TabState {
     /// means when there is no shell, and the answer was never a default — it was
     /// "there is nothing here to do", written out as an early return so the
     /// difference is visible in the text rather than hidden in a deref.
-    fn focused(&self) -> Option<&LeafSession> {
+    fn focused(&self) -> Option<&ShellSession> {
         self.sessions.get(&self.focused_leaf)
     }
 
-    fn focused_mut(&mut self) -> Option<&mut LeafSession> {
+    fn focused_mut(&mut self) -> Option<&mut ShellSession> {
         self.sessions.get_mut(&self.focused_leaf)
     }
 
@@ -15469,12 +15472,12 @@ impl TabState {
     /// question and is what a reader that does not already know the answer must
     /// ask; this one is only ever the second half of a sentence whose first half
     /// is visible in the same screenful.
-    fn shell(&self) -> &LeafSession {
+    fn shell(&self) -> &ShellSession {
         self.focused()
             .expect("a guard a few lines up returned early for a tab with no shell")
     }
 
-    fn shell_mut(&mut self) -> &mut LeafSession {
+    fn shell_mut(&mut self) -> &mut ShellSession {
         self.focused_mut()
             .expect("a guard a few lines up returned early for a tab with no shell")
     }
@@ -15869,7 +15872,7 @@ impl TabState {
         keys == seats
     }
 
-    fn leaves(&self) -> impl Iterator<Item = (&SeatId, &LeafSession)> {
+    fn leaves(&self) -> impl Iterator<Item = (&SeatId, &ShellSession)> {
         self.sessions.iter()
     }
 
@@ -15881,7 +15884,7 @@ impl TabState {
     /// anything the pointer is doing. The `expect` carries the same invariant
     /// `focused` does: a Terminal seat and a session are created and destroyed
     /// together, so a seat that named a session still names it.
-    fn leaf(&self, seat: SeatId) -> &LeafSession {
+    fn leaf(&self, seat: SeatId) -> &ShellSession {
         self.sessions
             .get(&seat)
             .expect("a terminal seat and its session are created and destroyed together")
@@ -15916,7 +15919,7 @@ impl TabState {
     }
 
     /// Every leaf of this tab, focused one included, in seat order.
-    fn leaves_mut(&mut self) -> impl Iterator<Item = (&SeatId, &mut LeafSession)> {
+    fn leaves_mut(&mut self) -> impl Iterator<Item = (&SeatId, &mut ShellSession)> {
         self.sessions.iter_mut()
     }
 
@@ -16001,7 +16004,7 @@ impl TabState {
     /// at the width the head actually has, by the only thing that knows it.
     ///
     /// `None` when that seat holds no session, or holds one with nothing at all
-    /// to be named by — no OSC 2 title, and no rung of [`LeafSession::standing_in`]
+    /// to be named by — no OSC 2 title, and no rung of [`ShellSession::standing_in`]
     /// reached. That is not a
     /// failure to answer but the honest answer, and [`seats::seat_caption`]
     /// turns it into the kind's own name where the caption is drawn. Nothing is
@@ -16048,7 +16051,7 @@ impl TabState {
 /// running — `cmd.exe - ping -n 8 127.0.0.1`.
 const TITLE_ACTIVITY_SEPARATOR: &str = " - ";
 
-impl LeafSession {
+impl ShellSession {
     /// **Where this pane stands, for a shell that is to be started in its place** — `Restart
     /// shell`, `Duplicate pane` and every split, `Duplicate tab` (`docs/M2-restart-shell-contract.md`
     /// §1.1; `docs/DESIGN.md` §7.1.4's ladder: the last OSC 7 report, else the folder the shell was
@@ -17366,7 +17369,7 @@ impl<'a> PtyTarget<'a> {
     }
 }
 
-impl LeafSession {
+impl ShellSession {
     /// Where bytes offered to this pane go — see [`PtyTarget`].
     fn input_target(&self) -> PtyTarget<'_> {
         PtyTarget::of(self.life.pty(), self.life.birth())
@@ -17598,7 +17601,7 @@ fn commit_leaf_resize(
 /// tab has no picture in this frame and none in any frame until somebody looks at it, so reflowing
 /// its actor inside the `Resized` buys nothing anyone can see and costs a full vendor reflow of
 /// that pane's grid on the window thread, per hidden pane, per OS event. See
-/// [`Runtime::resize_hidden_leaves_to_layout`], and [`LeafSession::propose_size`] for what
+/// [`Runtime::resize_hidden_leaves_to_layout`], and [`ShellSession::propose_size`] for what
 /// `Behind` defers and what it does not.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LeafOnStage {
@@ -17609,7 +17612,7 @@ enum LeafOnStage {
     Behind,
 }
 
-impl LeafSession {
+impl ShellSession {
     /// **The session hears where the keyboard is, as a report** (the ownership contract's
     /// `report_keyboard_focus`, revision (c)1, ticket O-3).
     ///
@@ -17623,10 +17626,34 @@ impl LeafSession {
     }
 }
 
+/// **The session's two owed-state doors** (the ownership contract's §2.1 and §2.2 invariant 5;
+/// ticket O-5a, rulings E8 and E9, 2026-10-27): what a view has seen and what is owed to be
+/// typed are written only here.
+impl ShellSession {
+    /// **A view reports the output revision it has seen** (§2.2 invariant 5, the owner's Q3
+    /// ruling of 2026-10-11: unread is the session's, and every view reports what it painted).
+    /// The session keeps the larger of what it holds and the report, so a stale report never
+    /// brings an unread claim back for output already seen.
+    fn mark_seen(&mut self, revision: u64) {
+        self.last_seen_revision = self.last_seen_revision.max(revision);
+    }
+
+    /// **Queue a line to be typed at this shell's next prompt** (§7.54e ⑤), replacing any line
+    /// still queued; [`drain_leaf_pty`] spends it through [`Self::take_typing`].
+    fn queue_typing(&mut self, text: String, submit: bool) {
+        self.pending_typing = Some((text, submit));
+    }
+
+    /// **The line owed to this shell's prompt, taken** so one prompt receives it once.
+    fn take_typing(&mut self) -> Option<(String, bool)> {
+        self.pending_typing.take()
+    }
+}
+
 /// **What a view proposes when its rectangle is solved again** — the grid stage of
-/// [`LeafSession::propose_size`].
+/// [`ShellSession::propose_size`].
 ///
-/// The grid is the caller's derivation, through the leaf's own [`LeafSession::grid_for`], and
+/// The grid is the caller's derivation, through the leaf's own [`ShellSession::grid_for`], and
 /// not the rectangle: a diagnostics or test caller hands an exact grid, and the derivation is
 /// the session's already.
 struct GridChange {
@@ -17655,7 +17682,7 @@ struct GridChange {
 /// session's cell-size setters, its `set_layout_key` or the local `resize_at` of a solve
 /// (`every_sizing_write_is_a_size_proposal`); the session's own release of a resize
 /// ([`release_due_leaf_resize`]) is the session's, not a proposal.
-impl LeafSession {
+impl ShellSession {
     /// **The cell-size stage**: the session's cell height, width, ASCII baseline and face size
     /// for freshly derived metrics. Infallible, and applied even when the integer grid is
     /// unchanged: a larger face on the same grid is a new picture.
@@ -17780,11 +17807,11 @@ impl LeafSession {
 
 /// Release whatever this one pane's quiet window has made due, and say when it could next be due.
 ///
-/// The counterpart of [`LeafSession::propose_size`], and the only place `conpty_grid` moves: what
+/// The counterpart of [`ShellSession::propose_size`], and the only place `conpty_grid` moves: what
 /// the child was *told* is written exactly where it is told, so a drag that wanders out and comes
 /// back cancels its own request instead of replaying an intermediate size.
 fn release_due_leaf_resize(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     now: Instant,
     hand_on_the_geometry: bool,
 ) -> Result<(Option<LeafResizeCommit>, Option<Instant>)> {
@@ -22179,7 +22206,7 @@ struct SessionFacts {
     /// Whether the tab holding this session is the one on screen.
     tab_is_active: bool,
     /// **Whether this session holds an unanswered place in the attention
-    /// queue** (§7.1.5b P1-8) — `LeafSession::attention`'s own place.
+    /// queue** (§7.1.5b P1-8) — `ShellSession::attention`'s own place.
     ///
     /// A fact about the *queue* and not about the shell, which is why it is
     /// carried in beside the status rather than read out of it: the signal that
@@ -31403,7 +31430,7 @@ impl StartupShells {
 
 /// The ConPTY source a leaf's shell came up on — `None` for a pane in birth, which has none yet;
 /// `"direct-input"` for a leaf with no shell at all (`BT_PROBE_INPUT`).
-fn conpty_source_of(leaf: Option<&LeafSession>) -> Option<String> {
+fn conpty_source_of(leaf: Option<&ShellSession>) -> Option<String> {
     match leaf {
         Some(leaf) if leaf.life.birth().is_some() => None,
         Some(leaf) => Some(
@@ -31826,7 +31853,7 @@ mod shell_birth_tests {
         }
     }
 
-    fn bare(decision: &BirthDecision, seed: &LeafSeed) -> LeafSession {
+    fn bare(decision: &BirthDecision, seed: &LeafSeed) -> ShellSession {
         bare_leaf(
             view(),
             grid(),
@@ -32283,7 +32310,7 @@ mod shell_birth_tests {
     }
 
     /// The facts of a landed pane a reader can see, and the session's own.
-    fn landed_facts(leaf: &LeafSession) -> String {
+    fn landed_facts(leaf: &ShellSession) -> String {
         format!(
             "{:#?}",
             (
@@ -32628,9 +32655,9 @@ fn create_leaf_session(
     // **The machine a shell is composed for**: its variables and its files, as the place, the
     // command line and the paste recipient read them — the system's own in the product.
     environment: &dyn bt_pty::ShellEnvironment,
-) -> Result<LeafSession> {
+) -> Result<ShellSession> {
     // **Born without a rail**: a shell that has not started has sent no mark, and
-    // [`LeafSession::has_rail`] is turned on only by one (owner, 2026-09-23).
+    // [`ShellSession::has_rail`] is turned on only by one (owner, 2026-09-23).
     let LeafView {
         text_scale,
         metrics,
@@ -32915,7 +32942,7 @@ fn bare_leaf(
     scrollback: NonZeroUsize,
     line_wrapping: bool,
     environment: &dyn bt_pty::ShellEnvironment,
-) -> LeafSession {
+) -> ShellSession {
     let LeafView {
         text_scale,
         metrics,
@@ -32951,7 +32978,7 @@ fn bare_leaf(
         line_wrapping,
     ));
     let projection = session.new_projection(session.layout_key());
-    LeafSession {
+    ShellSession {
         incarnation: next_incarnation(),
         wake,
         life: ShellLife::shellless(),
@@ -33019,7 +33046,7 @@ fn bare_leaf(
 /// so a pane split off or restarted from it while it is being born starts there — and in birth on
 /// `shell`, at the grid the shell is being born at, until [`land_shell_birth`].
 fn await_shell(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     shell: pty_door::ShellBirth,
     decision: BirthDecision,
     seed: &LeafSeed,
@@ -33048,7 +33075,7 @@ fn await_shell(
 /// on a row, or a birth that failed). `in_birth` is a pane still waiting on a row, about which
 /// nothing is said yet.
 fn finish_leaf_birth(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     pty: Option<PtySession>,
     decision: &BirthDecision,
     seed: &LeafSeed,
@@ -33205,7 +33232,7 @@ fn finish_leaf_birth(
 /// pane it was landed on. The record's diagnostics line is not owed here — the birth death's own
 /// exit line names the fallback — so it is spent with the landing.
 fn land_birth_death_fallback_shell(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     pty: PtySession,
     landing: ShellLanding,
 ) -> Result<()> {
@@ -33231,7 +33258,7 @@ fn land_birth_death_fallback_shell(
 /// Both an ordinary pane birth and a birth-death fallback spend [`ShellLanding::owed_physical`]
 /// here, through the same admitted PTY-resize door.
 fn apply_owed_shell_resize(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     born_grid: GridSize,
     owed_physical: Option<PhysicalSize<u32>>,
 ) -> Result<()> {
@@ -33253,7 +33280,7 @@ fn apply_owed_shell_resize(
 /// crossed into `profile`'s namespace after a fallback (`birth_place_of_the_started_shell`), told
 /// to the session as the second rung of §7.1.4's ladder, and kept on the leaf. A pane still waiting
 /// on a row was never put down anywhere; its seed says where it will be.
-fn place_leaf(leaf: &mut LeafSession, decision: &BirthDecision, profile: &str, in_birth: bool) {
+fn place_leaf(leaf: &mut ShellSession, decision: &BirthDecision, profile: &str, in_birth: bool) {
     // **And the place it was born in is said in the namespace of the shell that started**
     // (T-RESTART-CWD round 2): `spawn_place` was resolved for `spawn_profile`, and after the swap
     // this leaf is `profile`.
@@ -33296,7 +33323,7 @@ fn place_leaf(leaf: &mut LeafSession, decision: &BirthDecision, profile: &str, i
 /// with no shell, and what was typed into it is said dropped. `None` and nothing changed while
 /// the shell has not answered.
 fn land_shell_birth(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     mut note: impl FnMut(&str),
 ) -> Result<Option<anyhow::Error>> {
     let Some(mut held) = leaf.life.take_birth() else {
@@ -33355,7 +33382,7 @@ enum BirthDue {
     Shell,
 }
 
-impl LeafSession {
+impl ShellSession {
     /// The birth at `at`, if there is one.
     fn birth_at(&self, at: BirthAt) -> Option<&PaneBirth> {
         match at {
@@ -33363,7 +33390,7 @@ impl LeafSession {
             BirthAt::Successor => self
                 .successor
                 .as_deref()
-                .and_then(|successor: &LeafSession| successor.life.birth()),
+                .and_then(|successor: &ShellSession| successor.life.birth()),
         }
     }
 
@@ -33375,17 +33402,17 @@ impl LeafSession {
 
     /// **A replacement in birth waits beside this pane's shell** until its own lands
     /// ([`runtime::panes::land_successor`]).
-    fn await_successor(&mut self, next: Box<LeafSession>) {
+    fn await_successor(&mut self, next: Box<ShellSession>) {
         self.successor = Some(next);
     }
 
     /// The replacement in birth, lent for its landing.
-    fn successor_mut(&mut self) -> Option<&mut LeafSession> {
+    fn successor_mut(&mut self) -> Option<&mut ShellSession> {
         self.successor.as_deref_mut()
     }
 
     /// The replacement, leaving this pane: landed, or refused.
-    fn take_successor(&mut self) -> Option<Box<LeafSession>> {
+    fn take_successor(&mut self) -> Option<Box<ShellSession>> {
         self.successor.take()
     }
 }
@@ -33397,7 +33424,7 @@ enum SuccessorLanding {
     /// Its birth failed; the pane keeps the shell it has.
     Refused(anyhow::Error),
     /// It was born and is taken off the pane, to take the pane's place.
-    Landed(Box<LeafSession>),
+    Landed(Box<ShellSession>),
 }
 
 /// **A terminal pane's metrics for a test**, measured once per (scale, size) per process by the
@@ -33728,7 +33755,7 @@ fn create_tab_state<G: Glass>(
 #[allow(clippy::too_many_arguments)]
 fn assemble_tab_state(
     id: TabId,
-    sessions: BTreeMap<SeatId, LeafSession>,
+    sessions: BTreeMap<SeatId, ShellSession>,
     files: BTreeMap<SeatId, seats::FilesLeafState>,
     preview_pool: preview::PreviewPool,
     preview_panes: PreviewPanes,
@@ -33825,8 +33852,8 @@ fn assemble_tab_state(
 /// looking at has just become visible, so its members owe no unread claim, while
 /// the tab that absorbed it has whatever claims it already had. Calling
 /// `mark_seen` would clear those too, which is a different sentence.
-fn mark_leaf_seen(leaf: &mut LeafSession) {
-    leaf.last_seen_revision = leaf.output_revision;
+fn mark_leaf_seen(leaf: &mut ShellSession) {
+    leaf.mark_seen(leaf.output_revision);
     leaf.session.clear_attention();
 }
 
@@ -33843,8 +33870,12 @@ fn mark_leaf_seen(leaf: &mut LeafSession) {
 /// are looking is answered by [`attention_is_consumed`], which asks about the
 /// *window's* focus as well — being painted into a window nobody has in front of
 /// them is not hearing it.
-fn mark_leaf_painted(leaf: &mut LeafSession) {
-    leaf.last_seen_revision = seen_revision(leaf.last_seen_revision, leaf.output_revision, true);
+fn mark_leaf_painted(leaf: &mut ShellSession) {
+    leaf.mark_seen(seen_revision(
+        leaf.last_seen_revision,
+        leaf.output_revision,
+        true,
+    ));
 }
 
 /// **Stand a pane up as a tab of its own, carrying its shell across.**
@@ -33855,7 +33886,7 @@ fn mark_leaf_painted(leaf: &mut LeafSession) {
 /// `from`'s tree, or about to be.
 ///
 /// **The session travels; it is never killed and never respawned.** The
-/// [`LeafSession`] is *moved* out of `from.sessions` and into the new tab's — the
+/// [`ShellSession`] is *moved* out of `from.sessions` and into the new tab's — the
 /// ConPTY, the [`DualPlaneSession`], the scrollback, the ledger and the pending
 /// resize are the same objects on both sides of the gesture. Spawning a fresh
 /// shell in the new tab and shutting the old one down would be a gesture that
@@ -33981,7 +34012,7 @@ fn pane_into_new_tab(
         key,
         TabSeed {
             // The profile is not stated here any more, and its absence is the
-            // point: it rides on the [`LeafSession`] being moved, so the new tab
+            // point: it rides on the [`ShellSession`] being moved, so the new tab
             // is the same kind of shell as the pane because it *is* the pane. It
             // used to be copied off `from.profile` — the tab the pane was
             // leaving — which was right only while every pane of a tab was the
@@ -34716,13 +34747,13 @@ struct DrainOutcome {
     /// sentence about one pane out of N. A sibling that has spoken needs its own
     /// reason to reach the glass, and this is where that reason is heard.
     arrived_off_focus: bool,
-    /// Something the name stack reads changed — see [`LeafSession::name_evidence`].
+    /// Something the name stack reads changed — see [`ShellSession::name_evidence`].
     renamed: bool,
     /// The shell reported a different working directory, which is **durable**
     /// state: it is the `cwd` of this leaf in `session.json`.
     moved: bool,
     /// **A pane heard its first shell-integration mark this turn**, so it now
-    /// has a rail and its grid owes the rail room (`LeafSession::has_rail`).
+    /// has a rail and its grid owes the rail room (`ShellSession::has_rail`).
     /// True at most once per pane lifetime.
     rail_began: bool,
     /// **Where the shells that just finished a command are standing** (R31's
@@ -34833,7 +34864,7 @@ fn synchronized_update_committed(before: u64, session: &bt_term::DualPlaneSessio
     session.synchronized_update_commits() != before
 }
 
-fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<DrainOutcome> {
+fn drain_leaf_pty(leaf: &mut ShellSession, holds_the_keyboard: bool) -> Result<DrainOutcome> {
     if leaf.life.pty().is_none() {
         return Ok(DrainOutcome::default());
     }
@@ -34998,7 +35029,7 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
             .command_marks()
             .last()
             .is_some_and(|mark| mark.executed.is_none() && mark.finished.is_none())
-            && let Some((command, submit)) = leaf.pending_typing.take()
+            && let Some((command, submit)) = leaf.take_typing()
         {
             let bytes = quake::typed_into_a_prompt(&command, submit);
             if !bytes.is_empty() {
@@ -36975,7 +37006,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// because a startup command is one command — a window restored holding four tabs is not a
     /// window that asked for its command four times.
     ///
-    /// Queued and not written: see [`LeafSession::pending_typing`] for why a shell behind a ConPTY
+    /// Queued and not written: see [`ShellSession::pending_typing`] for why a shell behind a ConPTY
     /// is not ready for bytes at the moment it is created, and `drain_leaf_pty` for the moment it
     /// is.
     fn queue_typing_in_the_focused_pane(&mut self, text: String, submit: bool) {
@@ -36984,7 +37015,7 @@ impl<B: Backend> Runtime<'_, B> {
         };
         let focused = tab.focused_leaf;
         if let Some(leaf) = tab.sessions.get_mut(&focused) {
-            leaf.pending_typing = Some((text, submit));
+            leaf.queue_typing(text, submit);
         }
     }
 
@@ -45482,7 +45513,7 @@ mod quit_transaction_tests {
 ///
 /// The window's thread is the terminal's parser *and* the message pump, so what
 /// bounds one is what keeps the other alive. Nothing here can be asked of a
-/// `LeafSession` in a unit test — the drain needs a live ConPTY with a child
+/// `ShellSession` in a unit test — the drain needs a live ConPTY with a child
 /// printing into it, which is what the acceptance in `HANDOFF`/`DESIGN` is for —
 /// so what is pinned is mostly the *shape*: that the read is taken once and not
 /// in a loop, that the leftover is reported, and that the report becomes a wake.
@@ -47649,7 +47680,7 @@ impl<B: Backend> FolioApp<B> {
             let successor_wake = leaf
                 .successor
                 .as_deref()
-                .and_then(|successor: &LeafSession| successor.wake.as_ref());
+                .and_then(|successor: &ShellSession| successor.wake.as_ref());
             for wake in [leaf.wake.as_ref(), successor_wake].into_iter().flatten() {
                 wake.rebind(&target.pty_wake);
                 debug_assert!(

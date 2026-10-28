@@ -89,7 +89,7 @@ fn settle_exit_dispositions(
 
 /// Leave a birth death's transcript in place and append the one-line face that explains it.
 pub(super) fn keep_birth_death_face(
-    leaf: &mut crate::LeafSession,
+    leaf: &mut crate::ShellSession,
     exit: &exit_diagnostics::ShellExit,
     had_output: bool,
 ) -> Result<()> {
@@ -139,7 +139,7 @@ pub(super) enum BirthDeathLanding {
 /// and here; the shell itself is seated by the birth road (`land_birth_death_fallback_shell`),
 /// whose landing leaves the exit behind.
 pub(super) fn land_birth_death_fallback(
-    leaf: &mut crate::LeafSession,
+    leaf: &mut crate::ShellSession,
 ) -> Result<BirthDeathLanding> {
     let Some(mut pending) = leaf.life.take_fallback() else {
         return Ok(BirthDeathLanding::Waiting);
@@ -1609,7 +1609,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// a popup nothing can dismiss.
     ///
     /// Where the chooser opens is the same courtesy every other door shows: the
-    /// folder the pane you are looking at is standing in (`LeafSession::folder`:
+    /// folder the pane you are looking at is standing in (`ShellSession::folder`:
     /// its last OSC 7 report, else its shell process's folder, else the folder it
     /// was opened in), and failing
     /// that the place a tab of the default profile would have started in anyway.
@@ -4550,7 +4550,7 @@ mod birth_death_tests {
     }
 
     fn resize_pending_shell(
-        leaf: &mut crate::LeafSession,
+        leaf: &mut crate::ShellSession,
         next: crate::GridSize,
         physical: winit::dpi::PhysicalSize<u32>,
     ) {

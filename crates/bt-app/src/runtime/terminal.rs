@@ -10,12 +10,12 @@ use crate::runtime::mouse::link_target_to_ask_about;
 use crate::window_seam::prelude::*;
 use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
-    FlashBand, FormulaSwitches, LeafId, LeafSession, LocalImageActivation, MouseRoute, PasteTarget,
-    RailJumpLanding, ReferenceCard, RowHost, Runtime, SelectionDrag, SelectionDragMode, Step,
-    TerminalReference, UserInputKind, apply_stored_terminal_font, attention_trace, born_in_tab,
-    cmdrail, coalesce, create_leaf_session, cubic_bezier, files, hang_watch, input, marks,
-    mouse_trace, presentation_physical_size, scrollback_quota, seats, shell_literal, termscroll,
-    toast, write_pty_input,
+    FlashBand, FormulaSwitches, LeafId, LocalImageActivation, MouseRoute, PasteTarget,
+    RailJumpLanding, ReferenceCard, RowHost, Runtime, SelectionDrag, SelectionDragMode,
+    ShellSession, Step, TerminalReference, UserInputKind, apply_stored_terminal_font,
+    attention_trace, born_in_tab, cmdrail, coalesce, create_leaf_session, cubic_bezier, files,
+    hang_watch, input, marks, mouse_trace, presentation_physical_size, scrollback_quota, seats,
+    shell_literal, termscroll, toast, write_pty_input,
 };
 use crate::{
     ClickIntent, DRAIN_SLICES_PER_TURN, DRAIN_TURN_BUDGET, HyperlinkActivation, LeafSeed, TabState,
@@ -657,7 +657,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// the leaf that is leaving*: its `profile` (the seat's own, decided when it
     /// was created — never "the current default", so a seat restarted twice
     /// starts the same program both times), and
-    /// [`LeafSession::seed_place_for_a_new_shell`]: the **last trusted OSC 7 report**,
+    /// [`ShellSession::seed_place_for_a_new_shell`]: the **last trusted OSC 7 report**,
     /// else the live shell process's folder (T-CWD-FROM-PROCESS, superseding the
     /// contract's "not a reading of the live process" for this verb), else the folder
     /// the shell was put down in. The manual name is kept by not being touched: it is
@@ -667,9 +667,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// state behind one leaf and moves no rectangle, so pin, tab and position all
     /// survive by construction rather than by being restored.
     ///
-    /// The old shell dies when its `LeafSession` is dropped — `PtySession::drop`
+    /// The old shell dies when its `ShellSession` is dropped — `PtySession::drop`
     /// runs `shutdown`, which kills the child and joins its reader — and the new
-    /// one is born **first**, beside it (`LeafSession::successor`), so a ConPTY
+    /// one is born **first**, beside it (`ShellSession::successor`), so a ConPTY
     /// that cannot be created leaves the pane exactly as it was rather than empty.
     /// That is the reason this cannot half-succeed.
     ///
@@ -748,7 +748,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn replace_restarted_shell(
         &mut self,
         seat: SeatId,
-        spawned: LeafSession,
+        spawned: ShellSession,
     ) -> Result<()> {
         self.sessions.insert(seat, spawned);
         // **The window's frame slot held the pane that is gone.** `focus_pane_at`
@@ -855,7 +855,7 @@ impl<B: Backend> Runtime<'_, B> {
             self.mark_session_dirty(Instant::now());
         }
 
-        let LeafSession {
+        let ShellSession {
             life,
             session,
             view: crate::TermView { projection, .. },
@@ -1155,7 +1155,7 @@ impl<B: Backend> Runtime<'_, B> {
         }
         // **A pane that has just earned its rail makes room for it** (owner,
         // 2026-09-23: decoration never covers text). Once per pane lifetime —
-        // `LeafSession::has_rail` never turns back — so this is at most one
+        // `ShellSession::has_rail` never turns back — so this is at most one
         // extra grid change per pane, at its first prompt, when the screen is
         // nearly empty. Carried by the solve every other geometry change takes,
         // which re-derives every leaf's grid and changes only the one whose
@@ -1916,12 +1916,12 @@ pub(crate) fn seat_holds_the_keyboard(
 /// change, a display change and a transfer to another window — so the things that carry the
 /// metrics move together: the view's own record ([`crate::TermView::metrics`]), the session's cell
 /// height, width and baseline and its face size (the session's cell-size stage,
-/// [`crate::LeafSession::propose_cell`], which re-keys its math through `set_layout_key`),
+/// [`crate::ShellSession::propose_cell`], which re-keys its math through `set_layout_key`),
 /// and the projection, refreshed so a wheel or a scroll read after this sees the new rows. All of
 /// it happens **even when the integer grid is unchanged**: a larger face on the same grid is a new
 /// picture, and the frame it projects carries the new face size in its `layout_key`. The grid
 /// itself is the caller's to re-derive afterwards, through the existing resize transaction
-/// (`LeafSession::propose_size` → `release_due_leaf_resize` → `commit_leaf_resize`).
+/// (`ShellSession::propose_size` → `release_due_leaf_resize` → `commit_leaf_resize`).
 ///
 /// Answers whether anything moved. When the metrics are the ones the leaf already has — a step
 /// the clamp swallowed — it touches nothing and answers `false`, so no reflow, no PTY and no
@@ -1930,7 +1930,7 @@ pub(crate) fn seat_holds_the_keyboard(
 /// Writers of the rung: `Runtime::step_pane_text_scale` (the door) and construction. Readers:
 /// [`pane_cell_metrics`] and the pane head's indicator. Clearers: none — a view that ends takes
 /// its rung with it.
-pub(crate) fn apply_leaf_metrics(leaf: &mut LeafSession, metrics: bt_render::CellMetrics) -> bool {
+pub(crate) fn apply_leaf_metrics(leaf: &mut ShellSession, metrics: bt_render::CellMetrics) -> bool {
     if leaf.view.metrics == metrics {
         return false;
     }
@@ -1953,7 +1953,7 @@ pub(crate) fn apply_leaf_metrics(leaf: &mut LeafSession, metrics: bt_render::Cel
 ///   `settings.default_profile` here would turn a Git Bash pane into a
 ///   PowerShell the first time somebody changed that setting.
 /// * **The directory is where the pane stands**, read by the caller through
-///   [`LeafSession::seed_place_for_a_new_shell`]: the last trusted OSC 7 report,
+///   [`ShellSession::seed_place_for_a_new_shell`]: the last trusted OSC 7 report,
 ///   else the shell process's current folder, else the seat's initial cwd.
 ///   Since T-CWD-FROM-PROCESS (2026-10-17) a `cd` the old shell performed
 ///   without announcing it *is* seen when its process can be read — that
@@ -1972,7 +1972,7 @@ pub(crate) fn apply_leaf_metrics(leaf: &mut LeafSession, metrics: bt_render::Cel
 pub(crate) fn restart_seed(profile: &str, standing_in: Option<profiles::SeedPlace>) -> LeafSeed {
     LeafSeed {
         profile: profile.to_owned(),
-        // Named or carried as the leaf says (`LeafSession::seed_place_for_a_new_shell`):
+        // Named or carried as the leaf says (`ShellSession::seed_place_for_a_new_shell`):
         // `profiles::place_for` weighs it.
         cwd: standing_in,
         // A running pane's profile is one this build has, by construction — it
@@ -2195,7 +2195,7 @@ pub(crate) fn terminal_link_answers_a_press(
 /// else has been touched. The rung itself moves even then: the indicator shows the requested
 /// rung, and a pane at the floor of a base-10 face still says it is at 50 %.
 pub(crate) fn step_leaf_text_scale(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     step: TextStep,
     count: u32,
     derive: impl FnOnce(TextScale) -> Result<bt_render::CellMetrics>,

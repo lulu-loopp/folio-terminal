@@ -10,8 +10,8 @@ use crate::runtime::pointer::{CaptureOwner, PointerCapture};
 use crate::test_support::{buffer_saying, cross_tab, host_spelling, seat_of, tab_with_a_preview};
 use crate::{
     DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragSource, FilePeekPress, FloatDrag,
-    FloatHeadPress, ImageDrag, LeafSession, LocalImageActivation, PanePress, PreviewBlockDrag,
-    PreviewBodyDrag, PreviewTextDrag, RowMiddlePress, RowPress, SelectionDrag, SelectionDragMode,
+    FloatHeadPress, ImageDrag, LocalImageActivation, PanePress, PreviewBlockDrag, PreviewBodyDrag,
+    PreviewTextDrag, RowMiddlePress, RowPress, SelectionDrag, SelectionDragMode, ShellSession,
     SpringGate, TabCarry, TabPress, TerminalColumnDrag, TerminalThumbDrag, VideoPicturePress,
     preview, settings,
 };
@@ -215,7 +215,7 @@ fn two_tabs(tag: &str) -> HeadlessApplication {
 
 /// The pane of the tab in front at `index` among its shells, as the shell a press is handed to.
 fn shell(runtime: &Runtime<'_, Headless>, index: usize) -> PasteTarget {
-    let (seat, leaf): (&SeatId, &LeafSession) = runtime
+    let (seat, leaf): (&SeatId, &ShellSession) = runtime
         .sessions
         .iter()
         .nth(index)
@@ -788,7 +788,7 @@ fn a_new_parse_lets_go_of_the_block_thumb_and_keeps_the_selection() {
 }
 
 /// A shell still being born, which keeps what it is sent (`PaneBirth::typed`).
-fn a_shell_being_born() -> LeafSession {
+fn a_shell_being_born() -> ShellSession {
     let mut leaf = crate::test_support::leaf_saying("SHELL");
     leaf.life.begin_birth(crate::PaneBirth {
         seed: crate::LeafSeed {

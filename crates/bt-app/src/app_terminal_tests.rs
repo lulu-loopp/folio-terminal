@@ -1911,7 +1911,7 @@ fn a_gesture_says_one_thing_to_the_shell_and_says_it_at_the_end() {
 /// Those verbs spawn a ConPTY and cannot run here, so this is their bodies, read
 /// through `bt_source`.
 ///
-/// Since 2026-10-05 the ladder is read with its kind (`LeafSession::seed_place_for_a_new_shell`,
+/// Since 2026-10-05 the ladder is read with its kind (`ShellSession::seed_place_for_a_new_shell`,
 /// which reads `place_for_a_new_shell`), so a pane born in a named folder hands it on as named.
 ///
 /// MUTATION, observed red: put `leaf.session.working_directory()` back in any one
@@ -1924,16 +1924,16 @@ fn every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder() {
             body.contains("leaf.seed_place_for_a_new_shell()")
                 && !body.contains("session.working_directory()"),
             "`{door}` reads where the pane stands through \
-             `LeafSession::seed_place_for_a_new_shell`:\n{body}"
+             `ShellSession::seed_place_for_a_new_shell`:\n{body}"
         );
     }
     // And the `+` and a picker row carry, whatever the pane under them was born in (coordinator's
     // ruling 2026-10-05; the review's unpinned clause). Its leaf half is pinned by
     // `a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profile_says`.
-    // MUTATION, observed red: read `LeafSession::seed_place_for_a_new_shell` here instead.
+    // MUTATION, observed red: read `ShellSession::seed_place_for_a_new_shell` here instead.
     let beside = method_body("Runtime", "new_tab_with_profile_carrying");
     assert!(
-        beside.contains("LeafSession::place_for_a_new_tab_beside")
+        beside.contains("ShellSession::place_for_a_new_tab_beside")
             && !beside.contains("seed_place_for_a_new_shell"),
         "the `+` carries the pane's folder:\n{beside}"
     );
@@ -2083,13 +2083,13 @@ fn the_foot_is_one_writing_for_rows_and_references() {
 /// A width that followed the per-frame rail would resize the shell whenever a
 /// mark arrived and whenever `vim` entered or left the alternate screen, where
 /// [`cmdrail::host_rect`] hides the rail — a reflow of the TUI because it
-/// started. So `LeafSession::has_rail` turns on at the ledger's first mark and
+/// started. So `ShellSession::has_rail` turns on at the ledger's first mark and
 /// never turns back: a leaf fed its first `OSC 133` schedules exactly one grid
 /// change, and entering and leaving the alternate screen afterwards schedule
 /// none. Driven through the real session, the real `hear_first_mark` the drain
-/// asks and the real `LeafSession::propose_size` every solve goes through.
+/// asks and the real `ShellSession::propose_size` every solve goes through.
 ///
-/// MUTATION: make `LeafSession::grid_for` pass
+/// MUTATION: make `ShellSession::grid_for` pass
 /// `self.has_rail && !self.session.terminal_modes().alternate_screen` — red at
 /// the alternate screen's entry; or drop `leaf.hear_first_mark()` from
 /// `drain_leaf_pty` — red on the pin at the end.
@@ -2103,7 +2103,7 @@ fn the_first_mark_reserves_the_room_once_and_the_alternate_screen_keeps_it() {
     let mut leaf = leaf_saying("");
     apply_leaf_metrics(&mut leaf, metrics);
     let mut heard = 0;
-    let mut step = |leaf: &mut LeafSession, bytes: &str| -> bool {
+    let mut step = |leaf: &mut ShellSession, bytes: &str| -> bool {
         leaf.session
             .feed(bytes.as_bytes())
             .expect("feed the shell's bytes");

@@ -1676,7 +1676,7 @@ pub(crate) fn tab_with_a_files_column(id: u64, root: &str) -> TabState {
         }));
     let terminals = seats.terminals();
     let focused = terminals[0];
-    let sessions: BTreeMap<SeatId, LeafSession> = terminals
+    let sessions: BTreeMap<SeatId, ShellSession> = terminals
         .iter()
         .map(|s| (*s, leaf_saying("SHELL")))
         .collect();
@@ -2329,7 +2329,7 @@ pub(crate) fn text_buffer(name: &str, body: &str) -> preview::PreviewBuffer {
 }
 
 /// One lone-terminal tab holding exactly this shell.
-pub(crate) fn tab_holding(leaf: LeafSession) -> TabState {
+pub(crate) fn tab_holding(leaf: ShellSession) -> TabState {
     let seats = seats::Seats::lone_terminal();
     let identity = seats.identity();
     let (layout, overflow) = cross_solve(&seats);
@@ -2496,7 +2496,7 @@ pub(crate) fn cross_solve(seats: &seats::Seats) -> (SeatLayout, Option<seats::Fi
     )
 }
 
-pub(crate) fn card_restore_fixture() -> LeafSession {
+pub(crate) fn card_restore_fixture() -> ShellSession {
     install_host_answers();
     let mut leaf = leaf_saying("");
     leaf.session = DualPlaneSession::new(nonzero_u32(10), nonzero_u32(40));
@@ -2541,11 +2541,11 @@ pub(crate) fn card_restore_fixture() -> LeafSession {
 /// draws it — and, since T-CARD-NO-PASSIVE-CLAMP, drawn without touching the
 /// leaf's number: the draw's own clamp lives in `transcript_tail` and writes
 /// nothing back, so looking at a card is not a way to move it.
-pub(crate) fn card_restore_first(leaf: &LeafSession) -> String {
+pub(crate) fn card_restore_first(leaf: &ShellSession) -> String {
     focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.view.card_skip).0[0].clone()
 }
 
-pub(crate) fn card_restore_widen(leaf: &mut LeafSession) {
+pub(crate) fn card_restore_widen(leaf: &mut ShellSession) {
     leaf.propose_size(GridChange {
         next: GridSize {
             columns: std::num::NonZeroU16::new(40).unwrap(),
@@ -2567,7 +2567,7 @@ pub(crate) fn card_restore_widen(leaf: &mut LeafSession) {
 }
 
 pub(crate) fn card_restore_resize(
-    leaf: &mut LeafSession,
+    leaf: &mut ShellSession,
     columns: u16,
     rows: u16,
     stage: LeafOnStage,
@@ -2608,7 +2608,7 @@ pub(crate) fn card_restore_resize(
     }
 }
 
-pub(crate) fn card_restore_settle(leaf: &mut LeafSession) {
+pub(crate) fn card_restore_settle(leaf: &mut ShellSession) {
     leaf.session.mark_pty_resize_requested_at(
         nonzero_u32(leaf.grid.columns.get()),
         nonzero_u32(leaf.grid.rows.get()),
@@ -2623,7 +2623,7 @@ pub(crate) fn card_restore_settle(leaf: &mut LeafSession) {
 /// `pty: None` — this is the same shell-less mode `BT_PROBE_INPUT` uses, so
 /// nothing here spawns a ConPTY, and the scrollback is still a real
 /// `DualPlaneSession`'s.
-pub(crate) fn leaf_saying(text: &str) -> LeafSession {
+pub(crate) fn leaf_saying(text: &str) -> ShellSession {
     install_host_answers();
     let columns = NonZeroU32::new(40).unwrap();
     let rows = NonZeroU32::new(4).unwrap();
@@ -2642,7 +2642,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         columns: std::num::NonZeroU16::new(40).unwrap(),
         rows: std::num::NonZeroU16::new(4).unwrap(),
     };
-    LeafSession {
+    ShellSession {
         // A fixture is a shell for the purposes of being told apart from the
         // next one, so it takes a number from the same counter production
         // takes one from.
@@ -2757,7 +2757,7 @@ pub(crate) fn cross_seats(panes: usize) -> seats::Seats {
 pub(crate) fn cross_tab(id: u64, texts: &[&str]) -> TabState {
     let seats = cross_seats(texts.len());
     let terminals = seats.terminals();
-    let sessions: BTreeMap<SeatId, LeafSession> = terminals
+    let sessions: BTreeMap<SeatId, ShellSession> = terminals
         .iter()
         .zip(texts)
         .map(|(seat, text)| (*seat, leaf_saying(text)))
@@ -3295,8 +3295,8 @@ pub(crate) fn rail_test_body(logical: u32, scale: f64) -> SeatViewport {
 //
 // `Runtime::redraw` cannot be built without a window, so the gate it asks is a method of the tab
 // (`TabState::admit_resize_present`), and these tests run it on a real tab holding a real leaf:
-// the real `hear_first_mark` the drain asks, the real `LeafSession::grid_for` every solve asks and
-// the real `LeafSession::propose_size` every solve goes through, and frames the leaf's own
+// the real `hear_first_mark` the drain asks, the real `ShellSession::grid_for` every solve asks and
+// the real `ShellSession::propose_size` every solve goes through, and frames the leaf's own
 // session composes.
 
 /// Re-solve the tab's focused pane into `body`, as every road that re-solves the panes does.
@@ -3339,7 +3339,7 @@ pub(crate) fn focused_frame(tab: &mut TabState) -> ViewportFrame {
 // reach, which door the answer leaves by — it is pinned on the method bodies through `bt_source`.
 
 /// A shell-less leaf whose paste grammar is `grammar`, after the program printed `printed`.
-pub(crate) fn paste_leaf(grammar: shell_literal::ShellGrammar, printed: &[u8]) -> LeafSession {
+pub(crate) fn paste_leaf(grammar: shell_literal::ShellGrammar, printed: &[u8]) -> ShellSession {
     let mut leaf = leaf_saying("");
     leaf.launch.paste_recipient.encoder.grammar = grammar;
     leaf.session
@@ -3349,7 +3349,7 @@ pub(crate) fn paste_leaf(grammar: shell_literal::ShellGrammar, printed: &[u8]) -
 }
 
 /// One tab holding `leaf`, and the address a paste into it is aimed at.
-pub(crate) fn paste_tab(leaf: LeafSession) -> (TabState, PasteTarget) {
+pub(crate) fn paste_tab(leaf: ShellSession) -> (TabState, PasteTarget) {
     let tab = tab_holding(leaf);
     let (seat, leaf) = tab.sessions.iter().next().expect("a lone terminal");
     let target = PasteTarget {

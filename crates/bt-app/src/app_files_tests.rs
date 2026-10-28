@@ -1592,7 +1592,7 @@ fn reopened_from_recent(
     profile_id: &str,
     folder: &Path,
     account: &HomeIs,
-) -> (LeafSession, Option<PathBuf>) {
+) -> (ShellSession, Option<PathBuf>) {
     let mut vault = seed::SeedVault::default();
     vault.record(
         seed::Seed::Term {

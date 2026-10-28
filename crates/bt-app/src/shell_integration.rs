@@ -12423,7 +12423,7 @@ mod tests {
     /// machine delivers the same bytes further apart, and a shell that falls silent fails by name.
     #[cfg(windows)]
     fn feed_leaf_until(
-        leaf: &mut crate::LeafSession,
+        leaf: &mut crate::ShellSession,
         wakes: &std::sync::mpsc::Receiver<()>,
         marker: &str,
     ) {
@@ -12448,14 +12448,14 @@ mod tests {
     /// RED (T-CWD-FROM-PROCESS) — **a Command Prompt pane with no integration stands where its
     /// process stands, and the verbs that start a shell from it start there**: `cmd.exe` with a
     /// plain `PROMPT` (`$P$G`, no OSC 7), started in a folder whose name is not ASCII, read through
-    /// the pane's own road (`LeafSession::folder`, the shell's pid and its output count off the
+    /// the pane's own road (`ShellSession::folder`, the shell's pid and its output count off the
     /// real pseudoconsole) at the first prompt and again after `cd` into a subfolder. The pane
     /// never reports a folder. After the `cd`, the place Split with, Duplicate pane, Duplicate tab
     /// and Restart shell start a shell in (`seed_place_for_a_new_shell`, the one reader each of
     /// them calls) and the one a new tab beside carries (`place_for_a_new_tab_beside`) are the
     /// subfolder.
     ///
-    /// MUTATIONS (observed red): `LeafSession::folder` hands the ladder no shell (`None`) — at the
+    /// MUTATIONS (observed red): `ShellSession::folder` hands the ladder no shell (`None`) — at the
     /// first prompt the pane answers `Opened`, the folder it was opened in, not its process; the
     /// memo keyed by the shell alone (output not counted) — after `cd` the first read, the
     /// starting folder, is answered again; `place_where_the_pane_stands` reading the old ladder

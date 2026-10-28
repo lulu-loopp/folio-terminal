@@ -6,9 +6,9 @@
 use super::*;
 use crate::test_support::{
     EndSessionHome, ResizeGateHarness, TITLE_FRAME, calls_of, claim_after_a_look, cross_tab, facts,
-    facts_with, free_calls_of, grid_of, item_body, latched, launch_plan_on_disk, method_body,
-    on_the_window_thread, placement, quiet, reader_names, record_as_the_app_does, shells_document,
-    source, tab_with_a_files_column, the_system_asks, waiting,
+    facts_with, free_calls_of, grid_of, item_body, latched, launch_plan_on_disk, leaf_saying,
+    method_body, on_the_window_thread, placement, quiet, reader_names, record_as_the_app_does,
+    shells_document, source, tab_with_a_files_column, the_system_asks, waiting,
 };
 use bt_source::ItemQuery;
 use std::time::Duration;
@@ -2022,6 +2022,53 @@ fn every_pane_the_present_painted_is_square_with_its_shell() {
         StatusClaim::Silent,
         "a tab every pane of which reached the glass owes nothing when you leave it"
     );
+}
+
+/// RED (T-CONTRACT-M8, ticket O-5a, ruling E8; the ownership contract's §2.2 invariant 5 and
+/// §3.4 M8 pin) — **a view reports the revision it has seen through one session door, and unread
+/// never goes back.**
+///
+/// `ShellSession::mark_seen` keeps the larger of what the session holds and what a view reports,
+/// so a report that arrives late — a view that painted an older frame — cannot bring back an
+/// unread claim for output a newer report already answered. Today's two reporters,
+/// `mark_leaf_seen` and `mark_leaf_painted`, report the session's own current count, so the
+/// larger is always the report and the product reads as it did; with two views on one session
+/// (O-6) the stale report is real. The census half is bt-source's
+/// `the_seen_revision_has_one_door`.
+///
+/// MUTATION (observed red): `mark_seen` stores the report instead of taking the maximum — the
+/// stale report brings the ledger back to 1, and the backgrounded pane claims unread for output
+/// it had shown.
+#[test]
+fn a_view_reports_seen_and_unread_never_goes_back() {
+    let mut leaf = leaf_saying("构建完成 build ok — 下一步 next\r\n");
+    leaf.output_revision = output_revision(leaf.output_revision, true, false);
+    leaf.output_revision = output_revision(leaf.output_revision, true, false);
+    assert_eq!(leaf.output_revision, 2, "two drains heard output");
+    assert!(
+        leaf.session_facts(false).has_unseen_output(),
+        "nothing has been seen yet"
+    );
+
+    leaf.mark_seen(2);
+    assert!(!leaf.session_facts(false).has_unseen_output());
+
+    // A stale report: a view that last painted the first drain's frame.
+    leaf.mark_seen(1);
+    assert_eq!(
+        leaf.last_seen_revision, 2,
+        "a stale report is not a step back"
+    );
+    assert!(
+        !leaf.session_facts(false).has_unseen_output(),
+        "output already seen stays seen"
+    );
+
+    // And the next thing the shell says still counts.
+    leaf.output_revision = output_revision(leaf.output_revision, true, false);
+    assert!(leaf.session_facts(false).has_unseen_output());
+    mark_leaf_painted(&mut leaf);
+    assert_eq!(leaf.last_seen_revision, 3);
 }
 
 /// RED (T-FRESH-FACTS) — **each thing a window's settings ear hears wakes the loop for its own
