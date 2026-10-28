@@ -33,7 +33,6 @@ mod quake;
 pub(crate) mod search;
 mod settings;
 pub(crate) mod tabs;
-pub(crate) use tabs::owe_birth_death_fallback_resize;
 pub(crate) use windows::AfterTheWait;
 #[cfg(test)]
 pub(crate) use windows::{

@@ -103,8 +103,8 @@ impl<B: Backend> Runtime<'_, B> {
         let trace = self.shell().session.resize_trace();
         let conpty_source = self
             .shell()
-            .pty
-            .as_ref()
+            .life
+            .pty()
             .map(|pty| pty.conpty_source().to_string())
             .unwrap_or_else(|| "direct-input".to_string());
         for event in &trace[self.window.resize_trace_logged_events.min(trace.len())..] {

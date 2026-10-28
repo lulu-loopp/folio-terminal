@@ -887,12 +887,12 @@ fn an_ended_tab_waits_for_its_saves_and_closes_at_the_bound_when_only_clean_ones
         let runtime = saving.application.runtime();
         for tab in runtime.window.tabs.iter_mut() {
             for (_, leaf) in tab.leaves_mut() {
-                leaf.pty = Some(bt_pty::PtySession::fake_exited(
+                leaf.life.land(Some(bt_pty::PtySession::fake_exited(
                     std::time::Duration::from_secs(60),
                     0,
                     b"",
                     false,
-                ));
+                )));
             }
         }
     }

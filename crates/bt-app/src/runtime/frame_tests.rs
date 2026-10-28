@@ -311,7 +311,7 @@ fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() 
     let successor = runtime
         .sessions
         .get_mut(&seat)
-        .and_then(|pane| pane.successor.take())
+        .and_then(|pane| pane.take_successor())
         .expect("the replacement");
     runtime
         .replace_restarted_shell(seat, *successor)

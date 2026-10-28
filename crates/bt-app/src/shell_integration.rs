@@ -12429,7 +12429,7 @@ mod tests {
     ) {
         let mut seen = Vec::new();
         while !String::from_utf8_lossy(&seen).contains(marker) {
-            let chunk = leaf.pty.as_ref().expect("the pane's shell").read_output();
+            let chunk = leaf.life.pty().expect("the pane's shell").read_output();
             if chunk.is_empty() {
                 crate::lane::wait_for_a_wake(
                     wakes,
@@ -12494,7 +12494,7 @@ mod tests {
         let mut leaf = crate::test_support::leaf_saying("");
         leaf.session.set_spawn_directory(Some(start.clone()));
         leaf.launch.spawn_place = Some(start.clone());
-        leaf.pty = Some(pty);
+        leaf.life.land(Some(pty));
         let door = crate::pane_folder::SystemProcessFolders;
 
         feed_leaf_until(&mut leaf, &wakes, "start>");
@@ -12506,11 +12506,7 @@ mod tests {
             other => panic!("at the first prompt: {other:?}"),
         }
 
-        leaf.pty
-            .as_ref()
-            .unwrap()
-            .write(b"cd moved-here\r")
-            .unwrap();
+        leaf.life.pty().unwrap().write(b"cd moved-here\r").unwrap();
         feed_leaf_until(&mut leaf, &wakes, "moved-here>");
         assert_eq!(leaf.session.working_directory(), None, "no report was made");
 
@@ -12536,7 +12532,7 @@ mod tests {
             "an unknown folder: a new tab beside carries nothing, as before"
         );
         // That refusal is this moment's read; one more prompt is a new moment for the real door.
-        leaf.pty.as_ref().unwrap().write(b"\r").unwrap();
+        leaf.life.pty().unwrap().write(b"\r").unwrap();
         feed_leaf_until(&mut leaf, &wakes, "moved-here>");
         match leaf.folder(&door) {
             crate::pane_folder::PaneFolder::Process(folder) => assert!(
@@ -12559,7 +12555,7 @@ mod tests {
             ),
             other => panic!("after cd, what a new tab beside carries: {other:?}"),
         }
-        let mut pty = leaf.pty.take().unwrap();
+        let mut pty = leaf.life.retire().unwrap();
         pty.write(b"exit\r").unwrap();
         pty.shutdown().unwrap();
         drop(pty);

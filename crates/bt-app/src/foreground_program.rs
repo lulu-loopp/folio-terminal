@@ -100,8 +100,8 @@ pub(crate) fn dispatch(
     requests: &mpsc::Sender<Request>,
 ) {
     let sent = leaf
-        .pty
-        .as_ref()
+        .life
+        .pty()
         .and_then(bt_pty::PtySession::shell_process_id)
         .is_some_and(|shell| {
             requests

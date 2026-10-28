@@ -1055,6 +1055,159 @@ fn the_attention_account_is_one_fact() {
     );
 }
 
+/// `ShellLife`'s transitions (O-4b): the only calls that may write `LeafSession.life`.
+const LIFE_TRANSITIONS: [&str; 13] = [
+    "begin_birth",
+    "take_birth",
+    "record_spawn_fallback",
+    "take_spawn_fallback",
+    "land",
+    "owe_landing_size",
+    "exit_draining",
+    "exited",
+    "release_dead_shell",
+    "fall_back",
+    "take_fallback",
+    "keep_birth_death",
+    "retire",
+];
+
+/// The `LeafSession` record's methods that move a *Restart shell* successor (O-4b, ruling E5).
+const SUCCESSOR_MOVES: [&str; 3] = ["await_successor", "successor_mut", "take_successor"];
+
+/// RED (O-4b; the ownership contract's M6, rulings D2, D5, D9 and E5) — **the shell's life is
+/// one fact, written only by its transitions.**
+///
+/// The seven fields M6 folded are gone from the census, and `LeafSession.life` is the one fact of
+/// type `ShellLife`. Every write row of it calls only a transition — or, in the reaper, a call into
+/// the shell through the one lend (`try_wait`, `take_birth_fallback` on what `pty_mut` lent) — and
+/// every access row is one of today's lends kept as they stood: `pty_mut` in the reaper and the two
+/// resize roads, and the two destructures of the input roads. The functions that touch it other
+/// than by reading are these sixteen (§2's 20 → 16: D10 folded the owed-resize roads; E5 kept the
+/// successor's three on the record). And `LeafSession.successor`'s every non-read site is in the
+/// record's three methods that move it.
+///
+/// MUTATION: `leaf.life.phase = Phase::Kept` written in `keep_birth_death_face` (an assign row);
+/// `match &mut leaf.life.phase` in the reaper (an unlisted access row); `leaf.successor =
+/// Some(..)` written in `restart_shell` — each is named.
+#[test]
+fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
+    const GONE: [&str; 7] = [
+        "pty",
+        "shell_exit_age",
+        "shell_exit_said",
+        "birth_death_fallback",
+        "birth_death_kept",
+        "spawn_fallback",
+        "birth",
+    ];
+    const THROUGH_THE_LEND: [(&str, &str); 2] = [
+        ("Runtime::reap_exited_tabs", "call:take_birth_fallback"),
+        ("Runtime::reap_exited_tabs", "call:try_wait"),
+    ];
+    const LENDS: [(&str, &str); 5] = [
+        ("apply_owed_shell_resize", "call:pty_mut"),
+        ("release_due_leaf_resize", "call:pty_mut"),
+        ("Runtime::reap_exited_tabs", "call:pty_mut"),
+        ("Runtime::send_paste", "pattern"),
+        ("Runtime::insert_path_into_terminal", "pattern"),
+    ];
+    let census = the_census();
+    let facts: BTreeSet<&str> = census
+        .facts()
+        .iter()
+        .map(|fact| fact.fact.as_str())
+        .collect();
+    for gone in GONE {
+        assert!(
+            !facts.contains(format!("LeafSession.{gone}").as_str()),
+            "`{gone}` is a part of the shell's life, not a field of the leaf"
+        );
+    }
+    let life: Vec<&str> = census
+        .facts()
+        .iter()
+        .filter(|fact| fact.fact.starts_with("LeafSession.") && fact.declared.contains("ShellLife"))
+        .map(|fact| fact.fact.as_str())
+        .collect();
+    assert_eq!(life, ["LeafSession.life"], "one life");
+    let rows: Vec<&SiteRow> = census
+        .rows()
+        .iter()
+        .filter(|row| row.fact == "LeafSession.life")
+        .collect();
+    let mut stray = Vec::new();
+    for row in &rows {
+        for kind in &row.kinds {
+            let admitted = match row.column.name() {
+                "write" => {
+                    kind.strip_prefix("call:")
+                        .is_some_and(|name| LIFE_TRANSITIONS.contains(&name))
+                        || THROUGH_THE_LEND.contains(&(row.function.as_str(), kind.as_str()))
+                }
+                "access" => LENDS.contains(&(row.function.as_str(), kind.as_str())),
+                _ => false,
+            };
+            if !admitted {
+                stray.push(format!(
+                    "{} {} {} {kind}",
+                    row.column.name(),
+                    row.module,
+                    row.function
+                ));
+            }
+        }
+    }
+    assert!(
+        stray.is_empty(),
+        "the shell's life written other than by a transition: {stray:?}"
+    );
+    let writers: BTreeSet<(&str, &str)> = rows
+        .iter()
+        .map(|row| (row.module.as_str(), row.function.as_str()))
+        .collect();
+    assert_eq!(
+        writers,
+        BTreeSet::from([
+            ("crate", "TabState::retire_all_shells"),
+            ("crate", "apply_owed_shell_resize"),
+            ("crate", "await_shell"),
+            ("crate", "create_leaf_session"),
+            ("crate", "finish_leaf_birth"),
+            ("crate", "land_birth_death_fallback_shell"),
+            ("crate", "land_shell_birth"),
+            ("crate", "release_due_leaf_resize"),
+            ("crate::runtime::clipboard", "Runtime::send_paste"),
+            ("crate::runtime::panes", "Runtime::land_own_shell"),
+            ("crate::runtime::panes", "Runtime::land_restart"),
+            ("crate::runtime::panes", "end_leaves_of"),
+            ("crate::runtime::tabs", "Runtime::reap_exited_tabs"),
+            ("crate::runtime::tabs", "keep_birth_death_face"),
+            ("crate::runtime::tabs", "land_birth_death_fallback"),
+            (
+                "crate::runtime::terminal",
+                "Runtime::insert_path_into_terminal"
+            ),
+        ]),
+        "the life's sixteen writers"
+    );
+    let moves: BTreeSet<&str> = census
+        .rows()
+        .iter()
+        .filter(|row| row.fact == "LeafSession.successor")
+        .map(|row| row.function.as_str())
+        .collect();
+    let expected: BTreeSet<String> = SUCCESSOR_MOVES
+        .iter()
+        .map(|name| format!("LeafSession::{name}"))
+        .collect();
+    assert_eq!(
+        moves,
+        expected.iter().map(String::as_str).collect(),
+        "a successor is moved only by the record's own methods"
+    );
+}
+
 /// RED (O-2; the ownership contract's (b)1 and (c)1) — **the drain takes the
 /// keyboard's focus as a report and touches no field of the view.**
 ///
@@ -1485,6 +1638,266 @@ fn the_keyboard_focus_is_one_report() {
     assert!(
         unfollowed.is_empty(),
         "a call the graph cannot follow may reach the focus report: {unfollowed:?}"
+    );
+}
+
+// ── the shell's life (O-4b) ──────────────────────────────────────────────
+
+/// `bt-app`'s `ShellLife::name`, keyed as the call graph keys it.
+fn life(name: &str) -> String {
+    app(&format!("ShellLife::{name}"))
+}
+
+/// `bt-app`'s `LeafSession::name`, keyed as the call graph keys it.
+fn record(name: &str) -> String {
+    app(&format!("LeafSession::{name}"))
+}
+
+impl Callers {
+    /// The callers of `callee`, sorted, counting an edge the graph could not follow when its one
+    /// candidate is `callee`: a method call through a receiver the rules do not type (a binding
+    /// of a `?`'s value, a box bound by a pattern) whose name only `callee` declares.
+    fn of_counting_sole(&self, callee: &str) -> Vec<String> {
+        let mut out: BTreeSet<String> = self.of(callee).into_iter().collect();
+        out.extend(
+            self.unfollowed
+                .iter()
+                .filter(|edge| edge.candidates == [callee])
+                .map(|edge| edge.caller.clone()),
+        );
+        out.into_iter().collect()
+    }
+
+    /// What `caller` calls, sorted, counting the unfollowed edges [`Self::of_counting_sole`]
+    /// counts.
+    fn callees_of(&self, caller: &str) -> Vec<String> {
+        let mut out: BTreeSet<String> = self
+            .by_callee
+            .iter()
+            .filter(|(_, callers)| callers.contains(caller))
+            .map(|(callee, _)| callee.clone())
+            .collect();
+        out.extend(
+            self.unfollowed
+                .iter()
+                .filter(|edge| edge.caller == caller && edge.candidates.len() == 1)
+                .map(|edge| edge.candidates[0].clone()),
+        );
+        out.into_iter().collect()
+    }
+
+    /// [`Self::unfollowed_into`], less the edges whose one candidate is one of `callees`: those
+    /// [`Self::of_counting_sole`] counts as calls.
+    fn unfollowed_into_beyond_sole(&self, callees: &[&str]) -> Vec<String> {
+        self.unfollowed
+            .iter()
+            .filter(|edge| {
+                !(edge.candidates.len() == 1 && callees.contains(&edge.candidates[0].as_str()))
+            })
+            .filter(|edge| {
+                edge.candidates
+                    .iter()
+                    .any(|candidate| callees.contains(&candidate.as_str()))
+                    || edge.spelled.iter().any(|spelled| {
+                        callees
+                            .iter()
+                            .any(|callee| last_segment(callee) == last_segment(spelled))
+                    })
+            })
+            .map(|edge| format!("{} -> `{}` (unfollowed)", edge.caller, edge.what))
+            .collect()
+    }
+}
+
+/// RED (O-4b; the ownership contract's M6, rulings D8 and E5) — **each life transition has its
+/// callers**, and each of the record's successor moves its.
+///
+/// The census proves which functions write the life; this proves which call each transition, so
+/// a road that takes another road's edge — the landing keeping a pane itself, a close road
+/// releasing a dead shell — changes a row here. An edge the graph cannot follow is refused when a
+/// candidate or a name it spells is one of them.
+///
+/// MUTATION: have `land_birth_death_fallback` call `leaf.life.keep_birth_death()` itself instead of going
+/// through `keep_birth_death_face`; have `end_leaves_of` call `release_dead_shell`; have
+/// `restart_shell` call `take_successor` — each is named.
+#[test]
+fn each_life_transition_has_its_callers() {
+    let callers = bt_app_callers();
+    let reaper = "runtime::tabs::Runtime::reap_exited_tabs";
+    let table: [(String, &[&str]); 17] = [
+        (life("shellless"), &["bare_leaf"]),
+        (
+            life("begin_birth"),
+            &["await_shell", "create_leaf_session", "land_shell_birth"],
+        ),
+        (life("take_birth"), &["land_shell_birth"]),
+        (life("record_spawn_fallback"), &["finish_leaf_birth"]),
+        (
+            life("take_spawn_fallback"),
+            &[
+                "land_birth_death_fallback_shell",
+                "runtime::panes::Runtime::land_own_shell",
+                "runtime::panes::Runtime::land_restart",
+            ],
+        ),
+        (life("land"), &["finish_leaf_birth"]),
+        (life("owe_landing_size"), &["release_due_leaf_resize"]),
+        (life("exit_draining"), &[reaper]),
+        (life("exited"), &[reaper]),
+        (life("release_dead_shell"), &[reaper]),
+        (
+            life("fall_back"),
+            &[reaper, "runtime::tabs::land_birth_death_fallback"],
+        ),
+        (
+            life("take_fallback"),
+            &["runtime::tabs::land_birth_death_fallback"],
+        ),
+        (
+            life("keep_birth_death"),
+            &["runtime::tabs::keep_birth_death_face"],
+        ),
+        (
+            life("retire"),
+            &[
+                "TabState::retire_all_shells",
+                "runtime::panes::end_leaves_of",
+            ],
+        ),
+        (
+            record("await_successor"),
+            &[
+                "runtime::panes::Runtime::land_pane_birth",
+                "runtime::terminal::Runtime::restart_shell",
+            ],
+        ),
+        (record("successor_mut"), &["runtime::panes::land_successor"]),
+        (
+            record("take_successor"),
+            &["runtime::panes::land_successor"],
+        ),
+    ];
+    let mut every: Vec<String> = Vec::new();
+    for (callee, expected) in table {
+        let mut expected: Vec<String> = expected.iter().map(|path| app(path)).collect();
+        expected.sort();
+        assert_eq!(
+            callers.of_counting_sole(&callee),
+            expected,
+            "`{callee}`'s callers"
+        );
+        every.push(callee);
+    }
+    let every: Vec<&str> = every.iter().map(String::as_str).collect();
+    let unfollowed = callers.unfollowed_into_beyond_sole(&every);
+    assert!(
+        unfollowed.is_empty(),
+        "a call the graph cannot follow may reach a life transition: {unfollowed:?}"
+    );
+}
+
+/// RED (O-4b; the ownership contract's M6, ruling D9) — **a life transition performs no
+/// effect**: no method of `ShellLife`, and none of the record's successor moves, calls any item of
+/// the workspace but `ShellLife`'s own — so none reaches `bt_pty::retire_session`, `pty_door`,
+/// `DualPlaneSession::feed` or any effect of `window_waits.tsv`. Those stay on the roads that take
+/// the edge, in the order they had. Nor does any of them make a call the graph cannot follow.
+///
+/// MUTATION: move `bt_pty::retire_session(pty)` into `ShellLife::retire`; move the
+/// `pty_door::request` into `fall_back` — each is named.
+#[test]
+fn a_life_transition_performs_no_effect() {
+    let callers = bt_app_callers();
+    let pure = |key: &str| {
+        key.starts_with(&life(""))
+            || SUCCESSOR_MOVES
+                .iter()
+                .any(|name| key == record(name).as_str())
+    };
+    let mut reached: Vec<String> = Vec::new();
+    let mut walked = 0;
+    for (callee, from) in &callers.by_callee {
+        for caller in from.iter().filter(|caller| pure(caller)) {
+            walked += 1;
+            if !callee.starts_with(&life("")) {
+                reached.push(format!("{caller} -> {callee}"));
+            }
+        }
+    }
+    assert!(walked > 0, "the transitions' own calls are found");
+    assert!(
+        reached.is_empty(),
+        "a life transition calls out of the life: {reached:?}"
+    );
+    let unfollowed: Vec<String> = callers
+        .unfollowed
+        .iter()
+        .filter(|edge| pure(&edge.caller))
+        // `matches!` is the standard library's, and expands to a `match` with no call in it.
+        // `debug_assert!` is the standard library's too: the entry transitions' refusal of a wrong
+        // phase (review F2), a panic in a debug build only and compiled out of a release one.
+        .filter(|edge| {
+            !(edge.candidates.is_empty()
+                && matches!(edge.what.as_str(), "matches" | "debug_assert"))
+        })
+        .map(|edge| format!("{} -> `{}`", edge.caller, edge.what))
+        .collect();
+    assert!(
+        unfollowed.is_empty(),
+        "a life transition makes a call the graph cannot follow: {unfollowed:?}"
+    );
+}
+
+/// RED (O-4b; the ownership contract's (c)3, ruling E5) — **a restart asks only whether one is in
+/// flight**: of the record's successor methods, `restart_shell` calls only `restart_in_flight`
+/// and `await_successor`, and of `ShellLife` only `birth` — the replacement's question, whether it
+/// waits — never a phase of the pane it replaces; `land_pane_birth`'s successor road asks the same
+/// of the replacement it made.
+///
+/// The graph cannot tell the replacement's life from the old pane's, so a restart that asked the
+/// old pane's phase through `birth` would pass; one that asks it through any other read or
+/// transition (`leaf.life.pty().is_none()` → refuse) adds a callee and is named.
+///
+/// MUTATION: have `restart_shell` refuse unless `leaf.life.pty().is_some()` — named.
+#[test]
+fn a_restart_asks_only_whether_one_is_in_flight() {
+    let callers = bt_app_callers();
+    let asked = |caller: &str| -> (Vec<String>, Vec<String>) {
+        let callees = callers.callees_of(&app(caller));
+        let of_life = callees
+            .iter()
+            .filter(|callee| callee.starts_with(&life("")))
+            .cloned()
+            .collect();
+        let of_record = callees
+            .iter()
+            .filter(|callee| {
+                [
+                    "restart_in_flight",
+                    "await_successor",
+                    "successor_mut",
+                    "take_successor",
+                    "birth_at",
+                ]
+                .iter()
+                .any(|name| callee.as_str() == record(name))
+            })
+            .cloned()
+            .collect();
+        (of_life, of_record)
+    };
+    assert_eq!(
+        asked("runtime::terminal::Runtime::restart_shell"),
+        (
+            vec![life("birth")],
+            vec![record("await_successor"), record("restart_in_flight")]
+        ),
+        "a restart asks the record whether one is in flight, and the replacement whether it waits"
+    );
+    let (of_life, _) = asked("runtime::panes::Runtime::land_pane_birth");
+    assert_eq!(
+        of_life,
+        [life("birth")],
+        "a successor made again is asked only whether it waits"
     );
 }
 
