@@ -465,7 +465,7 @@ fn a_field_holding_the_keyboard_moves_the_caret_to_the_field() {
 /// the caret outlives it.
 ///
 /// The IMM32 forms (`ImeArea`) a whole composition at the prompt produces — opened, typed into,
-/// emptied, ended — are the very list main `3ae54f485` produced for the same steps (this test's
+/// emptied, ended — are the very list main `3cec1b48a` produced for the same steps (this test's
 /// `MAIN_AREAS`, recorded there), so Microsoft Pinyin's placement is untouched; the caret stands
 /// at each area's corner while it lasts; and the composition ending no longer takes the caret
 /// with it (it is the keyboard owner's, not the composition's).
@@ -551,9 +551,9 @@ fn a_compositions_input_method_calls_are_unchanged_and_the_caret_outlives_it() {
     );
 }
 
-/// What main `3ae54f485` told the input method for
+/// What main `3cec1b48a` told the input method for
 /// [`a_compositions_input_method_calls_are_unchanged_and_the_caret_outlives_it`]'s steps.
-const MAIN_AREAS: &[[i32; 4]] = &[];
+const MAIN_AREAS: &[[i32; 4]] = &[[44, 48, 9, 22], [80, 48, 9, 22], [44, 48, 9, 22]];
 
 /// RED (T-CARET-EVERY-LAYOUT ⑥) — **a window that opens without the focus never creates the
 /// caret**; given the focus, it does.
