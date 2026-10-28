@@ -135,6 +135,12 @@ impl<U> UiaReport<U> {
     }
 }
 
+/// The cells of a frame's first `rows` rows.
+fn drawn_cells(frame: &ViewportFrame, rows: usize) -> &[bt_transcript::CapturedCell] {
+    let end = (rows * frame.columns.get() as usize).min(frame.cells.len());
+    &frame.cells[..end]
+}
+
 /// **Whether two frames say the same to UI Automation** — everything [`pane_text`] reads: the
 /// width, the drawn rows' placement records (whole, which hold a little more than their places
 /// and wraps), their cells' text and spacers, the caret, the selection, and the metrics that
@@ -159,11 +165,7 @@ fn says_the_same(
     {
         return false;
     }
-    let cells = |frame: &ViewportFrame| {
-        let end = (rows * frame.columns.get() as usize).min(frame.cells.len());
-        &frame.cells[..end]
-    };
-    let (old_cells, new_cells) = (cells(old), cells(new));
+    let (old_cells, new_cells) = (drawn_cells(old, rows), drawn_cells(new, rows));
     old_cells.len() == new_cells.len()
         && old_cells.iter().zip(new_cells).all(|(old, new)| {
             old.wide_spacer == new.wide_spacer && old.text.as_str() == new.text.as_str()

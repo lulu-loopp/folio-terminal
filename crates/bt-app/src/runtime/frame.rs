@@ -2206,7 +2206,7 @@ impl<B: Backend> Runtime<'_, B> {
             && self.window.settings.category() == settings::SettingsCategory::About)
             .then(|| update::last_checked_deadline(now, update::unix_epoch_ms()))
             .flatten();
-        const DEADLINE_OWNERS: [WakeOwner; 56] = [
+        const DEADLINE_OWNERS: [WakeOwner; 57] = [
             WakeOwner::StartupPoll,
             WakeOwner::ImeCursor,
             WakeOwner::ShellCaret,
@@ -2260,6 +2260,7 @@ impl<B: Backend> Runtime<'_, B> {
             WakeOwner::FilesWatch,
             WakeOwner::RefusedFrame,
             WakeOwner::WindowTitle,
+            WakeOwner::UiAutomation,
             WakeOwner::SearchWalk,
             WakeOwner::WebEngineWarmUp,
             WakeOwner::SpareWebController,

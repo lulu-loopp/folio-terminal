@@ -320,7 +320,8 @@ fn rectangles_are_clipped_to_the_pane_body() {
 /// document's end, and every unit there but the document is the empty range at the end, never the
 /// row above; a full last row still encloses its last line at the end.
 ///
-/// MUTATION: drop the empty-last-row arm of `PaneText::enclosing`.
+/// MUTATION: drop the empty-last-row arm of `PaneText::enclosing`, or place a degenerate range at
+/// the end on the row before the end's (`PaneText::rectangles`).
 #[test]
 fn a_caret_on_an_empty_last_row_reads_as_that_row() {
     let text = PaneText::new(

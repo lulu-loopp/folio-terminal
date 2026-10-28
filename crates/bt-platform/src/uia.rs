@@ -565,7 +565,7 @@ impl PaneText {
             return Vec::new();
         }
         if start == end {
-            let row = self.row_of(start.min(self.len().saturating_sub(1)));
+            let row = self.row_of(start);
             let row_text = &self.rows[row];
             let local = (start.saturating_sub(self.starts[row]) as usize).min(row_text.units.len());
             let right_edge = (self.body.left + self.body.width - 1.0).max(self.body.left);

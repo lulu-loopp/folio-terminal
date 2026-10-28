@@ -783,7 +783,7 @@ impl<B: Backend> Runtime<'_, B> {
         } else {
             None
         };
-        drop(leaving);
+        hang_watch::at(leaving);
         if let Some(events) = owed {
             self.app.uia_events.request(events);
         }
