@@ -39,7 +39,7 @@ use crate::ime_report::NativeFacts;
 use crate::window_seam::{
     Backend, CompositorDoor, DeviceLayer, FolderPickerDoor, FrameDoor, Glass, ImagePickerDoor,
     ImeCaretDoor, LoopDoor, LoopProxy, MathMenuDoor, PageTree, SavePickerDoor, TaskbarDoor,
-    WindowHost,
+    UiaDoor, WindowHost,
 };
 use crate::{App, AppEvent, TabState, WindowRuntime};
 
@@ -384,6 +384,44 @@ impl TaskbarDoor for HeadlessTaskbar {
     }
 }
 
+/// **A headless window's answer to UI Automation**: no client, so a test plays one — it asks
+/// ([`Self::ask`]) and requests a pane's focus ([`Self::ask_focus`]) — and every publication the
+/// loop makes is recorded, in order.
+#[derive(Default)]
+pub(crate) struct HeadlessUia {
+    wanted: Cell<bool>,
+    focus_asked: Cell<Option<u64>>,
+    published: RefCell<Vec<bt_platform::uia::WindowText>>,
+}
+
+impl HeadlessUia {
+    /// A client's first question for the window's root.
+    pub(crate) fn ask(&self) {
+        self.wanted.set(true);
+    }
+    /// A client's `SetFocus` on a pane.
+    pub(crate) fn ask_focus(&self, seat: u64) {
+        self.focus_asked.set(Some(seat));
+    }
+    /// Every publication so far, oldest first.
+    pub(crate) fn published(&self) -> Vec<bt_platform::uia::WindowText> {
+        self.published.borrow().clone()
+    }
+}
+
+impl UiaDoor for HeadlessUia {
+    fn wanted(&self) -> bool {
+        self.wanted.get()
+    }
+    fn publish(&self, text: bt_platform::uia::WindowText) -> Option<bt_platform::uia::UiaEvents> {
+        self.published.borrow_mut().push(text);
+        None
+    }
+    fn take_focus_request(&self) -> Option<u64> {
+        self.focus_asked.take()
+    }
+}
+
 impl WindowHost for HeadlessWindow {
     fn id(&self) -> WindowId {
         self.id
@@ -532,13 +570,14 @@ impl WindowHost for HeadlessWindow {
         self.ledger.record(WindowEffect::SessionEndWatched);
         None
     }
+    type Uia = HeadlessUia;
     fn answer_ui_automation(
         &self,
         _shape: bt_platform::uia::Shape,
         _asked: Box<dyn Fn() + Send + Sync>,
-    ) -> Option<bt_platform::uia::UiaHook> {
+    ) -> Option<HeadlessUia> {
         self.ledger.record(WindowEffect::UiAutomationAnswered);
-        None
+        Some(HeadlessUia::default())
     }
     /// **A headless window hosts no web engine**: the place is recorded, and the answer is the
     /// refusal a page's open takes when there is no engine to open it in.
@@ -1939,11 +1978,10 @@ mod tests {
                 .watch_session_end(Box::new(|_| {}), Box::new(String::new))
                 .is_none()
         );
-        assert!(
-            window
-                .answer_ui_automation(bt_platform::uia::Shape::default(), Box::new(|| {}))
-                .is_none()
-        );
+        let uia = window
+            .answer_ui_automation(bt_platform::uia::Shape::default(), Box::new(|| {}))
+            .expect("a headless window answers through its recorder");
+        assert!(!uia.wanted(), "and no client has asked it anything");
         assert!(
             window.page_address(page).is_err(),
             "a headless window hosts no web engine, and says so"

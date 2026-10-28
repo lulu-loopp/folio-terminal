@@ -5,7 +5,7 @@
 //! [`bt_platform::uia::WindowText`]; this module builds that value from what the window already holds — each
 //! terminal pane of the active tab, its last presented frame and the metrics it was drawn at, its
 //! body's rectangle, its name, and whether it holds the keyboard — and decides when it is built:
-//! never before a client has asked ([`UiaReport::hook`]'s `wanted`), and after that only on a turn
+//! never before a client has asked (the door's `wanted`), and after that only on a turn
 //! where a frame reached the glass or what the frames do not say (the panes, their places, their
 //! names, the keyboard) moved. A turn that changes none of it builds nothing.
 
@@ -14,12 +14,12 @@ use bt_render::{CellMetrics, SeatViewport};
 use bt_viewport::ViewportFrame;
 use bt_viewport::horizontal::{WordClass, cluster_word_class};
 
-/// **One window's report**: the hook its subclass answers through, and what decides whether a
-/// turn publishes.
-pub(crate) struct UiaReport {
-    /// `None` where the window's handle could not be reached or its subclass would not install
-    /// (and in the headless suite): the window then answers UI Automation as it did before.
-    pub(crate) hook: Option<bt_platform::uia::UiaHook>,
+/// **One window's report**: the door its subclass answers through (`crate::window_seam::UiaDoor`;
+/// the product's is `bt_platform::uia::UiaHook`), and what decides whether a turn publishes.
+pub(crate) struct UiaReport<U> {
+    /// `None` where the window's handle could not be reached or its subclass would not install:
+    /// the window then answers UI Automation as it did before.
+    pub(crate) hook: Option<U>,
     /// A frame of the active tab reached the glass since the last publication.
     pub(crate) presented: bool,
     /// What the last publication was built from besides the frames.
@@ -35,8 +35,8 @@ pub(crate) struct PaneKey {
     pub(crate) name: String,
 }
 
-impl UiaReport {
-    pub(crate) fn new(hook: Option<bt_platform::uia::UiaHook>) -> Self {
+impl<U> UiaReport<U> {
+    pub(crate) fn new(hook: Option<U>) -> Self {
         Self {
             hook,
             presented: false,

@@ -88,7 +88,7 @@ impl From<EventLoopProxy<AppEvent>> for LoopProxy {
 pub(crate) mod prelude {
     pub(crate) use super::{
         Backend, CompositorDoor, DeviceLayer, FolderPickerDoor, FrameDoor, Glass, ImagePickerDoor,
-        ImeCaretDoor, LoopDoor, MathMenuDoor, SavePickerDoor, TaskbarDoor, WindowHost,
+        ImeCaretDoor, LoopDoor, MathMenuDoor, SavePickerDoor, TaskbarDoor, UiaDoor, WindowHost,
     };
 }
 
@@ -291,6 +291,8 @@ pub(crate) trait WindowHost {
         hear: Box<dyn Fn(bt_platform::session_end::SessionEnd)>,
         reason: Box<dyn Fn() -> String>,
     ) -> Option<bt_platform::session_end::SessionEndWatch>;
+    /// **What this window tells UI Automation**, through [`UiaDoor`].
+    type Uia: UiaDoor;
     /// **What this window tells UI Automation, answered through it** —
     /// `bt_platform::uia::UiaHook::install`; `None` where the window cannot install one. `asked`
     /// wakes the loop, on the window's thread or on one of UI Automation's.
@@ -298,7 +300,7 @@ pub(crate) trait WindowHost {
         &self,
         shape: bt_platform::uia::Shape,
         asked: Box<dyn Fn() + Send + Sync>,
-    ) -> Option<bt_platform::uia::UiaHook>;
+    ) -> Option<Self::Uia>;
     /// **A page's place in this window, as the web engine is told it** — the page's visual and
     /// this window's handle, sealed in a [`crate::webhost::SeatAddress`] only the engine reads.
     fn page_address(
@@ -492,6 +494,7 @@ impl WindowHost for Arc<Window> {
         let native = crate::native_window_of(self).ok()?;
         bt_platform::session_end::SessionEndWatch::install(native, hear, reason).ok()
     }
+    type Uia = bt_platform::uia::UiaHook;
     fn answer_ui_automation(
         &self,
         shape: bt_platform::uia::Shape,
@@ -1339,6 +1342,30 @@ impl ImeCaretDoor for bt_platform::ImeSystemCaret {
     }
     fn destroy(&mut self) {
         bt_platform::ImeSystemCaret::destroy(self);
+    }
+}
+
+/// **What a window tells UI Automation** (T-UIA-SKELETON) — `bt_platform::uia::UiaHook`'s
+/// methods, name for name. The door's promise is the hook's: after [`UiaDoor::publish`] returns,
+/// every answer a client gets is computed from that publication and from nothing else.
+pub(crate) trait UiaDoor {
+    /// Whether a client has asked this window for its root: until then the loop builds nothing.
+    fn wanted(&self) -> bool;
+    /// The window's new publication, and the focus event it owes, for the events lane.
+    fn publish(&self, text: bt_platform::uia::WindowText) -> Option<bt_platform::uia::UiaEvents>;
+    /// The pane a client asked to focus, taken once.
+    fn take_focus_request(&self) -> Option<u64>;
+}
+
+impl UiaDoor for bt_platform::uia::UiaHook {
+    fn wanted(&self) -> bool {
+        bt_platform::uia::UiaHook::wanted(self)
+    }
+    fn publish(&self, text: bt_platform::uia::WindowText) -> Option<bt_platform::uia::UiaEvents> {
+        bt_platform::uia::UiaHook::publish(self, text)
+    }
+    fn take_focus_request(&self) -> Option<u64> {
+        bt_platform::uia::UiaHook::take_focus_request(self)
     }
 }
 

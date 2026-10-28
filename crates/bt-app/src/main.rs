@@ -9824,7 +9824,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// questions from the publication, and what decides when a turn publishes
     /// (`Runtime::flush_uia`). Its hook is `None` where the subclass would not install, and the
     /// window then answers UI Automation as every window did before.
-    uia: uia_report::UiaReport,
+    uia: uia_report::UiaReport<<B::Window as WindowHost>::Uia>,
     tabs: Vec<TabState>,
     active_tab: usize,
     /// The one bit every shell in this window nudges the loop through. See

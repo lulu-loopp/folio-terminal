@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use windows::Win32::Foundation::{
     E_INVALIDARG, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
-use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
+use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, SAFEARRAY};
 use windows::Win32::System::Ole::{SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement};
 use windows::Win32::System::Variant::{VARENUM, VARIANT, VT_I4, VT_R8, VT_UNKNOWN};
@@ -50,7 +50,8 @@ use windows::Win32::UI::Accessibility::{
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::WM_DESTROY;
 use windows::core::{
-    BOOL, BSTR, ComObject, Error, HRESULT, IUnknown, Interface, PCWSTR, Ref, Result, implement,
+    BOOL, BSTR, ComObject, Error, HRESULT, IUnknown, IUnknownImpl, Interface, PCWSTR, Ref, Result,
+    implement,
 };
 
 use super::{Boundary, ClientRect, PaneText, Shape, WindowText, asks_for_the_root};
@@ -207,10 +208,12 @@ impl HookData {
     }
 
     /// Whether the root has been made.
+    #[cfg(test)]
     pub(super) fn made(&self) -> bool {
         self.root.borrow().is_some()
     }
 
+    #[cfg(test)]
     pub(super) fn shared(&self) -> &Arc<Shared> {
         &self.shared
     }
@@ -428,10 +431,12 @@ impl IRawElementProviderFragment_Impl for Root_Impl {
     fn Navigate(&self, direction: NavigateDirection) -> Result<IRawElementProviderFragment> {
         self.shared.alive()?;
         let text = self.shared.snapshot();
-        let seat = match direction {
-            NavigateDirection_FirstChild => text.panes.first(),
-            NavigateDirection_LastChild => text.panes.last(),
-            _ => None,
+        let seat = if direction == NavigateDirection_FirstChild {
+            text.panes.first()
+        } else if direction == NavigateDirection_LastChild {
+            text.panes.last()
+        } else {
+            None
         };
         match seat {
             Some(pane) => Ok(self.pane_fragment(pane.seat)),
@@ -544,17 +549,25 @@ impl IRawElementProviderSimple_Impl for Pane_Impl {
 
     fn GetPropertyValue(&self, propertyid: UIA_PROPERTY_ID) -> Result<VARIANT> {
         self.with(|pane| {
-            Ok(match propertyid {
-                UIA_ControlTypePropertyId => VARIANT::from(self.shared.shape.control_type_id()),
-                UIA_NamePropertyId => VARIANT::from(pane.name.as_str()),
-                UIA_AutomationIdPropertyId => VARIANT::from(format!("pane-{}", pane.seat).as_str()),
-                UIA_ClassNamePropertyId => VARIANT::from("FolioTerminalPane"),
-                UIA_HasKeyboardFocusPropertyId => VARIANT::from(pane.holds_keyboard),
-                UIA_IsKeyboardFocusablePropertyId
-                | UIA_IsEnabledPropertyId
-                | UIA_IsControlElementPropertyId
-                | UIA_IsContentElementPropertyId => VARIANT::from(true),
-                _ => VARIANT::default(),
+            let is = |id: UIA_PROPERTY_ID| propertyid == id;
+            Ok(if is(UIA_ControlTypePropertyId) {
+                VARIANT::from(self.shared.shape.control_type_id())
+            } else if is(UIA_NamePropertyId) {
+                VARIANT::from(pane.name.as_str())
+            } else if is(UIA_AutomationIdPropertyId) {
+                VARIANT::from(format!("pane-{}", pane.seat).as_str())
+            } else if is(UIA_ClassNamePropertyId) {
+                VARIANT::from("FolioTerminalPane")
+            } else if is(UIA_HasKeyboardFocusPropertyId) {
+                VARIANT::from(pane.holds_keyboard)
+            } else if is(UIA_IsKeyboardFocusablePropertyId)
+                || is(UIA_IsEnabledPropertyId)
+                || is(UIA_IsControlElementPropertyId)
+                || is(UIA_IsContentElementPropertyId)
+            {
+                VARIANT::from(true)
+            } else {
+                VARIANT::default()
             })
         })
     }
@@ -567,11 +580,14 @@ impl IRawElementProviderSimple_Impl for Pane_Impl {
 impl IRawElementProviderFragment_Impl for Pane_Impl {
     fn Navigate(&self, direction: NavigateDirection) -> Result<IRawElementProviderFragment> {
         self.shared.alive()?;
-        match direction {
-            NavigateDirection_Parent => Ok(self.root.to_interface()),
-            NavigateDirection_NextSibling => self.sibling(1),
-            NavigateDirection_PreviousSibling => self.sibling(-1),
-            _ => none(),
+        if direction == NavigateDirection_Parent {
+            Ok(self.root.to_interface())
+        } else if direction == NavigateDirection_NextSibling {
+            self.sibling(1)
+        } else if direction == NavigateDirection_PreviousSibling {
+            self.sibling(-1)
+        } else {
+            none()
         }
     }
 

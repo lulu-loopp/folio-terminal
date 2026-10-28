@@ -252,12 +252,12 @@ fn providers_read_the_newest_publication_only() {
     let root: IRawElementProviderFragment = data.root().to_interface();
     // SAFETY: in-process calls on this window's own providers.
     unsafe {
-        let pane: IRawElementProviderSimple = root
+        let simple: IRawElementProviderSimple = root
             .Navigate(NavigateDirection_FirstChild)
             .unwrap()
             .cast()
             .unwrap();
-        let text: ITextProvider = pane
+        let text: ITextProvider = simple
             .GetPatternProvider(UIA_TextPatternId)
             .unwrap()
             .cast()

@@ -234,7 +234,9 @@ fn a_selection_is_two_offsets_in_order() {
 #[test]
 fn units_and_shapes_are_windows_numbers() {
     assert_eq!(Boundary::of_text_unit(0), Boundary::Character);
-    assert_eq!(Boundary::of_text_unit(2), Boundary::Word, "Format is a word");
+    assert_eq!(Boundary::of_text_unit(1), Boundary::Word, "Format is a word");
+    assert_eq!(Boundary::of_text_unit(2), Boundary::Word);
+    assert_eq!(Boundary::of_text_unit(6), Boundary::Document);
     assert_eq!(Boundary::of_text_unit(5), Boundary::Document, "Page is the document");
     assert_eq!(Shape::Edit.control_type_id(), 50_004);
     assert_eq!(Shape::Document.control_type_id(), 50_030);
@@ -250,4 +252,77 @@ fn the_root_question_reads_the_low_bits() {
     assert!(asks_for_the_root(WM_GETOBJECT, 0xFFFF_FFE7));
     assert!(!asks_for_the_root(WM_GETOBJECT, -4), "OBJID_CLIENT is MSAA's");
     assert!(!asks_for_the_root(0x0010, -25));
+}
+
+/// RED (88a) — **a cluster with combining marks is one character**: `e` + U+0301 in one cell is
+/// one unit of two code points, and moving by a character steps over both.
+///
+/// MUTATION: make a unit per `char` in `RowText::from_cells`.
+#[test]
+fn combining_marks_stay_inside_their_character() {
+    let cells = ["e\u{301}", "x"];
+    let rows = vec![RowText::from_cells(
+        cells.iter().map(|text| CellIn {
+            text,
+            spacer: false,
+            word_start: false,
+        }),
+        place(0),
+        false,
+        0,
+    )];
+    let text = pane(rows);
+    assert_eq!(text.len(), 2, "é and x");
+    assert_eq!(text.text(0, 1, -1), "e\u{301}", "both code points");
+    assert_eq!(text.moved(0, Boundary::Character, 1), (1, 1));
+    assert_eq!(text.text(1, 2, -1), "x");
+}
+
+/// RED (88a) — **the caret on a wide glyph's spacer is a degenerate range at the glyph's start**:
+/// the grid names the second column, the caret's offset is the glyph's, and its rectangle stands
+/// at the glyph's left edge.
+///
+/// MUTATION: map a spacer column to the unit after it in `RowText::index_at_column`.
+#[test]
+fn the_caret_is_a_degenerate_range_on_the_wide_cell_start() {
+    let text = PaneText::new(
+        1,
+        String::new(),
+        ClientRect::default(),
+        true,
+        vec![row("a中b", 0, false, 0)],
+        Some(CellPoint { row: 0, column: 2 }),
+        None,
+    );
+    assert_eq!(text.caret(), Some(1), "the glyph, not its spacer");
+    let caret = text.rectangles(1, 1);
+    assert_eq!(caret.len(), 1);
+    assert_eq!((caret[0].left, caret[0].width), (14.0, 1.0), "at the glyph's left edge");
+}
+
+/// RED (88a) — **an unsupported unit expands to the next larger one**: `Format` encloses the word,
+/// `Page` the whole document.
+///
+/// MUTATION: map `Format` or `Page` to `Character` in `Boundary::of_text_unit`.
+#[test]
+fn expand_to_an_unsupported_unit_takes_the_next_larger() {
+    let text = pane(vec![row("ls foo", 0, false, 0), row("bar", 1, false, 0)]);
+    assert_eq!(text.enclosing(4, Boundary::of_text_unit(1)), (3, 6), "Format is foo");
+    assert_eq!(text.enclosing(4, Boundary::of_text_unit(5)), (0, text.len()), "Page is all");
+}
+
+/// RED (88a) — **a range made on an older, longer publication is clamped into the newer**: its
+/// offsets past the end become the end, and nothing reads past the rows.
+///
+/// MUTATION: drop `PaneText::clamp`'s `min`.
+#[test]
+fn a_range_from_an_older_snapshot_is_clamped() {
+    let older = pane((0..10).map(|index| row("row", index, false, 0)).collect());
+    let late = older.len() - 2;
+    let newer = pane((0..5).map(|index| row("row", index, false, 0)).collect());
+    assert!(late > newer.len(), "the fixture: the range starts past the newer end");
+    let (start, end) = (newer.clamp(late), newer.clamp(older.len()));
+    assert_eq!((start, end), (newer.len(), newer.len()));
+    assert_eq!(newer.text(start, end, -1), "");
+    assert_eq!(newer.rectangles(start, end).len(), 1, "a degenerate range at the end");
 }
