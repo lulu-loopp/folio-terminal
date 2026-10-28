@@ -604,7 +604,7 @@ A program title outranks the working directory in the name stack, so without int
 Command Prompt tab is *called* `C:\WINDOWS\System32\cmd.exe` and stays called that after `OSC 7`
 finally gives it a real directory. A shell reading its own command line back has not named itself,
 it has repeated what this terminal wrote — so a title equal to the pane's own resolved program is
-dropped before the name stack sees it (`LeafSession::announced_title`). This is the rule the pane
+dropped before the name stack sees it (`ShellSession::announced_title`). This is the rule the pane
 head already applied to a title equal to the profile's *display name*, said in the other
 vocabulary. `title Build` in that same pane is kept.
 

@@ -49,7 +49,7 @@ const FIXTURE_STRUCTS: [&str; 4] = ["App", "WindowRuntime", "TabState", "LeafSes
 /// the session record (ticket O-2, the contract's M0 and M1), and the facts of a
 /// pane's launch, `LaunchFacts`, nested beside it (ticket O-4a, M5). The session
 /// record is `ShellSession`, the contract's M0 name, since M8's rename (ticket
-/// O-5a, 2026-10-27; `ShellSession` before it): the census refuses a struct the
+/// O-5a, 2026-10-27; `LeafSession` before it): the census refuses a struct the
 /// package does not declare (`CensusFailure::NoSuchStruct`), so the name came in
 /// with the rename and replaced the old one, and the count stays ten. M7's
 /// `AttentionAccount` is not declared: its nest, `ShellSession.attention`, is the
@@ -1314,7 +1314,7 @@ fn non_read_rows(census: &FieldCensus, fact: &str) -> Vec<(&'static str, String)
 /// (`the_shell_life_is_one_fact_written_only_by_its_transitions`,
 /// `the_attention_account_is_one_fact`, `the_launch_facts_are_launch_facts`,
 /// `the_view_fields_are_term_views`), so they are named here but their rows are not repeated;
-/// `session`'s 47 writer functions are counted, not listed. The reads are not pinned, as O-2's
+/// `session`'s 47 writer functions are listed with the rest. The reads are not pinned, as O-2's
 /// pin does not pin them: the rename's base-to-head diff of `fields.tsv` shows them equal (the
 /// `fact` column only; O-5a's report §2), and the runtime dependency map's guard holds them
 /// since.
@@ -1449,14 +1449,62 @@ fn the_session_record_is_shell_session() {
             "`ShellSession.{field}`'s writes and lends"
         );
     }
-    let session_writers: BTreeSet<String> = non_read_rows(census, "ShellSession.session")
-        .into_iter()
-        .map(|(_, function)| function)
-        .collect();
+    // The hub's writes and lends: the 47 functions it had at O-4b's head (49 rows; two write
+    // and lend it both).
     assert_eq!(
-        session_writers.len(),
-        47,
-        "`ShellSession.session`'s writer functions are the 47 it had at O-4b's head"
+        non_read_rows(census, "ShellSession.session"),
+        expected(&[
+            ("access", "Runtime::advance_live_math_if_due"),
+            ("access", "Runtime::apply_clipboard_write_effect"),
+            ("access", "Runtime::insert_path_into_terminal"),
+            ("access", "Runtime::publish_frame_inner"),
+            ("access", "Runtime::redraw"),
+            ("access", "Runtime::send_paste"),
+            ("access", "dispatch_tab_decoration_tasks"),
+            ("access", "finish_leaf_birth"),
+            ("access", "leaf_session_mut"),
+            ("access", "release_due_leaf_resize"),
+            ("write", "Runtime::apply_block_max_height"),
+            ("write", "Runtime::apply_display_formulas"),
+            ("write", "Runtime::apply_inline_formulas"),
+            ("write", "Runtime::apply_repair_row_breaks"),
+            ("write", "Runtime::apply_scrollback_lines"),
+            ("write", "Runtime::apply_tables"),
+            ("write", "Runtime::ask_the_worker_about_a_link_target"),
+            ("write", "Runtime::clear_pane_screen"),
+            ("write", "Runtime::clear_pane_scrollback"),
+            ("write", "Runtime::drain_pty"),
+            ("write", "Runtime::finish_resize_if_quiescent"),
+            ("write", "Runtime::finish_synchronized_update_if_due"),
+            ("write", "Runtime::mouse_wheel"),
+            ("write", "Runtime::note_user_typing"),
+            ("write", "Runtime::present_math_toggle"),
+            ("write", "Runtime::press_math_toggle"),
+            ("write", "Runtime::publish_frame_inner"),
+            ("write", "Runtime::re_ask_the_worker_about_a_link_target"),
+            ("write", "Runtime::reset_terminal_modes"),
+            ("write", "Runtime::return_to_live_for_input"),
+            ("write", "Runtime::sample_math_toggle"),
+            ("write", "Runtime::set_hovered_math"),
+            ("write", "Runtime::settle_math_toggle"),
+            ("write", "Runtime::switch_math_source_now"),
+            ("write", "ShellSession::propose_cell"),
+            ("write", "ShellSession::propose_layout"),
+            ("write", "ShellSession::propose_size"),
+            ("write", "ShellSession::report_keyboard_focus"),
+            ("write", "TabState::clear_leaf_selection"),
+            ("write", "TabState::set_leaf_selection"),
+            ("write", "apply_answer"),
+            ("write", "drain_leaf_pty"),
+            ("write", "finish_leaf_birth"),
+            ("write", "forget_work_in_flight_for_seat"),
+            ("write", "keep_birth_death_face"),
+            ("write", "mark_leaf_seen"),
+            ("write", "place_leaf"),
+            ("write", "request"),
+            ("write", "settle_attention"),
+        ]),
+        "`ShellSession.session`'s writes and lends"
     );
 }
 

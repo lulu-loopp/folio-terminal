@@ -76,8 +76,9 @@ exact count of what it does see.
     `runtime/tabs.rs` (118), `runtime/floats.rs` (95), `runtime/keyboard.rs` (93),
     `runtime/windows.rs` (90) and `runtime/frame.rs` (81).
   - The `runtime/*` topics call each other along 372 edges (2,782 sites).
-- **doors.tsv**: 334 doors. 224 are on `WindowRuntime`, 55 on `App`, 34 on
-  `LeafSession` and 21 on `TabState`. `PreviewBuffer`, `PreviewPane`,
+- **doors.tsv**: 317 doors at O-5a (2026-10-27; 334 at O-1). 221 are on
+  `WindowRuntime`, 55 on `App`, 19 on `TabState`, 9 on `ShellSession`, 7 on
+  `LaunchFacts` and 6 on `TermView`. `PreviewBuffer`, `PreviewPane`,
   `DocumentView` and `PictureView` have none: O-7 and O-8 put their writes inside
   their own types.
 - **unclassified.tsv**: **275 items, 241 free functions and 34 `Runtime`
