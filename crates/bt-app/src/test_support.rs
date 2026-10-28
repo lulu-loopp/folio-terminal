@@ -474,9 +474,17 @@ impl Drop for EndSessionHome {
 
 /// The system asks, through the platform's own answer to `WM_QUERYENDSESSION` and the `hear` the
 /// window procedure is given; answers what the window procedure returns.
+pub(crate) fn resolved_callers_of(
+    type_owner: &str,
+    name: &str,
+) -> std::collections::BTreeSet<String> {
+    crate::pointer_app_tests::resolved_callers_of(type_owner, name)
+}
+
 pub(crate) fn the_system_asks() -> Option<isize> {
     bt_platform::session_end::answer(
         bt_platform::session_end::WM_QUERYENDSESSION,
+        0,
         0,
         &session_end::hear,
     )

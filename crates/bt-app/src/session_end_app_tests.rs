@@ -77,6 +77,7 @@ fn a_shutdown_taken_back_lets_the_document_go_and_puts_the_sentinel_back() {
         bt_platform::session_end::answer(
             bt_platform::session_end::WM_ENDSESSION,
             0,
+            0,
             &session_end::hear
         ),
         Some(0),
@@ -135,6 +136,7 @@ fn a_shutdown_taken_back_after_its_wait_ran_out_is_waited_for_again() {
     assert_eq!(
         bt_platform::session_end::answer(
             bt_platform::session_end::WM_ENDSESSION,
+            0,
             0,
             &session_end::hear
         ),

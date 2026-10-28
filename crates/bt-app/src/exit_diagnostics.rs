@@ -114,6 +114,8 @@ pub(crate) enum LastWindowCause<'a> {
     Quit,
     LaunchWireQuit,
     UpdateRestart,
+    /// The Restart Manager closed Folio (`ENDSESSION_CLOSEAPP`, T-RESTART-REGISTRATION).
+    SystemClosedIt,
     ControlledFailure(&'a str),
     UnknownRoad(&'static str),
 }
@@ -235,6 +237,7 @@ fn last_window_closed_line(cause: LastWindowCause<'_>) -> String {
         LastWindowCause::Quit => "quit".to_owned(),
         LastWindowCause::LaunchWireQuit => "launch wire quit".to_owned(),
         LastWindowCause::UpdateRestart => "update restart".to_owned(),
+        LastWindowCause::SystemClosedIt => "the system closed it".to_owned(),
         LastWindowCause::ControlledFailure(what) => {
             format!("controlled failure ({})", controlled_failure_text(what))
         }
@@ -451,6 +454,7 @@ mod tests {
             (LastWindowCause::PersonClosedIt, "the person closed it"),
             (LastWindowCause::LaunchWireQuit, "launch wire quit"),
             (LastWindowCause::UpdateRestart, "update restart"),
+            (LastWindowCause::SystemClosedIt, "the system closed it"),
             (
                 LastWindowCause::ControlledFailure("renderer failed\nwhile presenting"),
                 "controlled failure (renderer failed while presenting)",
