@@ -2,6 +2,7 @@
 // other package's types, a type named like one of them, a backend seam, and
 // a topic that calls them.
 mod glass;
+mod imported;
 mod ports;
 mod runtime;
 mod twin;

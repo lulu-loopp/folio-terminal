@@ -25,3 +25,9 @@ impl Shine for Pane {
         1
     }
 }
+
+// A call through a generic's trait, by the parameter's path: it reaches
+// whichever implementation the argument's type has.
+pub fn lit<T: Shine>(glass: &T) -> u32 {
+    T::shine(glass)
+}

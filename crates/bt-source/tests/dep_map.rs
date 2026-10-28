@@ -384,26 +384,37 @@ fn a_call_into_a_subject_trait_on_another_packages_type_is_an_edge() {
     assert!(
         !not_followed(&census)
             .iter()
-            .any(|(_, called, _)| *called == "port" || called.ends_with("::port")),
-        "a call of `port` is followed: {:?}",
+            .any(|(function, ..)| *function == "poke"),
+        "both of `poke`'s calls are followed: {:?}",
         not_followed(&census)
     );
 }
 
-/// RED (T-CENSUS-FOLLOWS-CALLS-INTO-BT-APP-TRAITS, 2026-10-27) — **a call the census cannot
-/// follow to one implementation is listed as not followed, by kind; never dropped.**
+/// RED (T-CENSUS-FOLLOWS-CALLS-INTO-BT-APP-TRAITS, 2026-10-27; review fold F1, F2) — **a call
+/// the census cannot follow to one implementation is listed as not followed, by kind; never
+/// dropped.**
 ///
-/// Two shapes. `prod`'s `nudge` reaches the subject's `impl Nudge for Cell`, whose self type is
-/// written `Cell`: a standard type's name and the other package's, and the census's rules do
-/// not read the `use` that says which, so the impl cannot be placed at the receiver's type. And
-/// `Window::paint`'s `self.glass.shine()` is a call through `B::Glass`, an associated type of a
-/// generic, which reaches whichever implementation the backend names: the census reads the
-/// bound's declaration for what the call does, and follows it to no implementation.
+/// - `prod`'s `nudge` reaches the subject's `impl Nudge for Cell`, whose self type is written
+///   `Cell`: a standard type's name and the other package's. The census's rules do not read the
+///   `use` that says which, so the impl cannot be placed at the receiver's type.
+/// - `elsewhere`'s `other` reaches `imported.rs`'s `impl Other for Session`, `Session` brought in
+///   by a `use` while the subject declares a `Session` of its own (`twin.rs`). Placed by package
+///   it would be the twin's, the call reaching nothing; a self type is placed only where the
+///   rules are sure (F1).
+/// - `renamed`'s `rename` is declared only by the twin `Session`: the other package's reaches
+///   it through a deref. The answer would stand on another type's method (F2).
+/// - `Window::paint`'s `self.glass.shine()` is a call through `B::Glass`, and `lit`'s
+///   `T::shine(..)` a call through a generic's trait by its path: each reaches whichever
+///   implementation the argument names, and the census follows it to none (F2, for the path).
+/// - `qualified`'s `<term_fixture::Session as Ports>::port(..)`: the rules read no qualified
+///   self type.
 ///
-/// RED before: neither is listed, and neither is an edge. MUTATION: in
-/// `Resolver::workspace_methods`, drop an outside impl whose self type is not placed instead of
-/// refusing it, and `prod`'s row is gone; in `Resolver::bound_method`, answer without the
-/// refusal, and `paint`'s row is gone.
+/// RED before the change: none is listed, and none is an edge. RED before the review fold:
+/// only `paint` and `prod` are. MUTATION: in `Resolver::reached`, drop an outside impl whose
+/// self type is not placed instead of refusing it, and `prod`'s and `elsewhere`'s rows are gone;
+/// in `Resolver::placed_for_sure`, accept a placement by package, and `elsewhere` is refused
+/// for the twin's reason while `prod`'s `Cell` impl is guessed into an edge;
+/// in `Resolver::bound_method`, answer without the refusal, and `paint`'s row is gone.
 #[test]
 fn a_call_the_census_cannot_follow_to_one_implementation_is_listed_by_kind() {
     let (_, census) = foreign_fixture();
@@ -417,10 +428,33 @@ fn a_call_the_census_cannot_follow_to_one_implementation_is_listed_by_kind() {
                  implementation: `B::Glass`"
             ),
             (
+                "lit",
+                "T::shine",
+                "a call through a generic's trait, which the census follows to no \
+                 implementation: `T::shine`"
+            ),
+            (
+                "elsewhere",
+                "other",
+                "a method a trait implements outside its type's package, on a self type the \
+                 rules do not place: `Session` is not declared in the impl's own module, and \
+                 the workspace declares 2 types of that name"
+            ),
+            (
                 "prod",
                 "nudge",
                 "a method a trait implements outside its type's package, on a self type the \
                  rules do not place: `Cell` is both a standard type and a workspace type"
+            ),
+            (
+                "qualified",
+                "Ports::port",
+                "a call through a qualified path"
+            ),
+            (
+                "renamed",
+                "rename",
+                "a method only other types of the receiver's name declare"
             ),
         ]
     );

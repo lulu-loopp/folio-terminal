@@ -1262,20 +1262,31 @@ pub(crate) struct Callees {
     /// Set when the call reaches a product item the rules cannot name — the
     /// walk lists the site as not followed with this reason, never drops it.
     pub(crate) refused: Option<String>,
+    /// Set when a `Type::f` path names a type whose `f` the rules do not
+    /// resolve: the walk lists the site with this reason unless the path's
+    /// free functions answer it instead (a module path is spelled the same).
+    pub(crate) unresolved: Option<String>,
 }
 
 impl Callees {
     pub(crate) fn items(items: BTreeSet<Callable>) -> Self {
         Self {
             items,
-            refused: None,
+            ..Self::default()
         }
     }
 
     pub(crate) fn refused(why: String) -> Self {
         Self {
-            items: BTreeSet::new(),
             refused: Some(why),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn unresolved(why: String) -> Self {
+        Self {
+            unresolved: Some(why),
+            ..Self::default()
         }
     }
 }

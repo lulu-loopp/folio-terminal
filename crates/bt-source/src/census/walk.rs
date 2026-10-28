@@ -759,9 +759,6 @@ impl<'w, 'd> Walk<'w, 'd> {
         let syn::Expr::Path(path) = &*call.func else {
             return;
         };
-        if path.qself.is_some() {
-            return;
-        }
         let segments: Vec<String> = path
             .path
             .segments
@@ -771,6 +768,18 @@ impl<'w, 'd> Walk<'w, 'd> {
         let Some(name) = segments.last().cloned() else {
             return;
         };
+        if path.qself.is_some() {
+            // `<T as Trait>::f(..)`: the rules read no qualified self type.
+            if self.resolver.subject.methods.contains(&name) {
+                self.sink.unfollowed(
+                    &self.module,
+                    &self.function,
+                    &segments.join("::"),
+                    "a call through a qualified path",
+                );
+            }
+            return;
+        }
         if segments.len() == 1 && self.lookup(&name).is_some() {
             // A closure or a function value held in a binding.
             return;
@@ -788,20 +797,24 @@ impl<'w, 'd> Walk<'w, 'd> {
         }
         let package = self.resolver.subject.package.clone();
         let reach = if segments.len() == 1 {
-            self.resolver.functions_at(&package, &self.module, &name)
+            Some(self.resolver.functions_at(&package, &self.module, &name))
         } else {
-            let Some(absolute) = self.resolver.absolute(&package, &self.module, &segments) else {
-                // The path leaves the package.
-                return;
-            };
-            let Some((last, at)) = absolute.split_last() else {
-                return;
-            };
-            self.resolver.functions_at(&package, &at.join("::"), last)
+            // `None`: the path leaves the package.
+            self.resolver
+                .absolute(&package, &self.module, &segments)
+                .and_then(|absolute| {
+                    let (last, at) = absolute.split_last()?;
+                    Some(self.resolver.functions_at(&package, &at.join("::"), last))
+                })
         };
-        if !reach.items.is_empty() {
-            self.edge(reach.items, &segments.join("::"));
-        } else if !reach.outside
+        if let Some(reach) = &reach
+            && !reach.items.is_empty()
+        {
+            self.edge(reach.items.clone(), &segments.join("::"));
+            return;
+        }
+        if let Some(reach) = &reach
+            && !reach.outside
             && !reach.test_only
             && self.resolver.subject.functions.contains(&name)
         {
@@ -811,6 +824,15 @@ impl<'w, 'd> Walk<'w, 'd> {
                 &segments.join("::"),
                 "a path the module's declarations and `use` items do not reach",
             );
+            return;
+        }
+        if let Some(why) = by_type.unresolved
+            && self.resolver.subject.methods.contains(&name)
+        {
+            // A type's path whose `f` the rules do not resolve, and no free function of
+            // that path either.
+            self.sink
+                .unfollowed(&self.module, &self.function, &segments.join("::"), &why);
         }
     }
 

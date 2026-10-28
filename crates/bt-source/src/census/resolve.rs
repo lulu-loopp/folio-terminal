@@ -580,10 +580,14 @@ impl<'d> Resolver<'d> {
     /// orphan rule puts a package's trait on another package's type in the trait's package, and
     /// the call graph matches an impl to a type the same way (`trait_members`, by the resolved
     /// self type). A trait method whose self type the rules cannot place is not guessed either
-    /// way: with no inherent method to answer first, the call is refused with the reason.
+    /// way: with no inherent method to answer first, the call is refused with the reason — even
+    /// over a trait method of the type's own packages, since the unplaced one may be the type's
+    /// too. And a call whose only product declarations of that name are other types' is refused
+    /// as well: the answer then stands on a method this type does not declare.
     fn reached(&self, all: &[MethodDecl], home: Option<&Home>) -> Callees {
         let mut found: BTreeSet<Callable> = BTreeSet::new();
         let mut unplaced: Option<String> = None;
+        let mut others = false;
         for decl in all {
             let Some(callable) = &decl.callable else {
                 continue;
@@ -597,6 +601,7 @@ impl<'d> Resolver<'d> {
                 continue;
             }
             if !callable.function.starts_with('<') {
+                others = true;
                 continue;
             }
             let placed = match &decl.self_ty {
@@ -607,7 +612,7 @@ impl<'d> Resolver<'d> {
                 Ok(places) if !places.is_disjoint(&home.places) => {
                     found.insert(callable.clone());
                 }
-                Ok(_) => {}
+                Ok(_) => others = true,
                 Err(why) => {
                     unplaced.get_or_insert(why);
                 }
@@ -621,13 +626,18 @@ impl<'d> Resolver<'d> {
         if !inherent.is_empty() {
             return Callees::items(inherent);
         }
-        match unplaced {
-            Some(why) => Callees::refused(format!(
+        if let Some(why) = unplaced {
+            return Callees::refused(format!(
                 "a method a trait implements outside its type's package, on a self type the rules \
                  do not place: {why}"
-            )),
-            None => Callees::items(found),
+            ));
         }
+        if found.is_empty() && others {
+            return Callees::refused(
+                "a method only other types of the receiver's name declare".to_owned(),
+            );
+        }
+        Callees::items(found)
     }
 
     /// The declarations an `impl` block's self type is placed at: none for a standard or an
@@ -635,14 +645,7 @@ impl<'d> Resolver<'d> {
     fn self_type_places(&self, ty: &Ty) -> Result<BTreeSet<Place>, String> {
         match self.expand(ty.clone()) {
             Ty::Ref { inner, .. } => self.self_type_places(&inner),
-            Ty::Named(named) => match self.kind(&named) {
-                Kind::Four(owner) => Ok(self.four_home(&owner).places),
-                Kind::Workspace { decls, .. } => {
-                    Ok(decls.iter().map(|decl| decl.place.clone()).collect())
-                }
-                Kind::Std(_) | Kind::External(_) => Ok(BTreeSet::new()),
-                Kind::Ambiguous(why) => Err(why),
-            },
+            Ty::Named(named) => self.placed_for_sure(&named),
             Ty::Unknown(why) => Err(why),
             Ty::Tuple(_) | Ty::Slice(_) | Ty::Fn(_) | Ty::Iter(_) | Ty::Entry(_) => {
                 Ok(BTreeSet::new())
@@ -653,6 +656,48 @@ impl<'d> Resolver<'d> {
             )),
             Ty::Traits(_) => Err("an `impl` on a trait object".to_owned()),
         }
+    }
+
+    /// **An `impl` header's self type, placed only where the rules are sure.** The rules place a
+    /// name without reading `use` items, so a bare name not declared in the impl's own module goes
+    /// to a type of that name in the impl's package, then anywhere — and `use other::X; impl T for
+    /// X` beside a type `X` of the impl's own package would be placed at the wrong one. Sure is:
+    /// the name declared in the impl's own module, a path that reaches one declaration, or a bare
+    /// name the workspace declares once and no standard type has. Anything else is an `Err`.
+    fn placed_for_sure(&self, named: &Named) -> Result<BTreeSet<Place>, String> {
+        let name = &named.name;
+        if matches!(named.krate.as_deref(), Some("std" | "core" | "alloc")) {
+            return Ok(BTreeSet::new());
+        }
+        let decls: &[TypeDecl] = self.declarations.types.get(name).map_or(&[], Vec::as_slice);
+        let visible: Vec<Place> = decls
+            .iter()
+            .filter(|decl| decl.public || decl.place.0 == named.home)
+            .map(|decl| decl.place.clone())
+            .collect();
+        let Some((found, how)) = self.locate(named, &visible) else {
+            // No workspace type of that name: a standard or an outside one.
+            return Ok(BTreeSet::new());
+        };
+        let path = named.krate.is_some() || !named.prefix.is_empty();
+        let sure = how == How::Exact
+            || (path && found.len() == 1)
+            || (decls.len() == 1 && std_kind(name).is_none());
+        if !sure {
+            return Err(if std_kind(name).is_some() {
+                format!("`{name}` is both a standard type and a workspace type")
+            } else {
+                format!(
+                    "`{name}` is not declared in the impl's own module, and the workspace \
+                     declares {} types of that name",
+                    decls.len()
+                )
+            });
+        }
+        if found.len() > 1 {
+            return Err(format!("`{name}` names {} declarations", found.len()));
+        }
+        Ok(found.into_iter().collect())
     }
 
     /// Where one of the four is declared: the subject package, at its one declaration.
@@ -954,12 +999,32 @@ impl<'d> Resolver<'d> {
     /// argument position receive, and the product items the call reaches.
     /// `owner` is the type the path names.
     pub(crate) fn associated(&self, owner: &Ty, function: &str) -> Associated {
-        let Ty::Named(named) = self.expand(owner.clone()) else {
-            return (
-                Ty::unknown(format!("`{function}` on a type that is not a path")),
-                Vec::new(),
-                Callees::default(),
-            );
+        let named = match self.expand(owner.clone()) {
+            Ty::Named(named) => named,
+            other => {
+                let unresolved = match &other {
+                    Ty::Param(param) => format!(
+                        "a call through a generic's trait, which the census follows to no \
+                         implementation: `{param}::{function}`"
+                    ),
+                    Ty::Assoc { param, name } => format!(
+                        "a call through an associated type, which the census follows to no \
+                         implementation: `{param}::{name}::{function}`"
+                    ),
+                    Ty::Unknown(why) => format!(
+                        "a call by a type's path, whose function the rules do not resolve: {why}"
+                    ),
+                    _ => format!(
+                        "a call by a type's path, whose function the rules do not resolve: `{function}` on {}",
+                        other.spelling()
+                    ),
+                };
+                return (
+                    Ty::unknown(format!("`{function}` on a type that is not a path")),
+                    Vec::new(),
+                    Callees::unresolved(unresolved),
+                );
+            }
         };
         let home = match self.kind(&named) {
             Kind::Four(owner) => Some(self.four_home(&owner)),
@@ -970,20 +1035,37 @@ impl<'d> Resolver<'d> {
                 places: decls.iter().map(|decl| decl.place.clone()).collect(),
             }),
             Kind::Std(_) => None,
-            Kind::External(name) | Kind::Ambiguous(name) => {
+            Kind::External(name) => {
                 if builds_itself(function) {
                     return (Ty::Named(named), Vec::new(), Callees::default());
                 }
+                // A module's path is spelled like a type's: what it names is the free
+                // functions' rules to say.
                 return (
                     Ty::unknown(format!("`{name}::{function}`")),
                     Vec::new(),
                     Callees::default(),
                 );
             }
+            Kind::Ambiguous(why) => {
+                if builds_itself(function) {
+                    return (Ty::Named(named), Vec::new(), Callees::default());
+                }
+                return (
+                    Ty::unknown(format!("`{}::{function}`", named.name)),
+                    Vec::new(),
+                    Callees::unresolved(format!(
+                        "a call by a type's path, whose function the rules do not resolve: {why}"
+                    )),
+                );
+            }
         };
+        // A standard type's own functions are the lists' (none reaches a product item); a
+        // workspace extension trait implemented for it is the workspace's, as for a method call.
+        let workspace = home.is_some();
         let found = match home {
             Some(home) => self.workspace_methods(&named.name, function, Some(&home), &named.args),
-            None => Ok(None),
+            None => self.workspace_methods(&named.name, function, None, &named.args),
         };
         match found {
             Ok(Some(found)) => {
@@ -996,12 +1078,27 @@ impl<'d> Resolver<'d> {
             Ok(None) if builds_itself(function) => {
                 (Ty::Named(named), Vec::new(), Callees::default())
             }
-            Ok(None) => (
+            Ok(None) if !workspace => (
                 Ty::unknown(format!("`{}::{function}` is not declared", named.name)),
                 Vec::new(),
                 Callees::default(),
             ),
-            Err(why) => (Ty::unknown(why), Vec::new(), Callees::default()),
+            Ok(None) => (
+                Ty::unknown(format!("`{}::{function}` is not declared", named.name)),
+                Vec::new(),
+                Callees::unresolved(format!(
+                    "a call by a type's path, whose function the rules do not resolve: `{}::{function}` \
+                     is not declared",
+                    named.name
+                )),
+            ),
+            Err(why) => (
+                Ty::unknown(why.clone()),
+                Vec::new(),
+                Callees::unresolved(format!(
+                    "a call by a type's path, whose function the rules do not resolve: {why}"
+                )),
+            ),
         }
     }
 
