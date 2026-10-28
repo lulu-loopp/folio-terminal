@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::Callable;
 use super::types::{
-    Callees, Class, Declarations, FnDecl, Method, MethodDecl, Named, Place, Receiver, Std, Ty,
-    TypeDecl, builds_itself, closures_by_position, entry_method, external_method, iterator_method,
-    prelude_method, std_kind, std_method,
+    Binding, Callees, Class, Declarations, FnDecl, Method, MethodDecl, Named, Place, Receiver, Std,
+    Ty, TypeDecl, builds_itself, closures_by_position, entry_method, external_method,
+    iterator_method, prelude_method, std_kind, std_method,
 };
 
 /// One field of the four: where it is declared and whether it is a hub.
@@ -715,10 +715,8 @@ impl<'d> Resolver<'d> {
     }
 
     /// **A method of the traits an associated type is bounded by** — the trait's own declaration
-    /// of it, read for its receiver and its return as an implementation's would be.
-    ///
-    /// The call reaches whichever implementation the generic's argument names, which the census
-    /// does not follow: the answer says what the call does and refuses to name what it reaches.
+    /// of it, read for its receiver and its return as an implementation's would be — and what the
+    /// call reaches: [`Resolver::through_binding`].
     fn bound_method(
         &self,
         param: &str,
@@ -728,6 +726,7 @@ impl<'d> Resolver<'d> {
         let Some(traits) = self.declarations.associated_bounds.get(associated) else {
             return Ok(None);
         };
+        let callees = self.through_binding(param, associated, method);
         let answers: Vec<Method> = traits
             .iter()
             .filter_map(|bound| {
@@ -752,10 +751,7 @@ impl<'d> Resolver<'d> {
                     ret,
                     closure: Vec::new(),
                     by_position: closures_by_position(&decl.params),
-                    callees: Callees::refused(format!(
-                        "a call through an associated type, which the census follows to no \
-                         implementation: `{param}::{associated}`"
-                    )),
+                    callees: callees.clone(),
                 }
             })
             .collect();
@@ -765,6 +761,199 @@ impl<'d> Resolver<'d> {
         agreement(&answers).map(Some).ok_or_else(|| {
             format!("the bounds of `{associated}` declare `{method}` in ways that disagree")
         })
+    }
+
+    /// **What a call of `method` through `param::associated` reaches** (T-CENSUS-FOLLOWS-
+    /// ASSOCIATED-TYPE-CALLS): the bound trait's implementation of it on the type the product
+    /// impls bind the associated type to.
+    ///
+    /// - **The binding.** Every product `impl` of a trait that declares an associated type of that
+    ///   name binds it; the call is followed only when they all bind one type
+    ///   ([`Resolver::same_type`]) — so `B::Device`, bound by `Backend`'s one product impl and by
+    ///   `Glass`'s, both to one `GpuContext`, is followed. With no product binding, a binding to
+    ///   the impl's own generic, bindings that differ, or bindings the rules cannot compare, the
+    ///   call is refused with that reason.
+    /// - **The method.** On a value of a generic's associated type the language offers only the
+    ///   bound traits' methods, so the callee is the bound trait's `impl` method on that type —
+    ///   never the type's own inherent method of the same name, which the window seam's forwards
+    ///   call in turn — or, where that impl does not write it, the trait's provided method.
+    ///
+    /// Associated types and traits are keyed by bare name, as
+    /// [`Declarations::associated_bounds`] says.
+    fn through_binding(&self, param: &str, associated: &str, method: &str) -> Callees {
+        let through = format!("`{param}::{associated}`");
+        let declarers = self.declarations.associated_declarers.get(associated);
+        let bindings: Vec<&Binding> = self
+            .declarations
+            .associated_bindings
+            .get(associated)
+            .into_iter()
+            .flatten()
+            .filter(|binding| {
+                binding.product
+                    && declarers.is_some_and(|traits| traits.contains(&binding.trait_name))
+            })
+            .collect();
+        let Some((first, rest)) = bindings.split_first() else {
+            return Callees::refused(format!(
+                "an associated type no product impl binds, which the census follows to no \
+                 implementation: {through}"
+            ));
+        };
+        let generic = bindings
+            .iter()
+            .find_map(|binding| match self.expand(binding.ty.clone()) {
+                Ty::Param(generic) => Some(generic),
+                _ => None,
+            });
+        if let Some(generic) = generic {
+            return Callees::refused(format!(
+                "an associated type an impl binds to its own generic, which the census follows to \
+                 no implementation: {through} (`{generic}`)"
+            ));
+        }
+        for binding in rest {
+            match self.same_type(&first.ty, &binding.ty) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Callees::refused(format!(
+                        "an associated type the product impls bind to types that differ: \
+                         {through} (`{}`, `{}`)",
+                        first.ty.spelling(),
+                        binding.ty.spelling()
+                    ));
+                }
+                Err(why) => {
+                    return Callees::refused(format!(
+                        "an associated type whose bindings the rules do not compare: {through}, \
+                         {why}"
+                    ));
+                }
+            }
+        }
+        let bound = &first.ty;
+        let owner = match self.expand(bound.clone()) {
+            Ty::Named(named) => named.name,
+            other => {
+                return Callees::refused(format!(
+                    "an associated type bound to a type that is not a path: {through} (`{}`)",
+                    other.spelling()
+                ));
+            }
+        };
+        let traits = self.declarations.associated_bounds.get(associated);
+        let mut found: BTreeSet<Callable> = BTreeSet::new();
+        for decl in self
+            .declarations
+            .methods
+            .get(&(owner, method.to_owned()))
+            .into_iter()
+            .flatten()
+        {
+            let (Some(callable), Some(trait_name), Some(self_ty)) =
+                (&decl.callable, &decl.trait_name, &decl.self_ty)
+            else {
+                continue;
+            };
+            if !traits.is_some_and(|traits| traits.contains(trait_name)) {
+                continue;
+            }
+            match self.same_type(self_ty, bound) {
+                Ok(true) => {
+                    found.insert(callable.clone());
+                }
+                Ok(false) => {}
+                Err(why) => {
+                    return Callees::refused(format!(
+                        "an associated type whose bound type's impls the rules do not compare: \
+                         {through}, {why}"
+                    ));
+                }
+            }
+        }
+        if found.is_empty() {
+            // The impl does not write it: the bound trait's provided method answers.
+            found = traits
+                .into_iter()
+                .flatten()
+                .filter_map(|bound| {
+                    self.declarations
+                        .trait_declarations
+                        .get(&(bound.clone(), method.to_owned()))
+                })
+                .flatten()
+                .filter_map(|decl| decl.callable.clone())
+                .collect();
+        }
+        if found.is_empty() {
+            return Callees::refused(format!(
+                "a method of an associated type's bound trait that neither the bound type's impl \
+                 nor the trait writes: {through} (`{method}`)"
+            ));
+        }
+        Callees::items(found)
+    }
+
+    /// **Whether two types, each as written where it is, are one type.** The same spelling in the
+    /// same module is one type, whatever it names: the items of one module see one scope.
+    /// Otherwise a workspace type is its declaration, placed only where the rules are sure
+    /// ([`Resolver::placed_for_sure`]), with its arguments compared the same way; a standard type
+    /// is its kind; two outside types of one name written differently cannot be told apart and
+    /// are an `Err`, as is a type the rules do not read.
+    fn same_type(&self, a: &Ty, b: &Ty) -> Result<bool, String> {
+        let (a, b) = (self.expand(a.clone()), self.expand(b.clone()));
+        if a == b {
+            return Ok(true);
+        }
+        let all = |xs: &[Ty], ys: &[Ty]| -> Result<bool, String> {
+            if xs.len() != ys.len() {
+                return Ok(false);
+            }
+            for (x, y) in xs.iter().zip(ys) {
+                if !self.same_type(x, y)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        };
+        match (&a, &b) {
+            (
+                Ty::Ref {
+                    mutable: first,
+                    inner: x,
+                },
+                Ty::Ref {
+                    mutable: second,
+                    inner: y,
+                },
+            ) => Ok(first == second && self.same_type(x, y)?),
+            (Ty::Tuple(xs), Ty::Tuple(ys)) => all(xs, ys),
+            (Ty::Slice(x), Ty::Slice(y)) => self.same_type(x, y),
+            // A place is a module: a type is its name there.
+            (Ty::Named(x), Ty::Named(y)) if x.name != y.name => Ok(false),
+            (Ty::Named(x), Ty::Named(y)) => {
+                let x_places = self.placed_for_sure(x)?;
+                let y_places = self.placed_for_sure(y)?;
+                match (x_places.is_empty(), y_places.is_empty()) {
+                    (false, false) => Ok(x_places == y_places && all(&x.args, &y.args)?),
+                    (true, true) if std_kind(&x.name).is_some() => all(&x.args, &y.args),
+                    (true, true) => Err(format!(
+                        "`{}`, a type outside the workspace, written two ways",
+                        x.name
+                    )),
+                    _ => Ok(false),
+                }
+            }
+            (Ty::Param(_) | Ty::Assoc { .. } | Ty::Traits(_) | Ty::Unknown(_), _)
+            | (_, Ty::Param(_) | Ty::Assoc { .. } | Ty::Traits(_) | Ty::Unknown(_)) => {
+                Err(format!(
+                    "`{}` and `{}`, which the rules do not compare",
+                    a.spelling(),
+                    b.spelling()
+                ))
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Whether `Type::method` is declared with a receiver — called with the
@@ -1007,10 +1196,29 @@ impl<'d> Resolver<'d> {
                         "a call through a generic's trait, which the census follows to no \
                          implementation: `{param}::{function}`"
                     ),
-                    Ty::Assoc { param, name } => format!(
-                        "a call through an associated type, which the census follows to no \
-                         implementation: `{param}::{name}::{function}`"
-                    ),
+                    Ty::Assoc { param, name } => match self.bound_method(param, name, function) {
+                        Ok(Some(found)) => match found.callees.refused {
+                            None => {
+                                return (
+                                    Ty::unknown(format!(
+                                        "`{function}` on a type that is not a path"
+                                    )),
+                                    Vec::new(),
+                                    found.callees,
+                                );
+                            }
+                            Some(why) => why,
+                        },
+                        Ok(None) => format!(
+                            "a call through an associated type, whose bounds declare no such \
+                             function: `{param}::{name}::{function}`"
+                        ),
+                        Err(why) => {
+                            format!(
+                                "a call through an associated type, whose bounds disagree: {why}"
+                            )
+                        }
+                    },
                     Ty::Unknown(why) => format!(
                         "a call by a type's path, whose function the rules do not resolve: {why}"
                     ),

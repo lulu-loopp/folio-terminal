@@ -536,10 +536,23 @@ pub(crate) struct MethodDecl {
     /// The `impl` block's self type as written there: the type the method is
     /// declared on, which the bare name it is filed under does not say.
     pub(crate) self_ty: Option<Ty>,
+    /// The trait the `impl` block implements, by its bare name (`Glass`, `Owed` for
+    /// `Owed<Id>`); `None` for an inherent method and a trait's own declaration.
+    pub(crate) trait_name: Option<String>,
     pub(crate) params: Vec<Ty>,
     /// The item, when a product build can contain it: what a call resolved
     /// to this declaration reaches.
     pub(crate) callable: Option<Callable>,
+}
+
+/// **One `impl` block's binding of an associated type** — `type Glass = WindowRenderer;` in
+/// `impl Backend for Native`: the trait implemented (by its bare name), the type bound, read in the
+/// block's module with the block's generics in scope, and whether a product build has the block.
+#[derive(Clone, Debug)]
+pub(crate) struct Binding {
+    pub(crate) trait_name: String,
+    pub(crate) ty: Ty,
+    pub(crate) product: bool,
 }
 
 /// One free function of the workspace.
@@ -584,7 +597,8 @@ pub(crate) struct Declarations {
     /// trait's signature is not trusted for that name.
     pub(crate) trait_methods: BTreeSet<String>,
     /// A workspace trait's own method declarations, by trait and method name: what a call on a
-    /// [`Ty::Assoc`] bounded by that trait answers.
+    /// [`Ty::Assoc`] bounded by that trait answers. `callable` is set for a provided method (one
+    /// with a body) a product build has.
     pub(crate) trait_declarations: BTreeMap<(String, String), Vec<MethodDecl>>,
     /// The traits each associated type name is bounded by, over every workspace trait that
     /// declares one (`type Glass: Glass<..>;` gives `Glass` → `{Glass}`).
@@ -596,6 +610,13 @@ pub(crate) struct Declarations {
     /// resolved to every candidate's declaration, and only agreeing ones answer. `bt-app` declares
     /// each name once (the window seam's `Backend`), so nothing is merged there today.
     pub(crate) associated_bounds: BTreeMap<String, BTreeSet<String>>,
+    /// The traits that declare each associated type name, bounded or not (`Device` →
+    /// `{Backend, Glass}`): whose impls' bindings of the name a call through it reaches.
+    pub(crate) associated_declarers: BTreeMap<String, BTreeSet<String>>,
+    /// Every `impl` block's bindings of associated types, by the associated type's name (T-CENSUS-
+    /// FOLLOWS-ASSOCIATED-TYPE-CALLS): what a call through `B::Glass` reaches is the bound trait's
+    /// method on the type the product impls bind `Glass` to.
+    pub(crate) associated_bindings: BTreeMap<String, Vec<Binding>>,
     /// Crate (library target) names, mapped to their packages.
     pub(crate) crates: BTreeMap<String, String>,
     /// Every module's `use` items, by package and module path.
@@ -647,6 +668,18 @@ fn self_arguments(written: &Written, self_ty: &syn::Type) -> Vec<Ty> {
     }
 }
 
+/// A trait's name as an item or a block spells it (`Owed<Id>`, `crate::seam::Glass`), bare:
+/// `Owed`, `Glass`.
+pub(crate) fn bare_trait_name(spelled: &str) -> String {
+    let unargued = spelled.split('<').next().unwrap_or(spelled);
+    unargued
+        .rsplit("::")
+        .next()
+        .unwrap_or(unargued)
+        .trim()
+        .to_owned()
+}
+
 /// An `impl` block's header, parsed: the block with its body emptied.
 pub(crate) fn impl_header(index: &Index, block: &ImplRecord) -> Option<syn::ItemImpl> {
     let head = &index.union()[block.whole().start()..block.body().start()];
@@ -696,6 +729,7 @@ impl Declarations {
 
     fn read_one(&mut self, index: &Index, crates: &BTreeSet<String>) {
         self.read_associated_bounds(index);
+        self.read_bindings(index, crates);
         self.read_derefs(index, crates);
         self.read_aliases(index, crates);
         self.read_imports(index);
@@ -730,6 +764,10 @@ impl Declarations {
                 let syn::TraitItem::Type(associated) = member else {
                     continue;
                 };
+                self.associated_declarers
+                    .entry(associated.ident.to_string())
+                    .or_default()
+                    .insert(declaration.name().to_owned());
                 for bound in &associated.bounds {
                     if let syn::TypeParamBound::Trait(bound) = bound
                         && let Some(last) = bound.path.segments.last()
@@ -739,6 +777,42 @@ impl Declarations {
                             .or_default()
                             .insert(last.ident.to_string());
                     }
+                }
+            }
+        }
+    }
+
+    /// Every trait `impl` block's `type X = T;` items, each read in the block's module with the
+    /// block's generics in scope (a binding to one of them is [`Ty::Param`]).
+    fn read_bindings(&mut self, index: &Index, crates: &BTreeSet<String>) {
+        for block in index.impls() {
+            let Some(trait_name) = block.trait_path().and_then(<[String]>::last) else {
+                continue;
+            };
+            let Ok(parsed) = syn::parse_str::<syn::ItemImpl>(index.text(block.whole())) else {
+                self.unparsed
+                    .push(format!("impl {trait_name} for {}", block.type_owner()));
+                continue;
+            };
+            let package = package_at(index, block.whole().start());
+            let module = module_at(index, block.whole().start());
+            let mut written = self.written(package, module, crates);
+            written.enter(&parsed.generics);
+            let product = block.declared.iter().any(|path| {
+                path.compilation
+                    .and(block.variant().compilation)
+                    .permits_product()
+            });
+            for member in &parsed.items {
+                if let syn::ImplItem::Type(binding) = member {
+                    self.associated_bindings
+                        .entry(binding.ident.to_string())
+                        .or_default()
+                        .push(Binding {
+                            trait_name: trait_name.clone(),
+                            ty: written.ty(&binding.ty),
+                            product,
+                        });
                 }
             }
         }
@@ -942,6 +1016,11 @@ impl Declarations {
                     syn::ReturnType::Type(_, ty) => written.ty(ty),
                 };
                 let params = typed_inputs(&written, &signature);
+                // A provided method (one with a body) is what a call reaches on a type whose
+                // impl does not write it.
+                let callable = item
+                    .body()
+                    .and_then(|_| Callable::of(index, item, &package));
                 self.trait_declarations
                     .entry((trait_name.to_owned(), item.name().to_owned()))
                     .or_default()
@@ -952,8 +1031,9 @@ impl Declarations {
                         impl_params: Vec::new(),
                         self_args: Vec::new(),
                         self_ty: None,
+                        trait_name: None,
                         params,
-                        callable: None,
+                        callable,
                     });
             }
             return;
@@ -988,6 +1068,7 @@ impl Declarations {
                 impl_params,
                 self_args,
                 self_ty,
+                trait_name: item.trait_name().map(bare_trait_name),
                 params,
                 callable,
             });
