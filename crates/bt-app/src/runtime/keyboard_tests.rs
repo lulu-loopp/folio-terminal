@@ -276,9 +276,19 @@ impl Turns {
         self.0 += Duration::from_millis(250);
         self.0
     }
+
+    /// Count on from the later of this test's last turn and the real clock, after a step the
+    /// product times with `Instant::now()` itself (`Ime::Enabled` flushes the area at the real
+    /// instant): every turn after this is a whole interval and more past both that flush and the
+    /// turns before it, however long the steps took on a loaded machine (review F2).
+    #[cfg(windows)]
+    fn after_the_real_flush(&mut self) {
+        self.0 = self.0.max(Instant::now());
+    }
 }
 
 /// The one caret placement in `effects`, or a panic naming what was there.
+#[cfg(windows)]
 fn the_one_caret(effects: &[WindowEffect]) -> (i32, i32) {
     let placed: Vec<(i32, i32)> = effects
         .iter()
@@ -305,6 +315,7 @@ fn the_one_caret(effects: &[WindowEffect]) -> (i32, i32) {
 /// MUTATION (observed red): restore the `if !self.window.ime_active { return; }` head of
 /// `Runtime::offer_ime_caret` — no `ImeCaret` before the composition.
 #[test]
+#[cfg(windows)]
 fn the_shell_cursor_has_a_system_caret_without_a_composition() {
     let mut folio = HeadlessFolio::with_tabs(
         "caret-every-layout-shell",
@@ -353,6 +364,7 @@ fn the_shell_cursor_has_a_system_caret_without_a_composition() {
 /// MUTATION (observed red): drop `self.window.window_focused &&` from `caret_owner` in
 /// `Runtime::offer_ime_caret` — the frame after the blur places the caret again.
 #[test]
+#[cfg(windows)]
 fn focus_loss_takes_the_caret_and_the_next_turns_do_not_bring_it_back() {
     let folio = HeadlessFolio::with_tabs(
         "caret-every-layout-blur",
@@ -389,6 +401,7 @@ fn focus_loss_takes_the_caret_and_the_next_turns_do_not_bring_it_back() {
 /// MUTATION (observed red): drop the `self.vacate_system_caret()` call from
 /// `Runtime::offer_ime_caret` — the caret stays standing at the prompt under the sheet.
 #[test]
+#[cfg(windows)]
 fn an_owner_without_a_caret_takes_it_down_once() {
     let mut folio = HeadlessFolio::with_tabs(
         "caret-every-layout-modal",
@@ -427,6 +440,7 @@ fn an_owner_without_a_caret_takes_it_down_once() {
 /// MUTATION (observed red): want the system caret only for `ImeCaretSource::TerminalCursor` in
 /// `Runtime::offer_ime_caret` — the caret stays at the prompt.
 #[test]
+#[cfg(windows)]
 fn a_field_holding_the_keyboard_moves_the_caret_to_the_field() {
     let mut folio = HeadlessFolio::with_tabs(
         "caret-every-layout-field",
@@ -465,8 +479,11 @@ fn a_field_holding_the_keyboard_moves_the_caret_to_the_field() {
 /// the caret outlives it.
 ///
 /// The IMM32 forms (`ImeArea`) a whole composition at the prompt produces — opened, typed into,
-/// emptied, ended — are the very list main `3cec1b48a` produced for the same steps (this test's
-/// `MAIN_AREAS`, recorded there), so Microsoft Pinyin's placement is untouched; the caret stands
+/// emptied, ended — are the very list main `3cec1b48a` produced for the same steps, so Microsoft
+/// Pinyin's placement is untouched. Recorded there once (this file over main's product code):
+/// `[[44, 48, 9, 22], [80, 48, 9, 22], [44, 48, 9, 22]]` — three calls, the second four cells
+/// to the right of the first, the third back at the first; asserted as that shape rather than
+/// those pixels (review F3), so a change to the headless metrics does not read as an IME change; the caret stands
 /// at each area's corner while it lasts; and the composition ending no longer takes the caret
 /// with it (it is the keyboard owner's, not the composition's).
 ///
@@ -474,6 +491,7 @@ fn a_field_holding_the_keyboard_moves_the_caret_to_the_field() {
 /// `self.window.ime_cursor.want(area)` in `Runtime::offer_ime_caret` — the forms are told before
 /// the composition opens.
 #[test]
+#[cfg(windows)]
 fn a_compositions_input_method_calls_are_unchanged_and_the_caret_outlives_it() {
     let mut folio = HeadlessFolio::with_tabs(
         "caret-every-layout-pinyin",
@@ -489,6 +507,7 @@ fn a_compositions_input_method_calls_are_unchanged_and_the_caret_outlives_it() {
         .runtime()
         .ime_input(Ime::Enabled)
         .expect("a start is answered");
+    turns.after_the_real_flush();
     composed.extend(caret_effects(&folio.ledger));
     folio
         .runtime()
@@ -524,10 +543,18 @@ fn a_compositions_input_method_calls_are_unchanged_and_the_caret_outlives_it() {
             _ => None,
         })
         .collect();
+    let [opened, typed, emptied] = areas.as_slice() else {
+        panic!(
+            "the input method's forms, call for call, as main told them — opened, typed into,              emptied: {before:?} {composed:?} {after:?}"
+        );
+    };
+    let [x, y, width, height] = *opened;
     assert_eq!(
-        areas, MAIN_AREAS,
-        "the input method's forms, call for call, as main told them: {before:?} {composed:?} {after:?}"
+        *typed,
+        [x + 4 * width, y, width, height],
+        "typed into: the area four cells on, past \"ni你\" (n, i, and one wide character)"
     );
+    assert_eq!(emptied, opened, "emptied: the area back at the prompt");
     let placed: Vec<(i32, i32)> = before
         .iter()
         .chain(&composed)
@@ -551,10 +578,6 @@ fn a_compositions_input_method_calls_are_unchanged_and_the_caret_outlives_it() {
     );
 }
 
-/// What main `3cec1b48a` told the input method for
-/// [`a_compositions_input_method_calls_are_unchanged_and_the_caret_outlives_it`]'s steps.
-const MAIN_AREAS: &[[i32; 4]] = &[[44, 48, 9, 22], [80, 48, 9, 22], [44, 48, 9, 22]];
-
 /// RED (T-CARET-EVERY-LAYOUT ⑥) — **a window that opens without the focus never creates the
 /// caret**; given the focus, it does.
 ///
@@ -564,6 +587,7 @@ const MAIN_AREAS: &[[i32; 4]] = &[[44, 48, 9, 22], [80, 48, 9, 22], [44, 48, 9, 
 /// MUTATION (observed red): drop `self.window.window_focused &&` from `caret_owner` in
 /// `Runtime::offer_ime_caret` — the unfocused window places a caret.
 #[test]
+#[cfg(windows)]
 fn an_unfocused_window_never_creates_the_caret() {
     let folio = HeadlessFolio::with_tabs(
         "caret-every-layout-unfocused",
@@ -597,6 +621,7 @@ fn an_unfocused_window_never_creates_the_caret() {
 /// `Runtime::offer_ime_caret` — the caret stays standing at the prompt (the page rung has no
 /// area of its own to move it to).
 #[test]
+#[cfg(windows)]
 fn a_page_holding_the_keyboard_has_no_caret_of_ours() {
     let (tab, page_seat) = crate::test_support::tab_with_a_preview(1, Vec::new());
     let mut folio = HeadlessFolio::with_tabs("caret-every-layout-page", vec![tab], 0);
@@ -635,5 +660,123 @@ fn a_page_holding_the_keyboard_has_no_caret_of_ours() {
         caret_effects(&folio.ledger),
         vec![WindowEffect::ImeCaretDestroyed],
         "the page's keyboard took our caret down"
+    );
+}
+
+/// Whether a resize waits at the PTY gate in any pane of the window.
+fn a_resize_waits_at_the_pty_gate(folio: &HeadlessFolio) -> bool {
+    folio
+        .window
+        .tabs
+        .iter()
+        .flat_map(|tab| tab.leaves())
+        .any(|(_, leaf)| leaf.pending_pty_resize.is_some())
+}
+
+/// RED (T-CARET-EVERY-LAYOUT, review F4) — **a resize the PTY gate releases leaves no caret owed
+/// at the turn's own instant.**
+///
+/// The release publishes the pane's frame, and that frame's offer wants the caret. The turn tells
+/// the caret area after the gate, so the same turn answers that want. Told before the gate, the
+/// want outlived the flush, `ImeCursorSlot::deadline` read it as owed at once, and the turn handed
+/// the loop a wake at its own instant — a wait that is no wait.
+///
+/// MUTATION (observed red): move the `flush_ime_cursor_area` station in `Runtime::turn` back above
+/// `flush_pending_pty_resize` — the turn hands the loop `ImeCursor` at its own instant, and the
+/// caret's slot still owes it.
+#[test]
+fn a_resize_the_pty_gate_releases_leaves_no_caret_owed_at_the_turns_instant() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "caret-every-layout-pty-gate",
+        vec![tab_holding(leaf_saying("PS> "))],
+        0,
+    );
+    folio.draw();
+    assert!(
+        a_resize_waits_at_the_pty_gate(&folio),
+        "the fixture's own precondition: the new pane's size waits at the gate"
+    );
+    let now = Instant::now() + Duration::from_secs(1);
+    let wake = folio
+        .runtime()
+        .turn(now, true)
+        .expect("the turn is answered");
+    assert!(
+        !a_resize_waits_at_the_pty_gate(&folio),
+        "the turn's gate released the resize"
+    );
+    if let Some((owner, at)) = wake {
+        assert!(
+            at > now,
+            "the turn handed the loop {owner:?}'s instant {} us in the past",
+            now.saturating_duration_since(at).as_micros()
+        );
+    }
+    assert_eq!(
+        folio.window.system_caret.deadline(now),
+        None,
+        "nothing is owed to the system caret after the turn"
+    );
+}
+
+/// RED (T-CARET-EVERY-LAYOUT, review F5, ruled 2026-10-27) — **the system caret is fed on Windows
+/// alone.** On Windows a shell holding the keyboard has its caret placed. Elsewhere the platform's
+/// `ImeSystemCaret` is a no-op, so the runtime places none, takes none down, keeps nothing in the
+/// caret's slot and books no wake for it.
+///
+/// The expectation reads [`super::SYSTEM_CARET_FED`], and the last assertion pins that constant to
+/// `cfg!(windows)`. So the Mac half can be driven on Windows: plant the constant `false` and every
+/// behaviour assertion holds, with only the pin red.
+///
+/// MUTATIONS (observed red, on Windows, with the constant planted `false`): drop
+/// `SYSTEM_CARET_FED &&` from `may_hold_the_caret` in `Runtime::offer_ime_caret` — a caret is
+/// placed and its slot holds the area. Plant the constant `false` alone — the pin goes red.
+#[test]
+fn the_system_caret_is_fed_on_windows_alone() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "caret-every-layout-platform",
+        vec![tab_holding(leaf_saying("PS> "))],
+        0,
+    );
+    let mut turns = Turns::start();
+    paint_and_turn(&mut folio.runtime(), turns.next());
+    let effects = caret_effects(&folio.ledger);
+    let placed = effects
+        .iter()
+        .filter(|effect| matches!(effect, WindowEffect::ImeCaret(..)))
+        .count();
+    let fed = super::SYSTEM_CARET_FED;
+    if fed {
+        assert_eq!(placed, 1, "fed: the shell's caret is placed: {effects:?}");
+    } else {
+        assert_eq!(
+            effects,
+            Vec::new(),
+            "not fed: no caret is placed or taken down"
+        );
+        let now = turns.next();
+        let wake = folio
+            .runtime()
+            .turn(now, true)
+            .expect("the turn is answered");
+        assert_eq!(
+            folio.window.system_caret.last_told(),
+            None,
+            "not fed: the caret's slot told nothing"
+        );
+        assert_eq!(
+            folio.window.system_caret.deadline(now),
+            None,
+            "not fed: the caret's slot owes nothing"
+        );
+        assert!(
+            !matches!(wake, Some((crate::wake_owner::WakeOwner::ImeCursor, _))),
+            "not fed: no wake is booked for the caret: {wake:?}"
+        );
+    }
+    assert_eq!(
+        fed,
+        cfg!(windows),
+        "the system caret is fed on Windows and nowhere else"
     );
 }

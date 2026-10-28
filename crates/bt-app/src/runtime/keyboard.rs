@@ -807,10 +807,19 @@ impl<B: Backend> Runtime<'_, B> {
     /// thread's, so a background window's caret would be the focused one's taken.
     /// A text owner with nothing to say this turn (the grid between frames, a
     /// caret in a gap between blocks) leaves the caret where it stands.
+    ///
+    /// **Fed on Windows alone** ([`SYSTEM_CARET_FED`], review F5): the Mac's
+    /// `ImeSystemCaret` is a no-op, so there the offer is what it was before this
+    /// ticket — nothing outside a composition, and no caret slot to wake for.
     pub(in crate::runtime) fn offer_ime_caret(&mut self, grid: Option<&ViewportFrame>) {
+        let may_hold_the_caret = SYSTEM_CARET_FED && self.window.window_focused;
+        if !may_hold_the_caret && !self.window.ime_active {
+            self.vacate_system_caret();
+            return;
+        }
         let owner = ime_owner(self.keyboard_owner());
         let source = ime_caret_source(owner);
-        let caret_owner = self.window.window_focused
+        let caret_owner = may_hold_the_caret
             && source != ImeCaretSource::Nowhere
             && !self.page_holds_the_keyboard();
         if !caret_owner {
@@ -819,11 +828,14 @@ impl<B: Backend> Runtime<'_, B> {
         let area = match source {
             ImeCaretSource::Nowhere => return,
             ImeCaretSource::Field => self.field_ime_caret(owner),
-            // Only while the shell is the one composing. A terminal that keeps
-            // printing behind a preview being typed into still publishes frames,
-            // and each of them used to drag the candidate window back to the
-            // grid's caret — under the pointer's own reading, the candidate list
-            // would sit over the shell while the letters went into the file.
+            // The grid's caret, for the input method only while the shell is the
+            // one composing (`ime_owner` says the keyboard is the shell's), and for
+            // the system caret whenever the shell holds the keyboard. A terminal
+            // that keeps printing behind a preview being typed into still
+            // publishes frames, and each of them used to drag the candidate window
+            // back to the grid's caret — under the pointer's own reading, the
+            // candidate list would sit over the shell while the letters went into
+            // the file; the owner rung keeps both takers on the preview.
             // `grid` is the focused pane's frame, composed this pass at that pane's own metrics
             // (ticket 37), so the caret rectangle is measured in the same cells.
             ImeCaretSource::TerminalCursor => grid
@@ -3438,6 +3450,13 @@ pub(crate) fn composition_outlived_its_field(
 fn ime_native_facts(window: &impl WindowHost) -> ime_report::NativeFacts {
     window.ime_facts()
 }
+
+/// **Whether this platform keeps a system caret at all** (T-CARET-EVERY-LAYOUT,
+/// review F5, ruled 2026-10-27). Windows' `ImeSystemCaret` is the hidden Win32
+/// caret Pinyin, Magnifier, the emoji panel and every `GetGUIThreadInfo` reader
+/// follow; the Mac's is a no-op, so feeding its slot would compute an area on
+/// every offer and book a held area's wake for nothing.
+const SYSTEM_CARET_FED: bool = cfg!(windows);
 
 #[cfg(test)]
 #[path = "keyboard_tests.rs"]
