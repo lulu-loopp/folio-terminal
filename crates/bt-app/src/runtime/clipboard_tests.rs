@@ -496,7 +496,7 @@ fn recording_lane(folio: &mut HeadlessFolio, executor: &crate::lane::Executor) -
 /// its birth's queue — which is what the test reads back as what the shell was sent.
 fn a_shell_being_born() -> crate::LeafSession {
     let mut leaf = leaf_saying("SHELL 外壳");
-    leaf.birth = Some(crate::PaneBirth {
+    leaf.life.begin_birth(crate::PaneBirth {
         seed: crate::LeafSeed {
             profile: crate::profiles::DEFAULT_IDENTITY.to_owned(),
             ..crate::LeafSeed::default()
@@ -526,13 +526,7 @@ fn sent_to_the_shell(folio: &mut HeadlessFolio, tab: usize) -> String {
         .values()
         .next()
         .expect("the shell");
-    let typed = leaf
-        .birth
-        .as_ref()
-        .expect("in birth")
-        .typed
-        .borrow()
-        .clone();
+    let typed = leaf.life.birth().expect("in birth").typed.borrow().clone();
     String::from_utf8(typed).expect("UTF-8 was sent")
 }
 

@@ -73,8 +73,8 @@ impl<B: Backend> Runtime<'_, B> {
                 .sessions
                 .iter()
                 .filter_map(|(seat, leaf)| {
-                    leaf.birth_death_fallback
-                        .as_ref()
+                    leaf.life
+                        .falling_back()
                         .is_some_and(|pending| pending.landing.shell.answered())
                         .then_some(*seat)
                 })
@@ -158,7 +158,7 @@ impl<B: Backend> Runtime<'_, B> {
                 self.app.startup_shells = None;
             }
         }
-        if let Some(fallback) = leaf.spawn_fallback.take() {
+        if let Some(fallback) = leaf.life.take_spawn_fallback() {
             exit_diagnostics::say_spawn_fallback(seat.0, &fallback, diagnostics::note);
         } else if let Some(refusal) = refusal.as_ref() {
             exit_diagnostics::say_spawn_failure(
@@ -196,13 +196,13 @@ impl<B: Backend> Runtime<'_, B> {
                 self.say_shell_refusal(&refusal)
             }
             SuccessorLanding::Landed(mut successor) if tab_index == self.window.active_tab => {
-                if let Some(fallback) = successor.spawn_fallback.take() {
+                if let Some(fallback) = successor.life.take_spawn_fallback() {
                     exit_diagnostics::say_spawn_fallback(seat.0, &fallback, diagnostics::note);
                 }
                 self.replace_restarted_shell(seat, *successor)
             }
             SuccessorLanding::Landed(mut successor) => {
-                if let Some(fallback) = successor.spawn_fallback.take() {
+                if let Some(fallback) = successor.life.take_spawn_fallback() {
                     exit_diagnostics::say_spawn_fallback(seat.0, &fallback, diagnostics::note);
                 }
                 self.window.tabs[tab_index]
@@ -313,9 +313,9 @@ impl<B: Backend> Runtime<'_, B> {
             // A successor made again stays beside the shell it replaces until its own shell
             // lands; one with no shell to wait for takes the pane's place now, as
             // `restart_shell` does with one.
-            BirthAt::Successor if born.birth.is_some() => {
+            BirthAt::Successor if born.life.birth().is_some() => {
                 if let Some(leaf) = self.window.tabs[tab_index].sessions.get_mut(&seat) {
-                    leaf.successor = Some(Box::new(born));
+                    leaf.await_successor(Box::new(born));
                 }
             }
             BirthAt::Successor => {
@@ -2307,7 +2307,7 @@ impl<B: Backend> Runtime<'_, B> {
         let host = if alternate {
             bt_term::HostScreen::Cleared
         } else {
-            match leaf.pty.as_ref() {
+            match leaf.life.pty() {
                 // No child, so no second buffer to disagree with this one.
                 None => bt_term::HostScreen::Cleared,
                 Some(pty) => host_screen_after(pty.clear_host_buffer(true)),
@@ -7291,14 +7291,14 @@ pub(crate) fn land_successor(
     leaf: &mut LeafSession,
     note: impl FnMut(&str),
 ) -> Result<SuccessorLanding> {
-    let Some(successor) = leaf.successor.as_deref_mut() else {
+    let Some(successor) = leaf.successor_mut() else {
         return Ok(SuccessorLanding::Waiting);
     };
     if !successor.shell_answered() {
         return Ok(SuccessorLanding::Waiting);
     }
     let refusal = land_shell_birth(successor, note)?;
-    let Some(landed) = leaf.successor.take() else {
+    let Some(landed) = leaf.take_successor() else {
         return Ok(SuccessorLanding::Waiting);
     };
     Ok(match refusal {
@@ -7664,7 +7664,7 @@ pub(crate) fn end_leaves_of<'t>(
                 leaf.attention_ended = true;
                 ended.push(at);
             }
-            if let Some(pty) = leaf.pty.take() {
+            if let Some(pty) = leaf.life.retire() {
                 bt_pty::retire_session(pty);
             }
         }
