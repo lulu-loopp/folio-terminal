@@ -98,6 +98,11 @@ pub(crate) enum WindowEffect {
     SystemSettingsWatched,
     /// The system's end-of-session question asked for (`WindowHost::watch_session_end`).
     SessionEndWatched,
+    /// The system asked to start the program again after its restart, on these occasions
+    /// (`Backend::register_restart`).
+    RestartRegistered { flags: u32 },
+    /// That registration taken back (`Backend::withdraw_restart`).
+    RestartWithdrawn,
     /// A page's place in the window asked for, for the web engine (`WindowHost::page_address`).
     PageAddressed(bt_platform::PageVisual),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
@@ -294,6 +299,18 @@ impl Backend for Headless {
     ) -> anyhow::Result<(WindowId, WindowRuntime<Self>)> {
         event_loop.ledger.record(WindowEffect::WindowOpened);
         Err(anyhow::anyhow!("a headless loop opens no second window"))
+    }
+
+    fn register_restart(event_loop: &HeadlessLoop, flags: u32) -> Result<(), String> {
+        event_loop
+            .ledger
+            .record(WindowEffect::RestartRegistered { flags });
+        Ok(())
+    }
+
+    fn withdraw_restart(event_loop: &HeadlessLoop) -> Result<(), String> {
+        event_loop.ledger.record(WindowEffect::RestartWithdrawn);
+        Ok(())
     }
 }
 

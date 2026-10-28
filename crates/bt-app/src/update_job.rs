@@ -1891,6 +1891,13 @@ impl<W: Copy + Eq> Job<W> {
         self.staged.as_ref()
     }
 
+    /// **A transaction staged as the `Verified` report leaves it**, for a test of the hand-over
+    /// that has no driver to stage one (T-RESTART-REGISTRATION).
+    #[cfg(test)]
+    pub(crate) fn stage_for_a_test(&mut self, staged: Staged) {
+        self.staged = Some(staged);
+    }
+
     /// **Restart** on the verified card (§C.3): the job moves to `Quitting`
     /// and answers the reason the ordinary quit begins with — the quit
     /// carries the offer's transaction, so its two answers are refused as

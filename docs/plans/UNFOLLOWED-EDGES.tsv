@@ -1940,6 +1940,7 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::publish_window_directory	Ambig
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::publish_window_directory	Ambiguous	filter_map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::publish_window_directory	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::refresh_main_menu	Ambiguous	map	1	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::register_for_restart_held_by	Dynamic	held	1	2026-10-27: T-RESTART-REGISTRATION (review F4): the trial's gate asked through a function value — update_trial::defer in the product (a mutex read, no door), a test's own Gate::defer in a test
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::report_to_quit	Dynamic	report	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::say_the_cancelled_quit	Ambiguous	find_map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::say_the_cancelled_quit	Ambiguous	then_some	1	
@@ -2287,6 +2288,7 @@ crates/bt-app/src/main.rs	bt-app crate::profile_banner_name	Ambiguous	unwrap_or_
 crates/bt-app/src/main.rs	bt-app crate::prose_source_lines	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::prose_source_lines	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::push_markdown_table	Ambiguous	as_deref_mut	1	
+crates/bt-app/src/main.rs	bt-app crate::release_trial_writer	Dynamic	(value)	1	2026-10-27: T-RESTART-REGISTRATION (review F4): TrialStores::restart, the committed trial's restart registration — register_restart_now through the loop's Backend::register_restart (RegisterApplicationRestart, returns at once), a no-op in quit_tests' stores
 crates/bt-app/src/main.rs	bt-app crate::report_frame_shape_stop	Dynamic	announce	1	
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	map_or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	or_else	1	
@@ -9922,9 +9924,11 @@ crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_disp
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_dispatch	Dynamic	(value)	2	
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_dispatch	Dynamic	inner	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::answer	Dynamic	hear	1	
+crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::register_restart	Ambiguous	map_err	1	2026-10-27: T-RESTART-REGISTRATION: Result::map_err on RegisterApplicationRestart's answer (a kernel32 call that returns at once), formatting the refusal into a String; no door
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::SessionEndWatch::install	Ambiguous	as_bool	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::session_end_subclass	Ambiguous	is_null	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::windows_session_end::session_end_subclass	Dynamic	(value)	1	
+crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::withdraw_restart	Ambiguous	map_err	1	2026-10-27: T-RESTART-REGISTRATION: Result::map_err on UnregisterApplicationRestart's answer (a kernel32 call that returns at once), formatting the refusal into a String; no door
 crates/bt-platform/src/stderr_road.rs	bt-platform crate::stderr_road::say	Dynamic	road	1	2026-10-25: the road fn main installs, diagnostics::stderr_line (a request door of its own row): this crate's stderr lines handed to the writer that owns the run's stderr; the crate cannot name bt-app, so the call is a function value (T-TRACE-SINK-OFF-THE-CALLING-THREAD)
 crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Ambiguous	as_raw_handle	2	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door
 crates/bt-platform/src/threads.rs	bt-platform crate::threads::each_thread_of	Ambiguous	expect	1	2026-10-25: T-IDLE-TURN-COST: the thread-snapshot walk moved out of ProbeChild::suspended into threads::each_thread_of (those rows shrank), handle and ControlFlow methods, no door

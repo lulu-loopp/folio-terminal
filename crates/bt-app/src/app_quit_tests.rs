@@ -254,3 +254,139 @@ fn the_final_write_is_judged_and_the_verdict_is_what_decides() {
         "and it leaves anyway"
     );
 }
+
+/// An update's quit walked to its way out with the session landed (`Handoff::Owed`), on a
+/// headless application whose ledger is then emptied.
+fn owed_handoff(tag: &str, txn: crate::update_txn::TxnId) -> crate::headless::HeadlessApplication {
+    let folio = crate::headless::HeadlessFolio::with_tabs(
+        tag,
+        vec![crate::test_support::ringing_tab(1, 1)],
+        0,
+    );
+    let mut application = crate::headless::HeadlessApplication::of(folio);
+    let now = Instant::now();
+    let mut quit = quit::Quit::begin_for(Vec::new(), quit::Reason::UpdateRestart { txn });
+    assert_eq!(quit.documents(&[], now), quit::QuitStep::Photograph);
+    assert_eq!(quit.photographed(), quit::QuitStep::Write);
+    assert_eq!(
+        quit.written(quit::WriteVerdict::Landed),
+        quit::QuitStep::Retire
+    );
+    let _ = quit.retired(now);
+    assert_eq!(quit.pages(true, now), quit::QuitStep::Exit);
+    assert_eq!(quit.handoff(), quit::Handoff::Owed, "the session landed");
+    application
+        .folio
+        .app
+        .as_mut()
+        .expect("the application")
+        .quit = Some(quit);
+    let _ = application.event_loop.ledger.take();
+    application
+}
+
+/// A transaction staged in `root` as Prepare leaves it: the journal durably at `Prepared`, the
+/// transaction lock held.
+fn staged_in(root: &Path, txn: crate::update_txn::TxnId) -> crate::update_handoff::Staged {
+    use crate::update_txn::{Event, Home, Inventories, Journal, Layout};
+    let home = Home::at(root.join(".folio-update"));
+    std::fs::create_dir_all(home.transaction(txn).join("rescue"))
+        .expect("the transaction's folder");
+    let rescue = home.transaction(txn).join("rescue").join("folio.exe");
+    let journal = Journal::allocate(
+        txn,
+        rescue.to_string_lossy().into_owned(),
+        Layout::Members(Inventories {
+            old_shipped: Vec::new(),
+            old_present: Vec::new(),
+            new: Vec::new(),
+        }),
+    )
+    .advance(&Event::Prepared)
+    .expect("Allocated → Prepared");
+    bt_platform::install_txn::durable_write(&home.journal(), &journal.encode())
+        .expect("the journal is written durably");
+    let lock =
+        bt_platform::install_txn::try_hold(&home.lock(), bt_platform::install_txn::Hold::Exclusive)
+            .expect("the lock file opens")
+            .expect("nobody else holds the lock");
+    crate::update_handoff::Staged {
+        home,
+        journal,
+        lock,
+    }
+}
+
+/// RED (T-RESTART-REGISTRATION; review F5) — **an update's hand-over takes the restart
+/// registration back on its first step, whether or not the job then goes**: from there on, who
+/// opens Folio is the election's, and a reboot before this process has left must not start a
+/// third contender.
+///
+/// The update's quit walked to its way out with the session landed (`Handoff::Owed`), then the
+/// loop's own `FolioApp::hand_the_update_over`, twice:
+/// - **sent**: a transaction staged in a scratch home and a storage lane only the test reads, so
+///   the hand-over job is queued (never run: no journal is advanced, no applier started) — the
+///   registration was taken back, and the job is on the lane;
+/// - **refused**: nothing staged, so the hand-over is refused and said — the registration was
+///   taken back all the same.
+///
+/// Both effects are this one call's, and the order between the two inside it is not a thing
+/// either ledger can see: the withdraw is the arm's first statement, ahead of the job's build.
+/// What the two cases hold is that it is asked on both of the arm's roads.
+///
+/// MUTATION: drop the `B::withdraw_restart` call in `FolioApp::hand_the_update_over` — both
+/// cases leave a registration standing; move it into the `Err(why)` arm — the sent case does;
+/// move it into the `Ok(answer)` arm — the refused case does.
+#[test]
+fn the_update_hand_over_takes_the_restart_registration_back() {
+    crate::test_support::on_the_window_thread();
+    let txn = crate::update_txn::TxnId::new([0x5a; 16]);
+    let now = Instant::now();
+
+    let root = bt_testpath::temp_path("bt-restart-交接 handoff");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("the scratch folder");
+    let mut application = owed_handoff("handoff-restart-sent", txn);
+    let (lane, jobs) = persist::StorageLane::scripted();
+    {
+        let app = application.folio.app.as_mut().expect("the application");
+        app.session_store = persist::SessionStore::at_on(
+            root.join("session.json"),
+            root.join("session.lock"),
+            lane,
+        );
+        app.update_job.stage_for_a_test(staged_in(&root, txn));
+    }
+    let leaves = application
+        .folio
+        .hand_the_update_over(&application.event_loop, now);
+    let effects = application.event_loop.ledger.take();
+    assert!(
+        effects.contains(&crate::headless::WindowEffect::RestartWithdrawn),
+        "the registration is taken back: {effects:?}"
+    );
+    assert!(
+        !leaves,
+        "the job was sent, and the way out waits for its answer"
+    );
+    assert!(
+        matches!(jobs.next(), Some(persist::ScriptedJob::Other)),
+        "the hand-over job is on the lane"
+    );
+    drop(application);
+    let _ = std::fs::remove_dir_all(&root);
+
+    let mut application = owed_handoff("handoff-restart-refused", txn);
+    let leaves = application
+        .folio
+        .hand_the_update_over(&application.event_loop, now);
+    let effects = application.event_loop.ledger.take();
+    assert!(
+        effects.contains(&crate::headless::WindowEffect::RestartWithdrawn),
+        "the registration is taken back: {effects:?}"
+    );
+    assert!(
+        leaves,
+        "an update with nothing staged is not handed over, and the quit leaves"
+    );
+}

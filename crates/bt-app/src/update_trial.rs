@@ -184,6 +184,14 @@ pub(crate) enum Writer {
     /// (`recovered::ANNOUNCED_RECORD`, written by `recovered::begin`'s worker before its toast):
     /// held back, the question is not asked, and the release asks it.
     RecoveredAnnouncement,
+    /// **The system's restart registration** (`RegisterApplicationRestart`, through
+    /// `FolioApp::register_for_restart`; T-RESTART-REGISTRATION, the coordinator's ruling of
+    /// 2026-10-27 on review F4): not a file, but state the system keeps for this process, and
+    /// what it does with it — start a plain Folio after a reboot — is a contender beside the
+    /// logon entrance's `--update-recover` while the transaction can still roll back. Held back,
+    /// a trial asks for it only once it is committed, and so the person's Folio; the release
+    /// asks for it then (`register_restart_now`).
+    RestartRegistration,
 }
 
 impl Writer {
@@ -206,13 +214,14 @@ impl Writer {
             | Writer::PsReadLineModule
             | Writer::ExplorerRepair
             | Writer::ToastIdentity
-            | Writer::RecoveredAnnouncement => false,
+            | Writer::RecoveredAnnouncement
+            | Writer::RestartRegistration => false,
         }
     }
 
     /// Every writer, in release order.
     #[cfg(test)]
-    pub(crate) const ALL: [Writer; 17] = [
+    pub(crate) const ALL: [Writer; 18] = [
         Writer::DataFolderMove,
         Writer::DataFolder,
         Writer::RefusedCopies,
@@ -230,6 +239,7 @@ impl Writer {
         Writer::ExplorerRepair,
         Writer::ToastIdentity,
         Writer::RecoveredAnnouncement,
+        Writer::RestartRegistration,
     ];
 }
 
