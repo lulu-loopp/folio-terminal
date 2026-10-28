@@ -2835,6 +2835,11 @@ fn a_recovery_leaves_handoff_to_an_election_still_in_flight() {
 /// Folio holds the data directory (the world's `carry`) — and starts nothing
 /// itself; the start it was handed reverts with is still its own start.
 ///
+/// "Nothing waited for" is not timed (T-ELAPSED-UPPER-BOUNDS-ON-OTHER-WAITS):
+/// the road at a marked `Handoff` reads the mark and answers, with no pause
+/// on it, and the journal, the opened windows and the carried start say what
+/// it did.
+///
 /// MUTATIONS: in `recover`, leave a `Handoff` to any live process of the
 /// rescue image, named or not; or answer `deferred_to: None` (the deferred
 /// start dropped, as before E3).
@@ -2877,13 +2882,7 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
         )
         .is_mine()
     );
-    let began = Instant::now();
     let (code, world) = run(road(&install));
-    assert!(
-        began.elapsed() < Duration::from_secs(5),
-        "nothing is waited for: {:?}",
-        began.elapsed()
-    );
     assert_eq!(code, 0, "{:?}", world.said);
     assert!(
         said_at(&world, &format!("{} has the update's window", applier.pid)).is_some(),
@@ -4411,6 +4410,22 @@ fn old_leaves(install: &Install, old: Running, leaving: Leaving) -> JoinHandle<(
     })
 }
 
+/// [`old_leaves`], with O's wait for its applier read and paused on `clock`
+/// (`Leaving::leave_on`).
+fn old_leaves_on(
+    install: &Install,
+    clock: Arc<CountedClock>,
+    old: Running,
+    leaving: Leaving,
+) -> JoinHandle<(Left, Started)> {
+    let installed = install.installed.clone();
+    start_on_a_worker(move |worker| {
+        let mut starts = Starts::default();
+        let left = leaving.leave_on(&*clock, old, &installed, &mut starts, Some(worker));
+        (left, starts.calls)
+    })
+}
+
 /// RED (U-34, round 6; the clean VM's happy path on A5) — **O, reaching its
 /// end before the applier it started has taken the window's mark, waits for
 /// that applier's decision: the applier takes the mark, the update is applied
@@ -4452,10 +4467,19 @@ fn o_waits_for_the_applier_it_started_and_the_update_applies() {
 /// leaves the duty to O, which takes it and starts Folio as soon as the
 /// applier is gone** — well within its wait.
 ///
-/// MUTATION: in `update_handoff::Leaving::leave`, wait the whole budget
+/// The applier is a real process (O reads the process list), one that stays
+/// up until this test ends it, so its end cannot come before O's first look.
+/// O's wait is read on a clock that moves only by its pauses
+/// ([`CountedClock`]; T-ELAPSED-UPPER-BOUNDS-ON-OTHER-WAITS): the applier ends
+/// inside the pause `DIES_AT` chooses, and "as soon as it is gone" is the
+/// count of O's pauses — that one and no more — never a time.
+///
+/// MUTATION: in `update_handoff::Leaving::leave_on`, wait the whole budget
 /// whether or not the applier still runs (the start then comes only after it).
 #[test]
 fn an_applier_that_dies_before_its_mark_leaves_the_window_to_o() {
+    /// The pause of O's wait the applier ends in.
+    const DIES_AT: usize = 6;
     let Some(install) = Install::new("applier-dies") else {
         return;
     };
@@ -4469,19 +4493,38 @@ fn an_applier_that_dies_before_its_mark_leaves_the_window_to_o() {
         pid: doomed,
         started: install_flip::started_of(doomed).expect("it runs"),
     };
-    let leaving = Leaving::over(&install.home, install.txn, &install.data)
-        .after_applier(applier, Duration::from_secs(20));
-    let began = Instant::now();
-    let o = old_leaves(&install, old, leaving);
-    std::thread::sleep(Duration::from_millis(300));
-    install.children.end(doomed);
+    let within = Duration::from_secs(20);
+    let leaving =
+        Leaving::over(&install.home, install.txn, &install.data).after_applier(applier, within);
+    let ended_in = Arc::new(Mutex::new(None));
+    let clock = {
+        let children = install.children.clone();
+        let ended_in = Arc::clone(&ended_in);
+        Arc::new(CountedClock::new(move |pause| {
+            if pause == DIES_AT {
+                children.end(doomed);
+                *ended_in.lock().unwrap() = Some(pause);
+            }
+        }))
+    };
+    let o = old_leaves_on(&install, Arc::clone(&clock), old, leaving);
     let (left, starts) = o.join().unwrap();
     assert_eq!(left, Left::Started(install.installed.clone()), "{starts:?}");
     assert_eq!(starts.len(), 1);
+    assert_eq!(
+        *ended_in.lock().unwrap(),
+        Some(DIES_AT),
+        "the applier ended inside O's wait"
+    );
+    assert_eq!(
+        clock.pauses(),
+        DIES_AT,
+        "O took the duty at its first look after the applier was gone"
+    );
     assert!(
-        began.elapsed() < Duration::from_secs(10),
-        "O did not wait out its budget: {:?}",
-        began.elapsed()
+        u128::from(clock.moved_ms()) < within.as_millis(),
+        "O did not wait out its budget: {} ms",
+        clock.moved_ms()
     );
 }
 

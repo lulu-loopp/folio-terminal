@@ -1123,14 +1123,40 @@ impl TrialClock for WallClock {
     }
 }
 
-/// **A test's [`TrialClock`]** (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK): it starts
-/// at one wall reading and moves only by the pauses it is asked for — it never
-/// sleeps — counts them, and runs `at_pause` inside each, with its number from
-/// one. A test makes the trial's end happen in the pause of its choosing and
-/// asks how many pauses the watch took: "at once" is counted, never timed.
+/// **The clock a wait for another process is read on, and the pause between
+/// two looks at it** (T-ELAPSED-UPPER-BOUNDS-ON-OTHER-WAITS): O's wait for the
+/// applier it started ([`crate::update_handoff::Leaving::leave_on`]) reads its
+/// deadline on [`WaitClock::now`] and pauses through [`WaitClock::pause`].
+/// [`WallClock`] in the product (the monotonic clock and the worker's wait
+/// door); a test hands [`CountedClock`], which moves only by those pauses.
+pub(crate) trait WaitClock: Send + Sync {
+    /// The monotonic reading a deadline is set and read on.
+    fn now(&self) -> Instant;
+    /// One pause between two looks, through `worker`'s wait door.
+    fn pause(&self, worker: &WorkerCtx, pause: Duration);
+}
+
+impl WaitClock for WallClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn pause(&self, worker: &WorkerCtx, pause: Duration) {
+        bt_platform::wait::sleep_within(worker, pause);
+    }
+}
+
+/// **A test's [`TrialClock`] and [`WaitClock`]** (T-TRIAL-DEATH-WAIT-CONTROLLED-CLOCK,
+/// T-ELAPSED-UPPER-BOUNDS-ON-OTHER-WAITS): it starts at one wall reading and
+/// one monotonic reading and moves only by the pauses it is asked for — it
+/// never sleeps — counts them, and runs `at_pause` inside each, with its number
+/// from one. A test makes the awaited end happen in the pause of its choosing
+/// and asks how many pauses the wait took: "at once" is counted, never timed.
 #[cfg(test)]
 pub(crate) struct CountedClock {
     began_ms: u64,
+    /// The monotonic reading the clock started at, for [`WaitClock::now`].
+    began: Instant,
     /// The clock's reading, and the pauses so far.
     now: std::sync::Mutex<(u64, usize)>,
     at_pause: std::sync::Mutex<Box<dyn FnMut(usize) + Send>>,
@@ -1142,6 +1168,7 @@ impl CountedClock {
         let began_ms = now_ms();
         Self {
             began_ms,
+            began: Instant::now(),
             now: std::sync::Mutex::new((began_ms, 0)),
             at_pause: std::sync::Mutex::new(Box::new(at_pause)),
         }
@@ -1174,6 +1201,17 @@ impl TrialClock for CountedClock {
             now.1
         };
         (self.at_pause.lock().unwrap())(number);
+    }
+}
+
+#[cfg(test)]
+impl WaitClock for CountedClock {
+    fn now(&self) -> Instant {
+        self.began + Duration::from_millis(self.moved_ms())
+    }
+
+    fn pause(&self, worker: &WorkerCtx, pause: Duration) {
+        TrialClock::pause(self, worker, pause);
     }
 }
 

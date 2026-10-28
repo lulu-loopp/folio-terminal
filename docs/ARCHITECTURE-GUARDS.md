@@ -902,6 +902,11 @@ proves the watch ended at the trial's end, not at its deadline, hands its road a
 pause the test chooses, and is asked how many pauses the watch took. Elapsed real time over
 the whole road is never that verdict.
 
+2026-10-27 (T-ELAPSED-UPPER-BOUNDS-ON-OTHER-WAITS): O's wait for the applier it started is
+read and paused on `update_apply::WaitClock` (`Leaving::leave_on`; `leave` hands it `WallClock`),
+so a test counts its pauses with `CountedClock`; a road with no clock (a lock only tried, a mark
+only read) is proven by a signal awaited within the suite's patience, or by the state it leaves.
+
 ## Test order and shared fixtures
 
 The rule: a test's verdict does not hang on a file another build step made, on the
