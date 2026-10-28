@@ -287,7 +287,12 @@ fn the_update_hand_over_takes_the_restart_registration_back() {
     let _ = quit.retired(now);
     assert_eq!(quit.pages(true, now), quit::QuitStep::Exit);
     assert_eq!(quit.handoff(), quit::Handoff::Owed, "the session landed");
-    application.folio.app.as_mut().expect("the application").quit = Some(quit);
+    application
+        .folio
+        .app
+        .as_mut()
+        .expect("the application")
+        .quit = Some(quit);
     let _ = application.event_loop.ledger.take();
 
     let leaves = application
@@ -298,5 +303,8 @@ fn the_update_hand_over_takes_the_restart_registration_back() {
         effects.contains(&crate::headless::WindowEffect::RestartWithdrawn),
         "the registration is taken back: {effects:?}"
     );
-    assert!(leaves, "an update with nothing staged is not handed over, and the quit leaves");
+    assert!(
+        leaves,
+        "an update with nothing staged is not handed over, and the quit leaves"
+    );
 }

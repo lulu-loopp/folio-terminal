@@ -311,9 +311,9 @@ mod windows_session_end {
         use windows::Win32::UI::WindowsAndMessaging;
 
         use super::super::{
-            ENDSESSION_CLOSEAPP, RESTART_FLAGS, RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_PATCH,
-            RESTART_NO_REBOOT, SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, register_restart,
-            withdraw_restart,
+            ENDSESSION_CLOSEAPP, RESTART_FLAGS, RESTART_NO_CRASH, RESTART_NO_HANG,
+            RESTART_NO_PATCH, RESTART_NO_REBOOT, SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION,
+            register_restart, withdraw_restart,
         };
         use super::{SESSION_END_SUBCLASS_ID, SessionEndHook, session_end_subclass};
 
@@ -416,7 +416,10 @@ mod windows_session_end {
                 )
             }
             .ok()?;
-            let length = line.iter().position(|&unit| unit == 0).unwrap_or(line.len());
+            let length = line
+                .iter()
+                .position(|&unit| unit == 0)
+                .unwrap_or(line.len());
             Some((flags, String::from_utf16_lossy(&line[..length])))
         }
 
@@ -515,9 +518,8 @@ mod tests {
         assert_eq!(answer(0x0010, 0, 0, &|_| told.set(told.get() + 1)), None);
         assert_eq!(told.get(), 0, "a message that is not heard tells nobody");
         assert_eq!(
-            answer(WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP, &|_| told.set(
-                told.get() + 1
-            )),
+            answer(WM_ENDSESSION, 1, ENDSESSION_CLOSEAPP, &|_| told
+                .set(told.get() + 1)),
             Some(0),
             "the close is processed"
         );

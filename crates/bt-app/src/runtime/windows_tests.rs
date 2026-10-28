@@ -1896,7 +1896,11 @@ fn the_restart_managers_close_saves_then_leaves() {
         "both edits are in their files"
     );
     assert!(!quitting.sentinel_stands(), "and the layout landed");
-    assert_eq!(quitting.application.folio.windows.len(), 2, "nothing is gone yet");
+    assert_eq!(
+        quitting.application.folio.windows.len(),
+        2,
+        "nothing is gone yet"
+    );
     let _ = quitting.application.event_loop.ledger.take();
 
     assert_eq!(
@@ -1926,10 +1930,7 @@ fn the_restart_managers_close_saves_then_leaves() {
         "and the loop is asked to exit, so the process leaves by itself"
     );
     assert_eq!(quitting.copies(), Vec::<String>::new(), "nothing is copied");
-    assert!(
-        !quitting.sentinel_stands(),
-        "the run's clean exit stands"
-    );
+    assert!(!quitting.sentinel_stands(), "the run's clean exit stands");
 }
 
 /// RED (T-ENDSESSION-SAVES) — **a save that had not landed when the document's wait ran out is
