@@ -2711,7 +2711,7 @@ pub(crate) fn dirty_gate_names(
         restore::GateRequest::ClearScrollback(seat) => active_item(tabs, active_tab)
             .sessions
             .get(seat)
-            .map(|leaf| leaf.session.scrollback_line_count())
+            .map(|crate::TerminalPane { session: leaf, .. }| leaf.session.scrollback_line_count())
             .filter(|lines| *lines > 0)
             .map(|lines| vec![lines_phrase(lines)])
             .unwrap_or_default(),

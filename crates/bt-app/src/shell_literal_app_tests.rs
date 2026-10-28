@@ -102,7 +102,7 @@ fn paste_bytes_sent(tab: &mut TabState, seat: SeatId, text: &str) -> Vec<u8> {
     let leaf = tab.sessions.get_mut(&seat).expect("the seat has a shell");
     let mut sent = Vec::new();
     paste_text(
-        &mut leaf.session,
+        &mut leaf.session.session,
         &mut leaf.view.projection,
         text,
         |bytes| {
@@ -169,7 +169,11 @@ fn a_dropped_path_is_never_asked() {
     let file = dir.join("notes.txt");
     std::fs::write(&file, b"x").unwrap();
     let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
-    let recipient = tab.sessions[&target.seat].launch.paste_recipient.clone();
+    let recipient = tab.sessions[&target.seat]
+        .session
+        .launch
+        .paste_recipient
+        .clone();
     let prepared = prepare_dropped_paste(vec![file.clone(), file], &recipient, false);
     assert!(!prepared.clipboard_text, "a drop is Folio's own spelling");
     let text = prepared.text.expect("the path is spelled");
@@ -227,7 +231,7 @@ fn a_multi_line_paste_into_cmd_sends_nothing_until_answered() {
         "held exactly as the clipboard gave it"
     );
     // The card's line, from the profile the pane shows.
-    let shell = profile_banner_name(&tab.sessions[&seat].launch.profile);
+    let shell = profile_banner_name(&tab.sessions[&seat].session.launch.profile);
     let title = i18n::paste_card_title(pending.lines, &shell);
     assert!(
         title.starts_with("3 ") && title.ends_with(&format!("→ {shell}")),
@@ -350,7 +354,7 @@ fn paste_card_keys(
         let pending = tab
             .sessions
             .values_mut()
-            .find_map(|leaf| leaf.pending_paste.as_mut())
+            .find_map(|leaf| leaf.session.pending_paste.as_mut())
             .expect("the card is up");
         answer = paste_card_key(key, modifiers, pending.focus())
             .and_then(|key| paste_card_step(pending, key));
@@ -496,7 +500,10 @@ fn a_restarted_shell_cancels_the_pending_paste() {
         pending_paste_in(&tab).is_none(),
         "the card is gone with the shell"
     );
-    let standing = tab.sessions.get(&target.seat).map(|leaf| leaf.incarnation);
+    let standing = tab
+        .sessions
+        .get(&target.seat)
+        .map(|leaf| leaf.session.incarnation);
     assert!(!paste_target_is_live(tab.id, standing, target));
 }
 
@@ -518,7 +525,7 @@ fn an_answer_spent_after_the_tab_moved_sends_nothing() {
     let standing = tab
         .sessions
         .get(&pending.target.seat)
-        .map(|leaf| leaf.incarnation);
+        .map(|leaf| leaf.session.incarnation);
     assert!(
         paste_target_is_live(tab.id, standing, pending.target),
         "control"
@@ -691,7 +698,11 @@ fn a_transformed_paste_never_takes_the_clipboard_road() {
         shell_literal::ShellGrammar::PowerShell,
         POWERSHELL_PROMPT,
     ));
-    let recipient = tab.sessions[&target.seat].launch.paste_recipient.clone();
+    let recipient = tab.sessions[&target.seat]
+        .session
+        .launch
+        .paste_recipient
+        .clone();
     let prepared = prepare_clipboard_paste(
         bt_platform::ClipboardPayload::Files(vec![first, second]),
         &recipient,

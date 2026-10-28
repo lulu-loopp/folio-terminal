@@ -2103,27 +2103,29 @@ fn the_first_mark_reserves_the_room_once_and_the_alternate_screen_keeps_it() {
     let mut leaf = leaf_saying("");
     apply_leaf_metrics(&mut leaf, metrics);
     let mut heard = 0;
-    let mut step = |leaf: &mut ShellSession, bytes: &str| -> bool {
+    let mut step = |leaf: &mut TerminalPane, bytes: &str| -> bool {
         leaf.session
+            .session
             .feed(bytes.as_bytes())
             .expect("feed the shell's bytes");
-        if leaf.hear_first_mark() {
+        if leaf.session.hear_first_mark() {
             heard += 1;
         }
-        let next = leaf.grid_for(body);
-        leaf.propose_size(GridChange {
-            next,
-            physical,
-            observed_at: Instant::now(),
-            on_stage: LeafOnStage::Shown,
-            context: "ticket 32",
-            pane: card_trace::Pane::untraced(),
-        })
-        .unwrap()
+        let next = leaf.session.grid_for(&leaf.view.metrics, body);
+        leaf.session
+            .propose_size(GridChange {
+                next,
+                physical,
+                observed_at: Instant::now(),
+                on_stage: LeafOnStage::Shown,
+                context: "ticket 32",
+                pane: card_trace::Pane::untraced(),
+            })
+            .unwrap()
     };
     // Born into the pane at the grid it has always had.
     step(&mut leaf, "");
-    assert_eq!(leaf.grid, unreserved);
+    assert_eq!(leaf.session.grid, unreserved);
     assert!(
         !step(&mut leaf, "a banner, before any prompt\r\n"),
         "output without a mark is not a rail"
@@ -2132,7 +2134,7 @@ fn the_first_mark_reserves_the_room_once_and_the_alternate_screen_keeps_it() {
         step(&mut leaf, RAIL_FAILED_THEN_PROMPT),
         "the first mark makes room for the rail"
     );
-    let reserved = leaf.grid;
+    let reserved = leaf.session.grid;
     assert!(reserved.columns < unreserved.columns);
     assert!(
         !step(
@@ -2146,14 +2148,14 @@ fn the_first_mark_reserves_the_room_once_and_the_alternate_screen_keeps_it() {
         "entering the alternate screen keeps the room"
     );
     assert!(
-        leaf.session.terminal_modes().alternate_screen,
+        leaf.session.session.terminal_modes().alternate_screen,
         "the fixture really is on the alternate screen"
     );
     assert!(
         !step(&mut leaf, "\u{1b}[?1049l"),
         "leaving it keeps the room too"
     );
-    assert_eq!(leaf.grid, reserved);
+    assert_eq!(leaf.session.grid, reserved);
     assert_eq!(heard, 1, "the first mark is heard once per pane lifetime");
 
     // And the drain is where it is heard, and a heard mark is carried by a solve.

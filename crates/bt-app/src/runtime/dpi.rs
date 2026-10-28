@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::Ending;
+use crate::TerminalPane;
 use crate::pane_cell_metrics;
 use crate::runtime::floats::files_float_content_height;
 use crate::runtime::terminal::apply_leaf_metrics;
@@ -215,7 +216,7 @@ impl<B: Backend> Runtime<'_, B> {
         let window = u64::from(self.window.window.id());
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let tab_id = tab.id;
-            for (seat, leaf) in tab.sessions.iter_mut() {
+            for (seat, TerminalPane { session: leaf, .. }) in tab.sessions.iter_mut() {
                 // The deferred local reflow lands inside this, immediately before the child hears
                 // the same size, in the same order every other resize path uses (actor first,
                 // then ConPTY, then the vendor reconcile). When nothing was deferred the actor
@@ -747,7 +748,7 @@ pub(crate) fn apply_tabs_leaf_metrics(
     mut derive: impl FnMut(TextScale) -> Result<bt_render::CellMetrics>,
 ) -> Result<()> {
     for tab in tabs {
-        for (_, leaf) in tab.leaves_mut() {
+        for (_, leaf) in tab.panes_mut() {
             let metrics = derive(leaf.view.text_scale)?;
             apply_leaf_metrics(leaf, metrics);
         }

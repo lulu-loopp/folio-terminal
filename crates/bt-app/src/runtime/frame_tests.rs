@@ -170,6 +170,7 @@ fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
     for _ in 0..8 {
         if !folio.runtime().sessions[&beside]
             .session
+            .session
             .resize_transaction_open()
         {
             break;
@@ -184,6 +185,7 @@ fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
     assert!(
         !folio.runtime().sessions[&beside]
             .session
+            .session
             .resize_transaction_open(),
         "the fixture's own precondition: the pane beside has settled its first size"
     );
@@ -195,6 +197,7 @@ fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
         .sessions
         .get_mut(&beside)
         .expect("the pane beside")
+        .session
         .session
         .feed(b"$$x^2$$\r\n")
         .expect("the formula is printed");
@@ -220,9 +223,15 @@ fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
         let pane = runtime.sessions.get_mut(&beside).expect("the pane beside");
         let mut printed = b"\r\n$$a^2$$\r\n".to_vec();
         printed.extend(b"\r\n".repeat(64));
-        pane.session.feed(&printed).expect("the formula is printed");
-        pane.session.refresh_projection(&mut pane.view.projection);
         pane.session
+            .session
+            .feed(&printed)
+            .expect("the formula is printed");
+        pane.session
+            .session
+            .refresh_projection(&mut pane.view.projection);
+        pane.session
+            .session
             .viewport_frame(&mut pane.view.projection)
             .expect("the pane projects");
         pane.view.projection.scroll_to_top();
@@ -238,6 +247,7 @@ fn every_visible_pane_settles_its_rows_and_schedules_its_own_artifacts() {
         .sessions
         .get_mut(&beside)
         .expect("the pane beside")
+        .session
         .session
         .forget_work_in_flight();
     let before = asked(&watched);
@@ -284,7 +294,7 @@ fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() 
     })
     .expect("the pane steps up");
     let rung = runtime.sessions[&seat].view.text_scale;
-    let old = runtime.sessions[&seat].incarnation;
+    let old = runtime.sessions[&seat].session.incarnation;
     assert!(
         !rung.is_actual(),
         "the fixture's own precondition: a pane off 100 %"
@@ -296,7 +306,10 @@ fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() 
         .sessions
         .get(&seat)
         .expect("the seat still holds a shell while its replacement is born");
-    assert_eq!(pane.incarnation, old, "the old shell is still the pane");
+    assert_eq!(
+        pane.session.incarnation, old,
+        "the old shell is still the pane"
+    );
     let successor = pane
         .successor
         .as_ref()
@@ -307,7 +320,7 @@ fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() 
     );
 
     // Its landing: the replacement takes the seat by the insert that drops the old shell.
-    let born = successor.incarnation;
+    let born = successor.session.incarnation;
     let successor = runtime
         .sessions
         .get_mut(&seat)
@@ -318,7 +331,7 @@ fn restart_shell_keeps_the_rung_and_the_old_leaf_until_its_replacement_exists() 
         .expect("the replacement lands");
     let pane = runtime.sessions.get(&seat).expect("the seat holds a shell");
     assert_eq!(
-        pane.incarnation, born,
+        pane.session.incarnation, born,
         "the replacement is the pane once it has landed, and the old shell is gone"
     );
     assert_eq!(pane.view.text_scale, rung, "at the pane's own rung");
@@ -404,6 +417,7 @@ fn the_root_menu_reads_the_shells_folders_once_as_it_opens() {
             .sessions
             .get_mut(&terminal)
             .expect("the terminal pane")
+            .session
             .session
             .feed(report(folder).as_bytes())
             .expect("the report is read");

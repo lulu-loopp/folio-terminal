@@ -139,13 +139,13 @@ pub(super) enum BirthDeathLanding {
 /// and here; the shell itself is seated by the birth road (`land_birth_death_fallback_shell`),
 /// whose landing leaves the exit behind.
 pub(super) fn land_birth_death_fallback(
-    leaf: &mut crate::ShellSession,
+    leaf: &mut crate::TerminalPane,
 ) -> Result<BirthDeathLanding> {
-    let Some(mut pending) = leaf.life.take_fallback() else {
+    let Some(mut pending) = leaf.session.life.take_fallback() else {
         return Ok(BirthDeathLanding::Waiting);
     };
     let Some(answer) = pending.landing.shell.take() else {
-        leaf.life.fall_back(pending);
+        leaf.session.life.fall_back(pending);
         return Ok(BirthDeathLanding::Waiting);
     };
     match answer.session {
@@ -156,7 +156,7 @@ pub(super) fn land_birth_death_fallback(
         }
         Err(error) => {
             pending.exit.disposition = exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept;
-            keep_birth_death_face(leaf, &pending.exit, false)?;
+            keep_birth_death_face(&mut leaf.session, &pending.exit, false)?;
             Ok(BirthDeathLanding::Kept(pending.exit, error.to_string()))
         }
     }
@@ -730,9 +730,11 @@ impl<B: Backend> Runtime<'_, B> {
                 // two different shells for one drag.
                 mark_kind: seats::pane_mark(
                     kind,
-                    self.sessions
-                        .get(&seat)
-                        .map(|leaf| profiles::identity_mark(&leaf.launch.profile)),
+                    self.sessions.get(&seat).map(
+                        |crate::TerminalPane { session: leaf, .. }| {
+                            profiles::identity_mark(&leaf.launch.profile)
+                        },
+                    ),
                     bt_render::chrome_palette(),
                 )
                 .0,
@@ -4612,10 +4614,10 @@ mod birth_death_tests {
         let banner = crate::fallback_banner(&record, profiles::fallback_profile_id());
         assert!(banner.contains("failed to start"), "{banner:?}");
         let mut leaf = test_support::leaf_saying("");
-        leaf.launch.program = Some(PathBuf::from("preferred-shell"));
+        leaf.session.launch.program = Some(PathBuf::from("preferred-shell"));
         // The program that died was a Cygwin bash; the one that lands is Windows PowerShell.
-        leaf.launch.program_kind = profiles::ShellProgram::Cygwin;
-        let born_grid = leaf.conpty_grid;
+        leaf.session.launch.program_kind = profiles::ShellProgram::Cygwin;
+        let born_grid = leaf.session.conpty_grid;
         let (wake, heard) = waking();
         let worker_wake = Arc::clone(&wake);
         let open = Arc::new(Barrier::new(2));
@@ -4637,20 +4639,21 @@ mod birth_death_tests {
             seat: 4,
             code: Some(23),
             elapsed: Duration::from_millis(400),
-            program: leaf.launch.program.clone(),
+            program: leaf.session.launch.program.clone(),
             tab: 8,
             disposition: exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
                 bt_pty::LAST_RESORT_SHELL,
             ),
         };
-        let pending = crate::BirthDeathFallback::waiting(&leaf, shell, exit);
-        leaf.life.fall_back(pending);
+        let pending = crate::BirthDeathFallback::waiting(&leaf.session, shell, exit);
+        leaf.session.life.fall_back(pending);
 
         let resized_grid = grid(52, 7);
         let resized_physical = winit::dpi::PhysicalSize::new(777, 333);
-        resize_pending_shell(&mut leaf, resized_grid, resized_physical);
+        resize_pending_shell(&mut leaf.session, resized_grid, resized_physical);
         assert_eq!(
-            leaf.life
+            leaf.session
+                .life
                 .falling_back()
                 .and_then(|pending| pending.landing.owed_physical),
             Some(resized_physical),
@@ -4660,6 +4663,7 @@ mod birth_death_tests {
         open.wait();
         wait_for_answer(
             &leaf
+                .session
                 .life
                 .falling_back()
                 .expect("the fallback is pending")
@@ -4671,8 +4675,9 @@ mod birth_death_tests {
             land_birth_death_fallback(&mut leaf).expect("the fallback lands"),
             BirthDeathLanding::FellBack(_)
         ));
-        assert!(leaf.life.pty().is_some() && leaf.life.spawn_fallback.is_none());
+        assert!(leaf.session.life.pty().is_some() && leaf.session.life.spawn_fallback.is_none());
         let landed_size = leaf
+            .session
             .life
             .pty()
             .expect("the fallback is seated")
@@ -4683,26 +4688,35 @@ mod birth_death_tests {
             crate::pty_size(resized_grid, resized_physical),
             "the fallback PTY receives the size released while it was pending"
         );
-        assert_eq!(leaf.launch.profile, profiles::fallback_profile_id());
+        assert_eq!(leaf.session.launch.profile, profiles::fallback_profile_id());
         assert_eq!(
-            leaf.launch.program.as_deref(),
+            leaf.session.launch.program.as_deref(),
             Some(Path::new(bt_pty::LAST_RESORT_SHELL))
         );
         // And the spelling it reads is the one the shell that landed prints.
-        assert_eq!(leaf.launch.program_kind, profiles::ShellProgram::Native);
+        assert_eq!(
+            leaf.session.launch.program_kind,
+            profiles::ShellProgram::Native
+        );
         let landed_spelling = profiles::printed_path_namespace(
             profiles::index_of_id(profiles::fallback_profile_id()),
             &profiles::ShellProgram::Native,
             &bt_pty::SystemShellEnvironment,
         );
-        assert_eq!(leaf.session.printed_path_namespace(), landed_spelling);
-        assert_eq!(leaf.launch.paste_recipient.namespace, landed_spelling);
+        assert_eq!(
+            leaf.session.session.printed_path_namespace(),
+            landed_spelling
+        );
+        assert_eq!(
+            leaf.session.launch.paste_recipient.namespace,
+            landed_spelling
+        );
         let squeeze = |text: &str| -> String {
             text.chars()
                 .filter(|character| !character.is_whitespace())
                 .collect()
         };
-        let visible = leaf.session.terminal().visible_text().join("\n");
+        let visible = leaf.session.session.terminal().visible_text().join("\n");
         // The banner's text, without the dim attribute that wraps it on the wire.
         let shown = banner.replace("\u{1b}[2m", "").replace("\u{1b}[0m", "");
         assert!(squeeze(&visible).contains(&squeeze(&shown)), "{visible:?}");
@@ -4730,10 +4744,10 @@ mod birth_death_tests {
     fn a_fresh_birth_still_lands_at_the_size_released_while_it_was_pending() {
         test_support::on_the_window_thread();
         let mut leaf = test_support::leaf_saying("");
-        let born_grid = leaf.conpty_grid;
+        let born_grid = leaf.session.conpty_grid;
         let decision = crate::BirthDecision {
             started: crate::Started::AsAsked,
-            spawn_profile: leaf.launch.profile.clone(),
+            spawn_profile: leaf.session.launch.profile.clone(),
             spawn_place: None,
             at_shell_home: false,
             named: false,
@@ -4742,7 +4756,7 @@ mod birth_death_tests {
             unless_gone: None,
         };
         let seed = crate::LeafSeed {
-            profile: leaf.launch.profile.clone(),
+            profile: leaf.session.launch.profile.clone(),
             ..crate::LeafSeed::default()
         };
         let (wake, heard) = waking();
@@ -4765,13 +4779,13 @@ mod birth_death_tests {
             wake,
         )
         .expect("the fresh birth worker starts");
-        crate::await_shell(&mut leaf, shell, decision, &seed);
+        crate::await_shell(&mut leaf.session, shell, decision, &seed);
 
         let resized_grid = grid(57, 9);
         let resized_physical = winit::dpi::PhysicalSize::new(901, 407);
-        resize_pending_shell(&mut leaf, resized_grid, resized_physical);
+        resize_pending_shell(&mut leaf.session, resized_grid, resized_physical);
         open.wait();
-        let landing = match leaf.life.birth().map(|birth| &birth.waiting) {
+        let landing = match leaf.session.life.birth().map(|birth| &birth.waiting) {
             Some(crate::BirthWait::Shell(landing)) => landing,
             _ => panic!("the fresh shell is pending"),
         };
@@ -4782,6 +4796,7 @@ mod birth_death_tests {
                 .is_none()
         );
         let landed_size = leaf
+            .session
             .life
             .pty()
             .expect("the fresh shell is seated")
@@ -4817,8 +4832,8 @@ mod birth_death_tests {
             tab: 8,
             disposition: exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
         };
-        keep_birth_death_face(&mut leaf, &exit, true).expect("the face is appended");
-        let visible = leaf.session.terminal().visible_text().join("\n");
+        keep_birth_death_face(&mut leaf.session, &exit, true).expect("the face is appended");
+        let visible = leaf.session.session.terminal().visible_text().join("\n");
         let compact: String = visible
             .chars()
             .filter(|character| !character.is_whitespace())
@@ -4829,9 +4844,9 @@ mod birth_death_tests {
             "{visible:?}"
         );
         assert!(
-            matches!(leaf.life.phase, crate::Phase::Kept)
-                && leaf.wake.is_none()
-                && leaf.life.pty().is_none()
+            matches!(leaf.session.life.phase, crate::Phase::Kept)
+                && leaf.session.wake.is_none()
+                && leaf.session.life.pty().is_none()
         );
         assert!(!tab_has_ended(true, true));
 

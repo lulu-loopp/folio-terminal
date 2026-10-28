@@ -796,10 +796,11 @@ pub(crate) fn ring(tab: &mut TabState, seat: SeatId) {
         .get_mut(&seat)
         .expect("the fixture's seat holds a shell")
         .session
+        .session
         .feed(b"\x07")
         .expect("a bell parses");
     assert!(
-        tab.sessions[&seat].session.status().bell_latched(),
+        tab.sessions[&seat].session.session.status().bell_latched(),
         "the fixture's own precondition: the bell really latched"
     );
 }
@@ -814,6 +815,7 @@ pub(crate) fn request_attention(tab: &mut TabState, seat: SeatId, value: &str) {
     tab.sessions
         .get_mut(&seat)
         .expect("the fixture's seat holds a shell")
+        .session
         .session
         .feed(bytes.as_bytes())
         .expect("the sequence parses");
@@ -1684,7 +1686,7 @@ pub(crate) fn tab_with_a_files_column(id: u64, root: &str) -> TabState {
         }));
     let terminals = seats.terminals();
     let focused = terminals[0];
-    let sessions: BTreeMap<SeatId, ShellSession> = terminals
+    let sessions: BTreeMap<SeatId, TerminalPane> = terminals
         .iter()
         .map(|s| (*s, leaf_saying("SHELL")))
         .collect();
@@ -2337,7 +2339,7 @@ pub(crate) fn text_buffer(name: &str, body: &str) -> preview::PreviewBuffer {
 }
 
 /// One lone-terminal tab holding exactly this shell.
-pub(crate) fn tab_holding(leaf: ShellSession) -> TabState {
+pub(crate) fn tab_holding(leaf: TerminalPane) -> TabState {
     let seats = seats::Seats::lone_terminal();
     let identity = seats.identity();
     let (layout, overflow) = cross_solve(&seats);
@@ -2504,17 +2506,18 @@ pub(crate) fn cross_solve(seats: &seats::Seats) -> (SeatLayout, Option<seats::Fi
     )
 }
 
-pub(crate) fn card_restore_fixture() -> ShellSession {
+pub(crate) fn card_restore_fixture() -> TerminalPane {
     install_host_answers();
     let mut leaf = leaf_saying("");
-    leaf.session = DualPlaneSession::new(nonzero_u32(10), nonzero_u32(40));
-    leaf.grid = GridSize {
+    leaf.session.session = DualPlaneSession::new(nonzero_u32(10), nonzero_u32(40));
+    leaf.session.grid = GridSize {
         columns: std::num::NonZeroU16::new(10).unwrap(),
         rows: std::num::NonZeroU16::new(40).unwrap(),
     };
-    leaf.conpty_grid = leaf.grid;
+    leaf.session.conpty_grid = leaf.session.grid;
     for number in 1..=100 {
         leaf.session
+            .session
             .feed(format!("H{number:03}\r\n").as_bytes())
             .unwrap();
     }
@@ -2523,12 +2526,13 @@ pub(crate) fn card_restore_fixture() -> ShellSession {
         .collect::<Vec<_>>()
         .join("\r\n");
     assert!(live.split("\r\n").all(|line| line.len() == 16));
-    leaf.session.feed(live.as_bytes()).unwrap();
+    leaf.session.session.feed(live.as_bytes()).unwrap();
     leaf.view.card_skip = 130;
-    assert_eq!(leaf.session.document().entries().len(), 100);
+    assert_eq!(leaf.session.session.document().entries().len(), 100);
     assert_eq!(
         (0..40)
             .filter(|row| leaf
+                .session
                 .session
                 .live_row(*row)
                 .is_some_and(|row| row.cells.iter().any(|cell| !cell.text.trim().is_empty())))
@@ -2536,7 +2540,7 @@ pub(crate) fn card_restore_fixture() -> ShellSession {
         40
     );
     assert_eq!(
-        focus_thumb::transcript_tail(&leaf.session, 40, 200, 0)
+        focus_thumb::transcript_tail(&leaf.session.session, 40, 200, 0)
             .0
             .len(),
         140
@@ -2549,25 +2553,26 @@ pub(crate) fn card_restore_fixture() -> ShellSession {
 /// draws it — and, since T-CARD-NO-PASSIVE-CLAMP, drawn without touching the
 /// leaf's number: the draw's own clamp lives in `transcript_tail` and writes
 /// nothing back, so looking at a card is not a way to move it.
-pub(crate) fn card_restore_first(leaf: &ShellSession) -> String {
-    focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.view.card_skip).0[0].clone()
+pub(crate) fn card_restore_first(leaf: &TerminalPane) -> String {
+    focus_thumb::transcript_tail(&leaf.session.session, 40, 4, leaf.view.card_skip).0[0].clone()
 }
 
-pub(crate) fn card_restore_widen(leaf: &mut ShellSession) {
-    leaf.propose_size(GridChange {
-        next: GridSize {
-            columns: std::num::NonZeroU16::new(40).unwrap(),
-            rows: std::num::NonZeroU16::new(40).unwrap(),
-        },
-        physical: PhysicalSize::new(400, 400),
-        observed_at: Instant::now(),
-        on_stage: LeafOnStage::Shown,
-        context: "resize card skip fixture",
-        pane: card_trace::Pane::untraced(),
-    })
-    .unwrap();
+pub(crate) fn card_restore_widen(leaf: &mut TerminalPane) {
+    leaf.session
+        .propose_size(GridChange {
+            next: GridSize {
+                columns: std::num::NonZeroU16::new(40).unwrap(),
+                rows: std::num::NonZeroU16::new(40).unwrap(),
+            },
+            physical: PhysicalSize::new(400, 400),
+            observed_at: Instant::now(),
+            on_stage: LeafOnStage::Shown,
+            context: "resize card skip fixture",
+            pane: card_trace::Pane::untraced(),
+        })
+        .unwrap();
     assert_eq!(
-        focus_thumb::transcript_tail(&leaf.session, 40, 200, 0)
+        focus_thumb::transcript_tail(&leaf.session.session, 40, 200, 0)
             .0
             .len(),
         120
@@ -2575,7 +2580,7 @@ pub(crate) fn card_restore_widen(leaf: &mut ShellSession) {
 }
 
 pub(crate) fn card_restore_resize(
-    leaf: &mut ShellSession,
+    leaf: &mut TerminalPane,
     columns: u16,
     rows: u16,
     stage: LeafOnStage,
@@ -2584,46 +2589,50 @@ pub(crate) fn card_restore_resize(
         columns: std::num::NonZeroU16::new(columns).unwrap(),
         rows: std::num::NonZeroU16::new(rows).unwrap(),
     };
-    leaf.propose_size(GridChange {
-        next,
-        physical: PhysicalSize::new(400, 400),
-        observed_at: Instant::now(),
-        on_stage: stage,
-        context: "card skip resize",
-        pane: card_trace::Pane::untraced(),
-    })
-    .unwrap();
+    leaf.session
+        .propose_size(GridChange {
+            next,
+            physical: PhysicalSize::new(400, 400),
+            observed_at: Instant::now(),
+            on_stage: stage,
+            context: "card skip resize",
+            pane: card_trace::Pane::untraced(),
+        })
+        .unwrap();
     if stage == LeafOnStage::Behind {
         let mut pending = false;
         commit_leaf_resize(
-            &mut leaf.session,
+            &mut leaf.session.session,
             None,
             ResizeReanchor {
                 pending: &mut pending,
                 integration: profiles::Integration::None,
             },
             ReleaseGrids {
-                local: leaf.grid,
-                conpty: leaf.conpty_grid,
+                local: leaf.session.grid,
+                conpty: leaf.session.conpty_grid,
                 next,
             },
             PhysicalSize::new(400, 400),
             Instant::now(),
         )
         .unwrap();
-        leaf.grid = next;
-        leaf.conpty_grid = next;
+        leaf.session.grid = next;
+        leaf.session.conpty_grid = next;
     }
 }
 
-pub(crate) fn card_restore_settle(leaf: &mut ShellSession) {
-    leaf.session.mark_pty_resize_requested_at(
-        nonzero_u32(leaf.grid.columns.get()),
-        nonzero_u32(leaf.grid.rows.get()),
+pub(crate) fn card_restore_settle(leaf: &mut TerminalPane) {
+    leaf.session.session.mark_pty_resize_requested_at(
+        nonzero_u32(leaf.session.grid.columns.get()),
+        nonzero_u32(leaf.session.grid.rows.get()),
         Instant::now(),
     );
-    let deadline = leaf.session.resize_finish_deadline().unwrap();
-    leaf.session.finish_resize_if_quiescent(deadline).unwrap();
+    let deadline = leaf.session.session.resize_finish_deadline().unwrap();
+    leaf.session
+        .session
+        .finish_resize_if_quiescent(deadline)
+        .unwrap();
 }
 
 /// One shell with a word in it that no other shell in the test has.
@@ -2631,7 +2640,7 @@ pub(crate) fn card_restore_settle(leaf: &mut ShellSession) {
 /// `pty: None` — this is the same shell-less mode `BT_PROBE_INPUT` uses, so
 /// nothing here spawns a ConPTY, and the scrollback is still a real
 /// `DualPlaneSession`'s.
-pub(crate) fn leaf_saying(text: &str) -> ShellSession {
+pub(crate) fn leaf_saying(text: &str) -> TerminalPane {
     install_host_answers();
     let columns = NonZeroU32::new(40).unwrap();
     let rows = NonZeroU32::new(4).unwrap();
@@ -2650,48 +2659,65 @@ pub(crate) fn leaf_saying(text: &str) -> ShellSession {
         columns: std::num::NonZeroU16::new(40).unwrap(),
         rows: std::num::NonZeroU16::new(4).unwrap(),
     };
-    ShellSession {
-        // A fixture is a shell for the purposes of being told apart from the
-        // next one, so it takes a number from the same counter production
-        // takes one from.
-        incarnation: next_incarnation(),
-        life: crate::ShellLife::shellless(),
-        foreground_program_cadence: foreground_program::Cadence::default(),
-        process_folder: crate::pane_folder::ProcessFolderMemo::default(),
-        // No ConPTY, so no reader thread, so nothing to wake — see the field.
-        wake: None,
-        launch: crate::LaunchFacts {
-            // A shell-less fixture is not a shell of some other kind: these
-            // panes exist to carry scrollback, and the default profile is what
-            // the pane they stand in for would have been started as.
-            profile: profiles::fallback_profile_id().to_owned(),
-            paste_recipient: profiles::paste_recipient(
-                profiles::fallback_profile(),
-                &profiles::ShellProgram::Native,
-                &bt_pty::SystemShellEnvironment,
-            ),
-            // And the door that profile is served through, which is the one the
-            // spawn would have read for it.
-            integration: profiles::row_of(profiles::fallback_profile_id())
-                .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
-            // And no program either, which is the honest shape of the same
-            // fact: nothing was started, so nothing can have announced itself.
-            program: None,
-            program_kind: profiles::ShellProgram::Native,
-            // Nor a place: a fixture was never put down anywhere.
-            spawn_place: None,
-            born_named: false,
+    TerminalPane {
+        session: ShellSession {
+            // A fixture is a shell for the purposes of being told apart from the
+            // next one, so it takes a number from the same counter production
+            // takes one from.
+            incarnation: next_incarnation(),
+            life: crate::ShellLife::shellless(),
+            foreground_program_cadence: foreground_program::Cadence::default(),
+            process_folder: crate::pane_folder::ProcessFolderMemo::default(),
+            // No ConPTY, so no reader thread, so nothing to wake — see the field.
+            wake: None,
+            launch: crate::LaunchFacts {
+                // A shell-less fixture is not a shell of some other kind: these
+                // panes exist to carry scrollback, and the default profile is what
+                // the pane they stand in for would have been started as.
+                profile: profiles::fallback_profile_id().to_owned(),
+                paste_recipient: profiles::paste_recipient(
+                    profiles::fallback_profile(),
+                    &profiles::ShellProgram::Native,
+                    &bt_pty::SystemShellEnvironment,
+                ),
+                // And the door that profile is served through, which is the one the
+                // spawn would have read for it.
+                integration: profiles::row_of(profiles::fallback_profile_id())
+                    .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
+                // And no program either, which is the honest shape of the same
+                // fact: nothing was started, so nothing can have announced itself.
+                program: None,
+                program_kind: profiles::ShellProgram::Native,
+                // Nor a place: a fixture was never put down anywhere.
+                spawn_place: None,
+                born_named: false,
+            },
+            session,
+            attention: crate::AttentionAccount {
+                ledger: attention::AttentionLedger::default(),
+                bell_reported: false,
+                clock: attention_wire::WaitClock::default(),
+                // A fixture has no shell, so nothing was ever told a capability — and an empty
+                // string is one no arriving message can match, which is the honest shape of that.
+                capability: String::new(),
+            },
+            attention_ended: false,
+            grid,
+            conpty_grid: grid,
+            last_finished_command: None,
+            // A fixture's bytes were fed before it was a leaf; whether they marked a
+            // prompt is heard the way the drain hears it, by asking.
+            has_rail: false,
+            pending_pty_resize: None,
+            pending_psreadline_resize_reanchor: false,
+            output_revision: 0,
+            last_seen_revision: 0,
+            // Nothing has been pasted into a fixture.
+            pending_paste: None,
+            paste_hold: None,
+            // A fixture is not a restore, so nothing is owed to its prompt.
+            pending_typing: None,
         },
-        session,
-        attention: crate::AttentionAccount {
-            ledger: attention::AttentionLedger::default(),
-            bell_reported: false,
-            clock: attention_wire::WaitClock::default(),
-            // A fixture has no shell, so nothing was ever told a capability — and an empty
-            // string is one no arriving message can match, which is the honest shape of that.
-            capability: String::new(),
-        },
-        attention_ended: false,
         view: TermView {
             projection,
             // A fixture is a new view, so it is at 100 % (ticket 37), at the default face measured
@@ -2707,21 +2733,6 @@ pub(crate) fn leaf_saying(text: &str) -> ShellSession {
             presented_metrics: fixture_cell_metrics(1.0, 16.0),
             frame_image_references: FrameImageReferences::default(),
         },
-        grid,
-        conpty_grid: grid,
-        last_finished_command: None,
-        // A fixture's bytes were fed before it was a leaf; whether they marked a
-        // prompt is heard the way the drain hears it, by asking.
-        has_rail: false,
-        pending_pty_resize: None,
-        pending_psreadline_resize_reanchor: false,
-        output_revision: 0,
-        last_seen_revision: 0,
-        // Nothing has been pasted into a fixture.
-        pending_paste: None,
-        paste_hold: None,
-        // A fixture is not a restore, so nothing is owed to its prompt.
-        pending_typing: None,
         // Nor a shell being restarted.
         successor: None,
     }
@@ -2732,6 +2743,7 @@ pub(crate) fn leaf_says(tab: &TabState, seat: SeatId) -> String {
     tab.sessions
         .get(&seat)
         .unwrap_or_else(|| panic!("no session filed under {seat:?}"))
+        .session
         .session
         .terminal()
         .visible_text()
@@ -2765,7 +2777,7 @@ pub(crate) fn cross_seats(panes: usize) -> seats::Seats {
 pub(crate) fn cross_tab(id: u64, texts: &[&str]) -> TabState {
     let seats = cross_seats(texts.len());
     let terminals = seats.terminals();
-    let sessions: BTreeMap<SeatId, ShellSession> = terminals
+    let sessions: BTreeMap<SeatId, TerminalPane> = terminals
         .iter()
         .zip(texts)
         .map(|(seat, text)| (*seat, leaf_saying(text)))
@@ -3313,26 +3325,30 @@ pub(crate) fn resolve_focused_pane(
     metrics: &bt_render::CellMetrics,
     body: SeatViewport,
 ) {
-    let leaf = tab.focused_mut().expect("the tab holds a shell");
+    let leaf = tab.focused_pane_mut().expect("the tab holds a shell");
     // The pane at these metrics (ticket 37: a pane's grid is solved at its own metrics).
     apply_leaf_metrics(leaf, *metrics);
-    let next = leaf.grid_for(body);
-    leaf.propose_size(GridChange {
-        next,
-        physical: PhysicalSize::new(body.width, body.height),
-        observed_at: Instant::now(),
-        on_stage: LeafOnStage::Shown,
-        context: "ticket 47",
-        pane: card_trace::Pane::untraced(),
-    })
-    .expect("carry the solved grid to the pane");
+    let next = leaf.session.grid_for(&leaf.view.metrics, body);
+    leaf.session
+        .propose_size(GridChange {
+            next,
+            physical: PhysicalSize::new(body.width, body.height),
+            observed_at: Instant::now(),
+            on_stage: LeafOnStage::Shown,
+            context: "ticket 47",
+            pane: card_trace::Pane::untraced(),
+        })
+        .expect("carry the solved grid to the pane");
 }
 
 /// The frame the tab's focused pane composes now.
 pub(crate) fn focused_frame(tab: &mut TabState) -> ViewportFrame {
-    let leaf = tab.focused_mut().expect("the tab holds a shell");
-    leaf.session.refresh_projection(&mut leaf.view.projection);
+    let leaf = tab.focused_pane_mut().expect("the tab holds a shell");
     leaf.session
+        .session
+        .refresh_projection(&mut leaf.view.projection);
+    leaf.session
+        .session
         .viewport_frame(&mut leaf.view.projection)
         .expect("compose the pane's frame")
 }
@@ -3347,23 +3363,24 @@ pub(crate) fn focused_frame(tab: &mut TabState) -> ViewportFrame {
 // reach, which door the answer leaves by — it is pinned on the method bodies through `bt_source`.
 
 /// A shell-less leaf whose paste grammar is `grammar`, after the program printed `printed`.
-pub(crate) fn paste_leaf(grammar: shell_literal::ShellGrammar, printed: &[u8]) -> ShellSession {
+pub(crate) fn paste_leaf(grammar: shell_literal::ShellGrammar, printed: &[u8]) -> TerminalPane {
     let mut leaf = leaf_saying("");
-    leaf.launch.paste_recipient.encoder.grammar = grammar;
+    leaf.session.launch.paste_recipient.encoder.grammar = grammar;
     leaf.session
+        .session
         .feed(printed)
         .expect("feed the program's own bytes");
     leaf
 }
 
 /// One tab holding `leaf`, and the address a paste into it is aimed at.
-pub(crate) fn paste_tab(leaf: ShellSession) -> (TabState, PasteTarget) {
+pub(crate) fn paste_tab(leaf: TerminalPane) -> (TabState, PasteTarget) {
     let tab = tab_holding(leaf);
     let (seat, leaf) = tab.sessions.iter().next().expect("a lone terminal");
     let target = PasteTarget {
         tab: tab.id,
         seat: *seat,
-        incarnation: leaf.incarnation,
+        incarnation: leaf.session.incarnation,
     };
     (tab, target)
 }
@@ -3387,7 +3404,11 @@ pub(crate) fn paste_text_into_on(
     ask: bool,
     host: bt_platform::HostPlatform,
 ) -> StagedPaste {
-    let recipient = tab.sessions[&target.seat].launch.paste_recipient.clone();
+    let recipient = tab.sessions[&target.seat]
+        .session
+        .launch
+        .paste_recipient
+        .clone();
     let prepared = prepare_clipboard_paste(
         bt_platform::ClipboardPayload::Text(text.to_owned()),
         &recipient,
@@ -3431,7 +3452,7 @@ pub(crate) fn staged_bytes_sent(
     let leaf = tab.sessions.get_mut(&seat).expect("the seat has a shell");
     let mut sent = Vec::new();
     paste_body(
-        &mut leaf.session,
+        &mut leaf.session.session,
         &mut leaf.view.projection,
         body,
         |bytes| {

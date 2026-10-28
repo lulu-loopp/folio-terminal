@@ -217,14 +217,15 @@ fn the_look_that_spends_a_latch_is_the_runtimes_own_call() {
         .get_mut(&seat)
         .expect("the fixture's one shell")
         .session
+        .session
         .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07x\x1b]133;C\x07\x1b]133;D;1\x07\x07")
         .expect("the fixture's bytes parse");
-    let rang = tabs[0].sessions[&seat].session.status();
+    let rang = tabs[0].sessions[&seat].session.session.status();
     assert!(rang.bell_latched() && rang.failure_exit_code == Some(1));
 
     one_turn(&mut tabs, 0, true, &mut next);
 
-    let looked = tabs[0].sessions[&seat].session.status();
+    let looked = tabs[0].sessions[&seat].session.session.status();
     assert!(!looked.bell_latched());
     assert_eq!(looked.failure_exit_code, None);
     // The fixture, handed the same two facts, says the same thing.
