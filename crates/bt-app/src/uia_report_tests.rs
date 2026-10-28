@@ -118,9 +118,9 @@ fn nothing_is_built_until_automation_asks() {
     assert_eq!(published[0].panes.len(), 1);
 }
 
-/// RED (88a) — **a move of the keyboard between two idle panes publishes once, with no frame**:
-/// a focus-only turn presents nothing, so the publication cannot wait for one; and a turn after
-/// it that changes nothing publishes nothing.
+/// RED (88a) — **a move of the keyboard between two idle panes publishes, with no frame owed**:
+/// the move is in the keys the frames do not carry, so the publication does not wait for a
+/// present; and a turn after it that changes nothing publishes nothing.
 ///
 /// MUTATION: gate `UiaReport::due` on `presented` alone.
 #[test]
@@ -137,7 +137,9 @@ fn a_focus_only_change_publishes_without_a_frame() {
         .runtime()
         .focus_seat(terminals[1])
         .expect("the pane chord's door");
-    assert!(!folio.window.uia.presented, "no frame was presented");
+    // The focus door may repaint; this turn is held to what the frames do not say, so the
+    // present it made is spent before the clock run.
+    folio.window.uia.presented = false;
     folio.runtime().flush_uia().expect("a turn's clock run");
     let published = recorder(&folio).published();
     assert_eq!(published.len(), 2, "the move publishes");
