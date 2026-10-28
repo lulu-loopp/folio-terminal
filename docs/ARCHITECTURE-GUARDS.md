@@ -366,7 +366,10 @@ and their methods are reachable only as `Ambiguous` candidates.
 **The unfollowed edges, by site.** `docs/plans/UNFOLLOWED-EDGES.tsv` lists every `Dynamic` edge
 and every `Ambiguous` edge with other than one candidate met walking from every product callable
 of bt-app — the calls the door reach does not follow — keyed by file, item, kind and the call's
-name, with `sites` (the calls behind the key) and a `reason`.
+name, with `sites` (the calls behind the key) and a `reason`. Since 2026-10-28 (plan row 84) its
+header also states how many `Ambiguous` calls have exactly one candidate
+(`Unresolved::sole_candidate`, the rule the census test's callers count by), held equal to the tree
+by the same test, so a rename that takes an edge off the list moves that count.
 `the_unfollowed_edges_are_the_committed_list` holds the list equal to the tree;
 `scripts/ci/check-unfollowed-edges.ps1` holds it to the merge base's, refusing a key added or
 grown unless its reason is `YYYY-MM-DD: <why>` — for a grown key, a reason other than the one the
