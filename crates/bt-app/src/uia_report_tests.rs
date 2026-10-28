@@ -30,7 +30,10 @@ fn a_turn_publishes_only_what_moved_after_a_client_asked() {
     assert!(report.due(true, &keys), "a frame reached the glass");
     assert!(!report.due(true, &keys), "and the bit is spent");
     assert!(report.due(true, &[key(1, false)]), "the keyboard moved");
-    assert!(report.due(true, &[key(1, false), key(2, true)]), "a pane came");
+    assert!(
+        report.due(true, &[key(1, false), key(2, true)]),
+        "a pane came"
+    );
 }
 
 /// RED (88a) — **the publication is the pane as it was presented**: after a frame reaches the
@@ -42,11 +45,17 @@ fn a_turn_publishes_only_what_moved_after_a_client_asked() {
 /// `presented` write in `Runtime::redraw`.
 #[test]
 fn the_publication_is_the_presented_pane() {
-    let mut folio =
-        HeadlessFolio::with_tabs("uia-publication", vec![tab_holding(leaf_saying("门 door"))], 0);
+    let mut folio = HeadlessFolio::with_tabs(
+        "uia-publication",
+        vec![tab_holding(leaf_saying("门 door"))],
+        0,
+    );
     folio.window.uia.presented = false;
     folio.draw();
-    assert!(folio.window.uia.presented, "a present owes the next publication");
+    assert!(
+        folio.window.uia.presented,
+        "a present owes the next publication"
+    );
     let runtime = folio.runtime();
     let keys = runtime.uia_keys();
     assert_eq!(keys.len(), 1, "the one terminal: {keys:?}");
@@ -60,7 +69,11 @@ fn the_publication_is_the_presented_pane() {
         "{:?}",
         pane.text(0, pane.len(), -1)
     );
-    assert_eq!(pane.caret(), Some(6), "after door: 门, the space and four letters");
+    assert_eq!(
+        pane.caret(),
+        Some(6),
+        "after door: 门, the space and four letters"
+    );
     let width = f64::from(runtime.sessions[&seat].view.presented_metrics.cell_width_px);
     let glyph = pane.rectangles(0, 1);
     assert_eq!(glyph.len(), 1);
@@ -97,7 +110,11 @@ fn nothing_is_built_until_automation_asks() {
     recorder(&folio).ask();
     folio.runtime().flush_uia().expect("a turn's clock run");
     let published = recorder(&folio).published();
-    assert_eq!(published.len(), 1, "the first turn after the question publishes");
+    assert_eq!(
+        published.len(),
+        1,
+        "the first turn after the question publishes"
+    );
     assert_eq!(published[0].panes.len(), 1);
 }
 
@@ -126,7 +143,11 @@ fn a_focus_only_change_publishes_without_a_frame() {
     assert_eq!(published.len(), 2, "the move publishes");
     assert_eq!(published[1].focused(), Some(terminals[1].0));
     folio.runtime().flush_uia().expect("a turn's clock run");
-    assert_eq!(recorder(&folio).published().len(), 2, "an idle turn publishes nothing");
+    assert_eq!(
+        recorder(&folio).published().len(),
+        2,
+        "an idle turn publishes nothing"
+    );
 }
 
 /// RED (88a) — **a client's focus request is the pane chord's focus**: the parked seat is taken
@@ -144,7 +165,9 @@ fn a_clients_focus_request_focuses_the_pane() {
     assert_eq!(folio.runtime().focused_leaf, terminals[1]);
     let published = recorder(&folio).published();
     assert_eq!(
-        published.last().and_then(bt_platform::uia::WindowText::focused),
+        published
+            .last()
+            .and_then(bt_platform::uia::WindowText::focused),
         Some(terminals[1].0)
     );
 }
@@ -175,10 +198,16 @@ fn the_snapshot_caret_carries_the_seat_origin() {
         width: key.body[2],
         height: key.body[3],
     };
-    assert!(body.x > 0, "the fixture: the right pane does not start at the window's edge");
+    assert!(
+        body.x > 0,
+        "the fixture: the right pane does not start at the window's edge"
+    );
     let view = &runtime.sessions[&terminals[1]].view;
     let frame = view.last_presented_frame.as_ref().expect("presented");
-    assert!(frame.cursor_in_view, "the fixture: the caret is on the glass");
+    assert!(
+        frame.cursor_in_view,
+        "the fixture: the caret is on the glass"
+    );
     let area = crate::runtime::window_ime_cursor_area(
         body,
         bt_render::ime_cursor_area_for_metrics(view.presented_metrics, frame),
@@ -190,7 +219,11 @@ fn the_snapshot_caret_carries_the_seat_origin() {
     // Pixels on the glass: far inside `i32`.
     #[allow(clippy::cast_possible_truncation)]
     let at = (rect.left.floor() as i32, rect.top.floor() as i32);
-    assert_eq!(at, (area.x, area.y), "the caret the input method is told for this pane");
+    assert_eq!(
+        at,
+        (area.x, area.y),
+        "the caret the input method is told for this pane"
+    );
 }
 
 /// RED (88a) — **only the focused shell pane holds the keyboard**: in a row of two, the focused
@@ -218,13 +251,25 @@ fn the_focused_pane_reports_keyboard_focus_and_no_other() {
         );
         holding
     };
-    assert_eq!(holding(&mut folio), [terminals[0].0], "the focused pane only");
+    assert_eq!(
+        holding(&mut folio),
+        [terminals[0].0],
+        "the focused pane only"
+    );
     assert!(folio.window.search.open(terminals[0]), "the capsule opens");
     folio.window.search.focus();
     assert!(folio.window.search.is_focused(), "and holds the keyboard");
-    assert_eq!(holding(&mut folio), Vec::<u64>::new(), "the capsule holds it");
+    assert_eq!(
+        holding(&mut folio),
+        Vec::<u64>::new(),
+        "the capsule holds it"
+    );
     folio.window.search.close();
     assert_eq!(holding(&mut folio), [terminals[0].0], "and gives it back");
     folio.window.window_focused = false;
-    assert_eq!(holding(&mut folio), Vec::<u64>::new(), "an unfocused window");
+    assert_eq!(
+        holding(&mut folio),
+        Vec::<u64>::new(),
+        "an unfocused window"
+    );
 }

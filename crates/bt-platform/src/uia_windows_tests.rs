@@ -105,7 +105,9 @@ fn send(data: &HookData, message: u32, lparam: isize) -> isize {
 }
 
 fn bstr(value: &VARIANT) -> String {
-    BSTR::try_from(value).map(|text| text.to_string()).unwrap_or_default()
+    BSTR::try_from(value)
+        .map(|text| text.to_string())
+        .unwrap_or_default()
 }
 
 /// RED (88a) — **nothing is built until a client asks**: the root is made on the first
@@ -125,7 +127,11 @@ fn the_root_is_made_on_the_first_question_only() {
     let _ = send(&data, WM_GETOBJECT, -25);
     assert!(data.made());
     assert!(data.shared().wanted.load(Ordering::SeqCst));
-    assert_eq!(woken.load(Ordering::SeqCst), 1, "one wake, at the first question");
+    assert_eq!(
+        woken.load(Ordering::SeqCst),
+        1,
+        "one wake, at the first question"
+    );
 }
 
 /// RED (88a) — **the tree and the text, answered from the publication through the providers'
@@ -150,18 +156,33 @@ fn the_providers_answer_the_published_tree_and_text() {
         let first = fragment.Navigate(NavigateDirection_FirstChild).unwrap();
         let last = fragment.Navigate(NavigateDirection_LastChild).unwrap();
         let simple: IRawElementProviderSimple = first.cast().unwrap();
-        assert_eq!(bstr(&simple.GetPropertyValue(UIA_NamePropertyId).unwrap()), "pwsh");
+        assert_eq!(
+            bstr(&simple.GetPropertyValue(UIA_NamePropertyId).unwrap()),
+            "pwsh"
+        );
         assert_eq!(
             i32::try_from(&simple.GetPropertyValue(UIA_ControlTypePropertyId).unwrap()).unwrap(),
             Shape::Text.control_type_id()
         );
-        assert!(bool::try_from(&simple.GetPropertyValue(UIA_HasKeyboardFocusPropertyId).unwrap())
-            .unwrap());
+        assert!(
+            bool::try_from(
+                &simple
+                    .GetPropertyValue(UIA_HasKeyboardFocusPropertyId)
+                    .unwrap()
+            )
+            .unwrap()
+        );
         let next = first.Navigate(NavigateDirection_NextSibling).unwrap();
         let next: IRawElementProviderSimple = next.cast().unwrap();
         let last: IRawElementProviderSimple = last.cast().unwrap();
-        assert_eq!(bstr(&next.GetPropertyValue(UIA_NamePropertyId).unwrap()), "cmd");
-        assert_eq!(bstr(&last.GetPropertyValue(UIA_NamePropertyId).unwrap()), "cmd");
+        assert_eq!(
+            bstr(&next.GetPropertyValue(UIA_NamePropertyId).unwrap()),
+            "cmd"
+        );
+        assert_eq!(
+            bstr(&last.GetPropertyValue(UIA_NamePropertyId).unwrap()),
+            "cmd"
+        );
         assert!(first.Navigate(NavigateDirection_Parent).is_ok());
         let pattern = simple.GetPatternProvider(UIA_TextPatternId).unwrap();
         let text: ITextProvider = pattern.cast().unwrap();
@@ -169,10 +190,16 @@ fn the_providers_answer_the_published_tree_and_text() {
         assert_eq!(document.GetText(-1).unwrap().to_string(), "PS> ls\r\na.txt");
         let focus = root.GetFocus().unwrap();
         let focus: IRawElementProviderSimple = focus.cast().unwrap();
-        assert_eq!(bstr(&focus.GetPropertyValue(UIA_NamePropertyId).unwrap()), "pwsh");
+        assert_eq!(
+            bstr(&focus.GetPropertyValue(UIA_NamePropertyId).unwrap()),
+            "pwsh"
+        );
         let at = root.ElementProviderFromPoint(150.0, 10.0).unwrap();
         let at: IRawElementProviderSimple = at.cast().unwrap();
-        assert_eq!(bstr(&at.GetPropertyValue(UIA_NamePropertyId).unwrap()), "cmd");
+        assert_eq!(
+            bstr(&at.GetPropertyValue(UIA_NamePropertyId).unwrap()),
+            "cmd"
+        );
         assert_eq!(first.BoundingRectangle().unwrap().width, 100.0);
     }
 }
@@ -201,12 +228,24 @@ fn the_caret_range_is_the_published_caret() {
         let mut active = BOOL::from(false);
         let caret = text.GetCaretRange(&raw mut active).unwrap();
         assert!(active.as_bool(), "the pane holds the keyboard");
-        assert_eq!(caret.GetText(-1).unwrap().to_string(), "", "a caret is degenerate");
+        assert_eq!(
+            caret.GetText(-1).unwrap().to_string(),
+            "",
+            "a caret is degenerate"
+        );
         caret.ExpandToEnclosingUnit(TextUnit_Word).unwrap();
-        assert_eq!(caret.GetText(-1).unwrap().to_string(), "ls ", "the word at column 4");
+        assert_eq!(
+            caret.GetText(-1).unwrap().to_string(),
+            "ls ",
+            "the word at column 4"
+        );
         assert_eq!(caret.Move(TextUnit_Word, 1).unwrap(), 1);
         assert_eq!(caret.GetText(-1).unwrap().to_string(), "-a");
-        assert_eq!(caret.Move(TextUnit_Word, 1).unwrap(), 0, "no word after the last");
+        assert_eq!(
+            caret.Move(TextUnit_Word, 1).unwrap(),
+            0,
+            "no word after the last"
+        );
         let rectangles = caret.GetBoundingRectangles().unwrap();
         assert!(!rectangles.is_null());
         let _ = windows::Win32::System::Ole::SafeArrayDestroy(rectangles);
@@ -216,7 +255,11 @@ fn the_caret_range_is_the_published_caret() {
 /// RED (88a) — **the Value pattern is the edit shape's only**.
 #[test]
 fn only_the_edit_shape_answers_the_value_pattern() {
-    for (shape, answers) in [(Shape::Edit, true), (Shape::Document, false), (Shape::Text, false)] {
+    for (shape, answers) in [
+        (Shape::Edit, true),
+        (Shape::Document, false),
+        (Shape::Text, false),
+    ] {
         let (data, _) = hook(shape);
         let _ = data.publish(WindowText {
             panes: vec![pane(4, "pwsh", 0.0, true, &["ab"])],
@@ -271,11 +314,23 @@ fn providers_read_the_newest_publication_only() {
             panes: vec![pane(5, "other", 0.0, true, &["x"])],
         });
         let error = document.GetText(-1).unwrap_err();
-        assert_eq!(error.code(), hresult(UIA_E_ELEMENTNOTAVAILABLE), "pane 4 is gone");
+        assert_eq!(
+            error.code(),
+            hresult(UIA_E_ELEMENTNOTAVAILABLE),
+            "pane 4 is gone"
+        );
         let _ = send(&data, WM_DESTROY, 0);
         let error = root.Navigate(NavigateDirection_FirstChild).unwrap_err();
-        assert_eq!(error.code(), hresult(UIA_E_ELEMENTNOTAVAILABLE), "the window is gone");
-        assert_eq!(send(&data, WM_GETOBJECT, -25), 0, "a released window answers nothing");
+        assert_eq!(
+            error.code(),
+            hresult(UIA_E_ELEMENTNOTAVAILABLE),
+            "the window is gone"
+        );
+        assert_eq!(
+            send(&data, WM_GETOBJECT, -25),
+            0,
+            "a released window answers nothing"
+        );
     }
 }
 
@@ -293,7 +348,10 @@ fn focus_moves_owe_one_event_and_a_clients_focus_is_parked() {
     };
     assert!(data.publish(two(4)).is_some(), "the first focus");
     assert!(data.publish(two(4)).is_none(), "unmoved");
-    assert!(data.publish(two(0)).is_none(), "the window let the keyboard go");
+    assert!(
+        data.publish(two(0)).is_none(),
+        "the window let the keyboard go"
+    );
     assert!(data.publish(two(4)).is_some(), "and took it back");
     assert!(data.publish(two(9)).is_some(), "moved");
     let root: IRawElementProviderFragment = data.root().to_interface();
@@ -302,7 +360,14 @@ fn focus_moves_owe_one_event_and_a_clients_focus_is_parked() {
         let first = root.Navigate(NavigateDirection_FirstChild).unwrap();
         first.SetFocus().unwrap();
     }
-    assert_eq!(woken.load(Ordering::SeqCst), 2, "the first question and the focus request");
-    let seat = data.shared().focus_asked.swap(super::NO_SEAT, Ordering::SeqCst);
+    assert_eq!(
+        woken.load(Ordering::SeqCst),
+        2,
+        "the first question and the focus request"
+    );
+    let seat = data
+        .shared()
+        .focus_asked
+        .swap(super::NO_SEAT, Ordering::SeqCst);
     assert_eq!(seat, 4);
 }

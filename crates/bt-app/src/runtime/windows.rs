@@ -801,7 +801,11 @@ impl<B: Backend> Runtime<'_, B> {
             .filter_map(|seat| {
                 let body =
                     crate::seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
-                self.sessions.get(&seat)?.view.last_presented_frame.as_ref()?;
+                self.sessions
+                    .get(&seat)?
+                    .view
+                    .last_presented_frame
+                    .as_ref()?;
                 Some(crate::uia_report::PaneKey {
                     seat: seat.0,
                     body: [body.x, body.y, body.width, body.height],

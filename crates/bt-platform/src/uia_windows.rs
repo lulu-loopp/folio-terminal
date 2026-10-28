@@ -25,25 +25,27 @@ use windows::Win32::Foundation::{
     E_INVALIDARG, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::ClientToScreen;
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, SAFEARRAY};
+use windows::Win32::System::Com::{
+    COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, SAFEARRAY,
+};
 use windows::Win32::System::Ole::{SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement};
 use windows::Win32::System::Variant::{VARENUM, VARIANT, VT_I4, VT_R8, VT_UNKNOWN};
 use windows::Win32::UI::Accessibility::{
-    IRawElementProviderFragment, IRawElementProviderFragment_Impl,
-    IRawElementProviderFragmentRoot, IRawElementProviderFragmentRoot_Impl,
-    IRawElementProviderSimple, IRawElementProviderSimple_Impl, ITextProvider_Impl, ITextProvider2,
-    ITextProvider2_Impl, ITextRangeProvider, ITextRangeProvider_Impl, IValueProvider,
-    IValueProvider_Impl, NavigateDirection, NavigateDirection_FirstChild,
-    NavigateDirection_LastChild, NavigateDirection_NextSibling, NavigateDirection_Parent,
-    NavigateDirection_PreviousSibling, ProviderOptions, ProviderOptions_ServerSideProvider,
-    SupportedTextSelection, SupportedTextSelection_Single, TextPatternRangeEndpoint,
-    TextPatternRangeEndpoint_Start, TextUnit, UIA_AutomationFocusChangedEventId,
-    UIA_AutomationIdPropertyId, UIA_ClassNamePropertyId, UIA_ControlTypePropertyId,
-    UIA_E_ELEMENTNOTAVAILABLE, UIA_E_INVALIDOPERATION, UIA_HasKeyboardFocusPropertyId,
-    UIA_IsContentElementPropertyId, UIA_IsControlElementPropertyId, UIA_IsEnabledPropertyId,
-    UIA_IsKeyboardFocusablePropertyId, UIA_IsReadOnlyAttributeId, UIA_NamePropertyId,
-    UIA_PATTERN_ID, UIA_PROPERTY_ID, UIA_TEXTATTRIBUTE_ID, UIA_TextPattern2Id, UIA_TextPatternId,
-    UIA_ValuePatternId, UiaAppendRuntimeId, UiaClientsAreListening, UiaDisconnectProvider,
+    IRawElementProviderFragment, IRawElementProviderFragment_Impl, IRawElementProviderFragmentRoot,
+    IRawElementProviderFragmentRoot_Impl, IRawElementProviderSimple,
+    IRawElementProviderSimple_Impl, ITextProvider_Impl, ITextProvider2, ITextProvider2_Impl,
+    ITextRangeProvider, ITextRangeProvider_Impl, IValueProvider, IValueProvider_Impl,
+    NavigateDirection, NavigateDirection_FirstChild, NavigateDirection_LastChild,
+    NavigateDirection_NextSibling, NavigateDirection_Parent, NavigateDirection_PreviousSibling,
+    ProviderOptions, ProviderOptions_ServerSideProvider, SupportedTextSelection,
+    SupportedTextSelection_Single, TextPatternRangeEndpoint, TextPatternRangeEndpoint_Start,
+    TextUnit, UIA_AutomationFocusChangedEventId, UIA_AutomationIdPropertyId,
+    UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_E_ELEMENTNOTAVAILABLE,
+    UIA_E_INVALIDOPERATION, UIA_HasKeyboardFocusPropertyId, UIA_IsContentElementPropertyId,
+    UIA_IsControlElementPropertyId, UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
+    UIA_IsReadOnlyAttributeId, UIA_NamePropertyId, UIA_PATTERN_ID, UIA_PROPERTY_ID,
+    UIA_TEXTATTRIBUTE_ID, UIA_TextPattern2Id, UIA_TextPatternId, UIA_ValuePatternId,
+    UiaAppendRuntimeId, UiaClientsAreListening, UiaDisconnectProvider,
     UiaGetReservedNotSupportedValue, UiaHostProviderFromHwnd, UiaPoint, UiaRaiseAutomationEvent,
     UiaRect, UiaReturnRawElementProvider,
 };
@@ -273,9 +275,8 @@ impl UiaHook {
         let reference_data = (&raw const *data) as usize;
         // SAFETY: called on the window's own thread with a live HWND, and the box above outlives
         // the subclass — `Drop` removes it first.
-        let installed = unsafe {
-            SetWindowSubclass(hwnd, Some(uia_subclass), UIA_SUBCLASS_ID, reference_data)
-        };
+        let installed =
+            unsafe { SetWindowSubclass(hwnd, Some(uia_subclass), UIA_SUBCLASS_ID, reference_data) };
         if !installed.as_bool() {
             return Err(format!(
                 "SetWindowSubclass(ui automation) failed: {}",
@@ -387,7 +388,11 @@ impl UiaEvents {
 
 /// **The window's root fragment**: hosted by the window (`UiaHostProviderFromHwnd` gives its
 /// name, rectangle and runtime id), its children the active tab's terminal panes.
-#[implement(IRawElementProviderSimple, IRawElementProviderFragment, IRawElementProviderFragmentRoot)]
+#[implement(
+    IRawElementProviderSimple,
+    IRawElementProviderFragment,
+    IRawElementProviderFragmentRoot
+)]
 pub(super) struct Root {
     shared: Arc<Shared>,
 }
@@ -490,7 +495,12 @@ impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
 /// **One terminal pane**: a fragment of the root, its own Text pattern, and for the edit shape
 /// the Value pattern. It names its pane by seat and reads the pane from the publication at each
 /// question: a pane the publication no longer has is gone.
-#[implement(IRawElementProviderSimple, IRawElementProviderFragment, ITextProvider2, IValueProvider)]
+#[implement(
+    IRawElementProviderSimple,
+    IRawElementProviderFragment,
+    ITextProvider2,
+    IValueProvider
+)]
 pub(super) struct Pane {
     shared: Arc<Shared>,
     root: ComObject<Root>,
@@ -723,8 +733,7 @@ impl Range {
     fn peer<'a>(&self, other: &'a Ref<ITextRangeProvider>) -> Result<&'a Range_Impl> {
         let other = other.ok()?;
         let other = other.cast_object_ref::<Range>()?;
-        if other.pane.seat == self.pane.seat && Arc::ptr_eq(&other.pane.shared, &self.pane.shared)
-        {
+        if other.pane.seat == self.pane.seat && Arc::ptr_eq(&other.pane.shared, &self.pane.shared) {
             Ok(other)
         } else {
             Err(Error::from_hresult(E_INVALIDARG))
@@ -804,7 +813,13 @@ impl ITextRangeProvider_Impl for Range_Impl {
         let needle = text.to_string();
         let found = self.pane.with(|pane| {
             let (start, end) = self.ends(pane);
-            Ok(pane.find(start, end, &needle, backward.as_bool(), ignorecase.as_bool()))
+            Ok(pane.find(
+                start,
+                end,
+                &needle,
+                backward.as_bool(),
+                ignorecase.as_bool(),
+            ))
         })?;
         match found {
             Some((start, end)) => Ok(self.pane.range(start, end)),

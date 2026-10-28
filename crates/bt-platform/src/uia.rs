@@ -430,9 +430,9 @@ impl PaneText {
                     .find(|start| *start < offset && self.is_boundary(*start, unit))
                     .or(Some(0))
             }
-            Boundary::Character | Boundary::Word => {
-                (0..offset).rev().find(|earlier| self.is_boundary(*earlier, unit))
-            }
+            Boundary::Character | Boundary::Word => (0..offset)
+                .rev()
+                .find(|earlier| self.is_boundary(*earlier, unit)),
         }
     }
 
