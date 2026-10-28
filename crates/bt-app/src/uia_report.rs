@@ -135,6 +135,11 @@ impl<U> UiaReport<U> {
     }
 }
 
+/// How many of a frame's rows are drawn and placed: what [`pane_text`] publishes.
+fn drawn_rows(frame: &ViewportFrame) -> usize {
+    frame.drawable_rows().min(frame.row_map.len())
+}
+
 /// The cells of a frame's first `rows` rows.
 fn drawn_cells(frame: &ViewportFrame, rows: usize) -> &[bt_transcript::CapturedCell] {
     let end = (rows * frame.columns.get() as usize).min(frame.cells.len());
@@ -152,10 +157,9 @@ fn says_the_same(
     new: &ViewportFrame,
     new_metrics: CellMetrics,
 ) -> bool {
-    let drawn = |frame: &ViewportFrame| frame.drawable_rows().min(frame.row_map.len());
-    let rows = drawn(old);
+    let rows = drawn_rows(old);
     if old.columns != new.columns
-        || rows != drawn(new)
+        || rows != drawn_rows(new)
         || old.row_map[..rows] != new.row_map[..rows]
         || old.cursor_in_view != new.cursor_in_view
         || (old.cursor.row, old.cursor.column) != (new.cursor.row, new.cursor.column)
@@ -193,7 +197,7 @@ pub(crate) fn pane_text(
     // The class of the cell before, carried across a soft wrap so a word broken by the pane's
     // edge stays one word.
     let mut before = WordClass::Space;
-    let drawn = frame.drawable_rows().min(frame.row_map.len());
+    let drawn = drawn_rows(frame);
     let mut rows = Vec::with_capacity(drawn);
     for (index, mapped) in frame.row_map.iter().take(drawn).enumerate() {
         let cells = frame
