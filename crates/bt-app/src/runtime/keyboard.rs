@@ -2010,7 +2010,7 @@ impl<B: Backend> Runtime<'_, B> {
                 leaf.session.terminal_modes().keyboard,
                 // Which pseudoconsole the pane runs on, fixed when it was spawned: records go
                 // only to the ConPTY Folio ships. A pane with no ConPTY behind it writes none.
-                leaf.pty.as_ref().map_or(
+                leaf.life.pty().map_or(
                     bt_pty::ConPtyKind::NotConPty,
                     bt_pty::PtySession::conpty_kind,
                 ),

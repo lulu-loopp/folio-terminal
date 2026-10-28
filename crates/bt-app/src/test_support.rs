@@ -2655,12 +2655,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // next one, so it takes a number from the same counter production
         // takes one from.
         incarnation: next_incarnation(),
-        pty: None,
-        shell_exit_age: None,
-        shell_exit_said: false,
-        birth_death_fallback: None,
-        birth_death_kept: false,
-        spawn_fallback: None,
+        life: crate::ShellLife::shellless(),
         foreground_program_cadence: foreground_program::Cadence::default(),
         process_folder: crate::pane_folder::ProcessFolderMemo::default(),
         // No ConPTY, so no reader thread, so nothing to wake — see the field.
@@ -2727,8 +2722,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         paste_hold: None,
         // A fixture is not a restore, so nothing is owed to its prompt.
         pending_typing: None,
-        // Nor a shell being born: it was never going to have one.
-        birth: None,
+        // Nor a shell being restarted.
         successor: None,
     }
 }

@@ -165,12 +165,13 @@ fn a_window_of_two_asking_panes() -> (Vec<TabState>, attention::Places) {
         .sessions
         .get_mut(&in_birth)
         .expect("the fixture's seat holds a pane")
-        .birth = Some(PaneBirth {
-        seed: LeafSeed::default(),
-        probe_input: None,
-        typed: std::cell::RefCell::default(),
-        waiting: BirthWait::Locale,
-    });
+        .life
+        .begin_birth(PaneBirth {
+            seed: LeafSeed::default(),
+            probe_input: None,
+            typed: std::cell::RefCell::default(),
+            waiting: BirthWait::Locale,
+        });
     for tab in &mut tabs {
         let seat = tab.seats.terminals()[0];
         request_attention(tab, seat, "yes");
@@ -301,7 +302,8 @@ fn every_road_that_ends_a_pane_emits_leaf_gone_once() {
         .sessions
         .get_mut(&seat)
         .expect("the placeholder's pane")
-        .pty = Some(shell);
+        .life
+        .land(Some(shell));
     request_attention(&mut placeholder, seat, "yes");
     let mut tabs = vec![placeholder];
     let mut places = attention::Places::default();
@@ -314,7 +316,7 @@ fn every_road_that_ends_a_pane_emits_leaf_gone_once() {
         "the placeholder's pane ends once"
     );
     assert!(
-        tabs[0].sessions[&seat].pty.is_none(),
+        tabs[0].sessions[&seat].life.pty().is_none(),
         "and its shell is retired"
     );
     drop(tabs);

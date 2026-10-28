@@ -2224,8 +2224,6 @@ crates/bt-app/src/main.rs	bt-app crate::install_panic_log_hook_at	Ambiguous	unwr
 crates/bt-app/src/main.rs	bt-app crate::install_panic_log_hook_at	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/main.rs	bt-app crate::install_panic_log_hook_at	Dynamic	fatal	1	
 crates/bt-app/src/main.rs	bt-app crate::install_panic_log_hook_at	Dynamic	previous	1	
-crates/bt-app/src/main.rs	bt-app crate::land_shell_birth	Ambiguous	clone	2	
-crates/bt-app/src/main.rs	bt-app crate::land_shell_birth	Ambiguous	take	1	
 crates/bt-app/src/main.rs	bt-app crate::loudest_claim	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/main.rs	bt-app crate::main	Ambiguous	as_bytes	3	
 crates/bt-app/src/main.rs	bt-app crate::main	Ambiguous	as_deref	1	
@@ -4120,7 +4118,6 @@ crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::land_p
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::land_pane_birth	Ambiguous	map_or	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::land_restart	Ambiguous	and_then	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::land_restart	Ambiguous	as_deref	1	
-crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::land_restart	Ambiguous	take	2	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::move_pane_to_new_window	Ambiguous	is_some	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::move_pane_to_new_window	Ambiguous	unwrap_or	1	
 crates/bt-app/src/runtime/panes.rs	bt-app crate::runtime::panes::Runtime::pane_draws	Ambiguous	collect	1	
