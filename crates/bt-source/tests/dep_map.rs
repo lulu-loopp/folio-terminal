@@ -407,8 +407,12 @@ fn a_call_into_a_subject_trait_on_another_packages_type_is_an_edge() {
 ///   by a `use` while the subject declares a `Session` of its own (`twin.rs`). Placed by package
 ///   it would be the twin's, the call reaching nothing; a self type is placed only where the
 ///   rules are sure (F1).
-/// - `renamed`'s `rename` is declared only by the twin `Session`: the other package's reaches
-///   it through a deref. The answer would stand on another type's method (F2).
+/// - `renamed_crate`'s `aliased` reaches `aliased.rs`'s `impl Aliased for t::Session`, `t` a
+///   renamed crate: a path through a name that is no module is not placed by package (row 84,
+///   N2; placed by package it was the twin's, and the call was listed for the wrong reason).
+/// - `outside`'s `Thing::port(..)` names a type outside the workspace on which the subject
+///   implements `Ports`: the language picks the outside type's own `port` first when it has one,
+///   which the census does not read (row 84, N1; dropped before).
 /// - `Window::paint`'s `self.glass.shine()` is a call through `B::Glass`, which no product impl
 ///   of `Backend` binds (row 84 follows a bound one: `dep_map_assoc`), and `lit`'s `T::shine(..)`
 ///   a call through a generic's trait by its path, which reaches whichever implementation the
@@ -422,7 +426,12 @@ fn a_call_into_a_subject_trait_on_another_packages_type_is_an_edge() {
 /// in `Resolver::placed_for_sure`, accept a placement by package, and `elsewhere` is refused
 /// for the twin's reason while `prod`'s `Cell` impl is guessed into an edge;
 /// in `Resolver::through_binding`, answer no binding with no callee instead of the refusal, and
-/// `paint`'s row is gone.
+/// `paint`'s row is gone; in `Resolver::placed_for_sure`, accept any path that reaches one
+/// declaration again, and `renamed_crate` is refused as "only other types"; in
+/// `Resolver::associated`, drop the outside-type check, and `outside`'s row is gone. `renamed`'s
+/// `rename`, declared only by the twin `Session`, is followed through the other package's deref
+/// to `Inner::rename` (row 84, N3; listed as "only other types" before): MUTATION — do not go
+/// past the other types (`past_other_types` answering `None`), and its row is back.
 #[test]
 fn a_call_the_census_cannot_follow_to_one_implementation_is_listed_by_kind() {
     let (_, census) = foreign_fixture();
@@ -440,6 +449,12 @@ fn a_call_the_census_cannot_follow_to_one_implementation_is_listed_by_kind() {
                 "T::shine",
                 "a call through a generic's trait, which the census follows to no \
                  implementation: `T::shine`"
+            ),
+            (
+                "outside",
+                "Thing::port",
+                "a type's path on a type outside the workspace, whose own functions the census \
+                 does not read: `Thing::port`, which a workspace trait implements on it"
             ),
             (
                 "elsewhere",
@@ -460,12 +475,21 @@ fn a_call_the_census_cannot_follow_to_one_implementation_is_listed_by_kind() {
                 "a call through a qualified path"
             ),
             (
-                "renamed",
-                "rename",
-                "a method only other types of the receiver's name declare"
+                "renamed_crate",
+                "aliased",
+                "a method a trait implements outside its type's package, on a self type the \
+                 rules do not place: `Session` is not declared in the impl's own module, and \
+                 the workspace declares 2 types of that name"
             ),
         ]
     );
+    let renamed: Vec<String> = census
+        .calls()
+        .iter()
+        .filter(|row| row.caller.function == "renamed")
+        .flat_map(|row| row.callees.iter().map(|callee| callee.function.clone()))
+        .collect();
+    assert_eq!(renamed, ["Inner::rename"]);
 }
 
 // ── calls through an associated type ─────────────────────────────────────

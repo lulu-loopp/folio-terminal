@@ -633,7 +633,7 @@ impl<'d> Resolver<'d> {
             ));
         }
         if found.is_empty() && others {
-            return Callees::refused(
+            return Callees::others_only(
                 "a method only other types of the receiver's name declare".to_owned(),
             );
         }
@@ -662,8 +662,11 @@ impl<'d> Resolver<'d> {
     /// name without reading `use` items, so a bare name not declared in the impl's own module goes
     /// to a type of that name in the impl's package, then anywhere — and `use other::X; impl T for
     /// X` beside a type `X` of the impl's own package would be placed at the wrong one. Sure is:
-    /// the name declared in the impl's own module, a path that reaches one declaration, or a bare
-    /// name the workspace declares once and no standard type has. Anything else is an `Err`.
+    /// the name declared in the impl's own module or where its path says, a path rooted at a named
+    /// workspace crate that reaches one declaration of that crate's package, or a bare name the
+    /// workspace declares once and no standard type has. Anything else is an `Err`: a path through
+    /// a module name that matches no module (`use other as alias; impl T for alias::X`) is not
+    /// placed by package (row 84, N2).
     fn placed_for_sure(&self, named: &Named) -> Result<BTreeSet<Place>, String> {
         let name = &named.name;
         if matches!(named.krate.as_deref(), Some("std" | "core" | "alloc")) {
@@ -679,9 +682,14 @@ impl<'d> Resolver<'d> {
             // No workspace type of that name: a standard or an outside one.
             return Ok(BTreeSet::new());
         };
-        let path = named.krate.is_some() || !named.prefix.is_empty();
+        // A path rooted at a named workspace crate is in that crate's package for sure; a path
+        // through `crate::` or a module name may go through a `use … as` the rules do not read.
+        let crate_rooted = named
+            .krate
+            .as_deref()
+            .is_some_and(|krate| krate != "crate" && self.declarations.crates.contains_key(krate));
         let sure = how == How::Exact
-            || (path && found.len() == 1)
+            || (crate_rooted && found.len() == 1)
             || (decls.len() == 1 && std_kind(name).is_none());
         if !sure {
             return Err(if std_kind(name).is_some() {
@@ -956,6 +964,38 @@ impl<'d> Resolver<'d> {
         }
     }
 
+    /// **Where a call goes on when only other types of the receiver's name declare the method**
+    /// (T-CENSUS-FOLLOWS-ASSOCIATED-TYPE-CALLS, N3): the receiver's type declares no such method,
+    /// so the language derefs it — to its `Deref` target, when the type has one. `None` keeps the
+    /// answer and its refusal: any other answer, and a type with no target (or targets that
+    /// disagree, which the refusal already lists).
+    fn past_other_types(&self, found: &Method, name: &str, home: &Home, args: &[Ty]) -> Option<Ty> {
+        if !found.callees.others_only {
+            return None;
+        }
+        self.deref_target(name, &home.packages, args).ok().flatten()
+    }
+
+    /// Whether a workspace trait's product impl on a type outside the workspace declares
+    /// `function` (row 84, N1): an `impl` filed under the type's name whose self type is no
+    /// workspace declaration.
+    fn outside_type_implements(&self, type_name: &str, function: &str) -> bool {
+        self.declarations
+            .methods
+            .get(&(type_name.to_owned(), function.to_owned()))
+            .into_iter()
+            .flatten()
+            .any(|decl| {
+                decl.callable
+                    .as_ref()
+                    .is_some_and(|callable| callable.function.starts_with('<'))
+                    && decl.self_ty.as_ref().is_some_and(|ty| {
+                        self.self_type_places(ty)
+                            .is_ok_and(|places| places.is_empty())
+                    })
+            })
+    }
+
     /// Whether `Type::method` is declared with a receiver — called with the
     /// path syntax, its first argument is then the receiver.
     pub(crate) fn has_receiver(&self, type_name: &str, method: &str) -> bool {
@@ -1061,7 +1101,13 @@ impl<'d> Resolver<'d> {
                             .workspace_methods(&owner, method, Some(&home), &named.args)
                             .map_err(|why| fail(why, shared))?;
                         if let Some(found) = found {
-                            return Ok(answer(found, true, shared));
+                            match self.past_other_types(&found, &owner, &home, &named.args) {
+                                Some(target) => {
+                                    ty = target;
+                                    continue;
+                                }
+                                None => return Ok(answer(found, true, shared)),
+                            }
                         }
                         match self
                             .deref_target(&owner, &home.packages, &named.args)
@@ -1094,7 +1140,13 @@ impl<'d> Resolver<'d> {
                             .workspace_methods(&name, method, Some(&home), &named.args)
                             .map_err(|why| fail(why, shared))?;
                         if let Some(found) = found {
-                            return Ok(answer(found, false, shared));
+                            match self.past_other_types(&found, &name, &home, &named.args) {
+                                Some(target) => {
+                                    ty = target;
+                                    continue;
+                                }
+                                None => return Ok(answer(found, false, shared)),
+                            }
                         }
                         match self
                             .deref_target(&name, &home.packages, &named.args)
@@ -1246,6 +1298,19 @@ impl<'d> Resolver<'d> {
             Kind::External(name) => {
                 if builds_itself(function) {
                     return (Ty::Named(named), Vec::new(), Callees::default());
+                }
+                if self.outside_type_implements(&named.name, function) {
+                    // The language picks the outside type's own `f` before a trait's, and the
+                    // census does not read the outside type: it cannot tell which this is.
+                    return (
+                        Ty::unknown(format!("`{name}::{function}`")),
+                        Vec::new(),
+                        Callees::unresolved(format!(
+                            "a type's path on a type outside the workspace, whose own functions \
+                             the census does not read: `{name}::{function}`, which a workspace \
+                             trait implements on it"
+                        )),
+                    );
                 }
                 // A module's path is spelled like a type's: what it names is the free
                 // functions' rules to say.

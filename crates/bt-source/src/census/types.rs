@@ -1347,6 +1347,9 @@ pub(crate) struct Callees {
     /// resolve: the walk lists the site with this reason unless the path's
     /// free functions answer it instead (a module path is spelled the same).
     pub(crate) unresolved: Option<String>,
+    /// Set with `refused` when every product declaration of the name is another type's of the
+    /// receiver's name: the receiver's type declares no such method, and a deref may reach one.
+    pub(crate) others_only: bool,
 }
 
 impl Callees {
@@ -1360,6 +1363,15 @@ impl Callees {
     pub(crate) fn refused(why: String) -> Self {
         Self {
             refused: Some(why),
+            ..Self::default()
+        }
+    }
+
+    /// Refused because only other types of the receiver's name declare the method.
+    pub(crate) fn others_only(why: String) -> Self {
+        Self {
+            refused: Some(why),
+            others_only: true,
             ..Self::default()
         }
     }
