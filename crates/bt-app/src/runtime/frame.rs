@@ -2101,17 +2101,21 @@ impl<B: Backend> Runtime<'_, B> {
         // active or what it is called; `want_title` only said so. A title held for
         // its frame books its wake-up in the fold below.
         self.flush_title(now);
-        // **And the input method's caret area, on the same terms** (ticket 63). Every
-        // road above — the drain's frames, the IME events' frames, a preview repainted,
-        // the caret offer at the head of the clock run — only said which area it
-        // wants; this is where the system is told, once, and only if the area moved.
-        // An area held for its 60Hz slot books its wake-up in the fold below.
-        hang_watch::during(hang_watch::Station::ClockFlushImeCursorArea, || {
-            self.flush_ime_cursor_area(now)
-        });
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
+        // **And the input method's caret area, on the same terms** (ticket 63). Every
+        // road above — the drain's frames, the IME events' frames, a preview repainted,
+        // the caret offer at the head of the clock run, and the frame a resize the PTY
+        // gate just let through publishes — only said which area it wants; this is
+        // where the system is told, once, and only if the area moved. An area held for
+        // its 60Hz slot books its wake-up in the fold below. **After the PTY gate**
+        // (T-CARET-EVERY-LAYOUT, 2026-10-27): the system caret's slot is wanted by every
+        // frame, so an area wanted by that resize's frame after this flush was left for
+        // the fold to read as owed at once — a wake at the turn's own instant.
+        hang_watch::during(hang_watch::Station::ClockFlushImeCursorArea, || {
+            self.flush_ime_cursor_area(now)
+        });
         // **And the round trip's name stops there** (T-STATION-SPLIT): the
         // deadline arithmetic below is this window reading its own clocks, not
         // conhost answering.
