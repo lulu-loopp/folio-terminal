@@ -291,6 +291,14 @@ pub(crate) trait WindowHost {
         hear: Box<dyn Fn(bt_platform::session_end::SessionEnd)>,
         reason: Box<dyn Fn() -> String>,
     ) -> Option<bt_platform::session_end::SessionEndWatch>;
+    /// **What this window tells UI Automation, answered through it** —
+    /// `bt_platform::uia::UiaHook::install`; `None` where the window cannot install one. `asked`
+    /// wakes the loop, on the window's thread or on one of UI Automation's.
+    fn answer_ui_automation(
+        &self,
+        shape: bt_platform::uia::Shape,
+        asked: Box<dyn Fn() + Send + Sync>,
+    ) -> Option<bt_platform::uia::UiaHook>;
     /// **A page's place in this window, as the web engine is told it** — the page's visual and
     /// this window's handle, sealed in a [`crate::webhost::SeatAddress`] only the engine reads.
     fn page_address(
@@ -483,6 +491,14 @@ impl WindowHost for Arc<Window> {
     ) -> Option<bt_platform::session_end::SessionEndWatch> {
         let native = crate::native_window_of(self).ok()?;
         bt_platform::session_end::SessionEndWatch::install(native, hear, reason).ok()
+    }
+    fn answer_ui_automation(
+        &self,
+        shape: bt_platform::uia::Shape,
+        asked: Box<dyn Fn() + Send + Sync>,
+    ) -> Option<bt_platform::uia::UiaHook> {
+        let native = crate::native_window_of(self).ok()?;
+        bt_platform::uia::UiaHook::install(native, shape, asked).ok()
     }
     fn page_address(
         &self,

@@ -98,6 +98,8 @@ pub(crate) enum WindowEffect {
     SystemSettingsWatched,
     /// The system's end-of-session question asked for (`WindowHost::watch_session_end`).
     SessionEndWatched,
+    /// UI Automation's questions asked to be answered (`WindowHost::answer_ui_automation`).
+    UiAutomationAnswered,
     /// A page's place in the window asked for, for the web engine (`WindowHost::page_address`).
     PageAddressed(bt_platform::PageVisual),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
@@ -528,6 +530,14 @@ impl WindowHost for HeadlessWindow {
         _reason: Box<dyn Fn() -> String>,
     ) -> Option<bt_platform::session_end::SessionEndWatch> {
         self.ledger.record(WindowEffect::SessionEndWatched);
+        None
+    }
+    fn answer_ui_automation(
+        &self,
+        _shape: bt_platform::uia::Shape,
+        _asked: Box<dyn Fn() + Send + Sync>,
+    ) -> Option<bt_platform::uia::UiaHook> {
+        self.ledger.record(WindowEffect::UiAutomationAnswered);
         None
     }
     /// **A headless window hosts no web engine**: the place is recorded, and the answer is the
@@ -1930,6 +1940,11 @@ mod tests {
                 .is_none()
         );
         assert!(
+            window
+                .answer_ui_automation(bt_platform::uia::Shape::default(), Box::new(|| {}))
+                .is_none()
+        );
+        assert!(
             window.page_address(page).is_err(),
             "a headless window hosts no web engine, and says so"
         );
@@ -2093,6 +2108,7 @@ mod tests {
                 WindowEffect::TaskbarProgress(bt_platform::TaskbarProgress::CLEARED),
                 WindowEffect::SystemSettingsWatched,
                 WindowEffect::SessionEndWatched,
+                WindowEffect::UiAutomationAnswered,
                 WindowEffect::PageAddressed(page),
                 WindowEffect::HandedOff(bt_platform::Handoff::Reveal(folder.clone())),
                 WindowEffect::Presented {

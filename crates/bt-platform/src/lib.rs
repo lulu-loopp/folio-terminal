@@ -8966,6 +8966,11 @@ pub use packaged_program::{PackageFamily, package_family_of};
 /// system asks the application to terminate instead.
 pub mod session_end;
 
+/// **What a window tells UI Automation about its terminals** (0.4.9 plan row 88, T-UIA-SKELETON):
+/// the publication a window's loop makes of its active tab's panes, the arithmetic their text
+/// ranges are answered by, and on Windows the subclass and the providers that answer from it.
+pub mod uia;
+
 /// **The system's pan gesture, as travel the wheel road can spend** (0.4.4
 /// ticket 11). Platform-free arithmetic over the positions Windows reports;
 /// the Windows touch door ([`let_the_system_translate_touch`]) is its only

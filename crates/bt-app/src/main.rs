@@ -206,6 +206,9 @@ mod toast;
 mod tooltip;
 mod trace;
 mod trace_sink;
+// What a window tells UI Automation: the publication's builder, and the events lane (T-UIA-SKELETON).
+mod uia_events;
+mod uia_report;
 mod uninstall;
 mod update;
 // Which adapter a copy's update takes, and whether its road is built (0.4.7 ticket U-41a1).
@@ -953,6 +956,12 @@ enum AppEvent {
     /// `session_end`'s inbox by the window procedure the system sent it to, and the document is
     /// already held there. What this owes is the turn that writes it.
     SessionEnding,
+    /// **UI Automation asked this window something the loop owes a turn** (T-UIA-SKELETON): a
+    /// client's first question for a window's root, or a client setting the focus on a pane.
+    ///
+    /// Carries nothing, on [`Self::AppDelegateSpoke`]'s footing: the request is parked in the
+    /// window's hook, and the clock run of the turn this brings reads it (`Runtime::flush_uia`).
+    UiAutomationAsked,
     /// **The clipboard's picture has been written to a file** (§7.61).
     ///
     /// The thirteenth of the same family and owed a wake for
@@ -1086,7 +1095,8 @@ impl AppEvent {
             | Self::LaunchAsked
             | Self::InstallChannelRead
             | Self::AppDelegateSpoke
-            | Self::SessionEnding => Station::Woken,
+            | Self::SessionEnding
+            | Self::UiAutomationAsked => Station::Woken,
         }
     }
 }
@@ -8711,6 +8721,9 @@ struct App<B: Backend = Native> {
     /// printed paths.
     math_worker: Arc<computation_lane::ComputationLane>,
     foreground_program_worker: foreground_program::Worker,
+    /// **The UI Automation events lane** (T-UIA-SKELETON, R6): one thread for the process,
+    /// started at the first focus event any window owes.
+    uia_events: uia_events::UiaEventsLane,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
     /// **The repositories the kernel has been asked to report changes in**
@@ -9387,6 +9400,7 @@ impl<B: Backend> App<B> {
         Self {
             preview_saves,
             stop_keeps: preview::StopKeeps::default(),
+            uia_events: uia_events::UiaEventsLane::default(),
             git_mutations,
             gpu,
             tab_ids,
@@ -9806,6 +9820,11 @@ struct WindowRuntime<B: Backend = Native> {
     /// the system's question then goes to `DefWindowProc` for that window, as it did for every
     /// window before, and the other windows still hear it.
     session_end_watch: Option<bt_platform::session_end::SessionEndWatch>,
+    /// **What this window tells UI Automation** (T-UIA-SKELETON): the subclass that answers its
+    /// questions from the publication, and what decides when a turn publishes
+    /// (`Runtime::flush_uia`). Its hook is `None` where the subclass would not install, and the
+    /// window then answers UI Automation as every window did before.
+    uia: uia_report::UiaReport,
     tabs: Vec<TabState>,
     active_tab: usize,
     /// The one bit every shell in this window nudges the loop through. See
@@ -34964,6 +34983,19 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
             Box::new(|| i18n::Text::ShutdownSavingWork.text().to_owned()),
         )
     };
+    // **The window's answer to UI Automation** (T-UIA-SKELETON). The subclass is cheap and builds
+    // nothing: the root is made at a client's first question, which wakes the loop, and only then
+    // does a turn build what the window publishes. One per window, as the system asks each
+    // window for its own root.
+    let uia = uia_report::UiaReport::new({
+        let proxy = event_proxy.clone();
+        window.answer_ui_automation(
+            bt_platform::uia::Shape::default(),
+            Box::new(move || {
+                let _ = proxy.send_event(AppEvent::UiAutomationAsked);
+            }),
+        )
+    });
     // **A window is born knowing its display's rate**, before it has drawn
     // anything: the first journey a reader starts can be in the first second,
     // and a window that had to wait for a move or a scale change to find out
@@ -34981,6 +35013,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         renderer,
         system_settings_watch,
         session_end_watch,
+        uia,
         tabs,
         active_tab,
         pty_wake,
@@ -52465,6 +52498,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // the launch requests it shares its whole shape with, and it needs
             // the `ActiveEventLoop` and every window at once.
             AppEvent::AppDelegateSpoke => Ok(()),
+            // **Nothing here either** (T-UIA-SKELETON): the request is parked in the window's
+            // hook, and `Runtime::flush_uia` on the clock run of this turn reads it.
+            AppEvent::UiAutomationAsked => Ok(()),
             // **Settled here, at once** (B-ENDSESSION): the system is waiting on the far side of
             // this turn and may end the process as soon as it has asked every application, so the
             // write is not left for `about_to_wait`'s chain. The document is already held.

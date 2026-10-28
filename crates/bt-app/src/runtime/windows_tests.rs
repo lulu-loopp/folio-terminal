@@ -2346,7 +2346,8 @@ fn the_taskbar_button_is_told_through_the_windows_door() {
 }
 
 /// RED — **a window is born listening to the system** through its own doors: the preference
-/// broadcasts and the end-of-session question are each asked for once, as the window is built.
+/// broadcasts, the end-of-session question and UI Automation's questions (T-UIA-SKELETON) are
+/// each asked for once, as the window is built.
 ///
 /// MUTATION: drop the `watch_session_end` call from `new_window_runtime` — `SessionEndWatched` is
 /// missing.
@@ -2365,6 +2366,7 @@ fn a_window_is_born_listening_to_the_system() {
     for asked in [
         WindowEffect::SystemSettingsWatched,
         WindowEffect::SessionEndWatched,
+        WindowEffect::UiAutomationAnswered,
     ] {
         assert_eq!(
             effects.iter().filter(|effect| **effect == asked).count(),

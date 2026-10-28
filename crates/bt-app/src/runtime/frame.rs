@@ -1513,6 +1513,9 @@ impl<B: Backend> Runtime<'_, B> {
                         mark_leaf_painted(leaf);
                     }
                     self.window.last_presented_frame = Some(frame);
+                    // What UI Automation is told is these frames: the next clock run publishes
+                    // them (`Runtime::flush_uia`).
+                    self.window.uia.presented = true;
                     // The pane under the pointer just drew new cells, so the list its pointer verbs
                     // read is re-derived from them. Only that pane: a reference scan answers a
                     // question nobody is asking of the panes the pointer is not in, and the resting
@@ -2101,6 +2104,10 @@ impl<B: Backend> Runtime<'_, B> {
         // active or what it is called; `want_title` only said so. A title held for
         // its frame books its wake-up in the fold below.
         self.flush_title(now);
+        // **And what UI Automation is told** (T-UIA-SKELETON), on the title's terms: after every
+        // road that can change the panes, their names or the keyboard, once, and nothing at all
+        // until a client has asked.
+        self.flush_uia()?;
         // **And the input method's caret area, on the same terms** (ticket 63). Every
         // road above — the drain's frames, the IME events' frames, a preview repainted,
         // the caret offer at the head of the clock run — only said which area it

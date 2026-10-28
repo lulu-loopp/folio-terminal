@@ -718,6 +718,105 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
+    /// **What this window tells UI Automation, published once a turn at most** (T-UIA-SKELETON,
+    /// 88a). Nothing at all until a client has asked (`UiaHook::wanted`); after that, a turn
+    /// publishes only when a frame of the active tab reached the glass or what the frames do not
+    /// say moved — the panes, their bodies, their names, which one holds the keyboard. A client's
+    /// request to focus a pane is taken here and answered through the one focus door a chord
+    /// uses ([`Self::focus_seat`]). The focus event a publication owes goes to the events lane
+    /// (R6), never raised on this thread.
+    ///
+    /// After `flush_title` on the clock run, for its reason: every road above can change which
+    /// tab is active, what a pane is called, or who holds the keyboard.
+    pub(crate) fn flush_uia(&mut self) -> Result<()> {
+        let Some(hook) = self.window.uia.hook.as_ref() else {
+            return Ok(());
+        };
+        let asked_focus = hook.take_focus_request().map(SeatId);
+        let wanted = hook.wanted();
+        if let Some(seat) = asked_focus
+            && self.seats.terminals().contains(&seat)
+        {
+            self.focus_seat(seat)?;
+        }
+        if !wanted {
+            // Nobody has asked: not even the keys are read.
+            return Ok(());
+        }
+        let keys = self.uia_keys();
+        if !self.window.uia.due(wanted, &keys) {
+            return Ok(());
+        }
+        let text = self.uia_publication(&keys);
+        let owed = self
+            .window
+            .uia
+            .hook
+            .as_ref()
+            .and_then(|hook| hook.publish(text));
+        if let Some(events) = owed {
+            self.app.uia_events.request(events);
+        }
+        Ok(())
+    }
+
+    /// **The window's publication from `keys`**: each pane's presented frame, at the metrics it
+    /// was drawn at, in its body.
+    pub(crate) fn uia_publication(
+        &self,
+        keys: &[crate::uia_report::PaneKey],
+    ) -> bt_platform::uia::WindowText {
+        let panes = keys
+            .iter()
+            .filter_map(|key| {
+                let leaf = self.sessions.get(&SeatId(key.seat))?;
+                let frame = leaf.view.last_presented_frame.as_ref()?;
+                let body = bt_render::SeatViewport {
+                    x: key.body[0],
+                    y: key.body[1],
+                    width: key.body[2],
+                    height: key.body[3],
+                };
+                Some(crate::uia_report::pane_text(
+                    key,
+                    body,
+                    frame,
+                    leaf.view.presented_metrics,
+                ))
+            })
+            .collect();
+        bt_platform::uia::WindowText { panes }
+    }
+
+    /// **What each terminal pane's publication depends on besides its frame** — every terminal
+    /// of the active tab with a presented frame, in tree order (R7: the active tab's panes only).
+    pub(crate) fn uia_keys(&self) -> Vec<crate::uia_report::PaneKey> {
+        let scale = self.window.renderer.scale_factor() as f32;
+        let window_focused = self.window.window_focused;
+        let owner_is_a_shell = self.keyboard_owner_is_a_shell();
+        let focused = self.focused_leaf;
+        self.seats
+            .terminals()
+            .into_iter()
+            .filter_map(|seat| {
+                let body =
+                    crate::seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
+                self.sessions.get(&seat)?.view.last_presented_frame.as_ref()?;
+                Some(crate::uia_report::PaneKey {
+                    seat: seat.0,
+                    body: [body.x, body.y, body.width, body.height],
+                    holds_keyboard: super::terminal::seat_holds_the_keyboard(
+                        window_focused,
+                        true,
+                        seat == focused,
+                        owner_is_a_shell,
+                    ),
+                    name: self.pane_title(seat),
+                })
+            })
+            .collect()
+    }
+
     /// Put the window on the screen — the other half of
     /// [`Self::dress_new_window`], with the launch trace between them.
     pub(crate) fn show_new_window(&mut self, maximized: bool) -> Result<()> {

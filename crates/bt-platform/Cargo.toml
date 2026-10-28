@@ -1090,6 +1090,10 @@ windows = { version = "0.62.2", features = [
     # never executed (`src/pe_resource.rs`, 0.4.6 ticket U-14, experiment E-14).
     # A feature, not a package.
     "Win32_System_LibraryLoader",
+    # `SafeArrayCreateVector` and `SafeArrayPutElement`: UI Automation's runtime ids, rectangles
+    # and range lists are `SAFEARRAY`s (`src/uia_windows.rs`, T-UIA-SKELETON). A feature, not a
+    # package.
+    "Win32_System_Ole",
     # `ReadDirectoryChangesW`'s three companions: the overlapped completion
     # (`Win32_System_IO`), and the events the watcher thread waits on and the
     # caller stops it with (`Win32_System_Threading`). See `DirWatch`.
@@ -1186,6 +1190,10 @@ windows = { version = "0.62.2", features = [
     # the way it does for every other program (`let_the_system_translate_touch`).
     # A feature and not a package, for `Win32_UI_Input_Ime`'s reason above.
     "Win32_UI_Input_Touch",
+    # The UI Automation provider interfaces and `UiaReturnRawElementProvider`: what a window tells
+    # the touch keyboard, Narrator and a phone remote about its terminals (`src/uia_windows.rs`,
+    # T-UIA-SKELETON). A feature of `windows`, already in the lock file: no new package.
+    "Win32_UI_Accessibility",
     "Win32_UI_Shell",
     # `COMDLG_FILTERSPEC` and therefore `IFileDialog::SetFileTypes`, which is
     # what filters the picture chooser to the formats the decoder honours.
