@@ -795,12 +795,28 @@ impl<B: Backend> Runtime<'_, B> {
     /// [`Self::flush_ime_cursor_area`], once at the turn's tail, so a burst of
     /// moves in one turn is one call, an area equal to the one told is none, and
     /// moves faster than 60Hz are held to one call per slot ([`ImeCursorSlot`]).
+    ///
+    /// **Two takers of the one area** (T-CARET-EVERY-LAYOUT, 2026-10-27). The input
+    /// method's forms ([`WindowRuntime::ime_cursor`]) are wanted only while a
+    /// composition is in progress, exactly as before. The system caret
+    /// ([`WindowRuntime::system_caret`]) is wanted whenever a text owner holds this
+    /// window's keyboard, composing or not: it is what Magnifier, the emoji panel
+    /// and every `GetGUIThreadInfo` reader follow. It is taken down when no text
+    /// owner holds it — a modal, a files column, a hosted page (whose engine keeps
+    /// its own caret), or a window without the focus: a Win32 caret is the
+    /// thread's, so a background window's caret would be the focused one's taken.
+    /// A text owner with nothing to say this turn (the grid between frames, a
+    /// caret in a gap between blocks) leaves the caret where it stands.
     pub(in crate::runtime) fn offer_ime_caret(&mut self, grid: Option<&ViewportFrame>) {
-        if !self.window.ime_active {
-            return;
-        }
         let owner = ime_owner(self.keyboard_owner());
-        let area = match ime_caret_source(owner) {
+        let source = ime_caret_source(owner);
+        let caret_owner = self.window.window_focused
+            && source != ImeCaretSource::Nowhere
+            && !self.page_holds_the_keyboard();
+        if !caret_owner {
+            self.vacate_system_caret();
+        }
+        let area = match source {
             ImeCaretSource::Nowhere => return,
             ImeCaretSource::Field => self.field_ime_caret(owner),
             // Only while the shell is the one composing. A terminal that keeps
@@ -819,10 +835,35 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(area) = area else {
             return;
         };
-        if ime_outbound::enabled() {
-            self.trace_ime_area(area, "wanted");
+        if self.window.ime_active {
+            if ime_outbound::enabled() {
+                self.trace_ime_area(area, "wanted");
+            }
+            self.window.ime_cursor.want(area);
         }
-        self.window.ime_cursor.want(area);
+        if caret_owner {
+            self.window.system_caret.want(area);
+        }
+    }
+
+    /// **No text owner holds this window's keyboard: the system caret goes**
+    /// (T-CARET-EVERY-LAYOUT). Its slot forgets what it was wanted and told, and a
+    /// caret that was standing is destroyed — once, not every turn the window
+    /// stays without one.
+    pub(in crate::runtime) fn vacate_system_caret(&mut self) {
+        let standing = self.window.system_caret.last_told().is_some();
+        self.forget_system_caret();
+        if standing {
+            hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
+                self.destroy_ime_caret("no_text_owner")
+            });
+        }
+    }
+
+    /// The system caret's slot forgets what it was wanted and told — the window
+    /// blur's half, whose destroy is its own (T-CARET-EVERY-LAYOUT).
+    pub(in crate::runtime) fn forget_system_caret(&mut self) {
+        self.window.system_caret.reset();
     }
 
     /// One key, with the terminal menu holding the keyboard.
@@ -943,6 +984,12 @@ impl<B: Backend> Runtime<'_, B> {
         if told.is_err() {
             let _ = self.window.ime_cursor.rearm();
         }
+    }
+
+    /// Stand the system caret at `area`'s top-left, in the same client device
+    /// pixels `SetCaretPos` takes (T-CARET-EVERY-LAYOUT). Told only by
+    /// [`Self::flush_ime_cursor_area`], from [`WindowRuntime::system_caret`].
+    fn place_system_caret(&mut self, area: ImeCursorArea) {
         let system_caret = hang_watch::during(hang_watch::Station::ImeSystemCaret, || {
             self.trace_ime_line(|| {
                 ime_outbound::caret_line("update", "cursor_area", Some((area.x, area.y)))
@@ -951,9 +998,7 @@ impl<B: Backend> Runtime<'_, B> {
         });
         if let Err(error) = system_caret {
             hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
-                crate::diagnostics::stderr_line(format!(
-                    "Chinese IME system-caret update ignored: {error}"
-                ));
+                crate::diagnostics::stderr_line(format!("system-caret update ignored: {error}"));
             });
         }
     }
@@ -966,9 +1011,16 @@ impl<B: Backend> Runtime<'_, B> {
     /// Called once at the turn's tail, after the last clock that can move a caret,
     /// and once from `Ime::Enabled`, so the input method has the area before the
     /// first pre-edit of a composition rather than a turn after it.
+    ///
+    /// **And the system caret's slot, after it** (T-CARET-EVERY-LAYOUT): on the same
+    /// terms, in the order the one call made them before the two were split — the
+    /// input method's forms, then the caret.
     pub(in crate::runtime) fn flush_ime_cursor_area(&mut self, now: Instant) {
         if let Some(area) = self.window.ime_cursor.take_due(now) {
             self.apply_ime_cursor_area(area, "flushed");
+        }
+        if let Some(area) = self.window.system_caret.take_due(now) {
+            self.place_system_caret(area);
         }
     }
 
@@ -1003,6 +1055,9 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(area) = self.window.ime_cursor.rearm() else {
             return;
         };
+        // The caret is said again with the forms, as it was while the two were one
+        // call: a composition's input method hears both after a move.
+        let _ = self.window.system_caret.rearm();
         if ime_outbound::enabled() {
             self.trace_ime_area(area, "reoffer_wanted");
         }
@@ -2413,9 +2468,9 @@ impl<B: Backend> Runtime<'_, B> {
                 // refused the cancel says before sending the commit anyway.
                 self.window.ime_active = false;
                 self.window.ime_cursor.reset();
-                hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
-                    self.destroy_ime_caret("ime_disabled")
-                });
+                // The system caret stays: it is the keyboard owner's, not the
+                // composition's (T-CARET-EVERY-LAYOUT), and `offer_ime_caret`
+                // takes it down when no text owner holds the keyboard.
                 // A composition taken away must stop being *drawn* where it was
                 // drawn. The grid is repainted by the frame below, but the
                 // preview paints from the same field on its own pass and would

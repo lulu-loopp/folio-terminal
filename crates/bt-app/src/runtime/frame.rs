@@ -2254,7 +2254,13 @@ impl<B: Backend> Runtime<'_, B> {
         ];
         let deadlines = [
             startup_deadline,
-            self.window.ime_cursor.deadline(now),
+            // The input method's forms and the system caret: two slots, one flush.
+            self.window
+                .ime_cursor
+                .deadline(now)
+                .into_iter()
+                .chain(self.window.system_caret.deadline(now))
+                .min(),
             // Only while a shell holds the keyboard: a frozen caret owes no
             // wake-up at all (ruling 2026-08-13).
             self.keyboard_owner_is_a_shell()

@@ -10485,6 +10485,16 @@ struct WindowRuntime<B: Backend = Native> {
     /// last told** (ticket 63). Written by [`Runtime::offer_ime_caret`], sent only
     /// by [`Runtime::flush_ime_cursor_area`]; see [`ImeCursorSlot`].
     ime_cursor: ImeCursorSlot,
+    /// **Where the system caret (`ImeSystemCaret`) is wanted, and where it was
+    /// last placed** (T-CARET-EVERY-LAYOUT). The same area as [`Self::ime_cursor`]
+    /// and the same pacing, but its own slot: that one is told only while a
+    /// composition is in progress, this one whenever a text owner holds this
+    /// window's keyboard, on every layout — the caret Magnifier, the emoji panel
+    /// and every `GetGUIThreadInfo` reader find. Written by
+    /// [`Runtime::offer_ime_caret`], placed only by
+    /// [`Runtime::flush_ime_cursor_area`], emptied by
+    /// [`Runtime::vacate_system_caret`].
+    system_caret: ImeCursorSlot,
     /// **The title this window wants, and the one the OS was last given**
     /// (ticket 49). Written by [`Runtime::want_title`], sent only by
     /// [`Runtime::flush_title`]; see [`TitleSlot`].
@@ -21755,8 +21765,8 @@ impl ImeCursorSlot {
         self.told.reset();
     }
 
-    /// The area the system is working from, if it has been told one.
-    #[cfg(test)]
+    /// The area the system is working from, if it has been told one — for the
+    /// system caret's slot, whether a caret is standing.
     fn last_told(&self) -> Option<ImeCursorArea> {
         self.told.last_sent()
     }
@@ -35073,6 +35083,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         composing_in: Composing::Idle,
         ime_active: false,
         ime_cursor: ImeCursorSlot::default(),
+        system_caret: ImeCursorSlot::default(),
         title: TitleSlot::default(),
         rename_caret_line: None,
         cursor_blink: CursorBlink::new(Instant::now(), motion),
@@ -37912,9 +37923,10 @@ impl<B: Backend> Runtime<'_, B> {
         self.window.preedit = None;
         self.window.composing = None;
         self.window.ime_cursor.reset();
-        hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
-            self.destroy_ime_caret("cancel_composition")
-        });
+        // **The system caret is not the composition's** (T-CARET-EVERY-LAYOUT):
+        // it stands wherever the keyboard's owner types, and this pass's own
+        // offer moves it to the field the keyboard went to — or takes it down
+        // when that owner has no caret ([`Self::offer_ime_caret`]).
         // The field the letters were going into, if it is still standing. A
         // palette that has closed has taken its own text with it and there is
         // nothing here to clear; a search capsule left open with the keyboard
