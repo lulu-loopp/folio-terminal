@@ -530,8 +530,13 @@ fn edges_of(map: &DependencyMap) -> Vec<(&str, &str, usize, &str)> {
 /// `Part` by no impl — and `light`'s `bulb.glow()`, which reaches `Glow`'s provided method, since
 /// `Bulb`'s impl does not write it.
 ///
+/// `choir`'s `voice.hum()` is refused (`Voice` bound to two types) though `hum` is only a provided
+/// method: a product provided method's name is one of the package's, so its refusal is listed
+/// (the review's N1).
+///
 /// RED before: no edge; seven calls listed as "a call through an associated type", and `light`'s
-/// `glow` (no impl of the package declares the name) dropped without a row. MUTATION:
+/// `glow` (no impl of the package declares the name) dropped without a row; before the review
+/// fold, `choir`'s refusal dropped without a row the same way. MUTATION:
 /// in `Resolver::through_binding`, let an inherent method of the bound type answer (drop the
 /// `trait_name` filter) — `paint`/`dev` reach the other package's inherent methods and the edge is
 /// gone; count the test-only impl's bindings (drop `binding.product`) — `Glass` and `Device` are
@@ -564,6 +569,12 @@ fn a_call_through_an_associated_type_reaches_the_bound_traits_impl_on_its_produc
                 "speak",
                 "an associated type an impl binds to its own generic, which the census follows \
                  to no implementation: `C::Load` (`A`)"
+            ),
+            (
+                "choir",
+                "hum",
+                "an associated type the product impls bind to types that differ: `C::Voice` \
+                 (`Loud`, `Quiet`)"
             ),
             (
                 "lone",

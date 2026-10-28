@@ -84,3 +84,31 @@ impl Lamp for Asker {
 pub fn light<L: Lamp>(bulb: &L::Bulb) -> u32 {
     bulb.glow()
 }
+
+// A provided method no impl writes, called through an associated type the
+// product impls bind to two types: refused, though no impl declares `hum`.
+pub trait Hum {
+    fn hum(&self) -> u32 {
+        3
+    }
+}
+
+impl Hum for Loud {}
+
+impl Hum for Quiet {}
+
+pub trait Choir {
+    type Voice: Hum;
+}
+
+impl Choir for Asker {
+    type Voice = Loud;
+}
+
+impl Choir for Teller {
+    type Voice = Quiet;
+}
+
+pub fn choir<C: Choir>(voice: &C::Voice) -> u32 {
+    voice.hum()
+}

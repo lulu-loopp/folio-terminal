@@ -72,10 +72,15 @@ plan row 84 (2026-10-28); the header is the authority:
   impl when the impl's self type is placed for sure at the receiver's type (declared in
   the impl's own module or where its path says, a path rooted at a named workspace
   crate to one declaration, or a name the workspace declares once), and listed as not
-  followed otherwise: none at row 84.
-- The call graph's `Ambiguous` calls with exactly one candidate (a rename to a name
-  only one item declares) are not listed by site in `docs/plans/UNFOLLOWED-EDGES.tsv`;
-  its header counts them (row 84: 1,765).
+  followed otherwise: none at row 84. A limit: a path's module part is matched by its
+  ending, so `use term as t; impl X for t::Session` is placed exactly when some module
+  whose path ends in `::t` happens to declare a `Session` (a coincidence of names the
+  rules do not tell from a real path; none at row 84).
+- The call graph's `Ambiguous` calls with exactly one candidate (every call through an
+  untyped receiver whose name one item declares; a rename to such a name is one way an
+  edge gets here) are not listed by site in `docs/plans/UNFOLLOWED-EDGES.tsv`; its header
+  counts them (row 84: 1,765), the call graph test holds the count to the tree, and
+  `check-unfollowed-edges.ps1` reads it and reports its change against the merge base.
 
 These are S-2a's call graph's to close. The map is a lower bound on edges and an
 exact count of what it does see.

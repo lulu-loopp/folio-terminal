@@ -787,7 +787,10 @@ impl<'d> Resolver<'d> {
     ///   call in turn — or, where that impl does not write it, the trait's provided method.
     ///
     /// Associated types and traits are keyed by bare name, as
-    /// [`Declarations::associated_bounds`] says.
+    /// [`Declarations::associated_bounds`] says. The generic's own bound is not read
+    /// ([`Ty::Assoc`] carries none), so a generic bounded by a trait no product impl implements
+    /// takes another declaring trait's product bindings: sound for the product build, which never
+    /// instantiates such a generic.
     fn through_binding(&self, param: &str, associated: &str, method: &str) -> Callees {
         let through = format!("`{param}::{associated}`");
         let declarers = self.declarations.associated_declarers.get(associated);
