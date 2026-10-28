@@ -17,8 +17,8 @@ use syn::punctuated::Punctuated;
 
 use super::resolve::{FieldAnswer, Kind, Owner, Resolver, first_arg};
 use super::types::{
-    Class, Receiver, Std, Ty, Written, closures_by_position, impl_header, impl_of, option_of,
-    standard_method_name,
+    Callees, Class, Receiver, Std, Ty, Written, closures_by_position, impl_header, impl_of,
+    option_of, standard_method_name,
 };
 use super::{Callable, Sink};
 use crate::index::{Index, ItemKind, ItemRecord};
@@ -678,19 +678,19 @@ impl<'w, 'd> Walk<'w, 'd> {
     /// A call `f(..)` or `Type::f(..)`: its value, what closures in each
     /// argument position receive, and — for `Type::f` — the product items it
     /// reaches by the type.
-    fn callee(&self, call: &syn::ExprCall) -> (Val, Vec<Option<Vec<Ty>>>, BTreeSet<Callable>) {
+    fn callee(&self, call: &syn::ExprCall) -> (Val, Vec<Option<Vec<Ty>>>, Callees) {
         let syn::Expr::Path(path) = &*call.func else {
             return (
                 Val::unknown("a call of something that is not a path"),
                 Vec::new(),
-                BTreeSet::new(),
+                Callees::default(),
             );
         };
         if path.qself.is_some() {
             return (
                 Val::unknown("a call through a qualified path"),
                 Vec::new(),
-                BTreeSet::new(),
+                Callees::default(),
             );
         }
         let segments: Vec<String> = path
@@ -707,7 +707,7 @@ impl<'w, 'd> Walk<'w, 'd> {
                 origin: args[0].origin,
                 shared: false,
             };
-            return (val, Vec::new(), BTreeSet::new());
+            return (val, Vec::new(), Callees::default());
         }
         let (ret, closures, callees) = if segments.len() >= 2 {
             let owner_ty = if segments[segments.len() - 2] == "Self" {
@@ -724,7 +724,7 @@ impl<'w, 'd> Walk<'w, 'd> {
             self.resolver.associated(&owner_ty, &last)
         } else {
             let (ret, closures) = self.free_function(&last, &args);
-            (ret, closures, BTreeSet::new())
+            (ret, closures, Callees::default())
         };
         let origin = if ret.carries_reference() {
             let lenders: Vec<Option<Origin>> = args
@@ -755,13 +755,10 @@ impl<'w, 'd> Walk<'w, 'd> {
     /// the declarations and `use` items of the module it is written in. A
     /// path that names a function of the subject package and reaches none, or
     /// reaches more than one item, is listed as not followed.
-    fn call_edge(&mut self, call: &syn::ExprCall, by_type: BTreeSet<Callable>) {
+    fn call_edge(&mut self, call: &syn::ExprCall, by_type: Callees) {
         let syn::Expr::Path(path) = &*call.func else {
             return;
         };
-        if path.qself.is_some() {
-            return;
-        }
         let segments: Vec<String> = path
             .path
             .segments
@@ -771,30 +768,53 @@ impl<'w, 'd> Walk<'w, 'd> {
         let Some(name) = segments.last().cloned() else {
             return;
         };
+        if path.qself.is_some() {
+            // `<T as Trait>::f(..)`: the rules read no qualified self type.
+            if self.resolver.subject.methods.contains(&name) {
+                self.sink.unfollowed(
+                    &self.module,
+                    &self.function,
+                    &segments.join("::"),
+                    "a call through a qualified path",
+                );
+            }
+            return;
+        }
         if segments.len() == 1 && self.lookup(&name).is_some() {
             // A closure or a function value held in a binding.
             return;
         }
-        if !by_type.is_empty() {
-            self.edge(by_type, &segments.join("::"));
+        if let Some(why) = by_type.refused {
+            if self.resolver.subject.methods.contains(&name) {
+                self.sink
+                    .unfollowed(&self.module, &self.function, &segments.join("::"), &why);
+            }
+            return;
+        }
+        if !by_type.items.is_empty() {
+            self.edge(by_type.items, &segments.join("::"));
             return;
         }
         let package = self.resolver.subject.package.clone();
         let reach = if segments.len() == 1 {
-            self.resolver.functions_at(&package, &self.module, &name)
+            Some(self.resolver.functions_at(&package, &self.module, &name))
         } else {
-            let Some(absolute) = self.resolver.absolute(&package, &self.module, &segments) else {
-                // The path leaves the package.
-                return;
-            };
-            let Some((last, at)) = absolute.split_last() else {
-                return;
-            };
-            self.resolver.functions_at(&package, &at.join("::"), last)
+            // `None`: the path leaves the package.
+            self.resolver
+                .absolute(&package, &self.module, &segments)
+                .and_then(|absolute| {
+                    let (last, at) = absolute.split_last()?;
+                    Some(self.resolver.functions_at(&package, &at.join("::"), last))
+                })
         };
-        if !reach.items.is_empty() {
-            self.edge(reach.items, &segments.join("::"));
-        } else if !reach.outside
+        if let Some(reach) = &reach
+            && !reach.items.is_empty()
+        {
+            self.edge(reach.items.clone(), &segments.join("::"));
+            return;
+        }
+        if let Some(reach) = &reach
+            && !reach.outside
             && !reach.test_only
             && self.resolver.subject.functions.contains(&name)
         {
@@ -804,6 +824,15 @@ impl<'w, 'd> Walk<'w, 'd> {
                 &segments.join("::"),
                 "a path the module's declarations and `use` items do not reach",
             );
+            return;
+        }
+        if let Some(why) = by_type.unresolved
+            && self.resolver.subject.methods.contains(&name)
+        {
+            // A type's path whose `f` the rules do not resolve, and no free function of
+            // that path either.
+            self.sink
+                .unfollowed(&self.module, &self.function, &segments.join("::"), &why);
         }
     }
 
@@ -1272,7 +1301,15 @@ impl<'w, 'd> Walk<'w, 'd> {
         let name = call.method.to_string();
         let found = self.resolver.method(&receiver.ty, receiver.shared, &name);
         match &found {
-            Ok(found) => self.edge(found.method.callees.clone(), &name),
+            Ok(found) => match &found.method.callees.refused {
+                Some(why) => {
+                    if self.resolver.subject.methods.contains(&name) {
+                        self.sink
+                            .unfollowed(&self.module, &self.function, &name, why);
+                    }
+                }
+                None => self.edge(found.method.callees.items.clone(), &name),
+            },
             Err(unresolved) => {
                 if self.resolver.subject.methods.contains(&name) {
                     let whose = if standard_method_name(&name) {

@@ -36,15 +36,31 @@ as the same item.
 
 **What the map does not see** is printed as a count in each header. Nothing is
 guessed. A read through a receiver the census rules do not type is not attributed:
-168 sites. A call is not followed through a trait object, a stored closure, a
-function value, or a receiver the rules do not type:
+182 sites. A call is not followed through a trait object, a stored closure, a
+function value, or a receiver the rules do not type. The counts below were read at
+plan row 83 (2026-10-27); the header is the authority:
 
-- 2,160 sites call a method name only the package has, through an untyped receiver.
+- 2,290 sites call a method name only the package has, through an untyped receiver.
   The largest share is `i18n::Text::X.text()`: the receiver is an enum variant's
   path, and the census does not type a path value.
-- 3,903 sites call a method name that a standard type also has.
-- 285 sites reach more than one item, for example two types of the same name in two
+- 4,318 sites call a method name that a standard type also has.
+- 301 sites reach more than one item, for example two types of the same name in two
   modules.
+- 566 sites call through an associated type of a generic (`B::Glass`,
+  `B::Compositor`), and 19 through a generic's trait by its path (`T::from_bytes`):
+  each reaches whichever implementation the argument names. The census reads what the
+  call does from the bound's declaration and follows it to no implementation (listed
+  since row 83, silent before; following them is plan row 84).
+- 27 sites call a method that only other types of the receiver's name declare (the
+  receiver's own reaches it some other way, a deref for one), and 21 call a type's
+  path whose function the rules do not resolve (`Window::set_title` on a type the
+  rules place at a workspace `Window`). Both were silent before row 83.
+- 1 site calls through a qualified path (`<T as Trait>::f`), and 1 through a path
+  the module's declarations and `use` items do not reach.
+- A trait method the subject implements on another package's type is followed to the
+  impl when the impl's self type is placed for sure at the receiver's type (declared in
+  the impl's own module, a path to one declaration, or a name the workspace declares
+  once), and listed as not followed otherwise: none at row 83.
 
 These are S-2a's call graph's to close. The map is a lower bound on edges and an
 exact count of what it does see.
@@ -758,6 +774,8 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
     main.rs` (2), `runtime/mouse.rs -> main.rs` (1) and `runtime/frame.rs ->
     main.rs` (1), and the `TermViewPorts` items' `called_by` and their callers'
     `calls`. The fix is a bt-source plan row of its own; the map regenerates then.
+    **Closed** by plan row 83 (2026-10-27): those four rows now count 45, 10, 176
+    and 49, and `Runtime::return_to_live_for_input`'s `calls` 5 (`main.rs` 4).
 - **O-4 (M5–M7).**
   - **M5, the launch facts.** Six fields, opening mostly `main.rs`, plus
     `runtime/{panes,tabs,clipboard,terminal,floats,mouse,peek,profiles,dpi}.rs` for
