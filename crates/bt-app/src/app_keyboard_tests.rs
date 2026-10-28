@@ -1374,7 +1374,7 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
     );
     let apply = squeezed_body("Runtime", "apply_clipboard_payload");
     let recipient = apply
-        .find("leaf.paste_recipient.clone()")
+        .find("leaf.launch.paste_recipient.clone()")
         .expect("the apply step resolves the recipient");
     let delivered = apply
         .find("self.deliver_paste(")

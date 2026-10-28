@@ -999,7 +999,7 @@ fn an_unfocused_leaf_resize_reaches_the_quiescence_that_pays_its_reanchor_debt()
 fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
     let start = Instant::now();
     let mut leaf = leaf_saying("one two three four");
-    leaf.integration = profiles::Integration::PowerShellOptIn;
+    leaf.launch.integration = profiles::Integration::PowerShellOptIn;
     leaf.session
         .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start)
         .unwrap();
@@ -1035,7 +1035,7 @@ fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
         take_psreadline_resize_reanchor_input(
             ResizeReanchor {
                 pending: &mut leaf.pending_psreadline_resize_reanchor,
-                integration: leaf.integration,
+                integration: leaf.launch.integration,
             },
             leaf.session.shell_input_region_open(),
         )
@@ -1079,7 +1079,7 @@ fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
         take_psreadline_resize_reanchor_input(
             ResizeReanchor {
                 pending: &mut leaf.pending_psreadline_resize_reanchor,
-                integration: leaf.integration,
+                integration: leaf.launch.integration,
             },
             leaf.session.shell_input_region_open(),
         ),
@@ -1114,7 +1114,7 @@ fn a_drag_that_ends_where_the_child_already_is_settles_without_telling_it() {
 fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
     let start = Instant::now();
     let mut leaf = leaf_saying("one two three four");
-    leaf.integration = profiles::Integration::PowerShellOptIn;
+    leaf.launch.integration = profiles::Integration::PowerShellOptIn;
     leaf.session
         .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start)
         .unwrap();
@@ -1172,7 +1172,7 @@ fn a_repair_owed_before_a_wobble_is_still_owed_after_it_and_paid_once() {
         .expect("the settlement arms the quiescence that pays it");
     assert!(leaf.session.finish_resize_if_quiescent(deadline).unwrap());
     let reanchor = |leaf: &mut LeafSession| {
-        let integration = leaf.integration;
+        let integration = leaf.launch.integration;
         let open = leaf.session.shell_input_region_open();
         take_psreadline_resize_reanchor_input(
             ResizeReanchor {
@@ -1247,7 +1247,7 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
         for stage in [LeafOnStage::Shown, LeafOnStage::Behind] {
             let start = Instant::now();
             let mut leaf = leaf_saying("one two three four");
-            leaf.integration = profiles::Integration::PowerShellOptIn;
+            leaf.launch.integration = profiles::Integration::PowerShellOptIn;
             leaf.session
                 .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start)
                 .unwrap();
@@ -1273,7 +1273,7 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
             let _ = take_psreadline_resize_reanchor_input(
                 ResizeReanchor {
                     pending: &mut leaf.pending_psreadline_resize_reanchor,
-                    integration: leaf.integration,
+                    integration: leaf.launch.integration,
                 },
                 leaf.session.shell_input_region_open(),
             );
@@ -1337,7 +1337,7 @@ fn every_gesture_that_lands_back_on_the_childs_grid_settles_whatever_moved_it() 
                 take_psreadline_resize_reanchor_input(
                     ResizeReanchor {
                         pending: &mut leaf.pending_psreadline_resize_reanchor,
-                        integration: leaf.integration,
+                        integration: leaf.launch.integration,
                     },
                     leaf.session.shell_input_region_open(),
                 ),

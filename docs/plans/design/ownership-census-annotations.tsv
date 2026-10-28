@@ -55,7 +55,7 @@ App.startup_shells	-	LIFE	the application (Runtime::create)	T-PROGRAMS-REFRESH (
 App.tab_ids	-	LIFE	tabs	the 2026-09-25 table
 App.web_spare	-	LIFE	web	proposed by census-1
 App.web_warmup	-	LIFE	web	proposed by census-1
-LeafSession.attention	-	LIFE	attention (→ bt-workbench)	the 2026-09-25 table
+LeafSession.attention	-	LIFE	attention (→ bt-workbench)	the 2026-09-25 table; 2026-10-27 (O-4a, M7): the nest of the account, its ledger, bell edge, clock and capability, one fact
 LeafSession.pty	-	LIFE	panes	the 2026-09-25 table
 LeafSession.session	-	HUB	terminal	the 2026-09-25 table
 LeafSession.spawn_fallback	-	LIFE	main (the leaf-birth road, finish_leaf_birth)	T-SHELL-BIRTH-DEATH (2026-10-10): a hand-off, not a shared state: the birth road stores bt-pty's fallback record when it seats a shell, and runtime::panes takes it once, at the landing, because only the runtime knows the pane's seat that the diagnostics line names

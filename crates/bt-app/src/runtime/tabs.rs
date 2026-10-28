@@ -746,7 +746,7 @@ impl<B: Backend> Runtime<'_, B> {
                     kind,
                     self.sessions
                         .get(&seat)
-                        .map(|leaf| profiles::identity_mark(&leaf.profile)),
+                        .map(|leaf| profiles::identity_mark(&leaf.launch.profile)),
                     bt_render::chrome_palette(),
                 )
                 .0,
@@ -1430,7 +1430,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = state.focused() else {
             return Ok(());
         };
-        let profile = leaf.profile.clone();
+        let profile = leaf.launch.profile.clone();
         // Where the pane stands, the one `Restart shell` reads: its report, else its shell
         // process's folder (T-CWD-FROM-PROCESS), else the folder it was put down in.
         let cwd = leaf.seed_place_for_a_new_shell();
@@ -3612,7 +3612,7 @@ impl<B: Backend> Runtime<'_, B> {
                     Some(status) => {
                         let elapsed = *leaf.shell_exit_age.get_or_insert_with(|| pty.age_at(now));
                         let code = status.signal().is_none().then(|| status.exit_code());
-                        let program = leaf.program.clone();
+                        let program = leaf.launch.program.clone();
                         let had_output = pty.output_bytes_received() != 0;
                         if let Some(birth_death) =
                             birth_death_disposition(elapsed, had_output, pty.has_birth_fallback())
@@ -3691,7 +3691,7 @@ impl<B: Backend> Runtime<'_, B> {
                                     seat: seat.0,
                                     code: status.signal().is_none().then(|| status.exit_code()),
                                     elapsed,
-                                    program: leaf.program.clone(),
+                                    program: leaf.launch.program.clone(),
                                     tab: tab_id.0,
                                     disposition: exit_diagnostics::ShellExitDisposition::TabKept,
                                 },
@@ -4623,9 +4623,9 @@ mod birth_death_tests {
         let banner = crate::fallback_banner(&record, profiles::fallback_profile_id());
         assert!(banner.contains("failed to start"), "{banner:?}");
         let mut leaf = test_support::leaf_saying("");
-        leaf.program = Some(PathBuf::from("preferred-shell"));
+        leaf.launch.program = Some(PathBuf::from("preferred-shell"));
         // The program that died was a Cygwin bash; the one that lands is Windows PowerShell.
-        leaf.program_kind = profiles::ShellProgram::Cygwin;
+        leaf.launch.program_kind = profiles::ShellProgram::Cygwin;
         let born_grid = leaf.conpty_grid;
         let (wake, heard) = waking();
         let worker_wake = Arc::clone(&wake);
@@ -4648,7 +4648,7 @@ mod birth_death_tests {
             seat: 4,
             code: Some(23),
             elapsed: Duration::from_millis(400),
-            program: leaf.program.clone(),
+            program: leaf.launch.program.clone(),
             tab: 8,
             disposition: exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
                 bt_pty::LAST_RESORT_SHELL,
@@ -4693,20 +4693,20 @@ mod birth_death_tests {
             crate::pty_size(resized_grid, resized_physical),
             "the fallback PTY receives the size released while it was pending"
         );
-        assert_eq!(leaf.profile, profiles::fallback_profile_id());
+        assert_eq!(leaf.launch.profile, profiles::fallback_profile_id());
         assert_eq!(
-            leaf.program.as_deref(),
+            leaf.launch.program.as_deref(),
             Some(Path::new(bt_pty::LAST_RESORT_SHELL))
         );
         // And the spelling it reads is the one the shell that landed prints.
-        assert_eq!(leaf.program_kind, profiles::ShellProgram::Native);
+        assert_eq!(leaf.launch.program_kind, profiles::ShellProgram::Native);
         let landed_spelling = profiles::printed_path_namespace(
             profiles::index_of_id(profiles::fallback_profile_id()),
             &profiles::ShellProgram::Native,
             &bt_pty::SystemShellEnvironment,
         );
         assert_eq!(leaf.session.printed_path_namespace(), landed_spelling);
-        assert_eq!(leaf.paste_recipient.namespace, landed_spelling);
+        assert_eq!(leaf.launch.paste_recipient.namespace, landed_spelling);
         let squeeze = |text: &str| -> String {
             text.chars()
                 .filter(|character| !character.is_whitespace())
@@ -4745,7 +4745,7 @@ mod birth_death_tests {
         let born_grid = leaf.conpty_grid;
         let decision = crate::BirthDecision {
             started: crate::Started::AsAsked,
-            spawn_profile: leaf.profile.clone(),
+            spawn_profile: leaf.launch.profile.clone(),
             spawn_place: None,
             at_shell_home: false,
             named: false,
@@ -4754,7 +4754,7 @@ mod birth_death_tests {
             unless_gone: None,
         };
         let seed = crate::LeafSeed {
-            profile: leaf.profile.clone(),
+            profile: leaf.launch.profile.clone(),
             ..crate::LeafSeed::default()
         };
         let (wake, heard) = waking();

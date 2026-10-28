@@ -211,7 +211,7 @@ impl<B: Backend> Runtime<'_, B> {
                     kind,
                     tab.sessions
                         .get(&seat)
-                        .map(|leaf| profiles::identity_mark(&leaf.profile)),
+                        .map(|leaf| profiles::identity_mark(&leaf.launch.profile)),
                     palette,
                 );
                 // The dragged seat's own name, by id — the ghost and the

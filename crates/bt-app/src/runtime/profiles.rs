@@ -369,7 +369,7 @@ impl<B: Backend> Runtime<'_, B> {
         let panes = self
             .sessions
             .values()
-            .filter(|leaf| leaf.profile == subject)
+            .filter(|leaf| leaf.launch.profile == subject)
             .count();
         let Some(removed) = profiles::delete(index) else {
             return Ok(());

@@ -1282,7 +1282,7 @@ impl PasteFacts {
         Self {
             clipboard_text,
             bracketed: leaf.session.bracketed_paste_mode(),
-            powershell_prompt_open: leaf.paste_recipient.encoder.grammar
+            powershell_prompt_open: leaf.launch.paste_recipient.encoder.grammar
                 == shell_literal::ShellGrammar::PowerShell
                 && leaf.session.shell_prompt_opened_in_order(),
             through_conpty: host == bt_platform::HostPlatform::Windows,
@@ -7554,98 +7554,11 @@ struct LeafSession {
     /// behind it — has nothing to re-point and says so, rather than holding a
     /// cell no thread reads.
     wake: Option<Arc<LeafWake>>,
-    /// **The stable id of the profile this pane's shell was started from**
-    /// (§7.1.4's 「稳定 profile_id」, T-PROFILE-TABLE-MOVE).
-    ///
-    /// **Here, and not on the tab.** It is a fact about the process — this is
-    /// the struct that owns the process — and so it survives every gesture that
-    /// moves a pane without restarting it: a tear-out into a new tab and a merge
-    /// into another tab's layout both *move* this whole struct, so the profile
-    /// travels with the shell it describes rather than being re-derived from
-    /// whichever tab the pane landed in. Under the old tab-level field, tearing
-    /// a Git Bash pane out of a PowerShell tab produced a tab that said
-    /// PowerShell over a running bash.
-    ///
-    /// **An id and not a row index**, which is the second thing it survives. A
-    /// position is only a profile for as long as nobody moves the table, and
-    /// Settings ▸ Profiles has `Move up`, `Move down`, `Duplicate` and `Delete`
-    /// on every row — a pane holding position 3 across one of those verbs was
-    /// silently a different shell afterwards, and a pane holding a position the
-    /// shortened table no longer had reached the spawn and panicked the window
-    /// thread. The id is what a move cannot touch, so the pane goes on naming
-    /// its own profile whatever the table does; a row that is really gone is the
-    /// one case left, and it degrades the way a missing program does — the
-    /// fallback profile, said out loud (see [`startable_profile`]).
-    profile: String,
-    /// Captured at spawn: profile edits cannot change an already running shell’s paste grammar.
-    paste_recipient: shell_literal::Recipient,
-    /// **Which shell integration door this pane's shell was started behind.**
-    ///
-    /// Beside [`Self::profile`] rather than read back off the table through it,
-    /// because a row is editable and a running shell is not: changing a
-    /// profile's `Shell integration` picker changes what the *next* pane of that
-    /// row is started with, and this pane goes on being whatever it was started
-    /// as until it is restarted. Re-deriving would let an edit made in Settings
-    /// decide what bytes an already-running shell is sent.
-    ///
-    /// It is the door and not the proof the script loaded: PowerShell's is
-    /// opt-in, so a `PowerShellOptIn` pane whose reader never dot-sourced
-    /// `folio.ps1` is still a PowerShell. What answers "is the integration
-    /// actually running" is the pane's own `OSC 133`, and the one place that
-    /// distinction matters — the post-resize anchor chord — asks both
-    /// (`psreadline_resize_repaint_input`).
-    integration: profiles::Integration,
-    /// The executable this pane's shell was actually started from, as the
-    /// machine resolved it.
-    ///
-    /// Beside [`Self::profile`] rather than derived from it, because it is the
-    /// answer to a different question: a profile names a *choice*, this names
-    /// what that choice turned into on this machine — which `pwsh.exe` of the
-    /// several that may exist, or `BT_SHELL`'s override, or the `powershell.exe`
-    /// a failed spawn fell back to. Only the leaf that spawned it knows.
-    ///
-    /// `None` for a leaf with no process behind it (the probe path), where there
-    /// is no program and therefore nothing for a title to be repeating.
-    program: Option<PathBuf>,
-    /// What kind of program [`Self::program`] is, beside it for its reason: only the spawn knew
-    /// it (`profiles::ShellProgram::Native` for a leaf with no process behind it).
-    program_kind: profiles::ShellProgram,
-    /// **Where this shell was put down**, in its own profile's namespace —
-    /// [`profiles::SpawnPlace::directory`], kept because only the spawn knew it.
-    ///
-    /// §7.1.4 gives one ladder for "where was this tab": the last trusted OSC 7
-    /// report, then the initial cwd, then `HOME`. `Restart shell` implements all
-    /// three; the vault implemented the first and wrote an empty string for the
-    /// rest, which is what put nameless rows in `RECENTLY OPENED` — a line
-    /// offering to bring something back without saying what.
-    ///
-    /// This field is the second and third rungs, resolved once and held. It is
-    /// **not** re-derived at the reader, and could not be: `profiles::spawn_place`
-    /// needs a `ShellEnvironment` and the profile's own table row, neither of
-    /// which a `TabState` has, and an answer computed later would drift with the
-    /// table anyway — a profile edited after this shell started would rewrite
-    /// history about where it began.
-    ///
-    /// Beside [`Self::program`] and for the same reason: it is a fact about the
-    /// process, so it travels with the leaf through a tear-out rather than being
-    /// re-derived from whichever tab the pane landed in.
-    ///
-    /// Runtime only — nothing writes it to disk. What a session file and a vault
-    /// row carry is the *string* this helps compute, in the field that already
-    /// held one, so no schema moves.
-    spawn_place: Option<PathBuf>,
-    /// **Whether this pane was born in a folder named for its launch** (`profiles::SpawnPlace::named`:
-    /// the Explorer verb, `folio <folder>`, `--cwd`, `New terminal in folder…`, a hand-over).
-    ///
-    /// Such a pane was first opened in that folder, so the shells later started in its place —
-    /// Restart shell, Duplicate tab, Duplicate pane, the splits — carry their folder as named and
-    /// stand there whatever the profile's starting place says (coordinator's ruling 2026-10-05,
-    /// read with the owner's 2026-10-04 "Restart shell goes back to the folder the pane was
-    /// first opened in"). See [`Self::seed_place_for_a_new_shell`].
-    ///
-    /// Runtime only, like [`Self::spawn_place`]: the session document has no field for it, so a
-    /// restored pane's folder is carried and follows its profile's starting place.
-    born_named: bool,
+    /// **The facts of this pane's launch** — the ownership contract's M5
+    /// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3; ticket O-4a). Written when
+    /// the shell is started and read for the rest of its life; nested, so they travel with the
+    /// leaf exactly as the fields did when they stood here. See [`LaunchFacts`].
+    launch: LaunchFacts,
     /// **Something to be typed into this shell as soon as it has a prompt**, and whether it is to
     /// be submitted (§7.54e ④ and ⑤).
     ///
@@ -7663,29 +7576,12 @@ struct LeafSession {
     /// Spent once, by [`drain_leaf_pty`]: a second write would be a second copy of the command.
     pending_typing: Option<(String, bool)>,
     session: DualPlaneSession,
-    /// **This pane's attention account, and with it the place it holds in this window's queue**
-    /// (`attention` plan §11.1; §7.1.5b P1-8).
-    ///
-    /// The ledger is where both producers' credentials land, it is the one thing that can tell a
-    /// restatement from a genuinely new request, and — since A2 — it is the only source the orange
-    /// dot is drawn from. What it hands out is a **monotonic serial and not a clock**, which is the
-    /// ruling's own wording (时间戳用单调序号, mock 可确定重放): the queue is walked oldest-first,
-    /// so ordering by a counter makes the walk a function of the order things happened rather than
-    /// of what the clock read while they happened. Two panes that ask in the same millisecond still
-    /// have an order, and a replay of the same events gives the same one.
-    ///
-    /// **On the leaf, so it dies with the leaf.** A queue kept as a table beside the tabs would
-    /// need pruning every time a pane closed or moved, and the way to get that wrong is to forget
-    /// once; here a tear-out carries the account with the shell (`profile`'s own argument, two
-    /// fields up) and a close takes it away with no bookkeeping at all.
-    ///
-    /// **What puts a place here and what takes it away are different events**, which is the whole
-    /// of 看一眼阻塞的 agent 不解除阻塞. [`attention::Event::Settle`] hands one out, and only three
-    /// things give it back: a user action **in this very seat**
-    /// ([`Runtime::answer_attention`]), the program withdrawing what it asked, or the pane going
-    /// away. Looking at the tab is not one of them —
-    /// [`attention::Event::MarkSeen`] is the arrival with nothing to say.
-    attention: attention::AttentionLedger,
+    /// **This pane's attention account** — the ownership contract's M7
+    /// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3; ticket O-4a): the ledger, the
+    /// bell's edge, the credentials' clock and the capability, nested so they have the leaf's
+    /// own lifetime and travel with it exactly as the fields did when they stood here. See
+    /// [`AttentionAccount`].
+    attention: AttentionAccount,
     /// **Whether a road that ends this pane has already given its place up**
     /// ([`runtime::panes::end_leaves_of`]).
     ///
@@ -7694,27 +7590,6 @@ struct LeafSession {
     /// [`attention::Event::LeafGone`] silently, so only this tells the second walk that the pane
     /// has already ended.
     attention_ended: bool,
-    /// **Whether the bell this pane currently has latched has already been announced** (`attention`
-    /// plan §11.7's fourth source).
-    ///
-    /// A bare `BEL` is an *event*, and the ledger's turn-end door takes events rather than levels
-    /// — while `bt-term`'s `bell_latched` is a level that stays up until somebody looks. This is
-    /// the edge between the two, and it is a field rather than a comparison against last frame's
-    /// status because the level it mirrors is retired by a different mechanism (a look) than the
-    /// one that raises it.
-    ///
-    /// It goes back down whenever the latch does, so a pane that rings, is read, and rings again
-    /// announces twice. That is the correct number: two turns ended.
-    bell_reported: bool,
-    /// When each of this pane's standing credentials runs out.
-    attention_clock: attention_wire::WaitClock,
-    /// **The name this pane answers to on the process's endpoint** — 128 bits, minted at birth.
-    ///
-    /// Held here rather than in a table beside the window, for the reason the ticket above is:
-    /// a leaf that is torn out carries it, a leaf that closes takes it away, and there is no
-    /// bookkeeping anywhere that could be forgotten. A capability that is gone is a capability
-    /// nothing can present.
-    attention_capability: String,
     /// **This pane's view of its shell**: the facts of the ownership contract's view owner (M1–M4,
     /// tickets O-2 and O-3). Nested, so it has the leaf's own lifetime and travels with it exactly
     /// as the fields did when they stood here.
@@ -7893,7 +7768,7 @@ struct TermView {
     /// pane: two panes can be at two different points of their own fades, and a
     /// single window-level clock would put out a bar the other pane's gesture
     /// had just lit. It travels with the leaf through a tear-out for the same
-    /// reason [`LeafSession::profile`] does — the pane that was scrolled is still
+    /// reason [`LaunchFacts::profile`] does — the pane that was scrolled is still
     /// the pane that was scrolled after it lands in another tab.
     ///
     /// Set to the leaf's own birth, which costs nothing: a pane with no
@@ -7962,6 +7837,166 @@ struct TermView {
     last_presented_frame: Option<ViewportFrame>,
 }
 
+/// **What a terminal pane's shell was launched as** — the ownership contract's M5
+/// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3), nested in [`LeafSession`] as
+/// [`LeafSession::launch`] with the leaf's own lifetime (ticket O-4a).
+///
+/// Each is a fact about the process that only its start knew, so each is written where the
+/// shell is started — the profile, the paste grammar, the integration door and the program by
+/// `finish_leaf_birth`, the place and whether it was named by `place_leaf` — and read for the
+/// rest of the shell's life. Their writers are the ones they had on the leaf, so the census's
+/// change is their key. Plain data: the type has no methods.
+struct LaunchFacts {
+    /// **The stable id of the profile this pane's shell was started from**
+    /// (§7.1.4's 「稳定 profile_id」, T-PROFILE-TABLE-MOVE).
+    ///
+    /// **Here, and not on the tab.** It is a fact about the process — this is
+    /// the struct that owns the process — and so it survives every gesture that
+    /// moves a pane without restarting it: a tear-out into a new tab and a merge
+    /// into another tab's layout both *move* this whole struct, so the profile
+    /// travels with the shell it describes rather than being re-derived from
+    /// whichever tab the pane landed in. Under the old tab-level field, tearing
+    /// a Git Bash pane out of a PowerShell tab produced a tab that said
+    /// PowerShell over a running bash.
+    ///
+    /// **An id and not a row index**, which is the second thing it survives. A
+    /// position is only a profile for as long as nobody moves the table, and
+    /// Settings ▸ Profiles has `Move up`, `Move down`, `Duplicate` and `Delete`
+    /// on every row — a pane holding position 3 across one of those verbs was
+    /// silently a different shell afterwards, and a pane holding a position the
+    /// shortened table no longer had reached the spawn and panicked the window
+    /// thread. The id is what a move cannot touch, so the pane goes on naming
+    /// its own profile whatever the table does; a row that is really gone is the
+    /// one case left, and it degrades the way a missing program does — the
+    /// fallback profile, said out loud (see [`startable_profile`]).
+    profile: String,
+    /// Captured at spawn: profile edits cannot change an already running shell’s paste grammar.
+    paste_recipient: shell_literal::Recipient,
+    /// **Which shell integration door this pane's shell was started behind.**
+    ///
+    /// Beside [`Self::profile`] rather than read back off the table through it,
+    /// because a row is editable and a running shell is not: changing a
+    /// profile's `Shell integration` picker changes what the *next* pane of that
+    /// row is started with, and this pane goes on being whatever it was started
+    /// as until it is restarted. Re-deriving would let an edit made in Settings
+    /// decide what bytes an already-running shell is sent.
+    ///
+    /// It is the door and not the proof the script loaded: PowerShell's is
+    /// opt-in, so a `PowerShellOptIn` pane whose reader never dot-sourced
+    /// `folio.ps1` is still a PowerShell. What answers "is the integration
+    /// actually running" is the pane's own `OSC 133`, and the one place that
+    /// distinction matters — the post-resize anchor chord — asks both
+    /// (`psreadline_resize_repaint_input`).
+    integration: profiles::Integration,
+    /// The executable this pane's shell was actually started from, as the
+    /// machine resolved it.
+    ///
+    /// Beside [`Self::profile`] rather than derived from it, because it is the
+    /// answer to a different question: a profile names a *choice*, this names
+    /// what that choice turned into on this machine — which `pwsh.exe` of the
+    /// several that may exist, or `BT_SHELL`'s override, or the `powershell.exe`
+    /// a failed spawn fell back to. Only the leaf that spawned it knows.
+    ///
+    /// `None` for a leaf with no process behind it (the probe path), where there
+    /// is no program and therefore nothing for a title to be repeating.
+    program: Option<PathBuf>,
+    /// What kind of program [`Self::program`] is, beside it for its reason: only the spawn knew
+    /// it (`profiles::ShellProgram::Native` for a leaf with no process behind it).
+    program_kind: profiles::ShellProgram,
+    /// **Where this shell was put down**, in its own profile's namespace —
+    /// [`profiles::SpawnPlace::directory`], kept because only the spawn knew it.
+    ///
+    /// §7.1.4 gives one ladder for "where was this tab": the last trusted OSC 7
+    /// report, then the initial cwd, then `HOME`. `Restart shell` implements all
+    /// three; the vault implemented the first and wrote an empty string for the
+    /// rest, which is what put nameless rows in `RECENTLY OPENED` — a line
+    /// offering to bring something back without saying what.
+    ///
+    /// This field is the second and third rungs, resolved once and held. It is
+    /// **not** re-derived at the reader, and could not be: `profiles::spawn_place`
+    /// needs a `ShellEnvironment` and the profile's own table row, neither of
+    /// which a `TabState` has, and an answer computed later would drift with the
+    /// table anyway — a profile edited after this shell started would rewrite
+    /// history about where it began.
+    ///
+    /// Beside [`Self::program`] and for the same reason: it is a fact about the
+    /// process, so it travels with the leaf through a tear-out rather than being
+    /// re-derived from whichever tab the pane landed in.
+    ///
+    /// Runtime only — nothing writes it to disk. What a session file and a vault
+    /// row carry is the *string* this helps compute, in the field that already
+    /// held one, so no schema moves.
+    spawn_place: Option<PathBuf>,
+    /// **Whether this pane was born in a folder named for its launch** (`profiles::SpawnPlace::named`:
+    /// the Explorer verb, `folio <folder>`, `--cwd`, `New terminal in folder…`, a hand-over).
+    ///
+    /// Such a pane was first opened in that folder, so the shells later started in its place —
+    /// Restart shell, Duplicate tab, Duplicate pane, the splits — carry their folder as named and
+    /// stand there whatever the profile's starting place says (coordinator's ruling 2026-10-05,
+    /// read with the owner's 2026-10-04 "Restart shell goes back to the folder the pane was
+    /// first opened in"). See [`LeafSession::seed_place_for_a_new_shell`].
+    ///
+    /// Runtime only, like [`Self::spawn_place`]: the session document has no field for it, so a
+    /// restored pane's folder is carried and follows its profile's starting place.
+    born_named: bool,
+}
+
+/// **A terminal pane's attention account** — the ownership contract's M7
+/// (`docs/plans/design/ownership-contract-2026-10-11.md` §3.3), nested in [`LeafSession`] as
+/// [`LeafSession::attention`] with the leaf's own lifetime (ticket O-4a).
+///
+/// One fact in the census, written by the attention roads that wrote its four parts on the
+/// leaf; each road goes on calling the ledger's and the clock's own methods, which are their
+/// doors. Plain data: the type has no methods. Whether a road that ends the pane has already
+/// given its place up stays on the leaf ([`LeafSession::attention_ended`]): the road that sets
+/// it is not one of the account's writers.
+struct AttentionAccount {
+    /// **This pane's attention ledger, and with it the place it holds in this window's queue**
+    /// (`attention` plan §11.1; §7.1.5b P1-8).
+    ///
+    /// The ledger is where both producers' credentials land, it is the one thing that can tell a
+    /// restatement from a genuinely new request, and — since A2 — it is the only source the orange
+    /// dot is drawn from. What it hands out is a **monotonic serial and not a clock**, which is the
+    /// ruling's own wording (时间戳用单调序号, mock 可确定重放): the queue is walked oldest-first,
+    /// so ordering by a counter makes the walk a function of the order things happened rather than
+    /// of what the clock read while they happened. Two panes that ask in the same millisecond still
+    /// have an order, and a replay of the same events gives the same one.
+    ///
+    /// **On the leaf, so it dies with the leaf.** A queue kept as a table beside the tabs would
+    /// need pruning every time a pane closed or moved, and the way to get that wrong is to forget
+    /// once; here a tear-out carries the account with the shell ([`LaunchFacts::profile`]'s own
+    /// argument) and a close takes it away with no bookkeeping at all.
+    ///
+    /// **What puts a place here and what takes it away are different events**, which is the whole
+    /// of 看一眼阻塞的 agent 不解除阻塞. [`attention::Event::Settle`] hands one out, and only three
+    /// things give it back: a user action **in this very seat**
+    /// ([`Runtime::answer_attention`]), the program withdrawing what it asked, or the pane going
+    /// away. Looking at the tab is not one of them —
+    /// [`attention::Event::MarkSeen`] is the arrival with nothing to say.
+    ledger: attention::AttentionLedger,
+    /// **Whether the bell this pane currently has latched has already been announced** (`attention`
+    /// plan §11.7's fourth source).
+    ///
+    /// A bare `BEL` is an *event*, and the ledger's turn-end door takes events rather than levels
+    /// — while `bt-term`'s `bell_latched` is a level that stays up until somebody looks. This is
+    /// the edge between the two, and it is a field rather than a comparison against last frame's
+    /// status because the level it mirrors is retired by a different mechanism (a look) than the
+    /// one that raises it.
+    ///
+    /// It goes back down whenever the latch does, so a pane that rings, is read, and rings again
+    /// announces twice. That is the correct number: two turns ended.
+    bell_reported: bool,
+    /// When each of this pane's standing credentials runs out.
+    clock: attention_wire::WaitClock,
+    /// **The name this pane answers to on the process's endpoint** — 128 bits, minted at birth.
+    ///
+    /// Held here rather than in a table beside the window, for [`Self::ledger`]'s reason: a
+    /// leaf that is torn out carries it, a leaf that closes takes it away, and there is no
+    /// bookkeeping anywhere that could be forgotten. A capability that is gone is a capability
+    /// nothing can present.
+    capability: String,
+}
+
 /// **What a pane in birth holds until its shell exists** — one road with two triggers: the walk
 /// answering the program rows it needs (T-PROGRAMS-REFRESH), and the `bt-pty-birth` worker
 /// answering for its pseudoconsole and process (T-BIRTH-OFF-WINDOW).
@@ -8026,12 +8061,12 @@ impl BirthDeathFallback {
                 shell,
                 decision: BirthDecision {
                     started: Started::AsAsked,
-                    spawn_profile: leaf.profile.clone(),
-                    spawn_place: leaf.spawn_place.clone(),
+                    spawn_profile: leaf.launch.profile.clone(),
+                    spawn_place: leaf.launch.spawn_place.clone(),
                     at_shell_home: leaf.session.spawn_at_shell_home(),
-                    named: leaf.born_named,
-                    program: leaf.program.clone(),
-                    program_kind: leaf.program_kind.clone(),
+                    named: leaf.launch.born_named,
+                    program: leaf.launch.program.clone(),
+                    program_kind: leaf.launch.program_kind.clone(),
                     unless_gone: None,
                 },
                 born_grid: leaf.conpty_grid,
@@ -11141,7 +11176,7 @@ struct WindowRuntime<B: Backend = Native> {
     /// attention in *this* window, and two windows sharing one counter would make
     /// "who has been waiting longest" a question about a program rather than
     /// about a screen. Never reset, never reused — see
-    /// [`LeafSession::attention`] for why it is a serial and not a clock.
+    /// [`AttentionAccount::ledger`] for why it is a serial and not a clock.
     ///
     /// **One counter, since A2.** A3 ran a second one beside it while the ledger and the bell-fed
     /// queue were both alive, precisely so that neither could renumber the other; taking the bell
@@ -14108,7 +14143,7 @@ impl TabState {
     fn session_profile(&self) -> String {
         self.focused().map_or_else(
             || profiles::fallback_profile_id().to_owned(),
-            |leaf| leaf.profile.clone(),
+            |leaf| leaf.launch.profile.clone(),
         )
     }
 
@@ -14169,7 +14204,7 @@ impl TabState {
     /// something back without saying what. `Restart shell` had all three rungs
     /// and this door had one, for the same tab.
     ///
-    /// The other two rungs are [`LeafSession::spawn_place`], which is where they
+    /// The other two rungs are [`LaunchFacts::spawn_place`], which is where they
     /// have to be: they are answers only the spawn knew, and the second of them
     /// (`HOME`) is already folded into the first by `profiles::spawn_place`, so
     /// this is one lookup rather than a second copy of the ladder.
@@ -14267,7 +14302,7 @@ impl TabState {
     /// vault entry is one address, and a tab with two panes has to answer with
     /// one of them; the identity terminal is the one the tab has always been.
     /// **Which profile the shell in `seat` was started from** — its stable id,
-    /// which is what the leaf holds (see [`LeafSession::profile`]).
+    /// which is what the leaf holds (see [`LaunchFacts::profile`]).
     ///
     /// [`profiles::fallback_profile_id()`] for a seat this tab holds no shell for,
     /// which is not a fallback so much as the only answer available: the callers
@@ -14277,7 +14312,7 @@ impl TabState {
     fn leaf_profile(&self, seat: SeatId) -> String {
         self.sessions.get(&seat).map_or_else(
             || profiles::fallback_profile_id().to_owned(),
-            |leaf| leaf.profile.clone(),
+            |leaf| leaf.launch.profile.clone(),
         )
     }
 
@@ -14296,7 +14331,7 @@ impl TabState {
     fn leaf_marks(&self) -> BTreeMap<SeatId, marks::ChromeMark> {
         self.sessions
             .iter()
-            .map(|(seat, leaf)| (*seat, profiles::identity_mark(&leaf.profile)))
+            .map(|(seat, leaf)| (*seat, profiles::identity_mark(&leaf.launch.profile)))
             .collect()
     }
 
@@ -15802,7 +15837,7 @@ impl LeafSession {
         self.session
             .working_directory()
             .map(Path::to_path_buf)
-            .or_else(|| self.spawn_place.clone())
+            .or_else(|| self.launch.spawn_place.clone())
     }
 
     /// **Where this pane stands for a verb that starts a shell from it** (T-CWD-FROM-PROCESS):
@@ -15860,7 +15895,7 @@ impl LeafSession {
         door: &dyn pane_folder::ProcessFolders,
     ) -> Option<profiles::SeedPlace> {
         self.place_where_the_pane_stands(door).map(|path| {
-            if self.born_named {
+            if self.launch.born_named {
                 profiles::SeedPlace::Named(path)
             } else {
                 profiles::SeedPlace::Carried(path)
@@ -15946,7 +15981,7 @@ impl LeafSession {
     /// nothing. Compared without case because Windows paths are.
     fn announced_title(&self) -> Option<&str> {
         let title = self.session.window_title()?.trim();
-        let Some(program) = &self.program else {
+        let Some(program) = &self.launch.program else {
             return Some(title);
         };
         let program = program.as_os_str().to_string_lossy();
@@ -16042,7 +16077,7 @@ impl LeafSession {
             output_revision: self.output_revision,
             last_seen_revision: self.last_seen_revision,
             tab_is_active,
-            awaiting: self.attention.ticket().is_some(),
+            awaiting: self.attention.ledger.ticket().is_some(),
         }
     }
 }
@@ -17525,7 +17560,7 @@ fn release_due_leaf_resize(
     };
     let local_grid = leaf.grid;
     let conpty_grid = leaf.conpty_grid;
-    let integration = leaf.integration;
+    let integration = leaf.launch.integration;
     let commit = commit_leaf_resize(
         &mut leaf.session,
         leaf.pty.as_mut(),
@@ -22164,7 +22199,7 @@ struct TabTriggerHand {
 fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {
     tab.sessions
         .iter()
-        .filter_map(|(seat, leaf)| leaf.attention.ticket().map(|ticket| (ticket, *seat)))
+        .filter_map(|(seat, leaf)| leaf.attention.ledger.ticket().map(|ticket| (ticket, *seat)))
         .min_by_key(|(ticket, _)| *ticket)
         .map(|(_, seat)| seat)
 }
@@ -22244,8 +22279,11 @@ fn settle_attention(
                 tab: index,
                 seat: *seat,
             };
-            for expired in leaf.attention_clock.due(now) {
-                let outcome = leaf.attention.apply(at, reach, expired, next_place, now);
+            for expired in leaf.attention.clock.due(now) {
+                let outcome = leaf
+                    .attention
+                    .ledger
+                    .apply(at, reach, expired, next_place, now);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (*seat, one)));
             }
@@ -22259,13 +22297,16 @@ fn settle_attention(
             // the session, and asking twice would let two decisions in one turn be taken from two
             // readings of one shell.
             let reported = leaf.session.status();
-            if let Some(edge) = leaf.attention.weak_edge(reported.attention_request) {
-                let outcome = leaf.attention.apply(at, reach, edge, next_place, now);
+            if let Some(edge) = leaf.attention.ledger.weak_edge(reported.attention_request) {
+                let outcome = leaf
+                    .attention
+                    .ledger
+                    .apply(at, reach, edge, next_place, now);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (*seat, one)));
             }
-            if let Some(rang) = reported.bell.filter(|_| !leaf.bell_reported) {
-                leaf.bell_reported = true;
+            if let Some(rang) = reported.bell.filter(|_| !leaf.attention.bell_reported) {
+                leaf.attention.bell_reported = true;
                 // **Neither ringer carries a sentence**, which is the whole of what is wrong with
                 // reading a bell as "it is waiting for you" — so the interruption this raises is
                 // worded from the i18n table rather than quoted from anybody. What the two *do*
@@ -22277,6 +22318,7 @@ fn settle_attention(
                 let (source, via) = attention_map::bell_provenance(rang);
                 let outcome = leaf
                     .attention
+                    .ledger
                     .announce_turn_end(at, reach, switches, source, via, None);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (*seat, one)));
@@ -22285,7 +22327,10 @@ fn settle_attention(
                 active: tab_is_active,
                 focused: place.focused,
             };
-            let outcome = leaf.attention.apply(at, reach, settle, next_place, now);
+            let outcome = leaf
+                .attention
+                .ledger
+                .apply(at, reach, settle, next_place, now);
             emit_attention_lines(trace, outcome.lines);
             allowed.extend(outcome.raised.map(|one| (*seat, one)));
             if consumed {
@@ -22293,7 +22338,7 @@ fn settle_attention(
             }
             // Whatever spent the latch — this look, or `mark_seen` on the way in — re-arms the
             // edge, so the next turn that ends is announced instead of being read as this one.
-            leaf.bell_reported = leaf.session.status().bell_latched();
+            leaf.attention.bell_reported = leaf.session.status().bell_latched();
         }
         for (seat, one) in allowed {
             raised.push(attention_delivery(tab, tab_id, seat, None, one));
@@ -22312,7 +22357,7 @@ fn settle_attention(
                 let episode = leader
                     .and_then(|seat| tab.sessions.get(&seat))
                     .and_then(|leaf| {
-                        leaf.attention.claim_episode(
+                        leaf.attention.ledger.claim_episode(
                             was == StatusClaim::Awaiting,
                             now_claim == StatusClaim::Awaiting,
                         )
@@ -22406,7 +22451,7 @@ fn deliver_attention(
             let tab_id = tab.id;
             let mut allowed: Vec<(SeatId, attention::Raised)> = Vec::new();
             let Some((seat, leaf)) = tab.leaves_mut().find(|(_, leaf)| {
-                attention_wire::names_this_pane(&message.capability, &leaf.attention_capability)
+                attention_wire::names_this_pane(&message.capability, &leaf.attention.capability)
             }) else {
                 continue;
             };
@@ -22419,7 +22464,7 @@ fn deliver_attention(
             // matched a leaf's own on the line above — so it is where the bound that has a name in
             // it belongs. `break` and not `continue`: the message named this pane and no other, so
             // the walk over the remaining tabs has nothing left to find.
-            if !leaf.attention.admits_a_frame(now) {
+            if !leaf.attention.ledger.admits_a_frame(now) {
                 emit_attention_lines(
                     trace,
                     vec![format!(
@@ -22434,13 +22479,16 @@ fn deliver_attention(
                 // an event the ledger treats as a restatement changes nothing, and re-arming its
                 // ten minutes is exactly right — the producer has just said it is still waiting.
                 match &event {
-                    attention::Event::StrongWait(slot) => leaf.attention_clock.arm(slot, now),
+                    attention::Event::StrongWait(slot) => leaf.attention.clock.arm(slot, now),
                     attention::Event::StrongClear { selector, .. } => {
-                        leaf.attention_clock.forget(selector);
+                        leaf.attention.clock.forget(selector);
                     }
                     _ => {}
                 }
-                let outcome = leaf.attention.apply(at, reach, event, next_place, now);
+                let outcome = leaf
+                    .attention
+                    .ledger
+                    .apply(at, reach, event, next_place, now);
                 emit_attention_lines(trace, outcome.lines);
                 allowed.extend(outcome.raised.map(|one| (seat, one)));
             }
@@ -22451,7 +22499,7 @@ fn deliver_attention(
                 // declared, already cleaned and bounded. `None` is the ordinary answer and the one
                 // every row had until this slice: the toast then says it in its own voice, out of
                 // the i18n table, exactly as before.
-                let outcome = leaf.attention.announce_turn_end(
+                let outcome = leaf.attention.ledger.announce_turn_end(
                     at,
                     reach,
                     switches,
@@ -28283,7 +28331,7 @@ impl TabState {
     fn fleet_awaiting(&self) -> bool {
         self.sessions
             .values()
-            .any(|leaf| leaf.attention.ticket().is_some())
+            .any(|leaf| leaf.attention.ledger.ticket().is_some())
     }
 
     /// Whether anything in this tab's mark slot is moving under its own steam,
@@ -29286,7 +29334,7 @@ fn born_in_tab(seed: LeafSeed, tab_environment: Option<&cli::CarriedEnvironment>
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct LeafSeed {
     /// **The stable id of the profile this pane is to be started from** — see
-    /// [`LeafSession::profile`] for why a seed may not carry a row index either.
+    /// [`LaunchFacts::profile`] for why a seed may not carry a row index either.
     /// A seed outlives the frame it was built on by more than a leaf does: it
     /// waits on a folder chooser, travels with a torn-out tab, and comes back off
     /// `session.json` a week later.
@@ -31544,7 +31592,7 @@ mod shell_birth_tests {
                 "{started:?}: the pane reads its shell's spelling"
             );
             assert_eq!(
-                leaf.paste_recipient.namespace, expected,
+                leaf.launch.paste_recipient.namespace, expected,
                 "{started:?}: and a path pasted into it is written in that spelling"
             );
         }
@@ -31784,7 +31832,7 @@ mod shell_birth_tests {
 
         assert_eq!(asked_about(&asked), share, "the birth asks the disk");
         assert!(!leaf.shell_answered(), "and waits on it, not the window");
-        assert_eq!(leaf.spawn_place.as_ref(), Some(&share));
+        assert_eq!(leaf.launch.spawn_place.as_ref(), Some(&share));
         let frame = leaf
             .session
             .viewport_frame(&mut leaf.view.projection)
@@ -31803,7 +31851,7 @@ mod shell_birth_tests {
         assert!(refusal.is_none(), "{refusal:?}");
         assert!(leaf.pty.is_some(), "the shell started");
         assert_eq!(
-            leaf.spawn_place, gone.place.directory,
+            leaf.launch.spawn_place, gone.place.directory,
             "where no folder would have put it"
         );
         assert_eq!(notes.len(), 1, "{notes:?}");
@@ -32012,11 +32060,11 @@ mod shell_birth_tests {
             "{:#?}",
             (
                 (
-                    &leaf.profile,
-                    &leaf.program,
-                    &leaf.spawn_place,
-                    leaf.born_named,
-                    leaf.integration,
+                    &leaf.launch.profile,
+                    &leaf.launch.program,
+                    &leaf.launch.spawn_place,
+                    leaf.launch.born_named,
+                    leaf.launch.integration,
                     leaf.wake.is_some(),
                     leaf.pty.as_ref().map(PtySession::conpty_kind),
                     leaf.birth.is_some(),
@@ -32029,7 +32077,7 @@ mod shell_birth_tests {
                     leaf.view.metrics,
                     leaf.view.card_skip,
                     &leaf.pending_typing,
-                    &leaf.attention_capability,
+                    &leaf.attention.capability,
                     leaf.has_rail,
                 ),
                 (
@@ -32430,7 +32478,7 @@ fn create_leaf_session(
     // itself was launched from, which for a shell started from an installed
     // shortcut is `C:\WINDOWS\system32`. That is not a place anybody meant.
     //
-    // Hoisted out of the spawn branch because `LeafSession::spawn_place` is the
+    // Hoisted out of the spawn branch because `LaunchFacts::spawn_place` is the
     // second rung of §7.1.4's ladder and a leaf is asked where it stands whether
     // or not a process was started behind it.
     //
@@ -32686,30 +32734,34 @@ fn bare_leaf(
         spawn_fallback: None,
         foreground_program_cadence: foreground_program::Cadence::default(),
         process_folder: pane_folder::ProcessFolderMemo::default(),
-        paste_recipient: profiles::paste_recipient(
-            profiles::index_of_id(&decision.spawn_profile),
-            &decision.program_kind,
-            environment,
-        ),
-        integration: profiles::row_of(&decision.spawn_profile)
-            .map_or(profiles::Integration::None, |row| {
-                profiles::door_of(&row, &decision.program_kind)
-            }),
-        profile: decision.spawn_profile.clone(),
-        program: decision.program.clone(),
-        program_kind: decision.program_kind.clone(),
-        born_named: false,
-        spawn_place: None,
+        launch: LaunchFacts {
+            paste_recipient: profiles::paste_recipient(
+                profiles::index_of_id(&decision.spawn_profile),
+                &decision.program_kind,
+                environment,
+            ),
+            integration: profiles::row_of(&decision.spawn_profile)
+                .map_or(profiles::Integration::None, |row| {
+                    profiles::door_of(&row, &decision.program_kind)
+                }),
+            profile: decision.spawn_profile.clone(),
+            program: decision.program.clone(),
+            program_kind: decision.program_kind.clone(),
+            born_named: false,
+            spawn_place: None,
+        },
         // **What this pane is owed at its first prompt** (§7.54e ④). `None` for every pane in the
         // product except a pinned tab of a restored summoned terminal — see `LeafSeed::prefill`.
         pending_typing: seed.prefill.clone().map(|command| (command, false)),
         session,
-        // Nobody has asked for anything yet.
-        attention: attention::AttentionLedger::default(),
+        attention: AttentionAccount {
+            // Nobody has asked for anything yet.
+            ledger: attention::AttentionLedger::default(),
+            bell_reported: false,
+            clock: attention_wire::WaitClock::default(),
+            capability,
+        },
         attention_ended: false,
-        bell_reported: false,
-        attention_clock: attention_wire::WaitClock::default(),
-        attention_capability: capability,
         view: TermView {
             projection,
             text_scale,
@@ -32834,7 +32886,7 @@ fn finish_leaf_birth(
         decision.spawn_profile.clone()
     };
     // Before the place: the namespace `place_leaf` tells the session is read off it.
-    leaf.program_kind = resolved_shell;
+    leaf.launch.program_kind = resolved_shell;
     let session = &mut leaf.session;
     // **The other way into the same degradation**, and the half that used to be
     // silent. A saved leaf naming a profile this build does not have resolves to
@@ -32905,19 +32957,20 @@ fn finish_leaf_birth(
     if pty.is_none() {
         leaf.wake = None;
     }
-    leaf.paste_recipient = profiles::paste_recipient(
+    leaf.launch.paste_recipient = profiles::paste_recipient(
         profiles::index_of_id(&profile),
-        &leaf.program_kind,
+        &leaf.launch.program_kind,
         &bt_pty::SystemShellEnvironment,
     );
     // The door of the profile this pane actually came up as, read once,
     // here, where that profile is finally known — after both fallbacks. See
     // the field for why it is not read again later.
-    leaf.integration = profiles::row_of(&profile).map_or(profiles::Integration::None, |row| {
-        profiles::door_of(&row, &leaf.program_kind)
-    });
-    leaf.profile = profile;
-    leaf.program = resolved_program;
+    leaf.launch.integration = profiles::row_of(&profile)
+        .map_or(profiles::Integration::None, |row| {
+            profiles::door_of(&row, &leaf.launch.program_kind)
+        });
+    leaf.launch.profile = profile;
+    leaf.launch.program = resolved_program;
     leaf.pty = pty;
     Ok(())
 }
@@ -32941,7 +32994,7 @@ fn land_birth_death_fallback_shell(
         ..
     } = landing;
     let seed = LeafSeed {
-        profile: leaf.profile.clone(),
+        profile: leaf.launch.profile.clone(),
         ..LeafSeed::default()
     };
     finish_leaf_birth(leaf, Some(pty), &decision, &seed, None, false)?;
@@ -33004,14 +33057,14 @@ fn place_leaf(leaf: &mut LeafSession, decision: &BirthDecision, profile: &str, i
     leaf.session
         .set_path_namespace(profiles::printed_path_namespace(
             profiles::index_of_id(profile),
-            &leaf.program_kind,
+            &leaf.launch.program_kind,
             &bt_pty::SystemShellEnvironment,
         ));
     // Named only while the started shell stands in the named folder: a fallback profile that
     // could not spell it was put down elsewhere (`birth_place_of_the_started_shell`).
-    leaf.born_named = !in_birth && decision.named && spawn_place.is_some();
+    leaf.launch.born_named = !in_birth && decision.named && spawn_place.is_some();
     // A pane in birth was never put down anywhere yet; its seed still says where it will be.
-    leaf.spawn_place = spawn_place.filter(|_| !in_birth);
+    leaf.launch.spawn_place = spawn_place.filter(|_| !in_birth);
 }
 
 /// **A pane's shell has answered: land it** (T-BIRTH-OFF-WINDOW). The pane's birth is finished
@@ -47373,6 +47426,7 @@ impl<B: Backend> FolioApp<B> {
             // from the serial of the window it arrived in.
             let lines = leaf
                 .attention
+                .ledger
                 .surrender_place(attention::Site {
                     tab: index,
                     seat: *_seat,
@@ -63014,7 +63068,7 @@ mod clipboard_path_tests {
         assert!(!paste.contains("set_files_keyboard("));
         let apply = method_body("Runtime", "apply_clipboard_payload");
         let recipient = apply
-            .find("leaf.paste_recipient.clone()")
+            .find("leaf.launch.paste_recipient.clone()")
             .expect("the apply step resolves the recipient");
         let delivered = apply
             .find("self.deliver_paste(")

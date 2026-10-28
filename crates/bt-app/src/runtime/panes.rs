@@ -163,7 +163,7 @@ impl<B: Backend> Runtime<'_, B> {
         } else if let Some(refusal) = refusal.as_ref() {
             exit_diagnostics::say_spawn_failure(
                 seat.0,
-                leaf.program.as_deref(),
+                leaf.launch.program.as_deref(),
                 &format!("{refusal:#}"),
                 diagnostics::note,
             );
@@ -183,7 +183,7 @@ impl<B: Backend> Runtime<'_, B> {
         let requested = leaf
             .successor
             .as_deref()
-            .and_then(|successor: &LeafSession| successor.program.clone());
+            .and_then(|successor: &LeafSession| successor.launch.program.clone());
         match land_successor(leaf, diagnostics::note)? {
             SuccessorLanding::Waiting => Ok(()),
             SuccessorLanding::Refused(refusal) => {
@@ -1686,7 +1686,12 @@ impl<B: Backend> Runtime<'_, B> {
             // Where the source stands, the one `Restart shell` reads: its report, else its shell
             // process's folder (T-CWD-FROM-PROCESS), else where it was put down — never its
             // profile's default.
-            .map(|leaf| seed.applied(&leaf.profile, leaf.seed_place_for_a_new_shell().as_ref()))
+            .map(|leaf| {
+                seed.applied(
+                    &leaf.launch.profile,
+                    leaf.seed_place_for_a_new_shell().as_ref(),
+                )
+            })
             // A seat with no shell to inherit from has no profile to inherit
             // either, and the fallback is the one answer that is startable by
             // construction. Said here rather than left to `LeafSeed::default()`,
@@ -2495,7 +2500,7 @@ impl<B: Backend> Runtime<'_, B> {
         let current = self
             .sessions
             .get(&seat)
-            .and_then(|leaf| profiles::position_of(&leaf.profile));
+            .and_then(|leaf| profiles::position_of(&leaf.launch.profile));
         let windows = self.other_window_rows();
         let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);

@@ -1667,7 +1667,7 @@ fn the_tab_menus_subject_is_an_id_resolved_when_the_verb_runs() {
     let duplicate = body("duplicate_tab");
     assert!(
         duplicate.contains("state.focused()")
-            && duplicate.contains("leaf.profile")
+            && duplicate.contains("leaf.launch.profile")
             && duplicate.contains("leaf.seed_place_for_a_new_shell()"),
         "both facts come off one leaf of the tab the menu names"
     );

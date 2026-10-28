@@ -169,7 +169,7 @@ fn a_dropped_path_is_never_asked() {
     let file = dir.join("notes.txt");
     std::fs::write(&file, b"x").unwrap();
     let (mut tab, target) = paste_tab(paste_leaf(shell_literal::ShellGrammar::Cmd, b""));
-    let recipient = tab.sessions[&target.seat].paste_recipient.clone();
+    let recipient = tab.sessions[&target.seat].launch.paste_recipient.clone();
     let prepared = prepare_dropped_paste(vec![file.clone(), file], &recipient, false);
     assert!(!prepared.clipboard_text, "a drop is Folio's own spelling");
     let text = prepared.text.expect("the path is spelled");
@@ -227,7 +227,7 @@ fn a_multi_line_paste_into_cmd_sends_nothing_until_answered() {
         "held exactly as the clipboard gave it"
     );
     // The card's line, from the profile the pane shows.
-    let shell = profile_banner_name(&tab.sessions[&seat].profile);
+    let shell = profile_banner_name(&tab.sessions[&seat].launch.profile);
     let title = i18n::paste_card_title(pending.lines, &shell);
     assert!(
         title.starts_with("3 ") && title.ends_with(&format!("→ {shell}")),
@@ -691,7 +691,7 @@ fn a_transformed_paste_never_takes_the_clipboard_road() {
         shell_literal::ShellGrammar::PowerShell,
         POWERSHELL_PROMPT,
     ));
-    let recipient = tab.sessions[&target.seat].paste_recipient.clone();
+    let recipient = tab.sessions[&target.seat].launch.paste_recipient.clone();
     let prepared = prepare_clipboard_paste(
         bt_platform::ClipboardPayload::Files(vec![first, second]),
         &recipient,
