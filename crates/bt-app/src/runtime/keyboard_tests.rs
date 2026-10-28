@@ -545,7 +545,8 @@ fn a_compositions_input_method_calls_are_unchanged_and_the_caret_outlives_it() {
         .collect();
     let [opened, typed, emptied] = areas.as_slice() else {
         panic!(
-            "the input method's forms, call for call, as main told them — opened, typed into,              emptied: {before:?} {composed:?} {after:?}"
+            "the input method's forms, call for call, as main told them — opened, typed into, \
+             emptied: {before:?} {composed:?} {after:?}"
         );
     };
     let [x, y, width, height] = *opened;
