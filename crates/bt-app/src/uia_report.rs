@@ -124,14 +124,19 @@ pub(crate) fn pane_text(
             keep,
         ));
     }
-    let point = |row: u32, column: u32| CellPoint { row, column };
     let selection = frame
         .selection_spans
         .iter()
         .map(|span| {
             (
-                point(span.row, span.start_column),
-                point(span.row, span.end_column),
+                CellPoint {
+                    row: span.row,
+                    column: span.start_column,
+                },
+                CellPoint {
+                    row: span.row,
+                    column: span.end_column,
+                },
             )
         })
         .reduce(|(start, end), (next_start, next_end)| {
