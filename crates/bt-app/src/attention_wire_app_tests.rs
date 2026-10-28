@@ -59,10 +59,6 @@ fn cancelling_a_composition_goes_through_one_door() {
         ("bt_platform::cancel_composition", "the method's own state"),
         ("self.window.preedit = None", "the letters"),
         ("ime_cursor.reset()", "the rectangle the list hung from"),
-        (
-            "destroy_ime_caret(\"cancel_composition\")",
-            "the caret Pinyin follows",
-        ),
         ("set_preedit(\"\")", "the field's own copy of them"),
     ] {
         assert!(door.contains(cleared), "the one door lets go of {what}");

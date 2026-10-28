@@ -10723,6 +10723,16 @@ struct WindowRuntime<B: Backend = Native> {
     /// last told** (ticket 63). Written by [`Runtime::offer_ime_caret`], sent only
     /// by [`Runtime::flush_ime_cursor_area`]; see [`ImeCursorSlot`].
     ime_cursor: ImeCursorSlot,
+    /// **Where the system caret (`ImeSystemCaret`) is wanted, and where it was
+    /// last placed** (T-CARET-EVERY-LAYOUT). The same area as [`Self::ime_cursor`]
+    /// and the same pacing, but its own slot: that one is told only while a
+    /// composition is in progress, this one whenever a text owner holds this
+    /// window's keyboard, on every layout — the caret Magnifier, the emoji panel
+    /// and every `GetGUIThreadInfo` reader find. Written by
+    /// [`Runtime::offer_ime_caret`], placed only by
+    /// [`Runtime::flush_ime_cursor_area`], emptied by
+    /// [`Runtime::vacate_system_caret`].
+    system_caret: ImeCursorSlot,
     /// **The title this window wants, and the one the OS was last given**
     /// (ticket 49). Written by [`Runtime::want_title`], sent only by
     /// [`Runtime::flush_title`]; see [`TitleSlot`].
@@ -22030,8 +22040,8 @@ impl ImeCursorSlot {
         self.told.reset();
     }
 
-    /// The area the system is working from, if it has been told one.
-    #[cfg(test)]
+    /// The area the system is working from, if it has been told one — for the
+    /// system caret's slot, whether a caret is standing.
     fn last_told(&self) -> Option<ImeCursorArea> {
         self.told.last_sent()
     }
@@ -35361,6 +35371,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         composing_in: Composing::Idle,
         ime_active: false,
         ime_cursor: ImeCursorSlot::default(),
+        system_caret: ImeCursorSlot::default(),
         title: TitleSlot::default(),
         rename_caret_line: None,
         cursor_blink: CursorBlink::new(Instant::now(), motion),
@@ -38200,9 +38211,10 @@ impl<B: Backend> Runtime<'_, B> {
         self.window.preedit = None;
         self.window.composing = None;
         self.window.ime_cursor.reset();
-        hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
-            self.destroy_ime_caret("cancel_composition")
-        });
+        // **The system caret is not the composition's** (T-CARET-EVERY-LAYOUT):
+        // it stands wherever the keyboard's owner types, and this pass's own
+        // offer moves it to the field the keyboard went to — or takes it down
+        // when that owner has no caret ([`Self::offer_ime_caret`]).
         // The field the letters were going into, if it is still standing. A
         // palette that has closed has taken its own text with it and there is
         // nothing here to clear; a search capsule left open with the keyboard
@@ -59303,7 +59315,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 31] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 32] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -59350,6 +59362,9 @@ mod platform_gate_tests {
         "profiles_app_tests.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
+        // Windows-only test fixtures: the hidden Win32 system caret every layout keeps
+        // (T-CARET-EVERY-LAYOUT), beside the every-platform test that the Mac feeds none.
+        "runtime/keyboard_tests.rs",
         // A test re-export gated as its only test caller is: a share handed over, which
         // only Windows names by its own spelling (`tests.rs`).
         "runtime/mod.rs",

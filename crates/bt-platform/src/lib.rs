@@ -14632,11 +14632,17 @@ mod windows_impl {
         }
     }
 
-    /// Thread-affine native positioning bridge used by Microsoft Pinyin.
+    /// **The window's text caret, as the system reads it** — a thread-affine, hidden 1x1 Win32
+    /// caret standing where typing lands.
     ///
-    /// Some Chinese IMEs follow the Win32 system caret instead of IMM32 candidate-form requests.
-    /// winit remains the sole owner of the HIMC candidate/composition forms; this bridge only
-    /// supplies the otherwise invisible 1x1 caret signal.
+    /// Two kinds of reader. Some Chinese IMEs (Microsoft Pinyin) follow the system caret instead
+    /// of IMM32 candidate-form requests; and caret readers outside the input method —
+    /// `GetGUIThreadInfo`'s `rcCaret`, the `OBJID_CARET` accessibility object Magnifier's "follow
+    /// the text cursor" and the emoji/voice-typing panels read — need one on every keyboard
+    /// layout, composing or not (T-CARET-EVERY-LAYOUT, 2026-10-27). So there is no layout gate:
+    /// the caller keeps it alive while a text owner holds this window's keyboard and destroys it
+    /// otherwise. winit remains the sole owner of the HIMC candidate/composition forms; this
+    /// bridge only supplies the otherwise invisible 1x1 caret signal.
     pub struct ImeSystemCaret {
         hwnd: HWND,
         active: bool,
@@ -14654,14 +14660,6 @@ mod windows_impl {
             crate::ime_trace::line(|| {
                 crate::ime_trace::caret_line("update", x, y, self.active, "call")
             });
-            if !active_layout_is_chinese() {
-                crate::ime_trace::line(|| {
-                    crate::ime_trace::caret_line("update", x, y, self.active, "layout_not_chinese")
-                });
-                self.destroy();
-                return Ok(());
-            }
-
             // SAFETY: the HWND originates from winit and calls occur on its event-loop thread.
             // A Win32 caret is owned by that GUI thread. The null bitmap plus 1x1 dimensions is
             // the non-painted compatibility caret used only as an IME positioning signal.
@@ -14779,16 +14777,6 @@ mod windows_impl {
             let _ = ImmReleaseContext(hwnd, context);
             told
         }
-    }
-
-    fn active_layout_is_chinese() -> bool {
-        // SAFETY: thread id zero asks user32 for the calling event-loop thread's active layout.
-        let layout = unsafe { GetKeyboardLayout(0) };
-        primary_language_id(layout.0 as usize as u16) == 0x04
-    }
-
-    fn primary_language_id(language_id: u16) -> u16 {
-        language_id & 0x03ff
     }
 
     pub fn get_dpi_for_window(window: NativeWindow) -> Result<u32, String> {
@@ -16894,8 +16882,8 @@ mod windows_impl {
             CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
             SaveFilePickerState, ShellPickKind, TOUCH_GOES_TO_THE_SYSTEM, TouchToTheSystem,
             compositor_failure, let_the_system_translate_touch, newest_live_owner,
-            pan_gesture_configuration, primary_language_id, retry_open_clipboard,
-            the_system_s_gesture_is_answered_here, touch_goes_to_the_system, wide_null,
+            pan_gesture_configuration, retry_open_clipboard, the_system_s_gesture_is_answered_here,
+            touch_goes_to_the_system, wide_null,
         };
         use crate::handoff::{validate_local_image_path, validate_openable_path};
         use crate::{NativeWindow, PanStep, PanTrack};
@@ -17259,13 +17247,6 @@ mod windows_impl {
             assert_eq!(waits, CLIPBOARD_OPEN_RETRY_DELAYS);
             assert!(error.contains("busy-5"));
             assert!(error.contains("75 ms"));
-        }
-
-        #[test]
-        fn chinese_system_caret_gate_uses_primary_language_bits() {
-            assert_eq!(primary_language_id(0x0804), 0x0004);
-            assert_eq!(primary_language_id(0x0404), 0x0004);
-            assert_ne!(primary_language_id(0x0409), 0x0004);
         }
 
         #[test]

@@ -2182,6 +2182,10 @@ impl<B: Backend> Runtime<'_, B> {
         let _ = self.close_command_palette();
         self.window.tab_clicks.interrupt();
         self.window.ime_cursor.reset();
+        // The system caret is the focused window's alone (a Win32 caret is the
+        // thread's): its slot forgets what it told, and the window's own offers
+        // keep it down until the focus comes back (T-CARET-EVERY-LAYOUT).
+        self.forget_system_caret();
         hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
             self.destroy_ime_caret("window_blur")
         });

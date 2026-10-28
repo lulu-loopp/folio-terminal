@@ -1565,9 +1565,10 @@ may not name `AppEvent`.
 ### 5.2 What must stay on the window thread
 
 Under the current interfaces these are **native affinity**, not habit. **IME** —
-`Window::set_ime_cursor_area`, the platform system-caret update and the caret
-destroy, from `Runtime::ime_input`, `apply_ime_cursor_area`,
-`cancel_composition`, `let_go_of_this_window`. **The web view's controller and
+`Window::set_ime_cursor_area` (`Runtime::apply_ime_cursor_area`), the platform
+system-caret update (`place_system_caret`) and the caret destroy
+(`vacate_system_caret`, `window_blurred`, `let_go_of_this_window`); the first two
+are told from `flush_ime_cursor_area`, the destroy from those three. **The web view's controller and
 native views** — `Runtime::sync_web_page`, `advance_web_page`,
 `apply_web_outcomes` and `window_moved` act on live native views, and
 `bt-platform::macos_webview::WebHost::request_controller` explicitly takes the

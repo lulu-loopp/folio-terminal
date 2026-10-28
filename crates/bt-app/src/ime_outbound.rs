@@ -283,13 +283,14 @@ mod tests {
                 "bt_platform::cancel_composition(reason)",
             ),
             ("apply_ime_cursor_area", "self.trace_ime_area(area, action)"),
-            ("apply_ime_cursor_area", "ime_outbound::caret_line("),
+            ("place_system_caret", "ime_outbound::caret_line("),
             ("offer_ime_caret", "self.trace_ime_area("),
             ("reoffer_ime_cursor_area", "self.trace_ime_area("),
             (
                 "flush_ime_cursor_area",
                 "self.apply_ime_cursor_area(area, \"flushed\")",
             ),
+            ("flush_ime_cursor_area", "self.place_system_caret(area)"),
         ] {
             assert!(body(method).contains(trace), "{method}: {trace}");
         }
@@ -300,12 +301,10 @@ mod tests {
                 "self.trace_ime_frame(&terminal_frame, written)"
             ))) > 0
         );
-        for reason in [
-            "ime_disabled",
-            "cancel_composition",
-            "window_teardown",
-            "window_blur",
-        ] {
+        // The system caret is the keyboard owner's, not the composition's
+        // (T-CARET-EVERY-LAYOUT): a composition ending or cancelled no longer
+        // takes it down; an owner without a caret, a blur and a teardown do.
+        for reason in ["no_text_owner", "window_teardown", "window_blur"] {
             assert_eq!(
                 in_the_product_raw(bt_source::Needle::new(bt_source::Pattern::text(&format!(
                     "destroy_ime_caret(\"{reason}\")"
