@@ -2371,6 +2371,14 @@ impl SessionStore {
         self.writer.send_receipt(receipt)
     }
 
+    /// **Whether this process is the one that writes this store's directory** — the
+    /// writer of record (review row R4-5), whatever an update's trial holds back for now. The
+    /// question the restart registration asks (T-RESTART-REGISTRATION): a window that saves
+    /// nothing is not the Folio the system should start again.
+    pub(crate) fn is_the_writer_of_record(&self) -> bool {
+        self.writer_of_record
+    }
+
     /// **An update's trial was committed: arm this run's sentinel and hand the
     /// document over** — what [`Self::open`] and the autosave held back
     /// (`update_trial`, F-7).

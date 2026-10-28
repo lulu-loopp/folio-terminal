@@ -1425,6 +1425,7 @@ impl TrialRun {
             keybindings: &mut self.keybindings,
             profiles: &mut self.profiles,
             pins: &mut self.pins,
+            restart: &|| {},
         }
     }
 

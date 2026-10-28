@@ -45,7 +45,8 @@
 //! Windows Terminal. The line is empty — Windows puts the executable's own path in front of it —
 //! because a plain start already reopens the saved layout, and a word an older build does not
 //! know would be refused by the build a rollback left. [`RESTART_FLAGS`] is which of the system's
-//! four occasions Folio is started again on (the owner's ruling, 2026-10-27).
+//! four occasions Folio is started again on (pending the owner's ruling; the coordinator's
+//! interim choice, as recommended, 2026-10-27).
 //!
 //! # macOS and the rest
 //!
@@ -75,8 +76,8 @@ pub const RESTART_NO_PATCH: u32 = 0x4;
 pub const RESTART_NO_REBOOT: u32 = 0x8;
 
 /// **When Windows starts Folio again**: after an update's reboot, a sign-in with "Restart apps"
-/// on, and the Restart Manager's close — **never after a crash or a hang** (the owner's ruling
-/// put on 2026-10-27; recommended and in force until it says otherwise). A layout that crashes a
+/// on, and the Restart Manager's close — **never after a crash or a hang** (pending the owner's
+/// ruling; the coordinator's interim choice, as recommended, 2026-10-27). A layout that crashes a
 /// minute after its restore would be restored into the same crash on every restart, which Windows
 /// Error Reporting's sixty seconds do not stop, and a hang's restart ends a process in the middle
 /// of a write; the next start the person makes reopens the layout anyway.
@@ -431,11 +432,23 @@ mod windows_session_end {
         /// ruled flags — no restart after a crash or a hang — and an empty line, the plain start
         /// Windows puts the executable's own path in front of.
         ///
+        /// A failed assertion takes the registration back too (review F6): a test process left
+        /// registered would be started again by a reboot or a Restart Manager's close in the
+        /// middle of the run.
+        ///
         /// MUTATION: take `RESTART_NO_CRASH` out of `RESTART_FLAGS` — the system reads back 0x2;
         /// make `withdraw_restart` do nothing — the registration is still read back.
         #[test]
         fn the_registration_is_the_one_the_system_reads_back_and_is_taken_back() {
+            /// Takes this process's registration back however the test ends.
+            struct TakenBack;
+            impl Drop for TakenBack {
+                fn drop(&mut self) {
+                    let _ = withdraw_restart();
+                }
+            }
             register_restart(RESTART_FLAGS).expect("the system registers the restart");
+            let _taken_back = TakenBack;
             assert_eq!(
                 registration(),
                 Some((RESTART_NO_CRASH | RESTART_NO_HANG, String::new())),
@@ -526,7 +539,8 @@ mod tests {
         assert_eq!(told.get(), 1, "and told");
     }
 
-    /// RED (T-RESTART-REGISTRATION; the owner's ruling) — **Windows starts Folio again after an
+    /// RED (T-RESTART-REGISTRATION; the coordinator's interim choice, pending the owner's ruling) — **Windows starts Folio again after
+    /// an
     /// update's reboot and the Restart Manager's close, and never after a crash or a hang.**
     ///
     /// MUTATION: register with `RESTART_NO_HANG` alone (a crash restart without the ruling), or

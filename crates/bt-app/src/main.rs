@@ -14714,6 +14714,24 @@ struct TrialStores<'a> {
     keybindings: &'a mut persist::KeybindingsStore,
     profiles: &'a mut persist::ProfilesStore,
     pins: &'a mut pins::PinsStore,
+    /// **The system's restart registration asked for** ([`register_restart_now`] through the
+    /// loop's backend, [`update_trial::Writer::RestartRegistration`]): the one released writer
+    /// that is not a store's, and whose door is the backend's.
+    restart: &'a dyn Fn(),
+}
+
+/// **Windows is asked to start this program again after its restart, now**
+/// (T-RESTART-REGISTRATION): after an update's reboot, a sign-in with "Restart apps" on, or the
+/// Restart Manager's close — on [`bt_platform::session_end::RESTART_FLAGS`]' occasions, never after
+/// a crash or a hang. The line is empty: a plain start reopens the saved layout as a click does.
+/// Cheap, and said only when it is refused: nothing a person sees depends on it. Asked by
+/// [`FolioApp::register_for_restart`] at the first window, or by a committed trial's release.
+fn register_restart_now<B: Backend>(event_loop: &B::Loop) {
+    if let Err(refused) = B::register_restart(event_loop, bt_platform::session_end::RESTART_FLAGS) {
+        diagnostics::note(&format!(
+            "{APP_NAME} will not be started again after the system's restart: {refused}"
+        ));
+    }
 }
 
 /// **One writer an update's trial held back, run now** (`update_trial`, F-7) — the
@@ -14762,6 +14780,8 @@ fn release_trial_writer(writer: update_trial::Writer, stores: &mut TrialStores<'
         }
         // On its worker, as at any start's first frame.
         Writer::RecoveredAnnouncement => recovered::ask(&persist::storage_dir()),
+        // The trial is committed: it is the person's Folio, and the system may start it again.
+        Writer::RestartRegistration => (stores.restart)(),
     }
 }
 
@@ -38042,14 +38062,16 @@ impl<B: Backend> App<B> {
     /// (`update_trial`, F-7) — each released writer run again, in
     /// [`update_trial::Writer`]'s order: the folder before anything written
     /// into it, the copies of refused documents before the documents that would
-    /// replace them. What is written is what this process holds now.
-    fn release_trial_writes(&mut self, writers: Vec<update_trial::Writer>) {
+    /// replace them. What is written is what this process holds now; `restart` asks the system
+    /// for the restart registration ([`update_trial::Writer::RestartRegistration`]).
+    fn release_trial_writes(&mut self, writers: Vec<update_trial::Writer>, restart: &dyn Fn()) {
         let mut stores = TrialStores {
             session: &mut self.session_store,
             settings: &mut self.settings_store,
             keybindings: &mut self.keybindings_store,
             profiles: &mut self.profiles_store,
             pins: &mut self.pins_store,
+            restart,
         };
         for writer in writers {
             release_trial_writer(writer, &mut stores);
@@ -38230,8 +38252,9 @@ impl<B: Backend> App<B> {
     }
 
     /// **Dispose of an update trial's held release as the quit's step says**
-    /// ([`settle_the_held_release`]), if a quit is under way.
-    fn settle_the_held_release(&mut self) {
+    /// ([`settle_the_held_release`]), if a quit is under way; `restart` as
+    /// [`Self::release_trial_writes`] takes it.
+    fn settle_the_held_release(&mut self, restart: &dyn Fn()) {
         let Some(quit) = self.quit.as_mut() else {
             return;
         };
@@ -38243,6 +38266,7 @@ impl<B: Backend> App<B> {
                 keybindings: &mut self.keybindings_store,
                 profiles: &mut self.profiles_store,
                 pins: &mut self.pins_store,
+                restart,
             },
         );
     }
@@ -49142,19 +49166,37 @@ impl<B: Backend> FolioApp<B> {
     }
 
     /// **Windows is asked to start this program again after its restart**
-    /// (T-RESTART-REGISTRATION): after an update's reboot, a sign-in with "Restart apps" on, or
-    /// the Restart Manager's close — on [`bt_platform::session_end::RESTART_FLAGS`]' occasions,
-    /// never after a crash or a hang. The line is empty: a plain start reopens the saved layout
-    /// as a click does. Cheap, and said only when it is refused: nothing a person sees depends on
-    /// it.
+    /// (T-RESTART-REGISTRATION) — by the data directory's owner alone, and by an update's trial
+    /// only once it is committed ([`Self::register_for_restart_held_by`] with the trial's gate).
     fn register_for_restart(&self, event_loop: &B::Loop) {
-        if let Err(refused) =
-            B::register_restart(event_loop, bt_platform::session_end::RESTART_FLAGS)
-        {
-            diagnostics::note(&format!(
-                "{APP_NAME} will not be started again after the system's restart: {refused}"
-            ));
+        self.register_for_restart_held_by(event_loop, update_trial::defer);
+    }
+
+    /// [`Self::register_for_restart`], the trial's gate asked through `held` (a test's own gate in
+    /// a test).
+    ///
+    /// **Only the Folio that writes the data directory asks** (review F4, the coordinator's ruling
+    /// of 2026-10-27): a start standing in beside U-35's reserved trial, and a second start whose
+    /// hand-over found nobody, open a window that saves nothing — the session store is not the
+    /// writer of record — and a restart of theirs would come back as one more plain start beside
+    /// the owner's. **And an update's trial asks once it is the person's Folio**: while its
+    /// transaction can still roll back the registration is held back with the trial's other
+    /// writes ([`update_trial::Writer::RestartRegistration`]), and the commit's release asks for it
+    /// ([`release_trial_writer`]); a start that holds its writes (`update_startup::is_held`) never
+    /// asks.
+    fn register_for_restart_held_by(
+        &self,
+        event_loop: &B::Loop,
+        held: impl FnOnce(update_trial::Writer) -> bool,
+    ) {
+        let owner = self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.session_store.is_the_writer_of_record());
+        if !owner || held(update_trial::Writer::RestartRegistration) {
+            return;
         }
+        register_restart_now::<B>(event_loop);
     }
 
     /// **The system asked this application to quit, and it is waiting** (M3-1).
@@ -50589,7 +50631,7 @@ impl<B: Backend> FolioApp<B> {
                     // (T-QUIT-DOCUMENTS rounds 3–4): the rest of it released, the session's
                     // half pending through the write's verdict (`Quit::settle_held_release`).
                     if let Some(app) = self.app.as_mut() {
-                        app.settle_the_held_release();
+                        app.settle_the_held_release(&|| register_restart_now::<B>(event_loop));
                     }
                     self.for_each_window(|runtime| runtime.photograph_for_quit())?;
                     self.report_to_quit(quit::Quit::photographed);
@@ -50671,7 +50713,7 @@ impl<B: Backend> FolioApp<B> {
                     // **The write left: a session release still pending is consumed**
                     // (T-QUIT-DOCUMENTS round 4).
                     if let Some(app) = self.app.as_mut() {
-                        app.settle_the_held_release();
+                        app.settle_the_held_release(&|| register_restart_now::<B>(event_loop));
                     }
                     // **Not `for_each_window`**, and this is the one place in the
                     // loop where that matters: it stops at the first failure, and
@@ -50785,7 +50827,7 @@ impl<B: Backend> FolioApp<B> {
                         // **A trial release still held runs now** (rounds 3–4): cancelled in the
                         // phases or its final write refused, the window stays, so the backup and
                         // the session go as they would have.
-                        app.settle_the_held_release();
+                        app.settle_the_held_release(&|| register_restart_now::<B>(event_loop));
                         app.quit = None;
                     }
                     if let Some(cancelled) = cancelled {
@@ -51342,8 +51384,10 @@ impl<B: Backend> FolioApp<B> {
     }
 
     /// **The one road a stop that is not a quit leaves by** (D-4, 0.4.8 G7): a
-    /// controlled failure ([`Self::fail`], twelve sites) and a loop stopped by
-    /// something that is not a window closing (`exiting`).
+    /// controlled failure ([`Self::fail`], twelve sites), a loop stopped by
+    /// something that is not a window closing (`exiting`), and the Restart Manager's
+    /// close ([`Self::leave_at_the_systems_close`], through
+    /// [`Self::stop_every_window_keeping_in`], T-RESTART-REGISTRATION).
     ///
     /// First the four hand-editable documents' owed changes are copied into the data
     /// directory's [`preview::RECOVERED_FOLDER`]. Then every window, because the stop is the
@@ -51364,14 +51408,14 @@ impl<B: Backend> FolioApp<B> {
     /// file and nothing is filed away as "closed".
     ///
     /// The structural guard `failure_road` holds every closing of a window with
-    /// `ending` to this road or a row of its table, and the twelve `fail` sites to
-    /// theirs.
+    /// `ending` to this road or a row of its table, the three roads to its `ROAD`
+    /// rows, and the twelve `fail` sites to theirs.
     fn stop_every_window(&mut self) -> Result<()> {
         self.stop_every_window_keeping_in(&persist::storage_dir().join(preview::RECOVERED_FOLDER))
     }
 
     /// [`Self::stop_every_window`], what no file takes kept in `recovery` — the data
-    /// directory's `recovered` folder on both roads, a test's own folder in a test.
+    /// directory's `recovered` folder on every road, a test's own folder in a test.
     fn stop_every_window_keeping_in(&mut self, recovery: &Path) -> Result<()> {
         // **The four hand-editable documents' owed changes** (T-QUIT-DOCUMENTS;
         // revisions (c)2 and (d)3), into the same folder — and every one that could be kept
@@ -52396,7 +52440,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // **And Windows is told to start Folio again after its restart**, once and
                 // here: the first window is the run's own — every door process, and every start
                 // that handed itself to a running Folio or to the rescue build, left before the
-                // loop — so the one registration is the data directory's owner's.
+                // loop. Of the starts that open one, only the data directory's owner asks, and an
+                // update's trial only once it is committed (`FolioApp::register_for_restart`).
                 self.register_for_restart(event_loop);
                 // A shortcut file that could not be read owes the user a sentence
                 // naming it (§5.3), and this is the first moment there is a window
@@ -52560,7 +52605,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                         Some(quit) => quit.trial_release(released),
                         None => released,
                     };
-                    app.release_trial_writes(now);
+                    app.release_trial_writes(now, &|| {
+                        register_restart_now::<Native>(event_loop);
+                    });
                     if app.update_job.after_commit(version::VERSION) {
                         diagnostics::note(
                             "Folio: update job — the update this launch said was incomplete is committed",

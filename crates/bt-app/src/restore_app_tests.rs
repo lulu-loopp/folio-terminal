@@ -1096,9 +1096,12 @@ fn an_unwritable_target_keeps_the_edit_in_a_recovery_copy_and_says_where() {
 ///
 /// * [`FAIL_SITES`] — every call of `FolioApp::fail`, by the item it stands in and how many: the
 ///   twelve sites, each a controlled failure;
-/// * [`ROAD`] — every call of `FolioApp::stop_every_window`, the road that keeps every window's
-///   unsaved edits and then closes every window with `ending`: `fail`, and `exiting` (a loop
-///   stopped by something that is not a window closing);
+/// * [`ROAD`] — every call of `FolioApp::stop_every_window` and of
+///   `FolioApp::stop_every_window_keeping_in`, the road that keeps every window's unsaved edits
+///   and then closes every window with `ending`: `fail`, `exiting` (a loop stopped by something
+///   that is not a window closing), the Restart Manager's close (`leave_at_the_systems_close`,
+///   T-RESTART-REGISTRATION), and `stop_every_window` itself, the road's door over the data
+///   directory's own folder;
 /// * [`CLOSES`] — every call of `Runtime::close_window` outside the road, with why it does not
 ///   need the road. A thirteenth site that closed windows for a stop of its own, past the
 ///   preservation, is a call this table does not have.
@@ -1155,6 +1158,16 @@ mod failure_road {
             "crate::FolioApp::exiting",
             1,
             "a loop stopped by something that is not a window closing",
+        ),
+        row(
+            "crate::FolioApp::leave_at_the_systems_close",
+            1,
+            "the Restart Manager's close: the session goes on and nobody ends the process",
+        ),
+        row(
+            "crate::FolioApp::stop_every_window",
+            1,
+            "the road's door, keeping what no file takes in the data directory's recovered folder",
         ),
     ];
 
@@ -1264,7 +1277,17 @@ mod failure_road {
             .filter(|(item, _)| item.starts_with("crate::FolioApp::"))
             .collect();
         compare("`FolioApp::fail`", &fails, fail_sites, &mut failures);
-        let roads = calls(index, "FolioApp", "stop_every_window", &mut failures);
+        let mut roads = calls(index, "FolioApp", "stop_every_window", &mut failures);
+        // The road's own folder-naming door and its body, one road (T-RESTART-REGISTRATION,
+        // review F2): a caller of either is a caller of the road.
+        for (item, count) in calls(
+            index,
+            "FolioApp",
+            "stop_every_window_keeping_in",
+            &mut failures,
+        ) {
+            *roads.entry(item).or_insert(0) += count;
+        }
         compare("the road", &roads, road, &mut failures);
         let closes_seen = calls(index, "Runtime", "close_window", &mut failures);
         compare(
@@ -1313,8 +1336,14 @@ impl FolioApp {
         self.stop_every_window();
     }
     fn stop_every_window(&mut self) {
+        self.stop_every_window_keeping_in();
+    }
+    fn stop_every_window_keeping_in(&mut self) {
         self.runtime.keep_unsaved_edits();
         self.runtime.close_window(true);
+    }
+    fn leave_by_itself(&mut self) {
+        self.stop_every_window_keeping_in();
     }
     fn turn(&mut self) {
         self.fail();
@@ -1358,23 +1387,38 @@ impl Archive {
         index
     }
 
-    /// RED (D-4, 0.4.8 G7) — **the guard names a thirteenth site that closes past the road, and
-    /// a `fail` site the table does not count; and passes the same crate whole.** Another type's
+    /// RED (D-4, 0.4.8 G7; T-RESTART-REGISTRATION review F2) — **the guard names a thirteenth
+    /// site that closes past the road, a `fail` site the table does not count, and a caller of
+    /// the road's body that has no road row; and passes the same crate whole.** Another type's
     /// `fail` is no site.
     ///
-    /// MUTATION: make `compare` skip items with no row — the planted `past_the_road` passes.
+    /// MUTATION: make `compare` skip items with no row — the planted `past_the_road` passes;
+    /// count only the callers of `stop_every_window` in `judge` — the planted `leave_by_itself`
+    /// (a caller of `stop_every_window_keeping_in`) passes without its row.
     #[test]
     fn the_guard_names_a_site_past_the_road_and_passes_the_crate_whole() {
         let index = planted_index();
         let fail_sites = [row("crate::FolioApp::turn", 2, "planted")];
-        let road = [row("crate::FolioApp::fail", 1, "planted")];
+        let road = [
+            row("crate::FolioApp::fail", 1, "planted"),
+            row("crate::FolioApp::stop_every_window", 1, "planted"),
+            row("crate::FolioApp::leave_by_itself", 1, "planted"),
+        ];
         let whole = [
-            row("crate::FolioApp::stop_every_window", 1, "the road"),
+            row("crate::FolioApp::stop_every_window_keeping_in", 1, "the road"),
             row("crate::FolioApp::past_the_road", 1, "planted"),
         ];
         assert_eq!(
             judge(&index, &fail_sites, &road, &whole),
             Vec::<String>::new()
+        );
+
+        let failures = judge(&index, &fail_sites, &road[..2], &whole);
+        assert!(
+            failures.len() == 1
+                && failures[0].contains("crate::FolioApp::leave_by_itself")
+                && failures[0].contains("has no row"),
+            "{failures:#?}"
         );
 
         let failures = judge(&index, &fail_sites, &road, &whole[..1]);
