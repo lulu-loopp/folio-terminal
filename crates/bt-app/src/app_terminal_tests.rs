@@ -1914,17 +1914,20 @@ fn a_gesture_says_one_thing_to_the_shell_and_says_it_at_the_end() {
 /// Since 2026-10-05 the ladder is read with its kind (`ShellSession::seed_place_for_a_new_shell`,
 /// which reads `place_for_a_new_shell`), so a pane born in a named folder hands it on as named.
 /// Since 2026-10-28 (T-CONTRACT-M8, O-5b) `restart_shell` holds the pane and calls it on
-/// `leaf.session`, so the ladder is matched by the call, whatever holds the session.
+/// `leaf.session`, so each verb's call is matched with its own receiver.
 ///
 /// MUTATION, observed red: put `leaf.session.working_directory()` back in any one
 /// of the three bodies.
 #[test]
 fn every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder() {
-    for door in ["restart_shell", "split_seat", "duplicate_tab"] {
+    for (door, seed) in [
+        ("restart_shell", "leaf.session.seed_place_for_a_new_shell()"),
+        ("split_seat", "leaf.seed_place_for_a_new_shell()"),
+        ("duplicate_tab", "leaf.seed_place_for_a_new_shell()"),
+    ] {
         let body = method_body("Runtime", door);
         assert!(
-            body.contains(".seed_place_for_a_new_shell()")
-                && !body.contains("session.working_directory()"),
+            body.contains(seed) && !body.contains("session.working_directory()"),
             "`{door}` reads where the pane stands through \
              `ShellSession::seed_place_for_a_new_shell`:\n{body}"
         );

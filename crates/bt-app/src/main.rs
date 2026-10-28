@@ -42766,7 +42766,12 @@ mod formula_tool_seat_tests {
                 < copy.find("self.submit_clipboard_write(").unwrap()
         );
         let validate = method_body("Runtime", "live_paste_target");
-        assert!(validate.contains(".sessions") && validate.contains(".get(&target.seat)"));
+        assert!(
+            validate
+                .split_whitespace()
+                .collect::<String>()
+                .contains("tab.sessions.get(&target.seat)")
+        );
         assert!(validate.contains("paste_target_is_live(tab.id, standing, target)"));
     }
 

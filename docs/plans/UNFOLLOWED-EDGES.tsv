@@ -2148,7 +2148,7 @@ crates/bt-app/src/main.rs	bt-app crate::TabState::tooltip_text	Ambiguous	into_ow
 crates/bt-app/src/main.rs	bt-app crate::TaskbarFlash::replaced	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::TaskbarFlash::replaced	Ambiguous	filter_map	1	
 crates/bt-app/src/main.rs	bt-app crate::TaskbarFlash::replaced	Dynamic	standing	1	
-crates/bt-app/src/main.rs	bt-app crate::TerminalPane::birth_at	Ambiguous	and_then	1	2026-10-28: T-CONTRACT-M8 (O-5b); re-keyed from crate::ShellSession::birth_at, the same site: the successor's methods move from the session record to the pane, TerminalPane (ruling E5, the ownership contract's M8)
+crates/bt-app/src/main.rs	bt-app crate::TerminalPane::birth_at	Ambiguous	and_then	1	2026-10-27: T-CONTRACT-M8 (O-5a); re-keyed from crate::LeafSession::birth_at, the same site: the type is renamed LeafSession -> ShellSession (the ownership contract's M8); 2026-10-28: T-CONTRACT-M8 (O-5b); re-keyed from crate::ShellSession::birth_at, the same site: the successor's methods move from the session record to the pane, TerminalPane (ruling E5, the ownership contract's M8)
 crates/bt-app/src/main.rs	bt-app crate::TextSizeAim::notch	Ambiguous	fold	1	
 crates/bt-app/src/main.rs	bt-app crate::TextSizeAim::notch	Ambiguous	stepped	2	
 crates/bt-app/src/main.rs	bt-app crate::TextSizeAim::spend	Ambiguous	unwrap_or_else	1	
