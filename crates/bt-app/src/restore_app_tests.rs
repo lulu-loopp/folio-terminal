@@ -1405,7 +1405,11 @@ impl Archive {
             row("crate::FolioApp::leave_by_itself", 1, "planted"),
         ];
         let whole = [
-            row("crate::FolioApp::stop_every_window_keeping_in", 1, "the road"),
+            row(
+                "crate::FolioApp::stop_every_window_keeping_in",
+                1,
+                "the road",
+            ),
             row("crate::FolioApp::past_the_road", 1, "planted"),
         ];
         assert_eq!(
