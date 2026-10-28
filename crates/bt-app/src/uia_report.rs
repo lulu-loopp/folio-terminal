@@ -5,14 +5,22 @@
 //! [`bt_platform::uia::WindowText`]; this module builds that value from what the window already holds — each
 //! terminal pane of the active tab, its last presented frame and the metrics it was drawn at, its
 //! body's rectangle, its name, and whether it holds the keyboard — and decides when it is built:
-//! never before a client has asked (the door's `wanted`), and after that only on a turn
-//! where a frame reached the glass or what the frames do not say (the panes, their places, their
-//! names, the keyboard) moved. A turn that changes none of it builds nothing.
+//! never before a client has asked (the door's `wanted`), and after that only on a turn where what
+//! the frames do not say (the panes, their places, their names, the keyboard) moved, or where a
+//! presented frame says something the last publication did not — at most once every
+//! [`UIA_FRAME_INTERVAL`] for those. A turn that changes none of it builds nothing.
 
-use bt_platform::uia::{CellIn, CellPoint, ClientRect, PaneText, RowPlace, RowText};
+use std::time::{Duration, Instant};
+
+use bt_platform::uia::{CellIn, CellPoint, ClientRect, PaneId, PaneText, RowPlace, RowText};
 use bt_render::{CellMetrics, SeatViewport};
 use bt_viewport::ViewportFrame;
 use bt_viewport::horizontal::{WordClass, cluster_word_class};
+
+/// **How often a frame-only change is published, at most** (the review's F2): text that streams
+/// is published ten times a second, never once a frame; a change of what the frames do not say
+/// (the panes, their places, their names, the keyboard) is published on its own turn.
+pub(crate) const UIA_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 
 /// **One window's report**: the door its subclass answers through (`crate::window_seam::UiaDoor`;
 /// the product's is `bt_platform::uia::UiaHook`), and what decides whether a turn publishes.
@@ -20,16 +28,28 @@ pub(crate) struct UiaReport<U> {
     /// `None` where the window's handle could not be reached or its subclass would not install:
     /// the window then answers UI Automation as it did before.
     pub(crate) hook: Option<U>,
-    /// A frame of the active tab reached the glass since the last publication.
+    /// A frame of the active tab reached the glass since the last look at the frames.
     pub(crate) presented: bool,
-    /// What the last publication was built from besides the frames.
-    published: Option<Vec<PaneKey>>,
+    /// What the last publication was built from, and when.
+    published: Option<Published>,
+    /// A frame-only change is held for [`UIA_FRAME_INTERVAL`] after the last publication.
+    held: bool,
+    /// The threads of a client's first call have been said in `diagnostics.log`.
+    pub(crate) threads_said: bool,
+}
+
+/// What a publication was built from: the keys, each pane's frame at the metrics it was drawn
+/// at, and the moment.
+struct Published {
+    keys: Vec<PaneKey>,
+    frames: Vec<(ViewportFrame, CellMetrics)>,
+    at: Instant,
 }
 
 /// What a pane's publication depends on besides its frame.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PaneKey {
-    pub(crate) seat: u64,
+    pub(crate) id: PaneId,
     pub(crate) body: [u32; 4],
     pub(crate) holds_keyboard: bool,
     pub(crate) name: String,
@@ -41,23 +61,113 @@ impl<U> UiaReport<U> {
             hook,
             presented: false,
             published: None,
+            held: false,
+            threads_said: false,
         }
     }
 
-    /// **Whether this turn publishes**: a client has asked (`wanted`, the hook's), and a frame
-    /// was presented or the panes' keys moved since the last publication. Spends the presented
-    /// bit and records the keys when it says yes.
-    pub(crate) fn due(&mut self, wanted: bool, keys: &[PaneKey]) -> bool {
-        if !wanted {
-            return false;
-        }
-        if !self.presented && self.published.as_deref() == Some(keys) {
-            return false;
-        }
-        self.presented = false;
-        self.published = Some(keys.to_vec());
-        true
+    /// **Whether this turn looks at the frames at all**: nothing has been published yet, the
+    /// keys moved, a frame reached the glass, or a held change is due. An idle turn reads only
+    /// the keys.
+    pub(crate) fn looks(&self, keys: &[PaneKey], now: Instant) -> bool {
+        let Some(last) = &self.published else {
+            return true;
+        };
+        self.presented || last.keys != keys || self.deadline().is_some_and(|due| now >= due)
     }
+
+    /// **Whether this turn publishes** — `pace::LatestThrottle`'s three rules, for the frames,
+    /// with the keys outside them:
+    ///
+    /// * the keys moved (or nothing was published): now;
+    /// * every pane's frame says what the published one said (its rows' text, their places, the
+    ///   caret, the selection, the metrics): nothing, and nothing is held;
+    /// * a frame says something new: now if [`UIA_FRAME_INTERVAL`] has passed since the last
+    ///   publication, held otherwise, with [`Self::deadline`] saying when.
+    ///
+    /// Spends the presented bit, and records what it says yes to.
+    pub(crate) fn due(
+        &mut self,
+        keys: &[PaneKey],
+        frames: &[(&ViewportFrame, CellMetrics)],
+        now: Instant,
+    ) -> bool {
+        self.presented = false;
+        let publish = match &self.published {
+            None => true,
+            Some(last) if last.keys != keys => true,
+            Some(last) => {
+                let same = last.frames.len() == frames.len()
+                    && last.frames.iter().zip(frames).all(
+                        |((old, old_metrics), (new, new_metrics))| {
+                            says_the_same(old, *old_metrics, new, *new_metrics)
+                        },
+                    );
+                if same {
+                    self.held = false;
+                    false
+                } else if now.saturating_duration_since(last.at) >= UIA_FRAME_INTERVAL {
+                    true
+                } else {
+                    self.held = true;
+                    false
+                }
+            }
+        };
+        if publish {
+            self.held = false;
+            self.published = Some(Published {
+                keys: keys.to_vec(),
+                frames: frames
+                    .iter()
+                    .map(|(frame, metrics)| ((*frame).clone(), *metrics))
+                    .collect(),
+                at: now,
+            });
+        }
+        publish
+    }
+
+    /// When a held frame-only change is owed; the turn's wake fold reads it.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        let last = self.published.as_ref().filter(|_| self.held)?;
+        Some(last.at + UIA_FRAME_INTERVAL)
+    }
+}
+
+/// **Whether two frames say the same to UI Automation** — everything [`pane_text`] reads: the
+/// width, the drawn rows' placement records (whole, which hold a little more than their places
+/// and wraps), their cells' text and spacers, the caret, the selection, and the metrics that
+/// place them. A difference it sees that the publication would not show costs one rebuild; one
+/// it missed would leave a client reading old text, so it misses none.
+fn says_the_same(
+    old: &ViewportFrame,
+    old_metrics: CellMetrics,
+    new: &ViewportFrame,
+    new_metrics: CellMetrics,
+) -> bool {
+    let drawn = |frame: &ViewportFrame| frame.drawable_rows().min(frame.row_map.len());
+    let rows = drawn(old);
+    if old.columns != new.columns
+        || rows != drawn(new)
+        || old.row_map[..rows] != new.row_map[..rows]
+        || old.cursor_in_view != new.cursor_in_view
+        || (old.cursor.row, old.cursor.column) != (new.cursor.row, new.cursor.column)
+        || old.selection_spans != new.selection_spans
+        || old_metrics.padding_px.to_bits() != new_metrics.padding_px.to_bits()
+        || old_metrics.cell_width_px.to_bits() != new_metrics.cell_width_px.to_bits()
+    {
+        return false;
+    }
+    let cells = |frame: &ViewportFrame| {
+        let end = (rows * frame.columns.get() as usize).min(frame.cells.len());
+        &frame.cells[..end]
+    };
+    let (old_cells, new_cells) = (cells(old), cells(new));
+    old_cells.len() == new_cells.len()
+        && old_cells.iter().zip(new_cells).all(|(old, new)| {
+            old.wide_spacer == new.wide_spacer && old.text.as_str() == new.text.as_str()
+        })
 }
 
 /// **One pane's publication, from its presented frame.** `body` is the pane's body in the
@@ -147,7 +257,7 @@ pub(crate) fn pane_text(
             )
         });
     PaneText::new(
-        key.seat,
+        key.id,
         key.name.clone(),
         client_rect(body),
         key.holds_keyboard,

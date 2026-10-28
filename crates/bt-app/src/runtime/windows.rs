@@ -720,40 +720,70 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **What this window tells UI Automation, published once a turn at most** (T-UIA-SKELETON,
     /// 88a). Nothing at all until a client has asked (`UiaHook::wanted`); after that, a turn
-    /// publishes only when a frame of the active tab reached the glass or what the frames do not
-    /// say moved — the panes, their bodies, their names, which one holds the keyboard. A client's
-    /// request to focus a pane is taken here and answered through the one focus door a chord
-    /// uses ([`Self::focus_seat`]). The focus event a publication owes goes to the events lane
-    /// (R6), never raised on this thread.
+    /// publishes when what the frames do not say moved — the panes, their bodies, their names,
+    /// which one holds the keyboard — and, at most once every
+    /// [`crate::uia_report::UIA_FRAME_INTERVAL`], when a presented frame says something the last
+    /// publication did not ([`crate::uia_report::UiaReport::due`]); a held change books its wake
+    /// in the turn's fold. A client's request to focus a pane is taken here and answered through
+    /// the one focus door a chord uses ([`Self::focus_seat`]) when the pane stands in the active
+    /// tab. The focus event a publication owes goes to the events lane (R6), never raised on this
+    /// thread.
     ///
     /// After `flush_title` on the clock run, for its reason: every road above can change which
     /// tab is active, what a pane is called, or who holds the keyboard.
-    pub(crate) fn flush_uia(&mut self) -> Result<()> {
+    pub(crate) fn flush_uia(&mut self, now: Instant) -> Result<()> {
         let Some(hook) = self.window.uia.hook.as_ref() else {
             return Ok(());
         };
-        let asked_focus = hook.take_focus_request().map(SeatId);
+        let asked_focus = hook.take_focus_request();
         let wanted = hook.wanted();
-        if let Some(seat) = asked_focus
-            && self.seats.terminals().contains(&seat)
+        let threads = hook.threads();
+        let tab = self.id.0;
+        if let Some(pane) = asked_focus
+            && pane.tab == tab
+            && self.seats.terminals().contains(&SeatId(pane.seat))
         {
-            self.focus_seat(seat)?;
+            self.focus_seat(SeatId(pane.seat))?;
+        }
+        if let Some(threads) = threads
+            && !self.window.uia.threads_said
+        {
+            self.window.uia.threads_said = true;
+            self.window.window.note(&format!(
+                "Folio: UI Automation — a client's first call came on thread {} (the window's \
+                 is {})",
+                threads.first_call, threads.window
+            ));
         }
         if !wanted {
             // Nobody has asked: not even the keys are read.
             return Ok(());
         }
         let keys = self.uia_keys();
-        if !self.window.uia.due(wanted, &keys) {
+        if !self.window.uia.looks(&keys, now) {
             return Ok(());
         }
-        let text = self.uia_publication(&keys);
-        let owed = self
-            .window
-            .uia
-            .hook
-            .as_ref()
-            .and_then(|hook| hook.publish(text));
+        let leaving = hang_watch::enter(hang_watch::Station::UiaFlush);
+        let window = &mut *self.window;
+        let frames = uia_frames(
+            &crate::active_item(&window.tabs, window.active_tab).sessions,
+            &keys,
+        );
+        let due = window.uia.due(&keys, &frames, now);
+        drop(frames);
+        let owed = if due {
+            let text = self.uia_publication(&keys);
+            hang_watch::during(hang_watch::Station::UiaPublish, || {
+                self.window
+                    .uia
+                    .hook
+                    .as_ref()
+                    .and_then(|hook| hook.publish(text))
+            })
+        } else {
+            None
+        };
+        drop(leaving);
         if let Some(events) = owed {
             self.app.uia_events.request(events);
         }
@@ -769,7 +799,7 @@ impl<B: Backend> Runtime<'_, B> {
         let panes = keys
             .iter()
             .filter_map(|key| {
-                let leaf = self.sessions.get(&SeatId(key.seat))?;
+                let leaf = self.sessions.get(&SeatId(key.id.seat))?;
                 let frame = leaf.view.last_presented_frame.as_ref()?;
                 let body = bt_render::SeatViewport {
                     x: key.body[0],
@@ -789,12 +819,14 @@ impl<B: Backend> Runtime<'_, B> {
     }
 
     /// **What each terminal pane's publication depends on besides its frame** — every terminal
-    /// of the active tab with a presented frame, in tree order (R7: the active tab's panes only).
+    /// of the active tab with a presented frame, in tree order (R7: the active tab's panes only),
+    /// each named by its tab and seat.
     pub(crate) fn uia_keys(&self) -> Vec<crate::uia_report::PaneKey> {
         let scale = self.window.renderer.scale_factor() as f32;
         let window_focused = self.window.window_focused;
         let owner_is_a_shell = self.keyboard_owner_is_a_shell();
         let focused = self.focused_leaf;
+        let tab = self.id.0;
         self.seats
             .terminals()
             .into_iter()
@@ -807,7 +839,7 @@ impl<B: Backend> Runtime<'_, B> {
                     .last_presented_frame
                     .as_ref()?;
                 Some(crate::uia_report::PaneKey {
-                    seat: seat.0,
+                    id: bt_platform::uia::PaneId { tab, seat: seat.0 },
                     body: [body.x, body.y, body.width, body.height],
                     holds_keyboard: super::terminal::seat_holds_the_keyboard(
                         window_focused,
@@ -3127,6 +3159,21 @@ pub(crate) fn recent_term_leaf_seed(profile_id: &str, cwd: String) -> LeafSeed {
         prefill: None,
         carried_environment: None,
     }
+}
+
+/// **Each published pane's presented frame, at the metrics it was drawn at**, in `keys`' order —
+/// what [`crate::uia_report::UiaReport::due`] compares with the last publication. Read from the
+/// active tab's shells alone, so the window's report can be written beside it.
+fn uia_frames<'a>(
+    sessions: &'a BTreeMap<SeatId, crate::LeafSession>,
+    keys: &[crate::uia_report::PaneKey],
+) -> Vec<(&'a bt_viewport::ViewportFrame, bt_render::CellMetrics)> {
+    keys.iter()
+        .filter_map(|key| {
+            let view = &sessions.get(&SeatId(key.id.seat))?.view;
+            Some((view.last_presented_frame.as_ref()?, view.presented_metrics))
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -4,11 +4,15 @@
 //! # Threads
 //!
 //! The subclass runs on the window's thread, inside whatever `SendMessage` asked. Every provider
-//! is a server-side provider *without* `ProviderOptions_UseComThreading`: UI Automation calls it on
-//! its own threads, at any moment, and it answers from the last [`WindowText`] the loop published
-//! and from nothing else. The publication is one `Arc` behind one mutex, held only to copy the
-//! `Arc` or to swap it ([`Shared::snapshot`], [`UiaHook::publish`]): no provider ever reaches the
-//! application's state, and the window thread never waits on a provider.
+//! is a server-side provider *with* `ProviderOptions_UseComThreading`, and every one is a
+//! free-threaded object (`#[implement]` answers `IAgileObject` and the free-threaded marshaler):
+//! COM's rules then let UI Automation call it on its own threads, at any moment, rather than
+//! routing the call to the thread that owns the window. The first call's thread is recorded beside
+//! the window's ([`UiaHook::threads`]) so the E-1 run shows which it was. A provider answers from
+//! the last [`WindowText`] the loop published and from nothing else. The publication is one `Arc`
+//! behind one mutex, held only to copy the `Arc` or to swap it ([`Shared::snapshot`],
+//! [`UiaHook::publish`]): no provider ever reaches the application's state, and the window thread
+//! never waits on a provider.
 //!
 //! # Laziness
 //!
@@ -18,8 +22,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
 use windows::Win32::Foundation::{
     E_INVALIDARG, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM,
@@ -29,6 +33,7 @@ use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, SAFEARRAY,
 };
 use windows::Win32::System::Ole::{SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement};
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::System::Variant::{VARENUM, VARIANT, VT_I4, VT_R8, VT_UNKNOWN};
 use windows::Win32::UI::Accessibility::{
     IRawElementProviderFragment, IRawElementProviderFragment_Impl, IRawElementProviderFragmentRoot,
@@ -37,15 +42,15 @@ use windows::Win32::UI::Accessibility::{
     ITextRangeProvider, ITextRangeProvider_Impl, IValueProvider, IValueProvider_Impl,
     NavigateDirection, NavigateDirection_FirstChild, NavigateDirection_LastChild,
     NavigateDirection_NextSibling, NavigateDirection_Parent, NavigateDirection_PreviousSibling,
-    ProviderOptions, ProviderOptions_ServerSideProvider, SupportedTextSelection,
-    SupportedTextSelection_Single, TextPatternRangeEndpoint, TextPatternRangeEndpoint_Start,
-    TextUnit, UIA_AutomationFocusChangedEventId, UIA_AutomationIdPropertyId,
-    UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_E_ELEMENTNOTAVAILABLE,
-    UIA_E_INVALIDOPERATION, UIA_HasKeyboardFocusPropertyId, UIA_IsContentElementPropertyId,
-    UIA_IsControlElementPropertyId, UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
-    UIA_IsReadOnlyAttributeId, UIA_NamePropertyId, UIA_PATTERN_ID, UIA_PROPERTY_ID,
-    UIA_TEXTATTRIBUTE_ID, UIA_TextPattern2Id, UIA_TextPatternId, UIA_ValuePatternId,
-    UiaAppendRuntimeId, UiaClientsAreListening, UiaDisconnectProvider,
+    ProviderOptions, ProviderOptions_ServerSideProvider, ProviderOptions_UseComThreading,
+    SupportedTextSelection, SupportedTextSelection_Single, TextPatternRangeEndpoint,
+    TextPatternRangeEndpoint_Start, TextUnit, UIA_AutomationFocusChangedEventId,
+    UIA_AutomationIdPropertyId, UIA_ClassNamePropertyId, UIA_ControlTypePropertyId,
+    UIA_E_ELEMENTNOTAVAILABLE, UIA_E_INVALIDOPERATION, UIA_HasKeyboardFocusPropertyId,
+    UIA_IsContentElementPropertyId, UIA_IsControlElementPropertyId, UIA_IsEnabledPropertyId,
+    UIA_IsKeyboardFocusablePropertyId, UIA_IsReadOnlyAttributeId, UIA_NamePropertyId,
+    UIA_PATTERN_ID, UIA_PROPERTY_ID, UIA_TEXTATTRIBUTE_ID, UIA_TextPattern2Id, UIA_TextPatternId,
+    UIA_ValuePatternId, UiaAppendRuntimeId, UiaClientsAreListening, UiaDisconnectProvider,
     UiaGetReservedNotSupportedValue, UiaHostProviderFromHwnd, UiaPoint, UiaRaiseAutomationEvent,
     UiaRect, UiaReturnRawElementProvider,
 };
@@ -56,17 +61,17 @@ use windows::core::{
     implement,
 };
 
-use super::{Boundary, ClientRect, PaneText, Shape, WindowText, asks_for_the_root};
+use super::{
+    Boundary, ClientRect, ClientThreads, PaneId, PaneText, Shape, WindowText, asks_for_the_root,
+};
 use crate::NativeWindow;
 
 /// "BTUA". Distinct from every other subclass id in this crate.
 const UIA_SUBCLASS_ID: usize = 0x4254_5541;
 
-/// No focus request parked.
-const NO_SEAT: u64 = u64::MAX;
-
 /// **What every provider of one window shares**: the window, the publication, and the two flags
-/// the loop reads. Free-threaded: every field is either fixed at birth, atomic, or the one mutex.
+/// the loop reads. Free-threaded: every field is either fixed at birth, atomic, a channel's
+/// sending end, or the one mutex.
 pub(super) struct Shared {
     /// The window's `HWND`, as a number: the handle is the window thread's, the number is only
     /// ever handed back to the system's coordinate calls, which take it from any thread.
@@ -78,8 +83,13 @@ pub(super) struct Shared {
     wanted: AtomicBool,
     /// The window is alive: after `WM_DESTROY` every provider answers "element not available".
     alive: AtomicBool,
-    /// A client's `SetFocus` on a pane, parked for the loop ([`NO_SEAT`] when none is).
-    focus_asked: AtomicU64,
+    /// A client's `SetFocus` on a pane, sent to the loop: a send never waits, and the loop takes
+    /// the newest ([`UiaHook::take_focus_request`]).
+    focus_asked: mpsc::Sender<PaneId>,
+    /// The thread the hook was made on: the window's.
+    window_thread: u32,
+    /// The thread of the first provider call a client made (0 until one has).
+    first_call: AtomicU32,
     /// Wakes the loop: on the first question, and on a parked focus request. It sends one
     /// event and waits for nothing.
     asked: Box<dyn Fn() + Send + Sync>,
@@ -100,7 +110,15 @@ impl Shared {
         HWND(self.hwnd as *mut c_void)
     }
 
+    /// Every provider call passes here first: the first one records its thread.
     fn alive(&self) -> Result<()> {
+        if self.first_call.load(Ordering::Relaxed) == 0 {
+            // SAFETY: reads this thread's id; no preconditions.
+            let thread = unsafe { GetCurrentThreadId() };
+            let _ =
+                self.first_call
+                    .compare_exchange(0, thread, Ordering::AcqRel, Ordering::Relaxed);
+        }
         if self.alive.load(Ordering::Acquire) {
             Ok(())
         } else {
@@ -170,13 +188,16 @@ pub(super) struct HookData {
     /// The root provider, made on the first question ([`HookData::root`]).
     root: RefCell<Option<ComObject<Root>>>,
     /// The pane the last focus event named, so a publication raises one only when it moved.
-    raised: Cell<Option<u64>>,
+    raised: Cell<Option<PaneId>>,
     /// The root has been handed back (at `WM_DESTROY`, or at the hook's drop).
     released: Cell<bool>,
+    /// The clients' focus requests, as [`Shared::focus_asked`] sent them.
+    focus_requests: mpsc::Receiver<PaneId>,
 }
 
 impl HookData {
     pub(super) fn new(hwnd: isize, shape: Shape, asked: Box<dyn Fn() + Send + Sync>) -> Self {
+        let (focus_asked, focus_requests) = mpsc::channel();
         Self {
             shared: Arc::new(Shared {
                 hwnd,
@@ -184,13 +205,31 @@ impl HookData {
                 snapshot: Mutex::new(Arc::new(WindowText::default())),
                 wanted: AtomicBool::new(false),
                 alive: AtomicBool::new(true),
-                focus_asked: AtomicU64::new(NO_SEAT),
+                focus_asked,
+                // SAFETY: reads this thread's id; no preconditions.
+                window_thread: unsafe { GetCurrentThreadId() },
+                first_call: AtomicU32::new(0),
                 asked,
             }),
             root: RefCell::new(None),
             raised: Cell::new(None),
             released: Cell::new(false),
+            focus_requests,
         }
+    }
+
+    /// **The pane a client asked to focus**, the newest of those asked since the last take.
+    pub(super) fn take_focus_request(&self) -> Option<PaneId> {
+        self.focus_requests.try_iter().last()
+    }
+
+    /// The window's thread and the first client call's, once a client has called.
+    pub(super) fn threads(&self) -> Option<ClientThreads> {
+        let first_call = self.shared.first_call.load(Ordering::Acquire);
+        (first_call != 0).then_some(ClientThreads {
+            window: self.shared.window_thread,
+            first_call,
+        })
     }
 
     /// **The root provider, made on the first question.** The first one also says the window is
@@ -252,9 +291,9 @@ impl HookData {
         };
         drop(old);
         let before = self.raised.replace(focused);
-        let seat = focused.filter(|seat| before != Some(*seat))?;
+        let pane = focused.filter(|pane| before != Some(*pane))?;
         let root = self.root.borrow().clone()?;
-        Some(UiaEvents { root, seat })
+        Some(UiaEvents { root, pane })
     }
 }
 
@@ -299,11 +338,16 @@ impl UiaHook {
         self.data.publish(text)
     }
 
-    /// **The pane a client asked to focus**, taken: once per request.
+    /// **The pane a client asked to focus**, taken: the newest request since the last take.
     #[must_use]
-    pub fn take_focus_request(&self) -> Option<u64> {
-        let seat = self.data.shared.focus_asked.swap(NO_SEAT, Ordering::AcqRel);
-        (seat != NO_SEAT).then_some(seat)
+    pub fn take_focus_request(&self) -> Option<PaneId> {
+        self.data.take_focus_request()
+    }
+
+    /// **The window's thread and the thread of a client's first call**, once one has called.
+    #[must_use]
+    pub fn threads(&self) -> Option<ClientThreads> {
+        self.data.threads()
     }
 }
 
@@ -354,7 +398,7 @@ pub(super) unsafe extern "system" fn uia_subclass(
 /// in-process handler runs inside the raise).
 pub struct UiaEvents {
     root: ComObject<Root>,
-    seat: u64,
+    pane: PaneId,
 }
 
 impl UiaEvents {
@@ -370,9 +414,9 @@ impl UiaEvents {
         let listening = unsafe { UiaClientsAreListening() }.as_bool();
         if listening
             && shared.alive.load(Ordering::Acquire)
-            && shared.snapshot().pane(self.seat).is_some()
+            && shared.snapshot().pane(self.pane).is_some()
         {
-            let pane: IRawElementProviderSimple = self.root.pane(self.seat).to_interface();
+            let pane: IRawElementProviderSimple = pane_of(&self.root, self.pane).to_interface();
             // SAFETY: a provider this window owns; a refusal only means no client heard.
             let _ = unsafe { UiaRaiseAutomationEvent(&pane, UIA_AutomationFocusChangedEventId) };
         }
@@ -397,24 +441,28 @@ pub(super) struct Root {
     shared: Arc<Shared>,
 }
 
-impl Root_Impl {
-    /// A provider of one of this root's panes.
-    fn pane(&self, seat: u64) -> ComObject<Pane> {
-        ComObject::new(Pane {
-            shared: Arc::clone(&self.shared),
-            root: self.to_object(),
-            seat,
-        })
-    }
+/// A provider of one of `root`'s panes.
+fn pane_of(root: &ComObject<Root>, id: PaneId) -> ComObject<Pane> {
+    ComObject::new(Pane {
+        shared: Arc::clone(&root.shared),
+        root: root.clone(),
+        id,
+    })
+}
 
-    fn pane_fragment(&self, seat: u64) -> IRawElementProviderFragment {
-        self.pane(seat).to_interface()
-    }
+fn pane_fragment_of(root: &ComObject<Root>, id: PaneId) -> IRawElementProviderFragment {
+    pane_of(root, id).to_interface()
+}
+
+/// What every provider of this window says it is: server-side, and called by COM's rules on
+/// free-threaded objects (see the module's threads note).
+fn provider_options() -> ProviderOptions {
+    ProviderOptions(ProviderOptions_ServerSideProvider.0 | ProviderOptions_UseComThreading.0)
 }
 
 impl IRawElementProviderSimple_Impl for Root_Impl {
     fn ProviderOptions(&self) -> Result<ProviderOptions> {
-        Ok(ProviderOptions_ServerSideProvider)
+        Ok(provider_options())
     }
 
     fn GetPatternProvider(&self, _patternid: UIA_PATTERN_ID) -> Result<IUnknown> {
@@ -436,15 +484,15 @@ impl IRawElementProviderFragment_Impl for Root_Impl {
     fn Navigate(&self, direction: NavigateDirection) -> Result<IRawElementProviderFragment> {
         self.shared.alive()?;
         let text = self.shared.snapshot();
-        let seat = if direction == NavigateDirection_FirstChild {
+        let child = if direction == NavigateDirection_FirstChild {
             text.panes.first()
         } else if direction == NavigateDirection_LastChild {
             text.panes.last()
         } else {
             None
         };
-        match seat {
-            Some(pane) => Ok(self.pane_fragment(pane.seat)),
+        match child {
+            Some(pane) => Ok(pane_fragment_of(&self.to_object(), pane.id)),
             None => none(),
         }
     }
@@ -478,7 +526,7 @@ impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
         let (x, y) = self.shared.to_client(x, y);
         let text = self.shared.snapshot();
         match text.panes.iter().find(|pane| pane.body.contains(x, y)) {
-            Some(pane) => Ok(self.pane_fragment(pane.seat)),
+            Some(pane) => Ok(pane_fragment_of(&self.to_object(), pane.id)),
             None => none(),
         }
     }
@@ -486,15 +534,16 @@ impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
     fn GetFocus(&self) -> Result<IRawElementProviderFragment> {
         self.shared.alive()?;
         match self.shared.snapshot().focused() {
-            Some(seat) => Ok(self.pane_fragment(seat)),
+            Some(id) => Ok(pane_fragment_of(&self.to_object(), id)),
             None => none(),
         }
     }
 }
 
 /// **One terminal pane**: a fragment of the root, its own Text pattern, and for the edit shape
-/// the Value pattern. It names its pane by seat and reads the pane from the publication at each
-/// question: a pane the publication no longer has is gone.
+/// the Value pattern. It names its pane by its tab and seat ([`PaneId`]) and reads the pane from
+/// the publication at each question: a pane the publication no longer has — closed, or standing
+/// in a tab that is no longer the active one — is gone.
 #[implement(
     IRawElementProviderSimple,
     IRawElementProviderFragment,
@@ -504,7 +553,7 @@ impl IRawElementProviderFragmentRoot_Impl for Root_Impl {
 pub(super) struct Pane {
     shared: Arc<Shared>,
     root: ComObject<Root>,
-    seat: u64,
+    id: PaneId,
 }
 
 /// **One pane of the publication a question is answered from**: the publication held for the
@@ -530,39 +579,37 @@ impl Pane {
         let index = text
             .panes
             .iter()
-            .position(|pane| pane.seat == self.seat)
+            .position(|pane| pane.id == self.id)
             .ok_or_else(gone)?;
         Ok(Published { text, index })
     }
-}
 
-impl Pane_Impl {
-    fn range(&self, start: u32, end: u32) -> ITextRangeProvider {
-        ComObject::new(Range {
-            pane: self.to_object(),
-            ends: AtomicU64::new(pack(start, end)),
-        })
-        .to_interface()
-    }
-
+    /// The pane `step` places after this one in the publication's tree order.
     fn sibling(&self, step: isize) -> Result<IRawElementProviderFragment> {
-        let text = self.shared.snapshot();
-        let Some(index) = text.panes.iter().position(|pane| pane.seat == self.seat) else {
-            return Err(gone());
-        };
-        match index
+        let pane = self.published()?;
+        match pane
+            .index
             .checked_add_signed(step)
-            .and_then(|next| text.panes.get(next))
+            .and_then(|next| pane.text.panes.get(next))
         {
-            Some(pane) => Ok(self.root.pane_fragment(pane.seat)),
+            Some(next) => Ok(pane_fragment_of(&self.root, next.id)),
             None => none(),
         }
     }
 }
 
+/// A range of `pane`, from `start` to `end`.
+fn range_of(pane: &ComObject<Pane>, start: u32, end: u32) -> ITextRangeProvider {
+    ComObject::new(Range {
+        pane: pane.clone(),
+        ends: AtomicU64::new(pack(start, end)),
+    })
+    .to_interface()
+}
+
 impl IRawElementProviderSimple_Impl for Pane_Impl {
     fn ProviderOptions(&self) -> Result<ProviderOptions> {
-        Ok(ProviderOptions_ServerSideProvider)
+        Ok(provider_options())
     }
 
     fn GetPatternProvider(&self, patternid: UIA_PATTERN_ID) -> Result<IUnknown> {
@@ -584,7 +631,7 @@ impl IRawElementProviderSimple_Impl for Pane_Impl {
         } else if is(UIA_NamePropertyId) {
             VARIANT::from(pane.name.as_str())
         } else if is(UIA_AutomationIdPropertyId) {
-            VARIANT::from(format!("pane-{}", pane.seat).as_str())
+            VARIANT::from(format!("pane-{}-{}", pane.id.tab, pane.id.seat).as_str())
         } else if is(UIA_ClassNamePropertyId) {
             VARIANT::from("FolioTerminalPane")
         } else if is(UIA_HasKeyboardFocusPropertyId) {
@@ -620,10 +667,10 @@ impl IRawElementProviderFragment_Impl for Pane_Impl {
     }
 
     fn GetRuntimeId(&self) -> Result<*mut SAFEARRAY> {
-        let low = i32::from_ne_bytes(((self.seat & 0xFFFF_FFFF) as u32).to_ne_bytes());
-        let high = i32::from_ne_bytes(((self.seat >> 32) as u32).to_ne_bytes());
         let append = i32::try_from(UiaAppendRuntimeId).unwrap_or(3);
-        safe_array_i4(&[append, low, high])
+        let [tab_low, tab_high] = halves(self.id.tab);
+        let [seat_low, seat_high] = halves(self.id.seat);
+        safe_array_i4(&[append, tab_low, tab_high, seat_low, seat_high])
     }
 
     fn BoundingRectangle(&self) -> Result<UiaRect> {
@@ -636,8 +683,10 @@ impl IRawElementProviderFragment_Impl for Pane_Impl {
 
     fn SetFocus(&self) -> Result<()> {
         self.published()?;
-        self.shared.focus_asked.store(self.seat, Ordering::Release);
-        self.shared.wake();
+        // The receiving end is the hook's; a hook already gone has no loop to tell.
+        if self.shared.focus_asked.send(self.id).is_ok() {
+            self.shared.wake();
+        }
         Ok(())
     }
 
@@ -650,16 +699,17 @@ impl ITextProvider_Impl for Pane_Impl {
     fn GetSelection(&self) -> Result<*mut SAFEARRAY> {
         let pane = self.published()?;
         let ends = pane.selection().or(pane.caret().map(|at| (at, at)));
+        let me = self.to_object();
         let ranges: Vec<ITextRangeProvider> = ends
             .into_iter()
-            .map(|(start, end)| self.range(start, end))
+            .map(|(start, end)| range_of(&me, start, end))
             .collect();
         safe_array_unknown(&ranges)
     }
 
     fn GetVisibleRanges(&self) -> Result<*mut SAFEARRAY> {
         let len = self.published()?.len();
-        safe_array_unknown(&[self.range(0, len)])
+        safe_array_unknown(&[range_of(&self.to_object(), 0, len)])
     }
 
     fn RangeFromChild(
@@ -672,12 +722,12 @@ impl ITextProvider_Impl for Pane_Impl {
     fn RangeFromPoint(&self, point: &UiaPoint) -> Result<ITextRangeProvider> {
         let (x, y) = self.shared.to_client(point.x, point.y);
         let at = self.published()?.offset_at(x, y);
-        Ok(self.range(at, at))
+        Ok(range_of(&self.to_object(), at, at))
     }
 
     fn DocumentRange(&self) -> Result<ITextRangeProvider> {
         let len = self.published()?.len();
-        Ok(self.range(0, len))
+        Ok(range_of(&self.to_object(), 0, len))
     }
 
     fn SupportedTextSelection(&self) -> Result<SupportedTextSelection> {
@@ -700,7 +750,7 @@ impl ITextProvider2_Impl for Pane_Impl {
             // SAFETY: UI Automation's out-parameter, checked non-null.
             unsafe { *isactive = BOOL::from(active) };
         }
-        Ok(self.range(at, at))
+        Ok(range_of(&self.to_object(), at, at))
     }
 }
 
@@ -717,6 +767,16 @@ impl IValueProvider_Impl for Pane_Impl {
     fn IsReadOnly(&self) -> Result<BOOL> {
         Ok(BOOL::from(false))
     }
+}
+
+/// A 64-bit number as the two 32-bit elements of a runtime id, low first.
+fn halves(number: u64) -> [i32; 2] {
+    let low = u32::try_from(number & 0xFFFF_FFFF).unwrap_or(u32::MAX);
+    let high = u32::try_from(number >> 32).unwrap_or(u32::MAX);
+    [
+        i32::from_ne_bytes(low.to_ne_bytes()),
+        i32::from_ne_bytes(high.to_ne_bytes()),
+    ]
 }
 
 /// Two offsets in one word, so a range moves atomically under a client on any thread.
@@ -753,7 +813,7 @@ impl Range {
     fn peer<'a>(&self, other: &'a Ref<ITextRangeProvider>) -> Result<&'a Range_Impl> {
         let other = other.ok()?;
         let other = other.cast_object_ref::<Range>()?;
-        if other.pane.seat == self.pane.seat && Arc::ptr_eq(&other.pane.shared, &self.pane.shared) {
+        if other.pane.id == self.pane.id && Arc::ptr_eq(&other.pane.shared, &self.pane.shared) {
             Ok(other)
         } else {
             Err(Error::from_hresult(E_INVALIDARG))
@@ -839,7 +899,7 @@ impl ITextRangeProvider_Impl for Range_Impl {
             ignorecase.as_bool(),
         );
         match found {
-            Some((start, end)) => Ok(self.pane.range(start, end)),
+            Some((start, end)) => Ok(range_of(&self.pane, start, end)),
             None => none(),
         }
     }

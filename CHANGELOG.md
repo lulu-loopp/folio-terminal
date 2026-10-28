@@ -16,7 +16,7 @@ All notable changes to Folio are recorded here. The format follows
 - A video that has ended plays again from the start, whether you press the play button, press Space or click the picture. <!-- zh: 已播完的视频再次播放时从头开始，无论是按播放按钮、按空格还是单击画面。 -->
 - When a picture is zoomed in past its pane, the arrow keys move around it, and Shift with an arrow moves further. <!-- zh: 图片放大到超出窗格时，方向键可在图上移动，按住 Shift 再按方向键移动得更远。 -->
 - Middle-clicking a file in the files column opens it in a new preview pane beside the current one, which keeps what it shows. <!-- zh: 在文件列中用鼠标中键单击文件，会在当前预览窗格旁新开一个窗格显示它，当前窗格的内容保持不变。 -->
-- On Windows, Narrator, the touch keyboard and other assistive tools can now find Folio's terminal panes, read their text and follow the caret and the keyboard focus. <!-- zh: pending T-UIA-SKELETON -->
+- On Windows, each terminal pane is now a text control for accessibility clients such as Narrator: they can find it, read its text and follow the caret and the keyboard focus. <!-- zh: pending T-UIA-SKELETON -->
 
 ### Fixed
 

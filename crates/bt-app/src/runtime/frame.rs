@@ -2106,8 +2106,9 @@ impl<B: Backend> Runtime<'_, B> {
         self.flush_title(now);
         // **And what UI Automation is told** (T-UIA-SKELETON), on the title's terms: after every
         // road that can change the panes, their names or the keyboard, once, and nothing at all
-        // until a client has asked.
-        self.flush_uia()?;
+        // until a client has asked. A frame-only change held for its interval books its wake-up
+        // in the fold below.
+        self.flush_uia(now)?;
         // **And the input method's caret area, on the same terms** (ticket 63). Every
         // road above — the drain's frames, the IME events' frames, a preview repainted,
         // the caret offer at the head of the clock run — only said which area it
@@ -2526,6 +2527,10 @@ impl<B: Backend> Runtime<'_, B> {
             // "the last title always reaches the OS" true on a window where nothing
             // else is happening. Absent unless a title is being held.
             self.window.title.deadline(),
+            // **A frame-only change UI Automation is owed** (the review's F2): held for its
+            // 100 ms after the last publication, then published on this wake-up. Absent unless
+            // one is held.
+            self.window.uia.deadline(),
             // **A search walk still owed** (ticket 51): the next turn at once, so the
             // rest of a changed question's history is read a slice a turn with no timer
             // and no other event. Absent unless a walk is partial, and a walk ends in

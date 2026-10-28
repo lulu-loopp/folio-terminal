@@ -21,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{self, WM_DESTROY};
 use windows::core::{BOOL, BSTR, Interface};
 
 use super::super::{
-    CellIn, CellPoint, ClientRect, PaneText, RowPlace, RowText, Shape, UIA_ROOT_OBJECT_ID,
+    CellIn, CellPoint, ClientRect, PaneId, PaneText, RowPlace, RowText, Shape, UIA_ROOT_OBJECT_ID,
     WM_GETOBJECT, WindowText,
 };
 use super::{HookData, UIA_SUBCLASS_ID, hresult, uia_subclass};
@@ -59,7 +59,7 @@ fn pane(seat: u64, name: &str, left: f64, holds: bool, lines: &[&str]) -> PaneTe
         .map(|(line, index)| row(line, index))
         .collect();
     PaneText::new(
-        seat,
+        PaneId { tab: 1, seat },
         name.to_owned(),
         ClientRect {
             left,
@@ -365,9 +365,114 @@ fn focus_moves_owe_one_event_and_a_clients_focus_is_parked() {
         2,
         "the first question and the focus request"
     );
-    let seat = data
-        .shared()
-        .focus_asked
-        .swap(super::NO_SEAT, Ordering::SeqCst);
-    assert_eq!(seat, 4);
+    assert_eq!(data.take_focus_request(), Some(PaneId { tab: 1, seat: 4 }));
+    assert_eq!(data.take_focus_request(), None, "taken once");
+}
+
+/// The elements of a one-dimensional `SAFEARRAY` of `VT_I4`, and the array destroyed.
+fn runtime_id(array: *mut windows::Win32::System::Com::SAFEARRAY) -> Vec<i32> {
+    use windows::Win32::System::Ole::{SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetUBound};
+    // SAFETY: an array the provider made and handed to the caller, read inside its bounds and
+    // destroyed once.
+    unsafe {
+        let upper = SafeArrayGetUBound(array, 1).unwrap();
+        let elements = (0..=upper)
+            .map(|index| {
+                let mut value = 0i32;
+                SafeArrayGetElement(array, &raw const index, (&raw mut value).cast()).unwrap();
+                value
+            })
+            .collect();
+        let _ = SafeArrayDestroy(array);
+        elements
+    }
+}
+
+/// The first pane of `data`'s published tree.
+fn first_pane(data: &HookData) -> IRawElementProviderFragment {
+    let root: IRawElementProviderFragment = data.root().to_interface();
+    // SAFETY: an in-process call on this window's own provider.
+    unsafe { root.Navigate(NavigateDirection_FirstChild).unwrap() }
+}
+
+/// RED (the review's F1) — **a pane is named by its tab and its seat**: two tabs each hold a seat
+/// 1, and their panes are two elements — two runtime ids, a focus event owed when the active tab
+/// changes, and a provider a client still holds for the first tab's pane answers "element not
+/// available" once that tab is not the published one, never with the second tab's text.
+///
+/// MUTATION: build `GetRuntimeId` from the seat alone, match `Pane::published` (or the focus
+/// event's `raised`) on the seat alone.
+#[test]
+fn a_pane_is_named_by_its_tab_and_seat() {
+    let (data, _) = hook(Shape::Text);
+    let _ = data.root();
+    let in_tab = |tab: u64, line: &str| {
+        let mut one = pane(1, line, 0.0, true, &[line]);
+        one.id = PaneId { tab, seat: 1 };
+        WindowText { panes: vec![one] }
+    };
+    assert!(
+        data.publish(in_tab(1, "first")).is_some(),
+        "the first focus"
+    );
+    let held = first_pane(&data);
+    // SAFETY: in-process calls on this window's own providers.
+    let first_id = runtime_id(unsafe { held.GetRuntimeId() }.unwrap());
+    assert!(
+        data.publish(in_tab(2, "second")).is_some(),
+        "the keyboard moved to another tab's seat 1: a focus event is owed"
+    );
+    let now = first_pane(&data);
+    // SAFETY: in-process calls on this window's own providers.
+    unsafe {
+        let second_id = runtime_id(now.GetRuntimeId().unwrap());
+        assert_ne!(first_id, second_id, "two panes, two runtime ids");
+        assert_eq!(
+            second_id[1..],
+            [2, 0, 1, 0],
+            "the tab, then the seat, low halves first"
+        );
+        let held: IRawElementProviderSimple = held.cast().unwrap();
+        let error = held.GetPropertyValue(UIA_NamePropertyId).unwrap_err();
+        assert_eq!(
+            error.code(),
+            hresult(UIA_E_ELEMENTNOTAVAILABLE),
+            "the first tab's pane is not the second's"
+        );
+        let now: IRawElementProviderSimple = now.cast().unwrap();
+        assert_eq!(
+            bstr(&now.GetPropertyValue(UIA_NamePropertyId).unwrap()),
+            "second"
+        );
+    }
+}
+
+/// RED (the review's F3) — **every provider says COM's threading rules, and the first client
+/// call's thread is recorded** beside the window's, for the E-1 run's one line.
+///
+/// MUTATION: answer `ProviderOptions_ServerSideProvider` alone, or drop the record in
+/// `Shared::alive`.
+#[test]
+fn providers_use_com_threading_and_the_first_calls_thread_is_kept() {
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::Accessibility::{
+        ProviderOptions_ServerSideProvider, ProviderOptions_UseComThreading,
+    };
+    let (data, _) = hook(Shape::Text);
+    let _ = data.publish(WindowText {
+        panes: vec![pane(4, "pwsh", 0.0, true, &["ab"])],
+    });
+    assert_eq!(data.threads(), None, "no client has called");
+    let root: IRawElementProviderSimple = data.root().to_interface();
+    let wanted = ProviderOptions_ServerSideProvider.0 | ProviderOptions_UseComThreading.0;
+    // SAFETY: in-process calls on this window's own providers.
+    unsafe {
+        assert_eq!(root.ProviderOptions().unwrap().0, wanted);
+        let pane: IRawElementProviderSimple = first_pane(&data).cast().unwrap();
+        assert_eq!(pane.ProviderOptions().unwrap().0, wanted);
+    }
+    let threads = data.threads().expect("a client has called");
+    // SAFETY: reads this thread's id; no preconditions.
+    let here = unsafe { GetCurrentThreadId() };
+    assert_eq!((threads.window, threads.first_call), (here, here));
 }

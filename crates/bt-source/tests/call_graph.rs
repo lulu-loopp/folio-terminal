@@ -1089,7 +1089,7 @@ fn a_static_or_const_initializer_is_walked_from_its_use() {
 /// is to be written where the tree can read it, or the list widened in a change that says why),
 /// and a row whose block is gone is refused as stale. Their methods are reachable only as
 /// `Ambiguous` candidates, never through a typed call.
-const UNPLACED_IMPLS: [&str; 35] = [
+const UNPLACED_IMPLS: [&str; 33] = [
     "alacritty_terminal crate::term TermMode",
     "alacritty_terminal crate::term TermMode",
     "bt-app crate::i18n Text",
@@ -1109,14 +1109,14 @@ const UNPLACED_IMPLS: [&str; 35] = [
     "bt-platform crate::macos_services ServicesProvider",
     // T-UIA-SKELETON (2026-10-27): the UI Automation providers are `#[implement]` COM types, as
     // `explorer_command`'s are; the macro writes their `_Impl` types where the tree cannot read.
-    "bt-platform crate::uia::imp Pane_Impl",
+    // Only the macro's own trait impls: the providers' helpers are free functions and `impl Pane`
+    // (the review's F8, 2026-10-28).
     "bt-platform crate::uia::imp Pane_Impl",
     "bt-platform crate::uia::imp Pane_Impl",
     "bt-platform crate::uia::imp Pane_Impl",
     "bt-platform crate::uia::imp Pane_Impl",
     "bt-platform crate::uia::imp Pane_Impl",
     "bt-platform crate::uia::imp Range_Impl",
-    "bt-platform crate::uia::imp Root_Impl",
     "bt-platform crate::uia::imp Root_Impl",
     "bt-platform crate::uia::imp Root_Impl",
     "bt-platform crate::uia::imp Root_Impl",
@@ -1153,7 +1153,7 @@ fn real_tree() -> Vec<(String, Arc<Index>)> {
 }
 
 /// RED (round 3) — **the `impl` blocks of types the module tree does not hold are exactly the
-/// named list** ([`UNPLACED_IMPLS`]): a 36th is refused, and so is a row whose block is gone.
+/// named list** ([`UNPLACED_IMPLS`]): a 34th is refused, and so is a row whose block is gone.
 ///
 /// MUTATION: remove one row of the list — the block it named is refused as unlisted.
 #[test]

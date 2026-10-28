@@ -8958,7 +8958,7 @@ struct App<B: Backend = Native> {
     foreground_program_worker: foreground_program::Worker,
     /// **The UI Automation events lane** (T-UIA-SKELETON, R6): one thread for the process,
     /// started at the first focus event any window owes.
-    uia_events: uia_events::UiaEventsLane,
+    uia_events: uia_events::UiaEventsLane<window_seam::UiaEventsOf<B>>,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
     /// **The repositories the kernel has been asked to report changes in**

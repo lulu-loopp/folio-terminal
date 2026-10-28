@@ -1349,23 +1349,36 @@ impl ImeCaretDoor for bt_platform::ImeSystemCaret {
 /// methods, name for name. The door's promise is the hook's: after [`UiaDoor::publish`] returns,
 /// every answer a client gets is computed from that publication and from nothing else.
 pub(crate) trait UiaDoor {
+    /// The focus event a publication owes, raised on the events lane
+    /// ([`crate::uia_events::UiaEventsLane`]).
+    type Events: crate::uia_events::UiaRaise;
     /// Whether a client has asked this window for its root: until then the loop builds nothing.
     fn wanted(&self) -> bool;
     /// The window's new publication, and the focus event it owes, for the events lane.
-    fn publish(&self, text: bt_platform::uia::WindowText) -> Option<bt_platform::uia::UiaEvents>;
+    fn publish(&self, text: bt_platform::uia::WindowText) -> Option<Self::Events>;
     /// The pane a client asked to focus, taken once.
-    fn take_focus_request(&self) -> Option<u64>;
+    fn take_focus_request(&self) -> Option<bt_platform::uia::PaneId>;
+    /// The window's thread and the thread of a client's first call, once one has called.
+    fn threads(&self) -> Option<bt_platform::uia::ClientThreads>;
 }
 
+/// **The focus events a backend's windows owe**, as the application's one events lane carries
+/// them.
+pub(crate) type UiaEventsOf<B> = <<<B as Backend>::Window as WindowHost>::Uia as UiaDoor>::Events;
+
 impl UiaDoor for bt_platform::uia::UiaHook {
+    type Events = bt_platform::uia::UiaEvents;
     fn wanted(&self) -> bool {
         bt_platform::uia::UiaHook::wanted(self)
     }
     fn publish(&self, text: bt_platform::uia::WindowText) -> Option<bt_platform::uia::UiaEvents> {
         bt_platform::uia::UiaHook::publish(self, text)
     }
-    fn take_focus_request(&self) -> Option<u64> {
+    fn take_focus_request(&self) -> Option<bt_platform::uia::PaneId> {
         bt_platform::uia::UiaHook::take_focus_request(self)
+    }
+    fn threads(&self) -> Option<bt_platform::uia::ClientThreads> {
+        bt_platform::uia::UiaHook::threads(self)
     }
 }
 

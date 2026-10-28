@@ -59,7 +59,7 @@ fn row(text: &str, index: u32, continues: bool, keep: u32) -> RowText {
 
 fn pane(rows: Vec<RowText>) -> PaneText {
     PaneText::new(
-        7,
+        PaneId { tab: 1, seat: 7 },
         "pwsh".to_owned(),
         ClientRect {
             left: 0.0,
@@ -149,9 +149,9 @@ fn a_wrapped_row_is_one_paragraph_over_two_lines() {
 fn the_caret_keeps_the_blanks_before_it() {
     let rows = vec![row("ab ", 0, false, 3)];
     let text = PaneText::new(
-        1,
+        PaneId { tab: 1, seat: 1 },
         String::new(),
-        ClientRect::default(),
+        screen(),
         true,
         rows,
         Some(CellPoint { row: 0, column: 3 }),
@@ -246,6 +246,112 @@ fn a_range_over_two_rows_is_two_rectangles() {
     );
 }
 
+/// A body far larger than any test pane's rows.
+fn screen() -> ClientRect {
+    ClientRect {
+        left: 0.0,
+        top: 0.0,
+        width: 800.0,
+        height: 600.0,
+    }
+}
+
+/// RED (the review's F7) — **a range's rectangles stay inside the pane's body**: a row cut by the
+/// body's right edge is cut there, a row below the body (the overscan) has no rectangle, and a
+/// caret past the right edge stands on the body's last pixel column.
+///
+/// MUTATION: push the drawn rectangle unclipped in `PaneText::rectangles`, or drop the clamp of a
+/// degenerate range's left.
+#[test]
+fn rectangles_are_clipped_to_the_pane_body() {
+    let body = ClientRect {
+        left: 0.0,
+        top: 0.0,
+        width: 25.0,
+        height: 30.0,
+    };
+    let text = PaneText::new(
+        PaneId { tab: 1, seat: 1 },
+        String::new(),
+        body,
+        true,
+        vec![row("abc", 0, false, 0), row("de", 1, false, 0)],
+        None,
+        None,
+    );
+    let rectangles = text.rectangles(0, text.len());
+    assert_eq!(rectangles.len(), 2, "{rectangles:?}");
+    assert_eq!(
+        (rectangles[0].left, rectangles[0].width),
+        (4.0, 21.0),
+        "abc is cut at the body's right edge"
+    );
+    assert_eq!(
+        (rectangles[1].top, rectangles[1].height),
+        (22.0, 8.0),
+        "de is cut at the body's bottom"
+    );
+    let caret = text.rectangles(3, 3);
+    assert_eq!(caret.len(), 1);
+    assert_eq!(
+        caret[0].left, 24.0,
+        "after abc is past the edge: the last column"
+    );
+    let below = PaneText::new(
+        PaneId { tab: 1, seat: 1 },
+        String::new(),
+        ClientRect {
+            height: 20.0,
+            ..body
+        },
+        true,
+        vec![row("ab", 0, false, 0), row("x", 1, false, 0)],
+        None,
+        None,
+    );
+    assert_eq!(
+        below.rectangles(3, 4),
+        Vec::new(),
+        "a row of the overscan has no rectangle"
+    );
+}
+
+/// RED (the review's F4) — **a caret on an empty last row is that row**: its offset is the
+/// document's end, and every unit there but the document is the empty range at the end, never the
+/// row above; a full last row still encloses its last line at the end.
+///
+/// MUTATION: drop the empty-last-row arm of `PaneText::enclosing`.
+#[test]
+fn a_caret_on_an_empty_last_row_reads_as_that_row() {
+    let text = PaneText::new(
+        PaneId { tab: 1, seat: 1 },
+        String::new(),
+        screen(),
+        true,
+        vec![row("PS> ls", 0, false, 0), row("", 1, false, 0)],
+        Some(CellPoint { row: 1, column: 0 }),
+        None,
+    );
+    let end = text.len();
+    assert_eq!(text.caret(), Some(end), "the empty row starts at the end");
+    for unit in [
+        Boundary::Character,
+        Boundary::Word,
+        Boundary::Line,
+        Boundary::Paragraph,
+    ] {
+        assert_eq!(text.enclosing(end, unit), (end, end), "{unit:?}");
+    }
+    assert_eq!(text.enclosing(end, Boundary::Document), (0, end));
+    assert_eq!(text.rectangles(end, end)[0].top, 22.0, "drawn on row 1");
+    let full = pane(vec![row("ab", 0, false, 0), row("cd", 1, false, 0)]);
+    assert_eq!(
+        full.enclosing(full.len(), Boundary::Line),
+        (3, 5),
+        "the last line"
+    );
+}
+
 /// RED (88a) — **a point below the text is on the last row**, and past a row's end is that row's
 /// end.
 #[test]
@@ -264,9 +370,9 @@ fn a_point_finds_the_nearest_row_and_the_rows_end() {
 #[test]
 fn a_selection_is_two_offsets_in_order() {
     let text = PaneText::new(
-        1,
+        PaneId { tab: 1, seat: 1 },
         String::new(),
-        ClientRect::default(),
+        screen(),
         false,
         vec![row("abc", 0, false, 0), row("中e", 1, false, 0)],
         None,
@@ -346,9 +452,9 @@ fn combining_marks_stay_inside_their_character() {
 #[test]
 fn the_caret_is_a_degenerate_range_on_the_wide_cell_start() {
     let text = PaneText::new(
-        1,
+        PaneId { tab: 1, seat: 1 },
         String::new(),
-        ClientRect::default(),
+        screen(),
         true,
         vec![row("a中b", 0, false, 0)],
         Some(CellPoint { row: 0, column: 2 }),

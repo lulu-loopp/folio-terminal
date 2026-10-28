@@ -47,6 +47,31 @@ impl ClientRect {
     pub fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.left && x < self.left + self.width && y >= self.top && y < self.top + self.height
     }
+
+    /// **The part of this rectangle inside `bounds`**, or `None` when nothing of it is.
+    #[must_use]
+    pub fn clipped(&self, bounds: &ClientRect) -> Option<ClientRect> {
+        let left = self.left.max(bounds.left);
+        let top = self.top.max(bounds.top);
+        let right = (self.left + self.width).min(bounds.left + bounds.width);
+        let bottom = (self.top + self.height).min(bounds.top + bounds.height);
+        (right > left && bottom > top).then_some(ClientRect {
+            left,
+            top,
+            width: right - left,
+            height: bottom - top,
+        })
+    }
+}
+
+/// **A pane's identity in its window**: the tab it stands in and its seat. A seat number is
+/// unique only inside its tab (every tab's first pane is seat 1); a tab number is the process's,
+/// never given out twice. So the pair names one pane for as long as the window lives, and a pane
+/// of another tab is never mistaken for it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct PaneId {
+    pub tab: u64,
+    pub seat: u64,
 }
 
 /// **One window's publication**: the terminal panes of its active tab, in tree order.
@@ -56,19 +81,19 @@ pub struct WindowText {
 }
 
 impl WindowText {
-    /// The pane with this seat id.
+    /// The pane with this identity.
     #[must_use]
-    pub fn pane(&self, seat: u64) -> Option<&PaneText> {
-        self.panes.iter().find(|pane| pane.seat == seat)
+    pub fn pane(&self, id: PaneId) -> Option<&PaneText> {
+        self.panes.iter().find(|pane| pane.id == id)
     }
 
     /// The pane that holds the keyboard, if one does.
     #[must_use]
-    pub fn focused(&self) -> Option<u64> {
+    pub fn focused(&self) -> Option<PaneId> {
         self.panes
             .iter()
             .find(|pane| pane.holds_keyboard)
-            .map(|pane| pane.seat)
+            .map(|pane| pane.id)
     }
 }
 
@@ -214,7 +239,7 @@ pub struct CellPoint {
 /// **One terminal pane's publication.**
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneText {
-    pub seat: u64,
+    pub id: PaneId,
     pub name: String,
     /// The pane body, in client pixels.
     pub body: ClientRect,
@@ -269,7 +294,7 @@ impl PaneText {
     /// glyph's spacer column lands on the glyph, and a selection's end is exclusive.
     #[must_use]
     pub fn new(
-        seat: u64,
+        id: PaneId,
         name: String,
         body: ClientRect,
         holds_keyboard: bool,
@@ -288,7 +313,7 @@ impl PaneText {
         }
         starts.push(offset);
         let mut pane = Self {
-            seat,
+            id,
             name,
             body,
             holds_keyboard,
@@ -437,7 +462,9 @@ impl PaneText {
     }
 
     /// **The unit enclosing `offset`** (`ExpandToEnclosingUnit`): from the boundary at or before
-    /// it to the next one. At the document's end, the last unit.
+    /// it to the next one. At the document's end, the last unit — unless the last row is empty:
+    /// its start *is* the document's end, so every unit but the document answers the empty range
+    /// there (a caret on an empty last row reads as that row, never as the row above it).
     #[must_use]
     pub fn enclosing(&self, offset: u32, unit: Boundary) -> (u32, u32) {
         let len = self.len();
@@ -445,6 +472,10 @@ impl PaneText {
             return (0, 0);
         }
         let offset = offset.min(len);
+        let empty_last_row = self.rows.last().is_some_and(|row| row.units.is_empty());
+        if offset == len && empty_last_row && unit != Boundary::Document {
+            return (len, len);
+        }
         let start = if offset < len && self.is_boundary(offset, unit) {
             offset
         } else {
@@ -523,8 +554,10 @@ impl PaneText {
         text
     }
 
-    /// **Where a range is drawn**: one rectangle per row it covers, in client pixels. A degenerate
-    /// range is a one-pixel-wide rectangle at its point.
+    /// **Where a range is drawn**: one rectangle per row it covers, in client pixels, each clipped
+    /// to the pane's body (a partly drawn row at the body's edge, or a row of the overscan, never
+    /// reaches outside the pane). A degenerate range is a one-pixel-wide rectangle at its point,
+    /// held inside the body's columns.
     #[must_use]
     pub fn rectangles(&self, start: u32, end: u32) -> Vec<ClientRect> {
         let (start, end) = (start.min(self.len()), end.min(self.len()));
@@ -535,12 +568,14 @@ impl PaneText {
             let row = self.row_of(start.min(self.len().saturating_sub(1)));
             let row_text = &self.rows[row];
             let local = (start.saturating_sub(self.starts[row]) as usize).min(row_text.units.len());
-            return vec![ClientRect {
-                left: row_text.unit_left(local),
+            let right_edge = (self.body.left + self.body.width - 1.0).max(self.body.left);
+            let point = ClientRect {
+                left: row_text.unit_left(local).clamp(self.body.left, right_edge),
                 top: row_text.top,
                 width: 1.0,
                 height: row_text.height,
-            }];
+            };
+            return point.clipped(&self.body).into_iter().collect();
         }
         let mut rectangles = Vec::new();
         for row in self.row_of(start)..=self.row_of(end - 1) {
@@ -554,12 +589,13 @@ impl PaneText {
             }
             let left = row_text.unit_left(first as usize);
             let right = row_text.unit_left(last as usize);
-            rectangles.push(ClientRect {
+            let drawn = ClientRect {
                 left,
                 top: row_text.top,
                 width: right - left,
                 height: row_text.height,
-            });
+            };
+            rectangles.extend(drawn.clipped(&self.body));
         }
         rectangles
     }
@@ -691,6 +727,17 @@ mod imp;
 #[cfg(windows)]
 pub use imp::{UiaEvents, UiaHook};
 
+/// **Which thread a client's first call came in on, beside the window's own** (the review's F3,
+/// measured on the E-1 build): the providers say `ProviderOptions_UseComThreading` and are
+/// free-threaded objects, so a call is expected on one of UI Automation's threads and never on
+/// the window's; the application says the two numbers once in `diagnostics.log`, so the owner's
+/// run shows which it was.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientThreads {
+    pub window: u32,
+    pub first_call: u32,
+}
+
 /// `WM_GETOBJECT`, as `WinUser.h` numbers it. Written out so that [`asks_for_the_root`] is the
 /// same function on every host; the Windows test holds it against the `windows` crate's constant.
 pub const WM_GETOBJECT: u32 = 0x003D;
@@ -745,7 +792,13 @@ impl UiaHook {
 
     /// Nothing asks for a pane's focus.
     #[must_use]
-    pub fn take_focus_request(&self) -> Option<u64> {
+    pub fn take_focus_request(&self) -> Option<PaneId> {
+        None
+    }
+
+    /// No client ever calls.
+    #[must_use]
+    pub fn threads(&self) -> Option<ClientThreads> {
         None
     }
 }

@@ -385,13 +385,35 @@ impl TaskbarDoor for HeadlessTaskbar {
 }
 
 /// **A headless window's answer to UI Automation**: no client, so a test plays one — it asks
-/// ([`Self::ask`]) and requests a pane's focus ([`Self::ask_focus`]) — and every publication the
-/// loop makes is recorded, in order.
+/// ([`Self::ask`]), requests a pane's focus ([`Self::ask_focus`]), makes its first call from a
+/// thread ([`Self::called_from`]) and listens for focus events ([`Self::listen`]) — and every
+/// publication the loop makes is recorded, in order, with the focus events it owed: one each
+/// time the pane holding the keyboard moved, by the platform hook's rule.
 #[derive(Default)]
 pub(crate) struct HeadlessUia {
     wanted: Cell<bool>,
-    focus_asked: Cell<Option<u64>>,
+    focus_asked: Cell<Option<bt_platform::uia::PaneId>>,
+    threads: Cell<Option<bt_platform::uia::ClientThreads>>,
     published: RefCell<Vec<bt_platform::uia::WindowText>>,
+    /// The pane the last owed event named.
+    raised: Cell<Option<bt_platform::uia::PaneId>>,
+    owed: RefCell<Vec<bt_platform::uia::PaneId>>,
+    /// Where a raised event is heard, once a test listens.
+    heard: RefCell<Option<std::sync::mpsc::Sender<bt_platform::uia::PaneId>>>,
+}
+
+/// **A headless window's owed focus event**: raised on the events lane, it is heard by the
+/// test listening ([`HeadlessUia::listen`]).
+pub(crate) struct HeadlessUiaEvents {
+    pane: bt_platform::uia::PaneId,
+    heard: std::sync::mpsc::Sender<bt_platform::uia::PaneId>,
+}
+
+impl crate::uia_events::UiaRaise for HeadlessUiaEvents {
+    fn raise(self, worker: &bt_platform::admission::WorkerCtx) {
+        let _ = worker;
+        let _ = self.heard.send(self.pane);
+    }
 }
 
 impl HeadlessUia {
@@ -400,25 +422,49 @@ impl HeadlessUia {
         self.wanted.set(true);
     }
     /// A client's `SetFocus` on a pane.
-    pub(crate) fn ask_focus(&self, seat: u64) {
-        self.focus_asked.set(Some(seat));
+    pub(crate) fn ask_focus(&self, pane: bt_platform::uia::PaneId) {
+        self.focus_asked.set(Some(pane));
+    }
+    /// A client's first call, on `threads.first_call`.
+    pub(crate) fn called_from(&self, threads: bt_platform::uia::ClientThreads) {
+        self.threads.set(Some(threads));
+    }
+    /// **Every focus event raised from now on** is heard on the receiver; before a test listens,
+    /// an owed event is recorded ([`Self::owed`]) and handed to no lane.
+    pub(crate) fn listen(&self) -> std::sync::mpsc::Receiver<bt_platform::uia::PaneId> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        *self.heard.borrow_mut() = Some(sender);
+        receiver
     }
     /// Every publication so far, oldest first.
     pub(crate) fn published(&self) -> Vec<bt_platform::uia::WindowText> {
         self.published.borrow().clone()
     }
+    /// The pane of every focus event the publications owed, oldest first.
+    pub(crate) fn owed(&self) -> Vec<bt_platform::uia::PaneId> {
+        self.owed.borrow().clone()
+    }
 }
 
 impl UiaDoor for HeadlessUia {
+    type Events = HeadlessUiaEvents;
     fn wanted(&self) -> bool {
         self.wanted.get()
     }
-    fn publish(&self, text: bt_platform::uia::WindowText) -> Option<bt_platform::uia::UiaEvents> {
+    fn publish(&self, text: bt_platform::uia::WindowText) -> Option<HeadlessUiaEvents> {
+        let focused = text.focused();
         self.published.borrow_mut().push(text);
-        None
+        let before = self.raised.replace(focused);
+        let pane = focused.filter(|pane| before != Some(*pane))?;
+        self.owed.borrow_mut().push(pane);
+        let heard = self.heard.borrow().clone()?;
+        Some(HeadlessUiaEvents { pane, heard })
     }
-    fn take_focus_request(&self) -> Option<u64> {
+    fn take_focus_request(&self) -> Option<bt_platform::uia::PaneId> {
         self.focus_asked.take()
+    }
+    fn threads(&self) -> Option<bt_platform::uia::ClientThreads> {
+        self.threads.get()
     }
 }
 

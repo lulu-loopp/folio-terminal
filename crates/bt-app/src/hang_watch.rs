@@ -328,7 +328,7 @@ const NS_PER_MS: u64 = 1_000_000;
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 224;
+const STATION_COUNT: usize = 226;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -1077,8 +1077,17 @@ pub enum Station {
     MediaQuiet = 222,
     /// **`diagnostics.log`'s writer settled on the way out** — `diagnostics::settle`, before
     /// the run's footer (§5.3 row 30; door `DiagnosticsSettle`,
-    /// T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD). Byte 223, the run's end.
+    /// T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD). Byte 223.
     DiagnosticsSettle = 223,
+    /// **What a window tells UI Automation, decided** — `Runtime::flush_uia` once a client has
+    /// asked and the turn looks at the frames: the presented frames compared with the last
+    /// publication's, and the publication built when one is owed (T-UIA-SKELETON; the review's
+    /// F2). Byte 224.
+    UiaFlush = 224,
+    /// **The publication handed to the window's hook** — `UiaHook::publish`: the snapshot's one
+    /// lock, held only to swap the `Arc` (§5.3 row 31), and the old publication let go. Byte 225,
+    /// the run's end.
+    UiaPublish = 225,
 }
 
 impl Station {
@@ -1310,6 +1319,8 @@ impl Station {
             Self::UpdateLeave => "update_handoff::leave_armed",
             Self::MediaQuiet => "video::shutdown_media_session",
             Self::DiagnosticsSettle => "diagnostics::settle",
+            Self::UiaFlush => "flush_uia",
+            Self::UiaPublish => "UiaHook::publish",
         }
     }
 
@@ -1555,6 +1566,8 @@ impl Station {
             221 => Self::UpdateJobProgress,
             222 => Self::MediaQuiet,
             223 => Self::DiagnosticsSettle,
+            224 => Self::UiaFlush,
+            225 => Self::UiaPublish,
             _ => Self::Starting,
         }
     }

@@ -10,26 +10,45 @@
 
 use std::sync::mpsc;
 
-use bt_platform::uia::UiaEvents;
+/// **An owed focus event, raised on the events thread** — the product's is
+/// `bt_platform::uia::UiaEvents`; the headless window's is heard by a test.
+pub(crate) trait UiaRaise: Send + 'static {
+    /// Raise it, on the events worker.
+    fn raise(self, worker: &bt_platform::admission::WorkerCtx);
+}
+
+impl UiaRaise for bt_platform::uia::UiaEvents {
+    fn raise(self, worker: &bt_platform::admission::WorkerCtx) {
+        bt_platform::uia::UiaEvents::raise(self, worker);
+    }
+}
 
 /// **The process's lane**: the events thread's channel once it has started, and whether it has
 /// failed.
-#[derive(Default)]
-pub(crate) struct UiaEventsLane {
-    sender: Option<mpsc::Sender<UiaEvents>>,
+pub(crate) struct UiaEventsLane<E> {
+    sender: Option<mpsc::Sender<E>>,
     /// The thread would not start, or it has ended: nothing is sent again.
     gone: bool,
 }
 
-impl UiaEventsLane {
+impl<E> Default for UiaEventsLane<E> {
+    fn default() -> Self {
+        Self {
+            sender: None,
+            gone: false,
+        }
+    }
+}
+
+impl<E: UiaRaise> UiaEventsLane<E> {
     /// **Hand one window's owed events over** — the door: a channel send, and on the first event
     /// the thread's start. Waits for nothing.
-    pub(crate) fn request(&mut self, events: UiaEvents) {
+    pub(crate) fn request(&mut self, events: E) {
         if self.gone {
             return;
         }
         if self.sender.is_none() {
-            let (sender, receiver) = mpsc::channel::<UiaEvents>();
+            let (sender, receiver) = mpsc::channel::<E>();
             if let Err(error) = bt_platform::spawn_at_priority(
                 "bt-uia-events",
                 bt_platform::ThreadPriority::BelowNormal,
@@ -59,7 +78,7 @@ impl UiaEventsLane {
 }
 
 /// The thread's body: each window's events raised in the order they were owed.
-fn run(worker: &bt_platform::admission::WorkerCtx, receiver: &mpsc::Receiver<UiaEvents>) {
+fn run<E: UiaRaise>(worker: &bt_platform::admission::WorkerCtx, receiver: &mpsc::Receiver<E>) {
     while let Ok(events) = receiver.recv() {
         events.raise(worker);
     }
