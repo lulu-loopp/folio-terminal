@@ -504,14 +504,21 @@ had. A pin is one call: the calls are counted per (writer, owner, landmark), and
 a second call matching a pin already met is reported as a surplus
 (`a_second_call_matching_a_pin_is_a_surplus`).
 
-A statement's `cfg` is refused, not read (T-WINDOW-WAITS-STATEMENT-CFG,
-2026-10-26). The index reads a file's, an item's and a module's `cfg`, never a
-statement's, so a gated call would count on a build it is not in:
-`#[cfg(test)] admission::exiting();` after `run_app` would meet the tail's pin.
-One reader (`window_waits_tests::under_statement_cfg`) serves every pin table:
-a call or a landmark that stands under a `#[cfg…]` or `#[cfg_attr(…)]` — the
-statement, block, match arm or list element an outer one governs, or the block an
-inner `#![…]` one opens — is refused by what is called, line and owner. That
+A statement's platform or feature `cfg` is refused, not read
+(T-WINDOW-WAITS-STATEMENT-CFG, 2026-10-26). Since 2026-10-29
+(T-CFG-TEST-USE-IS-NOT-PRODUCT, plan row 77) the index reads a `cfg` wherever it
+stands, and a statement gated to tests or to nothing (`#[cfg(test)]`,
+`#[cfg(any())]`, an inner `#![cfg(test)]`, a test-gated match arm) is out of the
+product: its call is not counted, so alone it leaves its pin "not there" and
+beside the real call it is no surplus; a `cfg_attr` that writes a `cfg` is the
+index's own refusal. A statement under a platform or feature `cfg` stays in the
+product, since some product build compiles it, so a gated call would count on a
+build it is not in: `#[cfg(windows)] admission::exiting();` after `run_app` would
+meet the tail's pin. One reader (`window_waits_tests::under_statement_cfg`)
+serves every pin table: a call that stands under such a `#[cfg…]` or
+`#[cfg_attr(…)]`, or a landmark under any (a landmark is read from the text) —
+the statement, block, match arm or list element an outer one governs, or the
+block an inner `#![…]` one opens — is refused by what is called, line and owner. That
 covers a pinned writer's call, an `enter_callback` entry, a remover helper's call
 (`deferred_removal::copy_new`, `failure_without_plan`), a pinned door's call
 (below), and a landmark of `LANDMARKS`. A gated landmark is refused through the
@@ -568,11 +575,12 @@ inside a macro's arguments or a nested `fn`, and a rename `admitted as …` in a
 on the pin's receiver, matched by spelling — a same-name method of another type
 called through a rebound `trace_shutdown` would count as the road — outside any
 macro's arguments and nested `fn`. A pinned door's call that stands under a
-statement's `#[cfg…]` or `#[cfg_attr(…)]` (the statement or block an outer one
-governs, or the block an inner `#![…]` one opens) is refused: the index reads a
-file's, an item's and a module's `cfg` but never a statement's, so a gated call
-would meet its pin on a build it is not in — the same reader, and the same
-refusal, as the writer table's and the landmarks' (above). Not read: closures
+statement's platform or feature `#[cfg…]` (the statement or block an outer one
+governs, or the block an inner `#![…]` one opens) is refused: some product build
+compiles the statement, so the call would meet its pin on a build it is not in —
+the same reader, and the same refusal, as the writer table's and the landmarks'
+(above); one gated to tests is out of the product (plan row 77, above), so its
+pin is "not there". Not read: closures
 and run-time-dead branches — a call in a closure's body, or in a branch that
 never runs (`if cfg!(…)`, `if false`), is placed where it is written, as a
 landmark is, and is still in the build, so a closure written after `run_app`
