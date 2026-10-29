@@ -298,7 +298,8 @@ fn a_contained_panics_report_names_this_crates_frame_by_file_and_line() {
          {NAMED_FRAME_FIRST_LINE}-{NAMED_FRAME_LAST_LINE}:\n{backtrace}"
     );
     std::fs::remove_file(&log).unwrap();
-    println!("the named frame resolved");
+    // On a line of its own: libtest has written `test <name> ... ` without a newline.
+    println!("\nthe named frame resolved");
 }
 
 /// RED (ticket 14) — **a share handed over meets the same program list a local file meets.**

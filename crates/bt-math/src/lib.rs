@@ -1667,7 +1667,8 @@ mod tests {
             assert_eq!(bytes, stack, "the child is the same test as its parent");
             let (name, build) = shapes()[index];
             draw_the_deepest_formula(name, build, stack);
-            println!("drawn {index}");
+            // On a line of its own: libtest has written `test <name> ... ` without a newline.
+            println!("\ndrawn {index}");
             return;
         }
         let exe = std::env::current_exe().expect("the test binary knows its own path");
