@@ -1187,20 +1187,20 @@ fn the_shell_life_is_one_fact_written_only_by_its_transitions() {
         writers,
         BTreeSet::from([
             ("crate", "TabState::retire_all_shells"),
-            ("crate", "apply_owed_shell_resize"),
             ("crate", "await_shell"),
             ("crate", "create_leaf_session"),
             ("crate", "finish_leaf_birth"),
-            ("crate", "land_birth_death_fallback_shell"),
-            ("crate", "land_shell_birth"),
             ("crate", "release_due_leaf_resize"),
             ("crate::runtime::clipboard", "Runtime::send_paste"),
             ("crate::runtime::panes", "Runtime::land_own_shell"),
             ("crate::runtime::panes", "Runtime::land_restart"),
+            ("crate::runtime::panes", "apply_owed_shell_resize"),
             ("crate::runtime::panes", "end_leaves_of"),
+            ("crate::runtime::panes", "land_shell_birth"),
             ("crate::runtime::tabs", "Runtime::reap_exited_tabs"),
             ("crate::runtime::tabs", "keep_birth_death_face"),
             ("crate::runtime::tabs", "land_birth_death_fallback"),
+            ("crate::runtime::tabs", "land_birth_death_fallback_shell"),
             (
                 "crate::runtime::terminal",
                 "Runtime::insert_path_into_terminal"
@@ -1639,6 +1639,9 @@ struct Unfollowed {
     what: String,
     candidates: Vec<String>,
     spelled: Vec<String>,
+    /// The edge's one candidate by the call graph's sole-candidate rule
+    /// (`Unresolved::sole_candidate`), keyed.
+    sole: Option<String>,
 }
 
 /// The last `::` segment of a key or a written path: the name an edge spells.
@@ -1736,6 +1739,7 @@ fn bt_app_callers() -> Callers {
                 spelled: vec![edge.site.name.clone(), what.clone()],
                 what,
                 candidates: candidates.iter().map(|id| resolver.key(*id)).collect(),
+                sole: unresolved.sole_candidate().map(|id| resolver.key(id)),
             });
         }
     }
@@ -1997,7 +2001,11 @@ fn the_keyboard_focus_is_one_report() {
     let setter = term("set_keyboard_focus");
     let door = app("ShellSession::report_keyboard_focus");
     assert_eq!(callers.of(&setter), std::slice::from_ref(&door), "one door");
-    assert_eq!(callers.of(&door), [app("drain_leaf_pty")], "one reporter");
+    assert_eq!(
+        callers.of(&door),
+        [app("runtime::terminal::drain_leaf_pty")],
+        "one reporter"
+    );
     let unfollowed = callers.unfollowed_into(&[setter.as_str(), door.as_str()]);
     assert!(
         unfollowed.is_empty(),
@@ -2020,14 +2028,15 @@ fn pane(name: &str) -> String {
 
 impl Callers {
     /// The callers of `callee`, sorted, counting an edge the graph could not follow when its one
-    /// candidate is `callee`: a method call through a receiver the rules do not type (a binding
-    /// of a `?`'s value, a box bound by a pattern) whose name only `callee` declares.
+    /// candidate is `callee` by the call graph's own rule (`Unresolved::sole_candidate`): a method
+    /// call through a receiver the rules do not type (a binding of a `?`'s value, a box bound by a
+    /// pattern) whose name only `callee` declares.
     fn of_counting_sole(&self, callee: &str) -> Vec<String> {
         let mut out: BTreeSet<String> = self.of(callee).into_iter().collect();
         out.extend(
             self.unfollowed
                 .iter()
-                .filter(|edge| edge.candidates == [callee])
+                .filter(|edge| edge.sole.as_deref() == Some(callee))
                 .map(|edge| edge.caller.clone()),
         );
         out.into_iter().collect()
@@ -2045,8 +2054,8 @@ impl Callers {
         out.extend(
             self.unfollowed
                 .iter()
-                .filter(|edge| edge.caller == caller && edge.candidates.len() == 1)
-                .map(|edge| edge.candidates[0].clone()),
+                .filter(|edge| edge.caller == caller)
+                .filter_map(|edge| edge.sole.clone()),
         );
         out.into_iter().collect()
     }
@@ -2057,7 +2066,10 @@ impl Callers {
         self.unfollowed
             .iter()
             .filter(|edge| {
-                !(edge.candidates.len() == 1 && callees.contains(&edge.candidates[0].as_str()))
+                !edge
+                    .sole
+                    .as_deref()
+                    .is_some_and(|sole| callees.contains(&sole))
             })
             .filter(|edge| {
                 edge.candidates
@@ -2093,14 +2105,18 @@ fn each_life_transition_has_its_callers() {
         (life("shellless"), &["bare_leaf"]),
         (
             life("begin_birth"),
-            &["await_shell", "create_leaf_session", "land_shell_birth"],
+            &[
+                "await_shell",
+                "create_leaf_session",
+                "runtime::panes::land_shell_birth",
+            ],
         ),
-        (life("take_birth"), &["land_shell_birth"]),
+        (life("take_birth"), &["runtime::panes::land_shell_birth"]),
         (life("record_spawn_fallback"), &["finish_leaf_birth"]),
         (
             life("take_spawn_fallback"),
             &[
-                "land_birth_death_fallback_shell",
+                "runtime::tabs::land_birth_death_fallback_shell",
                 "runtime::panes::Runtime::land_own_shell",
                 "runtime::panes::Runtime::land_restart",
             ],

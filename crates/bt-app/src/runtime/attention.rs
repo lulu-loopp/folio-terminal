@@ -4,10 +4,10 @@
 use crate::window_seam::prelude::*;
 use crate::{
     AttentionDelivery, Motion, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane,
-    PointerTarget, PreviewSurface, Runtime, ShellSession, TabState, TaskbarFlash, TerminalPane,
-    UserInputKind, WindowRuntime, attention, attention_trace, document_request,
-    emit_attention_lines, float, i18n, marks, notice, notify, profiles, quit, seats, taskbar_lane,
-    toast,
+    PointerTarget, PreviewSurface, Runtime, ShellSession, StatusClaim, TabState, TaskbarFlash,
+    TerminalPane, UserInputKind, WindowRuntime, attention, attention_is_consumed, attention_trace,
+    document_request, emit_attention_lines, float, i18n, marks, notice, notify, profiles, quit,
+    seats, taskbar_lane, toast,
 };
 use crate::{attention_delivery, attention_map, hang_watch};
 use anyhow::Result;
@@ -1186,6 +1186,192 @@ impl<B: Backend> Runtime<'_, B> {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+}
+
+/// The pane a tab's `Awaiting` is about: **the oldest place it holds.**
+///
+/// The one the queue would send you to ([`next_attention_stop`]'s 先到先服务), which
+/// is what makes it the honest answer to "which request is this dot reporting" — a tab is a lid
+/// over panes, and the claim it wears is the loudest of theirs.
+fn tab_queue_leader(tab: &TabState) -> Option<SeatId> {
+    tab.sessions
+        .iter()
+        .filter_map(|(seat, TerminalPane { session: leaf, .. })| {
+            leaf.attention.ledger.ticket().map(|ticket| (ticket, *seat))
+        })
+        .min_by_key(|(ticket, _)| *ticket)
+        .map(|(_, seat)| seat)
+}
+
+/// **One turn of the attention queue, for every shell in this window** (`attention` plan §11.1.4;
+/// §7.1.5b P1-8).
+///
+/// **What "asking" means, said out loud, and it is not what it was.** The queue's members used to
+/// be the sessions whose bell was latched, because a `BEL` was the only byte a program could send
+/// this terminal that meant *I want you*. Four recordings of a real Claude Code (`attention` plan
+/// §2) established that a bell rings when a **turn ends**, which is an event, and that a badge
+/// meaning "it is standing there waiting for you" is a state — so the badge lit when it should not,
+/// could not be put out, and could not say why. A2 takes the bell out of this door entirely. What
+/// comes in now is a credential the program can **withdraw** ([`attention::AttentionLedger`]), and
+/// the bell keeps the claim it always honestly had: a flat dot a look spends.
+///
+/// **A place is taken once and only once.** The ledger's own guard is that a held place is never
+/// re-stamped, and the difference matters at the other end: the bell latch retires when the tab is
+/// *looked at* ([`attention_is_consumed`]), while a place retires only when it is *answered*.
+/// Re-stamping would hand a shell that asks twice while unanswered a younger place than one that
+/// asked once and waited, and 先到先服务 would quietly become last-come-first.
+///
+/// **Everything a frame can decide, in one pass over one leaf at a time**, which is the shape the
+/// fix of 2026-08-21 left behind and A2 keeps. Four decisions, in the one order that is not
+/// arbitrary:
+///
+/// 1. **the timers that came due** — a credential that ran out this instant is not one to hand a
+///    place to, and the other way round would put an `admit` and a `withdraw` for the same episode
+///    in the file one line apart;
+/// 2. **a bell that has not been announced** — read here because the step below spends the latch it
+///    is read from. It takes no place and mints nothing (red line 14): the end of a turn reaches
+///    the desktop on its own lane and never through the queue;
+/// 3. **the queue's own pass** — which admits a request nobody is looking at and refuses one they
+///    are;
+/// 4. **the look** — watching is consuming, so the bell and failure latches retire on the tab that
+///    is both on screen *and* in a focused window. Both go together because `bt-term` retires them
+///    together, and because "the user has seen this" is one fact and not two.
+///
+/// **No unread ledger arithmetic here, and its absence is load-bearing.** This runs once per turn
+/// of the loop and *after* the turn's tab switch has already been paid, so a ledger advanced from
+/// `tab_is_active` squares the tab that arrived and strands the tab that left one revision behind —
+/// a permanent dot on a tab whose shell never spoke. Seeing is painting, and painting is answered
+/// where the painting happens ([`Runtime::redraw`]).
+// Seven, and each is a different question about one pass: where the panes are, which of them the
+// reader is looking at, where this window is with respect to the reader's eyes, what serial to
+// draw a place from, when now is, where the lines go, and where the interruptions the ledger
+// allows are collected. A struct would move the list rather than shorten it — `place` is not that
+// struct, it is the third question, which happens to take three bits to ask.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn settle_attention(
+    tabs: &mut [TabState],
+    active_tab: usize,
+    place: notify::WindowPlace,
+    switches: attention::NotificationSwitches,
+    next_place: &mut attention::Places,
+    now: Instant,
+    trace: Option<&attention_trace::Trace>,
+    raised: &mut Vec<AttentionDelivery>,
+) {
+    let traced = trace.is_some();
+    for (index, tab) in tabs.iter_mut().enumerate() {
+        let tab_is_active = index == active_tab;
+        let consumed = attention_is_consumed(tab_is_active, place.focused);
+        let reach = notify::desktop_reach(tab_is_active, place);
+        let tab_id = tab.id;
+        // Only computed when someone is reading: the claim is a fold over every shell in the tab,
+        // and this pass runs on every turn of the event loop. The leader is sampled beside it,
+        // because a dot that goes *out* this turn is reported by the pane that was holding it.
+        let was = traced.then(|| tab.fleet_claim_for(tab_is_active));
+        let leader_before = traced.then(|| tab_queue_leader(tab)).flatten();
+        // Collected while the tab is held mutably and turned into deliveries below, because the
+        // title's three-layer chain reads the pane's own name and its profile's — both facts of
+        // this tab, and both out of reach while its leaves are borrowed.
+        let mut allowed: Vec<(SeatId, attention::Raised)> = Vec::new();
+        for (seat, leaf) in tab.leaves_mut() {
+            let at = attention::Site {
+                tab: index,
+                seat: *seat,
+            };
+            for expired in leaf.attention.clock.due(now) {
+                let outcome = leaf
+                    .attention
+                    .ledger
+                    .apply(at, reach, expired, next_place, now);
+                emit_attention_lines(trace, outcome.lines);
+                allowed.extend(outcome.raised.map(|one| (*seat, one)));
+            }
+            // **The weak tier, which is a level on a status snapshot and has to become an edge.**
+            // `bt-term` mints a generation on the `None → Some` rise of `RequestAttention=yes` and
+            // clears the live value on `=no`; the translation is the ledger's own, next to the
+            // mirror it compares against, so no call site keeps a second copy of what was last
+            // seen. A program restating `yes` every second produces no edge and therefore no line.
+            //
+            // One snapshot for both this and the bell below: `status()` is a coherent reading of
+            // the session, and asking twice would let two decisions in one turn be taken from two
+            // readings of one shell.
+            let reported = leaf.session.status();
+            if let Some(edge) = leaf.attention.ledger.weak_edge(reported.attention_request) {
+                let outcome = leaf
+                    .attention
+                    .ledger
+                    .apply(at, reach, edge, next_place, now);
+                emit_attention_lines(trace, outcome.lines);
+                allowed.extend(outcome.raised.map(|one| (*seat, one)));
+            }
+            if let Some(rang) = reported.bell.filter(|_| !leaf.attention.bell_reported) {
+                leaf.attention.bell_reported = true;
+                // **Neither ringer carries a sentence**, which is the whole of what is wrong with
+                // reading a bell as "it is waiting for you" — so the interruption this raises is
+                // worded from the i18n table rather than quoted from anybody. What the two *do*
+                // differ in is how they arrived, and §13.2.2 is emphatic that only a literal
+                // `0x07` may be recorded as a bell: a `RequestAttention=once` written down by a
+                // program that has found this terminal is a different fact from a program that has
+                // fallen back to the oldest byte there is, and recording them alike makes "is the
+                // far end reaching us over OSC?" unanswerable.
+                let (source, via) = attention_map::bell_provenance(rang);
+                let outcome = leaf
+                    .attention
+                    .ledger
+                    .announce_turn_end(at, reach, switches, source, via, None);
+                emit_attention_lines(trace, outcome.lines);
+                allowed.extend(outcome.raised.map(|one| (*seat, one)));
+            }
+            let settle = attention::Event::Settle {
+                active: tab_is_active,
+                focused: place.focused,
+            };
+            let outcome = leaf
+                .attention
+                .ledger
+                .apply(at, reach, settle, next_place, now);
+            emit_attention_lines(trace, outcome.lines);
+            allowed.extend(outcome.raised.map(|one| (*seat, one)));
+            if consumed {
+                leaf.session.clear_attention();
+            }
+            // Whatever spent the latch — this look, or `mark_seen` on the way in — re-arms the
+            // edge, so the next turn that ends is announced instead of being read as this one.
+            leaf.attention.bell_reported = leaf.session.status().bell_latched();
+        }
+        for (seat, one) in allowed {
+            raised.push(attention_delivery(tab, tab_id, seat, None, one));
+        }
+        if let Some(was) = was {
+            let now_claim = tab.fleet_claim_for(tab_is_active);
+            if now_claim != was {
+                // §13.2.1: the request this change is about, when it is about one at all. The third
+                // branch is the common one — most claim changes are unread, bell or work in flight,
+                // and none of those belongs to a request.
+                let leader = if now_claim == StatusClaim::Awaiting {
+                    tab_queue_leader(tab)
+                } else {
+                    leader_before
+                };
+                let episode = leader.and_then(|seat| tab.sessions.get(&seat)).and_then(
+                    |TerminalPane { session: leaf, .. }| {
+                        leaf.attention.ledger.claim_episode(
+                            was == StatusClaim::Awaiting,
+                            now_claim == StatusClaim::Awaiting,
+                        )
+                    },
+                );
+                attention_trace::emit(trace, || {
+                    attention::claim_line(
+                        index,
+                        episode,
+                        &format!("{was:?}"),
+                        &format!("{now_claim:?}"),
+                    )
+                });
+            }
+        }
     }
 }
 

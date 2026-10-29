@@ -378,9 +378,12 @@ impl FieldCensus {
             .filter(|(_, decls)| decls.iter().any(|decl| in_package(decl.callable.as_ref())))
             .map(|(name, _)| name.clone())
             .collect();
+        // An impl's or inherent method's name, and a trait's provided method's (one with a body):
+        // a call that reaches only the provided method still names one of the package's own.
         let methods: BTreeSet<String> = read
             .methods
             .iter()
+            .chain(&read.trait_declarations)
             .filter(|(_, decls)| decls.iter().any(|decl| in_package(decl.callable.as_ref())))
             .map(|((_, name), _)| name.clone())
             .collect();
