@@ -1173,8 +1173,9 @@ type SiteKey = (String, String, String, String);
 /// bt-app, every `Dynamic` edge and every `Ambiguous` edge with other than one candidate — the
 /// calls the door reach does not follow (`window_waits_tests::followed`, whose `.into()` to the
 /// product's `From` impls is followed and left out here too) — keyed by its file, the item (or
-/// value) it is written in, its kind and the call's name.
-fn unfollowed_sites(resolver: &Resolver<'_>) -> BTreeMap<SiteKey, usize> {
+/// value) it is written in, its kind and the call's name; and how many `Ambiguous` calls have one
+/// candidate ([`Unresolved::sole_candidate`]), which the list does not carry by site.
+fn unfollowed_sites(resolver: &Resolver<'_>) -> (BTreeMap<SiteKey, usize>, usize) {
     let roots: Vec<ItemId> = resolver
         .callables("bt-app")
         .into_iter()
@@ -1186,7 +1187,15 @@ fn unfollowed_sites(resolver: &Resolver<'_>) -> BTreeMap<SiteKey, usize> {
         .canonicalize()
         .expect("the workspace root resolves");
     let mut sites: BTreeMap<SiteKey, usize> = BTreeMap::new();
+    let mut sole = 0;
     for (edge, _) in &reach.unresolved {
+        if let Target::Unresolved(unresolved) = &edge.to
+            && unresolved.sole_candidate().is_some()
+            && edge.site.name != "into"
+        {
+            sole += 1;
+            continue;
+        }
         let kind = match &edge.to {
             Target::Unresolved(Unresolved::Dynamic { .. }) => "Dynamic",
             Target::Unresolved(Unresolved::Ambiguous { candidates, .. })
@@ -1219,7 +1228,17 @@ fn unfollowed_sites(resolver: &Resolver<'_>) -> BTreeMap<SiteKey, usize> {
             ))
             .or_default() += 1;
     }
-    sites
+    (sites, sole)
+}
+
+/// The header line of the list that carries [`unfollowed_sites`]' one-candidate count.
+fn sole_candidate_line(sole: usize) -> String {
+    format!(
+        "# Ambiguous calls with exactly one candidate, not listed by site above or below \
+         (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts \
+         each as a call of its one candidate): {sole}. A call whose name is renamed to one only one \
+         item declares leaves the list and is counted here."
+    )
 }
 
 /// The committed list's path, from the workspace root.
@@ -1236,10 +1255,12 @@ fn unfollowed_list() -> PathBuf {
 /// commits `scripts/ci/check-unfollowed-edges.ps1` holds the list to the merge base's (no key added
 /// or grown without a dated reason). Every run leaves the rendering, the committed reasons kept,
 /// in `target/unfollowed-edges/UNFOLLOWED-EDGES.tsv`; `scripts/generate-unfollowed-edges.ps1`
-/// copies it.
+/// copies it. The header carries the count of `Ambiguous` calls with one candidate
+/// ([`sole_candidate_line`]; T-CENSUS-FOLLOWS-ASSOCIATED-TYPE-CALLS, the O-4b review's F5), held
+/// equal to the tree too: a rename that takes an edge off the list moves that count.
 ///
 /// MUTATION: delete one row of the committed list — the test names its key as in the tree and not
-/// on the list.
+/// on the list; change the header's one-candidate count — the test names the line.
 #[test]
 fn the_unfollowed_edges_are_the_committed_list() {
     let held = real_tree();
@@ -1249,7 +1270,8 @@ fn the_unfollowed_edges_are_the_committed_list() {
         .collect();
     let resolver =
         Resolver::new(&packages, Arms::product()).unwrap_or_else(|refusals| panic!("{refusals:?}"));
-    let sites = unfollowed_sites(&resolver);
+    let (sites, sole) = unfollowed_sites(&resolver);
+    let sole_line = sole_candidate_line(sole);
     let committed_text = std::fs::read_to_string(unfollowed_list()).unwrap_or_default();
     let mut committed: BTreeMap<SiteKey, (usize, String)> = BTreeMap::new();
     for line in committed_text.lines() {
@@ -1283,9 +1305,10 @@ fn the_unfollowed_edges_are_the_committed_list() {
          # candidate met walking from every product callable of bt-app, by site (file, item, kind, the call's\n\
          # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;\n\
          # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown\n\
-         # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.\n\
-         file\titem\tkind\tname\tsites\treason\n",
+         # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.\n",
     );
+    rendering.push_str(&sole_line);
+    rendering.push_str("\nfile\titem\tkind\tname\tsites\treason\n");
     for (key, count) in &sites {
         let reason = committed.get(key).map_or("", |(_, reason)| reason.as_str());
         rendering.push_str(&format!(
@@ -1297,6 +1320,9 @@ fn the_unfollowed_edges_are_the_committed_list() {
     std::fs::create_dir_all(&out).expect("target/unfollowed-edges");
     std::fs::write(out.join("UNFOLLOWED-EDGES.tsv"), &rendering).expect("the rendering is written");
     let mut differences = Vec::new();
+    if !committed_text.lines().any(|line| line == sole_line) {
+        differences.push(format!("the header does not say: {sole_line}"));
+    }
     for (key, count) in &sites {
         match committed.get(key) {
             None => differences.push(format!("in the tree, not on the list: {key:?} ({count})")),
@@ -1314,7 +1340,7 @@ fn the_unfollowed_edges_are_the_committed_list() {
         }
     }
     eprintln!(
-        "UNFOLLOWED_SITES\tkeys {}\tcalls {}",
+        "UNFOLLOWED_SITES\tkeys {}\tcalls {}\tsole {sole}",
         sites.len(),
         sites.values().sum::<usize>()
     );
@@ -1392,6 +1418,44 @@ fn every_file_system_shaped_unfollowed_edge_carries_a_dated_reason() {
          request-door guard then classifies the call), or write `YYYY-MM-DD: <why>`:\n  {}",
         undated.len(),
         undated.join("\n  ")
+    );
+}
+
+/// RED (T-CENSUS-FOLLOWS-ASSOCIATED-TYPE-CALLS, 2026-10-28; the O-4b review's F5) — **an untyped
+/// receiver's call with exactly one candidate has that candidate by the call graph's own rule**,
+/// and every other edge has none: `Unresolved::sole_candidate`, which the census test's callers
+/// and the list's header count use instead of a rule of their own.
+///
+/// RED before: the rule lived in `tests/census.rs` (`edge.candidates == [callee]`, any kind).
+/// MUTATION: answer the first candidate of any `Ambiguous` edge — `shared_name` has one.
+#[test]
+fn an_untyped_receivers_call_with_one_candidate_has_it_as_its_sole_candidate() {
+    let index = fixture("ambiguous");
+    let resolver = resolver("ambiguous", &index);
+    let root = item(&resolver, "cg-ambiguous", "root");
+    let mut sole: Vec<(String, Option<String>)> = resolver
+        .resolve_callees(root)
+        .iter()
+        .filter_map(|edge| match &edge.to {
+            Target::Unresolved(unresolved) => Some((
+                edge.site.name.clone(),
+                unresolved.sole_candidate().map(|id| resolver.key(id)),
+            )),
+            _ => None,
+        })
+        .collect();
+    sole.sort();
+    assert_eq!(
+        sole,
+        [
+            ("make".to_owned(), None),
+            ("no_such_method".to_owned(), None),
+            (
+                "only_a".to_owned(),
+                Some("cg-ambiguous crate::A::only_a".to_owned())
+            ),
+            ("shared_name".to_owned(), None),
+        ]
     );
 }
 

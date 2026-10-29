@@ -9,6 +9,7 @@ use crate::ime_outbound::{
 };
 use crate::input::Keystroke;
 use crate::runtime::floats::file_menu_powers;
+use crate::runtime::terminal::write_pty_input;
 use crate::window_seam::prelude::*;
 use crate::{
     Composing, ComposingAfter, ComposingEvent, CompositionOrigin, CompositionRuling,
@@ -16,7 +17,7 @@ use crate::{
     PasteCardKey, Popup, PopupsUp, PreviewSurface, RenameClipboard, RenameExit, RenameVerdict,
     Runtime, Step, TabRename, TextFieldSeat, UserInputKind, git_graph, hang_watch, ime_outbound,
     ime_report, input, keyhint, marks, menubar, profiles, quit, restore, settings, shortcuts,
-    text_field, toast, write_pty_input,
+    text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::{Axis, SeatId};
