@@ -1419,7 +1419,7 @@ fn a_parked_pan_is_spent_through_the_wheels_own_entrance() {
         walk.contains(
             "self.end_the_capture_that_lost_its_pointer()?;self.for_each_window(|runtime|runtime.spend_parked_pans())"
         ),
-        "the application's capture is asked first, then every window's parked pans are spent:          {walk}"
+        "the application's capture is asked first, then the pans are spent: {walk}"
     );
 }
 
