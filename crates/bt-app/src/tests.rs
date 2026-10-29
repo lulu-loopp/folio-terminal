@@ -176,16 +176,16 @@ fn hostile_math_is_refused_and_the_real_decoration_worker_survives() {
     assert_eq!(fatal_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
-/// The first line of [`the_frame_a_panic_report_names`]'s span, and below it the last: the
-/// location a backtrace gives for that frame has to fall between them.
-const NAMED_FRAME_FIRST_LINE: u32 = line!();
 /// A function of this crate the panic report's backtrace has to name, with its file and a line
-/// inside it. Never inlined, so its frame is on the stack when the hook captures it.
+/// inside it. Never inlined, so its frame is on the stack when the hook captures it. Its panic
+/// message says which line it stands on: `Location::caller()` outside a `#[track_caller]`
+/// function is the location of that call, and the panic is the very next line (bt-source's
+/// index refuses `line!()` in this crate, so the line is not spelled as one).
 #[inline(never)]
 fn the_frame_a_panic_report_names() -> u8 {
-    panic!("scripted: the frame a panic report names")
+    let here = std::panic::Location::caller().line();
+    panic!("scripted: the frame a panic report names, after line {here}")
 }
-const NAMED_FRAME_LAST_LINE: u32 = line!();
 
 /// RED (plan row 73, bt-app-split §4.4a) — **a contained panic's report resolves a frame of this
 /// crate to its function, its file and a line inside it.**
@@ -292,10 +292,15 @@ fn a_contained_panics_report_names_this_crates_frame_by_file_and_line() {
         file.ends_with(&["bt-app", "src", "tests.rs"]),
         "`{frame}` is located in `{path}`, not in this file:\n{backtrace}"
     );
+    let here: u32 = report
+        .split_once("the frame a panic report names, after line ")
+        .and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse().ok())
+        .expect("the panic line says where the function stands");
     assert!(
-        NAMED_FRAME_FIRST_LINE < line && line < NAMED_FRAME_LAST_LINE,
-        "`{frame}` is located at line {line}, outside its own lines \
-         {NAMED_FRAME_FIRST_LINE}-{NAMED_FRAME_LAST_LINE}:\n{backtrace}"
+        (here..=here + 1).contains(&line),
+        "`{frame}` is located at line {line}, not at its panic (line {}):\n{backtrace}",
+        here + 1
     );
     std::fs::remove_file(&log).unwrap();
     // On a line of its own: libtest has written `test <name> ... ` without a newline.
