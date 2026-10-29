@@ -55,6 +55,7 @@ use crate::{
 use anyhow::Result;
 use bt_layout::SeatId;
 use std::time::Instant;
+use winit::event::MouseButton;
 
 use super::capture::{CaptureOwner, PointerCapture, ReleaseSnapshot};
 
@@ -488,7 +489,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// "still held" while no hand holds anything. The button is asked of the platform
     /// ([`bt_platform::mouse_button_down`], through the window's seam), which says up only when
     /// no release of it can still be on its way, under every name the platform may give the
-    /// press ([`input::reported_buttons_of`]). An owner that outlives its button keeps the first
+    /// press ([`reported_buttons_of`]). An owner that outlives its button keeps the first
     /// test alone ([`CaptureOwner::lasts_while_its_button_is_down`]).
     pub(crate) fn end_a_capture_that_lost_its_pointer(&mut self) -> Result<bool> {
         let Some((at_the_press, button, by_its_button)) = self.own_capture().map(|capture| {
@@ -503,8 +504,11 @@ impl<B: Backend> Runtime<'_, B> {
         let pointer_held =
             a_capture_still_holds_its_pointer(at_the_press, bt_platform::thread_mouse_capture());
         let button_held = !by_its_button
-            || input::reported_buttons_of(button, bt_platform::host_platform())
-                .any(|reported| self.window.window.mouse_button_down(reported));
+            || reported_buttons_of(button, bt_platform::host_platform()).any(|reported| {
+                self.window
+                    .window
+                    .mouse_button_down(platform_button(reported))
+            });
         if pointer_held && button_held {
             return Ok(false);
         }
@@ -701,6 +705,32 @@ impl<B: Backend> FolioApp<B> {
                 Ok(())
             }
         }
+    }
+}
+
+/// **[`input::pressed_button`]'s inverse**: every button the platform may have reported for a
+/// press this window took as `button` (0.4.9 plan row 107). A held gesture asks the platform
+/// whether its button is still down, and the platform knows the button it reported, not the one
+/// this window made of it — on a Mac a gesture latched as the secondary press may be held by the
+/// left button under Control.
+pub(crate) fn reported_buttons_of(
+    button: MouseButton,
+    platform: bt_platform::HostPlatform,
+) -> impl Iterator<Item = MouseButton> {
+    let secondary_click =
+        platform == bt_platform::HostPlatform::MacOs && button == MouseButton::Right;
+    std::iter::once(button).chain(secondary_click.then_some(MouseButton::Left))
+}
+
+/// A button by the platform door's name for it ([`bt_platform::PointerButton`]).
+pub(crate) fn platform_button(button: MouseButton) -> bt_platform::PointerButton {
+    match button {
+        MouseButton::Left => bt_platform::PointerButton::Left,
+        MouseButton::Right => bt_platform::PointerButton::Right,
+        MouseButton::Middle => bt_platform::PointerButton::Middle,
+        MouseButton::Back => bt_platform::PointerButton::Back,
+        MouseButton::Forward => bt_platform::PointerButton::Forward,
+        MouseButton::Other(number) => bt_platform::PointerButton::Other(number),
     }
 }
 

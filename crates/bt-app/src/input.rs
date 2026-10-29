@@ -401,19 +401,6 @@ pub(crate) fn pressed_button(
     }
 }
 
-/// **[`pressed_button`]'s inverse**: every button the platform may have reported for a press
-/// this window took as `button` (0.4.9 plan row 107). A held gesture asks the platform whether
-/// its button is still down, and the platform knows the button it reported, not the one this
-/// window made of it — on a Mac a gesture latched as the secondary press may be held by the left
-/// button under Control.
-pub(crate) fn reported_buttons_of(
-    button: MouseButton,
-    platform: HostPlatform,
-) -> impl Iterator<Item = MouseButton> {
-    let secondary_click = platform == HostPlatform::MacOs && button == MouseButton::Right;
-    std::iter::once(button).chain(secondary_click.then_some(MouseButton::Left))
-}
-
 /// [`pressed_button`] **held for the length of the gesture**, which is what the
 /// one door actually asks.
 ///
@@ -3619,46 +3606,6 @@ mod tests {
                     button,
                     "{button:?} on {platform:?}"
                 );
-            }
-        }
-    }
-
-    /// RED (0.4.9 plan row 107) — **a held gesture asks for every button that can
-    /// be holding it**: what the platform reports, which on a Mac includes the
-    /// left button for a gesture taken as the secondary press, and is exactly the
-    /// set of buttons `pressed_button` maps onto it.
-    ///
-    /// MUTATION: answer only the gesture's own button — a Mac control-click held
-    /// on a mouse-tracking program reads its right button as up and is cancelled
-    /// under the hand.
-    #[test]
-    fn a_held_gesture_asks_for_every_button_that_can_be_holding_it() {
-        let buttons = [
-            MouseButton::Left,
-            MouseButton::Right,
-            MouseButton::Middle,
-            MouseButton::Back,
-            MouseButton::Forward,
-        ];
-        for platform in [WINDOWS, MAC] {
-            for latched in buttons {
-                let asked: Vec<MouseButton> = reported_buttons_of(latched, platform).collect();
-                let pressing: Vec<MouseButton> = buttons
-                    .into_iter()
-                    .filter(|reported| {
-                        [ModifiersState::empty(), ModifiersState::CONTROL]
-                            .into_iter()
-                            .any(|modifiers| {
-                                pressed_button(*reported, modifiers, platform) == latched
-                            })
-                    })
-                    .collect();
-                let mut sorted = asked.clone();
-                sorted.sort_by_key(|button| format!("{button:?}"));
-                let mut expected = pressing;
-                expected.sort_by_key(|button| format!("{button:?}"));
-                assert_eq!(sorted, expected, "{latched:?} on {platform:?}");
-                assert_eq!(asked[0], latched, "the gesture's own button is asked first");
             }
         }
     }

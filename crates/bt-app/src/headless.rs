@@ -490,7 +490,7 @@ impl WindowHost for HeadlessWindow {
     fn pointer_in_window(&self) -> Option<(i32, i32)> {
         self.answers.get().pointer
     }
-    fn mouse_button_down(&self, _button: winit::event::MouseButton) -> bool {
+    fn mouse_button_down(&self, _button: bt_platform::PointerButton) -> bool {
         self.answers.get().buttons_down
     }
     fn present_facts(&self) -> bt_platform::NativePresentFacts {

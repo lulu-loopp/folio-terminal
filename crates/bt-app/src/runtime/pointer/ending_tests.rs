@@ -936,3 +936,46 @@ fn a_tab_switch_puts_a_held_dividers_ratio_back() {
         "the split is back at the ratio it had when the press began"
     );
 }
+
+/// RED (0.4.9 plan row 107) — **a held gesture asks for every button that can
+/// be holding it**: what the platform reports, which on a Mac includes the
+/// left button for a gesture taken as the secondary press, and is exactly the
+/// set of buttons `input::pressed_button` maps onto it.
+///
+/// MUTATION: answer only the gesture's own button — a Mac control-click held
+/// on a mouse-tracking program reads its right button as up and is cancelled
+/// under the hand.
+#[test]
+fn a_held_gesture_asks_for_every_button_that_can_be_holding_it() {
+    let buttons = [
+        MouseButton::Left,
+        MouseButton::Right,
+        MouseButton::Middle,
+        MouseButton::Back,
+        MouseButton::Forward,
+    ];
+    for platform in [
+        bt_platform::HostPlatform::Windows,
+        bt_platform::HostPlatform::MacOs,
+    ] {
+        for latched in buttons {
+            let asked: Vec<MouseButton> = super::reported_buttons_of(latched, platform).collect();
+            let pressing: Vec<MouseButton> = buttons
+                .into_iter()
+                .filter(|reported| {
+                    [ModifiersState::empty(), ModifiersState::CONTROL]
+                        .into_iter()
+                        .any(|modifiers| {
+                            crate::input::pressed_button(*reported, modifiers, platform) == latched
+                        })
+                })
+                .collect();
+            let mut sorted = asked.clone();
+            sorted.sort_by_key(|button| format!("{button:?}"));
+            let mut expected = pressing;
+            expected.sort_by_key(|button| format!("{button:?}"));
+            assert_eq!(sorted, expected, "{latched:?} on {platform:?}");
+            assert_eq!(asked[0], latched, "the gesture's own button is asked first");
+        }
+    }
+}

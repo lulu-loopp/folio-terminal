@@ -266,7 +266,7 @@ pub(crate) trait WindowHost {
     fn pointer_in_window(&self) -> Option<(i32, i32)>;
     /// **Whether a hand may still be holding `button`** — `bt_platform::mouse_button_down`:
     /// `false` only when it is up and no release of it can still be on its way.
-    fn mouse_button_down(&self, button: winit::event::MouseButton) -> bool;
+    fn mouse_button_down(&self, button: bt_platform::PointerButton) -> bool;
     /// The platform's present facts about this window, for a diagnostic line —
     /// `bt_platform::native_present_facts`; every field unread where there is no handle.
     fn present_facts(&self) -> bt_platform::NativePresentFacts;
@@ -445,16 +445,8 @@ impl WindowHost for Arc<Window> {
             .ok()
             .and_then(crate::runtime::pointer_in_native_window)
     }
-    fn mouse_button_down(&self, button: winit::event::MouseButton) -> bool {
-        use winit::event::MouseButton;
-        bt_platform::mouse_button_down(match button {
-            MouseButton::Left => bt_platform::PointerButton::Left,
-            MouseButton::Right => bt_platform::PointerButton::Right,
-            MouseButton::Middle => bt_platform::PointerButton::Middle,
-            MouseButton::Back => bt_platform::PointerButton::Back,
-            MouseButton::Forward => bt_platform::PointerButton::Forward,
-            MouseButton::Other(number) => bt_platform::PointerButton::Other(number),
-        })
+    fn mouse_button_down(&self, button: bt_platform::PointerButton) -> bool {
+        bt_platform::mouse_button_down(button)
     }
     fn present_facts(&self) -> bt_platform::NativePresentFacts {
         crate::native_window_of(self)
