@@ -82,8 +82,9 @@ exact count of what it does see.
   `PreviewPane`, `DocumentView`, `PictureView` and `TerminalPane` have none: O-7
   and O-8 put their writes inside their own types, and the pane's writes are its
   own methods (O-5b).
-- **unclassified.tsv**: **275 items, 241 free functions and 34 `Runtime`
-  methods**, still in `main.rs` (at K2 batch 24's head; 285, 241 and 44 before it,
+- **unclassified.tsv**: **260 items, 226 free functions and 34 `Runtime`
+  methods**, still in `main.rs` (at K2 batch 25's head; 275, 241 and 34 before it,
+  at batch 24's head; 285, 241 and 44 before batch 24,
   at plan row 59's head: K2 batch 23's 284 and row 66's `say_in_a_box_or_on_stderr`;
   329, 242 and 87 before batch 23,
   368, 274 and 94 before batch 22,
@@ -158,6 +159,7 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    | — | the §13 re-sort (`docs/ARCHITECTURE.md` §13's "Still in `main.rs`") | moved by batch 22 (ruled 2026-10-26: 39 items out of `main.rs`, 7 methods and 32 free functions, and the whole `Runtime` blocks of `ime_outbound.rs` (8 methods) and `preview_viewport.rs` (4) into `runtime/keyboard.rs` and `runtime/preview.rs`; `Runtime::reveal_in_explorer` and `reveal_ask` to `runtime/handoff.rs` by clause (b); the six focus-card rows to `runtime/panes.rs` by clause (a); `Runtime::focus_seat`, `Runtime::focus_the_pane_a_path_landed_in` and `Runtime::settle_focus_on` to `runtime/mouse.rs` by the multi-owner rule, below; the three function values `web_page_cursor`, `files_a_tab_stands_on` and `seeded_tab` by first caller; the five holds the two blocks released (`ime_owner`, `popup_takes_the_key`, `terminal_ime_cursor_area`, `preview_caret_prose` and `scale_ppm`) with the tail `window_ime_cursor_area`; twelve rows beside their callers outside `runtime/`, with seven tails: `window_seam.rs` 4, `computation_lane.rs` 7, `preview_viewport.rs` 3, and one each into `handoff_lane.rs`, `update_job.rs`, `present_gate.rs`, `file_peek.rs` and `explorer_menu.rs`, below; `native_window_of`, `option_as_alt`, `is_format_or_bidi_control`, `measure_markdown_local` and `markdown_prose_face` held, below) | — |
    | — | `runtime/settings.rs` (re-sort D5) | moved by batch 23 (ruled 2026-10-26, which opened the file: 45 items out of `main.rs`, 43 into `runtime/settings.rs` (38 methods, the four `PointerHost` methods as one trait-impl block, and `contains_point`) and `Runtime::open_local_path` with `open_local_path_ask` into `runtime/handoff.rs` (D6); the four facts that already had several writer modules and gained `settings` are accepted by the shared-fact rule, below; `Runtime::add_scheme`, `Runtime::advance_scheme_watch`, `Runtime::advance_storage_watch` and `Runtime::adopt_option_as_alt` held by the census rule and `Runtime::reread_schemes`, `Runtime::apply_scheme`, `Runtime::open_scheme_for_editing` and `Runtime::settings_closed` with their root callers, below) | — |
    | — | `runtime/settings.rs` and `runtime/mouse.rs` (the settings topic's rest) | moved by batch 24 (ruled 2026-10-27: 10 `Runtime` methods out of `main.rs`; `Runtime::settings_layout`, `Runtime::drag_settings_menu_bar` and `Runtime::apply_slider`, with the six tails `Runtime::settings_content`, `Runtime::settings_dialog`, `Runtime::settings_values`, `Runtime::editor_subject`, `Runtime::advanced_open` and `Runtime::scheme_in_force` (the last at the review fold), into `runtime/settings.rs`; `Runtime::send_user_input` into `runtime/mouse.rs` by the multi-owner rule, below; `rail_state_for` and `Runtime::return_to_live_for_input` held, below) | — |
+   | — | `runtime/panes.rs`, `runtime/tabs.rs`, `runtime/attention.rs`, `runtime/terminal.rs`, `runtime/clipboard.rs` and `runtime/frame.rs` (the K2 tail's first batch) | moved by batch 25 (ruled 2026-10-28: the fifteen free functions O-4b and O-5a released, out of `main.rs` to the owners their release lines name, below; the input door's pair split by first caller, `write_pty_input` to terminal and `offer_pty_input` to clipboard) | — |
 
    **From batch 14 on, the order is the live map's** (ruled at batch 14). The smallest-sum-first rule above is
    applied to the map regenerated at each batch's base, not to this table's numbers, which were read at batch 1's
@@ -375,6 +377,17 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
    order in the list (batch 23's review, finding 1).
 
    **Held items** (each row's generated `called_from` home is not where it goes):
+   - **Batch 25 (2026-10-28) moved the fifteen rows O-4b and O-5a released** (rulings D15, E8, E9), and their
+     entries leave this list: `land_shell_birth`, `deliver_held_input` and `apply_owed_shell_resize` into
+     `runtime/panes.rs`; `land_birth_death_fallback_shell` into `runtime/tabs.rs`; `settle_attention` and
+     `tab_queue_leader` into `runtime/attention.rs`, where `ShellSession.session` gains its eleventh writer
+     module, as D15 admitted; `drain_leaf_pty`, `synchronized_update_committed`, `terminal_palette`,
+     `terminal_palette_in_force`, `output_revision` and `write_pty_input` into `runtime/terminal.rs`;
+     `offer_pty_input` into `runtime/clipboard.rs`; `mark_leaf_painted` and `seen_revision` into
+     `runtime/frame.rs`. `drain_leaf_pty`'s doc, which stood above `synchronized_update_committed`, now stands
+     above it. Fifteen stay held: `Runtime::return_to_live_for_input`, G3's seven, G5's six and G15's one.
+     The `//` note that stood above `tab_queue_leader` ("`attention_is_asked` and `attention_ticket` stood here
+     until A2…") is blank-separated from it and stays in `main.rs`, for row 78 (ruling R6).
    - `release_due_leaf_resize` — stays in `main.rs` (the census rule above).
    - `files_float_content_height` (tied `runtime/dpi.rs` / `runtime/floats.rs`) — the owner column
      (`docs/ARCHITECTURE.md` §13) gives it to `runtime/floats.rs` ("floating windows"); batch 10 moved it there.
@@ -391,24 +404,8 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      seats (`runtime/panes.rs`, "seat layout"), so that it moves once. Batch 18, that topic, leaves it: its one root
      product caller is `Runtime::focus_the_pane_a_path_landed_in`, held below for a ruling (the rule above).
      Batch 22 moved both, with `Runtime::settle_focus_on`, to `runtime/mouse.rs` by the multi-owner rule (above).
-   - `drain_leaf_pty` — its `called_from` home is `runtime/terminal.rs`, but it writes `LeafSession.pending_typing`,
-     whose other writer, `Runtime::queue_typing_in_the_focused_pane`, stays at the root (the census rule above).
-     Its doc comment is not above it: it stands above `synchronized_update_committed`, the function before it, and
-     runs into that function's own doc (`main.rs`, from "Drain one shell's pipe into its own screen." to
-     "…a leaf can supply none of them about itself."). `move.py` takes only the comment directly above an item, so
-     the batch that moves it carries that block by hand. **Released** 2026-10-27 with O-5a (ruling E9, G2):
-     `ShellSession.pending_typing` is written only by the session's own doors `ShellSession::{queue_typing,
-     take_typing}` in `main.rs`, which the drain and `Runtime::queue_typing_in_the_focused_pane` call, so the drain
-     writes `ShellSession.session` (owner terminal, which `runtime/terminal.rs` already writes) and
-     `ShellSession.output_revision` and `ShellSession.last_finished_command`, of which it is the only writer, so
-     they move whole. Its tails `synchronized_update_committed`, `terminal_palette`, `terminal_palette_in_force` and
-     `output_revision` (called only from it) and `write_pty_input` (root callers the drain and `deliver_held_input`,
-     released by O-4b) are released with it for the K2 tail.
    - `hyperlink_activation` — its `called_from` home is `runtime/terminal.rs`, but `ControlClickHint::of` at the root
      calls it in the product (the rule above); it moves when `ControlClickHint` does.
-   - `offer_pty_input` — its `called_from` home is `runtime/clipboard.rs`, but `write_pty_input` at the root calls it
-     in the product (the rule above); it moves when `write_pty_input` does. **Released** 2026-10-27 with O-5a
-     (ruling E9, G2), with `write_pty_input` (above, under `drain_leaf_pty`).
    - `Runtime::paste_into_settings_field` — its `called_from` home is `runtime/clipboard.rs`, but it writes
      `WindowRuntime.settings`, whose census owner is `main[settings]`; the owner column wins, and K2 opens no
      `runtime/settings.rs`, so it stays in `main.rs` with the settings topic. The hold rests on that write:
@@ -428,18 +425,14 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `advance_card_hint` stays with it: moving one alone would make that fact a new two-module one.
      Batch 23 moved both to `runtime/settings.rs` (2026-10-26, above); `WindowRuntime.card_hint` went from the root
      to `runtime/settings.rs` whole.
-   - `Runtime::advance_scheme_watch`, `Runtime::advance_storage_watch` and `mark_leaf_painted` (batch 13) — their
+   - `Runtime::advance_scheme_watch` and `Runtime::advance_storage_watch` (batch 13) — their
      `called_from` home is `runtime/frame.rs`, but they write `App.scheme_watch` (other writers `add_scheme` and
-     `create`), `App.storage_watch` (other writer `create`) and `ShellSession.last_seen_revision` (other writer
-     `mark_leaf_seen`), whose other writers stay at the root (the census rule above). `advance_storage_watch`
+     `create`) and `App.storage_watch` (other writer `create`), whose other writers stay at the root (the census
+     rule above). `advance_storage_watch`
      also writes facts of several census owners. At batch 23 the first two still hold in the settings topic's
      rest: `App.scheme_watch` and `App.storage_watch` would go from the root alone to the root and
      `runtime/settings.rs` (`Runtime::create` keeps writing both), and `Runtime::add_scheme`, the other writer of
-     `App.scheme_watch`, holds with them. `mark_leaf_painted` is **released** 2026-10-27 with O-5a (ruling E8,
-     G11): `ShellSession.last_seen_revision` is written only by the session's door `ShellSession::mark_seen` in
-     `main.rs`, which `mark_leaf_painted` and `mark_leaf_seen` call, so `mark_leaf_painted` writes no fact and goes
-     to its first caller's module (`runtime/frame.rs`) in the K2 tail, with its tail `seen_revision`;
-     `mark_leaf_seen` stays (its callers are `TabState::mark_seen` and `move_seat_content`).
+     `App.scheme_watch`, holds with them.
    - `Runtime::adopt_option_as_alt` (batch 23) — in the settings group, but it writes `WindowRuntime.modifiers`
      (owner keyboard), which `FolioApp::on_window_event` writes at the root, so `runtime/settings.rs` would make it a
      two-module fact (the census rule above).
@@ -545,11 +538,6 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      `create_tab_state` and `Runtime::create`, `Runtime::create`, and `plan_for` at the root call them in the
      product (the rule above). Batch 18 moved `Runtime::plan_for` to `runtime/panes.rs` and
      `pane_can_become_a_tab` with it, as a tail, to `runtime/tabs.rs` (above).
-   - `land_birth_death_fallback_shell` (batch 16) — its `called_from` home is `runtime/tabs.rs`, but it writes
-     `LeafSession.spawn_fallback`, whose census owner is the root's leaf-birth road (`finish_leaf_birth`), and
-     `runtime/tabs.rs` would be a new writer; by clause (a) it stays with its owner. O-4b (2026-10-27) folded
-     `spawn_fallback` into `LeafSession.life`, which `runtime/tabs.rs` already writes (the reaper and the
-     fallback's landing), so that reason closes: released for the K2 tail (ruling D15).
    - `pane_into_tab`, `absorb_tab_sessions` and `pane_into_new_tab` (batch 16) — their `called_from` home is
      `runtime/tabs.rs` (the last two are tails of this batch's moves), but each writes facts of more than one census
      owner and would make `runtime/tabs.rs` a new writer of some: `pane_into_tab` of panes' (`focused_leaf`,
@@ -581,17 +569,10 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      Their ties wait with them: `auto_split_axis` behind `Runtime::append_edge`,
      `resolved_birth_seed` behind `decided_birth`, `born_in_tab` behind `create_leaf_session` and
      `Runtime::focus_rail_geometry_at` behind `Runtime::focus_rail_geometry_now`.
-   - `schedule_leaf_grid_change` and `land_shell_birth` (batch 18) — their `called_from` home is
-     `runtime/panes.rs`, but each would leave a fact's writers split with the root (the census rule above):
-     `schedule_leaf_grid_change` is `LeafSession.grid`'s single-writer road, which stays with that fact, as
-     `release_due_leaf_resize` does, and it also writes terminal's `LeafSession.session`; `land_shell_birth` writes
-     `LeafSession.birth`, whose other writers are at the root. `deliver_held_input` waits with `land_shell_birth`,
-     its root caller. O-3 (2026-10-27) closes the first half: `schedule_leaf_grid_change` became
-     `LeafSession::propose_size`, the session's own method beside its struct in `main.rs`, which is no free item
-     for a batch to move. `land_shell_birth` and `deliver_held_input` stay held. O-4b (2026-10-27) closes the
-     second half: `birth` is now `LeafSession.life`, which `runtime/panes.rs` already writes (`end_leaves_of`,
-     `land_own_shell`, `land_restart`), so both are released for the K2 tail (ruling D15), with
-     `apply_owed_shell_resize`, whose `pty` lend is now `life`'s too.
+   - `schedule_leaf_grid_change` (batch 18) — its `called_from` home was `runtime/panes.rs`, but it is
+     `LeafSession.grid`'s single-writer road, which stays with that fact, as `release_due_leaf_resize` does. O-3
+     (2026-10-27) made it `LeafSession::propose_size`, the session's own method beside its struct in `main.rs`, which
+     is no free item for a batch to move.
    - `Runtime::aim_focus_card_window` (batch 18) — its `called_from` home is `runtime/panes.rs`, but it writes
      `WindowRuntime.focus_thumbs`, whose other writer, `Runtime::refresh_focus_thumbnails`, stayed at the root.
      Batch 22 moved both to `runtime/panes.rs` (the focus cards, by clause (a)); the fact, which has no owner, went
@@ -614,19 +595,6 @@ again at the crate root by `use runtime::{…}`, so no caller changes.
      stays (the same rule); `path_opens_as_a_page`, whose root callers are it and `preview_page_hand_off`, waits with
      it. Batch 21 moved `source_opens_as_a_page` and `preview_page_hand_off` and left both held; the moved
      `preview_page_hand_off` imports `path_opens_as_a_page` from the root.
-   - `settle_attention` (held at batch 19's judgement, and still at batch 21; re-cited at O-4a, 2026-10-27) — its
-     `called_from` home is `runtime/preview.rs`. It was held because it wrote `LeafSession.attention_clock`, whose
-     other writer, `deliver_attention`, stays at the root (the census rule above). O-4a nested the clock, the bell's
-     edge and the capability with the ledger in `LeafSession.attention: AttentionAccount`, so what it writes is that
-     one fact (owner attention, written at the root and in `runtime/attention.rs`) and `LeafSession.session`
-     (`clear_attention`; ten writer modules) — two census owners, which the owner-column rule above holds for a
-     ruling. That ruling is D15 (2026-10-27, the O-4 judgement): it is released under batch 23's shared-fact rule,
-     to `runtime/attention.rs` by clause (a), the page that writes the account, which makes `runtime/attention.rs`
-     the session's eleventh writer module; the release line is written when O-4b lands.
-     `tab_queue_leader`, whose root callers are all in `settle_attention`, waits with it. **Released**
-     2026-10-27 with O-4b: `settle_attention` and `tab_queue_leader` go to `runtime/attention.rs` in the K2
-     tail, and `LeafSession.session`'s writer modules go from ten to eleven, admitted by batch 23's shared-fact
-     rule (attention is the page's owner).
    - `animated_pane_viewports` (held at batch 18, behind `preview_image_placement`) — tied `runtime/panes.rs` /
      `runtime/preview.rs` once its root caller moved; it is the pane-motion viewports, and the owner column gives
      the move of panes to `runtime/panes.rs` (clause (b)); batch 20 moved it there, imported by `runtime/preview.rs`.
@@ -877,7 +845,7 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
     The census annotations `LeafSession.pty` (panes) and `.spawn_fallback` (main) go
     for one `LeafSession.life` row (main). The K2 rows `land_shell_birth`,
     `deliver_held_input`, `land_birth_death_fallback_shell` and `apply_owed_shell_resize`
-    are released, and `settle_attention` / `tab_queue_leader` with them (D15, above).
+    are released, and `settle_attention` / `tab_queue_leader` with them (D15); batch 25 moved all six (above).
 - **O-5 (M8).** What remains goes into `ShellSession`: `session` (177 sites),
   `grid` (17), `conpty_grid` (10), the revisions, the owed input, `wake`
   and `incarnation`. `pty` (20) moved at O-4b instead, into `ShellLife`'s phases
@@ -904,7 +872,7 @@ measured. "Sites" counts every use of the field (all kinds). The doors come from
     `a_view_reports_seen_and_unread_never_goes_back`) and `pending_typing` behind
     `ShellSession::{queue_typing, take_typing}`, so both pairs leave `doors.tsv`;
     `wake`'s doc marks it transport debt until O-6. The K2 rows released: G2's seven
-    and G11's two (above). The counts in this bullet were O-1's: `pty` moved at
+    and G11's two, which batch 25 moved (2026-10-28, above). The counts in this bullet were O-1's: `pty` moved at
     O-4b (ruling D4), and the eight membership items are `TabState.sessions`'
     writers, not new owners (the contract's §3.3 note of 2026-10-27). O-5b is
     `TerminalPane`.

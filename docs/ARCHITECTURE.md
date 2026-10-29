@@ -2776,9 +2776,9 @@ Every method below runs on the **window thread** and holds `&mut App` and
 ownership. "Asks" names the lanes of §5.1 whose requests the file sends or
 whose answers it applies; "doors and rows" names the §6 doors and the §5.3
 rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the methods K2
-(T-SPLIT-2B) has moved in since, updated with each batch (through batch 24: `profiles.rs` and
+(T-SPLIT-2B) has moved in since, updated with each batch (through batch 25: `profiles.rs` and
 `search.rs` +1 each in batch 1, `web.rs` +2 in batch 2 and +1 in batch 3, `dpi.rs` +1 in batch 3,
-`palette.rs` +5 in batch 5, `terminal.rs` +2 in batch 6, `git.rs` +3 in batch 7; batch 8 moved free functions only; `clipboard.rs` +1 in batch 9; `floats.rs` +4, `frame.rs` +1 and `clipboard.rs` +1 in batch 10; `terminal.rs` +1 in batch 11; `windows.rs` +1 in batch 12; `frame.rs` +10, `terminal.rs` +1, `handoff.rs` +1, `web.rs` +1, `math.rs` +1 and `keyboard.rs` +1 in batch 13; `math.rs` +5, `profiles.rs` +1, `frame.rs` +1 and `terminal.rs` +1 in batch 14; `keyboard.rs` +7, `floats.rs` +1, `windows.rs` +1, `terminal.rs` +1 and `math.rs` +1 in batch 15; `tabs.rs` +4, `panes.rs` +1 and `mouse.rs` +1 in batch 16; `mouse.rs` +14, `files.rs` +2, `tabs.rs` +1, `tooltips.rs` +1 and `terminal.rs` +2 in batch 17; `panes.rs` +7 in batch 18; `preview.rs` +2 in batch 19; `preview.rs` +1 and `frame.rs` +1 in batch 20; `preview.rs` +21 and `panes.rs` +1 in batch 21; `keyboard.rs` +8, `preview.rs` +4, `panes.rs` +3, `mouse.rs` +3 and `handoff.rs` +1 in batch 22; `settings.rs` opened with 42 and `handoff.rs` +1 in batch 23; `settings.rs` +9 and `mouse.rs` +1 in batch 24).
+`palette.rs` +5 in batch 5, `terminal.rs` +2 in batch 6, `git.rs` +3 in batch 7; batch 8 moved free functions only; `clipboard.rs` +1 in batch 9; `floats.rs` +4, `frame.rs` +1 and `clipboard.rs` +1 in batch 10; `terminal.rs` +1 in batch 11; `windows.rs` +1 in batch 12; `frame.rs` +10, `terminal.rs` +1, `handoff.rs` +1, `web.rs` +1, `math.rs` +1 and `keyboard.rs` +1 in batch 13; `math.rs` +5, `profiles.rs` +1, `frame.rs` +1 and `terminal.rs` +1 in batch 14; `keyboard.rs` +7, `floats.rs` +1, `windows.rs` +1, `terminal.rs` +1 and `math.rs` +1 in batch 15; `tabs.rs` +4, `panes.rs` +1 and `mouse.rs` +1 in batch 16; `mouse.rs` +14, `files.rs` +2, `tabs.rs` +1, `tooltips.rs` +1 and `terminal.rs` +2 in batch 17; `panes.rs` +7 in batch 18; `preview.rs` +2 in batch 19; `preview.rs` +1 and `frame.rs` +1 in batch 20; `preview.rs` +21 and `panes.rs` +1 in batch 21; `keyboard.rs` +8, `preview.rs` +4, `panes.rs` +3, `mouse.rs` +3 and `handoff.rs` +1 in batch 22; `settings.rs` opened with 42 and `handoff.rs` +1 in batch 23; `settings.rs` +9 and `mouse.rs` +1 in batch 24; batch 25 moved free functions only).
 
 | file | methods | owns | asks | doors and rows |
 |---|---|---|---|---|
@@ -2813,7 +2813,7 @@ rows its own methods reach. Counts are the census of §0.1, 2026-09-23, plus the
 
 **Still in `main.rs`** — the free functions and `Runtime` methods that
 `docs/plans/design/runtime-dep-map/unclassified.tsv` lists, which K2 (T-SPLIT-2B) moves
-into their topics batch by batch: 275 (241 free functions, 34 methods) after batch 24. The table of
+into their topics batch by batch: 260 (226 free functions, 34 methods) after batch 25. The table of
 the 2026-09-21 manifest's sort (201 methods then left) is retired (2026-10-27, plan row 59): since K2,
 `docs/plans/design/runtime-dep-map/unclassified.tsv` is the list, and each item's topic is decided by
 its batch (`runtime-dep-map/README.md`).
