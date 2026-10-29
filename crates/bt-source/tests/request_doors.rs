@@ -1409,43 +1409,57 @@ fn an_effects_row_names_one_item_of_its_arm_or_is_refused_by_its_line() {
     let planted = |row: &str| registry.replacen(header, &format!("{header}{row}\n"), 1);
 
     assert_eq!(
-        fixture_refusals(&planted("bt-rd\t-\tcrate::Lane::serve_gone\tworks\tworker-door-body\tthe worker\t")),
+        fixture_refusals(&planted(
+            "bt-rd\t-\tcrate::Lane::serve_gone\tworks\tworker-door-body\tthe worker\t"
+        )),
         [format!(
             "window_waits.tsv:{line}: `# effects` `bt-rd crate::Lane::serve_gone` (arm `-`) names no \
              item of the product"
         )]
     );
     assert_eq!(
-        fixture_refusals(&planted("bt-rd\t[windows]\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t")),
+        fixture_refusals(&planted(
+            "bt-rd\t[windows]\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t"
+        )),
         Vec::<String>::new()
     );
     assert_eq!(
-        fixture_refusals(&planted("bt-rd\t[not(windows)]\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t")),
+        fixture_refusals(&planted(
+            "bt-rd\t[not(windows)]\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t"
+        )),
         Vec::<String>::new()
     );
     assert_eq!(
-        fixture_refusals(&planted("bt-rd\t-\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t")),
+        fixture_refusals(&planted(
+            "bt-rd\t-\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t"
+        )),
         [format!(
             "window_waits.tsv:{line}: `# effects` `bt-rd crate::media::quiet` (arm `-`) names no item \
              on that arm; the item stands on [not(windows)], [windows]"
         )]
     );
     assert_eq!(
-        fixture_refusals(&planted("bt-rd\t[unix]\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t")),
+        fixture_refusals(&planted(
+            "bt-rd\t[unix]\tcrate::media::quiet\tquiets\towner-door-body\tthe window\t"
+        )),
         [format!(
             "window_waits.tsv:{line}: `# effects` `bt-rd crate::media::quiet` (arm `[unix]`) names no \
              item on that arm; the item stands on [not(windows)], [windows]"
         )]
     );
     assert_eq!(
-        fixture_refusals(&planted("bt-rd\t-\tcrate::Pair::get\tgets\tworker-door-body\tthe worker\t")),
+        fixture_refusals(&planted(
+            "bt-rd\t-\tcrate::Pair::get\tgets\tworker-door-body\tthe worker\t"
+        )),
         [format!(
             "window_waits.tsv:{line}: `# effects` `bt-rd crate::Pair::get` (arm `-`) names 2 items on \
              that arm"
         )]
     );
     assert_eq!(
-        fixture_refusals(&planted("bt-rd\t-\tcrate::Lane::serve\tworks\tworker-door-bdy\tthe worker\t")),
+        fixture_refusals(&planted(
+            "bt-rd\t-\tcrate::Lane::serve\tworks\tworker-door-bdy\tthe worker\t"
+        )),
         [format!(
             "window_waits.tsv:{line}: `# effects` `bt-rd crate::Lane::serve`'s kind `worker-door-bdy` \
              is not one of owner-door-body, interim-owner, worker-door-body, transport, \
@@ -1596,7 +1610,12 @@ const EFFECT_KINDS: [&str; 7] = [
 /// `window_waits_tests::item_and_arm` spells a row. Every module path an item answers to is read,
 /// not only the first. A row that names no item, or two on its arm, is refused: the walk's stop
 /// would be lost, or would stop at whichever of the two the order put first.
-fn effect_item(resolver: &Resolver<'_>, package: &str, arm: &str, item: &str) -> Result<ItemId, String> {
+fn effect_item(
+    resolver: &Resolver<'_>,
+    package: &str,
+    arm: &str,
+    item: &str,
+) -> Result<ItemId, String> {
     let mut found: Vec<ItemId> = Vec::new();
     let mut elsewhere: BTreeSet<String> = BTreeSet::new();
     for id in resolver.callables(package) {
@@ -1849,11 +1868,7 @@ struct Registry {
 
 /// `registry` (`window_waits.tsv`'s shape: `# vocabulary`, `# entrances`, `# effects`,
 /// `# completions`, `# request-doors`) read over `resolver`; a key without a crate is `home`'s.
-fn read_registry(
-    resolver: &Resolver<'_>,
-    registry: &str,
-    home: &str,
-) -> Registry {
+fn read_registry(resolver: &Resolver<'_>, registry: &str, home: &str) -> Registry {
     let mut refused: Vec<String> = Vec::new();
     let resolve = |key: &str, refused: &mut Vec<String>| -> BTreeSet<ItemId> {
         key_items(resolver, home, key).unwrap_or_else(|why| {
