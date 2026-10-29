@@ -319,6 +319,13 @@ the rules on a fixture. When red, regenerate with
 `target/depmap/`) and commit the files with the change that moved them; never
 edit a row. A header count that grows (reads not attributed, calls not
 followed) means the map sees less; the change that regenerates it says why.
+Since 2026-10-29 (T-GENERATED-STAMP-REFUSES-DIRTY-TREES, plan row 99)
+`scripts/ci/check-generated-stamps.ps1` (CI `logic`; its cases in
+`check-generated-stamps-tests.ps1`) reads the `# measured at <sha>` line the
+test skips and refuses a file without exactly one, a line off the grammar, the
+` with uncommitted changes` suffix, a sha that is no commit or not an ancestor
+of HEAD, and four files naming different commits; a shallow clone exits 2.
+When red: commit everything, run the generator, commit its output.
 
 ## Call graph
 
