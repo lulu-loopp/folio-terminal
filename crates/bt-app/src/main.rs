@@ -50975,7 +50975,7 @@ impl<B: Backend> FolioApp<B> {
         }
         crate::diagnostics::stderr_line(format!("{APP_NAME} stopped: {error:#}"));
         report_frame_shape_stop(&error, &panic_log_path(), |path| {
-            announce_panic(path);
+            announce_frame_shape_stop(path);
         });
         let had_windows = !self.windows.is_empty();
         let failure = format!("{error:#}");
@@ -57589,16 +57589,64 @@ static PANIC_ANNOUNCED: AtomicBool = AtomicBool::new(false);
 /// panic gets to end the process (§7.43): the alert is raised once, and the
 /// thread that raised it is the one whose reader has now seen it.
 fn announce_panic(path: &std::path::Path) -> bool {
-    if PANIC_ANNOUNCED.swap(true, Ordering::SeqCst) {
+    let Some(alert) = claim_the_alert(path) else {
         return false;
+    };
+    if let PanicAlert::Owed(text) = alert {
+        bt_platform::message_box(APP_NAME, &text);
+    }
+    true
+}
+
+/// **Where the one alert stands once this caller has claimed it** — what
+/// [`claim_the_alert`] answers when it was not already spoken.
+enum PanicAlert {
+    /// Written to the console that is watching this run; nothing more is owed.
+    Spoken,
+    /// No console was watching: the alert's text is still owed to a box (or, for a stop no
+    /// box would show, to the run's `stderr` road).
+    Owed(String),
+}
+
+/// **The alert's first two steps, shared by the panic hook and a frame-shape stop**
+/// (T-FRAME-SHAPE-STOP-BOX-QUERY, 0.4.9 plan row 79): the once-per-process claim
+/// ([`PANIC_ANNOUNCED`]) and the console, asked before it is written to. `None` when another
+/// caller already spoke. What is owed after that is each caller's own: the panic hook raises
+/// [`bt_platform::message_box`] ([`announce_panic`]); a frame-shape stop asks whether a box
+/// would be seen first ([`announce_frame_shape_stop`]).
+fn claim_the_alert(path: &std::path::Path) -> Option<PanicAlert> {
+    if PANIC_ANNOUNCED.swap(true, Ordering::SeqCst) {
+        return None;
     }
     let text = panic_alert_text(path);
     let said = diagnostics::a_screen_is_watching(diagnostics::resident_channel())
         && bt_platform::write_to_console(&format!("{text}\n"));
-    if !said {
-        bt_platform::message_box(APP_NAME, &text);
+    Some(if said {
+        PanicAlert::Spoken
+    } else {
+        PanicAlert::Owed(text)
+    })
+}
+
+/// **A frame-shape stop's alert, said where it would be read** (T-FRAME-SHAPE-STOP-BOX-QUERY,
+/// 0.4.9 plan row 79): the same claim and console as a panic's ([`claim_the_alert`]), then the
+/// box only when a box would be seen, and the run's queued `stderr` road when it would not.
+/// `FolioApp::fail` runs it on the window thread *before* the way out, so — unlike the panic
+/// hook, which ends the process after its box — a queued line here is inside the way out's
+/// fence, and the box's synchronous fallback (two lines into `diagnostics.log` beside the
+/// writer's queue) has no reason to be taken.
+fn announce_frame_shape_stop(path: &std::path::Path) {
+    say_the_stop_alert(claim_the_alert(path), &mut SystemBox);
+}
+
+/// What [`announce_frame_shape_stop`] does with its claim, with the platform's box handed in
+/// so a test can be the platform: an owed alert through [`say_in_a_box_or_on_stderr`] — the
+/// road a stop's lost-change notice takes (T-STOP-NOTICE-BOX-QUERY-MACOS); a spoken one, or
+/// one another caller already spoke, nothing.
+fn say_the_stop_alert(alert: Option<PanicAlert>, boxes: &mut impl SystemBoxes) {
+    if let Some(PanicAlert::Owed(text)) = alert {
+        say_in_a_box_or_on_stderr(boxes, &text);
     }
-    true
 }
 
 /// What that alert says: which build this was, and where it wrote what it knows.
