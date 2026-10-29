@@ -499,13 +499,17 @@ impl ClipboardAsks {
     /// left for the next drain even when it has ended since, so that no window takes an answer
     /// before an earlier one another window has not been asked for yet.
     pub(crate) fn answered(&mut self, owed: Option<ClipboardId>) -> Vec<(ClipboardId, Answered)> {
-        let below = |id: ClipboardId| owed.is_none_or(|owed| id < owed);
         let mut taken = Vec::new();
         let mut at = 0;
         while at < self.copies.len() {
             let copy = &mut self.copies[at];
             let id = copy.request.id();
-            let Some(ended) = below(id).then(|| copy.request.take()).flatten() else {
+            let ended = if below(id, owed) {
+                copy.request.take()
+            } else {
+                None
+            };
+            let Some(ended) = ended else {
                 at += 1;
                 continue;
             };
@@ -514,7 +518,7 @@ impl ClipboardAsks {
         }
         for paste in &mut self.pastes {
             if paste.ended.is_none()
-                && below(paste.id)
+                && below(paste.id, owed)
                 && let Some(ended) = paste.request.as_mut().and_then(ClipboardRequest::take)
             {
                 paste.ended = Some(ended);
@@ -524,6 +528,14 @@ impl ClipboardAsks {
         }
         taken.sort_by_key(|(id, _)| *id);
         taken
+    }
+}
+
+/// Whether `id` is below the drain's mark `owed` — every request is, when none is owed.
+fn below(id: ClipboardId, owed: Option<ClipboardId>) -> bool {
+    match owed {
+        Some(owed) => id < owed,
+        None => true,
     }
 }
 

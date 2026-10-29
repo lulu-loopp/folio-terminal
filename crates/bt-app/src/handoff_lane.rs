@@ -376,18 +376,19 @@ pub(crate) fn in_press_order<K, D>(
 where
     K: Copy,
 {
-    lane::in_admission_order(per_window.into_iter().map(|(window, answers)| {
-        (
-            window,
-            answers
-                .into_iter()
-                .map(|(id, answer, duty)| (id, (answer, duty)))
-                .collect(),
-        )
-    }))
-    .into_iter()
-    .map(|(window, id, (answer, duty))| (window, id, answer, duty))
-    .collect()
+    let mut keyed = Vec::new();
+    for (window, answers) in per_window {
+        let mut owed = Vec::new();
+        for (id, answer, duty) in answers {
+            owed.push((id, (answer, duty)));
+        }
+        keyed.push((window, owed));
+    }
+    let mut all = Vec::new();
+    for (window, id, (answer, duty)) in lane::in_admission_order(keyed) {
+        all.push((window, id, answer, duty));
+    }
+    all
 }
 
 /// **What one window owes one of its hand-offs' answers** — the refusal's words, and what a

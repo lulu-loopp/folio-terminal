@@ -1342,14 +1342,12 @@ where
     K: Copy,
     Id: Ord + Copy,
 {
-    let mut all: Vec<(K, Id, T)> = per_target
-        .into_iter()
-        .flat_map(|(target, answers)| {
-            answers
-                .into_iter()
-                .map(move |(id, answer)| (target, id, answer))
-        })
-        .collect();
+    let mut all: Vec<(K, Id, T)> = Vec::new();
+    for (target, answers) in per_target {
+        for (id, answer) in answers {
+            all.push((target, id, answer));
+        }
+    }
     all.sort_by_key(|(_, id, _)| *id);
     all
 }
